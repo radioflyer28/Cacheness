@@ -1,0 +1,19 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Cache system
+*.db
+*.json
+*.pkl
+*.pkl.*
+*.b2nd
+*.parquet
+.DS_Store

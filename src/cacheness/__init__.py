@@ -1,0 +1,73 @@
+"""
+cacheness - High-performance disk caching library with compression and multiple backend support.
+
+This library provides a unified interface for caching Python objects to disk with
+automatic compression, multiple storage formats, and flexible metadata backends.
+
+Key Features:
+- Automatic type detection and optimal storage format selection
+- Compression support (blosc2, lz4) for space efficiency
+- Multiple metadata backends (JSON, SQLite)
+- Support for NumPy arrays, Pandas/Polars DataFrames, and arbitrary Python objects
+- Thread-safe operations
+- TTL (Time To Live) support
+- Comprehensive caching statistics
+
+Quick Start:
+    >>> from cacheness import cacheness
+    >>>
+    >>> # Create a cache instance
+    >>> cache = cacheness("/path/to/cache/dir")
+    >>>
+    >>> # Store some data
+    >>> cache.put({"key": "value"}, description="My data")
+    >>>
+    >>> # Retrieve data
+    >>> data = cache.get("some_key")
+    >>>
+    >>> # Get cache statistics
+    >>> stats = cache.get_stats()
+"""
+
+from .core import CacheConfig, UnifiedCache as cacheness, get_cache
+from .decorators import cached
+from .handlers import ArrayHandler, HandlerRegistry, ObjectHandler
+from .metadata import JsonMetadataBackend, create_metadata_backend
+
+# Import optional components if available
+try:
+    from .metadata import SQLiteMetadataBackend
+    _SQLiteMetadataBackend = SQLiteMetadataBackend
+except ImportError:
+    _SQLiteMetadataBackend = None
+
+__version__ = "0.1.1"
+__author__ = "radioflyer28"
+__email__ = "akgithub.2drwc@aleeas.com"
+
+__all__ = [
+    # Core classes (with aliases for backward compatibility)
+    "cacheness",
+    "UnifiedCache",
+    "CacheConfig",
+    "get_cache",
+    # Handlers
+    "HandlerRegistry",
+    "ObjectHandler",
+    "ArrayHandler",
+    # Metadata backends
+    "JsonMetadataBackend",
+    "create_metadata_backend",
+    # Decorators
+    "cached",
+    # Version info
+    "__version__",
+]
+
+# Backward compatibility
+UnifiedCache = cacheness
+
+# Add SQLite backend to exports if available
+if _SQLiteMetadataBackend is not None:
+    SQLiteMetadataBackend = _SQLiteMetadataBackend
+    __all__.append("SQLiteMetadataBackend")

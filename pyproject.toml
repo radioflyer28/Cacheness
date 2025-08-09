@@ -1,0 +1,112 @@
+[project]
+name = "cacheness"
+version = "0.1.1"
+description = "High-performance disk caching library using Blosc compression, geared toward numpy arrays and dataframes and pickle-ing for everything else."
+readme = "README.md"
+authors = [
+    { name = "radioflyer28", email = "akgithub.2drwc@aleeas.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "blosc2>=3.6.1",
+    "numpy>=2.3.2",
+    "xxhash>=3.5.0",
+]
+
+[dependency-groups]
+recommended = [
+    "blosc2>=3.6.1",
+    "pandas>=2.3.1",
+    "pyarrow>=21.0.0",
+    "sqlmodel>=0.0.24"
+]
+sql = [
+    "sqlmodel>=0.0.24",
+]
+dataframes = [
+    "pandas>=2.3.1",
+    "polars>=1.32.2",
+    "pyarrow>=21.0.0",
+]
+dev = [
+    "pytest>=8.4.1",
+    "pytest-cov>=6.2.1",
+    "ruff>=0.12.8",
+]
+
+[build-system]
+requires = ["uv_build>=0.8.0,<0.9.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = [
+    "-ra",
+    "-q", 
+    "--strict-markers",
+]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+# Markers for optional tests
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+    "optional_deps: tests that require optional dependencies like polars/pandas",
+]
+
+# Logging configuration
+log_cli = true
+log_cli_level = "INFO"
+log_cli_format = "%(asctime)s [%(levelname)8s] %(name)s: %(message)s"
+log_cli_date_format = "%Y-%m-%d %H:%M:%S"
+
+# Ignore warnings from dependencies
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+]
+
+[tool.coverage.run]
+source = ["cacheness"]
+omit = [
+    "*/tests/*",
+    "*/test_*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+]
+
+[tool.black]
+line-length = 88
+target-version = ["py38", "py39", "py310", "py311", "py312"]
+
+[tool.isort]
+profile = "black"
+multi_line_output = 3
+line_length = 88
+
+[tool.ruff]
+target-version = "py38"
+line-length = 88
+select = [
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # pyflakes
+    "I",  # isort
+    "B",  # flake8-bugbear
+    "C4", # flake8-comprehensions
+    "UP", # pyupgrade
+]
+ignore = [
+    "E501", # line too long, handled by black
+    "B008", # do not perform function calls in argument defaults
+    "C901", # too complex
+]
