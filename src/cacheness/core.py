@@ -241,17 +241,25 @@ class UnifiedCache:
                 file_hash = self._calculate_file_hash(Path(actual_path))
 
             # Update metadata
+            metadata_dict = {
+                **result["metadata"],
+                "prefix": prefix,
+                "actual_path": result.get("actual_path", str(base_file_path)),
+                "file_hash": file_hash,  # Store file hash for verification
+            }
+
+            # Only store cache_key_params if enabled in configuration
+            if self.config.metadata.store_cache_key_params:
+                metadata_dict["cache_key_params"] = (
+                    kwargs  # Store original key-value parameters for efficient querying
+                )
+
             entry_data = {
                 "data_type": handler.data_type,
                 "prefix": prefix,
                 "description": description,
                 "file_size": result["file_size"],
-                "metadata": {
-                    **result["metadata"],
-                    "prefix": prefix,
-                    "actual_path": result.get("actual_path", str(base_file_path)),
-                    "file_hash": file_hash,  # Store file hash for verification
-                },
+                "metadata": metadata_dict,
             }
 
             self.metadata_backend.put_entry(cache_key, entry_data)

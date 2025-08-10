@@ -313,11 +313,25 @@ class JsonMetadataBackend(MetadataBackend):
             )
             self._metadata["file_sizes"][cache_key] = entry_data.get("file_size", 0)
 
-            # Store cache_key_params separately for efficient querying
+            # Store cache_key_params separately for efficient querying with unified serialization (only if params exist)
             if cache_key_params is not None:
                 if "cache_key_params" not in self._metadata:
                     self._metadata["cache_key_params"] = {}
-                self._metadata["cache_key_params"][cache_key] = cache_key_params
+                try:
+                    from .serialization import serialize_for_cache_key
+
+                    # Convert each value to a serializable format
+                    serializable_params = {}
+                    for key, value in cache_key_params.items():
+                        serializable_params[key] = serialize_for_cache_key(value)
+                    self._metadata["cache_key_params"][cache_key] = serializable_params
+                except Exception:
+                    # Fallback to original parameters, which might work for simple types
+                    try:
+                        self._metadata["cache_key_params"][cache_key] = cache_key_params
+                    except Exception:
+                        # If all else fails, don't store cache_key_params
+                        pass
 
             self._save_to_disk()
 
@@ -560,9 +574,25 @@ class SQLiteMetadataBackend(MetadataBackend):
             cache_key_params = metadata.pop(
                 "cache_key_params", None
             )  # Remove from metadata
-            entry.cache_key_params = (
-                json_dumps(cache_key_params) if cache_key_params is not None else None
-            )
+
+            # Use unified serialization for cache_key_params to handle complex objects (only if params exist)
+            if cache_key_params is not None:
+                try:
+                    from .serialization import serialize_for_cache_key
+
+                    # Convert each value to a serializable format
+                    serializable_params = {}
+                    for key, value in cache_key_params.items():
+                        serializable_params[key] = serialize_for_cache_key(value)
+                    entry.cache_key_params = json_dumps(serializable_params)
+                except Exception:
+                    # Fallback to simple JSON serialization, or None if it fails
+                    try:
+                        entry.cache_key_params = json_dumps(cache_key_params)
+                    except Exception:
+                        entry.cache_key_params = None
+            else:
+                entry.cache_key_params = None
             entry.metadata_json = json_dumps(metadata)
 
             # Update timestamps

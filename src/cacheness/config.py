@@ -8,7 +8,7 @@ Configuration is split into focused sub-configurations for better maintainabilit
 
 import logging
 from dataclasses import dataclass, field
-from typing import Optional, List, Union, Dict, Any
+from typing import Optional, List, Union
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -49,6 +49,9 @@ class CacheMetadataConfig:
     enable_metadata: bool = True
     default_ttl_hours: float = 24
     verify_cache_integrity: bool = True
+    store_cache_key_params: bool = (
+        True  # Store cache key parameters in metadata for querying
+    )
 
     def __post_init__(self):
         """Validate metadata backend configuration."""
@@ -59,6 +62,7 @@ class CacheMetadataConfig:
             raise ValueError("default_ttl_hours must be positive")
 
         logger.debug(f"Metadata backend configured: {self.metadata_backend}")
+        logger.debug(f"Store cache_key_params: {self.store_cache_key_params}")
         if self.metadata_backend in ["auto", "sqlite"]:
             logger.debug(f"SQLite database file: {self.sqlite_db_file}")
 
@@ -203,6 +207,7 @@ class CacheConfig:
         enable_metadata: Optional[bool] = None,
         max_cache_size_mb: Optional[int] = None,
         cleanup_on_init: Optional[bool] = None,
+        store_cache_key_params: Optional[bool] = None,
         # Handler enable/disable flags
         enable_pandas_dataframes: Optional[bool] = None,
         enable_polars_dataframes: Optional[bool] = None,
@@ -248,6 +253,8 @@ class CacheConfig:
             self.storage.max_cache_size_mb = max_cache_size_mb
         if cleanup_on_init is not None:
             self.storage.cleanup_on_init = cleanup_on_init
+        if store_cache_key_params is not None:
+            self.metadata.store_cache_key_params = store_cache_key_params
 
         # Map handler enable/disable flags
         if enable_pandas_dataframes is not None:
@@ -328,6 +335,10 @@ class CacheConfig:
     @property
     def hash_path_content(self) -> bool:
         return self.serialization.hash_path_content
+
+    @property
+    def store_cache_key_params(self) -> bool:
+        return self.metadata.store_cache_key_params
 
     @classmethod
     def create_performance_optimized(cls) -> "CacheConfig":
