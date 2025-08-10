@@ -9,7 +9,7 @@ Each handler implements the Strategy pattern for format-specific operations.
 import numpy as np
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 import logging
 
 # DataFrame libraries with fallback
@@ -687,30 +687,88 @@ class ObjectHandler(CacheHandler):
 
 
 class HandlerRegistry:
-    """Registry for cache handlers with automatic selection."""
+    """Registry for cache handlers with configurable selection order."""
 
-    def __init__(self):
+    def __init__(self, config: Optional[Any] = None):
+        self.config = config
         self.handlers = []
+        
+        # If config specifies handler priority, use that order
+        if config and hasattr(config, 'handler_priority') and config.handler_priority:
+            self._setup_handlers_from_config(config)
+        else:
+            self._setup_default_handlers(config)
 
+    def _setup_default_handlers(self, config):
+        """Setup handlers in default priority order."""
         # Add Series handlers first (higher priority than DataFrame handlers)
-        if POLARS_AVAILABLE:
-            self.handlers.append(PolarsSeriesHandler())
-        if PANDAS_AVAILABLE:
-            self.handlers.append(PandasSeriesHandler())
+        if self._should_enable_handler('polars_series', config):
+            if POLARS_AVAILABLE:
+                self.handlers.append(PolarsSeriesHandler())
+                
+        if self._should_enable_handler('pandas_series', config):
+            if PANDAS_AVAILABLE:
+                self.handlers.append(PandasSeriesHandler())
 
         # Add DataFrame handlers if available
-        if POLARS_AVAILABLE:
-            self.handlers.append(PolarsDataFrameHandler())
-        if PANDAS_AVAILABLE:
-            self.handlers.append(PandasDataFrameHandler())
+        if self._should_enable_handler('polars_dataframes', config):
+            if POLARS_AVAILABLE:
+                self.handlers.append(PolarsDataFrameHandler())
+                
+        if self._should_enable_handler('pandas_dataframes', config):
+            if PANDAS_AVAILABLE:
+                self.handlers.append(PandasDataFrameHandler())
 
         # Add other handlers
-        self.handlers.extend(
-            [
-                ArrayHandler(),
-                ObjectHandler(),  # Keep as fallback
-            ]
-        )
+        if self._should_enable_handler('numpy_arrays', config):
+            self.handlers.append(ArrayHandler())
+            
+        if self._should_enable_handler('object_pickle', config):
+            self.handlers.append(ObjectHandler())  # Keep as fallback
+
+    def _setup_handlers_from_config(self, config):
+        """Setup handlers based on config.handler_priority order."""
+        handler_map = {
+            'polars_series': lambda: PolarsSeriesHandler() if POLARS_AVAILABLE else None,
+            'pandas_series': lambda: PandasSeriesHandler() if PANDAS_AVAILABLE else None,
+            'polars_dataframes': lambda: PolarsDataFrameHandler() if POLARS_AVAILABLE else None,
+            'pandas_dataframes': lambda: PandasDataFrameHandler() if PANDAS_AVAILABLE else None,
+            'numpy_arrays': lambda: ArrayHandler(),
+            'object_pickle': lambda: ObjectHandler(),
+        }
+        
+        for handler_name in config.handler_priority:
+            if handler_name in handler_map and self._should_enable_handler(handler_name, config):
+                handler = handler_map[handler_name]()
+                if handler is not None:
+                    self.handlers.append(handler)
+        
+        # Add any missing default handlers that weren't specified in priority
+        remaining_handlers = set(handler_map.keys()) - set(config.handler_priority)
+        for handler_name in remaining_handlers:
+            if self._should_enable_handler(handler_name, config):
+                handler = handler_map[handler_name]()
+                if handler is not None:
+                    self.handlers.append(handler)
+
+    def _should_enable_handler(self, handler_name: str, config) -> bool:
+        """Check if a handler should be enabled based on config."""
+        if config is None:
+            return True  # Enable all by default
+            
+        handler_enable_map = {
+            'polars_series': 'enable_polars_series',
+            'pandas_series': 'enable_pandas_series',
+            'polars_dataframes': 'enable_polars_dataframes',
+            'pandas_dataframes': 'enable_pandas_dataframes',
+            'numpy_arrays': 'enable_numpy_arrays',
+            'object_pickle': 'enable_object_pickle',
+        }
+        
+        config_attr = handler_enable_map.get(handler_name)
+        if config_attr:
+            return getattr(config, config_attr, True)
+        return True
 
     def get_handler(self, data: Any) -> CacheHandler:
         """Get the appropriate handler for the given data."""

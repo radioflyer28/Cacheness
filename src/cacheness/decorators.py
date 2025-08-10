@@ -19,6 +19,7 @@ def _generate_cache_key(
     args: Tuple,
     kwargs: Dict[str, Any],
     key_prefix: Optional[str] = None,
+    config: Optional[CacheConfig] = None,
 ) -> str:
     """
     Generate a cache key for a function call using unified serialization.
@@ -28,6 +29,7 @@ def _generate_cache_key(
         args: Positional arguments passed to the function
         kwargs: Keyword arguments passed to the function
         key_prefix: Optional prefix for the cache key
+        config: Optional CacheConfig to control serialization behavior
 
     Returns:
         A deterministic hash string for the function call
@@ -37,9 +39,9 @@ def _generate_cache_key(
     func_module = getattr(func, "__module__", "unknown")
     func_id = f"{func_module}.{func_name}"
 
-    # Serialize arguments using unified approach
-    args_str = serialize_for_cache_key(args)
-    kwargs_str = serialize_for_cache_key(kwargs)
+    # Serialize arguments using unified approach with config
+    args_str = serialize_for_cache_key(args, config)
+    kwargs_str = serialize_for_cache_key(kwargs, config)
 
     # Combine all components
     if key_prefix:
@@ -122,7 +124,7 @@ class cached:
                 if self.key_func:
                     cache_key = self.key_func(func, args, kwargs)
                 else:
-                    cache_key = _generate_cache_key(func, args, kwargs, self.key_prefix)
+                    cache_key = _generate_cache_key(func, args, kwargs, self.key_prefix, self.cache_instance.config)
             except Exception as e:
                 if self.ignore_errors:
                     # If key generation fails, just call the function
@@ -173,7 +175,7 @@ class cached:
             if self.key_func:
                 return self.key_func(func, args, kwargs)
             else:
-                return _generate_cache_key(func, args, kwargs, self.key_prefix)
+                return _generate_cache_key(func, args, kwargs, self.key_prefix, self.cache_instance.config)
 
         # Attach methods (these will be available as wrapper.cache_clear(), etc.)
         setattr(wrapper, "cache_clear", cache_clear)

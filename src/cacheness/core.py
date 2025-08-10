@@ -13,7 +13,7 @@ import logging
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List, Union
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .handlers import HandlerRegistry
 from .serialization import create_unified_cache_key
@@ -49,6 +49,33 @@ class CacheConfig:
     auto_optimize_threads: bool = True  # Auto-optimize thread count based on data size
     # NumPy array compression options
     use_blosc2_arrays: bool = True  # Use blosc2 for arrays when available
+    
+    # Serialization Configuration
+    # Cache key serialization method priority order
+    serialization_methods: Optional[List[str]] = None  # None = use default order
+    
+    # Handler selection priority order  
+    handler_priority: Optional[List[str]] = None  # None = use default order
+    
+    # Enable/disable specific serialization strategies
+    enable_basic_types: bool = True        # Basic immutable types (str, int, float, bool, bytes)
+    enable_special_cases: bool = True      # NumPy arrays, Path objects, etc.
+    enable_collections: bool = True        # Lists, dicts, sets with recursive introspection
+    enable_object_introspection: bool = True  # Objects with __dict__
+    enable_hashable_fallback: bool = True    # Hashable objects performance fallback
+    enable_string_fallback: bool = True      # String representation as last resort
+    
+    # Collection serialization thresholds
+    max_tuple_recursive_length: int = 10  # Max tuple size for recursive serialization
+    max_collection_depth: int = 10         # Max recursion depth for collections
+    
+    # Enable/disable specific handlers
+    enable_polars_dataframes: bool = True
+    enable_pandas_dataframes: bool = True
+    enable_polars_series: bool = True
+    enable_pandas_series: bool = True
+    enable_numpy_arrays: bool = True
+    enable_object_pickle: bool = True
     blosc2_array_codec: str = "lz4"  # Codec for blosc2 array compression
     blosc2_array_clevel: int = 5  # Compression level for blosc2 arrays
     # Cache integrity verification
@@ -96,8 +123,8 @@ class UnifiedCache:
         # Thread safety
         self._lock = threading.Lock()
 
-        # Initialize handler registry
-        self.handlers = HandlerRegistry()
+        # Initialize handler registry with config
+        self.handlers = HandlerRegistry(self.config)
 
         # Initialize metadata backend
         self._init_metadata_backend(metadata_backend)
@@ -240,8 +267,8 @@ class UnifiedCache:
         # Process Path objects based on configuration
         processed_params = self._process_params_for_hashing(params)
         
-        # Use unified cache key generation
-        return create_unified_cache_key(processed_params)
+        # Use unified cache key generation with config
+        return create_unified_cache_key(processed_params, self.config)
 
     def _get_cache_file_path(self, cache_key: str, prefix: str = "") -> Path:
         """Get base cache file path (without extension)."""

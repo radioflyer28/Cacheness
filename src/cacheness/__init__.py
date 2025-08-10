@@ -42,7 +42,7 @@ try:
 except ImportError:
     _SQLiteMetadataBackend = None
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 __author__ = "radioflyer28"
 __email__ = "akgithub.2drwc@aleeas.com"
 

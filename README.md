@@ -1068,6 +1068,124 @@ cache_dir/
 The library automatically optimizes compression parameters based on data characteristics:
 
 - **Intelligent Threading**: Automatically adjusts thread count based on data size
+
+## Configurable Serialization and Handler Priority
+
+**NEW in v0.2.1**: Full control over cache key serialization methods and handler selection order.
+
+### Serialization Configuration
+
+Control how objects are serialized for cache key generation with fine-grained options:
+
+```python
+from cacheness import CacheConfig, UnifiedCache
+
+# Performance-optimized config (speed over precision)
+performance_config = CacheConfig(
+    # Disable expensive introspection methods
+    enable_collections=False,           # Skip recursive collection analysis
+    enable_object_introspection=False,  # Skip __dict__ inspection
+    max_tuple_recursive_length=2,       # Limit tuple recursion
+    max_collection_depth=3              # Limit nesting depth
+)
+
+# Precision-optimized config (accuracy over speed)
+precision_config = CacheConfig(
+    enable_collections=True,            # Full collection introspection
+    enable_object_introspection=True,   # Deep object analysis
+    max_tuple_recursive_length=50,      # Allow deep tuple recursion
+    max_collection_depth=20             # Allow deep nesting
+)
+
+# Custom serialization methods
+custom_config = CacheConfig(
+    enable_basic_types=True,            # str, int, float, bool, bytes
+    enable_special_cases=True,          # NumPy arrays, custom handlers
+    enable_collections=True,            # lists, dicts, sets with recursion
+    enable_object_introspection=True,   # Objects with __dict__
+    enable_hashable_fallback=True,      # Hashable objects (fast)
+    enable_string_fallback=True         # String representation (last resort)
+)
+```
+
+### Handler Priority Configuration
+
+Control the order and availability of data format handlers:
+
+```python
+# Custom handler priority (DataFrames processed first)
+config = CacheConfig(
+    handler_priority=[
+        "pandas_dataframes",    # Process pandas DataFrames first
+        "polars_dataframes",    # Then polars DataFrames  
+        "pandas_series",        # Then pandas Series
+        "polars_series",        # Then polars Series
+        "numpy_arrays",         # Then NumPy arrays
+        "object_pickle"         # Finally, pickle everything else
+    ]
+)
+
+# Disable specific handlers
+minimal_config = CacheConfig(
+    enable_pandas_dataframes=False,     # Disable pandas DataFrame caching
+    enable_polars_series=False,         # Disable polars Series caching
+    enable_numpy_arrays=True,           # Keep NumPy array support
+    enable_object_pickle=True           # Keep general object support
+)
+```
+
+### Serialization Method Priority
+
+The default serialization follows a **Quality-First Approach**:
+
+1. **Basic immutable types** → Direct representation (`str:hello`, `int:42`)
+2. **Special cases** → Custom handling (NumPy arrays, Path objects)  
+3. **Collections** → Recursive introspection (`list:[int:1,int:2,int:3]`)
+4. **Objects with __dict__** → Full introspection
+5. **Hashable objects** → Performance fallback (`hashed:tuple:12345`)
+6. **String representation** → Last resort (`MyClass:custom_str_repr`)
+
+### Real-World Use Cases
+
+**ML Pipeline Optimization**:
+```python
+# Fast caching for rapid iteration
+ml_config = CacheConfig(
+    cache_dir="./ml_cache",
+    enable_collections=False,           # Skip expensive list/dict analysis
+    max_tuple_recursive_length=3,       # Limit parameter tuple analysis
+    handler_priority=["numpy_arrays", "object_pickle"]  # Prioritize arrays
+)
+
+@cached(cache_instance=UnifiedCache(ml_config))
+def train_model(X, y, params):
+    # Model training logic
+    return trained_model, metrics, feature_importance
+```
+
+**Data Processing Precision**:
+```python
+# Detailed caching for complex workflows
+data_config = CacheConfig(
+    cache_dir="./data_cache", 
+    enable_collections=True,            # Full parameter introspection
+    enable_object_introspection=True,   # Deep object analysis
+    max_collection_depth=15,            # Allow complex nested structures
+    handler_priority=["pandas_dataframes", "polars_dataframes", "numpy_arrays"]
+)
+
+@cached(cache_instance=UnifiedCache(data_config))
+def process_datasets(raw_data, transformations, config_dict):
+    # Complex data processing with nested configurations
+    return processed_data, metadata, validation_results
+```
+
+**Configuration Benefits**:
+- **Performance Tuning**: Optimize for your specific data patterns
+- **Memory Efficiency**: Disable unnecessary introspection methods
+- **Cache Key Precision**: Control how function parameters are analyzed
+- **Handler Optimization**: Prioritize the data formats you use most
+- **Compatibility Control**: Enable/disable specific libraries (pandas/polars)
 - **Dynamic Compression Levels**: Optimizes compression level for data size and type
 - **ZSTD Optimizations**: Leverages ZSTD's advanced features for general-purpose data
 
