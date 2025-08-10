@@ -233,17 +233,108 @@ def get_recommended_settings(data_type="general", priority="balanced"):
     elif priority == "compression":
         settings = {"codec": "zstd", "clevel": 9}
     else:  # balanced
-        settings = {"codec": "lz4", "clevel": 5}
+        settings = {"codec": "zstd", "clevel": 5}  # Changed default to zstd
 
     # Adjust for data type
     if data_type == "numpy":
         settings["nparray"] = True
     elif data_type == "text":
         settings["codec"] = "zstd"  # Better for text
+        settings["clevel"] = 6  # Slightly higher for text
     elif data_type == "binary":
-        settings["codec"] = "lz4hc"  # Good for binary data
+        settings["codec"] = "zstd"  # ZSTD handles binary well
+        settings["clevel"] = 4  # Moderate compression for binary
 
     return settings
+
+
+def optimize_compression_params(data, codec="zstd", base_clevel=5, enable_multithreading=True, auto_optimize_threads=True):
+    """Optimize compression parameters based on data characteristics and system capabilities.
+    
+    This function analyzes the data and system to provide optimal compression settings
+    for ZSTD and other codecs, including multi-threading optimization.
+    
+    Parameters
+    ----------
+    data : object
+        The data to be compressed
+    codec : str
+        The compression codec to use
+    base_clevel : int
+        Base compression level
+    enable_multithreading : bool
+        Whether to enable multi-threading optimizations
+    auto_optimize_threads : bool
+        Whether to automatically optimize thread count based on data size
+        
+    Returns
+    -------
+    dict
+        Optimized compression parameters
+    """
+    import sys
+    
+    params = {
+        "codec": codec,
+        "clevel": base_clevel,
+        "filter": shuffle_obj
+    }
+    
+    # Only optimize for Blosc2/3 with actual blosc available
+    if not BLOSC_AVAILABLE or not (blosc_version.startswith("2") or blosc_version.startswith("3")):
+        return params
+    
+    # Estimate data size
+    try:
+        if hasattr(data, 'nbytes'):  # numpy array
+            data_size = data.nbytes
+        elif hasattr(data, '__len__'):
+            # Rough estimate for sequences
+            data_size = sys.getsizeof(data)
+        else:
+            # Rough estimate for other objects
+            data_size = sys.getsizeof(data)
+    except Exception:
+        data_size = 1024  # Default fallback
+    
+    # Optimize for ZSTD specifically
+    if codec.lower() == "zstd":
+        # ZSTD-specific optimizations
+        if data_size < 1024:  # Small data
+            params["clevel"] = 3  # Fast compression for small data
+        elif data_size < 1024 * 1024:  # Medium data (< 1MB)
+            params["clevel"] = base_clevel
+        elif data_size < 10 * 1024 * 1024:  # Large data (< 10MB)
+            params["clevel"] = base_clevel + 1  # Slightly higher compression
+        else:  # Very large data (>= 10MB)
+            params["clevel"] = min(base_clevel + 2, 9)  # Higher compression, capped at 9
+    
+    # Thread optimization for multi-threading
+    if enable_multithreading and auto_optimize_threads:
+        try:
+            available_cores = blosc.detect_number_of_cores()
+            current_threads = blosc.nthreads
+            
+            # Optimize thread count based on data size
+            if data_size < 1024 * 1024:  # < 1MB
+                # Small data: use fewer threads to avoid overhead
+                optimal_threads = min(2, available_cores)
+            elif data_size < 10 * 1024 * 1024:  # < 10MB
+                # Medium data: use moderate threading
+                optimal_threads = min(4, available_cores)
+            else:  # >= 10MB
+                # Large data: use more threads
+                optimal_threads = min(available_cores, 8)  # Cap at 8 for efficiency
+            
+            # Only change if it would be beneficial
+            if optimal_threads != current_threads:
+                # Note: We don't set threads here as it's global state
+                # Instead, we'll document the recommended thread count
+                params["_recommended_threads"] = optimal_threads
+        except Exception:
+            pass  # Fallback to current settings
+    
+    return params
 
 
 def get_compression_info(filepath):

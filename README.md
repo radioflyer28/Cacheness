@@ -1,7 +1,7 @@
 # cacheness
 
 A high-performance disk caching library for Python with key-based hashing, automatic compression with Blosc2, and decorator support.  
-It supports directly caching numpy arrays, Pandas and Polars dataframes via flexible backends. 
+It supports directly caching numpy arrays, Pandas and Polars DataFrames/Series via flexible backends. 
 For everything else, will use pickle and Blosc compression.
 
 Motivation... I wanted a very fast cache system to speed up ML model development when doing things like large API calls and persisting data intensive stages like building derived features.
@@ -29,7 +29,7 @@ It's made for dataframes as well, however, that's totally optional. So, if all y
 
 **Optional Dependencies:**
 - **sqlmodel**: SQLite metadata backend (10-500x faster than JSON for large caches)
-- **pandas/polars**: DataFrame support with Parquet storage
+- **pandas/polars**: DataFrame and Series support with Parquet storage
 
 ## Quick Start
 
@@ -170,7 +170,7 @@ config = CacheConfig(
     max_cache_size_mb=5000,            # Maximum cache size
     cleanup_on_init=True,              # Clean expired entries on startup
     use_blosc2_arrays=True,            # High-performance array compression
-    pickle_compression_codec="lz4"     # Compression for Python objects
+    pickle_compression_codec="zstd"     # Compression for Python objects
 )
 
 cache = cacheness(config)
@@ -486,7 +486,7 @@ training_data = cache.get(dataset="fraud_detection", split="80_20", preprocessin
 print(training_data.keys())  # ['X_train', 'X_test', 'y_train', 'y_test']
 ```
 
-### DataFrames (Pandas/Polars)
+### DataFrames & Series (Pandas/Polars)
 
 ```python
 # Pandas DataFrames (automatically stored as Parquet)
@@ -502,17 +502,40 @@ cache.put(df,
           date_range="2024_q1", 
           preprocessing="outliers_removed")
 
-# Polars DataFrames (if available, with automatic fallback to Pandas)
+# Pandas Series (automatically stored as Parquet with index preservation)
+series = pd.Series([1.1, 2.2, 3.3, 4.4, 5.5], 
+                   index=['a', 'b', 'c', 'd', 'e'], 
+                   name="measurements")
+
+cache.put(series, 
+          sensor="temperature", 
+          location="lab_1", 
+          date="2024_01_15")
+
+# Polars DataFrames and Series (if available, with automatic fallback)
 try:
     import polars as pl
+    
+    # Polars DataFrame
     df_polars = pl.DataFrame({
         "id": range(1000),
         "value": np.random.rand(1000)
     })
     cache.put(df_polars, source="sensor_data", date="2024_01_15")
+    
+    # Polars Series  
+    series_polars = pl.Series("measurements", [10.1, 20.2, 30.3])
+    cache.put(series_polars, sensor="pressure", location="lab_2")
+    
 except ImportError:
     # Library gracefully handles missing Polars
     pass
+
+# Complex index types are fully supported (MultiIndex, etc.)
+multi_index = pd.MultiIndex.from_tuples([('A', 1), ('A', 2), ('B', 1)], 
+                                        names=['letter', 'number'])
+complex_series = pd.Series([100, 200, 300], index=multi_index, name="values")
+cache.put(complex_series, experiment="multi_index_test")
 ```
 
 ## Real-World Examples
@@ -660,7 +683,7 @@ The library automatically selects optimal storage formats:
 | Data Type | Storage Format | Compression | Benefits |
 |-----------|---------------|-------------|----------|
 | NumPy arrays | NPZ + Blosc2 | LZ4/ZSTD | 60-80% size reduction, 4x faster I/O |
-| DataFrames | Parquet | LZ4 | 40-60% size reduction, columnar efficiency |
+| DataFrames & Series | Parquet | LZ4 | 40-60% size reduction, columnar efficiency |
 | Python objects | Pickle + Blosc | LZ4 | 30-50% size reduction, universal compatibility |
 
 ### Metadata Backend Performance
@@ -678,7 +701,8 @@ The library automatically selects optimal storage formats:
 
 ### Fallback Mechanisms
 
-- **DataFrame Libraries**: Polars → Pandas → Pickle (graceful degradation)
+- **DataFrame/Series Libraries**: Polars → Pandas → Pickle (graceful degradation)
+- **Parquet Compatibility**: DataFrames/Series with complex objects → Pickle fallback
 - **Array Compression**: Blosc2 → NPZ → Standard Pickle
 - **Metadata Backend**: SQLite → JSON (automatic selection based on availability)
 - **Thread Safety**: Built-in locking for concurrent access
@@ -708,11 +732,20 @@ cache_dir/
 | `cleanup_on_init` | bool | `True` | Clean expired entries on initialization |
 | `use_blosc2_arrays` | bool | `True` | Use Blosc2 for array compression |
 | `npz_compression` | bool | `True` | Enable NPZ compression |
-| `parquet_compression` | str | `"lz4"` | DataFrame compression algorithm |
-| `pickle_compression_codec` | str | `"lz4"` | Pickle compression codec |
+| `parquet_compression` | str | `"lz4"` | DataFrame/Series compression algorithm |
+| `pickle_compression_codec` | str | `"zstd"` | Pickle compression codec |
+| `pickle_compression_level` | int | `5` | Pickle compression level (1-9) |
 | `blosc2_array_codec` | str | `"lz4"` | Blosc2 compression codec |
+| `enable_multithreading` | bool | `True` | Use multi-threading for compression |
+| `auto_optimize_threads` | bool | `True` | Auto-optimize thread count based on data size |
 
 ### Compression Options
+
+**Python Object Compression (Pickle)**:
+- `"zstd"` (default): Excellent general-purpose compression with multi-threading support
+- `"lz4"`: Fastest compression/decompression, best for numerical data
+- `"lz4hc"`: Better compression than lz4 with similar speed
+- `"zlib"`: Standard compression, good compatibility
 
 **Array Compression**:
 - `"lz4"` (default): Fastest decompression
@@ -720,9 +753,24 @@ cache_dir/
 - `"zstd"`: Good balance of speed and compression
 - `"zlib"`: Standard compression
 
-**DataFrame Compression**:
+**DataFrame & Series Compression**:
 - `"lz4"` (default): Fast compression/decompression
 - `"snappy"`: Best for compatibility, balance of speed and compression
+
+### Advanced Compression Features
+
+The library automatically optimizes compression parameters based on data characteristics:
+
+- **Intelligent Threading**: Automatically adjusts thread count based on data size
+- **Dynamic Compression Levels**: Optimizes compression level for data size and type
+- **ZSTD Optimizations**: Leverages ZSTD's advanced features for general-purpose data
+
+```python
+# The library automatically optimizes these settings:
+# - Small data (<1MB): Fewer threads, lower compression
+# - Medium data (1-10MB): Moderate threading and compression  
+# - Large data (>10MB): More threads, higher compression
+```
 
 ## Best Practices
 
@@ -863,10 +911,10 @@ result = cache.get(debug="test")  # Will log retrieval details
 ### Optional (Graceful Fallbacks)
 - **sqlmodel**: SQLite metadata backend (10-500x faster than JSON)
 - **blosc2**: High-performance array compression  
-- **pandas**: DataFrame support
-- **polars**: High-performance DataFrame operations
+- **pandas**: DataFrame and Series support
+- **polars**: High-performance DataFrame and Series operations
 - **pyarrow**: Parquet file support
 
 ## License
 
-MIT License - see LICENSE file for details.
+GPLv3 License - see LICENSE file for details.

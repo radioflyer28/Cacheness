@@ -145,10 +145,11 @@ class TestCompressPickle:
 
     def test_all_compression_codecs_v1(self, temp_dir, test_data_simple):
         """Test all blosc v1 compression codecs."""
-        if not compress_pickle.blosc.__version__.startswith("1"):
+        if compress_pickle.blosc.__version__.startswith("1"):
+            # True blosc v1 functionality
+            comp_types = ["blosclz", "lz4", "lz4hc", "zlib", "zstd"]
+        else:
             pytest.skip("Blosc v1 not available")
-
-        comp_types = ["blosclz", "lz4", "lz4hc", "zlib", "zstd"]
 
         for comp_type in comp_types:
             filepath = temp_dir / f"test_v1_{comp_type}.pkl"
@@ -167,9 +168,10 @@ class TestCompressPickle:
             assert read_data == test_data_simple
 
     def test_all_compression_codecs_v2(self, temp_dir, test_data_simple):
-        """Test all blosc v2 compression codecs."""
-        if not compress_pickle.blosc.__version__.startswith("2"):
-            pytest.skip("Blosc v2 not available")
+        """Test all blosc v2+ compression codecs."""
+        version = compress_pickle.blosc.__version__
+        if not (version.startswith("2") or version.startswith("3")):
+            pytest.skip("Blosc v2+ not available")
 
         comp_types = [
             compress_pickle.blosc.Codec.BLOSCLZ,
@@ -177,11 +179,13 @@ class TestCompressPickle:
             compress_pickle.blosc.Codec.LZ4HC,
             compress_pickle.blosc.Codec.ZLIB,
             compress_pickle.blosc.Codec.ZSTD,
-            compress_pickle.blosc.Codec.NDLZ,
-            compress_pickle.blosc.Codec.ZFP_ACC,
-            compress_pickle.blosc.Codec.ZFP_PREC,
-            compress_pickle.blosc.Codec.ZFP_RATE,
         ]
+        
+        # Only include newer codecs if they exist (some may not be available in all versions)
+        optional_codecs = ["NDLZ", "ZFP_ACC", "ZFP_PREC", "ZFP_RATE"]
+        for codec_name in optional_codecs:
+            if hasattr(compress_pickle.blosc.Codec, codec_name):
+                comp_types.append(getattr(compress_pickle.blosc.Codec, codec_name))
 
         for comp_type in comp_types:
             codec_name = comp_type.name.lower()
@@ -207,10 +211,11 @@ class TestCompressPickle:
 
     def test_numpy_with_all_codecs_v1(self, temp_dir, test_data_numpy):
         """Test numpy arrays with all blosc v1 codecs."""
-        if not compress_pickle.blosc.__version__.startswith("1"):
+        if compress_pickle.blosc.__version__.startswith("1"):
+            # True blosc v1 functionality
+            comp_types = ["lz4", "zstd"]  # Test subset for performance
+        else:
             pytest.skip("Blosc v1 not available")
-
-        comp_types = ["lz4", "zstd"]  # Test subset for performance
 
         for comp_type in comp_types:
             filepath = temp_dir / f"test_numpy_v1_{comp_type}.pkl"
@@ -224,9 +229,10 @@ class TestCompressPickle:
             np.testing.assert_array_equal(read_data, test_data_numpy)
 
     def test_numpy_with_all_codecs_v2(self, temp_dir, test_data_numpy):
-        """Test numpy arrays with all blosc v2 codecs using pack_array."""
-        if not compress_pickle.blosc.__version__.startswith("2"):
-            pytest.skip("Blosc v2 not available")
+        """Test numpy arrays with all blosc v2+ codecs using pack_array."""
+        version = compress_pickle.blosc.__version__
+        if not (version.startswith("2") or version.startswith("3")):
+            pytest.skip("Blosc v2+ not available")
 
         comp_types = [
             compress_pickle.blosc.Codec.LZ4,

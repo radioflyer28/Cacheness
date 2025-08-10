@@ -35,6 +35,7 @@ from .compress_pickle import (
     read_file as read_compressed_pickle,
     is_pickleable,
     BLOSC_AVAILABLE,
+    optimize_compression_params,
 )
 
 # Optional dependency - blosc2 for array compression
@@ -100,7 +101,17 @@ class PolarsDataFrameHandler(CacheHandler):
         """Check if data is a Polars DataFrame."""
         if not POLARS_AVAILABLE or pl is None:
             return False
-        return isinstance(data, pl.DataFrame)
+        if not isinstance(data, pl.DataFrame):
+            return False
+            
+        # Check if DataFrame can be written to Parquet
+        try:
+            import io
+            data.write_parquet(io.BytesIO())
+            return True
+        except Exception:
+            # DataFrame has types that can't be written to Parquet, let ObjectHandler handle it
+            return False
 
     def put(self, data: Any, file_path: Path, config: Any) -> Dict[str, Any]:
         """Store Polars DataFrame as Parquet."""
@@ -124,15 +135,164 @@ class PolarsDataFrameHandler(CacheHandler):
         """Load Polars DataFrame from Parquet."""
         if not POLARS_AVAILABLE or pl is None:
             raise ImportError("Polars not available for loading DataFrame")
+        
         return pl.read_parquet(file_path)
 
     def get_file_extension(self, config: Any) -> str:
-        """Get file extension for Polars DataFrames."""
+        """Get file extension for Polars DataFrames and Series."""
         return ".parquet"
 
     @property
     def data_type(self) -> str:
         return "polars_dataframe"
+
+
+class PandasSeriesHandler(CacheHandler):
+    """Handler for Pandas Series using Parquet format."""
+
+    def can_handle(self, data: Any) -> bool:
+        """Check if data is a Pandas Series."""
+        if not PANDAS_AVAILABLE or pd is None:
+            return False
+        if not isinstance(data, pd.Series):
+            return False
+            
+        # Try to convert to Parquet to see if it's compatible
+        try:
+            temp_df = data.to_frame()
+            import io
+            temp_df.to_parquet(io.BytesIO())  # Keep index for Series compatibility check
+            return True
+        except Exception:
+            # This Series has mixed types that can't be handled by Parquet
+            return False
+
+    def put(self, data: Any, file_path: Path, config: Any) -> Dict[str, Any]:
+        """Store Pandas Series as Parquet."""
+        # Convert Series to DataFrame for Parquet storage
+        df = data.to_frame()
+        
+        # Use the same Parquet storage logic as DataFrame handler
+        parquet_path = file_path.with_suffix("").with_suffix(".parquet")
+        df.to_parquet(
+            parquet_path,
+            compression=config.parquet_compression,
+            # Keep index=True for Series to preserve index data
+        )
+
+        file_size = parquet_path.stat().st_size
+        return {
+            "file_size": file_size,
+            "actual_path": str(parquet_path),
+            "storage_format": "parquet",
+            "metadata": {
+                "shape": list(df.shape),
+                "columns": list(df.columns),
+                "dtypes": [str(dtype) for dtype in df.dtypes],
+                "compression": config.parquet_compression,
+                "backend": "pandas",
+                "is_series": True,
+                "series_name": data.name,
+            },
+        }
+
+    def get(self, file_path: Path, metadata: Dict[str, Any]) -> Any:
+        """Load Pandas Series from Parquet."""
+        df = pd.read_parquet(file_path)
+        
+        # Convert back to Series - since we preserved the index, use it
+        series = df.iloc[:, 0]  # Get the first (and only) column
+        
+        # Restore the original Series name
+        if metadata.get("is_series") and "series_name" in metadata:
+            series.name = metadata["series_name"]
+            
+        return series
+
+    def get_file_extension(self, config: Any) -> str:
+        """Get file extension for Series (Parquet)."""
+        return ".parquet"
+
+    @property
+    def file_extension(self) -> str:
+        """Get file extension for Series (Parquet)."""
+        return ".parquet"
+
+    @property
+    def data_type(self) -> str:
+        return "pandas_series"
+
+
+class PolarsSeriesHandler(CacheHandler):
+    """Handler for Polars Series using Parquet format."""
+
+    def can_handle(self, data: Any) -> bool:
+        """Check if data is a Polars Series."""
+        if not POLARS_AVAILABLE or pl is None:
+            return False
+        if not isinstance(data, pl.Series):
+            return False
+            
+        # Try to convert to Parquet to see if it's compatible
+        try:
+            temp_df = data.to_frame()
+            import io
+            temp_df.write_parquet(io.BytesIO())
+            return True
+        except Exception:
+            # This Series has mixed types that can't be handled by Parquet
+            return False
+
+    def put(self, data: Any, file_path: Path, config: Any) -> Dict[str, Any]:
+        """Store Polars Series as Parquet."""
+        # Convert Series to DataFrame for Parquet storage
+        df = data.to_frame()
+        
+        # Use the same Parquet storage logic as DataFrame handler
+        parquet_path = file_path.with_suffix("").with_suffix(".parquet")
+        df.write_parquet(parquet_path, compression=config.parquet_compression)
+
+        file_size = parquet_path.stat().st_size
+        return {
+            "file_size": file_size,
+            "actual_path": str(parquet_path),
+            "storage_format": "parquet",
+            "metadata": {
+                "shape": list(df.shape),
+                "columns": list(df.columns),
+                "dtypes": [str(dtype) for dtype in df.dtypes],
+                "compression": config.parquet_compression,
+                "backend": "polars",
+                "is_series": True,
+                "series_name": data.name,
+            },
+        }
+
+    def get(self, file_path: Path, metadata: Dict[str, Any]) -> Any:
+        """Load Polars Series from Parquet."""
+        df = pl.read_parquet(file_path)
+        
+        # Convert back to Series
+        series = df.to_series(0)  # Get the first (and only) column
+        
+        # Restore the original Series name
+        if metadata.get("is_series") and "series_name" in metadata:
+            series = series.alias(metadata["series_name"])
+            
+        return series
+
+    def get_file_extension(self, config: Any) -> str:
+        """Get file extension for Series (Parquet)."""
+        return ".parquet"
+
+    @property
+    def file_extension(self) -> str:
+        """Get file extension for Series (Parquet)."""
+        return ".parquet"
+
+    @property
+    def data_type(self) -> str:
+        return "polars_series"
 
 
 class PandasDataFrameHandler(CacheHandler):
@@ -142,13 +302,24 @@ class PandasDataFrameHandler(CacheHandler):
         """Check if data is a Pandas DataFrame."""
         if not PANDAS_AVAILABLE or pd is None:
             return False
-        return isinstance(data, pd.DataFrame)
+        if not isinstance(data, pd.DataFrame):
+            return False
+            
+        # Check if DataFrame can be written to Parquet
+        try:
+            import io
+            data.to_parquet(io.BytesIO())
+            return True
+        except Exception:
+            # DataFrame has types that can't be written to Parquet, let ObjectHandler handle it
+            return False
 
     def put(self, data: Any, file_path: Path, config: Any) -> Dict[str, Any]:
         """Store Pandas DataFrame as Parquet."""
         parquet_path = file_path.with_suffix("").with_suffix(".parquet")
         data.to_parquet(
-            parquet_path, compression=config.parquet_compression, index=False
+            parquet_path, compression=config.parquet_compression
+            # Keep index=True by default to preserve DataFrame index
         )
 
         return {
@@ -168,10 +339,11 @@ class PandasDataFrameHandler(CacheHandler):
         """Load Pandas DataFrame from Parquet."""
         if not PANDAS_AVAILABLE or pd is None:
             raise ImportError("Pandas not available for loading DataFrame")
+        
         return pd.read_parquet(file_path)
 
     def get_file_extension(self, config: Any) -> str:
-        """Get file extension for Pandas DataFrames."""
+        """Get file extension for Pandas DataFrames and Series."""
         return ".parquet"
 
     @property
@@ -370,11 +542,47 @@ class ObjectHandler(CacheHandler):
 
     def can_handle(self, data: Any) -> bool:
         """Check if data can be pickled (and isn't handled by other handlers)."""
-        # Don't handle DataFrames or arrays - let specialized handlers do that
+        # Don't handle DataFrames if specialized handlers can handle them
         if POLARS_AVAILABLE and pl is not None and isinstance(data, pl.DataFrame):
-            return False
+            # Check if PolarsDataFrameHandler would reject this (Object types, etc.)
+            try:
+                import io
+                data.write_parquet(io.BytesIO())
+                return False  # Specialized handler can handle it
+            except Exception:
+                return is_pickleable(data)  # We can handle it as fallback
+                
         if PANDAS_AVAILABLE and pd is not None and isinstance(data, pd.DataFrame):
-            return False
+            # Check if PandasDataFrameHandler would reject this (complex objects, etc.)
+            try:
+                import io
+                data.to_parquet(io.BytesIO())
+                return False  # Specialized handler can handle it
+            except Exception:
+                return is_pickleable(data)  # We can handle it as fallback
+            
+        # For Series, only handle if specialized handlers can't (i.e., mixed-type Series)
+        if POLARS_AVAILABLE and pl is not None and isinstance(data, pl.Series):
+            # Check if PolarsSeriesHandler would reject this (mixed types)
+            try:
+                temp_df = data.to_frame()
+                import io
+                temp_df.write_parquet(io.BytesIO())
+                return False  # Specialized handler can handle it
+            except Exception:
+                return is_pickleable(data)  # We can handle it as fallback
+                
+        if PANDAS_AVAILABLE and pd is not None and isinstance(data, pd.Series):
+            # Check if PandasSeriesHandler would reject this (mixed types)
+            try:
+                temp_df = data.to_frame()
+                import io
+                temp_df.to_parquet(io.BytesIO())  # Keep index for proper compatibility check
+                return False  # Specialized handler can handle it
+            except Exception:
+                return is_pickleable(data)  # We can handle it as fallback
+                
+        # Don't handle arrays - let ArrayHandler do that
         if isinstance(data, np.ndarray):
             return False
         if isinstance(data, dict) and all(
@@ -393,14 +601,23 @@ class ObjectHandler(CacheHandler):
 
         # Ensure clean path without existing extension
         if BLOSC_AVAILABLE:
-            pickle_path = file_path.with_suffix("").with_suffix(".pkl.lz4")
-            # Use compressed pickle with lz4 for best performance
+            pickle_path = file_path.with_suffix("").with_suffix(f".pkl.{config.pickle_compression_codec}")
+            
+            # Optimize compression parameters based on data characteristics
+            compression_params = optimize_compression_params(
+                data,
+                codec=config.pickle_compression_codec,
+                base_clevel=config.pickle_compression_level,
+                enable_multithreading=getattr(config, 'enable_multithreading', True),
+                auto_optimize_threads=getattr(config, 'auto_optimize_threads', True)
+            )
+            
+            # Use compressed pickle with optimized parameters
             write_compressed_pickle(
                 data,
                 pickle_path,
                 nparray=False,  # Don't use numpy optimization for general objects
-                codec=config.pickle_compression_codec,
-                clevel=config.pickle_compression_level,
+                **compression_params
             )
             storage_format = "compressed_pickle"
         else:
@@ -412,7 +629,11 @@ class ObjectHandler(CacheHandler):
                 pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
             storage_format = "pickle"
 
-        metadata = {"object_type": str(type(data)), "storage_format": storage_format}
+        metadata = {
+            "object_type": str(type(data)), 
+            "storage_format": storage_format,
+            "compression_codec": config.pickle_compression_codec if BLOSC_AVAILABLE else None
+        }
 
         return {
             "storage_format": storage_format,
@@ -430,7 +651,7 @@ class ObjectHandler(CacheHandler):
             pickle_path = file_path.with_suffix("").with_suffix(".pkl")
             if not pickle_path.exists():
                 # Try compressed version as fallback
-                pickle_path = file_path.with_suffix("").with_suffix(".pkl.lz4")
+                pickle_path = file_path.with_suffix("").with_suffix(f".pkl.{metadata.get('compression_codec', 'zstd')}")
 
             if not pickle_path.exists():
                 raise FileNotFoundError(f"Pickle file not found: {pickle_path}")
@@ -446,7 +667,8 @@ class ObjectHandler(CacheHandler):
                 return read_compressed_pickle(pickle_path, nparray=False)
         else:
             # Compressed pickle
-            pickle_path = file_path.with_suffix("").with_suffix(".pkl.lz4")
+            codec = metadata.get('compression_codec', 'zstd')
+            pickle_path = file_path.with_suffix("").with_suffix(f".pkl.{codec}")
             if not pickle_path.exists():
                 raise FileNotFoundError(f"Pickle file not found: {pickle_path}")
 
@@ -455,7 +677,7 @@ class ObjectHandler(CacheHandler):
     def get_file_extension(self, config: Any) -> str:
         """Get file extension for objects."""
         if BLOSC_AVAILABLE:
-            return ".pkl.lz4"
+            return f".pkl.{config.pickle_compression_codec}"
         else:
             return ".pkl"
 
@@ -469,6 +691,12 @@ class HandlerRegistry:
 
     def __init__(self):
         self.handlers = []
+
+        # Add Series handlers first (higher priority than DataFrame handlers)
+        if POLARS_AVAILABLE:
+            self.handlers.append(PolarsSeriesHandler())
+        if PANDAS_AVAILABLE:
+            self.handlers.append(PandasSeriesHandler())
 
         # Add DataFrame handlers if available
         if POLARS_AVAILABLE:

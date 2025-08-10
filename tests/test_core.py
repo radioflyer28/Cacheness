@@ -29,7 +29,7 @@ class TestCacheConfig:
         assert config.cleanup_on_init is True
         assert config.metadata_backend == "auto"
         assert config.sqlite_db_file == "cache_metadata.db"
-        assert config.pickle_compression_codec == "lz4"
+        assert config.pickle_compression_codec == "zstd"
         assert config.pickle_compression_level == 5
         assert config.use_blosc2_arrays is True
         assert config.blosc2_array_codec == "lz4"
@@ -138,8 +138,14 @@ class TestUnifiedCache:
         for key in test_dict.keys():
             assert np.array_equal(retrieved[key], test_dict[key])
 
+    def _has_dataframe_library(self):
+        """Check if polars or pandas is available."""
+        import importlib.util
+        return (importlib.util.find_spec("polars") is not None or 
+                importlib.util.find_spec("pandas") is not None)
+
     @pytest.mark.skipif(
-        True,  # Skip by default since polars/pandas may not be available
+        not _has_dataframe_library(None),
         reason="DataFrame tests require polars or pandas",
     )
     def test_put_and_get_dataframe(self, cache):
@@ -191,6 +197,45 @@ class TestUnifiedCache:
             assert isinstance(test_df, pd.DataFrame)
             assert isinstance(retrieved, pd.DataFrame)
             assert test_df.equals(retrieved)
+
+    def test_put_and_get_series(self, cache):
+        """Test caching Series (requires polars or pandas)."""
+        try:
+            import polars as pl
+
+            test_series = pl.Series("test_data", [1.1, 2.2, 3.3, 4.4, 5.5])
+            data_type = "polars"
+        except ImportError:
+            try:
+                import pandas as pd
+
+                test_series = pd.Series([1.1, 2.2, 3.3, 4.4, 5.5], name="test_data")
+                data_type = "pandas"
+            except ImportError:
+                pytest.skip("Neither polars nor pandas available")
+
+        cache_key_params = {"test": "series", "type": data_type}
+
+        # Put series
+        cache.put(test_series, description="Test series", **cache_key_params)
+
+        # Get series
+        retrieved = cache.get(**cache_key_params)
+
+        assert isinstance(retrieved, type(test_series))
+        assert retrieved.shape == test_series.shape
+
+        if data_type == "polars":
+            # For polars, compare values
+            assert retrieved.equals(test_series)
+            assert retrieved.name == test_series.name
+        else:  # pandas
+            # For pandas, use Series.equals()
+            import pandas as pd
+
+            assert isinstance(test_series, pd.Series)
+            assert isinstance(retrieved, pd.Series)
+            assert test_series.equals(retrieved)
 
     def test_cache_miss(self, cache):
         """Test cache miss scenario."""

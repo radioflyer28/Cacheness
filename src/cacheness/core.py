@@ -42,8 +42,11 @@ class CacheConfig:
         True  # Hash Path objects by content; False uses filename only
     )
     # Compressed pickle options
-    pickle_compression_codec: str = "lz4"  # Default to lz4 for best performance
+    pickle_compression_codec: str = "zstd"  # Default to zstd for general-purpose data
     pickle_compression_level: int = 5  # Balanced compression level
+    # Advanced compression options (for Blosc2/3 with ZSTD)
+    enable_multithreading: bool = True  # Use multi-threading for compression
+    auto_optimize_threads: bool = True  # Auto-optimize thread count based on data size
     # NumPy array compression options
     use_blosc2_arrays: bool = True  # Use blosc2 for arrays when available
     blosc2_array_codec: str = "lz4"  # Codec for blosc2 array compression
@@ -314,14 +317,14 @@ class UnifiedCache:
         if removed_count > 0:
             logger.info(f"Cleaned up {removed_count} expired cache entries")
 
-    def put(self, data: Any, description: str = "", prefix: str = "", **kwargs):
+    def put(self, data: Any, prefix: str = "", description: str = "", **kwargs):
         """
         Store any supported data type in cache.
 
         Args:
             data: Data to cache (DataFrame, array, or general object)
+            prefix: Descriptive prefix prepended to the cache filename
             description: Human-readable description
-            prefix: Descriptive prefix for the cache file
             **kwargs: Parameters identifying this data
         """
         # Get appropriate handler
@@ -341,9 +344,9 @@ class UnifiedCache:
 
             # Update metadata
             entry_data = {
-                "description": description,
                 "data_type": handler.data_type,
                 "prefix": prefix,
+                "description": description,
                 "file_size": result["file_size"],
                 "metadata": {
                     **result["metadata"],
@@ -367,20 +370,22 @@ class UnifiedCache:
             raise
 
     def get(
-        self, ttl_hours: Optional[int] = None, prefix: str = "", **kwargs
+        self, cache_key: Optional[str] = None, ttl_hours: Optional[int] = None, prefix: str = "", **kwargs
     ) -> Optional[Any]:
         """
         Retrieve any supported data type from cache.
 
         Args:
+            cache_key: Direct cache key (if provided, **kwargs are ignored)
             ttl_hours: Custom TTL (overrides default)
-            prefix: Descriptive prefix for the cache file
-            **kwargs: Parameters identifying the cached data
+            prefix: Descriptive prefix prepended to the cache filename
+            **kwargs: Parameters identifying the cached data (used if cache_key is None)
 
         Returns:
             Cached data or None if not found/expired
         """
-        cache_key = self._create_cache_key(kwargs)
+        if cache_key is None:
+            cache_key = self._create_cache_key(kwargs)
 
         # Check if entry exists and is not expired
         entry = self.metadata_backend.get_entry(cache_key)
@@ -453,42 +458,17 @@ class UnifiedCache:
         if removed_count > 0:
             logger.info(f"Cache size enforcement: removed {removed_count} entries")
 
-    # Legacy method aliases for backward compatibility
-    def put_dataframe(self, df, description: str = "", prefix: str = "", **kwargs):
-        """Store a Polars DataFrame in cache."""
-        return self.put(df, description, prefix, **kwargs)
-
-    def get_dataframe(
-        self, ttl_hours: Optional[int] = None, prefix: str = "", **kwargs
-    ):
-        """Retrieve a Polars DataFrame from cache."""
-        return self.get(ttl_hours, prefix, **kwargs)
-
-    def put_array(self, data, description: str = "", prefix: str = "", **kwargs):
-        """Store NumPy array(s) in cache."""
-        return self.put(data, description, prefix, **kwargs)
-
-    def get_array(self, ttl_hours: Optional[int] = None, prefix: str = "", **kwargs):
-        """Retrieve NumPy array(s) from cache."""
-        return self.get(ttl_hours, prefix, **kwargs)
-
-    def put_object(self, obj, description: str = "", prefix: str = "", **kwargs):
-        """Store a general Python object in cache."""
-        return self.put(obj, description, prefix, **kwargs)
-
-    def get_object(self, ttl_hours: Optional[int] = None, prefix: str = "", **kwargs):
-        """Retrieve a general Python object from cache."""
-        return self.get(ttl_hours, prefix, **kwargs)
-
-    def invalidate(self, prefix: str = "", **kwargs):
+    def invalidate(self, cache_key: Optional[str] = None, prefix: str = "", **kwargs):
         """
         Invalidate (remove) specific cache entries.
 
         Args:
-            prefix: Descriptive prefix for the cache file
-            **kwargs: Parameters identifying the cached data
+            cache_key: Direct cache key (if provided, **kwargs are ignored)
+            prefix: Descriptive prefix of the cache filename
+            **kwargs: Parameters identifying the cached data (used if cache_key is None)
         """
-        cache_key = self._create_cache_key(kwargs)
+        if cache_key is None:
+            cache_key = self._create_cache_key(kwargs)
 
         # Remove from metadata backend (handles file cleanup)
         if self.metadata_backend.remove_entry(cache_key):
