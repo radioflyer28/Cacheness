@@ -27,8 +27,6 @@ Tests the handler system including fallback mechanisms and different data types.
 """
 
 
-
-
 class TestHandlerRegistry:
     """Test the cache handler registry system."""
 

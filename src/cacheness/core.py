@@ -48,6 +48,8 @@ class CacheConfig:
     use_blosc2_arrays: bool = True  # Use blosc2 for arrays when available
     blosc2_array_codec: str = "lz4"  # Codec for blosc2 array compression
     blosc2_array_clevel: int = 5  # Compression level for blosc2 arrays
+    # Cache integrity verification
+    verify_cache_integrity: bool = True  # Verify cache file hash on retrieval
 
 
 class UnifiedCache:
@@ -280,6 +282,30 @@ class UnifiedCache:
 
         return current_time > expiry_time
 
+    def _calculate_file_hash(self, file_path: Path) -> Optional[str]:
+        """
+        Calculate XXH3_64 hash of a cache file for integrity verification.
+
+        Args:
+            file_path: Path to the cache file
+
+        Returns:
+            Hex string of the file hash, or None if file doesn't exist or error
+        """
+        try:
+            if not file_path.exists():
+                return None
+
+            hasher = xxhash.xxh3_64()
+            with open(file_path, "rb") as f:
+                # Read in chunks to handle large files efficiently
+                for chunk in iter(lambda: f.read(8192), b""):
+                    hasher.update(chunk)
+            return hasher.hexdigest()
+        except Exception as e:
+            logger.warning(f"Failed to calculate hash for {file_path}: {e}")
+            return None
+
     def _cleanup_expired(self):
         """Remove expired cache entries."""
         ttl = self.config.default_ttl_hours
@@ -307,6 +333,12 @@ class UnifiedCache:
             # Use handler to store the data
             result = handler.put(data, base_file_path, self.config)
 
+            # Calculate file hash for integrity verification (if enabled)
+            file_hash = None
+            if self.config.verify_cache_integrity:
+                actual_path = result.get("actual_path", str(base_file_path))
+                file_hash = self._calculate_file_hash(Path(actual_path))
+
             # Update metadata
             entry_data = {
                 "description": description,
@@ -317,6 +349,7 @@ class UnifiedCache:
                     **result["metadata"],
                     "prefix": prefix,
                     "actual_path": result.get("actual_path", str(base_file_path)),
+                    "file_hash": file_hash,  # Store file hash for verification
                 },
             }
 
@@ -372,6 +405,21 @@ class UnifiedCache:
                 file_path = Path(actual_path)
             else:
                 file_path = base_file_path
+
+            # Verify cache file integrity if enabled and hash is available
+            if self.config.verify_cache_integrity:
+                stored_hash = metadata.get("file_hash")
+                if stored_hash is not None:
+                    current_hash = self._calculate_file_hash(file_path)
+                    if current_hash != stored_hash:
+                        logger.warning(
+                            f"Cache integrity verification failed for {cache_key}: "
+                            f"stored hash {stored_hash} != current hash {current_hash}. "
+                            f"Removing corrupted cache entry."
+                        )
+                        self.metadata_backend.remove_entry(cache_key)
+                        self.metadata_backend.increment_misses()
+                        return None
 
             # Use handler to load the data
             data = handler.get(file_path, metadata)

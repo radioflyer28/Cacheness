@@ -51,7 +51,7 @@ try:
 
         __tablename__ = "cache_entries"
 
-        cache_key: str = Field(primary_key=True, max_length=32)
+        cache_key: str = Field(primary_key=True, max_length=16)
         description: str = Field(default="", max_length=500)
         data_type: str = Field(
             max_length=20, index=True
@@ -70,6 +70,11 @@ try:
 
         # File info - indexed for size-based queries and cache management
         file_size: int = Field(default=0, index=True)  # Size in bytes
+
+        # Cache integrity verification
+        file_hash: Optional[str] = Field(
+            default=None, max_length=16
+        )  # XXH3_64 hash (16 hex chars)
 
         # Data-specific metadata (stored as JSON)
         metadata_json: str = Field(default="{}", sa_column=Column(Text))
@@ -463,7 +468,11 @@ class SQLiteMetadataBackend(MetadataBackend):
             }
 
             for entry in entries:
-                metadata["entries"][entry.cache_key] = json.loads(entry.metadata_json)
+                entry_metadata = json.loads(entry.metadata_json)
+                # Add file_hash back into metadata if it exists
+                if entry.file_hash is not None:
+                    entry_metadata["file_hash"] = entry.file_hash
+                metadata["entries"][entry.cache_key] = entry_metadata
                 metadata["access_times"][entry.cache_key] = (
                     entry.accessed_at.isoformat()
                 )
@@ -479,15 +488,14 @@ class SQLiteMetadataBackend(MetadataBackend):
         """Save complete metadata structure (compatibility method)."""
         # This method is mainly for compatibility
         # The SQLite backend saves individual entries as they're updated
-        with self._lock:
-            with Session(self.engine) as session:
-                # Update stats
-                stats = self._get_stats_row(session)
-                stats.cache_hits = metadata.get("cache_hits", 0)
-                stats.cache_misses = metadata.get("cache_misses", 0)
-                stats.last_updated = datetime.now(timezone.utc)
-                session.add(stats)
-                session.commit()
+        with self._lock, Session(self.engine) as session:
+            # Update stats
+            stats = self._get_stats_row(session)
+            stats.cache_hits = metadata.get("cache_hits", 0)
+            stats.cache_misses = metadata.get("cache_misses", 0)
+            stats.last_updated = datetime.now(timezone.utc)
+            session.add(stats)
+            session.commit()
 
     def get_entry(self, cache_key: str) -> Optional[Dict[str, Any]]:
         """Get specific cache entry metadata."""
@@ -496,6 +504,11 @@ class SQLiteMetadataBackend(MetadataBackend):
             if not entry:
                 return None
 
+            metadata = json.loads(entry.metadata_json)
+            # Add file_hash back into metadata if it exists
+            if entry.file_hash is not None:
+                metadata["file_hash"] = entry.file_hash
+
             return {
                 "description": entry.description,
                 "data_type": entry.data_type,
@@ -503,53 +516,53 @@ class SQLiteMetadataBackend(MetadataBackend):
                 "created_at": entry.created_at.isoformat(),
                 "accessed_at": entry.accessed_at.isoformat(),
                 "file_size": entry.file_size,
-                "metadata": json.loads(entry.metadata_json),
+                "metadata": metadata,
             }
 
     def put_entry(self, cache_key: str, entry_data: Dict[str, Any]):
         """Store cache entry metadata."""
-        with self._lock:
-            with Session(self.engine) as session:
-                # Get existing entry or create new one
-                entry = session.get(CacheEntry, cache_key)
-                if not entry:
-                    entry = CacheEntry(cache_key=cache_key)
+        with self._lock, Session(self.engine) as session:
+            # Get existing entry or create new one
+            entry = session.get(CacheEntry, cache_key)
+            if not entry:
+                entry = CacheEntry(cache_key=cache_key)
 
-                # Update fields
-                entry.description = entry_data.get("description", "")
-                entry.data_type = entry_data.get("data_type", "unknown")
-                entry.prefix = entry_data.get("prefix", "")
-                entry.file_size = entry_data.get("file_size", 0)
-                entry.metadata_json = json.dumps(entry_data.get("metadata", {}))
+            # Update fields
+            entry.description = entry_data.get("description", "")
+            entry.data_type = entry_data.get("data_type", "unknown")
+            entry.prefix = entry_data.get("prefix", "")
+            entry.file_size = entry_data.get("file_size", 0)
 
-                # Update timestamps
-                if "created_at" in entry_data:
-                    if isinstance(entry_data["created_at"], str):
-                        entry.created_at = datetime.fromisoformat(
-                            entry_data["created_at"]
-                        )
-                    else:
-                        entry.created_at = entry_data["created_at"]
+            # Extract file_hash from metadata and store in dedicated column
+            metadata = entry_data.get("metadata", {})
+            entry.file_hash = metadata.pop("file_hash", None)  # Remove from metadata
+            entry.metadata_json = json.dumps(metadata)
 
-                if "accessed_at" in entry_data:
-                    if isinstance(entry_data["accessed_at"], str):
-                        entry.accessed_at = datetime.fromisoformat(
-                            entry_data["accessed_at"]
-                        )
-                    else:
-                        entry.accessed_at = entry_data["accessed_at"]
+            # Update timestamps
+            if "created_at" in entry_data:
+                if isinstance(entry_data["created_at"], str):
+                    entry.created_at = datetime.fromisoformat(entry_data["created_at"])
+                else:
+                    entry.created_at = entry_data["created_at"]
 
-                session.add(entry)
-                session.commit()
+            if "accessed_at" in entry_data:
+                if isinstance(entry_data["accessed_at"], str):
+                    entry.accessed_at = datetime.fromisoformat(
+                        entry_data["accessed_at"]
+                    )
+                else:
+                    entry.accessed_at = entry_data["accessed_at"]
+
+            session.add(entry)
+            session.commit()
 
     def remove_entry(self, cache_key: str):
         """Remove cache entry metadata."""
-        with self._lock:
-            with Session(self.engine) as session:
-                entry = session.get(CacheEntry, cache_key)
-                if entry:
-                    session.delete(entry)
-                    session.commit()
+        with self._lock, Session(self.engine) as session:
+            entry = session.get(CacheEntry, cache_key)
+            if entry:
+                session.delete(entry)
+                session.commit()
 
     def list_entries(self) -> List[Dict[str, Any]]:
         """List all cache entries with metadata."""
@@ -560,12 +573,16 @@ class SQLiteMetadataBackend(MetadataBackend):
 
             result = []
             for entry in entries:
+                entry_metadata = json.loads(entry.metadata_json)
+                # Add file_hash back into metadata if it exists
+                if entry.file_hash is not None:
+                    entry_metadata["file_hash"] = entry.file_hash
                 result.append(
                     {
                         "cache_key": entry.cache_key,
                         "data_type": entry.data_type,
                         "description": entry.description,
-                        "metadata": json.loads(entry.metadata_json),
+                        "metadata": entry_metadata,
                         "created": entry.created_at.isoformat(),
                         "last_accessed": entry.accessed_at.isoformat(),
                         "size_mb": round(entry.file_size / (1024 * 1024), 3),
@@ -606,53 +623,49 @@ class SQLiteMetadataBackend(MetadataBackend):
 
     def update_access_time(self, cache_key: str):
         """Update last access time for cache entry."""
-        with self._lock:
-            with Session(self.engine) as session:
-                entry = session.get(CacheEntry, cache_key)
-                if entry:
-                    entry.accessed_at = datetime.now(timezone.utc)
-                    session.add(entry)
-                    session.commit()
+        with self._lock, Session(self.engine) as session:
+            entry = session.get(CacheEntry, cache_key)
+            if entry:
+                entry.accessed_at = datetime.now(timezone.utc)
+                session.add(entry)
+                session.commit()
 
     def increment_hits(self):
         """Increment cache hits counter."""
-        with self._lock:
-            with Session(self.engine) as session:
-                stats = self._get_stats_row(session)
-                stats.cache_hits += 1
-                stats.last_updated = datetime.now(timezone.utc)
-                session.add(stats)
-                session.commit()
+        with self._lock, Session(self.engine) as session:
+            stats = self._get_stats_row(session)
+            stats.cache_hits += 1
+            stats.last_updated = datetime.now(timezone.utc)
+            session.add(stats)
+            session.commit()
 
     def increment_misses(self):
         """Increment cache misses counter."""
-        with self._lock:
-            with Session(self.engine) as session:
-                stats = self._get_stats_row(session)
-                stats.cache_misses += 1
-                stats.last_updated = datetime.now(timezone.utc)
-                session.add(stats)
-                session.commit()
+        with self._lock, Session(self.engine) as session:
+            stats = self._get_stats_row(session)
+            stats.cache_misses += 1
+            stats.last_updated = datetime.now(timezone.utc)
+            session.add(stats)
+            session.commit()
 
     def cleanup_expired(self, ttl_hours: int) -> int:
         """Remove expired entries and return count removed."""
         from datetime import timedelta
 
-        with self._lock:
-            cutoff_time = datetime.now(timezone.utc) - timedelta(hours=ttl_hours)
+        cutoff_time = datetime.now(timezone.utc) - timedelta(hours=ttl_hours)
 
-            with Session(self.engine) as session:
-                # Find expired entries
-                expired_entries = session.exec(
-                    select(CacheEntry).where(CacheEntry.created_at < cutoff_time)
-                ).all()
+        with self._lock, Session(self.engine) as session:
+            # Find expired entries
+            expired_entries = session.exec(
+                select(CacheEntry).where(CacheEntry.created_at < cutoff_time)
+            ).all()
 
-                # Delete expired entries
-                for entry in expired_entries:
-                    session.delete(entry)
+            # Delete expired entries
+            for entry in expired_entries:
+                session.delete(entry)
 
-                session.commit()
-                return len(expired_entries)
+            session.commit()
+            return len(expired_entries)
 
 
 def create_metadata_backend(backend_type: str = "auto", **kwargs) -> MetadataBackend:

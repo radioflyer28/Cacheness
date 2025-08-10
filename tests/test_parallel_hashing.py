@@ -205,9 +205,7 @@ class TestParallelHashing:
             for i in range(25):  # Total of 30 files
                 (tmp_path / f"many_{i}.txt").write_text(f"content {i}")
 
-            start = time.time()
             result2 = hash_directory_parallel(tmp_path)
-            time2 = time.time() - start
 
             # This might take longer due to parallel overhead, but should still work
             assert isinstance(result2, str) and len(result2) > 0
