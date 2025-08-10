@@ -12,74 +12,13 @@ import threading
 import logging
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Dict, Any, List, Union
-from dataclasses import dataclass, field
+from typing import Optional, Dict, Any, List
 
+from .config import CacheConfig, _DEFAULT_TTL, create_cache_config
 from .handlers import HandlerRegistry
 from .serialization import create_unified_cache_key
 
-# Sentinel value to distinguish between None (infinite TTL) and unspecified (use default)
-_DEFAULT_TTL = object()
-
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class CacheConfig:
-    """Configuration for the unified cache system."""
-
-    cache_dir: str = "./cache"
-    default_ttl_hours: int = 24
-    max_cache_size_mb: int = 2000
-    parquet_compression: str = "lz4"
-    npz_compression: bool = True
-    enable_metadata: bool = True
-    cleanup_on_init: bool = True
-    metadata_backend: str = "auto"  # "auto", "sqlite", or "json" - auto prefers sqlite
-    sqlite_db_file: str = "cache_metadata.db"
-    # Path hashing options
-    hash_path_content: bool = (
-        True  # Hash Path objects by content; False uses filename only
-    )
-    # Compressed pickle options
-    pickle_compression_codec: str = "zstd"  # Default to zstd for general-purpose data
-    pickle_compression_level: int = 5  # Balanced compression level
-    # Advanced compression options (for Blosc2/3 with ZSTD)
-    enable_multithreading: bool = True  # Use multi-threading for compression
-    auto_optimize_threads: bool = True  # Auto-optimize thread count based on data size
-    # NumPy array compression options
-    use_blosc2_arrays: bool = True  # Use blosc2 for arrays when available
-    
-    # Serialization Configuration
-    # Cache key serialization method priority order
-    serialization_methods: Optional[List[str]] = None  # None = use default order
-    
-    # Handler selection priority order  
-    handler_priority: Optional[List[str]] = None  # None = use default order
-    
-    # Enable/disable specific serialization strategies
-    enable_basic_types: bool = True        # Basic immutable types (str, int, float, bool, bytes)
-    enable_special_cases: bool = True      # NumPy arrays, Path objects, etc.
-    enable_collections: bool = True        # Lists, dicts, sets with recursive introspection
-    enable_object_introspection: bool = True  # Objects with __dict__
-    enable_hashable_fallback: bool = True    # Hashable objects performance fallback
-    enable_string_fallback: bool = True      # String representation as last resort
-    
-    # Collection serialization thresholds
-    max_tuple_recursive_length: int = 10  # Max tuple size for recursive serialization
-    max_collection_depth: int = 10         # Max recursion depth for collections
-    
-    # Enable/disable specific handlers
-    enable_polars_dataframes: bool = True
-    enable_pandas_dataframes: bool = True
-    enable_polars_series: bool = True
-    enable_pandas_series: bool = True
-    enable_numpy_arrays: bool = True
-    enable_object_pickle: bool = True
-    blosc2_array_codec: str = "lz4"  # Codec for blosc2 array compression
-    blosc2_array_clevel: int = 5  # Compression level for blosc2 arrays
-    # Cache integrity verification
-    verify_cache_integrity: bool = True  # Verify cache file hash on retrieval
 
 
 class UnifiedCache:
@@ -92,32 +31,20 @@ class UnifiedCache:
 
     def __init__(
         self,
-        cache_dir_or_config: Optional[Union[str, Path, CacheConfig]] = None,
+        config: Optional[CacheConfig] = None,
         metadata_backend=None,
     ):
         """
         Initialize the unified cache system.
 
         Args:
-            cache_dir_or_config: Cache directory path or CacheConfig object (uses defaults if None)
+            config: CacheConfig object (uses defaults if None)
             metadata_backend: Optional metadata backend instance (if None, creates based on config)
         """
-        # Handle different input types
-        if isinstance(cache_dir_or_config, (str, Path)):
-            # Create config from directory path
-            self.config = CacheConfig(cache_dir=str(cache_dir_or_config))
-        elif isinstance(cache_dir_or_config, CacheConfig):
-            # Use provided config
-            self.config = cache_dir_or_config
-        elif cache_dir_or_config is None:
-            # Use default config
-            self.config = CacheConfig()
-        else:
-            raise TypeError(
-                f"Expected str, Path, or CacheConfig, got {type(cache_dir_or_config)}"
-            )
+        # Use provided config or create default
+        self.config = config or CacheConfig()
 
-        self.cache_dir = Path(self.config.cache_dir)
+        self.cache_dir = Path(self.config.storage.cache_dir)
         self.cache_dir.mkdir(exist_ok=True, parents=True)
 
         # Thread safety
@@ -130,7 +57,7 @@ class UnifiedCache:
         self._init_metadata_backend(metadata_backend)
 
         # Clean up expired entries on initialization
-        if self.config.cleanup_on_init:
+        if self.config.storage.cleanup_on_init:
             self._cleanup_expired()
 
         logger.info(
@@ -147,114 +74,59 @@ class UnifiedCache:
             # Import here to avoid circular imports
             from .metadata import create_metadata_backend, SQLALCHEMY_AVAILABLE
 
-            # Determine backend based on config and availability
-            if self.config.metadata_backend == "json":
-                # Explicitly requested JSON
-                self.metadata_backend = create_metadata_backend(
-                    "json", metadata_file=self.cache_dir / "cache_metadata.json"
+        # Determine backend based on config and availability
+        if self.config.metadata.metadata_backend == "json":
+            # Explicitly requested JSON
+            self.metadata_backend = create_metadata_backend(
+                "json", metadata_file=self.cache_dir / "cache_metadata.json"
+            )
+            actual_backend = "json"
+        elif self.config.metadata.metadata_backend == "sqlite":
+            # Explicitly requested SQLite
+            if not SQLALCHEMY_AVAILABLE:
+                raise ImportError(
+                    "SQLAlchemy is required for SQLite backend but is not available. Install with: uv add sqlalchemy"
                 )
-                actual_backend = "json"
-            elif self.config.metadata_backend == "sqlite":
-                # Explicitly requested SQLite
-                if not SQLALCHEMY_AVAILABLE:
-                    raise ImportError(
-                        "SQLAlchemy is required for SQLite backend but is not available. Install with: uv add sqlalchemy"
+            self.metadata_backend = create_metadata_backend(
+                "sqlite",
+                db_file=str(self.cache_dir / self.config.metadata.sqlite_db_file),
+            )
+            actual_backend = "sqlite"
+        else:
+            # Auto mode: prefer SQLite, fallback to JSON
+            if SQLALCHEMY_AVAILABLE:
+                try:
+                    self.metadata_backend = create_metadata_backend(
+                        "sqlite",
+                        db_file=str(
+                            self.cache_dir / self.config.metadata.sqlite_db_file
+                        ),
                     )
-                self.metadata_backend = create_metadata_backend(
-                    "sqlite", db_file=str(self.cache_dir / self.config.sqlite_db_file)
-                )
-                actual_backend = "sqlite"
-            else:
-                # Auto mode: prefer SQLite, fallback to JSON
-                if SQLALCHEMY_AVAILABLE:
-                    try:
-                        self.metadata_backend = create_metadata_backend(
-                            "sqlite",
-                            db_file=str(self.cache_dir / self.config.sqlite_db_file),
-                        )
-                        actual_backend = "sqlite"
-                        logger.info(
-                            "🗄️  Using SQLite backend (auto-selected for better performance)"
-                        )
-                    except Exception as e:
-                        logger.warning(
-                            f"SQLite backend failed, falling back to JSON: {e}"
-                        )
-                        self.metadata_backend = create_metadata_backend(
-                            "json", metadata_file=self.cache_dir / "cache_metadata.json"
-                        )
-                        actual_backend = "json"
-                else:
-                    logger.info("📝 SQLModel not available, using JSON backend")
+                    actual_backend = "sqlite"
+                    logger.info(
+                        "🗄️  Using SQLite backend (auto-selected for better performance)"
+                    )
+                except Exception as e:
+                    logger.warning(f"SQLite backend failed, falling back to JSON: {e}")
                     self.metadata_backend = create_metadata_backend(
                         "json", metadata_file=self.cache_dir / "cache_metadata.json"
                     )
                     actual_backend = "json"
-
-        # Store the actual backend used for reporting
+            else:
+                logger.info("📝 SQLModel not available, using JSON backend")
+                self.metadata_backend = create_metadata_backend(
+                    "json", metadata_file=self.cache_dir / "cache_metadata.json"
+                )
+                actual_backend = "json"  # Store the actual backend used for reporting
         self.actual_backend = actual_backend
-
-    def _hash_path_content(self, path: Path) -> str:
-        """
-        Hash the content of a file or directory using optimized parallel processing.
-
-        Args:
-            path: Path object to hash
-
-        Returns:
-            Hex string hash of the file/directory content
-        """
-        from .utils import hash_directory_parallel, hash_file_content
-
-        try:
-            if not path.exists():
-                # If file doesn't exist, use the path string itself
-                return f"missing_file:{str(path)}"
-
-            if path.is_dir():
-                # Use parallel processing for directories
-                return hash_directory_parallel(path)
-            else:
-                # Use single file hashing for files
-                return hash_file_content(path)
-        except Exception as e:
-            # If anything fails, fall back to path string + error
-            logger.warning(f"Could not hash path content for {path}: {e}")
-            return f"error_reading:{str(path)}:{str(e)}"
-
-    def _process_params_for_hashing(self, params: Dict) -> Dict:
-        """
-        Process parameters to hash Path objects by their content or filename.
-
-        Args:
-            params: Dictionary of parameters
-
-        Returns:
-            Processed parameters with Path objects replaced by content hashes or path strings
-        """
-        processed_params = {}
-        for key, value in params.items():
-            if isinstance(value, Path):
-                if self.config.hash_path_content:
-                    # Hash the file content instead of using the path
-                    content_hash = self._hash_path_content(value)
-                    processed_params[key] = f"path_hash:{content_hash}"
-                    logger.debug(f"Hashed Path {value} -> {content_hash[:16]}...")
-                else:
-                    # Use the path string for faster but less robust hashing
-                    processed_params[key] = f"path_string:{str(value)}"
-                    logger.debug(f"Using path string for {value}")
-            else:
-                processed_params[key] = value
-        return processed_params
 
     def _create_cache_key(self, params: Dict) -> str:
         """
         Create cache key using unified serialization approach.
 
         Uses the unified serialization system that:
+        - Handles Path objects with content hashing based on config
         - Leverages __hash__() when available for hashable objects
-        - Handles Path objects based on hash_path_content config
         - Provides consistent behavior with decorators
         - Falls back gracefully for complex objects
 
@@ -264,11 +136,9 @@ class UnifiedCache:
         Returns:
             16-character hex string cache key
         """
-        # Process Path objects based on configuration
-        processed_params = self._process_params_for_hashing(params)
-        
         # Use unified cache key generation with config
-        return create_unified_cache_key(processed_params, self.config)
+        # Path objects will be handled by the serialization system
+        return create_unified_cache_key(params, self.config)
 
     def _get_cache_file_path(self, cache_key: str, prefix: str = "") -> Path:
         """Get base cache file path (without extension)."""
@@ -289,7 +159,7 @@ class UnifiedCache:
         if ttl_hours is None:
             return False  # Never expires
         elif ttl_hours is _DEFAULT_TTL:
-            ttl = self.config.default_ttl_hours
+            ttl = self.config.metadata.default_ttl_hours
         else:
             ttl = ttl_hours
 
@@ -339,7 +209,7 @@ class UnifiedCache:
 
     def _cleanup_expired(self):
         """Remove expired cache entries."""
-        ttl = self.config.default_ttl_hours
+        ttl = self.config.metadata.default_ttl_hours
         removed_count = self.metadata_backend.cleanup_expired(ttl)
 
         if removed_count > 0:
@@ -366,7 +236,7 @@ class UnifiedCache:
 
             # Calculate file hash for integrity verification (if enabled)
             file_hash = None
-            if self.config.verify_cache_integrity:
+            if self.config.metadata.verify_cache_integrity:
                 actual_path = result.get("actual_path", str(base_file_path))
                 file_hash = self._calculate_file_hash(Path(actual_path))
 
@@ -398,7 +268,11 @@ class UnifiedCache:
             raise
 
     def get(
-        self, cache_key: Optional[str] = None, ttl_hours: Optional[int] = None, prefix: str = "", **kwargs
+        self,
+        cache_key: Optional[str] = None,
+        ttl_hours: Optional[int] = None,
+        prefix: str = "",
+        **kwargs,
     ) -> Optional[Any]:
         """
         Retrieve any supported data type from cache.
@@ -440,7 +314,7 @@ class UnifiedCache:
                 file_path = base_file_path
 
             # Verify cache file integrity if enabled and hash is available
-            if self.config.verify_cache_integrity:
+            if self.config.metadata.verify_cache_integrity:
                 stored_hash = metadata.get("file_hash")
                 if stored_hash is not None:
                     current_hash = self._calculate_file_hash(file_path)
@@ -476,11 +350,13 @@ class UnifiedCache:
         stats = self.metadata_backend.get_stats()
         total_size_mb = stats.get("total_size_mb", 0)
 
-        if total_size_mb <= self.config.max_cache_size_mb:
+        if total_size_mb <= self.config.storage.max_cache_size_mb:
             return
 
         # Use metadata backend's cleanup functionality
-        target_size = self.config.max_cache_size_mb * 0.8  # Clean to 80% of limit
+        target_size = (
+            self.config.storage.max_cache_size_mb * 0.8
+        )  # Clean to 80% of limit
         removed_count = self.metadata_backend.cleanup_by_size(target_size)
 
         if removed_count > 0:
@@ -517,8 +393,8 @@ class UnifiedCache:
         stats.update(
             {
                 "cache_dir": str(self.cache_dir),
-                "max_size_mb": self.config.max_cache_size_mb,
-                "default_ttl_hours": self.config.default_ttl_hours,
+                "max_size_mb": self.config.storage.max_cache_size_mb,
+                "default_ttl_hours": self.config.metadata.default_ttl_hours,
                 "backend_type": self.actual_backend,  # Report actual backend used
             }
         )

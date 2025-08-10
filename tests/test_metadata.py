@@ -13,7 +13,7 @@ from cacheness.metadata import (
     JsonMetadataBackend,
     create_metadata_backend,
 )
-from cacheness.core import CacheConfig, UnifiedCache
+from cacheness import CacheConfig, cacheness
 
 
 class TestMetadataBackendCreation:
@@ -67,7 +67,7 @@ class TestMetadataIntegration:
         config = CacheConfig(
             cache_dir=str(temp_dir), metadata_backend="json", cleanup_on_init=False
         )
-        return UnifiedCache(config)
+        return cacheness(config)
 
     @pytest.fixture
     def cache_sqlite(self, temp_dir):
@@ -75,7 +75,7 @@ class TestMetadataIntegration:
         config = CacheConfig(
             cache_dir=str(temp_dir), metadata_backend="sqlite", cleanup_on_init=False
         )
-        return UnifiedCache(config)
+        return cacheness(config)
 
     def test_metadata_storage_json(self, cache_json):
         """Test metadata storage with JSON backend."""
@@ -134,12 +134,12 @@ class TestMetadataIntegration:
         )
 
         # Create first cache and store data
-        cache1 = UnifiedCache(config)
+        cache1 = cacheness(config)
         test_data = {"persistent": "data"}
         cache1.put(test_data, description="Persistent test", test_key="persistence")
 
         # Create second cache instance
-        cache2 = UnifiedCache(config)
+        cache2 = cacheness(config)
 
         # Should be able to retrieve data from second instance
         retrieved = cache2.get(test_key="persistence")
@@ -200,7 +200,7 @@ class TestMetadataIntegration:
         json_config = CacheConfig(
             cache_dir=str(temp_dir), metadata_backend="json", cleanup_on_init=False
         )
-        json_cache = UnifiedCache(json_config)
+        json_cache = cacheness(json_config)
         json_cache.put(
             {"backend": "json"}, description="JSON data", backend_test="json"
         )
@@ -209,7 +209,7 @@ class TestMetadataIntegration:
         sqlite_config = CacheConfig(
             cache_dir=str(temp_dir), metadata_backend="sqlite", cleanup_on_init=False
         )
-        sqlite_cache = UnifiedCache(sqlite_config)
+        sqlite_cache = cacheness(sqlite_config)
         sqlite_cache.put(
             {"backend": "sqlite"}, description="SQLite data", backend_test="sqlite"
         )

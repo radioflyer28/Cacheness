@@ -42,8 +42,17 @@ logger = logging.getLogger(__name__)
 
 try:
     from sqlalchemy import (
-        create_engine, Column, String, Integer, DateTime, Text, Index,
-        select, update, delete, desc
+        create_engine,
+        Column,
+        String,
+        Integer,
+        DateTime,
+        Text,
+        Index,
+        select,
+        update,
+        delete,
+        desc,
     )
     from sqlalchemy.orm import sessionmaker, declarative_base
 
@@ -59,22 +68,35 @@ try:
 
         cache_key = Column(String(16), primary_key=True)
         description = Column(String(500), default="", nullable=False)
-        data_type = Column(String(20), index=True, nullable=False)  # "dataframe", "array", "object"
+        data_type = Column(
+            String(20), index=True, nullable=False
+        )  # "dataframe", "array", "object"
         prefix = Column(String(100), default="", index=True, nullable=False)
 
         # Timestamps - indexed for time-based queries and cleanup operations
-        created_at = Column(DateTime(timezone=True), 
-                           default=lambda: datetime.now(timezone.utc), 
-                           index=True, nullable=False)
-        accessed_at = Column(DateTime(timezone=True), 
-                            default=lambda: datetime.now(timezone.utc), 
-                            index=True, nullable=False)
+        created_at = Column(
+            DateTime(timezone=True),
+            default=lambda: datetime.now(timezone.utc),
+            index=True,
+            nullable=False,
+        )
+        accessed_at = Column(
+            DateTime(timezone=True),
+            default=lambda: datetime.now(timezone.utc),
+            index=True,
+            nullable=False,
+        )
 
         # File info - indexed for size-based queries and cache management
         file_size = Column(Integer, default=0, index=True, nullable=False)
 
         # Cache integrity verification
         file_hash = Column(String(16), nullable=True)  # XXH3_64 hash (16 hex chars)
+
+        # Original cache key parameters (extracted from metadata for efficient querying)
+        cache_key_params = Column(
+            Text, nullable=True, index=True
+        )  # JSON string of original key-value pairs
 
         # Data-specific metadata (stored as JSON)
         metadata_json = Column(Text, default="{}", nullable=False)
@@ -101,13 +123,18 @@ try:
         id = Column(Integer, primary_key=True, default=1)
         cache_hits = Column(Integer, default=0, index=True, nullable=False)
         cache_misses = Column(Integer, default=0, index=True, nullable=False)
-        last_updated = Column(DateTime(timezone=True), 
-                             default=lambda: datetime.now(timezone.utc), 
-                             index=True, nullable=False)
+        last_updated = Column(
+            DateTime(timezone=True),
+            default=lambda: datetime.now(timezone.utc),
+            index=True,
+            nullable=False,
+        )
 
         # Composite index for hit rate calculations
         __table_args__ = (
-            Index("idx_hits_misses_updated", "cache_hits", "cache_misses", "last_updated"),
+            Index(
+                "idx_hits_misses_updated", "cache_hits", "cache_misses", "last_updated"
+            ),
         )
 
 except ImportError:
@@ -213,6 +240,7 @@ class JsonMetadataBackend(MetadataBackend):
             "creation_times": {},
             "file_sizes": {},
             "data_types": {},
+            "cache_key_params": {},  # Store original key-value params separately
             "cache_hits": 0,
             "cache_misses": 0,
         }
@@ -242,6 +270,12 @@ class JsonMetadataBackend(MetadataBackend):
             if cache_key not in self._metadata["entries"]:
                 return None
 
+            # Extract cache_key_params and add to dedicated storage if it exists
+            entry_metadata = self._metadata["entries"][cache_key].copy()
+            cache_key_params = self._metadata.get("cache_key_params", {}).get(cache_key)
+            if cache_key_params is not None:
+                entry_metadata["cache_key_params"] = cache_key_params
+
             return {
                 "description": self._metadata["entries"][cache_key].get(
                     "description", ""
@@ -251,7 +285,7 @@ class JsonMetadataBackend(MetadataBackend):
                 "created_at": self._metadata["creation_times"].get(cache_key),
                 "accessed_at": self._metadata["access_times"].get(cache_key),
                 "file_size": self._metadata["file_sizes"].get(cache_key, 0),
-                "metadata": self._metadata["entries"][cache_key],
+                "metadata": entry_metadata,
             }
 
     def put_entry(self, cache_key: str, entry_data: Dict[str, Any]):
@@ -259,9 +293,13 @@ class JsonMetadataBackend(MetadataBackend):
         with self._lock:
             now = datetime.now(timezone.utc).isoformat()
 
-            # Store the complete entry metadata, including description
+            # Extract cache_key_params from metadata and store separately
+            metadata = entry_data.get("metadata", {}).copy()
+            cache_key_params = metadata.pop("cache_key_params", None)
+
+            # Store the complete entry metadata, including description (but without cache_key_params)
             self._metadata["entries"][cache_key] = {
-                **entry_data.get("metadata", {}),
+                **metadata,
                 "description": entry_data.get("description", ""),
             }
             self._metadata["data_types"][cache_key] = entry_data.get(
@@ -275,6 +313,12 @@ class JsonMetadataBackend(MetadataBackend):
             )
             self._metadata["file_sizes"][cache_key] = entry_data.get("file_size", 0)
 
+            # Store cache_key_params separately for efficient querying
+            if cache_key_params is not None:
+                if "cache_key_params" not in self._metadata:
+                    self._metadata["cache_key_params"] = {}
+                self._metadata["cache_key_params"][cache_key] = cache_key_params
+
             self._save_to_disk()
 
     def remove_entry(self, cache_key: str):
@@ -283,6 +327,12 @@ class JsonMetadataBackend(MetadataBackend):
             for metadata_dict in self._metadata.values():
                 if isinstance(metadata_dict, dict) and cache_key in metadata_dict:
                     del metadata_dict[cache_key]
+            # Also specifically ensure cache_key_params is cleaned up
+            if (
+                "cache_key_params" in self._metadata
+                and cache_key in self._metadata["cache_key_params"]
+            ):
+                del self._metadata["cache_key_params"][cache_key]
             self._save_to_disk()
 
     def list_entries(self) -> List[Dict[str, Any]]:
@@ -296,12 +346,20 @@ class JsonMetadataBackend(MetadataBackend):
                 file_size = self._metadata["file_sizes"].get(cache_key, 0)
                 data_type = self._metadata["data_types"].get(cache_key, "unknown")
 
+                # Include cache_key_params in metadata if available
+                complete_metadata = entry_data.copy()
+                cache_key_params = self._metadata.get("cache_key_params", {}).get(
+                    cache_key
+                )
+                if cache_key_params is not None:
+                    complete_metadata["cache_key_params"] = cache_key_params
+
                 entries.append(
                     {
                         "cache_key": cache_key,
                         "data_type": data_type,
                         "description": entry_data.get("description", ""),
-                        "metadata": entry_data,
+                        "metadata": complete_metadata,
                         "created": creation_time,
                         "last_accessed": access_time,
                         "size_mb": round(file_size / (1024 * 1024), 3),
@@ -414,7 +472,9 @@ class SQLiteMetadataBackend(MetadataBackend):
 
         self.db_file = db_file
         self.engine = create_engine(f"sqlite:///{db_file}", echo=echo)
-        self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
+        self.SessionLocal = sessionmaker(
+            autocommit=False, autoflush=False, bind=self.engine
+        )
         self._lock = threading.Lock()
 
         # Create tables
@@ -431,7 +491,7 @@ class SQLiteMetadataBackend(MetadataBackend):
             stats = session.execute(
                 select(CacheStats).where(CacheStats.id == 1)
             ).scalar_one_or_none()
-            
+
             if not stats:
                 stats = CacheStats(id=1)
                 session.add(stats)
@@ -442,60 +502,12 @@ class SQLiteMetadataBackend(MetadataBackend):
         stats = session.execute(
             select(CacheStats).where(CacheStats.id == 1)
         ).scalar_one_or_none()
-        
+
         if not stats:
             stats = CacheStats(id=1)
             session.add(stats)
             session.commit()
         return stats
-
-    def load_metadata(self) -> Dict[str, Any]:
-        """Load complete metadata structure (compatibility method)."""
-        # This method is for compatibility with the original JSON structure
-        # In practice, the SQLite backend doesn't need to load everything at once
-        with self.SessionLocal() as session:
-            entries = session.execute(select(CacheEntry)).scalars().all()
-            stats = self._get_stats_row(session)
-
-            metadata = {
-                "entries": {},
-                "access_times": {},
-                "creation_times": {},
-                "file_sizes": {},
-                "data_types": {},
-                "cache_hits": stats.cache_hits,
-                "cache_misses": stats.cache_misses,
-            }
-
-            for entry in entries:
-                entry_metadata = json_loads(entry.metadata_json)
-                # Add file_hash back into metadata if it exists
-                if entry.file_hash is not None:
-                    entry_metadata["file_hash"] = entry.file_hash
-                metadata["entries"][entry.cache_key] = entry_metadata
-                metadata["access_times"][entry.cache_key] = (
-                    entry.accessed_at.isoformat()
-                )
-                metadata["creation_times"][entry.cache_key] = (
-                    entry.created_at.isoformat()
-                )
-                metadata["file_sizes"][entry.cache_key] = entry.file_size
-                metadata["data_types"][entry.cache_key] = entry.data_type
-
-            return metadata
-
-    def save_metadata(self, metadata: Dict[str, Any]):
-        """Save complete metadata structure (compatibility method)."""
-        # This method is mainly for compatibility
-        # The SQLite backend saves individual entries as they're updated
-        with self._lock, self.SessionLocal() as session:
-            # Update stats
-            stats = self._get_stats_row(session)
-            stats.cache_hits = metadata.get("cache_hits", 0)
-            stats.cache_misses = metadata.get("cache_misses", 0)
-            stats.last_updated = datetime.now(timezone.utc)
-            session.add(stats)
-            session.commit()
 
     def get_entry(self, cache_key: str) -> Optional[Dict[str, Any]]:
         """Get specific cache entry metadata."""
@@ -503,7 +515,7 @@ class SQLiteMetadataBackend(MetadataBackend):
             entry = session.execute(
                 select(CacheEntry).where(CacheEntry.cache_key == cache_key)
             ).scalar_one_or_none()
-            
+
             if not entry:
                 return None
 
@@ -511,6 +523,9 @@ class SQLiteMetadataBackend(MetadataBackend):
             # Add file_hash back into metadata if it exists
             if entry.file_hash is not None:
                 metadata["file_hash"] = entry.file_hash
+            # Add cache_key_params back into metadata if it exists
+            if entry.cache_key_params is not None:
+                metadata["cache_key_params"] = json_loads(entry.cache_key_params)
 
             return {
                 "description": entry.description,
@@ -529,7 +544,7 @@ class SQLiteMetadataBackend(MetadataBackend):
             entry = session.execute(
                 select(CacheEntry).where(CacheEntry.cache_key == cache_key)
             ).scalar_one_or_none()
-            
+
             if not entry:
                 entry = CacheEntry(cache_key=cache_key)
 
@@ -539,9 +554,15 @@ class SQLiteMetadataBackend(MetadataBackend):
             entry.prefix = entry_data.get("prefix", "")
             entry.file_size = entry_data.get("file_size", 0)
 
-            # Extract file_hash from metadata and store in dedicated column
+            # Extract file_hash and cache_key_params from metadata and store in dedicated columns
             metadata = entry_data.get("metadata", {})
             entry.file_hash = metadata.pop("file_hash", None)  # Remove from metadata
+            cache_key_params = metadata.pop(
+                "cache_key_params", None
+            )  # Remove from metadata
+            entry.cache_key_params = (
+                json_dumps(cache_key_params) if cache_key_params is not None else None
+            )
             entry.metadata_json = json_dumps(metadata)
 
             # Update timestamps
@@ -565,17 +586,19 @@ class SQLiteMetadataBackend(MetadataBackend):
     def remove_entry(self, cache_key: str):
         """Remove cache entry metadata."""
         with self._lock, self.SessionLocal() as session:
-            session.execute(
-                delete(CacheEntry).where(CacheEntry.cache_key == cache_key)
-            )
+            session.execute(delete(CacheEntry).where(CacheEntry.cache_key == cache_key))
             session.commit()
 
     def list_entries(self) -> List[Dict[str, Any]]:
         """List all cache entries with metadata."""
         with self.SessionLocal() as session:
-            entries = session.execute(
-                select(CacheEntry).order_by(desc(CacheEntry.created_at))
-            ).scalars().all()
+            entries = (
+                session.execute(
+                    select(CacheEntry).order_by(desc(CacheEntry.created_at))
+                )
+                .scalars()
+                .all()
+            )
 
             result = []
             for entry in entries:
@@ -583,6 +606,11 @@ class SQLiteMetadataBackend(MetadataBackend):
                 # Add file_hash back into metadata if it exists
                 if entry.file_hash is not None:
                     entry_metadata["file_hash"] = entry.file_hash
+                # Add cache_key_params back into metadata if it exists
+                if entry.cache_key_params is not None:
+                    entry_metadata["cache_key_params"] = json_loads(
+                        entry.cache_key_params
+                    )
                 result.append(
                     {
                         "cache_key": entry.cache_key,
@@ -645,7 +673,7 @@ class SQLiteMetadataBackend(MetadataBackend):
                 .where(CacheStats.id == 1)
                 .values(
                     cache_hits=CacheStats.cache_hits + 1,
-                    last_updated=datetime.now(timezone.utc)
+                    last_updated=datetime.now(timezone.utc),
                 )
             )
             session.commit()
@@ -658,7 +686,7 @@ class SQLiteMetadataBackend(MetadataBackend):
                 .where(CacheStats.id == 1)
                 .values(
                     cache_misses=CacheStats.cache_misses + 1,
-                    last_updated=datetime.now(timezone.utc)
+                    last_updated=datetime.now(timezone.utc),
                 )
             )
             session.commit()
@@ -677,6 +705,16 @@ class SQLiteMetadataBackend(MetadataBackend):
             deleted_count = result.rowcount
             session.commit()
             return deleted_count
+
+    def load_metadata(self) -> Dict[str, Any]:
+        """Load complete metadata structure (SQLite backend operates on individual entries)."""
+        # SQLite backend doesn't use bulk metadata operations - returns empty dict
+        return {}
+
+    def save_metadata(self, metadata: Dict[str, Any]):
+        """Save complete metadata structure (SQLite backend operates on individual entries)."""
+        # SQLite backend doesn't use bulk metadata operations - no-op
+        pass
 
 
 def create_metadata_backend(backend_type: str = "auto", **kwargs) -> MetadataBackend:

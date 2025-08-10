@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 import numpy as np
 
-from cacheness import UnifiedCache, CacheConfig
+from cacheness import cacheness, CacheConfig
 
 
 class TestCacheIntegrity:
@@ -26,7 +26,7 @@ class TestCacheIntegrity:
         """Test that file hash is calculated correctly."""
         with tempfile.TemporaryDirectory() as temp_dir:
             config = CacheConfig(cache_dir=temp_dir, verify_cache_integrity=True)
-            cache = UnifiedCache(config)
+            cache = cacheness(config)
 
             # Create a test file
             test_file = Path(temp_dir) / "test_file.txt"
@@ -45,7 +45,7 @@ class TestCacheIntegrity:
         """Test that file hash is stored in metadata when caching."""
         with tempfile.TemporaryDirectory() as temp_dir:
             config = CacheConfig(cache_dir=temp_dir, verify_cache_integrity=True)
-            cache = UnifiedCache(config)
+            cache = cacheness(config)
 
             # Cache some data
             test_data = {"message": "Hello, World!"}
@@ -65,7 +65,7 @@ class TestCacheIntegrity:
         """Test that file hash is not stored when verification is disabled."""
         with tempfile.TemporaryDirectory() as temp_dir:
             config = CacheConfig(cache_dir=temp_dir, verify_cache_integrity=False)
-            cache = UnifiedCache(config)
+            cache = cacheness(config)
 
             # Cache some data
             test_data = {"message": "Hello, World!"}
@@ -83,7 +83,7 @@ class TestCacheIntegrity:
         """Test that valid cache files pass integrity verification."""
         with tempfile.TemporaryDirectory() as temp_dir:
             config = CacheConfig(cache_dir=temp_dir, verify_cache_integrity=True)
-            cache = UnifiedCache(config)
+            cache = cacheness(config)
 
             # Cache some data
             test_data = np.array([1, 2, 3, 4, 5])
@@ -98,7 +98,7 @@ class TestCacheIntegrity:
         """Test that corrupted cache files are detected and removed."""
         with tempfile.TemporaryDirectory() as temp_dir:
             config = CacheConfig(cache_dir=temp_dir, verify_cache_integrity=True)
-            cache = UnifiedCache(config)
+            cache = cacheness(config)
 
             # Cache some data
             test_data = {"message": "Hello, World!"}
@@ -126,7 +126,7 @@ class TestCacheIntegrity:
         """Test that missing file hash (legacy entries) still allows retrieval."""
         with tempfile.TemporaryDirectory() as temp_dir:
             config = CacheConfig(cache_dir=temp_dir, verify_cache_integrity=True)
-            cache = UnifiedCache(config)
+            cache = cacheness(config)
 
             # Cache some data first
             test_data = {"message": "Hello, World!"}
@@ -161,7 +161,7 @@ class TestCacheIntegrity:
             config_enabled = CacheConfig(
                 cache_dir=temp_dir, verify_cache_integrity=True
             )
-            cache_enabled = UnifiedCache(config_enabled)
+            cache_enabled = cacheness(config_enabled)
 
             test_data = {"message": "Hello, World!"}
             cache_enabled.put(test_data, description="Test data", test_key="value")
@@ -179,7 +179,7 @@ class TestCacheIntegrity:
             config_disabled = CacheConfig(
                 cache_dir=temp_dir, verify_cache_integrity=False
             )
-            cache_disabled = UnifiedCache(config_disabled)
+            cache_disabled = cacheness(config_disabled)
 
             # Should still return data (though corrupted) because verification is disabled
             # Note: This might fail at the handler level due to actual corruption,
@@ -197,7 +197,7 @@ class TestCacheIntegrity:
         """Test that file hash calculation handles errors gracefully."""
         with tempfile.TemporaryDirectory() as temp_dir:
             config = CacheConfig(cache_dir=temp_dir, verify_cache_integrity=True)
-            cache = UnifiedCache(config)
+            cache = cacheness(config)
 
             # Test with non-existent file
             non_existent_file = Path(temp_dir) / "does_not_exist.txt"

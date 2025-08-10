@@ -124,7 +124,9 @@ class cached:
                 if self.key_func:
                     cache_key = self.key_func(func, args, kwargs)
                 else:
-                    cache_key = _generate_cache_key(func, args, kwargs, self.key_prefix, self.cache_instance.config)
+                    cache_key = _generate_cache_key(
+                        func, args, kwargs, self.key_prefix, self.cache_instance.config
+                    )
             except Exception as e:
                 if self.ignore_errors:
                     # If key generation fails, just call the function
@@ -175,7 +177,9 @@ class cached:
             if self.key_func:
                 return self.key_func(func, args, kwargs)
             else:
-                return _generate_cache_key(func, args, kwargs, self.key_prefix, self.cache_instance.config)
+                return _generate_cache_key(
+                    func, args, kwargs, self.key_prefix, self.cache_instance.config
+                )
 
         # Attach methods (these will be available as wrapper.cache_clear(), etc.)
         setattr(wrapper, "cache_clear", cache_clear)

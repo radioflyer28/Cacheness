@@ -1,8 +1,6 @@
 # cacheness
 
-A high-performance disk caching library for Python with key-based hashing, automatic compression with Blosc2, and decorator support.  
-It supports directly caching numpy arrays, Pandas and Polars DataFrames/Series via flexible backends. 
-For everything else, will use pickle and Blosc compression.
+Fast Python disk cache with key-value store hashing and a "cachetools-like" decorator. Caches NumPy/Pandas/Polars natively; other objects use pickle. Uses Blosc2 for compression.
 
 Motivation... I wanted a very fast cache system to speed up ML model development when doing things like large API calls and persisting data intensive stages like building derived features.
 
@@ -451,16 +449,60 @@ This unified serialization approach ensures your cache keys are **meaningful, co
 
 ```python
 from cacheness import cacheness, CacheConfig
+from cacheness.config import CacheStorageConfig, CacheMetadataConfig, CompressionConfig, SerializationConfig, HandlerConfig
 
-# Custom configuration
+# Simple configuration (recommended for most users)
 config = CacheConfig(
     cache_dir="./my_cache",
-    metadata_backend="sqlite",          # "sqlite", "json", or "auto"
+    metadata_backend="sqlite",          # "sqlite", "json", or "auto"  
     default_ttl_hours=48,              # Default TTL for entries
     max_cache_size_mb=5000,            # Maximum cache size
-    cleanup_on_init=True,              # Clean expired entries on startup
-    use_blosc2_arrays=True,            # High-performance array compression
-    pickle_compression_codec="zstd"     # Compression for Python objects
+    cleanup_on_init=True               # Clean expired entries on startup
+)
+
+cache = cacheness(config)
+
+# Advanced configuration with sub-configuration objects
+config = CacheConfig(
+    storage=CacheStorageConfig(
+        cache_dir="./advanced_cache",
+        max_cache_size_mb=10000,
+        cleanup_on_init=True
+    ),
+    metadata=CacheMetadataConfig(
+        backend="sqlite",                   # "sqlite", "json", or "auto"
+        database_url="./cache_metadata.db", # Custom SQLite path
+        verify_cache_integrity=True        # Enable file hash verification
+    ),
+    compression=CompressionConfig(
+        use_blosc2_arrays=True,            # High-performance array compression
+        npz_compression=True,              # Enable NPZ compression
+        pickle_compression_codec="zstd",   # Compression for Python objects
+        pickle_compression_level=5,        # Compression level (1-9)
+        blosc2_array_codec="lz4",         # Array compression algorithm
+        parquet_compression="lz4"         # DataFrame compression
+    ),
+    serialization=SerializationConfig(
+        enable_collections=True,           # Recursive collection analysis
+        enable_object_introspection=True,  # Deep object inspection  
+        max_collection_depth=10,           # Nesting depth limit
+        max_tuple_recursive_length=10      # Tuple recursion limit
+    ),
+    handlers=HandlerConfig(
+        enable_pandas_dataframes=True,     # Enable pandas DataFrame caching
+        enable_polars_dataframes=True,     # Enable polars DataFrame caching
+        enable_pandas_series=True,         # Enable pandas Series caching
+        enable_polars_series=True,         # Enable polars Series caching
+        enable_numpy_arrays=True,          # Enable NumPy array caching
+        enable_object_pickle=True,         # Enable general object caching
+        handler_priority=[                 # Custom handler priority order
+            "pandas_dataframes",
+            "polars_dataframes", 
+            "numpy_arrays",
+            "object_pickle"
+        ]
+    ),
+    default_ttl_hours=48
 )
 
 cache = cacheness(config)
@@ -690,15 +732,19 @@ config = CacheConfig(
 ### Custom Cache Instances
 
 ```python
-from cacheness import cached, CacheConfig, UnifiedCache
+from cacheness import cached, CacheConfig, cacheness
+from cacheness.config import CacheStorageConfig, CacheMetadataConfig
 
 # Create a specialized cache for ML models
 ml_config = CacheConfig(
-    cache_dir="./ml_cache",
-    default_ttl_hours=168,  # 1 week
-    max_cache_size_mb=10000
+    storage=CacheStorageConfig(
+        cache_dir="./ml_cache",
+        max_cache_size_mb=10000
+    ),
+    metadata=CacheMetadataConfig(backend="sqlite"),
+    default_ttl_hours=168  # 1 week
 )
-ml_cache = UnifiedCache(ml_config)
+ml_cache = cacheness(ml_config)
 
 @cached(cache_instance=ml_cache, key_prefix="production")
 def train_production_model(data, hyperparams):
@@ -1028,6 +1074,10 @@ cache_dir/
 
 ### CacheConfig Parameters
 
+The `CacheConfig` class now supports both **flat parameter access** (backwards compatible) and **focused sub-configurations** for better organization.
+
+#### Flat Parameter Access (Backwards Compatible)
+
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `cache_dir` | str | `"./cache"` | Cache directory path |
@@ -1044,6 +1094,91 @@ cache_dir/
 | `blosc2_array_codec` | str | `"lz4"` | Blosc2 compression codec |
 | `enable_multithreading` | bool | `True` | Use multi-threading for compression |
 | `auto_optimize_threads` | bool | `True` | Auto-optimize thread count based on data size |
+
+#### Sub-Configuration Objects (Recommended)
+
+**Storage Configuration (`CacheStorageConfig`)**:
+- `cache_dir`: Cache directory path
+- `max_cache_size_mb`: Maximum cache size in MB  
+- `cleanup_on_init`: Clean expired entries on initialization
+
+**Metadata Configuration (`CacheMetadataConfig`)**:
+- `backend`: "auto", "sqlite", or "json"
+- `database_url`: Custom SQLite database path
+- `verify_cache_integrity`: Enable file hash verification
+
+**Compression Configuration (`CompressionConfig`)**:
+- `use_blosc2_arrays`: High-performance array compression
+- `npz_compression`: Enable NPZ compression
+- `pickle_compression_codec`: Compression codec for Python objects
+- `pickle_compression_level`: Compression level (1-9)
+- `blosc2_array_codec`: Array compression algorithm
+- `parquet_compression`: DataFrame/Series compression
+- `enable_multithreading`: Multi-threading for compression
+- `auto_optimize_threads`: Auto-optimize thread count
+
+**Serialization Configuration (`SerializationConfig`)**:
+- `enable_basic_types`: Basic type serialization (str, int, float)
+- `enable_special_cases`: Special case handling (NumPy arrays)
+- `enable_collections`: Collection introspection (lists, dicts)
+- `enable_object_introspection`: Deep object analysis (__dict__)
+- `enable_hashable_fallback`: Hashable object fallback
+- `enable_string_fallback`: String representation fallback
+- `max_collection_depth`: Maximum nesting depth for collections
+- `max_tuple_recursive_length`: Maximum tuple recursion length
+
+**Handler Configuration (`HandlerConfig`)**:
+- `enable_pandas_dataframes`: Enable pandas DataFrame caching
+- `enable_polars_dataframes`: Enable polars DataFrame caching
+- `enable_pandas_series`: Enable pandas Series caching
+- `enable_polars_series`: Enable polars Series caching
+- `enable_numpy_arrays`: Enable NumPy array caching
+- `enable_object_pickle`: Enable general object caching
+- `handler_priority`: List defining handler priority order
+
+#### Configuration Examples
+
+```python
+from cacheness import CacheConfig
+from cacheness.config import CacheStorageConfig, CacheMetadataConfig, CompressionConfig
+
+# Simple flat configuration (backwards compatible)
+simple_config = CacheConfig(
+    cache_dir="./my_cache",
+    metadata_backend="sqlite",
+    default_ttl_hours=48,
+    use_blosc2_arrays=True
+)
+
+# Advanced sub-configuration approach (recommended)
+advanced_config = CacheConfig(
+    storage=CacheStorageConfig(
+        cache_dir="./advanced_cache",
+        max_cache_size_mb=10000
+    ),
+    metadata=CacheMetadataConfig(
+        backend="sqlite",
+        verify_cache_integrity=True
+    ),
+    compression=CompressionConfig(
+        pickle_compression_codec="zstd",
+        pickle_compression_level=6
+    ),
+    default_ttl_hours=48
+)
+
+# Mixed approach (both flat and sub-config parameters)
+mixed_config = CacheConfig(
+    cache_dir="./mixed_cache",                    # Flat parameter
+    storage=CacheStorageConfig(                   # Sub-configuration
+        max_cache_size_mb=5000,
+        cleanup_on_init=True
+    ),
+    default_ttl_hours=24                          # Flat parameter
+)
+```
+
+**Backwards Compatibility**: All existing flat parameter configurations continue to work without changes. The library automatically maps flat parameters to the appropriate sub-configuration objects.
 
 ### Compression Options
 
@@ -1078,33 +1213,39 @@ The library automatically optimizes compression parameters based on data charact
 Control how objects are serialized for cache key generation with fine-grained options:
 
 ```python
-from cacheness import CacheConfig, UnifiedCache
+from cacheness import CacheConfig
+from cacheness.config import SerializationConfig
 
 # Performance-optimized config (speed over precision)
 performance_config = CacheConfig(
-    # Disable expensive introspection methods
-    enable_collections=False,           # Skip recursive collection analysis
-    enable_object_introspection=False,  # Skip __dict__ inspection
-    max_tuple_recursive_length=2,       # Limit tuple recursion
-    max_collection_depth=3              # Limit nesting depth
+    serialization=SerializationConfig(
+        enable_collections=False,           # Skip recursive collection analysis
+        enable_object_introspection=False,  # Skip __dict__ inspection
+        max_tuple_recursive_length=2,       # Limit tuple recursion
+        max_collection_depth=3              # Limit nesting depth
+    )
 )
 
-# Precision-optimized config (accuracy over speed)
+# Precision-optimized config (accuracy over speed)  
 precision_config = CacheConfig(
-    enable_collections=True,            # Full collection introspection
-    enable_object_introspection=True,   # Deep object analysis
-    max_tuple_recursive_length=50,      # Allow deep tuple recursion
-    max_collection_depth=20             # Allow deep nesting
+    serialization=SerializationConfig(
+        enable_collections=True,            # Full collection introspection
+        enable_object_introspection=True,   # Deep object analysis
+        max_tuple_recursive_length=50,      # Allow deep tuple recursion
+        max_collection_depth=20             # Allow deep nesting
+    )
 )
 
 # Custom serialization methods
 custom_config = CacheConfig(
-    enable_basic_types=True,            # str, int, float, bool, bytes
-    enable_special_cases=True,          # NumPy arrays, custom handlers
-    enable_collections=True,            # lists, dicts, sets with recursion
-    enable_object_introspection=True,   # Objects with __dict__
-    enable_hashable_fallback=True,      # Hashable objects (fast)
-    enable_string_fallback=True         # String representation (last resort)
+    serialization=SerializationConfig(
+        enable_basic_types=True,            # str, int, float, bool, bytes
+        enable_special_cases=True,          # NumPy arrays, custom handlers
+        enable_collections=True,            # lists, dicts, sets with recursion
+        enable_object_introspection=True,   # Objects with __dict__
+        enable_hashable_fallback=True,      # Hashable objects (fast)
+        enable_string_fallback=True         # String representation (last resort)
+    )
 )
 ```
 
@@ -1113,24 +1254,42 @@ custom_config = CacheConfig(
 Control the order and availability of data format handlers:
 
 ```python
+from cacheness.config import HandlerConfig
+
 # Custom handler priority (DataFrames processed first)
 config = CacheConfig(
-    handler_priority=[
-        "pandas_dataframes",    # Process pandas DataFrames first
-        "polars_dataframes",    # Then polars DataFrames  
-        "pandas_series",        # Then pandas Series
-        "polars_series",        # Then polars Series
-        "numpy_arrays",         # Then NumPy arrays
-        "object_pickle"         # Finally, pickle everything else
-    ]
+    handlers=HandlerConfig(
+        handler_priority=[
+            "pandas_dataframes",    # Process pandas DataFrames first
+            "polars_dataframes",    # Then polars DataFrames  
+            "pandas_series",        # Then pandas Series
+            "polars_series",        # Then polars Series
+            "numpy_arrays",         # Then NumPy arrays
+            "object_pickle"         # Finally, pickle everything else
+        ]
+    )
 )
 
-# Disable specific handlers
+# Disable specific handlers for minimal configuration
 minimal_config = CacheConfig(
-    enable_pandas_dataframes=False,     # Disable pandas DataFrame caching
-    enable_polars_series=False,         # Disable polars Series caching
-    enable_numpy_arrays=True,           # Keep NumPy array support
-    enable_object_pickle=True           # Keep general object support
+    handlers=HandlerConfig(
+        enable_pandas_dataframes=False,     # Disable pandas DataFrame caching
+        enable_polars_series=False,         # Disable polars Series caching
+        enable_numpy_arrays=True,           # Keep NumPy array support
+        enable_object_pickle=True           # Keep general object support
+    )
+)
+
+# Performance-focused configuration
+performance_config = CacheConfig(
+    storage=CacheStorageConfig(cache_dir="./fast_cache"),
+    serialization=SerializationConfig(
+        enable_collections=False,           # Skip expensive introspection
+        max_tuple_recursive_length=3        # Limit recursion depth
+    ),
+    handlers=HandlerConfig(
+        handler_priority=["numpy_arrays", "object_pickle"]  # Prioritize arrays
+    )
 )
 ```
 
@@ -1149,15 +1308,22 @@ The default serialization follows a **Quality-First Approach**:
 
 **ML Pipeline Optimization**:
 ```python
+from cacheness import cached, CacheConfig
+from cacheness.config import CacheStorageConfig, SerializationConfig, HandlerConfig
+
 # Fast caching for rapid iteration
 ml_config = CacheConfig(
-    cache_dir="./ml_cache",
-    enable_collections=False,           # Skip expensive list/dict analysis
-    max_tuple_recursive_length=3,       # Limit parameter tuple analysis
-    handler_priority=["numpy_arrays", "object_pickle"]  # Prioritize arrays
+    storage=CacheStorageConfig(cache_dir="./ml_cache"),
+    serialization=SerializationConfig(
+        enable_collections=False,           # Skip expensive list/dict analysis
+        max_tuple_recursive_length=3        # Limit parameter tuple analysis
+    ),
+    handlers=HandlerConfig(
+        handler_priority=["numpy_arrays", "object_pickle"]  # Prioritize arrays
+    )
 )
 
-@cached(cache_instance=UnifiedCache(ml_config))
+@cached(cache_instance=cacheness(ml_config))
 def train_model(X, y, params):
     # Model training logic
     return trained_model, metrics, feature_importance
@@ -1167,14 +1333,18 @@ def train_model(X, y, params):
 ```python
 # Detailed caching for complex workflows
 data_config = CacheConfig(
-    cache_dir="./data_cache", 
-    enable_collections=True,            # Full parameter introspection
-    enable_object_introspection=True,   # Deep object analysis
-    max_collection_depth=15,            # Allow complex nested structures
-    handler_priority=["pandas_dataframes", "polars_dataframes", "numpy_arrays"]
+    storage=CacheStorageConfig(cache_dir="./data_cache"),
+    serialization=SerializationConfig(
+        enable_collections=True,            # Full parameter introspection
+        enable_object_introspection=True,   # Deep object analysis
+        max_collection_depth=15             # Allow complex nested structures
+    ),
+    handlers=HandlerConfig(
+        handler_priority=["pandas_dataframes", "polars_dataframes", "numpy_arrays"]
+    )
 )
 
-@cached(cache_instance=UnifiedCache(data_config))
+@cached(cache_instance=cacheness(data_config))
 def process_datasets(raw_data, transformations, config_dict):
     # Complex data processing with nested configurations
     return processed_data, metadata, validation_results

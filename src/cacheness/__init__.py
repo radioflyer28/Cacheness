@@ -42,14 +42,13 @@ try:
 except ImportError:
     _SQLiteMetadataBackend = None
 
-__version__ = "0.2.1"
+__version__ = "0.3.0"
 __author__ = "radioflyer28"
 __email__ = "akgithub.2drwc@aleeas.com"
 
 __all__ = [
-    # Core classes (with aliases for backward compatibility)
+    # Core classes
     "cacheness",
-    "UnifiedCache",
     "CacheConfig",
     "get_cache",
     # Handlers
@@ -64,9 +63,6 @@ __all__ = [
     # Version info
     "__version__",
 ]
-
-# Backward compatibility
-UnifiedCache = cacheness
 
 # Add SQLite backend to exports if available
 if _SQLiteMetadataBackend is not None:

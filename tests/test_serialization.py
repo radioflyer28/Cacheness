@@ -1,6 +1,7 @@
 """
 Tests for unified serialization system.
 """
+
 import numpy as np
 from pathlib import Path
 from cacheness.serialization import serialize_for_cache_key, create_unified_cache_key
@@ -26,7 +27,9 @@ class TestUnifiedSerialization:
 
         # Tuples (small tuples get recursive treatment for better introspection)
         result = serialize_for_cache_key((1, "two", 3.0))
-        assert "tuple:[int:1,str:two,float:3.0]" in result  # Small tuples use recursive serialization
+        assert (
+            "tuple:[int:1,str:two,float:3.0]" in result
+        )  # Small tuples use recursive serialization
 
         # Large tuples use hash for performance
         large_tuple = tuple(range(20))  # > 10 elements
@@ -43,14 +46,14 @@ class TestUnifiedSerialization:
 
     def test_hashable_objects(self):
         """Test serialization of objects with __hash__ method."""
-        
+
         class HashableObj:
             def __init__(self, value):
                 self.value = value
-            
+
             def __hash__(self):
                 return hash(self.value)
-            
+
             def __eq__(self, other):
                 return isinstance(other, HashableObj) and self.value == other.value
 
@@ -62,14 +65,14 @@ class TestUnifiedSerialization:
 
         # Test hashable object without useful __dict__ (e.g., built-in types with custom __hash__)
         class HashableWithoutDict:
-            __slots__ = ['value']  # No __dict__
-            
+            __slots__ = ["value"]  # No __dict__
+
             def __init__(self, value):
                 self.value = value
-            
+
             def __hash__(self):
                 return hash(self.value)
-        
+
         obj_no_dict = HashableWithoutDict(99)
         result = serialize_for_cache_key(obj_no_dict)
         # Should fall back to hash since no __dict__
@@ -77,11 +80,11 @@ class TestUnifiedSerialization:
 
     def test_non_hashable_objects(self):
         """Test serialization of objects without __hash__ method."""
-        
+
         class NonHashableObj:
             def __init__(self, value):
                 self.value = value
-            
+
             def __str__(self):
                 return f"NonHashable({self.value})"
 
@@ -92,7 +95,7 @@ class TestUnifiedSerialization:
 
     def test_custom_objects_with_dict(self):
         """Test serialization of custom objects with __dict__."""
-        
+
         class CustomObj:
             def __init__(self, x, y):
                 self.x = x
@@ -116,12 +119,12 @@ class TestUnifiedSerialization:
             "string_param": "hello",
             "int_param": 42,
             "array_param": np.array([1, 2, 3]),
-            "dict_param": {"nested": True}
+            "dict_param": {"nested": True},
         }
-        
+
         key1 = create_unified_cache_key(params)
         key2 = create_unified_cache_key(params)
-        
+
         # Should be consistent
         assert key1 == key2
         assert len(key1) == 16  # 16-character hex string
@@ -130,32 +133,32 @@ class TestUnifiedSerialization:
         """Test that parameter order doesn't affect cache key."""
         params1 = {"a": 1, "b": 2, "c": 3}
         params2 = {"c": 3, "a": 1, "b": 2}
-        
+
         key1 = create_unified_cache_key(params1)
         key2 = create_unified_cache_key(params2)
-        
+
         assert key1 == key2
 
 
-class TestUnifiedCacheIntegration:
+class TestcachenessIntegration:
     """Test integration of unified serialization with cache system."""
 
     def test_cache_consistency(self):
-        """Test that UnifiedCache and decorators use consistent serialization."""
-        
+        """Test that cacheness and decorators use consistent serialization."""
+
         class TestObj:
             def __init__(self, value):
                 self.value = value
-            
+
             def __hash__(self):
                 return hash(self.value)
-                
+
             def __eq__(self, other):
                 return isinstance(other, TestObj) and self.value == other.value
 
         test_obj = TestObj(42)
-        
-        # Test with UnifiedCache
+
+        # Test with cacheness
         cache = cacheness()
         cache.put("result1", test_param=test_obj, other_param="test")
         result1 = cache.get(test_param=test_obj, other_param="test")
@@ -168,37 +171,37 @@ class TestUnifiedCacheIntegration:
 
         result2 = test_function(test_obj, "test")
         result3 = test_function(test_obj, "test")  # Should hit cache
-        
+
         assert result2 == result3
         assert "result2_42_test" == result2
 
     def test_complex_object_caching(self):
         """Test caching with complex objects."""
-        
+
         complex_data = {
             "numpy_array": np.array([[1, 2], [3, 4]]),
             "nested_dict": {"level1": {"level2": [1, 2, 3]}},
             "tuple_data": (1, "two", 3.0, np.array([4, 5])),
         }
-        
+
         @cached()
         def process_complex_data(**kwargs):
             return f"processed_{len(kwargs)}_items"
 
         result1 = process_complex_data(**complex_data)
         result2 = process_complex_data(**complex_data)  # Should hit cache
-        
+
         assert result1 == result2
         assert "processed_3_items" == result1
 
     def test_path_object_handling(self):
         """Test that Path objects work with unified serialization."""
         import tempfile
-        
-        with tempfile.NamedTemporaryFile(mode='w', delete=False) as f:
+
+        with tempfile.NamedTemporaryFile(mode="w", delete=False) as f:
             f.write("test content")
             test_path = Path(f.name)
-        
+
         try:
             cache = cacheness()
             cache.put("path_result", file_path=test_path)

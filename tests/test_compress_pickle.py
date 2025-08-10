@@ -180,7 +180,7 @@ class TestCompressPickle:
             compress_pickle.blosc.Codec.ZLIB,
             compress_pickle.blosc.Codec.ZSTD,
         ]
-        
+
         # Only include newer codecs if they exist (some may not be available in all versions)
         optional_codecs = ["NDLZ", "ZFP_ACC", "ZFP_PREC", "ZFP_RATE"]
         for codec_name in optional_codecs:

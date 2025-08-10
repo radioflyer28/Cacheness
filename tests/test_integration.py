@@ -9,7 +9,7 @@ import tempfile
 import numpy as np
 from pathlib import Path
 
-from cacheness.core import UnifiedCache, CacheConfig
+from cacheness import cacheness, CacheConfig
 
 
 class TestCacheIntegration:
@@ -34,7 +34,7 @@ class TestCacheIntegration:
     @pytest.fixture
     def cache(self, cache_config):
         """Create a cache instance for testing."""
-        return UnifiedCache(cache_config)
+        return cacheness(cache_config)
 
     def test_end_to_end_workflow(self, cache):
         """Test complete end-to-end cache workflow."""
@@ -100,7 +100,7 @@ class TestCacheIntegration:
         )
 
         # Create first cache instance and store data
-        cache1 = UnifiedCache(config)
+        cache1 = cacheness(config)
         test_data = {"persistent_key": "persistent_value", "numbers": [1, 2, 3, 4, 5]}
         cache1.put(test_data, description="Persistence test", persistent="data")
 
@@ -108,7 +108,7 @@ class TestCacheIntegration:
         assert cache1.get(persistent="data") == test_data
 
         # Create second cache instance (simulate restart)
-        cache2 = UnifiedCache(config)
+        cache2 = cacheness(config)
 
         # Data should still be available
         retrieved = cache2.get(persistent="data")
@@ -201,7 +201,7 @@ class TestCacheIntegration:
             max_cache_size_mb=1,  # Small limit for testing
             cleanup_on_init=False,
         )
-        cache = UnifiedCache(config)
+        cache = cacheness(config)
 
         # Add data that might exceed the limit
         for i in range(10):
@@ -224,7 +224,7 @@ class TestCacheIntegration:
             metadata_backend="json",
             cleanup_on_init=False,
         )
-        json_cache = UnifiedCache(json_config)
+        json_cache = cacheness(json_config)
 
         # Test with SQLite backend
         sqlite_config = CacheConfig(
@@ -232,7 +232,7 @@ class TestCacheIntegration:
             metadata_backend="sqlite",
             cleanup_on_init=False,
         )
-        sqlite_cache = UnifiedCache(sqlite_config)
+        sqlite_cache = cacheness(sqlite_config)
 
         # Store same data in both caches
         test_data = {"comparison": "test", "value": 123}
@@ -296,7 +296,7 @@ class TestCacheConfiguration:
         test_data = np.random.rand(10, 10)
 
         for i, config in enumerate(configs):
-            cache = UnifiedCache(config)
+            cache = cacheness(config)
 
             # Store and retrieve data
             cache.put(test_data, description=f"Config test {i}", config_test=i)
@@ -316,7 +316,7 @@ class TestCacheConfiguration:
         config = CacheConfig(cache_dir=str(non_existent_dir), metadata_backend="json")
 
         # Cache should create the directory
-        cache = UnifiedCache(config)
+        cache = cacheness(config)
 
         assert non_existent_dir.exists()
 

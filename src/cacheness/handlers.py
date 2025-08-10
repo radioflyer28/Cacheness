@@ -3,14 +3,23 @@ Cache Format Handlers
 ====================
 
 This module contains specialized handlers for different data types in the cache system.
-Each handler implements the Strategy pattern for format-specific operations.
+Each handler implements focused interfaces following the Interface Segregation Principle.
 """
 
 import numpy as np
-from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Dict, Optional
 import logging
+
+# Import focused interfaces
+from .interfaces import (
+    CacheHandler,
+    CacheHandlerError,
+    CacheWriteError,
+    CacheReadError,
+    CacheFormatError,
+)
+from .error_handling import cache_operation_context
 
 # DataFrame libraries with fallback
 try:
@@ -49,7 +58,7 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# Log DataFrame backend availability
+# Log DataFrame backend availability with debug info
 if POLARS_AVAILABLE and PANDAS_AVAILABLE:
     logger.info("📊 Both Polars and Pandas available for DataFrame caching")
 elif POLARS_AVAILABLE:
@@ -61,85 +70,98 @@ else:
         "⚠️  Neither Polars nor Pandas available - DataFrame caching disabled"
     )
 
-logger = logging.getLogger(__name__)
-
-
-class CacheHandler(ABC):
-    """Abstract base class for cache format handlers."""
-
-    @abstractmethod
-    def can_handle(self, data: Any) -> bool:
-        """Check if this handler can process the given data type."""
-        pass
-
-    @abstractmethod
-    def put(self, data: Any, file_path: Path, config: Any) -> Dict[str, Any]:
-        """Store data and return metadata."""
-        pass
-
-    @abstractmethod
-    def get(self, file_path: Path, metadata: Dict[str, Any]) -> Any:
-        """Retrieve data from file."""
-        pass
-
-    @abstractmethod
-    def get_file_extension(self, config: Any) -> str:
-        """Get the file extension for this format."""
-        pass
-
-    @property
-    @abstractmethod
-    def data_type(self) -> str:
-        """Return the data type identifier for this handler."""
-        pass
-
 
 class PolarsDataFrameHandler(CacheHandler):
     """Handler for Polars DataFrames using Parquet format."""
 
     def can_handle(self, data: Any) -> bool:
-        """Check if data is a Polars DataFrame."""
+        """Check if data is a Polars DataFrame that can be saved to Parquet."""
         if not POLARS_AVAILABLE or pl is None:
+            logger.debug("Polars not available, cannot handle DataFrame")
             return False
         if not isinstance(data, pl.DataFrame):
             return False
-            
-        # Check if DataFrame can be written to Parquet
+
+        return self.validate_dataframe(data)
+
+    def validate_dataframe(self, data: Any) -> bool:
+        """Validate that the DataFrame can be cached in Parquet format."""
         try:
             import io
+
             data.write_parquet(io.BytesIO())
+            logger.debug(f"Polars DataFrame validation passed: shape={data.shape}")
             return True
-        except Exception:
-            # DataFrame has types that can't be written to Parquet, let ObjectHandler handle it
+        except Exception as e:
+            logger.debug(f"Polars DataFrame validation failed: {e}")
             return False
 
     def put(self, data: Any, file_path: Path, config: Any) -> Dict[str, Any]:
-        """Store Polars DataFrame as Parquet."""
-        parquet_path = file_path.with_suffix("").with_suffix(".parquet")
-        data.write_parquet(parquet_path, compression=config.parquet_compression)
+        """Store Polars DataFrame as Parquet with proper error handling."""
+        with cache_operation_context(
+            "store_polars_dataframe", shape=data.shape, columns=len(data.columns)
+        ):
+            try:
+                parquet_path = file_path.with_suffix("").with_suffix(".parquet")
+                compression = config.compression.parquet_compression
 
-        return {
-            "storage_format": "parquet",
-            "file_size": parquet_path.stat().st_size,
-            "actual_path": str(parquet_path),
-            "metadata": {
-                "shape": data.shape,
-                "columns": data.columns,
-                "dtypes": [str(dtype) for dtype in data.dtypes],
-                "compression": config.parquet_compression,
-                "backend": "polars",
-            },
-        }
+                logger.debug(
+                    f"Writing Polars DataFrame to {parquet_path} with {compression} compression"
+                )
+                data.write_parquet(parquet_path, compression=compression)
+
+                file_size = parquet_path.stat().st_size
+                logger.debug(
+                    f"Polars DataFrame written successfully: {file_size} bytes"
+                )
+
+                return {
+                    "storage_format": "parquet",
+                    "file_size": file_size,
+                    "actual_path": str(parquet_path),
+                    "metadata": {
+                        "shape": data.shape,
+                        "columns": data.columns,
+                        "dtypes": [str(dtype) for dtype in data.dtypes],
+                        "compression": compression,
+                        "backend": "polars",
+                    },
+                }
+
+            except Exception as e:
+                raise CacheWriteError(
+                    f"Failed to write Polars DataFrame to Parquet: {e}",
+                    handler_type="polars_dataframe",
+                    data_type=type(data).__name__,
+                ) from e
 
     def get(self, file_path: Path, metadata: Dict[str, Any]) -> Any:
-        """Load Polars DataFrame from Parquet."""
-        if not POLARS_AVAILABLE or pl is None:
-            raise ImportError("Polars not available for loading DataFrame")
-        
-        return pl.read_parquet(file_path)
+        """Load Polars DataFrame from Parquet with proper error handling."""
+        with cache_operation_context("load_polars_dataframe", file_path=str(file_path)):
+            try:
+                if not POLARS_AVAILABLE or pl is None:
+                    raise CacheReadError(
+                        "Polars not available for loading DataFrame",
+                        handler_type="polars_dataframe",
+                    )
+
+                logger.debug(f"Reading Polars DataFrame from {file_path}")
+                df = pl.read_parquet(file_path)
+
+                # Log successful read with basic stats
+                logger.debug(f"Polars DataFrame loaded successfully: shape={df.shape}")
+                return df
+
+            except Exception as e:
+                if isinstance(e, CacheReadError):
+                    raise
+                raise CacheReadError(
+                    f"Failed to read Polars DataFrame from Parquet: {e}",
+                    handler_type="polars_dataframe",
+                ) from e
 
     def get_file_extension(self, config: Any) -> str:
-        """Get file extension for Polars DataFrames and Series."""
+        """Get file extension for Polars DataFrames."""
         return ".parquet"
 
     @property
@@ -156,12 +178,15 @@ class PandasSeriesHandler(CacheHandler):
             return False
         if not isinstance(data, pd.Series):
             return False
-            
+
         # Try to convert to Parquet to see if it's compatible
         try:
             temp_df = data.to_frame()
             import io
-            temp_df.to_parquet(io.BytesIO())  # Keep index for Series compatibility check
+
+            temp_df.to_parquet(
+                io.BytesIO()
+            )  # Keep index for Series compatibility check
             return True
         except Exception:
             # This Series has mixed types that can't be handled by Parquet
@@ -171,12 +196,12 @@ class PandasSeriesHandler(CacheHandler):
         """Store Pandas Series as Parquet."""
         # Convert Series to DataFrame for Parquet storage
         df = data.to_frame()
-        
+
         # Use the same Parquet storage logic as DataFrame handler
         parquet_path = file_path.with_suffix("").with_suffix(".parquet")
         df.to_parquet(
             parquet_path,
-            compression=config.parquet_compression,
+            compression=config.compression.parquet_compression,
             # Keep index=True for Series to preserve index data
         )
 
@@ -189,7 +214,7 @@ class PandasSeriesHandler(CacheHandler):
                 "shape": list(df.shape),
                 "columns": list(df.columns),
                 "dtypes": [str(dtype) for dtype in df.dtypes],
-                "compression": config.parquet_compression,
+                "compression": config.compression.parquet_compression,
                 "backend": "pandas",
                 "is_series": True,
                 "series_name": data.name,
@@ -199,14 +224,14 @@ class PandasSeriesHandler(CacheHandler):
     def get(self, file_path: Path, metadata: Dict[str, Any]) -> Any:
         """Load Pandas Series from Parquet."""
         df = pd.read_parquet(file_path)
-        
+
         # Convert back to Series - since we preserved the index, use it
         series = df.iloc[:, 0]  # Get the first (and only) column
-        
+
         # Restore the original Series name
         if metadata.get("is_series") and "series_name" in metadata:
             series.name = metadata["series_name"]
-            
+
         return series
 
     def get_file_extension(self, config: Any) -> str:
@@ -232,11 +257,12 @@ class PolarsSeriesHandler(CacheHandler):
             return False
         if not isinstance(data, pl.Series):
             return False
-            
+
         # Try to convert to Parquet to see if it's compatible
         try:
             temp_df = data.to_frame()
             import io
+
             temp_df.write_parquet(io.BytesIO())
             return True
         except Exception:
@@ -247,10 +273,12 @@ class PolarsSeriesHandler(CacheHandler):
         """Store Polars Series as Parquet."""
         # Convert Series to DataFrame for Parquet storage
         df = data.to_frame()
-        
+
         # Use the same Parquet storage logic as DataFrame handler
         parquet_path = file_path.with_suffix("").with_suffix(".parquet")
-        df.write_parquet(parquet_path, compression=config.parquet_compression)
+        df.write_parquet(
+            parquet_path, compression=config.compression.parquet_compression
+        )
 
         file_size = parquet_path.stat().st_size
         return {
@@ -261,7 +289,7 @@ class PolarsSeriesHandler(CacheHandler):
                 "shape": list(df.shape),
                 "columns": list(df.columns),
                 "dtypes": [str(dtype) for dtype in df.dtypes],
-                "compression": config.parquet_compression,
+                "compression": config.compression.parquet_compression,
                 "backend": "polars",
                 "is_series": True,
                 "series_name": data.name,
@@ -271,14 +299,14 @@ class PolarsSeriesHandler(CacheHandler):
     def get(self, file_path: Path, metadata: Dict[str, Any]) -> Any:
         """Load Polars Series from Parquet."""
         df = pl.read_parquet(file_path)
-        
+
         # Convert back to Series
         series = df.to_series(0)  # Get the first (and only) column
-        
+
         # Restore the original Series name
         if metadata.get("is_series") and "series_name" in metadata:
             series = series.alias(metadata["series_name"])
-            
+
         return series
 
     def get_file_extension(self, config: Any) -> str:
@@ -304,10 +332,11 @@ class PandasDataFrameHandler(CacheHandler):
             return False
         if not isinstance(data, pd.DataFrame):
             return False
-            
+
         # Check if DataFrame can be written to Parquet
         try:
             import io
+
             data.to_parquet(io.BytesIO())
             return True
         except Exception:
@@ -318,7 +347,8 @@ class PandasDataFrameHandler(CacheHandler):
         """Store Pandas DataFrame as Parquet."""
         parquet_path = file_path.with_suffix("").with_suffix(".parquet")
         data.to_parquet(
-            parquet_path, compression=config.parquet_compression
+            parquet_path,
+            compression=config.compression.parquet_compression,
             # Keep index=True by default to preserve DataFrame index
         )
 
@@ -330,7 +360,7 @@ class PandasDataFrameHandler(CacheHandler):
                 "shape": data.shape,
                 "columns": data.columns.tolist(),
                 "dtypes": [str(dtype) for dtype in data.dtypes],
-                "compression": config.parquet_compression,
+                "compression": config.compression.parquet_compression,
                 "backend": "pandas",
             },
         }
@@ -339,7 +369,7 @@ class PandasDataFrameHandler(CacheHandler):
         """Load Pandas DataFrame from Parquet."""
         if not PANDAS_AVAILABLE or pd is None:
             raise ImportError("Pandas not available for loading DataFrame")
-        
+
         return pd.read_parquet(file_path)
 
     def get_file_extension(self, config: Any) -> str:
@@ -378,7 +408,7 @@ class ArrayHandler(CacheHandler):
     ) -> Dict[str, Any]:
         """Store a single numpy array, trying blosc2 first, then NPZ fallback."""
         # Try blosc2 compression first if enabled
-        if config.use_blosc2_arrays and BLOSC2_AVAILABLE:
+        if config.compression.use_blosc2_arrays and BLOSC2_AVAILABLE:
             try:
                 # Update file path for blosc2 format
                 blosc2_path = file_path.with_suffix("").with_suffix(".b2nd")
@@ -392,7 +422,7 @@ class ArrayHandler(CacheHandler):
                         "shape": data.shape,
                         "dtype": str(data.dtype),
                         "storage_format": "blosc2",
-                        "compression": config.blosc2_array_codec,
+                        "compression": config.compression.blosc2_array_codec,
                     },
                 }
             except Exception as e:
@@ -400,7 +430,7 @@ class ArrayHandler(CacheHandler):
 
         # Fallback to NPZ format
         npz_path = file_path.with_suffix("").with_suffix(".npz")
-        if config.npz_compression:
+        if config.compression.npz_compression:
             np.savez_compressed(npz_path, data=data)
         else:
             np.savez(npz_path, data=data)
@@ -413,7 +443,7 @@ class ArrayHandler(CacheHandler):
                 "shape": data.shape,
                 "dtype": str(data.dtype),
                 "storage_format": "npz",
-                "compression": "zlib" if config.npz_compression else "none",
+                "compression": "zlib" if config.compression.npz_compression else "none",
             },
         }
 
@@ -425,7 +455,7 @@ class ArrayHandler(CacheHandler):
         array_data = {k: v for k, v in data.items() if isinstance(v, np.ndarray)}
 
         npz_path = file_path.with_suffix("").with_suffix(".npz")
-        if config.npz_compression:
+        if config.compression.npz_compression:
             np.savez_compressed(npz_path, **array_data)
         else:
             np.savez(npz_path, **array_data)
@@ -440,7 +470,7 @@ class ArrayHandler(CacheHandler):
                     for key, arr in array_data.items()
                 },
                 "storage_format": "npz",
-                "compression": "zlib" if config.npz_compression else "none",
+                "compression": "zlib" if config.compression.npz_compression else "none",
             },
         }
 
@@ -457,9 +487,11 @@ class ArrayHandler(CacheHandler):
         compressed_data = blosc2.compress(
             data,
             typesize=data.dtype.itemsize,
-            clevel=config.blosc2_array_clevel,
+            clevel=config.compression.blosc2_array_clevel,
             codec=getattr(
-                blosc2.Codec, config.blosc2_array_codec.upper(), blosc2.Codec.LZ4
+                blosc2.Codec,
+                config.compression.blosc2_array_codec.upper(),
+                blosc2.Codec.LZ4,
             ),
         )
 
@@ -528,7 +560,7 @@ class ArrayHandler(CacheHandler):
 
     def get_file_extension(self, config: Any) -> str:
         """Get file extension for arrays (determined dynamically)."""
-        if config.use_blosc2_arrays and BLOSC2_AVAILABLE:
+        if config.compression.use_blosc2_arrays and BLOSC2_AVAILABLE:
             return ".b2nd"
         return ".npz"
 
@@ -547,41 +579,47 @@ class ObjectHandler(CacheHandler):
             # Check if PolarsDataFrameHandler would reject this (Object types, etc.)
             try:
                 import io
+
                 data.write_parquet(io.BytesIO())
                 return False  # Specialized handler can handle it
             except Exception:
                 return is_pickleable(data)  # We can handle it as fallback
-                
+
         if PANDAS_AVAILABLE and pd is not None and isinstance(data, pd.DataFrame):
             # Check if PandasDataFrameHandler would reject this (complex objects, etc.)
             try:
                 import io
+
                 data.to_parquet(io.BytesIO())
                 return False  # Specialized handler can handle it
             except Exception:
                 return is_pickleable(data)  # We can handle it as fallback
-            
+
         # For Series, only handle if specialized handlers can't (i.e., mixed-type Series)
         if POLARS_AVAILABLE and pl is not None and isinstance(data, pl.Series):
             # Check if PolarsSeriesHandler would reject this (mixed types)
             try:
                 temp_df = data.to_frame()
                 import io
+
                 temp_df.write_parquet(io.BytesIO())
                 return False  # Specialized handler can handle it
             except Exception:
                 return is_pickleable(data)  # We can handle it as fallback
-                
+
         if PANDAS_AVAILABLE and pd is not None and isinstance(data, pd.Series):
             # Check if PandasSeriesHandler would reject this (mixed types)
             try:
                 temp_df = data.to_frame()
                 import io
-                temp_df.to_parquet(io.BytesIO())  # Keep index for proper compatibility check
+
+                temp_df.to_parquet(
+                    io.BytesIO()
+                )  # Keep index for proper compatibility check
                 return False  # Specialized handler can handle it
             except Exception:
                 return is_pickleable(data)  # We can handle it as fallback
-                
+
         # Don't handle arrays - let ArrayHandler do that
         if isinstance(data, np.ndarray):
             return False
@@ -601,23 +639,29 @@ class ObjectHandler(CacheHandler):
 
         # Ensure clean path without existing extension
         if BLOSC_AVAILABLE:
-            pickle_path = file_path.with_suffix("").with_suffix(f".pkl.{config.pickle_compression_codec}")
-            
+            pickle_path = file_path.with_suffix("").with_suffix(
+                f".pkl.{config.compression.pickle_compression_codec}"
+            )
+
             # Optimize compression parameters based on data characteristics
             compression_params = optimize_compression_params(
                 data,
-                codec=config.pickle_compression_codec,
-                base_clevel=config.pickle_compression_level,
-                enable_multithreading=getattr(config, 'enable_multithreading', True),
-                auto_optimize_threads=getattr(config, 'auto_optimize_threads', True)
+                codec=config.compression.pickle_compression_codec,
+                base_clevel=config.compression.pickle_compression_level,
+                enable_multithreading=getattr(
+                    config.compression, "enable_multithreading", True
+                ),
+                auto_optimize_threads=getattr(
+                    config.compression, "auto_optimize_threads", True
+                ),
             )
-            
+
             # Use compressed pickle with optimized parameters
             write_compressed_pickle(
                 data,
                 pickle_path,
                 nparray=False,  # Don't use numpy optimization for general objects
-                **compression_params
+                **compression_params,
             )
             storage_format = "compressed_pickle"
         else:
@@ -630,9 +674,11 @@ class ObjectHandler(CacheHandler):
             storage_format = "pickle"
 
         metadata = {
-            "object_type": str(type(data)), 
+            "object_type": str(type(data)),
             "storage_format": storage_format,
-            "compression_codec": config.pickle_compression_codec if BLOSC_AVAILABLE else None
+            "compression_codec": config.compression.pickle_compression_codec
+            if BLOSC_AVAILABLE
+            else None,
         }
 
         return {
@@ -651,7 +697,9 @@ class ObjectHandler(CacheHandler):
             pickle_path = file_path.with_suffix("").with_suffix(".pkl")
             if not pickle_path.exists():
                 # Try compressed version as fallback
-                pickle_path = file_path.with_suffix("").with_suffix(f".pkl.{metadata.get('compression_codec', 'zstd')}")
+                pickle_path = file_path.with_suffix("").with_suffix(
+                    f".pkl.{metadata.get('compression_codec', 'zstd')}"
+                )
 
             if not pickle_path.exists():
                 raise FileNotFoundError(f"Pickle file not found: {pickle_path}")
@@ -667,7 +715,7 @@ class ObjectHandler(CacheHandler):
                 return read_compressed_pickle(pickle_path, nparray=False)
         else:
             # Compressed pickle
-            codec = metadata.get('compression_codec', 'zstd')
+            codec = metadata.get("compression_codec", "zstd")
             pickle_path = file_path.with_suffix("").with_suffix(f".pkl.{codec}")
             if not pickle_path.exists():
                 raise FileNotFoundError(f"Pickle file not found: {pickle_path}")
@@ -677,7 +725,7 @@ class ObjectHandler(CacheHandler):
     def get_file_extension(self, config: Any) -> str:
         """Get file extension for objects."""
         if BLOSC_AVAILABLE:
-            return f".pkl.{config.pickle_compression_codec}"
+            return f".pkl.{config.compression.pickle_compression_codec}"
         else:
             return ".pkl"
 
@@ -692,9 +740,9 @@ class HandlerRegistry:
     def __init__(self, config: Optional[Any] = None):
         self.config = config
         self.handlers = []
-        
+
         # If config specifies handler priority, use that order
-        if config and hasattr(config, 'handler_priority') and config.handler_priority:
+        if config and hasattr(config, "handlers") and config.handlers.handler_priority:
             self._setup_handlers_from_config(config)
         else:
             self._setup_default_handlers(config)
@@ -702,72 +750,88 @@ class HandlerRegistry:
     def _setup_default_handlers(self, config):
         """Setup handlers in default priority order."""
         # Add Series handlers first (higher priority than DataFrame handlers)
-        if self._should_enable_handler('polars_series', config):
+        if self._should_enable_handler("polars_series", config):
             if POLARS_AVAILABLE:
                 self.handlers.append(PolarsSeriesHandler())
-                
-        if self._should_enable_handler('pandas_series', config):
+
+        if self._should_enable_handler("pandas_series", config):
             if PANDAS_AVAILABLE:
                 self.handlers.append(PandasSeriesHandler())
 
         # Add DataFrame handlers if available
-        if self._should_enable_handler('polars_dataframes', config):
+        if self._should_enable_handler("polars_dataframes", config):
             if POLARS_AVAILABLE:
                 self.handlers.append(PolarsDataFrameHandler())
-                
-        if self._should_enable_handler('pandas_dataframes', config):
+
+        if self._should_enable_handler("pandas_dataframes", config):
             if PANDAS_AVAILABLE:
                 self.handlers.append(PandasDataFrameHandler())
 
         # Add other handlers
-        if self._should_enable_handler('numpy_arrays', config):
+        if self._should_enable_handler("numpy_arrays", config):
             self.handlers.append(ArrayHandler())
-            
-        if self._should_enable_handler('object_pickle', config):
+
+        if self._should_enable_handler("object_pickle", config):
             self.handlers.append(ObjectHandler())  # Keep as fallback
 
     def _setup_handlers_from_config(self, config):
-        """Setup handlers based on config.handler_priority order."""
+        """Setup handlers based on config.handlers.handler_priority order."""
         handler_map = {
-            'polars_series': lambda: PolarsSeriesHandler() if POLARS_AVAILABLE else None,
-            'pandas_series': lambda: PandasSeriesHandler() if PANDAS_AVAILABLE else None,
-            'polars_dataframes': lambda: PolarsDataFrameHandler() if POLARS_AVAILABLE else None,
-            'pandas_dataframes': lambda: PandasDataFrameHandler() if PANDAS_AVAILABLE else None,
-            'numpy_arrays': lambda: ArrayHandler(),
-            'object_pickle': lambda: ObjectHandler(),
+            "polars_series": lambda: PolarsSeriesHandler()
+            if POLARS_AVAILABLE
+            else None,
+            "pandas_series": lambda: PandasSeriesHandler()
+            if PANDAS_AVAILABLE
+            else None,
+            "polars_dataframes": lambda: PolarsDataFrameHandler()
+            if POLARS_AVAILABLE
+            else None,
+            "pandas_dataframes": lambda: PandasDataFrameHandler()
+            if PANDAS_AVAILABLE
+            else None,
+            "numpy_arrays": lambda: ArrayHandler(),
+            "object_pickle": lambda: ObjectHandler(),
         }
-        
-        for handler_name in config.handler_priority:
-            if handler_name in handler_map and self._should_enable_handler(handler_name, config):
+
+        # Get priority list from config structure
+        priority_list = config.handlers.handler_priority or []
+
+        for handler_name in priority_list:
+            if handler_name in handler_map and self._should_enable_handler(
+                handler_name, config
+            ):
                 handler = handler_map[handler_name]()
                 if handler is not None:
                     self.handlers.append(handler)
-        
+                    logger.debug(f"Registered {handler_name} handler with priority")
+
         # Add any missing default handlers that weren't specified in priority
-        remaining_handlers = set(handler_map.keys()) - set(config.handler_priority)
+        remaining_handlers = set(handler_map.keys()) - set(priority_list)
         for handler_name in remaining_handlers:
             if self._should_enable_handler(handler_name, config):
                 handler = handler_map[handler_name]()
                 if handler is not None:
                     self.handlers.append(handler)
+                    logger.debug(f"Registered {handler_name} handler as default")
 
     def _should_enable_handler(self, handler_name: str, config) -> bool:
         """Check if a handler should be enabled based on config."""
         if config is None:
             return True  # Enable all by default
-            
+
         handler_enable_map = {
-            'polars_series': 'enable_polars_series',
-            'pandas_series': 'enable_pandas_series',
-            'polars_dataframes': 'enable_polars_dataframes',
-            'pandas_dataframes': 'enable_pandas_dataframes',
-            'numpy_arrays': 'enable_numpy_arrays',
-            'object_pickle': 'enable_object_pickle',
+            "polars_series": "enable_polars_series",
+            "pandas_series": "enable_pandas_series",
+            "polars_dataframes": "enable_polars_dataframes",
+            "pandas_dataframes": "enable_pandas_dataframes",
+            "numpy_arrays": "enable_numpy_arrays",
+            "object_pickle": "enable_object_pickle",
         }
-        
+
         config_attr = handler_enable_map.get(handler_name)
         if config_attr:
-            return getattr(config, config_attr, True)
+            # Use the config structure
+            return getattr(config.handlers, config_attr, True)
         return True
 
     def get_handler(self, data: Any) -> CacheHandler:

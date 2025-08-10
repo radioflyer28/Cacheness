@@ -1,7 +1,7 @@
 """
 Unit tests for the core cache system.
 
-Tests the main UnifiedCache class and CacheConfig functionality.
+Tests the main cacheness class and CacheConfig functionality.
 """
 
 import pytest
@@ -10,7 +10,7 @@ import numpy as np
 from pathlib import Path
 from unittest.mock import patch
 
-from cacheness import CacheConfig, UnifiedCache
+from cacheness import CacheConfig, cacheness
 
 
 class TestCacheConfig:
@@ -20,46 +20,63 @@ class TestCacheConfig:
         """Test default configuration values."""
         config = CacheConfig()
 
-        assert config.cache_dir == "./cache"
-        assert config.default_ttl_hours == 24
-        assert config.max_cache_size_mb == 2000
-        assert config.parquet_compression == "lz4"
-        assert config.npz_compression is True
-        assert config.enable_metadata is True
-        assert config.cleanup_on_init is True
-        assert config.metadata_backend == "auto"
-        assert config.sqlite_db_file == "cache_metadata.db"
-        assert config.pickle_compression_codec == "zstd"
-        assert config.pickle_compression_level == 5
-        assert config.use_blosc2_arrays is True
-        assert config.blosc2_array_codec == "lz4"
-        assert config.blosc2_array_clevel == 5
+        assert config.storage.cache_dir == "./cache"
+        assert config.metadata.default_ttl_hours == 24
+        assert config.storage.max_cache_size_mb == 2000
+        assert config.compression.parquet_compression == "lz4"
+        assert config.compression.npz_compression is True
+        assert config.metadata.enable_metadata is True
+        assert config.storage.cleanup_on_init is True
+        assert config.metadata.metadata_backend == "auto"
+        assert config.metadata.sqlite_db_file == "cache_metadata.db"
+        assert config.compression.pickle_compression_codec == "zstd"
+        assert config.compression.pickle_compression_level == 5
+        assert config.compression.use_blosc2_arrays is True
+        assert config.compression.blosc2_array_codec == "lz4"
+        assert config.compression.blosc2_array_clevel == 5
 
     def test_custom_config(self):
         """Test custom configuration values."""
-        config = CacheConfig(
-            cache_dir="/tmp/test_cache",
-            default_ttl_hours=48,
-            max_cache_size_mb=1000,
-            parquet_compression="gzip",
-            npz_compression=False,
-            enable_metadata=False,
-            cleanup_on_init=False,
-            metadata_backend="json",
+        from cacheness.config import (
+            CacheStorageConfig,
+            CacheMetadataConfig,
+            CompressionConfig,
+            SerializationConfig,
+            HandlerConfig,
         )
 
-        assert config.cache_dir == "/tmp/test_cache"
-        assert config.default_ttl_hours == 48
-        assert config.max_cache_size_mb == 1000
-        assert config.parquet_compression == "gzip"
-        assert config.npz_compression is False
-        assert config.enable_metadata is False
-        assert config.cleanup_on_init is False
-        assert config.metadata_backend == "json"
+        storage_config = CacheStorageConfig(
+            cache_dir="/tmp/test_cache", max_cache_size_mb=1000, cleanup_on_init=False
+        )
+        metadata_config = CacheMetadataConfig(
+            default_ttl_hours=48, enable_metadata=False, metadata_backend="json"
+        )
+        compression_config = CompressionConfig(
+            parquet_compression="gzip", npz_compression=False
+        )
+        serialization_config = SerializationConfig()
+        handler_config = HandlerConfig()
+
+        config = CacheConfig(
+            storage=storage_config,
+            metadata=metadata_config,
+            compression=compression_config,
+            serialization=serialization_config,
+            handlers=handler_config,
+        )
+
+        assert config.storage.cache_dir == "/tmp/test_cache"
+        assert config.metadata.default_ttl_hours == 48
+        assert config.storage.max_cache_size_mb == 1000
+        assert config.compression.parquet_compression == "gzip"
+        assert config.compression.npz_compression is False
+        assert config.metadata.enable_metadata is False
+        assert config.storage.cleanup_on_init is False
+        assert config.metadata.metadata_backend == "json"
 
 
-class TestUnifiedCache:
-    """Test UnifiedCache class functionality."""
+class TestCacheness:
+    """Test cacheness class functionality."""
 
     @pytest.fixture
     def temp_cache_dir(self):
@@ -70,25 +87,43 @@ class TestUnifiedCache:
     @pytest.fixture
     def test_config(self, temp_cache_dir):
         """Create a test configuration."""
+        from cacheness.config import (
+            CacheStorageConfig,
+            CacheMetadataConfig,
+            CompressionConfig,
+            SerializationConfig,
+            HandlerConfig,
+        )
+
+        storage_config = CacheStorageConfig(cache_dir=str(temp_cache_dir))
+        metadata_config = CacheMetadataConfig(
+            metadata_backend="json"
+        )  # Use JSON to avoid SQLite dependencies
+        compression_config = CompressionConfig(
+            use_blosc2_arrays=False
+        )  # Disable blosc2 for testing
+        serialization_config = SerializationConfig()
+        handler_config = HandlerConfig()
+
         return CacheConfig(
-            cache_dir=str(temp_cache_dir),
-            metadata_backend="json",  # Use JSON to avoid SQLite dependencies
-            use_blosc2_arrays=False,  # Disable blosc2 for testing
-            npz_compression=True,
-            cleanup_on_init=False,
+            storage=storage_config,
+            metadata=metadata_config,
+            compression=compression_config,
+            serialization=serialization_config,
+            handlers=handler_config,
         )
 
     @pytest.fixture
     def cache(self, test_config):
         """Create a cache instance for testing."""
-        return UnifiedCache(test_config)
+        return cacheness(test_config)
 
     def test_cache_initialization(self, cache, test_config):
         """Test cache initialization."""
         assert cache.config == test_config
         assert cache.handlers is not None
         assert cache.metadata_backend is not None
-        assert cache.config.cache_dir in str(cache.config.cache_dir)
+        assert cache.config.storage.cache_dir in str(cache.config.storage.cache_dir)
 
     def test_put_and_get_simple_object(self, cache):
         """Test caching simple objects."""
@@ -141,8 +176,11 @@ class TestUnifiedCache:
     def _has_dataframe_library(self):
         """Check if polars or pandas is available."""
         import importlib.util
-        return (importlib.util.find_spec("polars") is not None or 
-                importlib.util.find_spec("pandas") is not None)
+
+        return (
+            importlib.util.find_spec("polars") is not None
+            or importlib.util.find_spec("pandas") is not None
+        )
 
     @pytest.mark.skipif(
         not _has_dataframe_library(None),
@@ -271,7 +309,7 @@ class TestUnifiedCache:
         assert cache_key in str(file_path)
         if prefix:
             assert prefix in str(file_path)
-        assert str(cache.config.cache_dir) in str(file_path)
+        assert str(cache.config.storage.cache_dir) in str(file_path)
 
     def test_ttl_expiration(self, cache):
         """Test TTL-based expiration."""
@@ -378,8 +416,28 @@ class TestUnifiedCache:
 
     def test_cleanup_initialization(self, temp_cache_dir):
         """Test cleanup on initialization."""
+        from cacheness.config import (
+            CacheStorageConfig,
+            CacheMetadataConfig,
+            CompressionConfig,
+            SerializationConfig,
+            HandlerConfig,
+        )
+
+        storage_config = CacheStorageConfig(
+            cache_dir=str(temp_cache_dir), cleanup_on_init=True
+        )
+        metadata_config = CacheMetadataConfig(metadata_backend="json")
+        compression_config = CompressionConfig()
+        serialization_config = SerializationConfig()
+        handler_config = HandlerConfig()
+
         config = CacheConfig(
-            cache_dir=str(temp_cache_dir), metadata_backend="json", cleanup_on_init=True
+            storage=storage_config,
+            metadata=metadata_config,
+            compression=compression_config,
+            serialization=serialization_config,
+            handlers=handler_config,
         )
 
         # Create some dummy files
@@ -387,7 +445,7 @@ class TestUnifiedCache:
         (temp_cache_dir / "old_file.pkl").touch()
 
         # Initialize cache with cleanup
-        cache = UnifiedCache(config)
+        cache = cacheness(config)
 
         # Cache should be initialized properly
-        assert cache.config.cleanup_on_init is True
+        assert cache.config.storage.cleanup_on_init is True

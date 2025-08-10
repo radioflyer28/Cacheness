@@ -15,5 +15,6 @@ wheels/
 *.pkl
 *.pkl.*
 *.b2nd
+*.npz
 *.parquet
 .DS_Store
