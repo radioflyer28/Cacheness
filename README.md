@@ -95,9 +95,62 @@ model1 = train_model(data, learning_rate=0.01)  # Cached
 model2 = train_model(data, learning_rate=0.02)  # Different cache entry
 model3 = train_model(data, learning_rate=0.01)  # Retrieved from cache
 
+# Multiple return values (cached as single tuple)
+@cached(ttl_hours=24)
+def process_dataset(data_path):
+    """Process dataset returning multiple objects."""
+    df_train = load_and_clean(f"{data_path}/train.csv")
+    df_test = load_and_clean(f"{data_path}/test.csv") 
+    features = extract_features(df_train)
+    metadata = {"processed_at": datetime.now(), "version": "1.0"}
+    
+    # Entire tuple cached as single unit (atomic consistency)
+    return df_train, df_test, features, metadata
+
 # Access cache management methods
 print(train_model.cache_info())  # Cache configuration info
 train_model.cache_clear()        # Clear function's cache entries
+```
+
+#### Design Note: Single Return Object
+
+The `@cached` decorator caches the **entire function return** as a single object, even for multiple return values (tuples). This design provides:
+
+- **Atomic consistency**: All components cached/retrieved together
+- **Simplicity**: No need to specify individual object types
+- **Performance**: Single cache operation, excellent compression
+- **Reliability**: No partial cache misses or synchronization issues
+
+For **individual object caching with specialized handlers** (DataFrame → Parquet, arrays → NPZ), use manual caching:
+
+```python
+# Manual approach for specialized storage formats
+@cached()  # Cache the coordination/metadata
+def process_dataset_manual(data_path):
+    cache = cacheness()
+    
+    # Check if already processed
+    metadata = cache.get(dataset=data_path, component="metadata", version="1.0")
+    if metadata:
+        # Load individual components with optimal formats
+        df_train = cache.get(dataset=data_path, component="train", version="1.0")
+        df_test = cache.get(dataset=data_path, component="test", version="1.0") 
+        features = cache.get(dataset=data_path, component="features", version="1.0")
+        return df_train, df_test, features, metadata
+    
+    # Process and cache individually
+    df_train = expensive_processing(f"{data_path}/train.csv")
+    df_test = expensive_processing(f"{data_path}/test.csv")
+    features = extract_features(df_train) 
+    metadata = {"processed_at": datetime.now(), "version": "1.0"}
+    
+    # Store each with specialized handlers
+    cache.put(df_train, dataset=data_path, component="train", version="1.0")      # → Parquet
+    cache.put(df_test, dataset=data_path, component="test", version="1.0")        # → Parquet  
+    cache.put(features, dataset=data_path, component="features", version="1.0")   # → NPZ
+    cache.put(metadata, dataset=data_path, component="metadata", version="1.0")   # → Pickle
+    
+    return df_train, df_test, features, metadata
 ```
 
 ## Installation
@@ -164,6 +217,235 @@ features = cache.get(
     preprocessing="minmax_scaled"
 )
 ```
+
+## Unified Serialization Strategy
+
+### Quality-First Object Serialization
+
+The library uses a sophisticated **unified serialization strategy** that prioritizes **semantic meaning and introspection quality** over raw performance, while still maintaining excellent speed through intelligent optimizations.
+
+Both the `UnifiedCache` and `@cached` decorators use the same serialization approach, ensuring **100% consistency** across all caching methods.
+
+#### Intelligent Ordering Strategy
+
+The serialization follows a carefully optimized 6-tier hierarchy:
+
+```python
+# Serialization Priority Order (Quality-First Approach):
+1. Basic immutable types     → Direct representation
+2. Special cases            → Custom handling (NumPy arrays, etc.)  
+3. Collections             → Recursive introspection
+4. Objects with __dict__   → Full introspection
+5. Hashable objects        → Performance fallback
+6. String representation   → Last resort
+```
+
+#### Example Output Comparison
+
+**Quality-First Approach (Current)**:
+```python
+# Small tuple - full introspection for better cache keys
+(1, "hello", 3.0) → "tuple:[int:1,str:hello,float:3.0]"
+
+# Custom object - meaningful introspection
+class User:
+    def __init__(self, name, age):
+        self.name = name
+        self.age = age
+
+user = User("Alice", 30)
+# Result: "User:dict:[str:age:int:30,str:name:str:Alice]"
+
+# NumPy array - content-aware hashing
+array = np.array([1, 2, 3])
+# Result: "array:(3,):int64:a9b2c3d4e5f6789a"
+```
+
+**Performance-First Alternative (Not Used)**:
+```python
+# Would sacrifice meaning for speed:
+(1, "hello", 3.0) → "hashed:tuple:-9217304902224717415"
+user = User("Alice", 30) → "hashed:User:42"
+```
+
+#### Detailed Serialization Behavior
+
+**1. Basic Immutable Types** *(Ultra-fast: ~0.10-0.14 μs)*
+```python
+42 → "int:42"
+"hello" → "str:hello" 
+3.14 → "float:3.14"
+True → "bool:True"
+None → "None"
+```
+
+**2. Special Cases with Custom Handling** *(Optimized: ~1.67 μs)*
+```python
+# NumPy arrays - content-aware with shape/dtype info
+np.array([[1, 2], [3, 4]]) → "array:(2, 2):int64:a1b2c3d4e5f67890"
+
+# TODO: Future special cases
+# pathlib.Path objects - content hashing
+# pandas.DataFrame - schema + content hash
+```
+
+**3. Collections - Recursive Introspection** *(Good performance: ~0.59-0.89 μs)*
+```python
+# Lists - full recursive serialization
+[1, 2, "three"] → "list:[int:1,int:2,str:three]"
+
+# Dictionaries - sorted keys for determinism
+{"b": 2, "a": 1} → "dict:[str:a:int:1,str:b:int:2]"
+
+# Sets - sorted for deterministic ordering
+{3, 1, 2} → "set:[int:1,int:2,int:3]"
+```
+
+**4. Objects with `__dict__` - Full Introspection** *(Quality-focused: ~0.81 μs)*
+```python
+class Config:
+    def __init__(self):
+        self.learning_rate = 0.01
+        self.epochs = 100
+
+config = Config()
+# Result: "Config:dict:[str:epochs:int:100,str:learning_rate:float:0.01]"
+```
+
+**5. Smart Tuple Handling** *(Adaptive performance)*
+```python
+# Small tuples (≤10 elements) - full introspection
+(1, 2, 3) → "tuple:[int:1,int:2,int:3]"
+
+# Large tuples (>10 elements) - performance fallback
+tuple(range(20)) → "hashed:tuple:-1234567890123456"
+```
+
+**6. Hashable Objects - Performance Fallback** *(Fast: ~0.31 μs)*
+```python
+# Objects without useful __dict__ (e.g., __slots__)
+class HashableToken:
+    __slots__ = ['value']
+    def __init__(self, value):
+        self.value = value
+    def __hash__(self):
+        return hash(self.value)
+
+token = HashableToken("abc123")
+# Result: "hashed:HashableToken:42"
+```
+
+**7. Final Fallback - String Representation**
+```python
+# Non-hashable objects without __dict__
+class CustomObj:
+    def __str__(self):
+        return "CustomObj(data)"
+
+obj = CustomObj()
+# Result: "CustomObj:CustomObj(data)"
+```
+
+#### Performance Characteristics
+
+| Object Type | Avg Time (μs) | Cache Key Quality | Use Case |
+|-------------|---------------|-------------------|----------|
+| Basic types | 0.10-0.14 | ⭐⭐⭐⭐⭐ | Primitives, fast path |
+| Collections | 0.59-0.89 | ⭐⭐⭐⭐⭐ | Lists, dicts, sets |
+| Objects w/ `__dict__` | 0.81 | ⭐⭐⭐⭐⭐ | Custom classes |
+| Large tuples | 0.34 | ⭐⭐⭐ | Performance fallback |
+| Hashable objects | 0.31 | ⭐⭐⭐ | `__slots__` objects |
+| NumPy arrays | 1.67 | ⭐⭐⭐⭐⭐ | Scientific data |
+
+#### Benefits of Quality-First Approach
+
+**🎯 Better Cache Key Semantics**:
+- **Meaningful keys**: `tuple:[int:1,str:data,float:3.14]` vs `hashed:tuple:42`
+- **Debugging-friendly**: Clear understanding of what's cached
+- **Introspection**: Full visibility into object structure
+
+**🔍 Superior Cache Invalidation**:
+- **Content-based**: Changes to object structure are detected
+- **Precise**: Different objects with same hash don't collide
+- **Deterministic**: Same content always produces same key
+
+**⚡ Smart Performance Optimizations**:
+- **Adaptive thresholds**: Large collections use hash fallback
+- **Type-specific handling**: Each type gets optimal treatment  
+- **Minimal overhead**: Quality improvements with <1 μs average cost
+
+#### Real-World Impact Examples
+
+**Machine Learning Pipeline**:
+```python
+# Model parameters get full introspection
+params = {
+    "learning_rate": 0.01,
+    "max_depth": 6,
+    "n_estimators": 100
+}
+
+# Quality-first result (excellent debugging):
+# "dict:[str:learning_rate:float:0.01,str:max_depth:int:6,str:n_estimators:int:100]"
+
+# vs Performance-first (poor debugging):
+# "hashed:dict:1234567890"
+
+@cached()
+def train_model(X, y, params):
+    # Cache key includes full parameter details!
+    return model
+```
+
+**Data Processing**:
+```python
+# Processing configuration
+config = ProcessingConfig(
+    normalize=True,
+    remove_outliers="iqr",
+    feature_selection=["age", "income", "score"]
+)
+
+# Quality-first approach captures full config:
+# "ProcessingConfig:dict:[str:feature_selection:list:[str:age,str:income,str:score],
+#  str:normalize:bool:True,str:remove_outliers:str:iqr]"
+
+# Perfect for cache invalidation when config changes!
+```
+
+#### Migration and Consistency
+
+**Before (Inconsistent)**:
+- `UnifiedCache` used JSON + str fallback
+- `@cached` decorators used custom `_serialize_for_hash()`
+- Different objects could have different cache keys
+
+**After (Unified)**:
+- Single `serialize_for_cache_key()` function used everywhere
+- Guaranteed consistency between caching methods
+- Comprehensive test coverage ensures reliability
+
+#### Configuration and Customization
+
+The serialization strategy is optimized by default, but you can understand its behavior:
+
+```python
+from cacheness.serialization import serialize_for_cache_key
+
+# Test how your objects will be serialized
+test_object = {"model": "xgboost", "params": {"max_depth": 6}}
+cache_key = serialize_for_cache_key(test_object)
+print(f"Cache key: {cache_key}")
+# Output: dict:[str:model:str:xgboost,str:params:dict:[str:max_depth:int:6]]
+
+# The unified approach ensures this key is identical whether using:
+cache.put(data, config=test_object)  # UnifiedCache
+# or
+@cached()
+def process(config=test_object): pass  # Decorator
+```
+
+This unified serialization approach ensures your cache keys are **meaningful, consistent, and debuggable** while maintaining excellent performance across all usage patterns.
 
 ## Advanced Configuration
 

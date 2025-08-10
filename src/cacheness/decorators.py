@@ -11,38 +11,7 @@ import xxhash
 from typing import Any, Callable, Optional, Union, Dict, Tuple, cast
 
 from .core import UnifiedCache, CacheConfig
-
-
-def _serialize_for_hash(obj: Any) -> str:
-    """
-    Serialize an object to a string for hashing.
-
-    Handles various Python types in a deterministic way.
-    """
-    if obj is None:
-        return "None"
-    elif isinstance(obj, (str, int, float, bool)):
-        return f"{type(obj).__name__}:{obj}"
-    elif isinstance(obj, (list, tuple)):
-        items = [_serialize_for_hash(item) for item in obj]
-        return f"{type(obj).__name__}:[{','.join(items)}]"
-    elif isinstance(obj, dict):
-        # Sort by keys for deterministic ordering
-        items = [
-            f"{_serialize_for_hash(k)}:{_serialize_for_hash(v)}"
-            for k, v in sorted(obj.items(), key=lambda x: str(x[0]))
-        ]
-        return f"dict:[{','.join(items)}]"
-    elif isinstance(obj, set):
-        # Sort for deterministic ordering
-        items = [_serialize_for_hash(item) for item in sorted(obj, key=str)]
-        return f"set:[{','.join(items)}]"
-    elif hasattr(obj, "__dict__"):
-        # For objects with attributes, use their dict representation
-        return _serialize_for_hash(obj.__dict__)
-    else:
-        # Fall back to string representation
-        return f"{type(obj).__name__}:{str(obj)}"
+from .serialization import serialize_for_cache_key
 
 
 def _generate_cache_key(
@@ -52,7 +21,7 @@ def _generate_cache_key(
     key_prefix: Optional[str] = None,
 ) -> str:
     """
-    Generate a cache key for a function call.
+    Generate a cache key for a function call using unified serialization.
 
     Args:
         func: The function being cached
@@ -68,9 +37,9 @@ def _generate_cache_key(
     func_module = getattr(func, "__module__", "unknown")
     func_id = f"{func_module}.{func_name}"
 
-    # Serialize arguments
-    args_str = _serialize_for_hash(args)
-    kwargs_str = _serialize_for_hash(kwargs)
+    # Serialize arguments using unified approach
+    args_str = serialize_for_cache_key(args)
+    kwargs_str = serialize_for_cache_key(kwargs)
 
     # Combine all components
     if key_prefix:
@@ -161,12 +130,12 @@ class cached:
                 else:
                     raise RuntimeError(f"Cache key generation failed: {e}") from e
 
-            # Try to get from cache using the cache key as the main parameter
+            # Try to get from cache using a synthetic parameter containing the cache key
             try:
                 cache_instance = cast(UnifiedCache, self.cache_instance)
                 cached_result = cache_instance.get(
                     ttl_hours=self.ttl_hours,
-                    cache_key=cache_key,  # Use cache_key as a parameter
+                    __decorator_cache_key=cache_key,  # Use synthetic parameter with the cache key
                 )
                 if cached_result is not None:
                     return cached_result
@@ -178,13 +147,13 @@ class cached:
             # Call the original function
             result = func(*args, **kwargs)
 
-            # Store result in cache using the cache key as the main parameter
+            # Store result in cache using the same synthetic parameter
             try:
                 cache_instance = cast(UnifiedCache, self.cache_instance)
                 cache_instance.put(
                     result,
-                    description=cache_key,  # Use cache_key as description for readability
-                    cache_key=cache_key,  # Use cache_key as the main parameter
+                    description=f"Cached result for {cache_key}",
+                    __decorator_cache_key=cache_key,  # Use same synthetic parameter
                 )
             except Exception as e:
                 if not self.ignore_errors:

@@ -16,7 +16,7 @@ from typing import Optional, Dict, Any, List, Union
 from dataclasses import dataclass
 
 from .handlers import HandlerRegistry
-from .json_utils import dumps as json_dumps
+from .serialization import create_unified_cache_key
 
 # Sentinel value to distinguish between None (infinite TTL) and unspecified (use default)
 _DEFAULT_TTL = object()
@@ -223,11 +223,13 @@ class UnifiedCache:
 
     def _create_cache_key(self, params: Dict) -> str:
         """
-        Create cache key using xxhash for optimal performance.
+        Create cache key using unified serialization approach.
 
-        Automatically processes Path objects based on hash_path_content config:
-        - If True: hashes by file content (robust to file moves)
-        - If False: hashes by path string (faster, filename-based)
+        Uses the unified serialization system that:
+        - Leverages __hash__() when available for hashable objects
+        - Handles Path objects based on hash_path_content config
+        - Provides consistent behavior with decorators
+        - Falls back gracefully for complex objects
 
         Args:
             params: Dictionary of parameters to hash
@@ -237,10 +239,9 @@ class UnifiedCache:
         """
         # Process Path objects based on configuration
         processed_params = self._process_params_for_hashing(params)
-
-        params_str = json_dumps(processed_params, sort_keys=True, default=str)
-        hash_value = xxhash.xxh3_64(params_str.encode()).hexdigest()
-        return hash_value[:16]  # Use first 16 characters
+        
+        # Use unified cache key generation
+        return create_unified_cache_key(processed_params)
 
     def _get_cache_file_path(self, cache_key: str, prefix: str = "") -> Path:
         """Get base cache file path (without extension)."""
