@@ -3,12 +3,12 @@ Cache Metadata Backend System
 =============================
 
 This module provides pluggable metadata backends for the unified cache system,
-supporting both JSON file storage and SQLite database storage with SQLModel ORM.
+supporting both JSON file storage and SQLite database storage with SQLAlchemy ORM.
 
 Features:
 - Abstract base class for metadata backends
 - JSON file backend (original implementation)
-- SQLite backend with SQLModel ORM
+- SQLite backend with SQLAlchemy ORM
 - Dependency injection for backend selection
 - Thread-safe operations
 - Migration utilities
@@ -28,7 +28,6 @@ Usage:
     cache = UnifiedCache(metadata_backend=backend)
 """
 
-import json
 import threading
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
@@ -37,92 +36,84 @@ from typing import Dict, Any, Optional, List
 
 import logging
 
+from .json_utils import dumps as json_dumps, loads as json_loads
+
 logger = logging.getLogger(__name__)
 
 try:
-    from sqlmodel import SQLModel, Field, create_engine, Session, select
-    from sqlalchemy import Column, Text, desc, Index
+    from sqlalchemy import (
+        create_engine, Column, String, Integer, DateTime, Text, Index,
+        select, update, delete, desc
+    )
+    from sqlalchemy.orm import sessionmaker, declarative_base
 
-    SQLMODEL_AVAILABLE = True
+    SQLALCHEMY_AVAILABLE = True
 
-    # Define SQLModel classes only when SQLModel is available
-    class CacheEntry(SQLModel, table=True):
-        """SQLModel for cache entry metadata."""
+    # Create declarative base
+    Base = declarative_base()
+
+    class CacheEntry(Base):
+        """SQLAlchemy model for cache entry metadata."""
 
         __tablename__ = "cache_entries"
 
-        cache_key: str = Field(primary_key=True, max_length=16)
-        description: str = Field(default="", max_length=500)
-        data_type: str = Field(
-            max_length=20, index=True
-        )  # "dataframe", "array", "object" - indexed for filtering
-        prefix: str = Field(
-            default="", max_length=100, index=True
-        )  # Indexed for prefix-based queries
+        cache_key = Column(String(16), primary_key=True)
+        description = Column(String(500), default="", nullable=False)
+        data_type = Column(String(20), index=True, nullable=False)  # "dataframe", "array", "object"
+        prefix = Column(String(100), default="", index=True, nullable=False)
 
         # Timestamps - indexed for time-based queries and cleanup operations
-        created_at: datetime = Field(
-            default_factory=lambda: datetime.now(timezone.utc), index=True
-        )
-        accessed_at: datetime = Field(
-            default_factory=lambda: datetime.now(timezone.utc), index=True
-        )
+        created_at = Column(DateTime(timezone=True), 
+                           default=lambda: datetime.now(timezone.utc), 
+                           index=True, nullable=False)
+        accessed_at = Column(DateTime(timezone=True), 
+                            default=lambda: datetime.now(timezone.utc), 
+                            index=True, nullable=False)
 
         # File info - indexed for size-based queries and cache management
-        file_size: int = Field(default=0, index=True)  # Size in bytes
+        file_size = Column(Integer, default=0, index=True, nullable=False)
 
         # Cache integrity verification
-        file_hash: Optional[str] = Field(
-            default=None, max_length=16
-        )  # XXH3_64 hash (16 hex chars)
+        file_hash = Column(String(16), nullable=True)  # XXH3_64 hash (16 hex chars)
 
         # Data-specific metadata (stored as JSON)
-        metadata_json: str = Field(default="{}", sa_column=Column(Text))
+        metadata_json = Column(Text, default="{}", nullable=False)
 
         # Composite indexes for common query patterns
         __table_args__ = (
             # Index for listing entries (most common query pattern)
-            # ORDER BY created_at DESC - used in list_entries()
             Index("idx_created_at_desc", "created_at"),
             # Index for cleanup operations (critical for performance)
-            # WHERE created_at < cutoff_time - used in cleanup_expired()
             Index("idx_cleanup_created_at", "created_at"),
             # Index for statistics generation by data type
-            # COUNT(*) WHERE data_type = 'dataframe' - used in get_stats()
             Index("idx_stats_data_type", "data_type"),
-            # Index for cache size management (most to least disk usage)
-            # ORDER BY file_size DESC, created_at ASC - for LRU eviction of large files
+            # Index for cache size management
             Index("idx_size_management", "file_size", "created_at"),
             # Index for access pattern analysis
-            # ORDER BY accessed_at DESC - for LRU-based cleanup
             Index("idx_lru_access", "accessed_at"),
         )
 
-    class CacheStats(SQLModel, table=True):
-        """SQLModel for cache statistics."""
+    class CacheStats(Base):
+        """SQLAlchemy model for cache statistics."""
 
         __tablename__ = "cache_stats"
 
-        id: int = Field(primary_key=True, default=1)  # Only one row
-        cache_hits: int = Field(default=0, index=True)  # Indexed for analytics queries
-        cache_misses: int = Field(
-            default=0, index=True
-        )  # Indexed for analytics queries
-        last_updated: datetime = Field(
-            default_factory=lambda: datetime.now(timezone.utc), index=True
-        )  # Indexed for monitoring
+        id = Column(Integer, primary_key=True, default=1)
+        cache_hits = Column(Integer, default=0, index=True, nullable=False)
+        cache_misses = Column(Integer, default=0, index=True, nullable=False)
+        last_updated = Column(DateTime(timezone=True), 
+                             default=lambda: datetime.now(timezone.utc), 
+                             index=True, nullable=False)
 
         # Composite index for hit rate calculations
         __table_args__ = (
-            Index(
-                "idx_hits_misses_updated", "cache_hits", "cache_misses", "last_updated"
-            ),
+            Index("idx_hits_misses_updated", "cache_hits", "cache_misses", "last_updated"),
         )
 
 except ImportError:
-    # SQLModel not available
-    SQLMODEL_AVAILABLE = False
-    logger.warning("SQLModel not available, SQLite backend will not work")
+    # SQLAlchemy not available
+    SQLALCHEMY_AVAILABLE = False
+    logger.warning("SQLAlchemy not available, SQLite backend will not work")
 
     # Define dummy classes to avoid runtime errors
     class CacheEntry:
@@ -130,6 +121,8 @@ except ImportError:
 
     class CacheStats:
         pass
+
+    Base = None
 
 
 class MetadataBackend(ABC):
@@ -210,8 +203,8 @@ class JsonMetadataBackend(MetadataBackend):
         if self.metadata_file.exists():
             try:
                 with open(self.metadata_file, "r") as f:
-                    return json.load(f)
-            except (json.JSONDecodeError, FileNotFoundError):
+                    return json_loads(f.read())
+            except Exception:
                 logger.warning("JSON metadata corrupted, starting fresh")
 
         return {
@@ -228,7 +221,7 @@ class JsonMetadataBackend(MetadataBackend):
         """Save metadata to JSON file."""
         try:
             with open(self.metadata_file, "w") as f:
-                json.dump(self._metadata, f, indent=2, default=str)
+                f.write(json_dumps(self._metadata, default=str))
         except Exception as e:
             logger.error(f"Failed to save JSON metadata: {e}")
 
@@ -404,7 +397,7 @@ class JsonMetadataBackend(MetadataBackend):
 
 
 class SQLiteMetadataBackend(MetadataBackend):
-    """SQLite database-based metadata backend using SQLModel ORM."""
+    """SQLite database-based metadata backend using SQLAlchemy ORM."""
 
     def __init__(self, db_file: str = "cache_metadata.db", echo: bool = False):
         """
@@ -414,27 +407,31 @@ class SQLiteMetadataBackend(MetadataBackend):
             db_file: Path to SQLite database file
             echo: Whether to echo SQL queries (for debugging)
         """
-        if not SQLMODEL_AVAILABLE:
+        if not SQLALCHEMY_AVAILABLE:
             raise ImportError(
-                "SQLModel is required for SQLite backend. Install with: pip install sqlmodel"
+                "SQLAlchemy is required for SQLite backend. Install with: pip install sqlalchemy"
             )
 
         self.db_file = db_file
         self.engine = create_engine(f"sqlite:///{db_file}", echo=echo)
+        self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
         self._lock = threading.Lock()
 
         # Create tables
-        SQLModel.metadata.create_all(self.engine)
+        Base.metadata.create_all(self.engine)
 
         # Initialize stats if not exists
         self._init_stats()
 
-        logger.info(f"✅ SQLite metadata backend initialized: {db_file}")
+        logger.info(f"✅ SQLAlchemy metadata backend initialized: {db_file}")
 
     def _init_stats(self):
         """Initialize cache stats if not exists."""
-        with Session(self.engine) as session:
-            stats = session.get(CacheStats, 1)
+        with self.SessionLocal() as session:
+            stats = session.execute(
+                select(CacheStats).where(CacheStats.id == 1)
+            ).scalar_one_or_none()
+            
             if not stats:
                 stats = CacheStats(id=1)
                 session.add(stats)
@@ -442,7 +439,10 @@ class SQLiteMetadataBackend(MetadataBackend):
 
     def _get_stats_row(self, session) -> "CacheStats":
         """Get the single stats row."""
-        stats = session.get(CacheStats, 1)
+        stats = session.execute(
+            select(CacheStats).where(CacheStats.id == 1)
+        ).scalar_one_or_none()
+        
         if not stats:
             stats = CacheStats(id=1)
             session.add(stats)
@@ -453,8 +453,8 @@ class SQLiteMetadataBackend(MetadataBackend):
         """Load complete metadata structure (compatibility method)."""
         # This method is for compatibility with the original JSON structure
         # In practice, the SQLite backend doesn't need to load everything at once
-        with Session(self.engine) as session:
-            entries = session.exec(select(CacheEntry)).all()
+        with self.SessionLocal() as session:
+            entries = session.execute(select(CacheEntry)).scalars().all()
             stats = self._get_stats_row(session)
 
             metadata = {
@@ -468,7 +468,7 @@ class SQLiteMetadataBackend(MetadataBackend):
             }
 
             for entry in entries:
-                entry_metadata = json.loads(entry.metadata_json)
+                entry_metadata = json_loads(entry.metadata_json)
                 # Add file_hash back into metadata if it exists
                 if entry.file_hash is not None:
                     entry_metadata["file_hash"] = entry.file_hash
@@ -488,7 +488,7 @@ class SQLiteMetadataBackend(MetadataBackend):
         """Save complete metadata structure (compatibility method)."""
         # This method is mainly for compatibility
         # The SQLite backend saves individual entries as they're updated
-        with self._lock, Session(self.engine) as session:
+        with self._lock, self.SessionLocal() as session:
             # Update stats
             stats = self._get_stats_row(session)
             stats.cache_hits = metadata.get("cache_hits", 0)
@@ -499,12 +499,15 @@ class SQLiteMetadataBackend(MetadataBackend):
 
     def get_entry(self, cache_key: str) -> Optional[Dict[str, Any]]:
         """Get specific cache entry metadata."""
-        with Session(self.engine) as session:
-            entry = session.get(CacheEntry, cache_key)
+        with self.SessionLocal() as session:
+            entry = session.execute(
+                select(CacheEntry).where(CacheEntry.cache_key == cache_key)
+            ).scalar_one_or_none()
+            
             if not entry:
                 return None
 
-            metadata = json.loads(entry.metadata_json)
+            metadata = json_loads(entry.metadata_json)
             # Add file_hash back into metadata if it exists
             if entry.file_hash is not None:
                 metadata["file_hash"] = entry.file_hash
@@ -521,9 +524,12 @@ class SQLiteMetadataBackend(MetadataBackend):
 
     def put_entry(self, cache_key: str, entry_data: Dict[str, Any]):
         """Store cache entry metadata."""
-        with self._lock, Session(self.engine) as session:
+        with self._lock, self.SessionLocal() as session:
             # Get existing entry or create new one
-            entry = session.get(CacheEntry, cache_key)
+            entry = session.execute(
+                select(CacheEntry).where(CacheEntry.cache_key == cache_key)
+            ).scalar_one_or_none()
+            
             if not entry:
                 entry = CacheEntry(cache_key=cache_key)
 
@@ -536,7 +542,7 @@ class SQLiteMetadataBackend(MetadataBackend):
             # Extract file_hash from metadata and store in dedicated column
             metadata = entry_data.get("metadata", {})
             entry.file_hash = metadata.pop("file_hash", None)  # Remove from metadata
-            entry.metadata_json = json.dumps(metadata)
+            entry.metadata_json = json_dumps(metadata)
 
             # Update timestamps
             if "created_at" in entry_data:
@@ -553,27 +559,27 @@ class SQLiteMetadataBackend(MetadataBackend):
                 else:
                     entry.accessed_at = entry_data["accessed_at"]
 
-            session.add(entry)
+            session.merge(entry)
             session.commit()
 
     def remove_entry(self, cache_key: str):
         """Remove cache entry metadata."""
-        with self._lock, Session(self.engine) as session:
-            entry = session.get(CacheEntry, cache_key)
-            if entry:
-                session.delete(entry)
-                session.commit()
+        with self._lock, self.SessionLocal() as session:
+            session.execute(
+                delete(CacheEntry).where(CacheEntry.cache_key == cache_key)
+            )
+            session.commit()
 
     def list_entries(self) -> List[Dict[str, Any]]:
         """List all cache entries with metadata."""
-        with Session(self.engine) as session:
-            entries = session.exec(
+        with self.SessionLocal() as session:
+            entries = session.execute(
                 select(CacheEntry).order_by(desc(CacheEntry.created_at))
-            ).all()
+            ).scalars().all()
 
             result = []
             for entry in entries:
-                entry_metadata = json.loads(entry.metadata_json)
+                entry_metadata = json_loads(entry.metadata_json)
                 # Add file_hash back into metadata if it exists
                 if entry.file_hash is not None:
                     entry_metadata["file_hash"] = entry.file_hash
@@ -593,9 +599,9 @@ class SQLiteMetadataBackend(MetadataBackend):
 
     def get_stats(self) -> Dict[str, Any]:
         """Get cache statistics."""
-        with Session(self.engine) as session:
+        with self.SessionLocal() as session:
             # Get counts by data type
-            total_entries = session.exec(select(CacheEntry)).all()
+            total_entries = session.execute(select(CacheEntry)).scalars().all()
 
             dataframe_count = len(
                 [e for e in total_entries if e.data_type == "dataframe"]
@@ -623,29 +629,38 @@ class SQLiteMetadataBackend(MetadataBackend):
 
     def update_access_time(self, cache_key: str):
         """Update last access time for cache entry."""
-        with self._lock, Session(self.engine) as session:
-            entry = session.get(CacheEntry, cache_key)
-            if entry:
-                entry.accessed_at = datetime.now(timezone.utc)
-                session.add(entry)
-                session.commit()
+        with self._lock, self.SessionLocal() as session:
+            session.execute(
+                update(CacheEntry)
+                .where(CacheEntry.cache_key == cache_key)
+                .values(accessed_at=datetime.now(timezone.utc))
+            )
+            session.commit()
 
     def increment_hits(self):
         """Increment cache hits counter."""
-        with self._lock, Session(self.engine) as session:
-            stats = self._get_stats_row(session)
-            stats.cache_hits += 1
-            stats.last_updated = datetime.now(timezone.utc)
-            session.add(stats)
+        with self._lock, self.SessionLocal() as session:
+            session.execute(
+                update(CacheStats)
+                .where(CacheStats.id == 1)
+                .values(
+                    cache_hits=CacheStats.cache_hits + 1,
+                    last_updated=datetime.now(timezone.utc)
+                )
+            )
             session.commit()
 
     def increment_misses(self):
         """Increment cache misses counter."""
-        with self._lock, Session(self.engine) as session:
-            stats = self._get_stats_row(session)
-            stats.cache_misses += 1
-            stats.last_updated = datetime.now(timezone.utc)
-            session.add(stats)
+        with self._lock, self.SessionLocal() as session:
+            session.execute(
+                update(CacheStats)
+                .where(CacheStats.id == 1)
+                .values(
+                    cache_misses=CacheStats.cache_misses + 1,
+                    last_updated=datetime.now(timezone.utc)
+                )
+            )
             session.commit()
 
     def cleanup_expired(self, ttl_hours: int) -> int:
@@ -654,18 +669,14 @@ class SQLiteMetadataBackend(MetadataBackend):
 
         cutoff_time = datetime.now(timezone.utc) - timedelta(hours=ttl_hours)
 
-        with self._lock, Session(self.engine) as session:
-            # Find expired entries
-            expired_entries = session.exec(
-                select(CacheEntry).where(CacheEntry.created_at < cutoff_time)
-            ).all()
-
+        with self._lock, self.SessionLocal() as session:
             # Delete expired entries
-            for entry in expired_entries:
-                session.delete(entry)
-
+            result = session.execute(
+                delete(CacheEntry).where(CacheEntry.created_at < cutoff_time)
+            )
+            deleted_count = result.rowcount
             session.commit()
-            return len(expired_entries)
+            return deleted_count
 
 
 def create_metadata_backend(backend_type: str = "auto", **kwargs) -> MetadataBackend:
@@ -684,16 +695,16 @@ def create_metadata_backend(backend_type: str = "auto", **kwargs) -> MetadataBac
         metadata_file = kwargs.get("metadata_file", Path("cache_metadata.json"))
         return JsonMetadataBackend(metadata_file)
     elif backend_type == "sqlite":
-        if not SQLMODEL_AVAILABLE:
+        if not SQLALCHEMY_AVAILABLE:
             raise ImportError(
-                "SQLModel is required for SQLite backend but is not available. Install with: uv add sqlmodel"
+                "SQLAlchemy is required for SQLite backend but is not available. Install with: uv add sqlalchemy"
             )
         db_file = kwargs.get("db_file", "cache_metadata.db")
         echo = kwargs.get("echo", False)
         return SQLiteMetadataBackend(db_file, echo)
     elif backend_type == "auto":
         # Auto mode: prefer SQLite, fallback to JSON
-        if SQLMODEL_AVAILABLE:
+        if SQLALCHEMY_AVAILABLE:
             try:
                 db_file = kwargs.get("db_file", "cache_metadata.db")
                 echo = kwargs.get("echo", False)
@@ -703,10 +714,7 @@ def create_metadata_backend(backend_type: str = "auto", **kwargs) -> MetadataBac
                 metadata_file = kwargs.get("metadata_file", Path("cache_metadata.json"))
                 return JsonMetadataBackend(metadata_file)
         else:
-            # SQLModel not available, use JSON
             metadata_file = kwargs.get("metadata_file", Path("cache_metadata.json"))
             return JsonMetadataBackend(metadata_file)
     else:
-        raise ValueError(
-            f"Unknown backend type: {backend_type}. Use 'auto', 'sqlite', or 'json'"
-        )
+        raise ValueError(f"Unknown backend type: {backend_type}")

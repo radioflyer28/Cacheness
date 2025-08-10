@@ -8,7 +8,6 @@ operations to specialized handlers.
 """
 
 import xxhash
-import json
 import threading
 import logging
 from pathlib import Path
@@ -16,10 +15,11 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List, Union
 from dataclasses import dataclass
 
+from .handlers import HandlerRegistry
+from .json_utils import dumps as json_dumps
+
 # Sentinel value to distinguish between None (infinite TTL) and unspecified (use default)
 _DEFAULT_TTL = object()
-
-from .handlers import HandlerRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +118,7 @@ class UnifiedCache:
             actual_backend = "custom"
         else:
             # Import here to avoid circular imports
-            from .metadata import create_metadata_backend, SQLMODEL_AVAILABLE
+            from .metadata import create_metadata_backend, SQLALCHEMY_AVAILABLE
 
             # Determine backend based on config and availability
             if self.config.metadata_backend == "json":
@@ -129,9 +129,9 @@ class UnifiedCache:
                 actual_backend = "json"
             elif self.config.metadata_backend == "sqlite":
                 # Explicitly requested SQLite
-                if not SQLMODEL_AVAILABLE:
+                if not SQLALCHEMY_AVAILABLE:
                     raise ImportError(
-                        "SQLModel is required for SQLite backend but is not available. Install with: uv add sqlmodel"
+                        "SQLAlchemy is required for SQLite backend but is not available. Install with: uv add sqlalchemy"
                     )
                 self.metadata_backend = create_metadata_backend(
                     "sqlite", db_file=str(self.cache_dir / self.config.sqlite_db_file)
@@ -139,7 +139,7 @@ class UnifiedCache:
                 actual_backend = "sqlite"
             else:
                 # Auto mode: prefer SQLite, fallback to JSON
-                if SQLMODEL_AVAILABLE:
+                if SQLALCHEMY_AVAILABLE:
                     try:
                         self.metadata_backend = create_metadata_backend(
                             "sqlite",
@@ -238,7 +238,7 @@ class UnifiedCache:
         # Process Path objects based on configuration
         processed_params = self._process_params_for_hashing(params)
 
-        params_str = json.dumps(processed_params, sort_keys=True, default=str)
+        params_str = json_dumps(processed_params, sort_keys=True, default=str)
         hash_value = xxhash.xxh3_64(params_str.encode()).hexdigest()
         return hash_value[:16]  # Use first 16 characters
 

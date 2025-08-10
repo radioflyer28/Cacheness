@@ -8,7 +8,7 @@ Motivation... I wanted a very fast cache system to speed up ML model development
 
 It requires Python>=3.11 (due to numpy v2.x) and works with Python 3.13.
 
-It's made for dataframes as well, however, that's totally optional. So, if all you want to do is cache random Python objects and/or numpy arrays then install as is. However, I do recommend installing at least **sqlmodel** for the SQLite metadata backend which is highly beneficial for performance and reliability.
+It's made for dataframes as well, however, that's totally optional. So, if all you want to do is cache random Python objects and/or numpy arrays then install as is. However, I do recommend installing at least **sqlalchemy** for the SQLite metadata backend which is highly beneficial for performance and reliability.
 
 *Note: this library is 100% vibe-coded, so you know what that means... :)*
 
@@ -28,7 +28,8 @@ It's made for dataframes as well, however, that's totally optional. So, if all y
 - **blosc2**: High-performance array compression
 
 **Optional Dependencies:**
-- **sqlmodel**: SQLite metadata backend (10-500x faster than JSON for large caches)
+- **sqlalchemy**: SQLite metadata backend (10-500x faster than JSON for large caches)
+- **orjson**: High-performance JSON serialization (1.5-5x faster than built-in json)
 - **pandas/polars**: DataFrame and Series support with Parquet storage
 
 ## Quick Start
@@ -105,7 +106,7 @@ train_model.cache_clear()        # Clear function's cache entries
 # Basic installation with core dependencies
 pip install cacheness
 
-# Recommended installation
+# Recommended installation (includes SQLAlchemy + orjson performance optimizations)
 pip install cacheness[recommended]
 
 # With SQLite backend support (recommended)
@@ -117,6 +118,13 @@ pip install cacheness[dataframes]
 # Full installation with all optional dependencies
 pip install cacheness[recommended,dataframes]
 ```
+
+### Dependency Groups
+
+- **`recommended`**: SQLAlchemy (SQLite backend) + orjson (JSON performance) + Pandas + PyArrow
+- **`sql`**: SQLAlchemy for high-performance metadata backend
+- **`dataframes`**: Pandas, Polars, and PyArrow for DataFrame/Series support
+- **`dev`**: Development dependencies (pytest, ruff, etc.)
 
 ## Key-Based Caching System
 
@@ -686,6 +694,21 @@ The library automatically selects optimal storage formats:
 | DataFrames & Series | Parquet | LZ4 | 40-60% size reduction, columnar efficiency |
 | Python objects | Pickle + Blosc | LZ4 | 30-50% size reduction, universal compatibility |
 
+### Performance Optimizations
+
+The library includes several automatic performance optimizations:
+
+**JSON Serialization with orjson**:
+- **orjson** (Rust-based): 1.5-5x faster JSON serialization, 1.5-3x faster deserialization
+- Automatic fallback to built-in `json` if orjson not available
+- Used for cache key generation and metadata storage
+- Native datetime handling and UTF-8 optimization
+
+**SQLAlchemy Metadata Backend**:
+- **Direct SQLAlchemy**: Lightweight, fast database operations without ORM overhead
+- **Connection pooling**: Efficient database connection management
+- **Optimized queries**: Minimized database round trips for metadata operations
+
 ### Metadata Backend Performance
 
 | Backend | Operation | Small Cache (<1k entries) | Large Cache (10k+ entries) |
@@ -701,6 +724,7 @@ The library automatically selects optimal storage formats:
 
 ### Fallback Mechanisms
 
+- **JSON Serialization**: orjson → built-in json (graceful performance degradation)
 - **DataFrame/Series Libraries**: Polars → Pandas → Pickle (graceful degradation)
 - **Parquet Compatibility**: DataFrames/Series with complex objects → Pickle fallback
 - **Array Compression**: Blosc2 → NPZ → Standard Pickle
@@ -900,16 +924,17 @@ logging.basicConfig(level=logging.DEBUG)
 cache = cacheness()
 cache.put(data, debug="test")  # Will log storage details
 result = cache.get(debug="test")  # Will log retrieval details
-```
 
 ## Dependencies
 
 ### Required
 - **xxhash**: XXH3_64 hashing for cache keys
 - **numpy**: Array handling and storage
+- **blosc2**: High-performance array compression (included in core)
 
 ### Optional (Graceful Fallbacks)
-- **sqlmodel**: SQLite metadata backend (10-500x faster than JSON)
+- **sqlalchemy**: SQLite metadata backend (10-500x faster than JSON)
+- **orjson**: High-performance JSON serialization (1.5-5x faster than built-in json)
 - **blosc2**: High-performance array compression  
 - **pandas**: DataFrame and Series support
 - **polars**: High-performance DataFrame and Series operations

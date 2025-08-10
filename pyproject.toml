@@ -1,6 +1,6 @@
 [project]
 name = "cacheness"
-version = "0.1.3"
+version = "0.1.4"
 description = "High-performance disk caching library using Blosc compression, geared toward numpy arrays and dataframes and pickle-ing for everything else."
 readme = "README.md"
 authors = [
@@ -18,10 +18,11 @@ recommended = [
     "blosc2>=3.6.1",
     "pandas>=2.3.1",
     "pyarrow>=21.0.0",
-    "sqlmodel>=0.0.24"
+    "sqlalchemy>=2.0.0",
+    "orjson>=3.8.0"
 ]
 sql = [
-    "sqlmodel>=0.0.24",
+    "sqlalchemy>=2.0.0",
 ]
 dataframes = [
     "pandas>=2.3.1",
