@@ -59,22 +59,26 @@ from pathlib import Path
 
 class CompressionError(Exception):
     """Raised when compression fails."""
+
     pass
 
 
 class DecompressionError(Exception):
     """Raised when decompression fails."""
+
     pass
 
 
 try:
     import blosc2 as blosc
+
     shuffle_obj = blosc.Filter.SHUFFLE
     BLOSC_AVAILABLE = True
     blosc_version = blosc.__version__
 except ImportError:
     try:
         import blosc
+
         shuffle_obj = blosc.SHUFFLE
         BLOSC_AVAILABLE = True
         blosc_version = blosc.__version__
@@ -84,10 +88,10 @@ except ImportError:
             __version__ = "not available"
             SHUFFLE = 1
             MAX_BUFFERSIZE = 2**31 - 1
-            
+
             class Filter:
                 SHUFFLE = 1
-            
+
             class Codec:
                 LZ4 = "lz4"
                 LZ4HC = "lz4hc"
@@ -100,42 +104,55 @@ except ImportError:
                 ZFP_RATE = "zfp_rate"
                 OPENHTJ2K = "openhtj2k"
                 GROK = "grok"
-            
+
             def pack_array(self, *args, **kwargs):
                 raise ImportError("blosc2/blosc not available")
-            
+
             def unpack_array(self, *args, **kwargs):
                 raise ImportError("blosc2/blosc not available")
-                
+
             def compress(self, *args, **kwargs):
                 raise ImportError("blosc2/blosc not available")
-                
+
             def decompress(self, *args, **kwargs):
                 raise ImportError("blosc2/blosc not available")
-        
+
         blosc = MockBlosc()
         shuffle_obj = blosc.Filter.SHUFFLE
         BLOSC_AVAILABLE = False
         blosc_version = "not available"
 
 # Make blosc available through the module for tests
-__all__ = ["blosc", "blosc_version", "get_compression_info", "list_available_codecs", "read_file", "write_file", 
-           "get_recommended_settings", "benchmark_codecs", "CompressionError", "DecompressionError",
-           "write_file_with_metadata", "read_file_with_metadata", "is_pickleable", "verify_pickleable"]
+__all__ = [
+    "blosc",
+    "blosc_version",
+    "get_compression_info",
+    "list_available_codecs",
+    "read_file",
+    "write_file",
+    "get_recommended_settings",
+    "benchmark_codecs",
+    "CompressionError",
+    "DecompressionError",
+    "write_file_with_metadata",
+    "read_file_with_metadata",
+    "is_pickleable",
+    "verify_pickleable",
+]
 # print(f'blosc version: {blosc_version}')
 
 
 def is_pickleable(obj) -> bool:
     """Check if an object can be pickled without actually pickling it.
-    
+
     This function attempts to pickle the object and returns True if successful,
     False if it fails. It doesn't save the pickled data.
-    
+
     Parameters
     ----------
     obj : object
         Any Python object to test for picklability
-        
+
     Returns
     -------
     bool
@@ -150,10 +167,10 @@ def is_pickleable(obj) -> bool:
 
 def verify_pickleable(obj, raise_on_error: bool = True):
     """Verify that an object can be pickled and optionally raise detailed error.
-    
+
     This function provides more detailed error information when an object
     cannot be pickled, which is useful for debugging.
-    
+
     Parameters
     ----------
     obj : object
@@ -161,13 +178,13 @@ def verify_pickleable(obj, raise_on_error: bool = True):
     raise_on_error : bool, default True
         If True, raises the original pickle exception on failure
         If False, returns a tuple (success: bool, error_message: str)
-        
+
     Returns
     -------
     bool or tuple
         If raise_on_error=True: Returns True if successful, raises exception if not
         If raise_on_error=False: Returns (success: bool, error_message: str)
-        
+
     Raises
     ------
     Exception
@@ -176,18 +193,18 @@ def verify_pickleable(obj, raise_on_error: bool = True):
     try:
         # Test pickling
         pickled_data = pickle.dumps(obj)
-        
+
         # Test unpickling to ensure round-trip works
         pickle.loads(pickled_data)
-        
+
         if raise_on_error:
             return True
         else:
             return True, ""
-            
+
     except Exception as e:
         error_msg = f"Object cannot be pickled: {type(e).__name__}: {str(e)}"
-        
+
         if raise_on_error:
             raise CompressionError(error_msg) from e
         else:
@@ -196,28 +213,28 @@ def verify_pickleable(obj, raise_on_error: bool = True):
 
 def get_recommended_settings(data_type="general", priority="balanced"):
     """Get recommended compression settings based on data type and priority.
-    
+
     Parameters
     ----------
     data_type : str
         Type of data: "general", "numpy", "text", "binary"
-    priority : str  
+    priority : str
         Priority: "speed", "compression", "balanced"
-        
+
     Returns
     -------
     dict
         Recommended compression parameters
     """
     settings = {}
-    
+
     if priority == "speed":
         settings = {"codec": "lz4", "clevel": 1}
     elif priority == "compression":
         settings = {"codec": "zstd", "clevel": 9}
     else:  # balanced
         settings = {"codec": "lz4", "clevel": 5}
-    
+
     # Adjust for data type
     if data_type == "numpy":
         settings["nparray"] = True
@@ -225,18 +242,18 @@ def get_recommended_settings(data_type="general", priority="balanced"):
         settings["codec"] = "zstd"  # Better for text
     elif data_type == "binary":
         settings["codec"] = "lz4hc"  # Good for binary data
-        
+
     return settings
 
 
 def get_compression_info(filepath):
     """Get compression information about a file.
-    
+
     Parameters
     ----------
     filepath : str or Path
         Path to the compressed file
-        
+
     Returns
     -------
     dict
@@ -245,7 +262,7 @@ def get_compression_info(filepath):
     filepath = Path(filepath)
     if not filepath.exists():
         raise FileNotFoundError(f"File not found: {filepath}")
-    
+
     file_size = filepath.stat().st_size
     return {
         "file_size_bytes": file_size,
@@ -256,7 +273,7 @@ def get_compression_info(filepath):
 
 def list_available_codecs():
     """List all available compression codecs for the current blosc version.
-    
+
     Returns
     -------
     list
@@ -269,7 +286,7 @@ def list_available_codecs():
 
 def benchmark_codecs(data, codecs=None, temp_dir=None):
     """Benchmark different codecs on sample data.
-    
+
     Parameters
     ----------
     data : object
@@ -278,7 +295,7 @@ def benchmark_codecs(data, codecs=None, temp_dir=None):
         List of codec names to test. If None, tests all available codecs.
     temp_dir : str or Path, optional
         Directory for temporary files. If None, uses system temp.
-        
+
     Returns
     -------
     dict
@@ -286,49 +303,49 @@ def benchmark_codecs(data, codecs=None, temp_dir=None):
     """
     import time
     import tempfile
-    
+
     if codecs is None:
         codecs = list_available_codecs()[:5]  # Limit to main codecs for speed
-    
+
     if temp_dir is None:
         temp_dir = tempfile.mkdtemp()
     else:
         temp_dir = Path(temp_dir)
         temp_dir.mkdir(exist_ok=True)
-    
+
     # Determine if numpy array optimization should be used
     is_numpy = isinstance(data, np.ndarray)
-    
+
     results = {}
-    
+
     # Get uncompressed size for comparison
     uncompressed_data = pickle.dumps(data, -1)
     uncompressed_size = len(uncompressed_data)
-    
+
     for codec in codecs:
         try:
             filepath = Path(temp_dir) / f"benchmark_{codec}.pkl"
-            
+
             # Time compression
             start_time = time.perf_counter()
             write_file(data, filepath, codec=codec, nparray=is_numpy)
             write_time = time.perf_counter() - start_time
-            
+
             # Get compressed file size
             compressed_size = filepath.stat().st_size
             compression_ratio = uncompressed_size / compressed_size
-            
+
             # Time decompression
             start_time = time.perf_counter()
             read_data = read_file(filepath, nparray=is_numpy)
             read_time = time.perf_counter() - start_time
-            
+
             # Verify data integrity
             if isinstance(data, np.ndarray):
                 data_match = np.array_equal(data, read_data)
             else:
                 data_match = data == read_data
-            
+
             results[codec] = {
                 "write_time": write_time,
                 "read_time": read_time,
@@ -337,19 +354,19 @@ def benchmark_codecs(data, codecs=None, temp_dir=None):
                 "uncompressed_size": uncompressed_size,
                 "data_match": data_match,
             }
-            
+
             # Clean up temp file
             filepath.unlink(missing_ok=True)
-            
+
         except Exception as e:
             results[codec] = {"error": str(e)}
-    
+
     return results
 
 
 def write_file_with_metadata(obj, filepath, metadata=None, **kwargs):
     """Write file with optional metadata.
-    
+
     Parameters
     ----------
     obj : object
@@ -360,13 +377,13 @@ def write_file_with_metadata(obj, filepath, metadata=None, **kwargs):
         Optional metadata to include
     **kwargs
         Additional arguments passed to write_file
-        
+
     Returns
     -------
     None
     """
     import time
-    
+
     data_to_write = {
         "data": obj,
         "metadata": metadata or {},
@@ -379,14 +396,14 @@ def write_file_with_metadata(obj, filepath, metadata=None, **kwargs):
 
 def read_file_with_metadata(filepath, **kwargs):
     """Read file with metadata.
-    
+
     Parameters
     ----------
     filepath : str or Path
         Input file path
     **kwargs
         Additional arguments passed to read_file
-        
+
     Returns
     -------
     tuple
@@ -452,22 +469,40 @@ def write_file(obj, filepath, *, nparray=True, **kwargs):
     # Input validation
     if not filepath:
         raise ValueError("filepath cannot be empty")
-    
+
     # Handle codec parameter for both Blosc v1 and v2/v3 compatibility
     if "codec" in kwargs and blosc_version.startswith("1"):
         # Convert codec to cname for Blosc v1 compatibility
         kwargs["cname"] = kwargs.pop("codec")
-    elif "cname" in kwargs and (blosc_version.startswith("2") or blosc_version.startswith("3")):
-        # Convert cname to codec for Blosc v2/v3 compatibility  
+    elif "cname" in kwargs and (
+        blosc_version.startswith("2") or blosc_version.startswith("3")
+    ):
+        # Convert cname to codec for Blosc v2/v3 compatibility
         kwargs["codec"] = kwargs.pop("cname")
-    
+
     # Validate codec early for better error messages
-    if (blosc_version.startswith("2") or blosc_version.startswith("3")) and "codec" in kwargs:
+    if (
+        blosc_version.startswith("2") or blosc_version.startswith("3")
+    ) and "codec" in kwargs:
         codec = kwargs["codec"]
         if isinstance(codec, str):
-            valid_codecs = ["lz4", "lz4hc", "zstd", "zlib", "blosclz", "ndlz", "zfp_acc", "zfp_prec", "zfp_rate", "openhtj2k", "grok"]
+            valid_codecs = [
+                "lz4",
+                "lz4hc",
+                "zstd",
+                "zlib",
+                "blosclz",
+                "ndlz",
+                "zfp_acc",
+                "zfp_prec",
+                "zfp_rate",
+                "openhtj2k",
+                "grok",
+            ]
             if codec.lower() not in valid_codecs:
-                raise ValueError(f"Unsupported codec: {codec}. Supported: {valid_codecs}")
+                raise ValueError(
+                    f"Unsupported codec: {codec}. Supported: {valid_codecs}"
+                )
 
     # typesize = kwargs.get('typesize', 8)
     # clevel = kwargs.get('clevel', 9)
@@ -554,7 +589,7 @@ def write_file(obj, filepath, *, nparray=True, **kwargs):
                             compress_kwargs["typesize"] = 1
                     else:
                         compress_kwargs["typesize"] = 1
-                
+
                 start = 0
                 while start < len(arr):
                     end = min(start + blosc.MAX_BUFFERSIZE, len(arr))

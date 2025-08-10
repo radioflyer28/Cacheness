@@ -37,6 +37,7 @@ from .metadata import JsonMetadataBackend, create_metadata_backend
 # Import optional components if available
 try:
     from .metadata import SQLiteMetadataBackend
+
     _SQLiteMetadataBackend = SQLiteMetadataBackend
 except ImportError:
     _SQLiteMetadataBackend = None

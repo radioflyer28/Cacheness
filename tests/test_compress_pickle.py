@@ -340,7 +340,9 @@ class TestCompressPickle:
         """Test error handling for invalid file paths."""
         invalid_path = Path("/nonexistent/directory/file.pkl")
 
-        with pytest.raises((FileNotFoundError, OSError, compress_pickle.CompressionError)):
+        with pytest.raises(
+            (FileNotFoundError, OSError, compress_pickle.CompressionError)
+        ):
             compress_pickle.write_file(test_data_simple, invalid_path)
 
     def test_error_handling_read_nonexistent_file(self):
