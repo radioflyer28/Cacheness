@@ -5,8 +5,8 @@ Test for store_cache_key_params configuration option
 
 import tempfile
 from pathlib import Path
-from src.cacheness.core import UnifiedCache
-from src.cacheness.config import CacheConfig
+from cacheness.core import UnifiedCache
+from cacheness.config import CacheConfig
 
 
 class TestStoreCacheKeyParamsConfig:
@@ -113,7 +113,7 @@ class TestStoreCacheKeyParamsConfig:
 
     def test_sub_config_access(self):
         """Test that the configuration can be accessed through sub-configuration objects."""
-        from src.cacheness.config import CacheMetadataConfig
+        from cacheness.config import CacheMetadataConfig
 
         # Test through sub-configuration
         metadata_config = CacheMetadataConfig(store_cache_key_params=False)

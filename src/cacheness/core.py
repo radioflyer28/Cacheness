@@ -56,6 +56,9 @@ class UnifiedCache:
         # Initialize metadata backend
         self._init_metadata_backend(metadata_backend)
 
+        # Initialize custom metadata support
+        self._init_custom_metadata_support()
+
         # Clean up expired entries on initialization
         if self.config.storage.cleanup_on_init:
             self._cleanup_expired()
@@ -119,6 +122,189 @@ class UnifiedCache:
                 )
                 actual_backend = "json"  # Store the actual backend used for reporting
         self.actual_backend = actual_backend
+
+    def _supports_custom_metadata(self) -> bool:
+        """Check if the current configuration supports custom metadata."""
+        return (
+            self.actual_backend == "sqlite"
+            and hasattr(self, "_custom_metadata_enabled")
+            and self._custom_metadata_enabled
+        )
+
+    def _init_custom_metadata_support(self):
+        """Initialize custom metadata support if SQLite backend is available."""
+        try:
+            from .custom_metadata import is_custom_metadata_available
+
+            if is_custom_metadata_available() and self.actual_backend == "sqlite":
+                self._custom_metadata_enabled = True
+                logger.info("🏷️  Custom metadata support enabled")
+            else:
+                self._custom_metadata_enabled = False
+        except ImportError:
+            self._custom_metadata_enabled = False
+
+    def _store_custom_metadata(self, cache_key: str, custom_metadata: Dict[str, Any]):
+        """Store custom metadata using link table architecture."""
+        if not self._supports_custom_metadata():
+            logger.warning("Custom metadata not supported - requires SQLite backend")
+            return
+
+        try:
+            from .custom_metadata import get_custom_metadata_model, CacheMetadataLink
+            from .metadata import Base
+
+            # Get SQLAlchemy session from the metadata backend
+            if hasattr(self.metadata_backend, "SessionLocal"):
+                with self.metadata_backend.SessionLocal() as session:
+                    # Create tables if they don't exist
+                    Base.metadata.create_all(self.metadata_backend.engine)
+
+                    for schema_name, metadata_instance in custom_metadata.items():
+                        model_class = get_custom_metadata_model(schema_name)
+                        if not model_class:
+                            logger.warning(
+                                f"Unknown custom metadata schema: {schema_name}"
+                            )
+                            continue
+
+                        # Ensure metadata instance is of the correct type
+                        if not isinstance(metadata_instance, model_class):
+                            logger.warning(
+                                f"Invalid metadata type for schema {schema_name}"
+                            )
+                            continue
+
+                        # Save the metadata instance
+                        session.add(metadata_instance)
+                        session.flush()  # Get the ID
+
+                        # Create link table entry
+                        link = CacheMetadataLink(
+                            cache_key=cache_key,
+                            metadata_table=model_class.__tablename__,
+                            metadata_id=metadata_instance.id,
+                        )
+                        session.add(link)
+
+                    session.commit()
+                    logger.debug(f"Stored custom metadata for cache key {cache_key}")
+        except Exception as e:
+            logger.error(f"Failed to store custom metadata: {e}")
+
+    def _get_custom_metadata(self, cache_key: str) -> Dict[str, Any]:
+        """Retrieve custom metadata for a cache key."""
+        if not self._supports_custom_metadata():
+            return {}
+
+        try:
+            from .custom_metadata import get_custom_metadata_model, CacheMetadataLink
+
+            if hasattr(self.metadata_backend, "SessionLocal"):
+                with self.metadata_backend.SessionLocal() as session:
+                    # Get all links for this cache key
+                    from sqlalchemy import select
+
+                    links = (
+                        session.execute(
+                            select(CacheMetadataLink).where(
+                                CacheMetadataLink.cache_key == cache_key
+                            )
+                        )
+                        .scalars()
+                        .all()
+                    )
+
+                    result = {}
+                    for link in links:
+                        # Find the schema name for this table
+                        for (
+                            schema_name,
+                            model_class,
+                        ) in self._get_registered_schemas().items():
+                            if model_class.__tablename__ == link.metadata_table:
+                                # Retrieve the metadata instance
+                                metadata_instance = session.execute(
+                                    select(model_class).where(
+                                        model_class.id == link.metadata_id
+                                    )
+                                ).scalar_one_or_none()
+
+                                if metadata_instance:
+                                    result[schema_name] = metadata_instance
+                                break
+
+                    return result
+        except Exception as e:
+            logger.error(f"Failed to retrieve custom metadata: {e}")
+            return {}
+
+    def _get_registered_schemas(self) -> Dict[str, Any]:
+        """Get all registered custom metadata schemas."""
+        try:
+            from .custom_metadata import get_all_custom_metadata_models
+
+            return get_all_custom_metadata_models()
+        except ImportError:
+            return {}
+
+    def query_custom_metadata(self, schema_name: str):
+        """
+        Query custom metadata for a specific schema.
+
+        Args:
+            schema_name: Name of the custom metadata schema to query
+
+        Returns:
+            SQLAlchemy query object for advanced querying, or None if not supported
+
+        Example:
+            query = cache.query_custom_metadata("ml_experiments")
+            high_accuracy = query.filter(MLExperimentMetadata.accuracy >= 0.9).all()
+        """
+        if not self._supports_custom_metadata():
+            logger.warning(
+                "Custom metadata querying not supported - requires SQLite backend"
+            )
+            return None
+
+        try:
+            from .custom_metadata import get_custom_metadata_model
+
+            model_class = get_custom_metadata_model(schema_name)
+            if not model_class:
+                logger.warning(f"Unknown custom metadata schema: {schema_name}")
+                return None
+
+            if hasattr(self.metadata_backend, "SessionLocal"):
+                session = self.metadata_backend.SessionLocal()
+                from sqlalchemy import select
+
+                return session.query(model_class)
+            else:
+                logger.warning("SQLAlchemy session not available")
+                return None
+        except Exception as e:
+            logger.error(f"Failed to create query for schema {schema_name}: {e}")
+            return None
+
+    def get_custom_metadata_for_entry(
+        self, cache_key: Optional[str] = None, **kwargs
+    ) -> Dict[str, Any]:
+        """
+        Get custom metadata for a specific cache entry.
+
+        Args:
+            cache_key: Direct cache key (if provided, **kwargs are ignored)
+            **kwargs: Parameters identifying the cached data (used if cache_key is None)
+
+        Returns:
+            Dictionary mapping schema names to metadata instances
+        """
+        if cache_key is None:
+            cache_key = self._create_cache_key(kwargs)
+
+        return self._get_custom_metadata(cache_key)
 
     def _create_cache_key(self, params: Dict) -> str:
         """
@@ -215,7 +401,14 @@ class UnifiedCache:
         if removed_count > 0:
             logger.info(f"Cleaned up {removed_count} expired cache entries")
 
-    def put(self, data: Any, prefix: str = "", description: str = "", **kwargs):
+    def put(
+        self,
+        data: Any,
+        prefix: str = "",
+        description: str = "",
+        custom_metadata: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ):
         """
         Store any supported data type in cache.
 
@@ -223,6 +416,7 @@ class UnifiedCache:
             data: Data to cache (DataFrame, array, or general object)
             prefix: Descriptive prefix prepended to the cache filename
             description: Human-readable description
+            custom_metadata: Dict mapping schema names to metadata instances
             **kwargs: Parameters identifying this data
         """
         # Get appropriate handler
@@ -263,6 +457,11 @@ class UnifiedCache:
             }
 
             self.metadata_backend.put_entry(cache_key, entry_data)
+
+            # Handle custom metadata if provided
+            if custom_metadata and self._supports_custom_metadata():
+                self._store_custom_metadata(cache_key, custom_metadata)
+
             self._enforce_size_limit()
 
             file_size_mb = result["file_size"] / (1024 * 1024)

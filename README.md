@@ -508,6 +508,248 @@ config = CacheConfig(
 cache = cacheness(config)
 ```
 
+## Custom Metadata with SQLAlchemy ORM
+
+**Advanced structured metadata tracking with full SQL querying capabilities.**
+
+The Cacheness library includes a powerful custom metadata system built on SQLAlchemy ORM that allows you to attach structured, typed metadata to your cache entries. This goes far beyond simple key-value storage, enabling sophisticated analytics, filtering, and tracking workflows.
+
+### Key Features
+
+- **SQLAlchemy ORM Integration**: Full type safety with IDE autocompletion
+- **Advanced Querying**: Complex SQL filters, joins, and aggregations
+- **Link Table Architecture**: Flexible many-to-many relationships
+- **Automatic Schema Management**: Migration, validation, and maintenance tools
+- **Production Ready**: Performance optimized with proper indexing
+
+### Quick Start
+
+#### 1. Define Custom Metadata Schemas
+
+```python
+from cacheness.custom_metadata import custom_metadata_model, CustomMetadataBase
+from cacheness.metadata import Base
+from sqlalchemy import Column, String, Float, Integer, Text
+
+# ML Experiment Tracking
+@custom_metadata_model("ml_experiments")
+class MLExperimentMetadata(Base, CustomMetadataBase):
+    __tablename__ = "custom_ml_experiments"
+    
+    experiment_id = Column(String(100), nullable=False, unique=True, index=True)
+    model_type = Column(String(50), nullable=False, index=True)
+    accuracy = Column(Float, nullable=False, index=True)
+    f1_score = Column(Float, nullable=True, index=True)
+    dataset_name = Column(String(100), nullable=False, index=True)
+    created_by = Column(String(100), nullable=False, index=True)
+    environment = Column(String(50), nullable=False, index=True)
+    hyperparams = Column(Text, nullable=True)  # JSON serialized
+    notes = Column(Text, nullable=True)
+
+# Data Pipeline Monitoring  
+@custom_metadata_model("data_pipelines")
+class DataPipelineMetadata(Base, CustomMetadataBase):
+    __tablename__ = "custom_data_pipelines"
+    
+    pipeline_id = Column(String(100), nullable=False, unique=True, index=True)
+    pipeline_name = Column(String(200), nullable=False, index=True)
+    source_system = Column(String(100), nullable=False, index=True)
+    execution_time_seconds = Column(Integer, nullable=False, index=True)
+    rows_processed = Column(Integer, nullable=False, index=True)
+    status = Column(String(20), nullable=False, index=True)
+    triggered_by = Column(String(100), nullable=False, index=True)
+```
+
+#### 2. Store Data with Custom Metadata
+
+```python
+from cacheness import cacheness, CacheConfig
+
+# SQLite backend required for custom metadata
+config = CacheConfig(
+    cache_dir="./cache",
+    metadata_backend="sqlite",  # Required for custom metadata
+    store_cache_key_params=True
+)
+
+cache = cacheness(config)
+
+# Create metadata instance
+experiment_metadata = MLExperimentMetadata(
+    experiment_id="exp_xgb_customer_churn_v3",
+    model_type="xgboost",
+    accuracy=0.947,
+    f1_score=0.923,
+    dataset_name="customer_churn_v2",
+    created_by="alice_ml",
+    environment="production",
+    hyperparams='{"n_estimators": 100, "max_depth": 6}',
+    notes="High-accuracy model with optimized hyperparameters"
+)
+
+# Store model with custom metadata
+cache.put(
+    model_data,
+    experiment="exp_xgb_customer_churn_v3",
+    model_type="xgboost",
+    version="v1.0",
+    custom_metadata={"ml_experiments": experiment_metadata},
+    description="Production customer churn prediction model"
+)
+```
+
+#### 3. Retrieve Data and Metadata
+
+```python
+# Retrieve cached model
+model = cache.get(
+    experiment="exp_xgb_customer_churn_v3",
+    model_type="xgboost", 
+    version="v1.0"
+)
+
+# Get custom metadata for the entry
+custom_meta = cache.get_custom_metadata_for_entry(
+    experiment="exp_xgb_customer_churn_v3",
+    model_type="xgboost",
+    version="v1.0"
+)
+
+if "ml_experiments" in custom_meta:
+    exp_meta = custom_meta["ml_experiments"]
+    print(f"Experiment: {exp_meta.experiment_id}")
+    print(f"Accuracy: {exp_meta.accuracy}")
+    print(f"Created by: {exp_meta.created_by}")
+    print(f"Environment: {exp_meta.environment}")
+```
+
+#### 4. Advanced SQL Querying
+
+```python
+from sqlalchemy import and_, or_
+
+# Get SQLAlchemy query object for advanced filtering
+query = cache.query_custom_metadata("ml_experiments")
+
+# High-accuracy production models
+production_models = query.filter(
+    and_(
+        MLExperimentMetadata.accuracy >= 0.9,
+        MLExperimentMetadata.environment == "production"
+    )
+).all()
+
+# Models by specific creators
+alice_experiments = query.filter(
+    MLExperimentMetadata.created_by == "alice_ml"
+).order_by(MLExperimentMetadata.created_at.desc()).all()
+
+# XGBoost vs LightGBM comparison
+model_comparison = query.filter(
+    or_(
+        MLExperimentMetadata.model_type == "xgboost",
+        MLExperimentMetadata.model_type == "lightgbm"
+    )
+).filter(MLExperimentMetadata.accuracy >= 0.85).all()
+
+# Complex analytics queries
+from sqlalchemy import func
+
+# Average accuracy by model type
+accuracy_by_type = query.with_entities(
+    MLExperimentMetadata.model_type,
+    func.avg(MLExperimentMetadata.accuracy).label('avg_accuracy'),
+    func.count(MLExperimentMetadata.id).label('experiment_count')
+).group_by(MLExperimentMetadata.model_type).all()
+
+for model_type, avg_acc, count in accuracy_by_type:
+    print(f"{model_type}: {avg_acc:.3f} avg accuracy ({count} experiments)")
+```
+
+### Multiple Metadata Types
+
+You can attach multiple metadata types to the same cache entry:
+
+```python
+# Model deployment metadata
+@custom_metadata_model("model_deployments")
+class ModelDeploymentMetadata(Base, CustomMetadataBase):
+    __tablename__ = "custom_model_deployments"
+    
+    deployment_id = Column(String(100), nullable=False, unique=True, index=True)
+    model_name = Column(String(100), nullable=False, index=True)
+    deployment_environment = Column(String(50), nullable=False, index=True)
+    endpoint_url = Column(String(500), nullable=True)
+    replicas = Column(Integer, nullable=False, index=True)
+    deployed_by = Column(String(100), nullable=False, index=True)
+
+# Store with multiple metadata types
+deployment_metadata = ModelDeploymentMetadata(
+    deployment_id="deploy_churn_prod_001",
+    model_name="customer_churn_predictor",
+    deployment_environment="kubernetes_prod",
+    endpoint_url="https://api.company.com/models/churn/predict",
+    replicas=3,
+    deployed_by="devops_team"
+)
+
+cache.put(
+    model_artifact,
+    model_id="churn_predictor_v1",
+    custom_metadata={
+        "ml_experiments": experiment_metadata,
+        "model_deployments": deployment_metadata
+    },
+    description="Production model with deployment info"
+)
+```
+
+### Schema Management
+
+```python
+from cacheness.custom_metadata import (
+    migrate_custom_metadata_tables,
+    validate_custom_metadata_model,
+    export_custom_metadata_schema,
+    list_registered_schemas
+)
+
+# Create/update all custom metadata tables
+migrate_custom_metadata_tables()
+
+# List registered schemas
+schemas = list_registered_schemas()
+print(f"Registered schemas: {schemas}")
+
+# Validate schema design
+issues = validate_custom_metadata_model(MLExperimentMetadata)
+for issue in issues:
+    print(f"Schema warning: {issue}")
+
+# Export DDL for deployment
+ddl = export_custom_metadata_schema("ml_experiments")
+with open("schema.sql", "w") as f:
+    f.write(ddl)
+```
+
+### Use Cases
+
+The custom metadata system enables powerful workflows:
+
+- **ML Experiment Tracking**: Model metrics, hyperparameters, training details
+- **Data Pipeline Monitoring**: Execution times, row counts, status tracking  
+- **Model Deployment**: Environment configurations, version tracking
+- **Compliance & Auditing**: Data lineage, access patterns, change tracking
+- **Advanced Analytics**: Cross-cache insights, performance analysis, trend identification
+
+### Requirements
+
+- **SQLite backend**: `metadata_backend="sqlite"` in configuration
+- **SQLAlchemy**: Included in `cacheness[recommended]` installation
+- **Schema registration**: Use `@custom_metadata_model()` decorator
+
+For complete examples and API documentation, see `examples/complete_custom_metadata_demo.py` and `CUSTOM_METADATA.md`.
+
 ## Path Content Hashing & Parallel Processing
 
 The library features intelligent `pathlib.Path` handling with automatic content hashing and performance-optimized parallel processing for large directories.

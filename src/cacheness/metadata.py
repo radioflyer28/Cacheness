@@ -98,6 +98,29 @@ try:
             Text, nullable=True, index=True
         )  # JSON string of original key-value pairs
 
+        # Relationship to custom metadata links (loaded lazily to avoid circular imports)
+        def __init_subclass__(cls, **kwargs):
+            super().__init_subclass__(**kwargs)
+            # This will be set up after custom_metadata module is imported
+
+        def get_custom_metadata_links(self):
+            """Get custom metadata links for this cache entry."""
+            # Import here to avoid circular dependency
+            try:
+                from .custom_metadata import CacheMetadataLink
+                from sqlalchemy.orm import object_session
+
+                session = object_session(self)
+                if session:
+                    return (
+                        session.query(CacheMetadataLink)
+                        .filter(CacheMetadataLink.cache_key == self.cache_key)
+                        .all()
+                    )
+            except ImportError:
+                pass
+            return []
+
         # Data-specific metadata (stored as JSON)
         metadata_json = Column(Text, default="{}", nullable=False)
 
@@ -614,9 +637,30 @@ class SQLiteMetadataBackend(MetadataBackend):
             session.commit()
 
     def remove_entry(self, cache_key: str):
-        """Remove cache entry metadata."""
+        """Remove cache entry metadata and associated custom metadata links."""
         with self._lock, self.SessionLocal() as session:
+            # Delete cache entry (this will cascade to metadata links due to foreign key constraint)
             session.execute(delete(CacheEntry).where(CacheEntry.cache_key == cache_key))
+
+            # Explicit cleanup of custom metadata links (redundant but ensures consistency)
+            try:
+                from .custom_metadata import CacheMetadataLink
+
+                cleaned_count = CacheMetadataLink.cleanup_for_cache_key(
+                    session, cache_key
+                )
+                if cleaned_count > 0:
+                    logger.debug(
+                        f"Cleaned up {cleaned_count} custom metadata links for {cache_key}"
+                    )
+            except ImportError:
+                # Custom metadata not available, skip cleanup
+                pass
+            except Exception as e:
+                logger.warning(
+                    f"Failed to cleanup custom metadata links for {cache_key}: {e}"
+                )
+
             session.commit()
 
     def list_entries(self) -> List[Dict[str, Any]]:
