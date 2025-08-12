@@ -40,11 +40,9 @@ wheels = [
 
 [[package]]
 name = "cacheness"
-version = "0.3.2"
+version = "0.3.3"
 source = { editable = "." }
 dependencies = [
-    { name = "blosc2" },
-    { name = "numpy" },
     { name = "xxhash" },
 ]
 
@@ -61,6 +59,7 @@ dev = [
 ]
 recommended = [
     { name = "blosc2" },
+    { name = "numpy" },
     { name = "orjson" },
     { name = "pandas" },
     { name = "pyarrow" },
@@ -71,11 +70,7 @@ sql = [
 ]
 
 [package.metadata]
-requires-dist = [
-    { name = "blosc2", specifier = ">=3.6.1" },
-    { name = "numpy", specifier = ">=2.3.2" },
-    { name = "xxhash", specifier = ">=3.5.0" },
-]
+requires-dist = [{ name = "xxhash", specifier = ">=3.5.0" }]
 
 [package.metadata.requires-dev]
 dataframes = [
@@ -90,6 +85,7 @@ dev = [
 ]
 recommended = [
     { name = "blosc2", specifier = ">=3.6.1" },
+    { name = "numpy", specifier = ">=2.3.2" },
     { name = "orjson", specifier = ">=3.8.0" },
     { name = "pandas", specifier = ">=2.3.1" },
     { name = "pyarrow", specifier = ">=21.0.0" },

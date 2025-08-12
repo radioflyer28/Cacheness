@@ -1,0 +1,461 @@
+# Configuration Guide
+
+Comprehensive guide to configuring cacheness for optimal performance and functionality.
+
+## Configuration Basics
+
+### Simple Configuration
+
+```python
+from cacheness import cacheness, CacheConfig
+
+# Basic configuration
+config = CacheConfig(
+    cache_dir="./my_cache",
+    metadata_backend="sqlite",     # "sqlite", "json", or "auto"  
+    default_ttl_hours=48,          # Default TTL for entries
+    max_cache_size_mb=5000,        # Maximum cache size
+)
+
+cache = cacheness(config)
+```
+
+### Sub-Configuration Approach (Recommended)
+
+```python
+from cacheness.config import (
+    CacheStorageConfig, 
+    CacheMetadataConfig, 
+    CompressionConfig,
+    SerializationConfig,
+    HandlerConfig
+)
+
+# Advanced configuration with sub-configurations
+config = CacheConfig(
+    storage=CacheStorageConfig(
+        cache_dir="./advanced_cache",
+        max_cache_size_mb=10000,
+        cleanup_on_init=True
+    ),
+    metadata=CacheMetadataConfig(
+        backend="sqlite",
+        verify_cache_integrity=True,
+        store_cache_key_params=True
+    ),
+    compression=CompressionConfig(
+        use_blosc2_arrays=True,
+        pickle_compression_codec="zstd",
+        pickle_compression_level=5
+    ),
+    default_ttl_hours=48
+)
+
+cache = cacheness(config)
+```
+
+## Configuration Options Reference
+
+### Core Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `cache_dir` | str | `"./cache"` | Cache directory path |
+| `default_ttl_hours` | int | `24` | Default time-to-live in hours |
+| `max_cache_size_mb` | int | `2000` | Maximum cache size in MB |
+
+### Storage Configuration (`CacheStorageConfig`)
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `cache_dir` | str | `"./cache"` | Cache directory path |
+| `max_cache_size_mb` | int | `2000` | Maximum cache size in MB |
+| `cleanup_on_init` | bool | `True` | Clean expired entries on initialization |
+
+### Metadata Configuration (`CacheMetadataConfig`)
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `backend` | str | `"auto"` | Backend: "auto", "sqlite", "json" |
+| `database_url` | str | `None` | Custom SQLite database path |
+| `verify_cache_integrity` | bool | `False` | Enable file hash verification |
+| `store_cache_key_params` | bool | `True` | Store cache key parameters |
+
+### Compression Configuration (`CompressionConfig`)
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `use_blosc2_arrays` | bool | `True` | High-performance array compression |
+| `npz_compression` | bool | `True` | Enable NPZ compression |
+| `pickle_compression_codec` | str | `"zstd"` | Compression codec for objects |
+| `pickle_compression_level` | int | `5` | Compression level (1-9) |
+| `blosc2_array_codec` | str | `"lz4"` | Array compression algorithm |
+| `parquet_compression` | str | `"lz4"` | DataFrame compression |
+
+### Serialization Configuration (`SerializationConfig`)
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `enable_collections` | bool | `True` | Recursive collection analysis |
+| `enable_object_introspection` | bool | `True` | Deep object inspection |
+| `max_collection_depth` | int | `10` | Nesting depth limit |
+| `max_tuple_recursive_length` | int | `10` | Tuple recursion limit |
+
+### Handler Configuration (`HandlerConfig`)
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `enable_pandas_dataframes` | bool | `True` | Enable pandas DataFrame caching |
+| `enable_polars_dataframes` | bool | `True` | Enable polars DataFrame caching |
+| `enable_numpy_arrays` | bool | `True` | Enable NumPy array caching |
+| `enable_object_pickle` | bool | `True` | Enable general object caching |
+| `handler_priority` | list | See below | Handler priority order |
+
+Default handler priority:
+```python
+["pandas_dataframes", "polars_dataframes", "pandas_series", "polars_series", "numpy_arrays", "object_pickle"]
+```
+
+## Use Case Configurations
+
+### Machine Learning Workflows
+
+```python
+# High-performance ML cache
+ml_config = CacheConfig(
+    storage=CacheStorageConfig(
+        cache_dir="./ml_cache",
+        max_cache_size_mb=10000,  # Large cache for datasets
+        cleanup_on_init=True
+    ),
+    metadata=CacheMetadataConfig(
+        backend="sqlite",  # Fast metadata operations
+        store_cache_key_params=True  # Track experiment parameters
+    ),
+    compression=CompressionConfig(
+        use_blosc2_arrays=True,      # Optimal for numeric data
+        pickle_compression_codec="zstd",
+        pickle_compression_level=6   # Higher compression for models
+    ),
+    handlers=HandlerConfig(
+        handler_priority=[
+            "numpy_arrays",          # Prioritize arrays
+            "pandas_dataframes",
+            "object_pickle"
+        ]
+    ),
+    default_ttl_hours=168  # 1 week
+)
+```
+
+### API Response Caching
+
+```python
+# Fast API response cache
+api_config = CacheConfig(
+    storage=CacheStorageConfig(
+        cache_dir="./api_cache",
+        max_cache_size_mb=1000,
+        cleanup_on_init=True
+    ),
+    metadata=CacheMetadataConfig(
+        backend="sqlite",
+        store_cache_key_params=False  # No sensitive API params
+    ),
+    compression=CompressionConfig(
+        pickle_compression_codec="lz4",  # Fast compression
+        pickle_compression_level=1
+    ),
+    serialization=SerializationConfig(
+        enable_collections=False,    # Skip deep introspection
+        max_tuple_recursive_length=3
+    ),
+    default_ttl_hours=6  # Short TTL for API data
+)
+```
+
+### Data Processing Pipeline
+
+```python
+# Precision-focused configuration
+data_config = CacheConfig(
+    storage=CacheStorageConfig(
+        cache_dir="./data_cache",
+        max_cache_size_mb=15000,  # Large data cache
+    ),
+    metadata=CacheMetadataConfig(
+        backend="sqlite",
+        verify_cache_integrity=True,  # Ensure data integrity
+        store_cache_key_params=True
+    ),
+    compression=CompressionConfig(
+        use_blosc2_arrays=True,
+        parquet_compression="snappy",  # Good for mixed data types
+        pickle_compression_codec="zstd",
+        pickle_compression_level=7     # High compression
+    ),
+    serialization=SerializationConfig(
+        enable_collections=True,           # Full parameter tracking
+        enable_object_introspection=True,
+        max_collection_depth=15           # Deep nested structures
+    ),
+    handlers=HandlerConfig(
+        handler_priority=[
+            "pandas_dataframes",
+            "polars_dataframes", 
+            "numpy_arrays",
+            "object_pickle"
+        ]
+    ),
+    default_ttl_hours=72  # 3 days
+)
+```
+
+## Backend Selection
+
+### SQLite Backend (Recommended)
+
+**When to use:**
+- Large number of cache entries (>1000)
+- Frequent metadata queries
+- Production deployments
+- Need advanced querying (custom metadata)
+
+**Configuration:**
+```python
+config = CacheConfig(
+    metadata=CacheMetadataConfig(
+        backend="sqlite",
+        database_url="./custom_cache.db",  # Optional custom path
+        verify_cache_integrity=True        # Enable integrity checks
+    )
+)
+```
+
+### JSON Backend
+
+**When to use:**
+- Small cache (< 1000 entries)
+- Simple deployment requirements
+- Development/testing
+- SQLAlchemy not available
+
+**Configuration:**
+```python
+config = CacheConfig(
+    metadata=CacheMetadataConfig(
+        backend="json"
+    )
+)
+```
+
+### Auto Backend (Default)
+
+Automatically selects the best available backend:
+1. SQLite if SQLAlchemy is available
+2. JSON as fallback
+
+## Compression Strategies
+
+### Object Compression
+
+| Codec | Speed | Compression | Best For |
+|-------|-------|-------------|----------|
+| `lz4` | Fastest | Good | Real-time applications |
+| `zstd` | Fast | Excellent | General purpose (default) |
+| `lz4hc` | Medium | Better | Balanced performance |
+| `zlib` | Slower | Good | Compatibility |
+
+### Array Compression
+
+| Codec | Speed | Compression | Best For |
+|-------|-------|-------------|----------|
+| `lz4` | Fastest | Good | Frequent access (default) |
+| `zstd` | Fast | Better | Storage efficiency |
+| `lz4hc` | Medium | Better | Balanced |
+
+### DataFrame Compression
+
+| Codec | Speed | Compression | Best For |
+|-------|-------|-------------|----------|
+| `lz4` | Fastest | Good | General purpose (default) |
+| `snappy` | Fast | Good | Mixed data types |
+| `gzip` | Slower | Better | Long-term storage |
+
+## Performance Tuning
+
+### High-Throughput Scenarios
+
+```python
+# Optimized for speed
+fast_config = CacheConfig(
+    compression=CompressionConfig(
+        pickle_compression_codec="lz4",
+        pickle_compression_level=1,
+        blosc2_array_codec="lz4"
+    ),
+    serialization=SerializationConfig(
+        enable_collections=False,        # Skip expensive introspection
+        max_tuple_recursive_length=2
+    ),
+    handlers=HandlerConfig(
+        handler_priority=["numpy_arrays", "object_pickle"]  # Minimal handlers
+    )
+)
+```
+
+### Storage-Optimized Scenarios
+
+```python
+# Optimized for compression
+compact_config = CacheConfig(
+    compression=CompressionConfig(
+        pickle_compression_codec="zstd",
+        pickle_compression_level=9,      # Maximum compression
+        blosc2_array_codec="zstd",
+        parquet_compression="gzip"
+    ),
+    storage=CacheStorageConfig(
+        max_cache_size_mb=50000,         # Large cache with high compression
+        cleanup_on_init=True
+    )
+)
+```
+
+## Security Considerations
+
+### Sensitive Parameters
+
+```python
+# Disable parameter storage for sensitive data
+secure_config = CacheConfig(
+    metadata=CacheMetadataConfig(
+        backend="sqlite",
+        store_cache_key_params=False     # Don't store sensitive params
+    )
+)
+
+# Use with API keys, passwords, etc.
+cache = cacheness(secure_config)
+cache.put(data, api_key="secret", user_id="12345")  # api_key not stored in metadata
+```
+
+### File Integrity
+
+```python
+# Enable integrity checking
+integrity_config = CacheConfig(
+    metadata=CacheMetadataConfig(
+        backend="sqlite",
+        verify_cache_integrity=True      # Verify file hashes
+    )
+)
+```
+
+## Environment-Specific Configurations
+
+### Development
+
+```python
+dev_config = CacheConfig(
+    cache_dir="./dev_cache",
+    default_ttl_hours=2,                 # Short TTL
+    cleanup_on_init=True,                # Clean start
+    metadata_backend="json",             # Simple backend
+    max_cache_size_mb=500               # Small cache
+)
+```
+
+### Production
+
+```python
+prod_config = CacheConfig(
+    storage=CacheStorageConfig(
+        cache_dir="/var/cache/app",
+        max_cache_size_mb=20000,
+        cleanup_on_init=False            # Preserve cache across restarts
+    ),
+    metadata=CacheMetadataConfig(
+        backend="sqlite",
+        verify_cache_integrity=True,
+        database_url="/var/cache/app/metadata.db"
+    ),
+    compression=CompressionConfig(
+        pickle_compression_level=6,      # Balanced compression
+        use_blosc2_arrays=True
+    ),
+    default_ttl_hours=168               # 1 week
+)
+```
+
+### Testing
+
+```python
+test_config = CacheConfig(
+    cache_dir="./test_cache",
+    default_ttl_hours=None,             # No expiration during tests
+    cleanup_on_init=True,               # Fresh cache for each test
+    metadata_backend="json",            # Simple, no external dependencies
+    max_cache_size_mb=100              # Small test cache
+)
+```
+
+## Troubleshooting Configuration
+
+### Common Issues
+
+**Cache misses with expected data:**
+```python
+# Enable parameter storage for debugging
+debug_config = CacheConfig(
+    metadata=CacheMetadataConfig(
+        store_cache_key_params=True      # See what parameters were used
+    )
+)
+
+# Check entries
+entries = cache.list_entries()
+for entry in entries:
+    print(f"Entry: {entry['cache_key_params']}")
+```
+
+**Performance issues:**
+```python
+# Monitor cache statistics
+stats = cache.get_stats()
+print(f"Hit rate: {stats['hit_rate']:.1%}")
+print(f"Backend: {stats['backend_type']}")
+
+# Use SQLite for large caches
+if stats['total_entries'] > 1000:
+    # Switch to SQLite backend
+    pass
+```
+
+**Storage issues:**
+```python
+# Monitor cache size
+stats = cache.get_stats()
+if stats['total_size_mb'] > config.max_cache_size_mb * 0.9:
+    print("Cache nearly full - consider cleanup or size increase")
+```
+
+### Debug Configuration
+
+```python
+import logging
+
+# Enable debug logging
+logging.basicConfig(level=logging.DEBUG)
+
+debug_config = CacheConfig(
+    metadata=CacheMetadataConfig(
+        backend="sqlite",
+        store_cache_key_params=True,
+        verify_cache_integrity=True
+    )
+)
+
+cache = cacheness(debug_config)
+# Cache operations will now log detailed information
+```

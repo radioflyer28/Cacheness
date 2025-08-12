@@ -1,6 +1,6 @@
 [project]
 name = "cacheness"
-version = "0.3.2"
+version = "0.3.3"
 description = "High-performance disk caching library using Blosc compression, geared toward numpy arrays and dataframes and pickle-ing for everything else."
 readme = "README.md"
 authors = [
@@ -8,13 +8,12 @@ authors = [
 ]
 requires-python = ">=3.11"
 dependencies = [
-    "blosc2>=3.6.1",
-    "numpy>=2.3.2",
     "xxhash>=3.5.0",
 ]
 
 [dependency-groups]
 recommended = [
+    "numpy>=2.3.2",
     "blosc2>=3.6.1",
     "pandas>=2.3.1",
     "pyarrow>=21.0.0",
