@@ -42,7 +42,17 @@ try:
 except ImportError:
     _SQLiteMetadataBackend = None
 
-__version__ = "0.3.3"
+# Import SQL cache if SQLAlchemy is available
+try:
+    from .sql_cache import SQLAlchemyPullThroughCache, SQLAlchemyDataAdapter
+
+    _SQLAlchemyPullThroughCache = SQLAlchemyPullThroughCache
+    _SQLAlchemyDataAdapter = SQLAlchemyDataAdapter
+except ImportError:
+    _SQLAlchemyPullThroughCache = None
+    _SQLAlchemyDataAdapter = None
+
+__version__ = "0.3.4"
 __author__ = "radioflyer28"
 __email__ = "akgithub.2drwc@aleeas.com"
 
@@ -68,3 +78,9 @@ __all__ = [
 if _SQLiteMetadataBackend is not None:
     SQLiteMetadataBackend = _SQLiteMetadataBackend
     __all__.append("SQLiteMetadataBackend")
+
+# Add SQL cache to exports if available
+if _SQLAlchemyPullThroughCache is not None:
+    SQLAlchemyPullThroughCache = _SQLAlchemyPullThroughCache
+    SQLAlchemyDataAdapter = _SQLAlchemyDataAdapter
+    __all__.extend(["SQLAlchemyPullThroughCache", "SQLAlchemyDataAdapter"])

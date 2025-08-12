@@ -4,7 +4,8 @@ Fast Python disk cache with key-value store hashing and a "cachetools-like" deco
 
 **Key Features:**
 - **Function decorators** for automatic caching with `@cached`
-- **Multi-format storage** with automatic type detection and optimal formatselection
+- **Multi-format storage** with automatic type detection and optimal format selection
+- **SQL pull-through cache** for intelligent API and database caching with automatic gap detection
 - **Key-based caching** using xxhash (XXH3_64) for fast, deterministic cache keys
 - **Advanced compression** using Blosc2 and LZ4 for fast compression
 - **Multiple backends** with SQLite and JSON metadata support
@@ -61,6 +62,40 @@ result1 = expensive_computation(5)  # Computed and cached
 
 # Second call returns instantly from cache
 result2 = expensive_computation(5)  # Retrieved from cache
+```
+
+### SQL Pull-Through Cache
+
+For intelligent API caching with automatic gap detection:
+
+```python
+from cacheness import SQLAlchemyPullThroughCache, SQLAlchemyDataAdapter
+from sqlalchemy import Table, Column, String, Date, Float, MetaData
+
+# Define table schema
+metadata = MetaData()
+stock_table = Table(
+    'stock_prices', metadata,
+    Column('symbol', String(10), primary_key=True),
+    Column('date', Date, primary_key=True),
+    Column('close', Float)
+)
+
+# Create data adapter
+class StockAdapter(SQLAlchemyDataAdapter):
+    def get_table_definition(self):
+        return stock_table
+    
+    def fetch_data(self, **kwargs):
+        # Your API logic here
+        return fetch_stock_data(kwargs['symbol'], kwargs['start_date'])
+    
+    def parse_query_params(self, **kwargs):
+        return {'symbol': kwargs['symbol'], 'date': {'start': kwargs['start_date']}}
+
+# Create and use pull-through cache
+cache = SQLAlchemyPullThroughCache("stocks.db", stock_table, StockAdapter())
+data = cache.get_data(symbol="AAPL", start_date="2024-01-01")  # Auto-fetches missing data
 ```
 
 ## Core Concepts
@@ -153,6 +188,7 @@ def train_model(data, hyperparams):
 Comprehensive examples are available in the [`examples/`](examples/) directory:
 
 - **[API Request Caching](examples/api_request_caching.py)** - Intelligent API caching with TTL strategies
+- **[Stock Cache Example](examples/stock_cache_example.py)** - SQL pull-through cache with Yahoo Finance integration
 - **[ML Pipeline Caching](examples/ml_pipeline_caching.py)** - Multi-stage ML training pipeline caching
 - **[S3 Caching](examples/s3_caching.py)** - Caching of S3 file downloads with ETag (remote file hash) validation
 - **[Custom Metadata Demo](examples/custom_metadata_demo.py)** - Advanced metadata tracking workflows
@@ -315,6 +351,7 @@ Missing optional dependencies are handled gracefully with automatic fallbacks.
 ## Documentation
 
 - **[Configuration Guide](docs/CONFIGURATION.md)** - Detailed configuration options and use cases
+- **[SQL Cache Guide](docs/SQL_CACHE.md)** - Pull-through cache for APIs and time-series data
 - **[Custom Metadata Guide](docs/CUSTOM_METADATA.md)** - Advanced metadata workflows with SQLAlchemy
 - **[Performance Guide](docs/PERFORMANCE.md)** - Optimization strategies and benchmarks
 - **[API Reference](docs/API_REFERENCE.md)** - Complete API documentation
