@@ -27,7 +27,7 @@ from sqlalchemy import (
 
 # Import the SQL cache components
 try:
-    from cacheness.sql_cache import SQLAlchemyPullThroughCache, SQLAlchemyDataAdapter
+    from cacheness.sql_cache import SqlCache, SqlCacheAdapter
 except ImportError:
     print("Error: cacheness SQL cache not available")
     print("Make sure SQLAlchemy is installed: pip install 'cacheness[sql]'")
@@ -63,7 +63,7 @@ stock_table = Table(
 )
 
 
-class StockDataAdapter(SQLAlchemyDataAdapter):
+class StockSqlCacheAdapter(SqlCacheAdapter):
     """
     Data adapter for fetching stock market data from Yahoo Finance.
     """
@@ -154,7 +154,7 @@ class StockDataAdapter(SQLAlchemyDataAdapter):
             return pd.DataFrame()
 
 
-class StockCache(SQLAlchemyPullThroughCache):
+class StockCache(SqlCache):
     """
     Stock-specific cache implementation with intelligent missing data detection.
     """
@@ -167,7 +167,7 @@ class StockCache(SQLAlchemyPullThroughCache):
             db_path: Path to the database file
             ttl_hours: Cache TTL in hours (24 hours = refresh daily)
         """
-        adapter = StockDataAdapter()
+        adapter = StockSqlCacheAdapter()
         super().__init__(
             db_url=f"duckdb:///{db_path}",
             table=adapter.get_table_definition(),

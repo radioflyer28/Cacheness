@@ -32,25 +32,28 @@ Quick Start:
 from .core import CacheConfig, UnifiedCache as cacheness, get_cache
 from .decorators import cached
 from .handlers import ArrayHandler, HandlerRegistry, ObjectHandler
-from .metadata import JsonMetadataBackend, create_metadata_backend
+from .metadata import JsonBackend, create_metadata_backend
 
 # Import optional components if available
 try:
-    from .metadata import SQLiteMetadataBackend
-
-    _SQLiteMetadataBackend = SQLiteMetadataBackend
+    from .metadata import SqliteBackend
+    # Backward compatibility aliases
+    JsonMetadataBackend = JsonBackend
+    SQLiteMetadataBackend = SqliteBackend
+    
+    _has_metadata_backends = True
 except ImportError:
-    _SQLiteMetadataBackend = None
+    _has_metadata_backends = False
 
 # Import SQL cache if SQLAlchemy is available
 try:
-    from .sql_cache import SQLAlchemyPullThroughCache, SQLAlchemyDataAdapter
-
-    _SQLAlchemyPullThroughCache = SQLAlchemyPullThroughCache
-    _SQLAlchemyDataAdapter = SQLAlchemyDataAdapter
+    from .sql_cache import SqlCache, SqlCacheAdapter
+    _has_sql_cache = True
+    # Backward compatibility aliases  
+    SQLAlchemyPullThroughCache = SqlCache
+    SQLAlchemySqlCacheAdapter = SqlCacheAdapter
 except ImportError:
-    _SQLAlchemyPullThroughCache = None
-    _SQLAlchemyDataAdapter = None
+    _has_sql_cache = False
 
 __version__ = "0.3.5"
 __author__ = "radioflyer28"
@@ -66,7 +69,7 @@ __all__ = [
     "ObjectHandler",
     "ArrayHandler",
     # Metadata backends
-    "JsonMetadataBackend",
+    "JsonBackend",
     "create_metadata_backend",
     # Decorators
     "cached",
@@ -74,13 +77,16 @@ __all__ = [
     "__version__",
 ]
 
-# Add SQLite backend to exports if available
-if _SQLiteMetadataBackend is not None:
-    SQLiteMetadataBackend = _SQLiteMetadataBackend
-    __all__.append("SQLiteMetadataBackend")
+# Add metadata backends to exports if available
+if _has_metadata_backends:
+    __all__.extend([
+        "SqliteBackend",  # New simple name
+        "JsonMetadataBackend", "SQLiteMetadataBackend"  # Backward compatibility
+    ])
 
 # Add SQL cache to exports if available
-if _SQLAlchemyPullThroughCache is not None:
-    SQLAlchemyPullThroughCache = _SQLAlchemyPullThroughCache
-    SQLAlchemyDataAdapter = _SQLAlchemyDataAdapter
-    __all__.extend(["SQLAlchemyPullThroughCache", "SQLAlchemyDataAdapter"])
+if _has_sql_cache:
+    __all__.extend([
+        "SqlCache", "SqlCacheAdapter",  # New simple names
+        "SQLAlchemyPullThroughCache", "SQLAlchemyDataAdapter"  # Backward compatibility
+    ])

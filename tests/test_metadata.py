@@ -9,8 +9,8 @@ import tempfile
 from pathlib import Path
 
 from cacheness.metadata import (
-    SQLiteMetadataBackend,
-    JsonMetadataBackend,
+    SqliteBackend,
+    JsonBackend,
     create_metadata_backend,
 )
 from cacheness import CacheConfig, cacheness
@@ -30,20 +30,20 @@ class TestMetadataBackendCreation:
         backend = create_metadata_backend(backend_type="auto", cache_dir=str(temp_dir))
 
         assert backend is not None
-        assert isinstance(backend, (SQLiteMetadataBackend, JsonMetadataBackend))
+        assert isinstance(backend, (SqliteBackend, JsonBackend))
 
     def test_explicit_json_backend(self, temp_dir):
         """Test explicit JSON backend creation."""
         backend = create_metadata_backend(backend_type="json", cache_dir=str(temp_dir))
 
-        assert isinstance(backend, JsonMetadataBackend)
+        assert isinstance(backend, JsonBackend)
 
     def test_explicit_sqlite_backend(self, temp_dir):
         """Test explicit SQLite backend creation."""
         db_file = str(temp_dir / "test.db")
         backend = create_metadata_backend(backend_type="sqlite", db_file=db_file)
 
-        assert isinstance(backend, SQLiteMetadataBackend)
+        assert isinstance(backend, SqliteBackend)
 
     def test_invalid_backend_type(self, temp_dir):
         """Test handling of invalid backend type."""

@@ -44,10 +44,10 @@ stock_table = Table(
 ### 2. Create a Data Adapter
 
 ```python
-from cacheness.sql_cache import SQLAlchemyDataAdapter
+from cacheness.sql_cache import SqlCacheAdapter
 import pandas as pd
 
-class StockDataAdapter(SQLAlchemyDataAdapter):
+class StockSqlCacheAdapter(SqlCacheAdapter):
     def get_table_definition(self):
         return stock_table
     
@@ -74,13 +74,13 @@ class StockDataAdapter(SQLAlchemyDataAdapter):
 ### 3. Create and Use the Cache
 
 ```python
-from cacheness.sql_cache import SQLAlchemyPullThroughCache
+from cacheness.sql_cache import SqlCache
 
 # Create cache instance
-cache = SQLAlchemyPullThroughCache(
+cache = SqlCache(
     db_url="stocks.db",  # DuckDB file
     table=stock_table,
-    data_adapter=StockDataAdapter(),
+    data_adapter=StockSqlCacheAdapter(),
     ttl_hours=24
 )
 
@@ -101,7 +101,7 @@ print(f"Retrieved {len(data)} records")
 For time-series data, you'll want to implement intelligent gap detection:
 
 ```python
-class TimeSeriesCache(SQLAlchemyPullThroughCache):
+class TimeSeriesCache(SqlCache):
     def _find_missing_data(self, query_params, cached_data):
         """Find missing date ranges"""
         if cached_data.empty:
@@ -181,22 +181,22 @@ The cache supports various database backends with different optimization profile
 
 ```python
 # DuckDB - Optimized for analytical/columnar workloads
-cache = SQLAlchemyPullThroughCache.with_duckdb("analytics.db", table, adapter)
+cache = SqlCache.with_duckdb("analytics.db", table, adapter)
 
 # SQLite - Optimized for transactional/row-wise operations  
-cache = SQLAlchemyPullThroughCache.with_sqlite("cache.db", table, adapter)
+cache = SqlCache.with_sqlite("cache.db", table, adapter)
 
 # PostgreSQL - Production-ready with high concurrency
-cache = SQLAlchemyPullThroughCache.with_postgresql(
+cache = SqlCache.with_postgresql(
     "postgresql://user:pass@localhost/db", table, adapter
 )
 
 # Manual URL specification
-cache = SQLAlchemyPullThroughCache("duckdb:///data.db", table, adapter)
-cache = SQLAlchemyPullThroughCache("sqlite:///cache.db", table, adapter)
+cache = SqlCache("duckdb:///data.db", table, adapter)
+cache = SqlCache("sqlite:///cache.db", table, adapter)
 
 # In-memory (for testing)
-cache = SQLAlchemyPullThroughCache.with_sqlite(":memory:", table, adapter)
+cache = SqlCache.with_sqlite(":memory:", table, adapter)
 ```
 
 ## Database Backend Selection
@@ -206,7 +206,7 @@ The SQL pull-through cache supports multiple database backends, each optimized f
 ### DuckDB - Analytical Workloads
 
 ```python
-cache = SQLAlchemyPullThroughCache.with_duckdb("analytics.db", table, adapter)
+cache = SqlCache.with_duckdb("analytics.db", table, adapter)
 ```
 
 **Strengths:**
@@ -238,7 +238,7 @@ stock_table = Table(
 )
 
 # Perfect for analyzing stock market data
-cache = SQLAlchemyPullThroughCache.with_duckdb(
+cache = SqlCache.with_duckdb(
     "market_analytics.db", 
     stock_table, 
     YahooFinanceAdapter(),
@@ -274,7 +274,7 @@ alternative_table = Table('data', metadata,
 ### SQLite - Transactional Workloads
 
 ```python
-cache = SQLAlchemyPullThroughCache.with_sqlite("cache.db", table, adapter)
+cache = SqlCache.with_sqlite("cache.db", table, adapter)
 ```
 
 **Strengths:**
@@ -292,7 +292,7 @@ cache = SQLAlchemyPullThroughCache.with_sqlite("cache.db", table, adapter)
 **Example - User Session Cache:**
 ```python
 # Perfect for user session data that needs ACID guarantees
-cache = SQLAlchemyPullThroughCache.with_sqlite(
+cache = SqlCache.with_sqlite(
     "user_sessions.db",
     session_table,
     SessionAPIAdapter(),
@@ -306,7 +306,7 @@ user_session = cache.get_data(user_id=12345, session_date="2024-01-15")
 ### PostgreSQL - Production Environments
 
 ```python
-cache = SQLAlchemyPullThroughCache.with_postgresql(
+cache = SqlCache.with_postgresql(
     "postgresql://user:pass@host:5432/dbname", 
     table, 
     adapter
@@ -328,7 +328,7 @@ cache = SQLAlchemyPullThroughCache.with_postgresql(
 **Example - Multi-Tenant API Cache:**
 ```python
 # Perfect for production API caching with multiple concurrent users
-cache = SQLAlchemyPullThroughCache.with_postgresql(
+cache = SqlCache.with_postgresql(
     "postgresql://cache_user:password@prod-db:5432/api_cache",
     api_data_table,
     ThirdPartyAPIAdapter(),
@@ -342,7 +342,7 @@ api_response = cache.get_data(endpoint="weather", location="NYC", timestamp="202
 ### In-Memory SQLite - Testing & Development
 
 ```python
-cache = SQLAlchemyPullThroughCache.with_sqlite(":memory:", table, adapter)
+cache = SqlCache.with_sqlite(":memory:", table, adapter)
 ```
 
 **Perfect for:**
@@ -414,13 +414,13 @@ Each backend includes database-specific optimizations:
 
 ```python
 # No expiration
-cache = SQLAlchemyPullThroughCache(..., ttl_hours=0)
+cache = SqlCache(..., ttl_hours=0)
 
 # 1 hour expiration
-cache = SQLAlchemyPullThroughCache(..., ttl_hours=1)
+cache = SqlCache(..., ttl_hours=1)
 
 # Daily refresh
-cache = SQLAlchemyPullThroughCache(..., ttl_hours=24)
+cache = SqlCache(..., ttl_hours=24)
 ```
 
 ## Dependencies

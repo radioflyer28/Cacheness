@@ -14,7 +14,7 @@ Key Features:
 
 Example Usage:
     >>> from sqlalchemy import Table, Column, String, Date, Float, MetaData
-    >>> from cacheness.sql_cache import SQLAlchemyPullThroughCache, SQLAlchemyDataAdapter
+    >>> from cacheness.sql_cache import SqlCache, SqlCacheAdapter
     >>> 
     >>> # Define your table schema
     >>> metadata = MetaData()
@@ -27,7 +27,7 @@ Example Usage:
     ... )
     >>> 
     >>> # Create a data adapter
-    >>> class StockAdapter(SQLAlchemyDataAdapter):
+    >>> class StockAdapter(SqlCacheAdapter):
     ...     def get_table_definition(self):
     ...         return stock_table
     ...     
@@ -36,7 +36,7 @@ Example Usage:
     ...         return pandas_dataframe
     >>> 
     >>> # Create and use the cache
-    >>> cache = SQLAlchemyPullThroughCache("stocks.db", stock_table, StockAdapter())
+    >>> cache = SqlCache("stocks.db", stock_table, StockAdapter())
     >>> data = cache.get_data(symbol="AAPL", start_date="2024-01-01", end_date="2024-01-31")
 """
 
@@ -93,12 +93,12 @@ def check_dependencies():
         )
 
 
-class SQLAlchemyDataAdapter(ABC):
+class SqlCacheAdapter(ABC):
     """
-    Abstract adapter for fetching data from external sources.
+    Abstract adapter for fetching data from external sources for SQL pull-through cache.
     
     This class defines the interface that data adapters must implement
-    to work with the SQLAlchemy pull-through cache system.
+    to work with the SQL pull-through cache system.
     """
     
     @abstractmethod
@@ -139,9 +139,9 @@ class SQLAlchemyDataAdapter(ABC):
         pass
 
 
-class SQLAlchemyPullThroughCache:
+class SqlCache:
     """
-    Pull-through cache implementation using SQLAlchemy.
+    Pull-through cache implementation using SQL databases.
     
     This cache automatically fetches missing data from external sources
     and stores it in a local database for fast subsequent access.
@@ -158,7 +158,7 @@ class SQLAlchemyPullThroughCache:
         cls,
         db_path: str,
         table: "Table",
-        data_adapter: SQLAlchemyDataAdapter,
+        data_adapter: SqlCacheAdapter,
         ttl_hours: int = 24,
         **kwargs
     ):
@@ -184,7 +184,7 @@ class SQLAlchemyPullThroughCache:
             **kwargs: Additional arguments for SQLAlchemy engine
             
         Returns:
-            SQLAlchemyPullThroughCache: Cache instance with DuckDB backend
+            SqlCache: Cache instance with DuckDB backend
             
         Example:
             >>> # Good: Composite primary key or no autoincrement
@@ -193,7 +193,7 @@ class SQLAlchemyPullThroughCache:
             ...     Column('date', Date, primary_key=True),
             ...     Column('value', Float)
             ... )
-            >>> cache = SQLAlchemyPullThroughCache.with_duckdb("data.db", table, adapter)
+            >>> cache = SqlCache.with_duckdb("data.db", table, adapter)
         """
         db_url = f"duckdb:///{db_path}"
         return cls(db_url, table, data_adapter, ttl_hours, **kwargs)
@@ -203,7 +203,7 @@ class SQLAlchemyPullThroughCache:
         cls,
         db_path: str,
         table: "Table", 
-        data_adapter: SQLAlchemyDataAdapter,
+        data_adapter: SqlCacheAdapter,
         ttl_hours: int = 24,
         **kwargs
     ):
@@ -224,7 +224,7 @@ class SQLAlchemyPullThroughCache:
             **kwargs: Additional arguments for SQLAlchemy engine
             
         Returns:
-            SQLAlchemyPullThroughCache: Cache instance with SQLite backend
+            SqlCache: Cache instance with SQLite backend
         """
         if db_path == ":memory:":
             db_url = "sqlite:///:memory:"
@@ -237,7 +237,7 @@ class SQLAlchemyPullThroughCache:
         cls,
         connection_string: str,
         table: "Table",
-        data_adapter: SQLAlchemyDataAdapter,
+        data_adapter: SqlCacheAdapter,
         ttl_hours: int = 24,
         **kwargs
     ):
@@ -259,7 +259,7 @@ class SQLAlchemyPullThroughCache:
             **kwargs: Additional arguments for SQLAlchemy engine
             
         Returns:
-            SQLAlchemyPullThroughCache: Cache instance with PostgreSQL backend
+            SqlCache: Cache instance with PostgreSQL backend
         """
         return cls(connection_string, table, data_adapter, ttl_hours, **kwargs)
     
@@ -267,7 +267,7 @@ class SQLAlchemyPullThroughCache:
         self,
         db_url: str,
         table: "Table",
-        data_adapter: SQLAlchemyDataAdapter,
+        data_adapter: SqlCacheAdapter,
         ttl_hours: int = 24,
         echo: bool = False,
         engine_kwargs: Optional[Dict[str, Any]] = None
@@ -750,3 +750,7 @@ class SQLAlchemyPullThroughCache:
         """Close the database connection"""
         if hasattr(self, 'engine'):
             self.engine.dispose()
+
+
+# Backward compatibility aliases
+SQLAlchemyDataAdapter = SqlCacheAdapter

@@ -12,7 +12,7 @@ from sqlalchemy import MetaData, Table, Column, String, Date, Float, Integer
 
 # Only run these tests if SQLAlchemy is available
 try:
-    from cacheness.sql_cache import SQLAlchemyPullThroughCache, SQLAlchemyDataAdapter
+    from cacheness.sql_cache import SqlCache, SqlCacheAdapter
     HAS_SQL_CACHE = True
 except ImportError:
     HAS_SQL_CACHE = False
@@ -36,7 +36,7 @@ class TestSQLCache:
         )
         
         # Create a simple test adapter
-        class TestDataAdapter(SQLAlchemyDataAdapter):
+        class TestSqlCacheAdapter(SqlCacheAdapter):
             def __init__(self, table, test_data=None):
                 self.table = table
                 self.test_data = test_data or []
@@ -53,11 +53,11 @@ class TestSQLCache:
                     return pd.DataFrame(self.test_data)
                 return pd.DataFrame()
         
-        self.adapter = TestDataAdapter(self.test_table)
+        self.adapter = TestSqlCacheAdapter(self.test_table)
     
     def test_cache_initialization(self):
         """Test that cache can be initialized"""
-        cache = SQLAlchemyPullThroughCache(
+        cache = SqlCache(
             db_url="sqlite:///:memory:",  # In-memory SQLite
             table=self.test_table,
             data_adapter=self.adapter,
@@ -80,7 +80,7 @@ class TestSQLCache:
         
         self.adapter.test_data = test_data
         
-        cache = SQLAlchemyPullThroughCache(
+        cache = SqlCache(
             db_url="sqlite:///:memory:",
             table=self.test_table,
             data_adapter=self.adapter,
@@ -99,7 +99,7 @@ class TestSQLCache:
     
     def test_cache_stats(self):
         """Test cache statistics"""
-        cache = SQLAlchemyPullThroughCache(
+        cache = SqlCache(
             db_url="sqlite:///:memory:",
             table=self.test_table,
             data_adapter=self.adapter,
@@ -117,7 +117,7 @@ class TestSQLCache:
     
     def test_cache_management(self):
         """Test cache management operations"""
-        cache = SQLAlchemyPullThroughCache(
+        cache = SqlCache(
             db_url="sqlite:///:memory:",
             table=self.test_table,
             data_adapter=self.adapter,
@@ -137,7 +137,7 @@ class TestSQLCache:
     def test_backend_selection_methods(self):
         """Test database backend selection class methods"""
         # Test SQLite backend selection
-        cache_sqlite = SQLAlchemyPullThroughCache.with_sqlite(
+        cache_sqlite = SqlCache.with_sqlite(
             ":memory:", self.test_table, self.adapter, ttl_hours=12
         )
         
@@ -147,7 +147,7 @@ class TestSQLCache:
         
         # Test DuckDB backend selection (if available)
         try:
-            cache_duck = SQLAlchemyPullThroughCache.with_duckdb(
+            cache_duck = SqlCache.with_duckdb(
                 ":memory:", self.test_table, self.adapter
             )
             # If this succeeds, DuckDB is available
@@ -158,7 +158,7 @@ class TestSQLCache:
             pass
         
         # Test PostgreSQL method (using SQLite URL for testing)
-        cache_pg = SQLAlchemyPullThroughCache.with_postgresql(
+        cache_pg = SqlCache.with_postgresql(
             "sqlite:///:memory:", self.test_table, self.adapter
         )
         # This should fall back to SQLite dialect
@@ -168,7 +168,7 @@ class TestSQLCache:
     def test_gap_detection_logic(self):
         """Test intelligent gap detection in cached data"""
         # Set up adapter with time-series test data for gap detection
-        class GapTestAdapter(SQLAlchemyDataAdapter):
+        class GapTestAdapter(SqlCacheAdapter):
             def __init__(self, table, fetch_count=0):
                 self.table = table
                 self.fetch_count = fetch_count
@@ -187,7 +187,7 @@ class TestSQLCache:
                 ])
         
         adapter = GapTestAdapter(self.test_table)
-        cache = SQLAlchemyPullThroughCache.with_sqlite(
+        cache = SqlCache.with_sqlite(
             ":memory:", self.test_table, adapter
         )
         
@@ -206,7 +206,7 @@ class TestSQLCache:
     def test_ttl_and_expiration(self):
         """Test TTL functionality and expiration logic"""
         # Create cache with short TTL for testing
-        cache = SQLAlchemyPullThroughCache.with_sqlite(
+        cache = SqlCache.with_sqlite(
             ":memory:", self.test_table, self.adapter, ttl_hours=1  # 1 hour
         )
         
@@ -226,7 +226,7 @@ class TestSQLCache:
             {'id': 'TEST', 'date': date(2024, 1, 1), 'value': 100.0, 'count': 1},
         ]
         
-        class UpsertTestAdapter(SQLAlchemyDataAdapter):
+        class UpsertTestAdapter(SqlCacheAdapter):
             def __init__(self, table, data):
                 self.table = table
                 self.data = data
@@ -246,7 +246,7 @@ class TestSQLCache:
                 return pd.DataFrame(updated_data)
         
         adapter = UpsertTestAdapter(self.test_table, test_data)
-        cache = SQLAlchemyPullThroughCache.with_sqlite(
+        cache = SqlCache.with_sqlite(
             ":memory:", self.test_table, adapter
         )
         
@@ -262,7 +262,7 @@ class TestSQLCache:
     
     def test_comprehensive_cache_operations(self):
         """Test comprehensive cache management operations"""
-        cache = SQLAlchemyPullThroughCache.with_sqlite(
+        cache = SqlCache.with_sqlite(
             ":memory:", self.test_table, self.adapter
         )
         
@@ -289,7 +289,7 @@ class TestSQLCache:
     def test_timezone_handling(self):
         """Test that all timestamps use UTC timezone consistently"""
         # Create cache with timezone-aware table
-        cache = SQLAlchemyPullThroughCache.with_sqlite(
+        cache = SqlCache.with_sqlite(
             ":memory:", self.test_table, self.adapter, ttl_hours=1
         )
         
@@ -333,7 +333,7 @@ class TestSQLCache:
     def test_timezone_expiry_consistency(self):
         """Test that TTL expiry logic uses consistent UTC timing"""
         # Create cache with TTL
-        cache = SQLAlchemyPullThroughCache.with_sqlite(
+        cache = SqlCache.with_sqlite(
             ":memory:", self.test_table, self.adapter, ttl_hours=1
         )
         
@@ -365,9 +365,9 @@ class TestSQLCache:
 def test_import_availability():
     """Test that imports work correctly from main package"""
     try:
-        from cacheness import SQLAlchemyPullThroughCache, SQLAlchemyDataAdapter
-        assert SQLAlchemyPullThroughCache is not None
-        assert SQLAlchemyDataAdapter is not None
+        from cacheness import SqlCache, SqlCacheAdapter
+        assert SqlCache is not None
+        assert SqlCacheAdapter is not None
     except ImportError:
         # This is expected if SQLAlchemy is not installed
         pass
@@ -384,7 +384,7 @@ def test_backend_selection_integration():
     # Use autoincrement=False to make it DuckDB-compatible and avoid warnings
     simple_table = Table('simple', metadata, Column('id', Integer, primary_key=True, autoincrement=False))
     
-    class SimpleAdapter(SQLAlchemyDataAdapter):
+    class SimpleAdapter(SqlCacheAdapter):
         def get_table_definition(self):
             return simple_table
         def parse_query_params(self, **kwargs):
@@ -395,18 +395,18 @@ def test_backend_selection_integration():
     adapter = SimpleAdapter()
     
     # Test SQLite method
-    cache_sqlite = SQLAlchemyPullThroughCache.with_sqlite(":memory:", simple_table, adapter)
+    cache_sqlite = SqlCache.with_sqlite(":memory:", simple_table, adapter)
     assert cache_sqlite.engine.dialect.name == "sqlite"
     cache_sqlite.close()
     
     # Test DuckDB method (may fail if not installed)
     try:
-        cache_duck = SQLAlchemyPullThroughCache.with_duckdb(":memory:", simple_table, adapter)
+        cache_duck = SqlCache.with_duckdb(":memory:", simple_table, adapter)
         cache_duck.close()
     except Exception:
         # Expected if duckdb-engine not installed
         pass
     
     # Test PostgreSQL method with fallback URL
-    cache_pg = SQLAlchemyPullThroughCache.with_postgresql("sqlite:///:memory:", simple_table, adapter)
+    cache_pg = SqlCache.with_postgresql("sqlite:///:memory:", simple_table, adapter)
     cache_pg.close()

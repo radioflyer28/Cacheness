@@ -18,13 +18,13 @@ Usage:
     cache = UnifiedCache()
 
     # Force SQLite backend
-    from shared.cache.metadata import SQLiteMetadataBackend
-    backend = SQLiteMetadataBackend("cache.db")
+    from shared.cache.metadata import SqliteBackend
+    backend = SqliteBackend("cache.db")
     cache = UnifiedCache(metadata_backend=backend)
 
     # Force JSON backend
-    from shared.cache.metadata import JsonMetadataBackend
-    backend = JsonMetadataBackend(Path("cache_metadata.json"))
+    from shared.cache.metadata import JsonBackend
+    backend = JsonBackend(Path("cache_metadata.json"))
     cache = UnifiedCache(metadata_backend=backend)
 """
 
@@ -234,7 +234,7 @@ class MetadataBackend(ABC):
         pass
 
 
-class JsonMetadataBackend(MetadataBackend):
+class JsonBackend(MetadataBackend):
     """JSON file-based metadata backend (original implementation)."""
 
     def __init__(self, metadata_file: Path):
@@ -491,7 +491,7 @@ class JsonMetadataBackend(MetadataBackend):
             return len(expired_keys)
 
 
-class SQLiteMetadataBackend(MetadataBackend):
+class SqliteBackend(MetadataBackend):
     """SQLite database-based metadata backend using SQLAlchemy ORM."""
 
     def __init__(self, db_file: str = "cache_metadata.db", echo: bool = False):
@@ -805,7 +805,7 @@ def create_metadata_backend(backend_type: str = "auto", **kwargs) -> MetadataBac
     """
     if backend_type == "json":
         metadata_file = kwargs.get("metadata_file", Path("cache_metadata.json"))
-        return JsonMetadataBackend(metadata_file)
+        return JsonBackend(metadata_file)
     elif backend_type == "sqlite":
         if not SQLALCHEMY_AVAILABLE:
             raise ImportError(
@@ -813,20 +813,20 @@ def create_metadata_backend(backend_type: str = "auto", **kwargs) -> MetadataBac
             )
         db_file = kwargs.get("db_file", "cache_metadata.db")
         echo = kwargs.get("echo", False)
-        return SQLiteMetadataBackend(db_file, echo)
+        return SqliteBackend(db_file, echo)
     elif backend_type == "auto":
         # Auto mode: prefer SQLite, fallback to JSON
         if SQLALCHEMY_AVAILABLE:
             try:
                 db_file = kwargs.get("db_file", "cache_metadata.db")
                 echo = kwargs.get("echo", False)
-                return SQLiteMetadataBackend(db_file, echo)
+                return SqliteBackend(db_file, echo)
             except Exception:
                 # Fall back to JSON if SQLite fails
                 metadata_file = kwargs.get("metadata_file", Path("cache_metadata.json"))
-                return JsonMetadataBackend(metadata_file)
+                return JsonBackend(metadata_file)
         else:
             metadata_file = kwargs.get("metadata_file", Path("cache_metadata.json"))
-            return JsonMetadataBackend(metadata_file)
+            return JsonBackend(metadata_file)
     else:
         raise ValueError(f"Unknown backend type: {backend_type}")

@@ -11,7 +11,7 @@ from sqlalchemy import MetaData, Table, Column, String, Date, Float, Integer, In
 
 # Only run these tests if SQLAlchemy is available
 try:
-    from cacheness.sql_cache import SQLAlchemyPullThroughCache, SQLAlchemyDataAdapter
+    from cacheness.sql_cache import SqlCache, SqlCacheAdapter
     HAS_SQL_CACHE = True
 except ImportError:
     HAS_SQL_CACHE = False
@@ -55,7 +55,7 @@ class TestDocumentationExamples:
     def test_readme_stock_adapter_example(self):
         """Test the stock adapter example from README"""
         
-        class StockAdapter(SQLAlchemyDataAdapter):
+        class StockAdapter(SqlCacheAdapter):
             def get_table_definition(self):
                 return self.stock_table
             
@@ -76,7 +76,7 @@ class TestDocumentationExamples:
         
         # Test DuckDB backend selection (from README)
         try:
-            cache = SQLAlchemyPullThroughCache.with_duckdb(":memory:", self.stock_table, adapter)
+            cache = SqlCache.with_duckdb(":memory:", self.stock_table, adapter)
             data = cache.get_data(symbol="AAPL", start_date="2024-01-01")
             assert not data.empty
             cache.close()
@@ -85,7 +85,7 @@ class TestDocumentationExamples:
             pass
         
         # Test SQLite backend selection (from README)
-        cache = SQLAlchemyPullThroughCache.with_sqlite(":memory:", self.stock_table, adapter)
+        cache = SqlCache.with_sqlite(":memory:", self.stock_table, adapter)
         data = cache.get_data(symbol="AAPL", start_date="2024-01-01")
         assert not data.empty
         assert 'symbol' in data.columns
@@ -95,7 +95,7 @@ class TestDocumentationExamples:
     def test_analytics_example_from_docs(self):
         """Test the analytics example from SQL_CACHE.md"""
         
-        class AnalyticsAdapter(SQLAlchemyDataAdapter):
+        class AnalyticsAdapter(SqlCacheAdapter):
             def get_table_definition(self):
                 return self.analytics_table
             
@@ -118,7 +118,7 @@ class TestDocumentationExamples:
         
         # Test the DuckDB analytics example
         try:
-            cache = SQLAlchemyPullThroughCache.with_duckdb(
+            cache = SqlCache.with_duckdb(
                 ":memory:",
                 self.analytics_table,
                 adapter,
@@ -141,7 +141,7 @@ class TestDocumentationExamples:
     def test_session_cache_example_from_docs(self):
         """Test the user session cache example from SQL_CACHE.md"""
         
-        class SessionAdapter(SQLAlchemyDataAdapter):
+        class SessionAdapter(SqlCacheAdapter):
             def get_table_definition(self):
                 return self.session_table
             
@@ -161,7 +161,7 @@ class TestDocumentationExamples:
         adapter = SessionAdapter()
         
         # Test SQLite session cache example
-        cache = SQLAlchemyPullThroughCache.with_sqlite(
+        cache = SqlCache.with_sqlite(
             ":memory:",
             self.session_table,
             adapter,
@@ -179,7 +179,7 @@ class TestDocumentationExamples:
     def test_backend_comparison_matrix(self):
         """Test that all backends mentioned in docs work"""
         
-        class SimpleAdapter(SQLAlchemyDataAdapter):
+        class SimpleAdapter(SqlCacheAdapter):
             def get_table_definition(self):
                 return self.stock_table
             
@@ -196,18 +196,18 @@ class TestDocumentationExamples:
         # Test all backend selection methods mentioned in docs
         
         # SQLite (should always work)
-        cache_sqlite = SQLAlchemyPullThroughCache.with_sqlite(":memory:", self.stock_table, adapter)
+        cache_sqlite = SqlCache.with_sqlite(":memory:", self.stock_table, adapter)
         assert cache_sqlite.engine.dialect.name == "sqlite"
         cache_sqlite.close()
         
         # In-memory SQLite (mentioned in docs)
-        cache_memory = SQLAlchemyPullThroughCache.with_sqlite(":memory:", self.stock_table, adapter)
+        cache_memory = SqlCache.with_sqlite(":memory:", self.stock_table, adapter)
         assert cache_memory.engine.dialect.name == "sqlite"
         cache_memory.close()
         
         # DuckDB (may not be available)
         try:
-            cache_duck = SQLAlchemyPullThroughCache.with_duckdb(":memory:", self.stock_table, adapter)
+            cache_duck = SqlCache.with_duckdb(":memory:", self.stock_table, adapter)
             assert cache_duck.engine.dialect.name == "duckdb"
             cache_duck.close()
         except Exception:
@@ -215,7 +215,7 @@ class TestDocumentationExamples:
             pass
         
         # PostgreSQL method (using SQLite URL for testing)
-        cache_pg = SQLAlchemyPullThroughCache.with_postgresql("sqlite:///:memory:", self.stock_table, adapter)
+        cache_pg = SqlCache.with_postgresql("sqlite:///:memory:", self.stock_table, adapter)
         # Should fall back to sqlite dialect when using sqlite URL
         assert cache_pg.engine is not None
         cache_pg.close()
@@ -223,7 +223,7 @@ class TestDocumentationExamples:
     def test_ttl_configuration_examples(self):
         """Test TTL configuration examples from docs"""
         
-        class SimpleAdapter(SQLAlchemyDataAdapter):
+        class SimpleAdapter(SqlCacheAdapter):
             def get_table_definition(self):
                 return self.stock_table
             
@@ -238,21 +238,21 @@ class TestDocumentationExamples:
         # Test TTL configurations from documentation
         
         # No expiration (ttl_hours=0)
-        cache_no_exp = SQLAlchemyPullThroughCache.with_sqlite(
+        cache_no_exp = SqlCache.with_sqlite(
             ":memory:", self.stock_table, adapter, ttl_hours=0
         )
         assert cache_no_exp.ttl_hours == 0
         cache_no_exp.close()
         
         # 1 hour expiration
-        cache_1h = SQLAlchemyPullThroughCache.with_sqlite(
+        cache_1h = SqlCache.with_sqlite(
             ":memory:", self.stock_table, adapter, ttl_hours=1
         )
         assert cache_1h.ttl_hours == 1
         cache_1h.close()
         
         # Daily refresh (24 hours)
-        cache_24h = SQLAlchemyPullThroughCache.with_sqlite(
+        cache_24h = SqlCache.with_sqlite(
             ":memory:", self.stock_table, adapter, ttl_hours=24
         )
         assert cache_24h.ttl_hours == 24
@@ -261,7 +261,7 @@ class TestDocumentationExamples:
     def test_cache_operations_from_docs(self):
         """Test cache management operations mentioned in documentation"""
         
-        class SimpleAdapter(SQLAlchemyDataAdapter):
+        class SimpleAdapter(SqlCacheAdapter):
             def get_table_definition(self):
                 return self.stock_table
             
@@ -274,7 +274,7 @@ class TestDocumentationExamples:
                 return kwargs
         
         adapter = SimpleAdapter()
-        cache = SQLAlchemyPullThroughCache.with_sqlite(":memory:", self.stock_table, adapter)
+        cache = SqlCache.with_sqlite(":memory:", self.stock_table, adapter)
         
         # Test cache statistics (mentioned in docs)
         stats = cache.get_cache_stats()
@@ -295,16 +295,16 @@ class TestDocumentationExamples:
 def test_main_package_imports():
     """Test that SQL cache can be imported from main package as documented"""
     try:
-        from cacheness import SQLAlchemyPullThroughCache, SQLAlchemyDataAdapter
+        from cacheness import SqlCache, SqlCacheAdapter
         
         # Test that the classes are available
-        assert SQLAlchemyPullThroughCache is not None
-        assert SQLAlchemyDataAdapter is not None
+        assert SqlCache is not None
+        assert SqlCacheAdapter is not None
         
         # Test that they have the expected methods
-        assert hasattr(SQLAlchemyPullThroughCache, 'with_sqlite')
-        assert hasattr(SQLAlchemyPullThroughCache, 'with_duckdb')
-        assert hasattr(SQLAlchemyPullThroughCache, 'with_postgresql')
+        assert hasattr(SqlCache, 'with_sqlite')
+        assert hasattr(SqlCache, 'with_duckdb')
+        assert hasattr(SqlCache, 'with_postgresql')
         
     except ImportError:
         # Expected if SQLAlchemy not installed
@@ -317,11 +317,11 @@ def test_recommended_installation():
         # These imports should work with recommended installation
         import sqlalchemy
         import pandas
-        from cacheness import SQLAlchemyPullThroughCache
+        from cacheness import SqlCache
         
         assert sqlalchemy is not None
         assert pandas is not None
-        assert SQLAlchemyPullThroughCache is not None
+        assert SqlCache is not None
         
     except ImportError:
         pytest.skip("Recommended dependencies not available")
