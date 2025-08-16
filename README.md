@@ -66,7 +66,7 @@ result2 = expensive_computation(5)  # Retrieved from cache
 
 ### SQL Pull-Through Cache
 
-For intelligent API caching with automatic gap detection:
+For intelligent API caching with automatic gap detection and database backend selection:
 
 ```python
 from cacheness import SQLAlchemyPullThroughCache, SQLAlchemyDataAdapter
@@ -93,10 +93,64 @@ class StockAdapter(SQLAlchemyDataAdapter):
     def parse_query_params(self, **kwargs):
         return {'symbol': kwargs['symbol'], 'date': {'start': kwargs['start_date']}}
 
-# Create and use pull-through cache
-cache = SQLAlchemyPullThroughCache("stocks.db", stock_table, StockAdapter())
-data = cache.get_data(symbol="AAPL", start_date="2024-01-01")  # Auto-fetches missing data
+# Choose backend based on workload:
+# DuckDB for analytical/columnar workloads (time-series analysis, aggregations)
+cache = SQLAlchemyPullThroughCache.with_duckdb("stocks.db", stock_table, StockAdapter())
+
+# SQLite for transactional/row-wise operations (ACID compliance, moderate concurrency)
+cache = SQLAlchemyPullThroughCache.with_sqlite("stocks.db", stock_table, StockAdapter())
+
+# PostgreSQL for production environments (high concurrency, advanced features)
+cache = SQLAlchemyPullThroughCache.with_postgresql("postgresql://...", stock_table, StockAdapter())
+
+# Get data - automatically fetches missing data gaps
+data = cache.get_data(symbol="AAPL", start_date="2024-01-01")
 ```
+
+## Database Backend Selection
+
+The SQL pull-through cache supports multiple database backends optimized for different workload characteristics:
+
+### DuckDB Backend - Analytical Workloads
+```python
+# Optimized for columnar efficiency: time-series analysis, aggregations, data science
+cache = SQLAlchemyPullThroughCache.with_duckdb("analytics.db", table, adapter)
+```
+**Best for:**
+- Time-series data analysis and aggregations
+- Large dataset processing with analytical queries
+- Data science workflows requiring columnar operations
+- OLAP-style workloads
+
+### SQLite Backend - Transactional Workloads  
+```python
+# Optimized for row-wise transactional efficiency: ACID compliance, moderate concurrency
+cache = SQLAlchemyPullThroughCache.with_sqlite("cache.db", table, adapter)
+```
+**Best for:**
+- Row-wise operations and transactional workloads
+- ACID compliance requirements
+- Moderate concurrent access patterns
+- Simple deployment and maintenance
+
+### PostgreSQL Backend - Production Environments
+```python
+# Full-featured production database: high concurrency, advanced SQL features
+cache = SQLAlchemyPullThroughCache.with_postgresql("postgresql://user:pass@host/db", table, adapter)
+```
+**Best for:**
+- Production environments with high concurrency
+- Advanced SQL features and complex queries
+- Horizontal scaling requirements
+- Enterprise-grade reliability
+
+### Backend Comparison
+
+| Backend | Best Use Case | Concurrency | Deployment | Query Performance |
+|---------|---------------|-------------|------------|------------------|
+| **DuckDB** | Analytics & Data Science | Low-Medium | Simple | Excellent (Analytical) |
+| **SQLite** | Transactional Apps | Medium | Very Simple | Good (Row-wise) |
+| **PostgreSQL** | Production Systems | High | Complex | Excellent (All types) |
 
 ## Core Concepts
 

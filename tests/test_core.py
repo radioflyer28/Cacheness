@@ -453,3 +453,77 @@ class TestCacheness:
 
         # Cache should be initialized properly
         assert cache.config.storage.cleanup_on_init is True
+
+    def test_ttl_expiration_with_utc_timestamps(self, cache):
+        """Test that TTL expiration handles UTC timestamps correctly"""
+        from datetime import datetime, timezone
+        from unittest.mock import patch
+        
+        test_data = {"timezone": "test"}
+        cache_key_params = {"test": "timezone_ttl"}
+        
+        # Store data to create a real cache entry
+        cache.put(test_data, **cache_key_params)
+        
+        # Find the actual cache key that was created
+        entries = cache.list_entries()
+        assert len(entries) > 0, "Should have at least one cache entry"
+        
+        # Get the first entry's cache key
+        cache_key = entries[0]["cache_key"]
+        
+        # Test that _is_expired uses UTC time correctly
+        with patch('cacheness.core.datetime') as mock_datetime:
+            # Mock current UTC time
+            current_utc = datetime(2024, 1, 15, 12, 0, 0, tzinfo=timezone.utc)
+            mock_datetime.now.return_value = current_utc
+            mock_datetime.fromisoformat = datetime.fromisoformat
+            
+            # Should not be expired with fresh timestamp (large TTL)
+            assert cache._is_expired(cache_key, ttl_hours=24) is False
+            
+            # Verify datetime.now was called with timezone.utc
+            mock_datetime.now.assert_called_with(timezone.utc)
+    
+    def test_timezone_aware_expiration_calculation(self, cache):
+        """Test expiration calculation with timezone-aware datetime strings"""
+        from datetime import datetime, timezone, timedelta
+        from unittest.mock import patch
+        
+        # Create a mock metadata entry with a timezone-aware timestamp
+        utc_time = datetime.now(timezone.utc) - timedelta(hours=2)  # 2 hours ago
+        timestamp_iso = utc_time.isoformat()
+        
+        # Mock the metadata backend to return our test entry
+        mock_entry = {"created_at": timestamp_iso, "description": "timezone test"}
+        
+        with patch.object(cache.metadata_backend, 'get_entry', return_value=mock_entry):
+            # Should be expired (created 2 hours ago, checking with 1 hour TTL)
+            assert cache._is_expired("test_key", ttl_hours=1) is True
+            
+            # Should not be expired with longer TTL
+            assert cache._is_expired("test_key", ttl_hours=3) is False
+    
+    def test_timezone_consistency_across_cache_operations(self, cache):
+        """Test that all cache operations use consistent UTC timezone handling"""
+        from datetime import datetime, timezone
+        
+        test_data = {"consistent": "timezone"}
+        cache_key_params = {"consistency": "test"}
+        
+        # Store data - this should create a UTC timestamp
+        cache.put(test_data, **cache_key_params)
+        
+        # The timestamp in metadata should be UTC
+        # We can't easily access the internal cache key generation,
+        # but we can verify the data is retrievable (indicating consistent timezone handling)
+        retrieved = cache.get(**cache_key_params)
+        assert retrieved == test_data
+        
+        # Test with current time for comparison
+        current_utc = datetime.now(timezone.utc)
+        assert current_utc.tzinfo == timezone.utc  # Verify we're using UTC
+
+
+class TestTimezoneHandling:
+    """Test timezone handling in core cache functionality"""

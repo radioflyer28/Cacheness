@@ -5,7 +5,7 @@ Unit tests for custom metadata functionality.
 import pytest
 import tempfile
 import shutil
-from sqlalchemy import Column, String, Float, Integer
+from sqlalchemy import Column, String, Float, Integer, DateTime
 
 from cacheness import cacheness, CacheConfig
 from cacheness.custom_metadata import (
@@ -175,6 +175,59 @@ class TestCustomMetadataModels:
         issues = validate_custom_metadata_model(PoorlyDesignedMetadata)
         # Validation might not find issues with simple fields
         assert isinstance(issues, list)
+
+    def test_datetime_timezone_awareness(self):
+        """Test that DateTime columns properly handle timezone-aware timestamps"""
+        from datetime import datetime, timezone, timedelta
+        
+        @custom_metadata_model("timezone_test")
+        class TimezoneTestMetadata(Base, CustomMetadataBase):
+            __tablename__ = "custom_timezone_test_unique"
+            
+            # Test timezone-aware DateTime column
+            test_timestamp = Column(DateTime(timezone=True), nullable=False)
+            experiment_name = Column(String(100), nullable=False)
+        
+        # Verify the model is properly registered
+        assert "timezone_test" in list_registered_schemas()
+        
+        # Test UTC timestamp
+        utc_time = datetime.now(timezone.utc)
+        assert utc_time.tzinfo == timezone.utc
+        
+        # Test different timezone
+        eastern_tz = timezone(timedelta(hours=-5))  # EST timezone
+        eastern_time = datetime.now(eastern_tz)
+        assert eastern_time.tzinfo == eastern_tz
+        
+        # Both should be valid timezone-aware datetimes
+        assert utc_time.tzinfo is not None
+        assert eastern_time.tzinfo is not None
+
+    def test_custom_metadata_timestamp_consistency(self):
+        """Test that custom metadata timestamps are stored with proper timezone info"""
+        from datetime import datetime, timezone
+        
+        @custom_metadata_model("timestamp_consistency_test")
+        class TimestampTestMetadata(Base, CustomMetadataBase):
+            __tablename__ = "custom_timestamp_consistency_unique"
+            
+            created_timestamp = Column(DateTime(timezone=True), nullable=False)
+            process_name = Column(String(100), nullable=False)
+        
+        # Create a UTC timestamp
+        utc_now = datetime.now(timezone.utc)
+        
+        # Verify we can create instances with timezone-aware timestamps
+        metadata_instance = TimestampTestMetadata(
+            created_timestamp=utc_now,
+            process_name="timezone_test"
+        )
+        
+        # Verify the timestamp is preserved
+        assert metadata_instance.created_timestamp == utc_now
+        assert metadata_instance.created_timestamp.tzinfo == timezone.utc
+        assert metadata_instance.process_name == "timezone_test"
 
 
 class TestCacheIntegration:

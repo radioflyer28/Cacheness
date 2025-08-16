@@ -41,7 +41,7 @@ Example Usage:
 """
 
 from abc import ABC, abstractmethod
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -145,7 +145,123 @@ class SQLAlchemyPullThroughCache:
     
     This cache automatically fetches missing data from external sources
     and stores it in a local database for fast subsequent access.
+    
+    Supported Database Backends:
+    - DuckDB: Optimized for analytical/columnar workloads with fast aggregations
+    - SQLite: Optimized for transactional/row-wise operations with ACID guarantees
+    - PostgreSQL: Full-featured RDBMS for production environments
+    - MySQL: Alternative production RDBMS option
     """
+    
+    @classmethod
+    def with_duckdb(
+        cls,
+        db_path: str,
+        table: "Table",
+        data_adapter: SQLAlchemyDataAdapter,
+        ttl_hours: int = 24,
+        **kwargs
+    ):
+        """
+        Create a cache using DuckDB backend (optimized for analytical workloads).
+        
+        DuckDB is ideal for:
+        - Time-series data analysis
+        - Large datasets with aggregations
+        - Columnar data processing
+        - Fast analytical queries
+        
+        DuckDB Limitations:
+        - No support for auto-incrementing Integer primary keys (SERIAL type)
+        - Use composite primary keys or set autoincrement=False
+        - Optimized for read-heavy analytical workloads
+        
+        Args:
+            db_path: Path to DuckDB database file
+            table: SQLAlchemy Table object (avoid autoincrement=True for primary keys)
+            data_adapter: Data adapter for fetching external data
+            ttl_hours: Cache TTL in hours
+            **kwargs: Additional arguments for SQLAlchemy engine
+            
+        Returns:
+            SQLAlchemyPullThroughCache: Cache instance with DuckDB backend
+            
+        Example:
+            >>> # Good: Composite primary key or no autoincrement
+            >>> table = Table('data', metadata,
+            ...     Column('symbol', String(10), primary_key=True),
+            ...     Column('date', Date, primary_key=True),
+            ...     Column('value', Float)
+            ... )
+            >>> cache = SQLAlchemyPullThroughCache.with_duckdb("data.db", table, adapter)
+        """
+        db_url = f"duckdb:///{db_path}"
+        return cls(db_url, table, data_adapter, ttl_hours, **kwargs)
+    
+    @classmethod
+    def with_sqlite(
+        cls,
+        db_path: str,
+        table: "Table", 
+        data_adapter: SQLAlchemyDataAdapter,
+        ttl_hours: int = 24,
+        **kwargs
+    ):
+        """
+        Create a cache using SQLite backend (optimized for transactional workloads).
+        
+        SQLite is ideal for:
+        - Row-wise operations and updates
+        - ACID transaction requirements
+        - Concurrent read access
+        - Simple deployment scenarios
+        
+        Args:
+            db_path: Path to SQLite database file (use ":memory:" for in-memory)
+            table: SQLAlchemy Table object
+            data_adapter: Data adapter for fetching external data
+            ttl_hours: Cache TTL in hours
+            **kwargs: Additional arguments for SQLAlchemy engine
+            
+        Returns:
+            SQLAlchemyPullThroughCache: Cache instance with SQLite backend
+        """
+        if db_path == ":memory:":
+            db_url = "sqlite:///:memory:"
+        else:
+            db_url = f"sqlite:///{db_path}"
+        return cls(db_url, table, data_adapter, ttl_hours, **kwargs)
+    
+    @classmethod
+    def with_postgresql(
+        cls,
+        connection_string: str,
+        table: "Table",
+        data_adapter: SQLAlchemyDataAdapter,
+        ttl_hours: int = 24,
+        **kwargs
+    ):
+        """
+        Create a cache using PostgreSQL backend (production-ready RDBMS).
+        
+        PostgreSQL is ideal for:
+        - Production environments
+        - Advanced SQL features
+        - High concurrency
+        - Complex data types
+        
+        Args:
+            connection_string: PostgreSQL connection string
+                             (e.g., "postgresql://user:pass@localhost/dbname")
+            table: SQLAlchemy Table object
+            data_adapter: Data adapter for fetching external data
+            ttl_hours: Cache TTL in hours
+            **kwargs: Additional arguments for SQLAlchemy engine
+            
+        Returns:
+            SQLAlchemyPullThroughCache: Cache instance with PostgreSQL backend
+        """
+        return cls(connection_string, table, data_adapter, ttl_hours, **kwargs)
     
     def __init__(
         self,
@@ -159,8 +275,18 @@ class SQLAlchemyPullThroughCache:
         """
         Initialize the SQL pull-through cache.
         
+        Database Backend Selection:
+        - Use class methods (.with_duckdb(), .with_sqlite(), .with_postgresql()) 
+          for explicit backend selection
+        - Or provide a full SQLAlchemy URL for custom configuration
+        - Simple file paths default to DuckDB for analytical workloads
+        
         Args:
-            db_url: Database URL (supports DuckDB, SQLite, PostgreSQL)
+            db_url: Database URL or file path
+                   - "stocks.db" → DuckDB (analytical/columnar)
+                   - "sqlite:///stocks.db" → SQLite (transactional/row-wise)
+                   - "duckdb:///stocks.db" → DuckDB (explicit)
+                   - "postgresql://user:pass@host/db" → PostgreSQL
             table: SQLAlchemy Table object defining the cache schema
             data_adapter: Adapter for fetching data from external sources
             ttl_hours: Cache TTL in hours (0 for no expiration)
@@ -192,49 +318,41 @@ class SQLAlchemyPullThroughCache:
         self.table = table
         self._add_cache_columns()
         
-        # Create table in database
-        self.table.create(self.engine, checkfirst=True)
-        
-        # Cache table information for performance
-        self._setup_query_helpers()
-        """
-        Initialize the SQL pull-through cache.
-        
-        Args:
-            db_url: Database URL (supports DuckDB, SQLite, PostgreSQL)
-            table: SQLAlchemy Table object defining the cache schema
-            data_adapter: Adapter for fetching data from external sources
-            ttl_hours: Cache TTL in hours (0 for no expiration)
-            echo: Whether to echo SQL statements for debugging
-            engine_kwargs: Additional arguments for SQLAlchemy engine
-        """
-        check_dependencies()
-        
-        # Normalize database URL
-        if not any(db_url.startswith(prefix) for prefix in [
-            'duckdb://', 'sqlite://', 'postgresql://', 'mysql://'
-        ]):
-            # Assume it's a file path, default to DuckDB
-            db_url = f'duckdb:///{db_url}'
-        
-        # Create SQLAlchemy engine
-        engine_kwargs = engine_kwargs or {}
-        self.engine = create_engine(db_url, echo=echo, **engine_kwargs)
-        self.Session = sessionmaker(bind=self.engine)
-        
-        # Store configuration
-        self.data_adapter = data_adapter
-        self.ttl_hours = ttl_hours
-        
-        # Set up table with cache metadata columns
-        self.table = table
-        self._add_cache_columns()
+        # Handle DuckDB-specific compatibility issues
+        self._handle_duckdb_compatibility()
         
         # Create table in database
         self.table.create(self.engine, checkfirst=True)
         
         # Cache table information for performance
         self._setup_query_helpers()
+    
+    def _handle_duckdb_compatibility(self):
+        """
+        Handle DuckDB-specific compatibility issues.
+        
+        DuckDB Limitations:
+        - No SERIAL type support (auto-incrementing columns)
+        - Limited support for some SQLAlchemy features
+        - Optimized for analytical/read-heavy workloads
+        """
+        if self.engine.dialect.name == 'duckdb':
+            # Check for potential compatibility issues
+            for column in self.table.columns:
+                if (hasattr(column.type, 'python_type') and 
+                    column.type.python_type is int and 
+                    column.primary_key and 
+                    getattr(column, 'autoincrement', None) is not False):
+                    
+                    import warnings
+                    warnings.warn(
+                        f"Column '{column.name}' may cause issues with DuckDB due to "
+                        "auto-incrementing Integer primary keys. DuckDB doesn't support "
+                        "SERIAL types. Consider using composite primary keys or "
+                        "explicitly set autoincrement=False for DuckDB compatibility.",
+                        UserWarning,
+                        stacklevel=3
+                    )
     
     def _add_cache_columns(self):
         """Add cache metadata columns to the table if not present"""
@@ -243,16 +361,16 @@ class SQLAlchemyPullThroughCache:
             
         existing_columns = {col.name for col in self.table.columns}
         
-        # Add cached_at timestamp
+        # Add cached_at timestamp (UTC timezone-aware)
         if 'cached_at' not in existing_columns:
             self.table.append_column(
-                Column('cached_at', DateTime, default=func.now(), nullable=False)  # type: ignore
+                Column('cached_at', DateTime(timezone=True), nullable=False)  # type: ignore
             )
         
-        # Add expires_at timestamp if TTL is configured
+        # Add expires_at timestamp if TTL is configured (UTC timezone-aware)
         if 'expires_at' not in existing_columns and self.ttl_hours > 0:
             self.table.append_column(
-                Column('expires_at', DateTime, nullable=True)  # type: ignore
+                Column('expires_at', DateTime(timezone=True), nullable=True)  # type: ignore
             )
     
     def _setup_query_helpers(self):
@@ -365,12 +483,13 @@ class SQLAlchemyPullThroughCache:
                 # Exact match
                 conditions.append(column == value)
         
-        # Add TTL condition if expires_at column exists
+        # Add TTL condition if expires_at column exists (using UTC)
         if 'expires_at' in self.table.c:
+            current_utc = datetime.now(timezone.utc)
             conditions.append(
                 or_(  # type: ignore
                     self.table.c.expires_at.is_(None),
-                    self.table.c.expires_at > func.now()  # type: ignore
+                    self.table.c.expires_at > current_utc  # type: ignore
                 )
             )
         
@@ -381,12 +500,12 @@ class SQLAlchemyPullThroughCache:
         if data.empty:
             return
         
-        # Add cache metadata
+        # Add cache metadata (using UTC timestamps)
         data = data.copy()
         if 'cached_at' in self.table.c:
-            data['cached_at'] = datetime.now()
+            data['cached_at'] = datetime.now(timezone.utc)
         if 'expires_at' in self.table.c and self.ttl_hours > 0:
-            data['expires_at'] = datetime.now() + timedelta(hours=self.ttl_hours)
+            data['expires_at'] = datetime.now(timezone.utc) + timedelta(hours=self.ttl_hours)
         
         # Filter to only include columns that exist in the table
         table_columns = {col.name for col in self.table.columns}
@@ -559,8 +678,9 @@ class SQLAlchemyPullThroughCache:
             
         try:
             with self.Session() as session:
+                current_utc = datetime.now(timezone.utc)
                 stmt = delete(self.table).where(  # type: ignore
-                    self.table.c.expires_at < func.now()  # type: ignore
+                    self.table.c.expires_at < current_utc  # type: ignore
                 )
                 result = session.execute(stmt)
                 session.commit()
@@ -589,11 +709,12 @@ class SQLAlchemyPullThroughCache:
                     'primary_keys': self.primary_key_cols
                 }
                 
-                # Expired records count
+                # Expired records count (using UTC)
                 if 'expires_at' in self.table.c:
+                    current_utc = datetime.now(timezone.utc)
                     expired_count = session.execute(
                         select(func.count()).select_from(self.table)  # type: ignore
-                        .where(self.table.c.expires_at < func.now())  # type: ignore
+                        .where(self.table.c.expires_at < current_utc)  # type: ignore
                     ).scalar()
                     stats['expired_records'] = expired_count
                 

@@ -52,7 +52,7 @@ except ImportError:
     _SQLAlchemyPullThroughCache = None
     _SQLAlchemyDataAdapter = None
 
-__version__ = "0.3.4"
+__version__ = "0.3.5"
 __author__ = "radioflyer28"
 __email__ = "akgithub.2drwc@aleeas.com"
 
