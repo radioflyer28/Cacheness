@@ -1,6 +1,6 @@
 [project]
 name = "cacheness"
-version = "0.3.5"
+version = "0.3.6"
 description = "High-performance disk caching library using Blosc compression, geared toward numpy arrays and dataframes and pickle-ing for everything else."
 readme = "README.md"
 authors = [
@@ -33,6 +33,9 @@ dev = [
     "pytest>=8.4.1",
     "pytest-cov>=6.2.1",
     "ruff>=0.12.8",
+]
+tensorflow = [
+    "tensorflow>=2.0.0",
 ]
 
 [build-system]
