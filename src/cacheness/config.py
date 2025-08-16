@@ -25,6 +25,8 @@ class CacheStorageConfig:
     max_cache_size_mb: Optional[int] = 2000  # Match test expectation
     cleanup_on_init: bool = True  # Match test expectation
     verify_cache_integrity: bool = True
+    create_cache_dir: bool = True  # Automatically create cache directory if it doesn't exist
+    temp_dir: Optional[str] = None  # Temporary directory for atomic writes (None = use cache_dir/tmp)
 
     def __post_init__(self):
         """Validate storage configuration."""
@@ -52,6 +54,8 @@ class CacheMetadataConfig:
     store_cache_key_params: bool = (
         True  # Store cache key parameters in metadata for querying
     )
+    enable_cache_stats: bool = True  # Track cache hit/miss statistics
+    auto_cleanup_expired: bool = True  # Automatically clean up expired entries
 
     def __post_init__(self):
         """Validate metadata backend configuration."""
@@ -83,6 +87,10 @@ class CompressionConfig:
     # Object (pickle) compression
     pickle_compression_codec: str = "zstd"  # lz4, zstd, gzip
     pickle_compression_level: int = 5
+    
+    # Performance and safety options
+    enable_parallel_compression: bool = True  # Use multiple threads for compression when available
+    compression_threshold_bytes: int = 1024  # Only compress objects larger than this threshold
 
     def __post_init__(self):
         """Validate compression configuration."""
@@ -100,9 +108,13 @@ class CompressionConfig:
         if not (0 <= self.blosc2_array_clevel <= 9):
             raise ValueError("blosc2_array_clevel must be between 0 and 9")
 
+        if self.compression_threshold_bytes < 0:
+            raise ValueError("compression_threshold_bytes must be non-negative")
+
         logger.debug(
             f"Compression configured: parquet={self.parquet_compression}, "
-            f"pickle={self.pickle_compression_codec}@{self.pickle_compression_level}"
+            f"pickle={self.pickle_compression_codec}@{self.pickle_compression_level}, "
+            f"threshold={self.compression_threshold_bytes}B"
         )
 
 
@@ -124,6 +136,9 @@ class SerializationConfig:
     # Recursion and depth limits
     max_tuple_recursive_length: int = 10
     max_collection_depth: int = 10
+    
+    # Performance and safety options
+    enable_type_validation: bool = True  # Validate types during key generation
 
     def __post_init__(self):
         """Validate serialization configuration."""
@@ -152,6 +167,10 @@ class HandlerConfig:
     enable_polars_series: bool = True
     enable_numpy_arrays: bool = True
     enable_object_pickle: bool = True
+    enable_tensorflow_tensors: bool = False  # Disabled by default due to import issues
+    
+    # Advanced serialization options
+    enable_dill_fallback: bool = True  # Use dill for objects that pickle can't handle
 
     def __post_init__(self):
         """Validate handler configuration."""
@@ -164,6 +183,7 @@ class HandlerConfig:
                 "polars_dataframes",
                 "pandas_series",
                 "polars_series",
+                "tensorflow_tensors",
             }
 
             invalid_handlers = set(self.handler_priority) - valid_handlers
@@ -215,6 +235,13 @@ class CacheConfig:
         enable_polars_series: Optional[bool] = None,
         enable_numpy_arrays: Optional[bool] = None,
         enable_object_pickle: Optional[bool] = None,
+        enable_tensorflow_tensors: Optional[bool] = None,
+        enable_dill_fallback: Optional[bool] = None,
+        # Additional useful parameters
+        enable_cache_stats: Optional[bool] = None,
+        auto_cleanup_expired: Optional[bool] = None,
+        compression_threshold_bytes: Optional[int] = None,
+        enable_parallel_compression: Optional[bool] = None,
         **kwargs,
     ):
         """Initialize configuration with backwards compatibility support."""
@@ -269,6 +296,20 @@ class CacheConfig:
             self.handlers.enable_numpy_arrays = enable_numpy_arrays
         if enable_object_pickle is not None:
             self.handlers.enable_object_pickle = enable_object_pickle
+        if enable_tensorflow_tensors is not None:
+            self.handlers.enable_tensorflow_tensors = enable_tensorflow_tensors
+        if enable_dill_fallback is not None:
+            self.handlers.enable_dill_fallback = enable_dill_fallback
+
+        # Map additional configuration parameters
+        if enable_cache_stats is not None:
+            self.metadata.enable_cache_stats = enable_cache_stats
+        if auto_cleanup_expired is not None:
+            self.metadata.auto_cleanup_expired = auto_cleanup_expired
+        if compression_threshold_bytes is not None:
+            self.compression.compression_threshold_bytes = compression_threshold_bytes
+        if enable_parallel_compression is not None:
+            self.compression.enable_parallel_compression = enable_parallel_compression
 
         # Handle handler configuration and compression parameters
         for key, value in kwargs.items():

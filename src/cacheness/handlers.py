@@ -43,7 +43,10 @@ from .compress_pickle import (
     write_file as write_compressed_pickle,
     read_file as read_compressed_pickle,
     is_pickleable,
+    is_dill_serializable,
+    verify_dill_serializable,
     BLOSC_AVAILABLE,
+    DILL_AVAILABLE,
     optimize_compression_params,
 )
 
@@ -55,6 +58,15 @@ try:
 except ImportError:
     blosc2 = None  # type: ignore
     BLOSC2_AVAILABLE = False
+
+# Optional dependency - dill for enhanced object serialization
+try:
+    import dill
+
+    DILL_AVAILABLE = True
+except ImportError:
+    dill = None  # type: ignore
+    DILL_AVAILABLE = False
 
 # Optional dependency - TensorFlow for tensor compression (completely lazy loaded)
 TENSORFLOW_AVAILABLE = False
@@ -748,8 +760,8 @@ class TensorFlowTensorHandler(CacheHandler):
 class ObjectHandler(CacheHandler):
     """Handler for general Python objects using compressed pickle."""
 
-    def can_handle(self, data: Any) -> bool:
-        """Check if data can be pickled (and isn't handled by other handlers)."""
+    def can_handle(self, data: Any, config: Any = None) -> bool:
+        """Check if data can be pickled or dill-serialized (and isn't handled by other handlers)."""
         # Don't handle DataFrames if specialized handlers can handle them
         if POLARS_AVAILABLE and pl is not None and isinstance(data, pl.DataFrame):
             # Check if PolarsDataFrameHandler would reject this (Object types, etc.)
@@ -759,7 +771,13 @@ class ObjectHandler(CacheHandler):
                 data.write_parquet(io.BytesIO())
                 return False  # Specialized handler can handle it
             except Exception:
-                return is_pickleable(data)  # We can handle it as fallback
+                # Try pickle first
+                if is_pickleable(data):
+                    return True
+                # Then try dill as fallback if enabled
+                if config and hasattr(config, 'handlers') and config.handlers.enable_dill_fallback:
+                    return is_dill_serializable(data)
+                return False
 
         if PANDAS_AVAILABLE and pd is not None and isinstance(data, pd.DataFrame):
             # Check if PandasDataFrameHandler would reject this (complex objects, etc.)
@@ -769,7 +787,13 @@ class ObjectHandler(CacheHandler):
                 data.to_parquet(io.BytesIO())
                 return False  # Specialized handler can handle it
             except Exception:
-                return is_pickleable(data)  # We can handle it as fallback
+                # Try pickle first
+                if is_pickleable(data):
+                    return True
+                # Then try dill as fallback if enabled
+                if config and hasattr(config, 'handlers') and config.handlers.enable_dill_fallback:
+                    return is_dill_serializable(data)
+                return False
 
         # For Series, only handle if specialized handlers can't (i.e., mixed-type Series)
         if POLARS_AVAILABLE and pl is not None and isinstance(data, pl.Series):
@@ -781,7 +805,13 @@ class ObjectHandler(CacheHandler):
                 temp_df.write_parquet(io.BytesIO())
                 return False  # Specialized handler can handle it
             except Exception:
-                return is_pickleable(data)  # We can handle it as fallback
+                # Try pickle first
+                if is_pickleable(data):
+                    return True
+                # Then try dill as fallback if enabled
+                if config and hasattr(config, 'handlers') and config.handlers.enable_dill_fallback:
+                    return is_dill_serializable(data)
+                return False
 
         if PANDAS_AVAILABLE and pd is not None and isinstance(data, pd.Series):
             # Check if PandasSeriesHandler would reject this (mixed types)
@@ -794,7 +824,13 @@ class ObjectHandler(CacheHandler):
                 )  # Keep index for proper compatibility check
                 return False  # Specialized handler can handle it
             except Exception:
-                return is_pickleable(data)  # We can handle it as fallback
+                # Try pickle first
+                if is_pickleable(data):
+                    return True
+                # Then try dill as fallback if enabled
+                if config and hasattr(config, 'handlers') and config.handlers.enable_dill_fallback:
+                    return is_dill_serializable(data)
+                return False
 
         # Don't handle arrays - let ArrayHandler do that
         if isinstance(data, np.ndarray):
@@ -804,17 +840,54 @@ class ObjectHandler(CacheHandler):
         ):
             return False
 
-        return is_pickleable(data)
+        # Try pickle first
+        if is_pickleable(data):
+            return True
+        # Then try dill as fallback if enabled
+        if config and hasattr(config, 'handlers') and config.handlers.enable_dill_fallback:
+            return is_dill_serializable(data)
+        return False
 
     def put(self, data: Any, file_path: Path, config: Any) -> Dict[str, Any]:
-        """Store object using compressed pickle or fallback to standard pickle."""
-        if not is_pickleable(data):
-            raise ValueError(
-                f"Object of type {type(data)} is not pickleable and cannot be cached"
-            )
+        """Store object using compressed pickle with dill fallback."""
+        # Determine serialization method: try pickle first, then dill if enabled
+        use_pickle = is_pickleable(data)
+        use_dill = False
+        serializer_name = "pickle"
+        
+        if not use_pickle:
+            # Only try dill if enabled in config
+            if config and hasattr(config, 'handlers') and config.handlers.enable_dill_fallback:
+                use_dill = is_dill_serializable(data)
+                if use_dill:
+                    serializer_name = "dill"
+            
+            if not use_dill:
+                dill_status = " (dill disabled)" if not (config and hasattr(config, 'handlers') and config.handlers.enable_dill_fallback) else ""
+                raise ValueError(
+                    f"Object of type {type(data)} cannot be serialized with pickle{dill_status}"
+                )
+
+        # Check if we should use compression based on size threshold
+        should_compress = BLOSC_AVAILABLE
+        if should_compress:
+            # Get a rough estimate of object size by pickling it first
+            import pickle
+            try:
+                if use_dill and DILL_AVAILABLE and dill is not None:
+                    test_data = dill.dumps(data, protocol=dill.HIGHEST_PROTOCOL)
+                else:
+                    test_data = pickle.dumps(data, protocol=pickle.HIGHEST_PROTOCOL)
+                
+                # Only compress if object is larger than threshold
+                if len(test_data) < config.compression.compression_threshold_bytes:
+                    should_compress = False
+            except Exception:
+                # If we can't estimate size, use compression anyway
+                should_compress = BLOSC_AVAILABLE
 
         # Ensure clean path without existing extension
-        if BLOSC_AVAILABLE:
+        if should_compress:
             pickle_path = file_path.with_suffix("").with_suffix(
                 f".pkl.{config.compression.pickle_compression_codec}"
             )
@@ -832,26 +905,38 @@ class ObjectHandler(CacheHandler):
                 ),
             )
 
-            # Use compressed pickle with optimized parameters
-            write_compressed_pickle(
-                data,
-                pickle_path,
-                nparray=False,  # Don't use numpy optimization for general objects
-                **compression_params,
-            )
-            storage_format = "compressed_pickle"
+            # Use the appropriate serializer with compression
+            if use_dill:
+                # Use dill for serialization but still apply blosc compression
+                self._write_compressed_dill(
+                    data, pickle_path, compression_params
+                )
+            else:
+                # Use compressed pickle with optimized parameters
+                write_compressed_pickle(
+                    data,
+                    pickle_path,
+                    nparray=False,  # Don't use numpy optimization for general objects
+                    **compression_params,
+                )
+            storage_format = f"compressed_{serializer_name}"
         else:
-            # Fall back to standard pickle when blosc is not available
+            # Fall back to standard serialization when blosc is not available
             pickle_path = file_path.with_suffix("").with_suffix(".pkl")
-            import pickle
-
-            with open(pickle_path, "wb") as f:
-                pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
-            storage_format = "pickle"
+            
+            if use_dill and DILL_AVAILABLE and dill is not None:
+                with open(pickle_path, "wb") as f:
+                    dill.dump(data, f, protocol=dill.HIGHEST_PROTOCOL)
+            else:
+                import pickle
+                with open(pickle_path, "wb") as f:
+                    pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+            storage_format = serializer_name
 
         metadata = {
             "object_type": str(type(data)),
             "storage_format": storage_format,
+            "serializer": serializer_name,
             "compression_codec": config.compression.pickle_compression_codec
             if BLOSC_AVAILABLE
             else None,
@@ -864,12 +949,62 @@ class ObjectHandler(CacheHandler):
             "metadata": metadata,
         }
 
-    def get(self, file_path: Path, metadata: Dict[str, Any]) -> Any:
-        """Load object using compressed pickle or standard pickle."""
-        storage_format = metadata.get("storage_format", "compressed_pickle")
+    def _write_compressed_dill(self, data: Any, file_path: Path, compression_params: Dict[str, Any]) -> None:
+        """Write object using dill serialization with blosc compression."""
+        if not DILL_AVAILABLE or dill is None:
+            raise ValueError("dill is not available for serialization")
+        
+        if not BLOSC_AVAILABLE:
+            raise ValueError("blosc is not available for compression")
+        
+        # Use similar approach to write_compressed_pickle but with dill
+        # Serialize with dill first
+        pickled_data = dill.dumps(data, protocol=dill.HIGHEST_PROTOCOL)
+        
+        # Use the same compression approach as compress_pickle
+        from .compress_pickle import blosc
+        
+        # Filter compression params to only include valid blosc2 parameters
+        # For pickled data, set typesize to 1 (byte) since it's arbitrary binary data
+        valid_blosc_params = {
+            'typesize': 1,  # Always use 1 for pickled binary data
+        }
+        for key, value in compression_params.items():
+            if key in ['clevel', 'codec', 'filter']:
+                valid_blosc_params[key] = value
+        
+        compressed_data = blosc.compress(pickled_data, **valid_blosc_params)
+        
+        # Write to file
+        with open(file_path, "wb") as f:
+            f.write(compressed_data)
 
-        if storage_format == "pickle" or not BLOSC_AVAILABLE:
-            # Standard pickle fallback
+    def _read_compressed_dill(self, file_path: Path) -> Any:
+        """Read object using dill deserialization with blosc decompression."""
+        if not DILL_AVAILABLE or dill is None:
+            raise ValueError("dill is not available for deserialization")
+        
+        if not BLOSC_AVAILABLE:
+            raise ValueError("blosc is not available for decompression")
+        
+        # Read compressed data
+        with open(file_path, "rb") as f:
+            compressed_data = f.read()
+        
+        # Use the same decompression approach as compress_pickle
+        from .compress_pickle import blosc
+        decompressed_data = blosc.decompress(compressed_data)
+        
+        # Deserialize with dill
+        return dill.loads(decompressed_data)
+
+    def get(self, file_path: Path, metadata: Dict[str, Any]) -> Any:
+        """Load object using compressed pickle/dill or standard pickle/dill."""
+        storage_format = metadata.get("storage_format", "compressed_pickle")
+        serializer = metadata.get("serializer", "pickle")
+
+        if storage_format in ["pickle", "dill"] or not BLOSC_AVAILABLE:
+            # Standard serialization fallback
             pickle_path = file_path.with_suffix("").with_suffix(".pkl")
             if not pickle_path.exists():
                 # Try compressed version as fallback
@@ -878,25 +1013,34 @@ class ObjectHandler(CacheHandler):
                 )
 
             if not pickle_path.exists():
-                raise FileNotFoundError(f"Pickle file not found: {pickle_path}")
+                raise FileNotFoundError(f"Serialized file not found: {pickle_path}")
 
             if pickle_path.suffix == ".pkl":
-                # Standard pickle
-                import pickle
-
-                with open(pickle_path, "rb") as f:
-                    return pickle.load(f)
+                # Standard serialization
+                if serializer == "dill" and DILL_AVAILABLE and dill is not None:
+                    with open(pickle_path, "rb") as f:
+                        return dill.load(f)
+                else:
+                    import pickle
+                    with open(pickle_path, "rb") as f:
+                        return pickle.load(f)
             else:
-                # Compressed pickle
-                return read_compressed_pickle(pickle_path, nparray=False)
+                # Compressed serialization
+                if serializer == "dill":
+                    return self._read_compressed_dill(pickle_path)
+                else:
+                    return read_compressed_pickle(pickle_path, nparray=False)
         else:
-            # Compressed pickle
+            # Compressed serialization
             codec = metadata.get("compression_codec", "zstd")
             pickle_path = file_path.with_suffix("").with_suffix(f".pkl.{codec}")
             if not pickle_path.exists():
-                raise FileNotFoundError(f"Pickle file not found: {pickle_path}")
+                raise FileNotFoundError(f"Serialized file not found: {pickle_path}")
 
-            return read_compressed_pickle(pickle_path, nparray=False)
+            if serializer == "dill":
+                return self._read_compressed_dill(pickle_path)
+            else:
+                return read_compressed_pickle(pickle_path, nparray=False)
 
     def get_file_extension(self, config: Any) -> str:
         """Get file extension for objects."""
@@ -1025,8 +1169,14 @@ class HandlerRegistry:
     def get_handler(self, data: Any) -> CacheHandler:
         """Get the appropriate handler for the given data."""
         for handler in self.handlers:
-            if handler.can_handle(data):
-                return handler
+            # Try to pass config to can_handle if the method supports it
+            try:
+                if handler.can_handle(data, self.config):
+                    return handler
+            except TypeError:
+                # Fallback for handlers that don't accept config parameter
+                if handler.can_handle(data):
+                    return handler
 
         raise ValueError(f"No handler available for data type: {type(data)}")
 

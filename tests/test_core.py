@@ -370,14 +370,12 @@ class TestCacheness:
             assert "size_mb" in entry
 
     def test_error_handling_invalid_data(self, cache):
-        """Test error handling for invalid data types."""
-
-        # Test with non-pickleable object
-        def unpickleable(x):
-            return x  # Local functions can be problematic for pickle
+        """Test error handling for invalid data."""
+        # Test with a truly unpickleable object (generators cannot be pickled or dilled)
+        unpickleable_object = (x for x in range(10))  # Generator object
 
         with pytest.raises((ValueError, TypeError)):
-            cache.put(unpickleable, test="unpickleable")
+            cache.put(unpickleable_object, test="unpickleable")
 
     def test_concurrent_access(self, cache):
         """Test thread safety of cache operations."""

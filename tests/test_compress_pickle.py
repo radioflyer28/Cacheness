@@ -84,13 +84,7 @@ class TestCompressPickle:
         filepath = temp_dir / "test_complex.pkl.zstd"
 
         # Write data with zstd compression
-        kwargs = {}
-        if compress_pickle.blosc.__version__.startswith("1"):
-            kwargs["cname"] = "zstd"
-        else:
-            kwargs["codec"] = "zstd"
-
-        compress_pickle.write_file(test_data_complex, filepath, **kwargs)
+        compress_pickle.write_file(test_data_complex, filepath, codec="zstd")
 
         # Read data back
         read_data = compress_pickle.read_file(filepath, nparray=False)
@@ -143,29 +137,7 @@ class TestCompressPickle:
         assert read_data.shape == test_data_large_numpy.shape
         assert read_data.dtype == test_data_large_numpy.dtype
 
-    def test_all_compression_codecs_v1(self, temp_dir, test_data_simple):
-        """Test all blosc v1 compression codecs."""
-        if compress_pickle.blosc.__version__.startswith("1"):
-            # True blosc v1 functionality
-            comp_types = ["blosclz", "lz4", "lz4hc", "zlib", "zstd"]
-        else:
-            pytest.skip("Blosc v1 not available")
 
-        for comp_type in comp_types:
-            filepath = temp_dir / f"test_v1_{comp_type}.pkl"
-
-            # Write with specific codec
-            compress_pickle.write_file(
-                test_data_simple, filepath, cname=comp_type, nparray=False
-            )
-
-            # Verify file exists and has content
-            assert filepath.exists()
-            assert filepath.stat().st_size > 0
-
-            # Read back and verify
-            read_data = compress_pickle.read_file(filepath, nparray=False)
-            assert read_data == test_data_simple
 
     def test_all_compression_codecs_v2(self, temp_dir, test_data_simple):
         """Test all blosc v2+ compression codecs."""
@@ -209,24 +181,7 @@ class TestCompressPickle:
                 # Some codecs might not be available or might fail with specific data
                 pytest.skip(f"Codec {codec_name} failed: {e}")
 
-    def test_numpy_with_all_codecs_v1(self, temp_dir, test_data_numpy):
-        """Test numpy arrays with all blosc v1 codecs."""
-        if compress_pickle.blosc.__version__.startswith("1"):
-            # True blosc v1 functionality
-            comp_types = ["lz4", "zstd"]  # Test subset for performance
-        else:
-            pytest.skip("Blosc v1 not available")
 
-        for comp_type in comp_types:
-            filepath = temp_dir / f"test_numpy_v1_{comp_type}.pkl"
-
-            # Note: blosc v1 doesn't support nparray=True, so use nparray=False
-            compress_pickle.write_file(
-                test_data_numpy, filepath, cname=comp_type, nparray=False
-            )
-
-            read_data = compress_pickle.read_file(filepath, nparray=False)
-            np.testing.assert_array_equal(read_data, test_data_numpy)
 
     def test_numpy_with_all_codecs_v2(self, temp_dir, test_data_numpy):
         """Test numpy arrays with all blosc v2+ codecs using pack_array."""
@@ -264,13 +219,7 @@ class TestCompressPickle:
             filepath = Path(f"{base_filepath}_{clevel}.pkl")
 
             # Write with specific compression level
-            kwargs = {"clevel": clevel}
-            if compress_pickle.blosc.__version__.startswith("1"):
-                kwargs["cname"] = "lz4"
-            else:
-                kwargs["codec"] = "lz4"
-
-            compress_pickle.write_file(test_data_complex, filepath, **kwargs)
+            compress_pickle.write_file(test_data_complex, filepath, codec="lz4", clevel=clevel)
 
             # Read back and verify
             read_data = compress_pickle.read_file(filepath, nparray=False)
@@ -287,14 +236,8 @@ class TestCompressPickle:
         with filepath_uncompressed.open("wb") as f:
             pickle.dump(test_data_large_numpy, f)
 
-        # Save compressed
-        kwargs = {}
-        if compress_pickle.blosc.__version__.startswith("1"):
-            kwargs.update({"cname": "zstd", "nparray": False})
-        else:
-            kwargs.update({"codec": "zstd", "nparray": True})
-
-        compress_pickle.write_file(test_data_large_numpy, filepath_compressed, **kwargs)
+        # Save compressed with blosc2
+        compress_pickle.write_file(test_data_large_numpy, filepath_compressed, codec="zstd", nparray=True)
 
         # Check file sizes
         uncompressed_size = filepath_uncompressed.stat().st_size
@@ -362,18 +305,13 @@ class TestCompressPickle:
         """Test that kwargs are properly passed to blosc functions."""
         filepath = temp_dir / "test_kwargs.pkl"
 
-        # Test with various kwargs
+        # Test with various kwargs for blosc2
         kwargs = {
             "clevel": 6,
             "typesize": 8,
+            "codec": compress_pickle.blosc.Codec.LZ4,
+            "filter": compress_pickle.blosc.Filter.SHUFFLE,
         }
-
-        if compress_pickle.blosc.__version__.startswith("1"):
-            kwargs["cname"] = "lz4"
-            kwargs["shuffle"] = compress_pickle.blosc.SHUFFLE
-        else:
-            kwargs["codec"] = "lz4"
-            kwargs["filter"] = compress_pickle.blosc.Filter.SHUFFLE
 
         # Should not raise any errors
         compress_pickle.write_file(test_data_simple, filepath, **kwargs)

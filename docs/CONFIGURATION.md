@@ -88,6 +88,12 @@ cache = cacheness(config)
 | `use_blosc2_arrays` | bool | `True` | High-performance array compression |
 | `npz_compression` | bool | `True` | Enable NPZ compression |
 | `pickle_compression_codec` | str | `"zstd"` | Compression codec for objects |
+| `pickle_compression_level` | int | `5` | Compression level (0-19) |
+| `compression_threshold_bytes` | int | `1024` | Only compress objects larger than this |
+| `enable_parallel_compression` | bool | `True` | Use multiple threads for compression |
+| `parquet_compression` | str | `"lz4"` | Compression for DataFrames |
+| `blosc2_array_codec` | str | `"lz4"` | Codec for array compression |
+| `blosc2_array_clevel` | int | `5` | Array compression level (0-9) |
 | `pickle_compression_level` | int | `5` | Compression level (1-9) |
 | `blosc2_array_codec` | str | `"lz4"` | Array compression algorithm |
 | `parquet_compression` | str | `"lz4"` | DataFrame compression |
@@ -107,14 +113,22 @@ cache = cacheness(config)
 |-----------|------|---------|-------------|
 | `enable_pandas_dataframes` | bool | `True` | Enable pandas DataFrame caching |
 | `enable_polars_dataframes` | bool | `True` | Enable polars DataFrame caching |
+| `enable_pandas_series` | bool | `True` | Enable pandas Series caching |
+| `enable_polars_series` | bool | `True` | Enable polars Series caching |
 | `enable_numpy_arrays` | bool | `True` | Enable NumPy array caching |
 | `enable_object_pickle` | bool | `True` | Enable general object caching |
+| `enable_tensorflow_tensors` | bool | `False` | Enable TensorFlow tensor caching |
+| `enable_dill_fallback` | bool | `True` | Use dill for complex objects (functions, lambdas) |
 | `handler_priority` | list | See below | Handler priority order |
 
 Default handler priority:
 ```python
-["pandas_dataframes", "polars_dataframes", "pandas_series", "polars_series", "numpy_arrays", "object_pickle"]
+["pandas_series", "polars_series", "pandas_dataframes", "polars_dataframes", "numpy_arrays", "tensorflow_tensors", "object_pickle"]
 ```
+
+**Advanced Object Serialization:**
+- `enable_dill_fallback=True`: Enables caching of functions, lambdas, closures, and other objects that standard pickle cannot handle
+- `enable_tensorflow_tensors=False`: TensorFlow handler disabled by default due to import overhead and system compatibility issues
 
 ## Use Case Configurations
 
@@ -397,6 +411,112 @@ test_config = CacheConfig(
     cleanup_on_init=True,               # Fresh cache for each test
     metadata_backend="json",            # Simple, no external dependencies
     max_cache_size_mb=100              # Small test cache
+)
+```
+
+## Advanced Object Serialization
+
+### Dill Serialization for Complex Objects
+
+Cacheness supports advanced Python objects using the **dill** library for enhanced serialization capabilities:
+
+```python
+# Enable/disable dill fallback (enabled by default)
+config = CacheConfig(
+    handlers=HandlerConfig(
+        enable_dill_fallback=True       # Use dill for complex objects
+    )
+)
+
+# Examples of objects that require dill:
+cache = cacheness(config)
+
+# Functions and closures
+def create_multiplier(factor):
+    return lambda x: x * factor
+
+multiplier = create_multiplier(2.5)
+cache.put(multiplier, operation="multiply", factor=2.5)
+
+# Partial functions
+from functools import partial
+import operator
+multiply_by_10 = partial(operator.mul, 10)
+cache.put(multiply_by_10, operation="partial_multiply")
+
+# Complex nested functions
+@cached(ttl_hours=24)
+def create_complex_processor():
+    import numpy as np
+    base_value = np.random.rand()
+    return lambda data: data + base_value * np.random.normal(0, 0.1)
+```
+
+**Configuration options:**
+```python
+# Strict mode: only standard pickle-compatible objects
+strict_config = CacheConfig(
+    handlers=HandlerConfig(
+        enable_dill_fallback=False      # Disable dill, fail on complex objects
+    )
+)
+
+# When dill is disabled, functions/lambdas will raise ValueError
+```
+
+### TensorFlow Tensor Support
+
+Native TensorFlow tensor caching with optimized storage:
+
+```python
+# Enable TensorFlow handler (disabled by default)
+tf_config = CacheConfig(
+    handlers=HandlerConfig(
+        enable_tensorflow_tensors=True  # Enable native tensor caching
+    )
+)
+
+import tensorflow as tf
+cache = cacheness(tf_config)
+
+# Cache TensorFlow tensors with preserved metadata
+tensor = tf.constant([[1, 2], [3, 4]], dtype=tf.float32)
+cache.put(tensor, model="cnn", layer="conv1", weights="initial")
+
+# Retrieve maintains all tensor properties
+cached_tensor = cache.get(model="cnn", layer="conv1", weights="initial")
+assert cached_tensor.dtype == tf.float32
+assert cached_tensor.shape == (2, 2)
+```
+
+**Storage details:**
+- Uses `.b2tr` file extension (TensorFlow tensor format)
+- Blosc2 compression for efficient storage
+- Preserves dtype, shape, and device information
+- GPU memory efficient loading
+
+**Why disabled by default:**
+- TensorFlow import adds ~2-3 second startup overhead
+- Potential system compatibility issues with mutex locks
+- Large memory footprint for simple caching needs
+
+**Enabling for production:**
+```python
+# Only enable if you regularly cache TensorFlow tensors
+production_config = CacheConfig(
+    handlers=HandlerConfig(
+        enable_tensorflow_tensors=True,
+        handler_priority=[
+            "tensorflow_tensors",       # Prioritize tensor handling
+            "numpy_arrays",
+            "pandas_dataframes",
+            "object_pickle"
+        ]
+    ),
+    compression=CompressionConfig(
+        blosc2_array_codec="zstd",      # Better compression for tensors
+        blosc2_array_clevel=7           # Higher compression level
+    )
 )
 ```
 

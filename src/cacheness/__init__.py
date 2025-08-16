@@ -55,7 +55,7 @@ try:
 except ImportError:
     _has_sql_cache = False
 
-__version__ = "0.3.6"
+__version__ = "0.3.7"
 __author__ = "radioflyer28"
 __email__ = "akgithub.2drwc@aleeas.com"
 

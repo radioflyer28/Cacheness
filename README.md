@@ -175,9 +175,14 @@ cache.put(data3, model="xgboost", dataset="test")   # Key: ghi789...
 
 | Data Type | Storage Format | Compression | Benefits |
 |-----------|---------------|-------------|----------|
-| NumPy arrays | NPZ + Blosc2 | LZ4/ZSTD | 60-80% size reduction, 4x faster I/O |
+| NumPy arrays | NPZ or Blosc2 | LZ4/ZSTD | 60-80% size reduction, 4x faster I/O |
 | DataFrames & Series | Parquet | LZ4 | 40-60% size reduction, columnar efficiency |
+| TensorFlow tensors* | Blosc2 | LZ4/ZSTD | Native tensor format, GPU memory efficient |
 | Python objects | Pickle + Blosc | LZ4 | 30-50% size reduction, universal compatibility |
+| Complex objects** | Dill + Blosc | LZ4 | Functions, lambdas, advanced serialization |
+
+*TensorFlow handler disabled by default due to import overhead  
+**Includes functions, lambdas, closures, and other objects that pickle cannot handle
 
 ### Configuration
 
@@ -231,6 +236,134 @@ ml_cache = cacheness(CacheConfig(cache_dir="./ml_cache", default_ttl_hours=168))
 def train_model(data, hyperparams):
     return expensive_model_training(data, hyperparams)
 ```
+
+### Advanced Object Serialization
+
+Cacheness supports advanced Python objects using **dill** for enhanced serialization:
+
+> ⚠️ **IMPORTANT WARNINGS**: Dill serialization can execute arbitrary code and may introduce bugs if class definitions change between cache storage and retrieval. See [Security Considerations](#dill-security-considerations) below.
+
+```python
+# Cache complex classes with large datasets (common ML use case)
+from dataclasses import dataclass
+import numpy as np
+
+@dataclass
+class ModelState:
+    weights: np.ndarray
+    metadata: dict
+    preprocessing_func: callable
+    
+    def __post_init__(self):
+        # Complex initialization with closures
+        scale_factor = self.metadata.get('scale_factor', 1.0)
+        self.preprocessing_func = lambda x: x * scale_factor + np.random.normal(0, 0.01)
+
+# Create model state with large data
+model_state = ModelState(
+    weights=np.random.randn(1000, 500),  # Large weight matrix
+    metadata={'epochs': 100, 'scale_factor': 2.5, 'accuracy': 0.94},
+    preprocessing_func=None  # Will be set in __post_init__
+)
+
+# Cache the entire initialized object (not possible with standard pickle)
+cache.put(model_state, model="resnet", checkpoint="epoch_100")
+
+# Retrieve and use - all data and functions preserved
+cached_model = cache.get(model="resnet", checkpoint="epoch_100")
+processed_data = cached_model.preprocessing_func(test_input)
+```
+
+#### Dill Security Considerations
+
+**🚨 Critical Security Risks:**
+- **Code Execution**: Dill can execute arbitrary code during deserialization
+- **Cache Tampering**: Malicious modification of cache files can compromise your application
+- **Version Conflicts**: Class definition changes can cause crashes or silent bugs
+
+**🛡️ Safe Usage Patterns:**
+
+```python
+# ✅ SAFE: Validate cached objects after retrieval
+def safe_cache_get(cache, **kwargs):
+    try:
+        cached_obj = cache.get(**kwargs)
+        if cached_obj is None:
+            return None
+            
+        # Validate object type and critical attributes
+        if not isinstance(cached_obj, ModelState):
+            raise ValueError("Cached object has unexpected type")
+        
+        if not hasattr(cached_obj, 'weights') or not hasattr(cached_obj, 'preprocessing_func'):
+            raise ValueError("Cached object missing required attributes")
+            
+        # Test critical functionality
+        test_input = np.array([[1.0, 2.0]])
+        _ = cached_obj.preprocessing_func(test_input)
+        
+        return cached_obj
+    except Exception as e:
+        print(f"⚠️ Cache validation failed: {e}")
+        return None  # Force recreation
+
+# ✅ SAFE: Version your cached classes
+@dataclass 
+class ModelState:
+    _version: str = "1.0"  # Track class version
+    weights: np.ndarray = None
+    # ... other fields
+    
+    def __post_init__(self):
+        if self._version != "1.0":
+            raise ValueError(f"Incompatible class version: {self._version}")
+
+# ❌ UNSAFE: Never cache objects from untrusted sources
+# ❌ UNSAFE: Don't cache in production without validation
+# ❌ UNSAFE: Don't ignore cache retrieval errors
+```
+
+**Configuration:**
+```python
+# Enable/disable dill fallback (enabled by default)
+config = CacheConfig(enable_dill_fallback=True)
+cache = cacheness(config)
+
+# For production: disable dill for security (recommended)
+config_secure = CacheConfig(enable_dill_fallback=False)
+
+# When disabled, only standard pickle-compatible objects work
+config_strict = CacheConfig(enable_dill_fallback=False)
+```
+
+> 🔒 **Production Recommendation**: Disable dill in production environments (`enable_dill_fallback=False`) to eliminate code execution risks. Use dill only in trusted development environments with proper validation.
+
+### TensorFlow Tensor Support
+
+Native TensorFlow tensor caching with optimized storage:
+
+```python
+import tensorflow as tf
+
+# Enable TensorFlow handler (disabled by default due to import overhead)
+config = CacheConfig(enable_tensorflow_tensors=True)
+cache = cacheness(config)
+
+# Cache TensorFlow tensors directly
+tensor = tf.constant([[1, 2], [3, 4]], dtype=tf.float32)
+cache.put(tensor, model="cnn", layer="conv1", weights="initial")
+
+# Retrieve maintains tensor properties
+cached_tensor = cache.get(model="cnn", layer="conv1", weights="initial")
+print(cached_tensor.dtype)  # <dtype: 'float32'>
+print(cached_tensor.shape)  # (2, 2)
+```
+
+**Storage Benefits:**
+- Native tensor format with Blosc2 compression
+- Preserves dtype, shape, and tensor metadata
+- GPU memory efficient loading
+- File extension: `.b2tr` (TensorFlow tensor format)
 
 ## Advanced Features
 
@@ -304,6 +437,35 @@ config = CacheConfig(
     default_ttl_hours=48,         # Default TTL for entries
     max_cache_size_mb=5000,       # Maximum cache size
     cleanup_on_init=True          # Clean expired entries on startup
+)
+
+cache = cacheness(config)
+```
+
+### Handler Configuration
+
+Control which data type handlers are enabled:
+
+```python
+# Configure data type handlers
+config = CacheConfig(
+    # Core object handlers
+    enable_object_pickle=True,          # General Python objects (default: True)
+    enable_dill_fallback=True,          # Classes, Functions, lambdas, closures (default: True)
+    
+    # Array and tensor handlers  
+    enable_numpy_arrays=True,           # NumPy arrays (default: True)
+    enable_tensorflow_tensors=False,    # TensorFlow tensors (default: False)
+    
+    # DataFrame handlers
+    enable_pandas_dataframes=True,      # Pandas DataFrames (default: True)
+    enable_polars_dataframes=True,      # Polars DataFrames (default: True)
+    enable_pandas_series=True,          # Pandas Series (default: True)
+    enable_polars_series=True,          # Polars Series (default: True)
+    
+    # Performance options
+    compression_threshold_bytes=1024,   # Only compress objects larger than this (default: 1024)
+    enable_parallel_compression=True,   # Use multiple threads for compression (default: True)
 )
 
 cache = cacheness(config)
