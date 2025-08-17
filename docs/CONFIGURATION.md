@@ -28,7 +28,8 @@ from cacheness.config import (
     CacheMetadataConfig, 
     CompressionConfig,
     SerializationConfig,
-    HandlerConfig
+    HandlerConfig,
+    SecurityConfig
 )
 
 # Advanced configuration with sub-configurations
@@ -47,6 +48,11 @@ config = CacheConfig(
         use_blosc2_arrays=True,
         pickle_compression_codec="zstd",
         pickle_compression_level=5
+    ),
+    security=SecurityConfig(
+        enable_entry_signing=True,
+        security_level="enhanced",
+        delete_invalid_signatures=True
     ),
     default_ttl_hours=48
 )
@@ -80,6 +86,20 @@ cache = cacheness(config)
 | `database_url` | str | `None` | Custom SQLite database path |
 | `verify_cache_integrity` | bool | `False` | Enable file hash verification |
 | `store_cache_key_params` | bool | `True` | Store cache key parameters |
+
+### Security Configuration (`SecurityConfig`)
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `enable_entry_signing` | bool | `True` | Enable HMAC-SHA256 cache entry signing |
+| `security_level` | str | `"enhanced"` | Security level: "minimal", "enhanced", "paranoid" |
+| `use_in_memory_key` | bool | `False` | Use in-memory signing key (no disk persistence) |
+| `delete_invalid_signatures` | bool | `True` | Auto-delete entries with invalid signatures |
+| `allow_unsigned_entries` | bool | `True` | Accept entries created before signing was enabled |
+| `signing_key_file` | str | `"cache_signing_key.bin"` | Path to signing key file |
+| `custom_signed_fields` | list | `None` | Custom fields to sign (overrides security_level) |
+
+**See [Security Guide](SECURITY.md) for comprehensive security configuration.**
 
 ### Compression Configuration (`CompressionConfig`)
 
@@ -135,7 +155,7 @@ Default handler priority:
 ### Machine Learning Workflows
 
 ```python
-# High-performance ML cache
+# High-performance ML cache with security
 ml_config = CacheConfig(
     storage=CacheStorageConfig(
         cache_dir="./ml_cache",
@@ -150,6 +170,11 @@ ml_config = CacheConfig(
         use_blosc2_arrays=True,      # Optimal for numeric data
         pickle_compression_codec="zstd",
         pickle_compression_level=6   # Higher compression for models
+    ),
+    security=SecurityConfig(
+        enable_entry_signing=True,
+        security_level="enhanced",   # Good security for ML models
+        delete_invalid_signatures=True
     ),
     handlers=HandlerConfig(
         handler_priority=[
@@ -338,6 +363,24 @@ compact_config = CacheConfig(
 
 ## Security Considerations
 
+### Cache Entry Signing
+
+Enable cryptographic signing for cache integrity:
+
+```python
+# Secure production configuration
+secure_config = CacheConfig(
+    security=SecurityConfig(
+        enable_entry_signing=True,
+        security_level="enhanced",       # Default security level
+        use_in_memory_key=True,          # No key persistence
+        delete_invalid_signatures=True   # Auto-cleanup tampered entries
+    )
+)
+```
+
+For comprehensive security configuration, see the [Security Guide](SECURITY.md).
+
 ### Sensitive Parameters
 
 ```python
@@ -397,6 +440,12 @@ prod_config = CacheConfig(
     compression=CompressionConfig(
         pickle_compression_level=6,      # Balanced compression
         use_blosc2_arrays=True
+    ),
+    security=SecurityConfig(
+        enable_entry_signing=True,
+        security_level="enhanced",       # Good security/performance balance
+        use_in_memory_key=True,          # No key persistence in production
+        delete_invalid_signatures=True   # Auto-cleanup
     ),
     default_ttl_hours=168               # 1 week
 )

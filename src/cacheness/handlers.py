@@ -868,8 +868,8 @@ class ObjectHandler(CacheHandler):
                     f"Object of type {type(data)} cannot be serialized with pickle{dill_status}"
                 )
 
-        # Check if we should use compression based on size threshold
-        should_compress = BLOSC_AVAILABLE
+        # Check if we should use compression based on codec, size threshold, and availability
+        should_compress = BLOSC_AVAILABLE and config.compression.pickle_compression_codec != "none"
         if should_compress:
             # Get a rough estimate of object size by pickling it first
             import pickle
@@ -883,8 +883,8 @@ class ObjectHandler(CacheHandler):
                 if len(test_data) < config.compression.compression_threshold_bytes:
                     should_compress = False
             except Exception:
-                # If we can't estimate size, use compression anyway
-                should_compress = BLOSC_AVAILABLE
+                # If we can't estimate size, use compression anyway (but respect "none" codec)
+                should_compress = BLOSC_AVAILABLE and config.compression.pickle_compression_codec != "none"
 
         # Ensure clean path without existing extension
         if should_compress:
@@ -1044,7 +1044,7 @@ class ObjectHandler(CacheHandler):
 
     def get_file_extension(self, config: Any) -> str:
         """Get file extension for objects."""
-        if BLOSC_AVAILABLE:
+        if BLOSC_AVAILABLE and config.compression.pickle_compression_codec != "none":
             return f".pkl.{config.compression.pickle_compression_codec}"
         else:
             return ".pkl"

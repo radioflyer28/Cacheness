@@ -125,7 +125,13 @@ class TestCacheIntegrity:
     def test_missing_file_hash_allows_retrieval(self):
         """Test that missing file hash (legacy entries) still allows retrieval."""
         with tempfile.TemporaryDirectory() as temp_dir:
-            config = CacheConfig(cache_dir=temp_dir, verify_cache_integrity=True)
+            # Disable entry signing for this legacy compatibility test
+            from cacheness.config import SecurityConfig
+            config = CacheConfig(
+                cache_dir=temp_dir, 
+                verify_cache_integrity=True,
+                security=SecurityConfig(enable_entry_signing=False)  # Test legacy behavior without signing
+            )
             cache = cacheness(config)
 
             # Cache some data first

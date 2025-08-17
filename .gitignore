@@ -18,3 +18,5 @@ wheels/
 *.npz
 *.parquet
 .DS_Store
+cache/cache_signing_key.bin
+delete_empty_files.sh

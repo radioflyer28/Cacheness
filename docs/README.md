@@ -1,0 +1,106 @@
+# Cacheness Documentation
+
+Welcome to the Cacheness documentation! This high-performance caching library provides intelligent data type handling, compression, and security features for Python applications.
+
+## Getting Started
+
+- **[README](../README.md)** - Quick start guide and basic usage
+- **[Configuration Guide](CONFIGURATION.md)** - Comprehensive configuration options
+- **[Security Guide](SECURITY.md)** - Cache entry signing and security features
+
+## Advanced Features
+
+- **[Performance Guide](PERFORMANCE.md)** - Optimization strategies and benchmarks
+- **[Custom Metadata](CUSTOM_METADATA.md)** - Working with SQLite backend and custom fields
+- **[SQL Cache Reference](SQL_CACHE.md)** - SQLite metadata backend details
+
+## Specialized Handlers
+
+- **[Dill Integration](DILL_INTEGRATION.md)** - Advanced object serialization (functions, lambdas)
+- **[TensorFlow Tensor Guide](TENSORFLOW_TENSOR_GUIDE.md)** - Native TensorFlow tensor caching
+- **[TensorFlow Handler Status](TENSORFLOW_HANDLER_STATUS.md)** - Handler implementation details
+
+## API Reference
+
+- **[API Reference](API_REFERENCE.md)** - Complete API documentation
+
+## Security
+
+Cacheness provides cryptographic signing for cache integrity:
+
+- **HMAC-SHA256 signatures** protect against tampering
+- **Configurable security levels** (minimal, enhanced, paranoid)
+- **In-memory keys** for enhanced security (no disk persistence)
+- **Automatic cleanup** of entries with invalid signatures
+
+See the [Security Guide](SECURITY.md) for detailed configuration and best practices.
+
+## Key Features
+
+### Intelligent Data Type Handling
+- **DataFrames**: pandas, polars with optimized parquet storage
+- **Arrays**: NumPy with blosc2 compression
+- **Objects**: Advanced serialization with dill fallback
+- **Tensors**: Native TensorFlow tensor support
+
+### Flexible Backends
+- **SQLite**: High-performance metadata queries (recommended)
+- **JSON**: Simple file-based storage for smaller caches
+
+### Advanced Compression
+- **Multi-codec support**: LZ4, ZSTD, LZ4HC for different performance profiles
+- **Array-specific compression**: Blosc2 optimization for numerical data
+- **Configurable thresholds**: Compress only when beneficial
+
+### Robust Caching Features
+- **TTL management**: Automatic expiration with configurable defaults
+- **Cache size limits**: Automatic cleanup when limits exceeded
+- **Integrity verification**: Optional file hash checking
+- **Flexible key generation**: Deep parameter introspection
+
+## Use Cases
+
+- **Machine Learning**: Cache datasets, models, and experiment results
+- **Data Processing**: Store intermediate pipeline results
+- **API Responses**: Fast response caching with automatic expiration
+- **Scientific Computing**: Preserve expensive computation results
+- **Development**: Speed up development with intelligent caching
+
+## Installation
+
+```bash
+pip install cacheness
+```
+
+## Quick Example
+
+```python
+from cacheness import cacheness, CacheConfig, SecurityConfig
+
+# Basic usage
+cache = cacheness()
+result = cache.get(experiment="ml_training", dataset="cifar10")
+if result is None:
+    result = expensive_training_function()
+    cache.put(result, experiment="ml_training", dataset="cifar10")
+
+# Secure configuration
+secure_cache = cacheness(CacheConfig(
+    security=SecurityConfig(
+        enable_entry_signing=True,
+        use_in_memory_key=True,
+        security_level="enhanced"
+    )
+))
+```
+
+## Contributing
+
+For development setup and contribution guidelines, see the project repository.
+
+---
+
+**Next Steps:**
+- Start with the [Configuration Guide](CONFIGURATION.md) for detailed setup
+- Review [Security Guide](SECURITY.md) for production deployments  
+- Check [Performance Guide](PERFORMANCE.md) for optimization tips

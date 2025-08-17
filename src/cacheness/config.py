@@ -197,6 +197,41 @@ class HandlerConfig:
         )
 
 
+@dataclass
+class SecurityConfig:
+    """Configuration for cache security and integrity."""
+
+    # Entry signing for metadata integrity
+    enable_entry_signing: bool = True
+    signing_key_file: str = "cache_signing_key.bin"
+    
+    # Custom field selection (if not provided, uses default enhanced fields)
+    custom_signed_fields: Optional[List[str]] = None
+    
+    # Key management options
+    use_in_memory_key: bool = False  # Use in-memory key (not persisted to disk)
+    
+    # Backward compatibility and key rotation
+    allow_unsigned_entries: bool = True  # Allow entries without signatures
+    signature_version: int = 1  # For future algorithm changes
+    
+    # Cleanup behavior for invalid signatures
+    delete_invalid_signatures: bool = True  # Automatically delete entries with invalid signatures
+
+    def __post_init__(self):
+        """Validate security configuration."""
+        if self.signature_version < 1:
+            raise ValueError("signature_version must be at least 1")
+
+        logger.debug(
+            f"Security configured: signing={self.enable_entry_signing}, "
+            f"custom_fields={self.custom_signed_fields}, "
+            f"in_memory_key={self.use_in_memory_key}, "
+            f"allow_unsigned={self.allow_unsigned_entries}, "
+            f"delete_invalid={self.delete_invalid_signatures}"
+        )
+
+
 class CacheConfig:
     """Main configuration class that combines all sub-configurations."""
 
@@ -205,6 +240,7 @@ class CacheConfig:
     compression: CompressionConfig = field(default_factory=CompressionConfig)
     serialization: SerializationConfig = field(default_factory=SerializationConfig)
     handlers: HandlerConfig = field(default_factory=HandlerConfig)
+    security: SecurityConfig = field(default_factory=SecurityConfig)
 
     def __init__(
         self,
@@ -213,6 +249,7 @@ class CacheConfig:
         compression: Optional[CompressionConfig] = None,
         serialization: Optional[SerializationConfig] = None,
         handlers: Optional[HandlerConfig] = None,
+        security: Optional[SecurityConfig] = None,
         # Backwards compatibility parameters
         cache_dir: Optional[str] = None,
         default_ttl_hours: Optional[float] = None,
@@ -242,6 +279,9 @@ class CacheConfig:
         auto_cleanup_expired: Optional[bool] = None,
         compression_threshold_bytes: Optional[int] = None,
         enable_parallel_compression: Optional[bool] = None,
+        # Security parameters
+        delete_invalid_signatures: Optional[bool] = None,
+        use_in_memory_key: Optional[bool] = None,
         **kwargs,
     ):
         """Initialize configuration with backwards compatibility support."""
@@ -252,6 +292,7 @@ class CacheConfig:
         self.compression = compression or CompressionConfig()
         self.serialization = serialization or SerializationConfig()
         self.handlers = handlers or HandlerConfig()
+        self.security = security or SecurityConfig()
 
         # Apply backwards compatibility mappings
         if cache_dir is not None:
@@ -310,6 +351,12 @@ class CacheConfig:
             self.compression.compression_threshold_bytes = compression_threshold_bytes
         if enable_parallel_compression is not None:
             self.compression.enable_parallel_compression = enable_parallel_compression
+
+        # Map security configuration parameters
+        if delete_invalid_signatures is not None:
+            self.security.delete_invalid_signatures = delete_invalid_signatures
+        if use_in_memory_key is not None:
+            self.security.use_in_memory_key = use_in_memory_key
 
         # Handle handler configuration and compression parameters
         for key, value in kwargs.items():

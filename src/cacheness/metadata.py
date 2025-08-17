@@ -53,6 +53,7 @@ try:
         update,
         delete,
         desc,
+        func,
     )
     from sqlalchemy.orm import sessionmaker, declarative_base
 
@@ -92,6 +93,9 @@ try:
 
         # Cache integrity verification
         file_hash = Column(String(16), nullable=True)  # XXH3_64 hash (16 hex chars)
+        
+        # Entry signature for metadata integrity protection
+        entry_signature = Column(String(64), nullable=True)  # HMAC-SHA256 hex (64 chars)
 
         # Original cache key parameters (extracted from metadata for efficient querying)
         cache_key_params = Column(
@@ -231,6 +235,11 @@ class MetadataBackend(ABC):
     @abstractmethod
     def cleanup_expired(self, ttl_hours: int) -> int:
         """Remove expired entries and return count removed."""
+        pass
+
+    @abstractmethod
+    def clear_all(self) -> int:
+        """Remove all cache entries and return count removed."""
         pass
 
 
@@ -490,6 +499,23 @@ class JsonBackend(MetadataBackend):
 
             return len(expired_keys)
 
+    def clear_all(self) -> int:
+        """Remove all cache entries and return count removed."""
+        with self._lock:
+            entry_count = len(self._metadata.get("entries", {}))
+            
+            # Clear all metadata dictionaries
+            self._metadata = {
+                "entries": {},
+                "creation_times": {},
+                "access_times": {},
+                "cache_hits": 0,
+                "cache_misses": 0,
+            }
+            
+            self._save_to_disk()
+            return entry_count
+
 
 class SqliteBackend(MetadataBackend):
     """SQLite database-based metadata backend using SQLAlchemy ORM."""
@@ -560,6 +586,9 @@ class SqliteBackend(MetadataBackend):
             # Add file_hash back into metadata if it exists
             if entry.file_hash is not None:
                 metadata["file_hash"] = entry.file_hash
+            # Add entry_signature back into metadata if it exists
+            if entry.entry_signature is not None:
+                metadata["entry_signature"] = entry.entry_signature
             # Add cache_key_params back into metadata if it exists
             if entry.cache_key_params is not None:
                 metadata["cache_key_params"] = json_loads(entry.cache_key_params)
@@ -591,9 +620,10 @@ class SqliteBackend(MetadataBackend):
             entry.prefix = entry_data.get("prefix", "")
             entry.file_size = entry_data.get("file_size", 0)
 
-            # Extract file_hash and cache_key_params from metadata and store in dedicated columns
+            # Extract file_hash, entry_signature, and cache_key_params from metadata and store in dedicated columns
             metadata = entry_data.get("metadata", {})
             entry.file_hash = metadata.pop("file_hash", None)  # Remove from metadata
+            entry.entry_signature = metadata.pop("entry_signature", None)  # Remove from metadata
             cache_key_params = metadata.pop(
                 "cache_key_params", None
             )  # Remove from metadata
@@ -680,6 +710,9 @@ class SqliteBackend(MetadataBackend):
                 # Add file_hash back into metadata if it exists
                 if entry.file_hash is not None:
                     entry_metadata["file_hash"] = entry.file_hash
+                # Add entry_signature back into metadata if it exists
+                if entry.entry_signature is not None:
+                    entry_metadata["entry_signature"] = entry.entry_signature
                 # Add cache_key_params back into metadata if it exists
                 if entry.cache_key_params is not None:
                     entry_metadata["cache_key_params"] = json_loads(
@@ -779,6 +812,28 @@ class SqliteBackend(MetadataBackend):
             deleted_count = result.rowcount
             session.commit()
             return deleted_count
+
+    def clear_all(self) -> int:
+        """Remove all cache entries and return count removed."""
+        with self._lock, self.SessionLocal() as session:
+            # Count existing entries
+            result = session.execute(select(func.count(CacheEntry.cache_key)))
+            entry_count = result.scalar() or 0
+            
+            # Delete all entries
+            session.execute(delete(CacheEntry))
+            
+            # Reset stats
+            stats = session.execute(
+                select(CacheStats).where(CacheStats.id == 1)
+            ).scalar_one_or_none()
+            
+            if stats:
+                stats.cache_hits = 0
+                stats.cache_misses = 0
+            
+            session.commit()
+            return entry_count
 
     def load_metadata(self) -> Dict[str, Any]:
         """Load complete metadata structure (SQLite backend operates on individual entries)."""

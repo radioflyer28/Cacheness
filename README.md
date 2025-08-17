@@ -367,10 +367,99 @@ print(cached_tensor.shape)  # (2, 2)
 
 ## Advanced Features
 
+- **Cache Entry Signing**: HMAC-SHA256 signatures for metadata integrity protection
 - **Custom Metadata**: Rich metadata tracking with SQLAlchemy ORM for experiment tracking and data lineage
 - **Path Content Hashing**: Automatic content-based hashing for cache key, using key values that contain file & directory paths
 - **Multi-format Storage**: Optimized formats for different data types (NPZ, Parquet, compressed pickle)
 - **Intelligent Compression**: Automatic codec selection and parallel processing for large datasets
+
+## Security and Integrity
+
+### Cache Entry Signing
+
+Protect cache metadata from tampering with HMAC-SHA256 signatures:
+
+```python
+from cacheness import cacheness, CacheConfig, SecurityConfig
+
+# Default: Signing enabled with enhanced security level
+cache = cacheness()  # Entry signing active by default
+
+# Custom security configuration
+config = CacheConfig(
+    security=SecurityConfig(
+        enable_entry_signing=True,        # Enable/disable signing
+        delete_invalid_signatures=True,   # Auto-cleanup tampered entries
+        use_in_memory_key=False,          # Persistent vs in-memory keys
+        allow_unsigned_entries=True,      # Backward compatibility
+        custom_signed_fields=None         # Custom fields to sign (uses default if None)
+    )
+)
+cache = cacheness(config)
+```
+
+**Default Signed Fields:**
+Signs 6 fields for enhanced security: `cache_key`, `file_hash`, `data_type`, `file_size`, `created_at`, `prefix`
+
+**Custom Field Selection:**
+```python
+# Sign only critical fields for minimal overhead
+config = CacheConfig(
+    security=SecurityConfig(
+        custom_signed_fields=["cache_key", "file_hash", "data_type", "file_size"]
+    )
+)
+
+# Sign all available fields for maximum security
+config = CacheConfig(
+    security=SecurityConfig(
+        custom_signed_fields=["cache_key", "file_hash", "data_type", "file_size", 
+                             "created_at", "prefix", "description", "actual_path"]
+    )
+)
+
+### In-Memory Signing Keys
+
+For enhanced security, use in-memory-only signing keys:
+
+```python
+# High-security configuration
+config = CacheConfig(
+    security=SecurityConfig(
+        use_in_memory_key=True,           # No key files on disk
+        delete_invalid_signatures=True    # Clean up on restart
+    )
+)
+cache = cacheness(config)
+
+# Benefits:
+# ✅ No cryptographic material persisted to disk
+# ✅ Cache entries invalidated on process restart
+# ✅ Ideal for containerized/high-security environments
+# ✅ Perfect for temporary/session-based caching
+```
+
+**Key Management:**
+- **Persistent Keys** (default): Key stored in `cache_signing_key.bin`, cache survives restarts
+- **In-Memory Keys**: Generated per process, cache invalidated on restart, enhanced security
+
+### Automatic Signature Verification
+
+All cache retrievals automatically verify signatures:
+
+```python
+# Signatures verified on every cache hit
+data = cache.get(model="xgboost", dataset="training")
+
+# Invalid signatures are handled based on configuration:
+# delete_invalid_signatures=True  → Entry deleted, cache miss returned
+# delete_invalid_signatures=False → Warning logged, data still returned
+```
+
+**Use Cases:**
+- **Development**: `delete_invalid_signatures=False` for debugging
+- **Production**: `delete_invalid_signatures=True` for automatic cleanup
+- **High Security**: `use_in_memory_key=True` + `delete_invalid_signatures=True`
 
 ## Real-World Examples
 
@@ -568,6 +657,7 @@ Missing optional dependencies are handled gracefully with automatic fallbacks.
 
 ## Documentation
 
+- **[Security Guide](docs/SECURITY.md)** - Cache entry signing, integrity protection, and security best practices
 - **[Configuration Guide](docs/CONFIGURATION.md)** - Detailed configuration options and use cases
 - **[SQL Cache Guide](docs/SQL_CACHE.md)** - Pull-through cache for APIs and time-series data
 - **[Custom Metadata Guide](docs/CUSTOM_METADATA.md)** - Advanced metadata workflows with SQLAlchemy

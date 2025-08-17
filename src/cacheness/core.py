@@ -59,6 +59,9 @@ class UnifiedCache:
         # Initialize custom metadata support
         self._init_custom_metadata_support()
 
+        # Initialize entry signer for metadata integrity
+        self._init_entry_signer()
+
         # Clean up expired entries on initialization
         if self.config.storage.cleanup_on_init:
             self._cleanup_expired()
@@ -143,6 +146,27 @@ class UnifiedCache:
                 self._custom_metadata_enabled = False
         except ImportError:
             self._custom_metadata_enabled = False
+
+    def _init_entry_signer(self):
+        """Initialize cache entry signer for metadata integrity protection."""
+        try:
+            if self.config.security.enable_entry_signing:
+                from .security import create_cache_signer
+                
+                self.signer = create_cache_signer(
+                    cache_dir=self.cache_dir,
+                    key_file=self.config.security.signing_key_file,
+                    custom_fields=self.config.security.custom_signed_fields,
+                    use_in_memory_key=self.config.security.use_in_memory_key
+                )
+                
+                logger.info(f"🔒 Entry signing enabled with fields: {self.signer.signed_fields}")
+            else:
+                self.signer = None
+                logger.debug("Entry signing disabled")
+        except Exception as e:
+            logger.warning(f"Failed to initialize entry signer: {e}")
+            self.signer = None
 
     def _store_custom_metadata(self, cache_key: str, custom_metadata: Dict[str, Any]):
         """Store custom metadata using link table architecture."""
@@ -456,6 +480,38 @@ class UnifiedCache:
                 "metadata": metadata_dict,
             }
 
+            # Sign the entry if signing is enabled
+            if self.signer:
+                try:
+                    # Use consistent timestamp for both storage and signing
+                    creation_timestamp = datetime.now(timezone.utc)
+                    # Store without timezone info for consistency with database format
+                    creation_timestamp_str = creation_timestamp.replace(tzinfo=None).isoformat()
+                    
+                    # Create complete entry data for signing
+                    complete_entry_data = {
+                        "cache_key": cache_key,
+                        "data_type": handler.data_type,
+                        "prefix": prefix,
+                        "description": description,
+                        "file_size": result["file_size"],
+                        "created_at": creation_timestamp_str,  # Use consistent format
+                        "actual_path": result.get("actual_path", str(base_file_path)),
+                        "file_hash": file_hash,
+                    }
+                    
+                    signature = self.signer.sign_entry(complete_entry_data)
+                    metadata_dict["entry_signature"] = signature
+                    
+                    # Store the creation timestamp in entry_data for the database
+                    entry_data["created_at"] = creation_timestamp_str
+                    
+                    logger.debug(f"Created signature for entry {cache_key}")
+                    
+                except Exception as e:
+                    logger.warning(f"Failed to sign entry {cache_key}: {e}")
+                    # Continue without signature for backward compatibility
+            
             self.metadata_backend.put_entry(cache_key, entry_data)
 
             # Handle custom metadata if provided
@@ -535,6 +591,48 @@ class UnifiedCache:
                         self.metadata_backend.increment_misses()
                         return None
 
+            # Verify entry signature if signing is enabled
+            if self.signer and self.config.security.enable_entry_signing:
+                stored_signature = metadata.get("entry_signature")
+                
+                if stored_signature is not None:
+                    # Reconstruct entry data for verification
+                    verify_entry_data = {
+                        "cache_key": cache_key,
+                        "data_type": entry.get("data_type"),
+                        "prefix": entry.get("prefix", ""),
+                        "description": entry.get("description", ""),
+                        "file_size": entry.get("file_size", 0),
+                        "created_at": entry.get("created_at"),
+                        "actual_path": metadata.get("actual_path", ""),
+                        "file_hash": metadata.get("file_hash"),
+                    }
+                    
+                    if not self.signer.verify_entry(verify_entry_data, stored_signature):
+                        if self.config.security.delete_invalid_signatures:
+                            logger.warning(
+                                f"Entry signature verification failed for {cache_key}. "
+                                f"Removing potentially tampered cache entry."
+                            )
+                            self.metadata_backend.remove_entry(cache_key)
+                            self.metadata_backend.increment_misses()
+                            return None
+                        else:
+                            logger.warning(
+                                f"Entry signature verification failed for {cache_key}. "
+                                f"Entry retained due to delete_invalid_signatures=False."
+                            )
+                            # Continue with loading despite invalid signature
+                        
+                elif not self.config.security.allow_unsigned_entries:
+                    logger.warning(
+                        f"Entry {cache_key} has no signature but unsigned entries are not allowed. "
+                        f"Removing entry."
+                    )
+                    self.metadata_backend.remove_entry(cache_key)
+                    self.metadata_backend.increment_misses()
+                    return None
+
             # Use handler to load the data
             data = handler.get(file_path, metadata)
 
@@ -588,9 +686,47 @@ class UnifiedCache:
             logger.debug(f"Cache entry {cache_key} not found for invalidation")
 
     def clear_all(self):
-        """Clear all cache entries."""
+        """Clear all cache entries and remove cache files."""
+        import os
+        import glob
+        
+        # Clear metadata first and get count
         removed_count = self.metadata_backend.clear_all()
-        logger.info(f"Cleared {removed_count} cache entries")
+        
+        # Remove all cache files - comprehensive pattern matching
+        # Primary extensions
+        cache_patterns = [
+            str(self.cache_dir / "*.pkl"),      # Uncompressed pickle
+            str(self.cache_dir / "*.npz"),      # NumPy arrays
+            str(self.cache_dir / "*.b2nd"),     # Blosc2 arrays  
+            str(self.cache_dir / "*.b2tr"),     # TensorFlow tensors with blosc2
+            str(self.cache_dir / "*.parquet"),  # DataFrame files
+        ]
+        
+        # Compressed pickle files with valid compression codecs
+        pickle_codecs = ["lz4", "zstd", "gzip", "zst", "gz", "bz2", "xz"]
+        for codec in pickle_codecs:
+            cache_patterns.append(str(self.cache_dir / f"*.pkl.{codec}"))
+        
+        # Additional patterns for any other compression extensions user might use
+        # This catches any .pkl.* pattern that might not be in our known list
+        cache_patterns.append(str(self.cache_dir / "*.pkl.*"))
+        
+        files_removed = 0
+        processed_files = set()  # Avoid double-counting due to overlapping patterns
+        
+        for pattern in cache_patterns:
+            for file_path in glob.glob(pattern):
+                if file_path not in processed_files:
+                    try:
+                        os.remove(file_path)
+                        files_removed += 1
+                        processed_files.add(file_path)
+                    except OSError as e:
+                        logger.warning(f"Failed to remove cache file {file_path}: {e}")
+        
+        logger.info(f"Cleared {removed_count} cache entries and removed {files_removed} cache files")
+        return removed_count
 
     def get_stats(self) -> Dict[str, Any]:
         """Get comprehensive cache statistics."""
