@@ -104,34 +104,15 @@ try:
         # Entry signature for metadata integrity protection
         entry_signature = Column(String(64), nullable=True)  # HMAC-SHA256 hex (64 chars)
 
+        # Backend technical metadata (previously stored in metadata_json)
+        object_type = Column(String(100), nullable=True)  # e.g., "<class 'int'>"
+        storage_format = Column(String(20), nullable=True)  # e.g., "pickle", "parquet"
+        serializer = Column(String(20), nullable=True)  # e.g., "pickle", "dill"
+        compression_codec = Column(String(20), nullable=True)  # e.g., "zstd", "lz4"
+        actual_path = Column(String(500), nullable=True)  # Full path to cache file
+
         # Original cache key parameters - only store, don't index (rarely queried)
         cache_key_params = Column(Text, nullable=True)  # Removed index=True
-
-        # Relationship to custom metadata links (loaded lazily to avoid circular imports)
-        def __init_subclass__(cls, **kwargs):
-            super().__init_subclass__(**kwargs)
-            # This will be set up after custom_metadata module is imported
-
-        def get_custom_metadata_links(self):
-            """Get custom metadata links for this cache entry."""
-            # Import here to avoid circular dependency
-            try:
-                from .custom_metadata import CacheMetadataLink
-                from sqlalchemy.orm import object_session
-
-                session = object_session(self)
-                if session:
-                    return (
-                        session.query(CacheMetadataLink)
-                        .filter(CacheMetadataLink.cache_key == self.cache_key)
-                        .all()
-                    )
-            except ImportError:
-                pass
-            return []
-
-        # Data-specific metadata (stored as JSON)
-        metadata_json = Column(Text, default="{}", nullable=False)
 
         # Optimized composite indexes for actual query patterns only
         __table_args__ = (
@@ -462,10 +443,9 @@ class CachedMetadataBackend(MetadataBackend):
 class InMemoryBackend(MetadataBackend):
     """Ultra-fast in-memory metadata backend optimized for maximum PUT/GET performance.
     
-    Uses a single unified dictionary structure to minimize lookups:
-    - Single dict for O(1) key-based lookups
-    - All metadata stored in one place to minimize object overhead
-    - Minimal object creation and copying
+    Uses a simple unified entry structure for minimal overhead:
+    - Single entries dict with complete entry data per key
+    - Entry structure matches SQLite backend schema at value level
     - No I/O operations for maximum speed
     - Thread-safe with minimal locking overhead
     
@@ -477,197 +457,144 @@ class InMemoryBackend(MetadataBackend):
     """
     
     def __init__(self):
-        """Initialize in-memory backend with optimized data structures."""
+        """Initialize in-memory backend with simple unified entry structure."""
         self._lock = threading.RLock()  # Reentrant lock for thread safety
         
-        # Single unified dict for maximum PUT/GET performance
-        # Structure: cache_key -> {
-        #   'metadata': {...},
-        #   'description': str,
-        #   'data_type': str,
-        #   'prefix': str,
-        #   'file_size': int,
-        #   'created_at': datetime,
-        #   'accessed_at': datetime
-        # }
+        # Simple unified dict: cache_key -> complete_entry
+        # Entry structure matches SQLite schema at the entry level
         self._entries = {}
         
-        # Statistics - single values for speed
-        self._stats = {
-            "hits": 0,
-            "misses": 0,
-            "total_entries": 0,
-            "total_size": 0
-        }
-        
-        # Cache for expensive operations (only used for list operations)
-        self._list_cache = None
-        self._list_cache_dirty = True
+        # Simple statistics counters
+        self._cache_hits = 0
+        self._cache_misses = 0
     
     def get_entry(self, cache_key: str) -> Optional[Dict[str, Any]]:
-        """Get specific cache entry metadata with O(1) lookup."""
-        entry = self._entries.get(cache_key)
-        if entry is None:
-            return None
-            
-        # Fast single-dict access - no multiple .get() calls
-        created_at = entry.get('created_at')
-        accessed_at = entry.get('accessed_at')
-        
-        return {
-            "description": entry.get('description', ''),
-            "data_type": entry.get('data_type', 'unknown'),
-            "prefix": entry.get('prefix', ''),
-            "created_at": created_at.isoformat() if created_at else None,
-            "accessed_at": accessed_at.isoformat() if accessed_at else None,
-            "file_size": entry.get('file_size', 0),
-            "metadata": entry.get('metadata', {}),
-        }
+        """Get specific cache entry metadata with O(1) lookup (simple unified entry)."""
+        with self._lock:
+            return self._entries.get(cache_key)
     
     def put_entry(self, cache_key: str, entry_data: Dict[str, Any]):
-        """Store cache entry metadata with optimized O(1) operations."""
+        """Store cache entry metadata with O(1) operations (simple unified entry)."""
         with self._lock:
+            # Create complete entry structure matching SQLite schema at entry level
             now = datetime.now(timezone.utc)
             
-            # Handle timestamps efficiently - reuse datetime objects when possible
+            # Handle timestamps
             created_at = entry_data.get("created_at")
             if isinstance(created_at, str):
                 try:
-                    created_at = datetime.fromisoformat(created_at)
+                    created_at = datetime.fromisoformat(created_at).isoformat()
                 except ValueError:
-                    created_at = now
-            elif not isinstance(created_at, datetime):
-                created_at = now
+                    created_at = now.isoformat()
+            elif isinstance(created_at, datetime):
+                created_at = created_at.isoformat()
+            else:
+                created_at = now.isoformat()
             
             accessed_at = entry_data.get("accessed_at")
             if isinstance(accessed_at, str):
                 try:
-                    accessed_at = datetime.fromisoformat(accessed_at)
+                    accessed_at = datetime.fromisoformat(accessed_at).isoformat()
                 except ValueError:
-                    accessed_at = now
-            elif not isinstance(accessed_at, datetime):
-                accessed_at = now
+                    accessed_at = now.isoformat()
+            elif isinstance(accessed_at, datetime):
+                accessed_at = accessed_at.isoformat()
+            else:
+                accessed_at = now.isoformat()
             
-            # Update statistics efficiently - check if this is a new entry
-            is_new_entry = cache_key not in self._entries
-            old_size = 0 if is_new_entry else self._entries[cache_key].get('file_size', 0)
-            new_size = entry_data.get("file_size", 0)
-            
-            if is_new_entry:
-                self._stats["total_entries"] += 1
-            self._stats["total_size"] += (new_size - old_size)
-            
-            # Store everything in unified structure with single dict assignment
-            self._entries[cache_key] = {
-                'metadata': entry_data.get("metadata", {}),
-                'description': entry_data.get("description", ""),
-                'data_type': entry_data.get("data_type", "unknown"),
-                'prefix': entry_data.get("prefix", ""),
-                'file_size': new_size,
-                'created_at': created_at,
-                'accessed_at': accessed_at,
+            # Store complete entry structure matching SQLite schema
+            entry = {
+                "description": entry_data.get("description", ""),
+                "data_type": entry_data.get("data_type", "unknown"),
+                "prefix": entry_data.get("prefix", ""),
+                "created_at": created_at,
+                "accessed_at": accessed_at,
+                "file_size": entry_data.get("file_size", 0),
+                "metadata": entry_data.get("metadata", {}).copy(),
             }
             
-            # Invalidate list cache
-            self._list_cache_dirty = True
+            self._entries[cache_key] = entry
+            
     
     def remove_entry(self, cache_key: str):
-        """Remove cache entry metadata with O(1) operations."""
+        """Remove cache entry metadata with O(1) operations (simple unified entry)."""
         with self._lock:
-            entry = self._entries.get(cache_key)
-            if entry is None:
-                return
-                
-            # Update statistics before removal
-            self._stats["total_entries"] -= 1
-            self._stats["total_size"] -= entry.get('file_size', 0)
-            
-            # Single dict removal - much faster than multiple pops
-            del self._entries[cache_key]
-            
-            # Invalidate list cache
-            self._list_cache_dirty = True
+            self._entries.pop(cache_key, None)
     
     def list_entries(self) -> List[Dict[str, Any]]:
-        """List all cache entries with smart caching for repeated calls."""
+        """List all cache entries - pure in-memory, no caching needed (simple unified entries)."""
         with self._lock:
-            # Use cached result if available and not dirty
-            if not self._list_cache_dirty and self._list_cache is not None:
-                return self._list_cache  # Return reference for speed (caller shouldn't modify)
-            
-            # Build optimized entry list with minimal overhead
             entries = []
             for cache_key, entry in self._entries.items():
-                # Single dict access for all fields - much faster
-                file_size = entry.get('file_size', 0)
-                created_at = entry.get('created_at')
-                accessed_at = entry.get('accessed_at')
-                
-                entry_dict = {
+                # Simple direct access to complete entry structure
+                list_entry = {
                     "cache_key": cache_key,
-                    "description": entry.get('description', ''),
-                    "data_type": entry.get('data_type', 'unknown'),
-                    "prefix": entry.get('prefix', ''),
-                    "file_size": file_size,
-                    "size_mb": file_size / (1024 * 1024),
+                    "data_type": entry.get("data_type", "unknown"),
+                    "description": entry.get("description", ""),
+                    "metadata": entry.get("metadata", {}),
+                    "created": entry.get("created_at"),
+                    "last_accessed": entry.get("accessed_at"),
+                    "size_mb": round(entry.get("file_size", 0) / (1024 * 1024), 3),
                 }
-                
-                # Only convert timestamps if they exist (avoid unnecessary work)
-                if created_at:
-                    entry_dict["created"] = created_at.isoformat()
-                if accessed_at:
-                    entry_dict["last_accessed"] = accessed_at.isoformat()
-                
-                entries.append(entry_dict)
+                entries.append(list_entry)
             
-            # Cache the result for future calls
-            self._list_cache = entries
-            self._list_cache_dirty = False
-            
+            # Sort by creation time (newest first)
+            entries.sort(key=lambda x: x["created"] or "", reverse=True)
             return entries
     
     def get_stats(self) -> Dict[str, Any]:
-        """Get cache statistics with O(1) performance."""
+        """Get cache statistics (simple entries-based counting)."""
         with self._lock:
-            total_size_mb = self._stats["total_size"] / (1024 * 1024)
+            entries = self._entries
+            total_entries = len(entries)
+            
+            # Calculate total size
+            total_size_mb = sum(entry.get("file_size", 0) for entry in entries.values()) / (1024 * 1024)
+            
+            # Count by data type
+            dataframe_count = sum(
+                1 for entry in entries.values()
+                if entry.get("data_type") == "dataframe"
+            )
+            array_count = sum(
+                1 for entry in entries.values()
+                if entry.get("data_type") == "array"
+            )
+            
+            # Cache hit rate
+            hits = self._cache_hits
+            misses = self._cache_misses
+            hit_rate = hits / (hits + misses) if (hits + misses) > 0 else 0.0
             
             return {
-                "backend_type": "memory",
-                "total_entries": self._stats["total_entries"],
+                "total_entries": total_entries,
+                "dataframe_entries": dataframe_count,
+                "array_entries": array_count,
                 "total_size_mb": round(total_size_mb, 2),
-                "hits": self._stats["hits"],
-                "misses": self._stats["misses"],
-                "hit_rate": (
-                    self._stats["hits"] / (self._stats["hits"] + self._stats["misses"])
-                    if (self._stats["hits"] + self._stats["misses"]) > 0
-                    else 0.0
-                ),
-                "avg_entry_size_mb": (
-                    total_size_mb / self._stats["total_entries"]
-                    if self._stats["total_entries"] > 0
-                    else 0.0
-                ),
+                "cache_hits": hits,
+                "cache_misses": misses,
+                "hit_rate": round(hit_rate, 3),
             }
     
     def update_access_time(self, cache_key: str):
-        """Update last access time with minimal overhead."""
-        entry = self._entries.get(cache_key)
-        if entry is not None:
-            entry['accessed_at'] = datetime.now(timezone.utc)
-            # Only invalidate list cache occasionally for better performance
-            if len(self._entries) % 100 == 0:  # Every 100 access updates
-                self._list_cache_dirty = True
+        """Update last access time (simple unified entry structure)."""
+        with self._lock:
+            entry = self._entries.get(cache_key)
+            if entry is not None:
+                entry['accessed_at'] = datetime.now(timezone.utc).isoformat()
     
     def increment_hits(self):
-        """Increment cache hits counter with O(1) performance."""
-        self._stats["hits"] += 1
+        """Increment cache hits counter."""
+        with self._lock:
+            self._cache_hits += 1
     
     def increment_misses(self):
-        """Increment cache misses counter with O(1) performance."""
-        self._stats["misses"] += 1
+        """Increment cache misses counter."""
+        with self._lock:
+            self._cache_misses += 1
     
     def cleanup_expired(self, ttl_hours: int) -> int:
-        """Remove expired entries efficiently with batch operations."""
+        """Remove expired entries (simple entries structure)."""
         if ttl_hours <= 0:
             return 0
             
@@ -675,38 +602,31 @@ class InMemoryBackend(MetadataBackend):
             cutoff_time = datetime.now(timezone.utc) - timedelta(hours=ttl_hours)
             expired_keys = []
             
-            # Find expired keys in single pass
+            # Find expired keys
             for cache_key, entry in self._entries.items():
-                created_at = entry.get('created_at')
-                if created_at and created_at < cutoff_time:
-                    expired_keys.append(cache_key)
+                created_at_str = entry.get('created_at')
+                if created_at_str:
+                    try:
+                        created_at = datetime.fromisoformat(created_at_str)
+                        if created_at < cutoff_time:
+                            expired_keys.append(cache_key)
+                    except (ValueError, TypeError):
+                        # Invalid timestamp, consider expired
+                        expired_keys.append(cache_key)
             
-            # Remove expired entries in batch
+            # Remove expired entries
             for cache_key in expired_keys:
-                self.remove_entry(cache_key)  # Reuse optimized removal
+                self._entries.pop(cache_key, None)
             
             return len(expired_keys)
     
     def clear_all(self) -> int:
-        """Clear all entries with O(1) performance."""
+        """Clear all entries (simple entries structure)."""
         with self._lock:
-            count = self._stats["total_entries"]
-            
-            # Clear unified data structure efficiently - single operation
+            count = len(self._entries)
             self._entries.clear()
-            
-            # Reset statistics
-            self._stats = {
-                "hits": 0,
-                "misses": 0,
-                "total_entries": 0,
-                "total_size": 0
-            }
-            
-            # Clear cache
-            self._list_cache = None
-            self._list_cache_dirty = True
-            
+            self._cache_hits = 0
+            self._cache_misses = 0
             return count
     
     def load_metadata(self) -> Dict[str, Any]:
@@ -747,12 +667,7 @@ class JsonBackend(MetadataBackend):
                 logger.warning("JSON metadata corrupted, starting fresh")
 
         return {
-            "entries": {},
-            "access_times": {},
-            "creation_times": {},
-            "file_sizes": {},
-            "data_types": {},
-            "cache_key_params": {},  # Store original key-value params separately
+            "entries": {},  # cache_key -> complete entry dict (with structured fields)
             "cache_hits": 0,
             "cache_misses": 0,
         }
@@ -785,70 +700,37 @@ class JsonBackend(MetadataBackend):
             self._save_to_disk()
 
     def get_entry(self, cache_key: str) -> Optional[Dict[str, Any]]:
-        """Get specific cache entry metadata."""
+        """Get specific cache entry metadata (simple entry lookup)."""
         with self._lock:
-            if cache_key not in self._metadata["entries"]:
+            # Simple lookup - entry contains all structured fields
+            entry = self._metadata.get("entries", {}).get(cache_key)
+            if entry is None:
                 return None
-
-            # Extract cache_key_params and add to dedicated storage if it exists
-            entry_metadata = self._metadata["entries"][cache_key].copy()
-            cache_key_params = self._metadata.get("cache_key_params", {}).get(cache_key)
-            if cache_key_params is not None:
-                entry_metadata["cache_key_params"] = cache_key_params
-
-            return {
-                "description": self._metadata["entries"][cache_key].get(
-                    "description", ""
-                ),
-                "data_type": self._metadata["data_types"].get(cache_key, "unknown"),
-                "prefix": self._metadata["entries"][cache_key].get("prefix", ""),
-                "created_at": self._metadata["creation_times"].get(cache_key),
-                "accessed_at": self._metadata["access_times"].get(cache_key),
-                "file_size": self._metadata["file_sizes"].get(cache_key, 0),
-                "metadata": entry_metadata,
-            }
+            
+            # Entry already contains the structured fields matching SQLite schema
+            return entry
 
     def put_entry(self, cache_key: str, entry_data: Dict[str, Any]):
-        """Store cache entry metadata with batching."""
+        """Store cache entry metadata as complete entry (matching SQLite schema structure)."""
         with self._lock:
             now = datetime.now(timezone.utc).isoformat()
 
-            # Extract cache_key_params from metadata and store separately
+            # Extract and restructure metadata to match SQLite schema
             metadata = entry_data.get("metadata", {}).copy()
-            cache_key_params = metadata.pop("cache_key_params", None)
-
-            # Store the complete entry metadata, including description (but without cache_key_params)
-            self._metadata["entries"][cache_key] = {
-                **metadata,
+            
+            # Build complete entry with structured fields (matching SQLite columns)
+            entry = {
                 "description": entry_data.get("description", ""),
+                "data_type": entry_data.get("data_type", "unknown"),
+                "prefix": entry_data.get("prefix", ""),
+                "created_at": entry_data.get("created_at", now),
+                "accessed_at": entry_data.get("accessed_at", now),
+                "file_size": entry_data.get("file_size", 0),
+                "metadata": metadata,  # Include all metadata as nested structure
             }
-            self._metadata["data_types"][cache_key] = entry_data.get(
-                "data_type", "unknown"
-            )
-            self._metadata["creation_times"][cache_key] = entry_data.get(
-                "created_at", now
-            )
-            self._metadata["access_times"][cache_key] = entry_data.get(
-                "accessed_at", now
-            )
-            self._metadata["file_sizes"][cache_key] = entry_data.get("file_size", 0)
-
-            # Store cache_key_params separately for efficient querying
-            if cache_key_params is not None:
-                if "cache_key_params" not in self._metadata:
-                    self._metadata["cache_key_params"] = {}
-                try:
-                    from .serialization import serialize_for_cache_key
-                    serializable_params = {
-                        key: serialize_for_cache_key(value) 
-                        for key, value in cache_key_params.items()
-                    }
-                    self._metadata["cache_key_params"][cache_key] = serializable_params
-                except Exception:
-                    try:
-                        self._metadata["cache_key_params"][cache_key] = cache_key_params
-                    except Exception:
-                        pass
+            
+            # Store complete entry - simple and efficient
+            self._metadata["entries"][cache_key] = entry
 
             # Batch writes for better performance
             self._write_count += 1
@@ -862,29 +744,21 @@ class JsonBackend(MetadataBackend):
     def remove_entry(self, cache_key: str):
         """Remove cache entry metadata."""
         with self._lock:
-            for metadata_dict in self._metadata.values():
-                if isinstance(metadata_dict, dict) and cache_key in metadata_dict:
-                    del metadata_dict[cache_key]
-            # Also specifically ensure cache_key_params is cleaned up
-            if (
-                "cache_key_params" in self._metadata
-                and cache_key in self._metadata["cache_key_params"]
-            ):
-                del self._metadata["cache_key_params"][cache_key]
+            if cache_key in self._metadata.get("entries", {}):
+                del self._metadata["entries"][cache_key]
             self._save_to_disk()
 
     def list_entries(self) -> List[Dict[str, Any]]:
-        """List all cache entries with metadata."""
+        """List all cache entries with metadata (simple entries iteration)."""
         with self._lock:
             entries = []
 
-            for cache_key, entry_data in self._metadata["entries"].items():
-                creation_time = self._metadata["creation_times"].get(cache_key)
-                access_time = self._metadata["access_times"].get(cache_key)
-                file_size = self._metadata["file_sizes"].get(cache_key, 0)
-                data_type = self._metadata["data_types"].get(cache_key, "unknown")
-
+            # Simple iteration over entries dict
+            for cache_key, entry in self._metadata.get("entries", {}).items():
                 # Ensure timestamps are timezone-aware when returned
+                creation_time = entry.get("created_at")
+                access_time = entry.get("accessed_at")
+                
                 if creation_time and isinstance(creation_time, str):
                     try:
                         # Parse ISO format string back to timezone-aware datetime
@@ -907,46 +781,44 @@ class JsonBackend(MetadataBackend):
                     except (ValueError, TypeError):
                         pass
 
-                # Include cache_key_params in metadata if available
-                complete_metadata = entry_data.copy()
-                cache_key_params = self._metadata.get("cache_key_params", {}).get(
-                    cache_key
-                )
-                if cache_key_params is not None:
-                    complete_metadata["cache_key_params"] = cache_key_params
+                # Build entry for list output
+                list_entry = {
+                    "cache_key": cache_key,
+                    "data_type": entry.get("data_type", "unknown"),
+                    "description": entry.get("description", ""),
+                    "metadata": entry.get("metadata", {}),
+                    "created": creation_time,
+                    "last_accessed": access_time,
+                    "size_mb": round(entry.get("file_size", 0) / (1024 * 1024), 3),
+                }
 
-                entries.append(
-                    {
-                        "cache_key": cache_key,
-                        "data_type": data_type,
-                        "description": entry_data.get("description", ""),
-                        "metadata": complete_metadata,
-                        "created": creation_time,
-                        "last_accessed": access_time,
-                        "size_mb": round(file_size / (1024 * 1024), 3),
-                    }
-                )
+                entries.append(list_entry)
 
             # Sort by creation time (newest first)
             entries.sort(key=lambda x: x["created"] or "", reverse=True)
             return entries
 
     def get_stats(self) -> Dict[str, Any]:
-        """Get cache statistics."""
+        """Get cache statistics (simple entries-based counting)."""
         with self._lock:
-            total_entries = len(self._metadata["entries"])
-            total_size_mb = sum(self._metadata["file_sizes"].values()) / (1024 * 1024)
+            entries = self._metadata.get("entries", {})
+            
+            # Count total entries
+            total_entries = len(entries)
+            
+            # Calculate total size
+            total_size_mb = sum(entry.get("file_size", 0) for entry in entries.values()) / (1024 * 1024)
 
             # Count by data type
             dataframe_count = sum(
                 1
-                for dt in self._metadata.get("data_types", {}).values()
-                if dt == "dataframe"
+                for entry in entries.values()
+                if entry.get("data_type") == "dataframe"
             )
             array_count = sum(
                 1
-                for dt in self._metadata.get("data_types", {}).values()
-                if dt == "array"
+                for entry in entries.values()
+                if entry.get("data_type") == "array"
             )
 
             # Cache hit rate
@@ -965,12 +837,12 @@ class JsonBackend(MetadataBackend):
             }
 
     def update_access_time(self, cache_key: str):
-        """Update last access time for cache entry."""
+        """Update last access time for cache entry (simple entries structure)."""
         with self._lock:
-            self._metadata["access_times"][cache_key] = datetime.now(
-                timezone.utc
-            ).isoformat()
-            self._save_to_disk()
+            entries = self._metadata.get("entries", {})
+            if cache_key in entries:
+                entries[cache_key]["accessed_at"] = datetime.now(timezone.utc).isoformat()
+                self._save_to_disk()
 
     def increment_hits(self):
         """Increment cache hits counter."""
@@ -985,29 +857,28 @@ class JsonBackend(MetadataBackend):
             self._save_to_disk()
 
     def cleanup_expired(self, ttl_hours: int) -> int:
-        """Remove expired entries and return count removed."""
+        """Remove expired entries and return count removed (simple entries structure)."""
         from datetime import timedelta
 
         with self._lock:
             expired_keys = []
             cutoff_time = datetime.now(timezone.utc) - timedelta(hours=ttl_hours)
+            entries = self._metadata.get("entries", {})
 
-            for cache_key, creation_time_str in self._metadata[
-                "creation_times"
-            ].items():
+            for cache_key, entry in entries.items():
                 try:
-                    creation_time = datetime.fromisoformat(creation_time_str)
-                    if creation_time < cutoff_time:
-                        expired_keys.append(cache_key)
+                    creation_time_str = entry.get("created_at")
+                    if creation_time_str:
+                        creation_time = datetime.fromisoformat(creation_time_str)
+                        if creation_time < cutoff_time:
+                            expired_keys.append(cache_key)
                 except (ValueError, TypeError):
                     # Invalid timestamp, consider expired
                     expired_keys.append(cache_key)
 
             # Remove expired entries
             for cache_key in expired_keys:
-                for metadata_dict in self._metadata.values():
-                    if isinstance(metadata_dict, dict) and cache_key in metadata_dict:
-                        del metadata_dict[cache_key]
+                entries.pop(cache_key, None)
 
             if expired_keys:
                 self._save_to_disk()
@@ -1015,15 +886,14 @@ class JsonBackend(MetadataBackend):
             return len(expired_keys)
 
     def clear_all(self) -> int:
-        """Remove all cache entries and return count removed."""
+        """Remove all cache entries and return count removed (simple entries structure)."""
         with self._lock:
+            # Count entries from the entries dict
             entry_count = len(self._metadata.get("entries", {}))
             
-            # Clear all metadata dictionaries
+            # Reset to simple structure
             self._metadata = {
                 "entries": {},
-                "creation_times": {},
-                "access_times": {},
                 "cache_hits": 0,
                 "cache_misses": 0,
             }
@@ -1132,9 +1002,9 @@ class SqliteBackend(MetadataBackend):
         return stats
 
     def get_entry(self, cache_key: str) -> Optional[Dict[str, Any]]:
-        """Get specific cache entry metadata."""
+        """Get specific cache entry metadata using columns directly - zero JSON parsing."""
         with self.SessionLocal() as session:
-            # Single optimized query with all needed data
+            # Single optimized query - get entry using columns only
             entry = session.execute(
                 select(CacheEntry).where(CacheEntry.cache_key == cache_key)
             ).scalar_one_or_none()
@@ -1142,16 +1012,33 @@ class SqliteBackend(MetadataBackend):
             if not entry:
                 return None
 
-            # Parse metadata once
-            metadata = json_loads(entry.metadata_json)
+            # Build metadata from columns directly - zero JSON parsing for backend data
+            metadata = {}
             
-            # Add extracted fields back to metadata
+            # Add backend technical metadata from dedicated columns (not JSON)
+            if entry.object_type is not None:
+                metadata["object_type"] = entry.object_type
+            if entry.storage_format is not None:
+                metadata["storage_format"] = entry.storage_format
+            if entry.serializer is not None:
+                metadata["serializer"] = entry.serializer
+            if entry.compression_codec is not None:
+                metadata["compression_codec"] = entry.compression_codec
+            if entry.actual_path is not None:
+                metadata["actual_path"] = entry.actual_path
+            
+            # Add optional security fields from columns (not JSON)
             if entry.file_hash is not None:
                 metadata["file_hash"] = entry.file_hash
             if entry.entry_signature is not None:
                 metadata["entry_signature"] = entry.entry_signature
+            
+            # Only parse cache_key_params JSON if it exists (should be disabled by default)
             if entry.cache_key_params is not None:
-                metadata["cache_key_params"] = json_loads(entry.cache_key_params)
+                try:
+                    metadata["cache_key_params"] = json_loads(entry.cache_key_params)
+                except (ValueError, TypeError):
+                    pass  # Skip malformed cache_key_params
 
             return {
                 "description": entry.description,
@@ -1164,15 +1051,28 @@ class SqliteBackend(MetadataBackend):
             }
 
     def put_entry(self, cache_key: str, entry_data: Dict[str, Any]):
-        """Store cache entry metadata using efficient upsert with optimized transaction."""
+        """Store cache entry metadata using dedicated columns - zero JSON overhead for backend data."""
         with self._lock, self.SessionLocal() as session:
             # Extract and process metadata fields efficiently
-            metadata = entry_data.get("metadata", {})
+            metadata = entry_data.get("metadata", {}).copy()
+            
+            # Extract backend technical metadata to dedicated columns (not JSON)
+            object_type = metadata.pop("object_type", None)
+            storage_format = metadata.pop("storage_format", None)
+            serializer = metadata.pop("serializer", None)
+            compression_codec = metadata.pop("compression_codec", None)
+            actual_path = metadata.pop("actual_path", None)
+            
+            # Extract security fields from metadata (remove from JSON to avoid duplication)
             file_hash = metadata.pop("file_hash", None)
             entry_signature = metadata.pop("entry_signature", None)
             cache_key_params = metadata.pop("cache_key_params", None)
             
-            # Serialize cache_key_params efficiently (only if needed)
+            # Remove redundant fields that are already stored as columns
+            metadata.pop("prefix", None)  # Already stored in prefix column
+            metadata.pop("data_type", None)  # Already stored in data_type column
+            
+            # Only serialize cache_key_params if absolutely necessary (should be off by default)
             serialized_params = None
             if cache_key_params is not None:
                 try:
@@ -1186,6 +1086,7 @@ class SqliteBackend(MetadataBackend):
                     try:
                         serialized_params = json_dumps(cache_key_params)
                     except Exception:
+                        # If serialization fails, skip cache_key_params entirely
                         serialized_params = None
             
             # Handle timestamps with proper defaults
@@ -1201,16 +1102,18 @@ class SqliteBackend(MetadataBackend):
             elif accessed_at is None:
                 accessed_at = datetime.now(timezone.utc)
             
-            # Use more efficient INSERT OR REPLACE instead of merge
+            # Use efficient INSERT OR REPLACE with dedicated columns - zero JSON overhead
             from sqlalchemy import text
             session.execute(
                 text("""
                     INSERT OR REPLACE INTO cache_entries 
                     (cache_key, description, data_type, prefix, file_size, 
-                     file_hash, entry_signature, cache_key_params, metadata_json, 
+                     file_hash, entry_signature, cache_key_params, 
+                     object_type, storage_format, serializer, compression_codec, actual_path,
                      created_at, accessed_at)
                     VALUES (:cache_key, :description, :data_type, :prefix, :file_size, 
-                           :file_hash, :entry_signature, :cache_key_params, :metadata_json, 
+                           :file_hash, :entry_signature, :cache_key_params, 
+                           :object_type, :storage_format, :serializer, :compression_codec, :actual_path,
                            :created_at, :accessed_at)
                 """),
                 {
@@ -1222,7 +1125,11 @@ class SqliteBackend(MetadataBackend):
                     "file_hash": file_hash,
                     "entry_signature": entry_signature,
                     "cache_key_params": serialized_params,
-                    "metadata_json": json_dumps(metadata),
+                    "object_type": object_type,
+                    "storage_format": storage_format,
+                    "serializer": serializer,
+                    "compression_codec": compression_codec,
+                    "actual_path": actual_path,
                     "created_at": created_at,
                     "accessed_at": accessed_at
                 }
@@ -1257,8 +1164,9 @@ class SqliteBackend(MetadataBackend):
             session.commit()
 
     def list_entries(self) -> List[Dict[str, Any]]:
-        """List all cache entries with metadata."""
+        """List all cache entries using columns directly - zero JSON parsing overhead for backend data."""
         with self.SessionLocal() as session:
+            # Use a single optimized query to get all data at once
             entries = (
                 session.execute(
                     select(CacheEntry).order_by(desc(CacheEntry.created_at))
@@ -1269,18 +1177,34 @@ class SqliteBackend(MetadataBackend):
 
             result = []
             for entry in entries:
-                entry_metadata = json_loads(entry.metadata_json)
-                # Add file_hash back into metadata if it exists
+                # Build metadata from columns directly - zero JSON parsing for backend data
+                entry_metadata = {}
+                
+                # Add backend technical metadata from dedicated columns (not JSON)
+                if entry.object_type is not None:
+                    entry_metadata["object_type"] = entry.object_type
+                if entry.storage_format is not None:
+                    entry_metadata["storage_format"] = entry.storage_format
+                if entry.serializer is not None:
+                    entry_metadata["serializer"] = entry.serializer
+                if entry.compression_codec is not None:
+                    entry_metadata["compression_codec"] = entry.compression_codec
+                if entry.actual_path is not None:
+                    entry_metadata["actual_path"] = entry.actual_path
+                
+                # Add optional security fields from columns (not JSON)
                 if entry.file_hash is not None:
                     entry_metadata["file_hash"] = entry.file_hash
-                # Add entry_signature back into metadata if it exists
                 if entry.entry_signature is not None:
                     entry_metadata["entry_signature"] = entry.entry_signature
-                # Add cache_key_params back into metadata if it exists
+                
+                # Only parse cache_key_params JSON if it exists (should be disabled by default)
                 if entry.cache_key_params is not None:
-                    entry_metadata["cache_key_params"] = json_loads(
-                        entry.cache_key_params
-                    )
+                    try:
+                        entry_metadata["cache_key_params"] = json_loads(entry.cache_key_params)
+                    except (ValueError, TypeError):
+                        pass  # Skip malformed cache_key_params
+                        
                 result.append(
                     {
                         "cache_key": entry.cache_key,

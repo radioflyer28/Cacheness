@@ -12,25 +12,24 @@ from cacheness.config import CacheConfig
 class TestStoreCacheKeyParamsConfig:
     """Test the store_cache_key_params configuration option."""
 
-    def test_default_config_stores_params(self):
-        """Test that default configuration stores cache_key_params."""
+    def test_default_config_doesnt_store_params(self):
+        """Test that default configuration does NOT store cache_key_params for performance."""
         with tempfile.TemporaryDirectory() as temp_dir:
             cache_dir = Path(temp_dir) / "cache_default"
             config = CacheConfig(cache_dir=str(cache_dir), metadata_backend="sqlite")
             cache = UnifiedCache(config)
 
-            # Verify default is True
-            assert config.metadata.store_cache_key_params is True
+            # Verify default is False for performance
+            assert config.metadata.store_cache_key_params is False
 
             # Store data with parameters
             test_params = {"model": "gpt-4", "temperature": 0.7}
             cache.put("test data", description="Test", **test_params)
 
-            # Check metadata includes cache_key_params
+            # Check metadata does NOT include cache_key_params (default behavior)
             entries = cache.list_entries()
             assert len(entries) == 1
-            assert "cache_key_params" in entries[0]["metadata"]
-            assert entries[0]["metadata"]["cache_key_params"]["model"] == "str:gpt-4"
+            assert "cache_key_params" not in entries[0]["metadata"]
 
     def test_explicit_enable_stores_params(self):
         """Test that explicitly enabling storage works."""

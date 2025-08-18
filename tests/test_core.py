@@ -34,7 +34,7 @@ class TestCacheConfig:
         assert config.compression.use_blosc2_arrays is True
         assert config.compression.blosc2_array_codec == "lz4"
         assert config.compression.blosc2_array_clevel == 5
-        assert config.metadata.store_cache_key_params is True  # New default
+        assert config.metadata.store_cache_key_params is False  # New default for performance
 
     def test_custom_config(self):
         """Test custom configuration values."""
@@ -75,8 +75,8 @@ class TestCacheConfig:
         assert config.storage.cleanup_on_init is False
         assert config.metadata.metadata_backend == "json"
         assert (
-            config.metadata.store_cache_key_params is True
-        )  # Still default even with custom config
+            config.metadata.store_cache_key_params is False
+        )  # New default for performance (was True)
 
 
 class TestCacheness:

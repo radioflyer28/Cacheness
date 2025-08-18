@@ -85,7 +85,7 @@ cache = cacheness(config)
 | `backend` | str | `"auto"` | Backend: "auto", "sqlite", "json" |
 | `database_url` | str | `None` | Custom SQLite database path |
 | `verify_cache_integrity` | bool | `False` | Enable file hash verification |
-| `store_cache_key_params` | bool | `True` | Store cache key parameters |
+| `store_cache_key_params` | bool | `False` | Store cache key parameters (enable for querying, disable for performance) |
 | **Memory Cache Layer** | | | |
 | `enable_memory_cache` | bool | `False` | Enable memory cache layer for disk backends |
 | `memory_cache_type` | str | `"lru"` | Cache algorithm: "lru", "lfu", "fifo", "rr" |

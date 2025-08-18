@@ -52,7 +52,7 @@ class CacheMetadataConfig:
     default_ttl_hours: float = 24
     verify_cache_integrity: bool = True
     store_cache_key_params: bool = (
-        True  # Store cache key parameters in metadata for querying
+        False  # Store cache key parameters in metadata for querying - DISABLED by default for performance
     )
     enable_cache_stats: bool = True  # Track cache hit/miss statistics
     auto_cleanup_expired: bool = True  # Automatically clean up expired entries

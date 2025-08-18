@@ -12,9 +12,39 @@ This guide helps you choose between JSON and SQLite metadata backends based on y
 | Multiple processes | SQLite | JSON **unsafe** for concurrency |
 | Production deployment | SQLite | Robust, ACID compliance, data integrity |
 | Need complex queries | SQLite | Full SQL support vs basic key lookup |
-| Temporary high-performance cache | SQLite (memory) | Best performance without persistence |
+| Temporary high-performance cache | InMemory | Best performance without persistence |
 
 ## Performance Characteristics
+
+**Schema Optimization Benefits:**
+All backends now use unified entry structures with consistent API return formats, while maintaining optimal storage patterns for each backend type. This provides:
+- **Consistent API**: Identical entry formats across all backends
+- **Storage Efficiency**: Each backend optimizes internal storage while maintaining schema consistency  
+- **Reduced Overhead**: Eliminated unnecessary data conversions and JSON parsing
+- **Predictable Performance**: Consistent entry handling across backend types
+
+### InMemory Backend
+
+**Strengths:**
+- ✅ **Ultra-fast performance** - 6,000+ PUT ops/sec, 15,000+ GET ops/sec
+- ✅ Zero I/O operations - all data in memory
+- ✅ Perfect for temporary high-performance caching
+- ✅ Consistent performance regardless of cache size
+- ✅ Simple setup with no external dependencies
+
+**Limitations:**
+- ❌ **No persistence** - data lost on restart
+- ❌ Memory consumption grows with cache size
+- ❌ Single-process only (no sharing between processes)
+- ❌ Limited by available system memory
+
+**Performance Profile:**
+```
+Cache Size:    50     200     500    1000
+PUT ops/sec:   6011   6547    6693   6228
+GET ops/sec:   19594  21732   14698  14794
+LIST time:     0.1ms  0.3ms   0.6ms  1.2ms
+```
 
 ### JSON Backend
 
@@ -35,9 +65,9 @@ This guide helps you choose between JSON and SQLite metadata backends based on y
 **Performance Profile:**
 ```
 Cache Size:    50     200     500    1000
-PUT ops/sec:   3472   3962    2016   1500
-GET ops/sec:   4329   3497    1511    969
-LIST time:     0.2ms  0.7ms   1.5ms  3.0ms
+PUT ops/sec:   4678   4403    3646   2720
+GET ops/sec:   5491   3666    2190   1142
+LIST time:     0.2ms  0.6ms   1.3ms  2.7ms
 ```
 
 ### SQLite Backend
@@ -58,9 +88,9 @@ LIST time:     0.2ms  0.7ms   1.5ms  3.0ms
 **Performance Profile:**
 ```
 Cache Size:    50     200     500    1000
-PUT ops/sec:   1768   1264    640     394
-GET ops/sec:   1766   1802    1466   1454
-LIST time:     5.2ms  19ms    50ms   98ms
+PUT ops/sec:   1753   1171    578     361
+GET ops/sec:   1810   1895    1626   1659
+LIST time:     5.5ms  21.7ms  50.3ms 94.3ms
 ```
 
 ## Concurrency Comparison
@@ -137,8 +167,12 @@ Based on benchmark data, here's when SQLite becomes advantageous:
 ### Memory Usage Patterns
 
 ```python
+# InMemory Backend - all data in memory (fastest)
+memory_usage = cache_entries * (avg_data_size + avg_metadata_size)
+# Fastest access but highest memory usage
+
 # JSON Backend - loads entire metadata into memory
-json_memory_usage = cache_entries * avg_metadata_size
+json_memory_usage = cache_entries * avg_metadata_size + file_cache
 # Linear growth - can become problematic
 
 # SQLite Backend - uses efficient caching
@@ -185,9 +219,9 @@ from cacheness import CacheConfig
 
 perf_config = CacheConfig(
     cache_dir="./temp_cache",
-    metadata_backend="sqlite_memory",  # In-memory for speed
-    max_cache_size_mb=5000,           # Large memory cache
-    default_ttl_hours=6               # Medium TTL
+    metadata_backend="memory",        # Ultra-fast in-memory storage
+    max_cache_size_mb=5000,          # Large memory cache
+    default_ttl_hours=6              # Medium TTL
 )
 ```
 
@@ -220,6 +254,8 @@ def get_data():
 ```
 
 ## Migration Between Backends
+
+**Schema Compatibility:** All backends now use unified entry structures, making migrations seamless. The migration process automatically handles schema conversion while preserving all cache data and metadata.
 
 ### From JSON to SQLite
 
@@ -314,27 +350,44 @@ config = CacheConfig(
 
 **Issue**: Lower than expected throughput
 ```python
-# 1. Check disk I/O - use SSD storage
-# 2. Verify not running on network storage
-# 3. Consider in-memory SQLite for temporary data
-config = CacheConfig(metadata_backend="sqlite_memory")
+# 1. For maximum speed, use InMemory backend for temporary data
+config = CacheConfig(metadata_backend="memory")
+
+# 2. Check disk I/O - use SSD storage for persistent backends
+config = CacheConfig(
+    cache_dir="/fast_ssd/cache",  # SSD storage
+    metadata_backend="sqlite"
+)
+
+# 3. JSON backend: switch to SQLite for large caches (>500 entries)
+if cache_size_entries > 500:
+    config = CacheConfig(metadata_backend="sqlite")
 ```
 
 **Issue**: High latency spikes
 ```python
-# 1. JSON: Caused by large metadata file parsing
+# 1. JSON: Caused by large metadata file parsing - switch to SQLite
 # 2. SQLite: Usually due to WAL checkpoint operations (normal)
-# 3. Consider tuning checkpoint frequency if problematic
+# 3. InMemory: Should have minimal latency - check system memory pressure
 ```
 
 **Issue**: Memory consumption concerns
 ```python
+# InMemory: All data in memory (highest speed, highest memory usage)
 # JSON: Loads all metadata into memory (grows with cache size)
 # SQLite: Constant memory usage with configurable cache size
-# Our SQLite config uses 20MB cache - adjust if needed
+# Choose based on your memory vs speed tradeoffs
 ```
 
 ## Best Practices
+
+### InMemory Backend
+
+1. **Use for temporary high-performance scenarios** where persistence isn't needed
+2. **Monitor memory usage** - grows linearly with cache content
+3. **Single-process applications only** - not shareable between processes
+4. **Perfect for development and testing** with immediate feedback
+5. **Consider for ML model inference caching** where speed is critical
 
 ### JSON Backend
 
@@ -354,13 +407,51 @@ config = CacheConfig(metadata_backend="sqlite_memory")
 
 ### General
 
-1. **Start with JSON for prototyping**, migrate to SQLite for production
-2. **Benchmark your specific workload** - patterns may vary
-3. **Consider cache size growth** over time
-4. **Plan for concurrency needs** early in development
-5. **Use appropriate TTLs** to prevent unbounded growth
+1. **Start with InMemory for prototyping** where speed matters most
+2. **Use JSON for small persistent caches**, migrate to SQLite for production
+3. **Benchmark your specific workload** - patterns may vary
+4. **Consider cache size growth** over time
+5. **Plan for concurrency needs** early in development
+6. **Use appropriate TTLs** to prevent unbounded growth
 
 ### Advanced Performance Tuning
+
+#### Schema Optimization Impact
+
+Recent schema improvements provide significant performance benefits:
+
+**JSON Backend:**
+- Simplified to `{cache_key: entry}` storage format
+- Eliminated unnecessary columnar structure
+- 35% improvement in PUT operations (4,678 vs 3,472 ops/sec at 50 entries)
+- Reduced metadata parsing overhead
+
+**SQLite Backend:** 
+- Eliminated `metadata_json` column for cleaner schema
+- Uses dedicated columns for backend-specific metadata
+- Reduced data conversion overhead
+- Maintains ACID properties with improved efficiency
+
+**InMemory Backend:**
+- Streamlined unified entry structure
+- Optimized for consistent high performance across cache sizes
+- Direct memory access patterns for maximum speed
+
+#### InMemory Backend Optimization
+
+```python
+# InMemory backend is already optimized for maximum speed
+# Main considerations:
+# 1. Ensure sufficient system memory
+# 2. Monitor garbage collection impact for very large caches
+# 3. Consider data structure efficiency for your specific use case
+
+config = CacheConfig(
+    metadata_backend="memory",        # Fastest option
+    max_cache_size_mb=10000,         # Set based on available memory
+    cache_dir="./temp_cache"         # Only used for data files
+)
+```
 
 #### SQLite Backend Optimization
 
@@ -383,15 +474,15 @@ config = CacheConfig(
 
 ```python
 # JSON backend performance tips:
-# 1. Keep metadata files small (< 200 entries)
+# 1. Keep metadata files small (< 500 entries for optimal performance)
 # 2. Use faster JSON library (orjson) - automatically used if available  
 # 3. Minimize metadata complexity
-# 4. Consider disabling parameter storage for better performance
+# 4. Consider switching to SQLite for better scalability
 
 config = CacheConfig(
     metadata_backend="json",
-    store_cache_key_params=False,  # Reduces JSON file size
-    verify_cache_integrity=False   # Skip hash verification for speed
+    max_cache_size_mb=1000,          # Keep cache smaller for JSON
+    verify_cache_integrity=False     # Skip hash verification for speed
 )
 ```
 
