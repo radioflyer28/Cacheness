@@ -5,7 +5,7 @@ Performance comparison of the improved serialization ordering.
 
 import time
 import numpy as np
-from src.cacheness.serialization import serialize_for_cache_key
+from cacheness.serialization import serialize_for_cache_key
 
 # Test objects
 basic_int = 42

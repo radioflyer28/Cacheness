@@ -1050,14 +1050,13 @@ class SqliteBackend(MetadataBackend):
 
         self.db_file = db_file
         
-        # Configure SQLite engine with aggressive performance optimizations
+        # Configure SQLite engine with appropriate optimizations
+        # Note: SQLite uses SingletonThreadPool which doesn't support pool_size/max_overflow
         self.engine = create_engine(
             f"sqlite:///{db_file}", 
             echo=echo,
             pool_pre_ping=True,
             pool_recycle=3600,  # Recycle connections every hour
-            pool_size=20,       # Larger connection pool
-            max_overflow=30,    # Allow more overflow connections
             connect_args={
                 "check_same_thread": False,  # Allow multi-threading
                 "timeout": 30,  # Longer timeout for database locks
