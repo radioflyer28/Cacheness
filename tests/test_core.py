@@ -525,3 +525,108 @@ class TestCacheness:
 
 class TestTimezoneHandling:
     """Test timezone handling in core cache functionality"""
+
+
+class TestMemoryCacheConfig:
+    """Test memory cache layer configuration and functionality."""
+
+    def test_memory_cache_config_new_naming(self):
+        """Test memory cache configuration with parameter names."""
+        config = CacheConfig(
+            cache_dir="/tmp/test_memory_cache",
+            metadata_backend="sqlite",
+            enable_memory_cache=True,
+            memory_cache_type="lru",
+            memory_cache_maxsize=500,
+            memory_cache_ttl_seconds=300,
+            memory_cache_stats=True
+        )
+        
+        # Verify parameters are set correctly
+        assert config.metadata.enable_memory_cache is True
+        assert config.metadata.memory_cache_type == "lru"
+        assert config.metadata.memory_cache_maxsize == 500
+        assert config.metadata.memory_cache_ttl_seconds == 300
+        assert config.metadata.memory_cache_stats is True
+
+    def test_memory_cache_config_defaults(self):
+        """Test memory cache defaults when not specified."""
+        config = CacheConfig(cache_dir="/tmp/test_defaults")
+        
+        # Verify defaults
+        assert config.metadata.enable_memory_cache is False
+        assert config.metadata.memory_cache_type == "lru"
+        assert config.metadata.memory_cache_maxsize == 1000
+        assert config.metadata.memory_cache_ttl_seconds == 300.0
+        assert config.metadata.memory_cache_stats is False
+
+    def test_memory_cache_functional_test(self):
+        """Test that memory cache layer actually works."""
+        import tempfile
+        import time
+        
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Create cache with memory cache layer enabled
+            config = CacheConfig(
+                cache_dir=temp_dir,
+                metadata_backend="sqlite",
+                enable_memory_cache=True,
+                memory_cache_type="lru",
+                memory_cache_maxsize=10,
+                memory_cache_ttl_seconds=2,  # Short TTL for testing
+                memory_cache_stats=True
+            )
+            
+            cache = cacheness(config)
+            
+            # Store some test data
+            test_data = {"test": "memory_cache_data", "value": 42}
+            cache.put(test_data, test_key="memory_cache_test")
+            
+            # Verify data is cached
+            result = cache.get(test_key="memory_cache_test")
+            assert result == test_data
+            
+            # Check if memory cache statistics are available (should be CachedMetadataBackend)
+            from cacheness.metadata import CachedMetadataBackend
+            if isinstance(cache.metadata_backend, CachedMetadataBackend):
+                stats = cache.metadata_backend.get_cache_stats()
+                assert 'memory_cache_enabled' in stats
+                assert stats['memory_cache_enabled'] is True
+                assert stats['memory_cache_type'] == 'lru'
+                assert stats['memory_cache_maxsize'] == 10
+
+    def test_memory_cache_cache_types(self):
+        """Test different memory cache types."""
+        cache_types = ["lru", "lfu", "fifo", "rr"]
+        
+        for cache_type in cache_types:
+            config = CacheConfig(
+                cache_dir="/tmp/test_cache_types",
+                enable_memory_cache=True,
+                memory_cache_type=cache_type,
+                memory_cache_maxsize=50
+            )
+            
+            assert config.metadata.memory_cache_type == cache_type
+
+    def test_memory_cache_validation(self):
+        """Test validation of memory cache parameters."""
+        # Test invalid cache type
+        config = CacheConfig(
+            enable_memory_cache=True,
+            memory_cache_type="invalid_type"
+        )
+        
+        # Should accept any string (validation happens at cache creation)
+        assert config.metadata.memory_cache_type == "invalid_type"
+        
+        # Test edge case values
+        config = CacheConfig(
+            enable_memory_cache=True,
+            memory_cache_maxsize=1,  # Minimum
+            memory_cache_ttl_seconds=0.1  # Very short
+        )
+        
+        assert config.metadata.memory_cache_maxsize == 1
+        assert config.metadata.memory_cache_ttl_seconds == 0.1

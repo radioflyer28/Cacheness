@@ -192,12 +192,14 @@ from cacheness import cacheness, CacheConfig
 # Simple configuration
 config = CacheConfig(
     cache_dir="./my_cache",
-    metadata_backend="sqlite",     # "sqlite", "json", or "auto"  
+    metadata_backend="sqlite",     # "sqlite" (production), "json" (dev), or "auto"  
     default_ttl_hours=48,          # Default TTL for entries
     max_cache_size_mb=5000,        # Maximum cache size
 )
 
 cache = cacheness(config)
+
+# See docs/BACKEND_SELECTION.md for choosing between JSON and SQLite backends
 ```
 
 ## Quick Examples

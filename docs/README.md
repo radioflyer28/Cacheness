@@ -6,6 +6,7 @@ Welcome to the Cacheness documentation! This high-performance caching library pr
 
 - **[README](../README.md)** - Quick start guide and basic usage
 - **[Configuration Guide](CONFIGURATION.md)** - Comprehensive configuration options
+- **[Backend Selection Guide](BACKEND_SELECTION.md)** - Choose JSON vs SQLite backend
 - **[Security Guide](SECURITY.md)** - Cache entry signing and security features
 
 ## Advanced Features
@@ -44,8 +45,13 @@ See the [Security Guide](SECURITY.md) for detailed configuration and best practi
 - **Tensors**: Native TensorFlow tensor support
 
 ### Flexible Backends
-- **SQLite**: High-performance metadata queries (recommended)
-- **JSON**: Simple file-based storage for smaller caches
+- **SQLite**: Production-ready with full concurrency support (recommended for 200+ entries)
+- **JSON**: Fast for small caches and development (< 200 entries, single-process only)
+- **In-Memory SQLite**: Maximum performance for temporary data
+
+**Important**: JSON backend is **not safe** for multiple processes. Use SQLite backend for production deployments or when multiple processes access the same cache.
+
+See the [Backend Selection Guide](BACKEND_SELECTION.md) for detailed comparison and recommendations.
 
 ### Advanced Compression
 - **Multi-codec support**: LZ4, ZSTD, LZ4HC for different performance profiles

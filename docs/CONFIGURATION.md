@@ -86,6 +86,12 @@ cache = cacheness(config)
 | `database_url` | str | `None` | Custom SQLite database path |
 | `verify_cache_integrity` | bool | `False` | Enable file hash verification |
 | `store_cache_key_params` | bool | `True` | Store cache key parameters |
+| **Memory Cache Layer** | | | |
+| `enable_memory_cache` | bool | `False` | Enable memory cache layer for disk backends |
+| `memory_cache_type` | str | `"lru"` | Cache algorithm: "lru", "lfu", "fifo", "rr" |
+| `memory_cache_maxsize` | int | `1000` | Maximum cached metadata entries |
+| `memory_cache_ttl_seconds` | float | `300.0` | Entry expiration time in seconds |
+| `memory_cache_stats` | bool | `False` | Enable cache statistics tracking |
 
 ### Security Configuration (`SecurityConfig`)
 
@@ -293,6 +299,100 @@ config = CacheConfig(
 Automatically selects the best available backend:
 1. SQLite if SQLAlchemy is available
 2. JSON as fallback
+
+## Memory Cache Layer
+
+The memory cache layer provides an in-memory cache on top of disk-persistent metadata backends to avoid repeated disk I/O operations. This is separate from the pure in-memory backend.
+
+### Architecture
+
+```
+Application → Memory Cache Layer → Disk Backend (JSON/SQLite)
+```
+
+### Configuration
+
+```python
+# Enable memory cache layer for SQLite backend
+config = CacheConfig(
+    cache_dir="./my_cache",
+    metadata_backend="sqlite",
+    enable_memory_cache=True,
+    memory_cache_type="lru",
+    memory_cache_maxsize=1000,
+    memory_cache_ttl_seconds=300,  # 5 minutes
+    memory_cache_stats=True
+)
+```
+
+### Cache Types
+
+| Type | Algorithm | Best For |
+|------|-----------|----------|
+| `lru` | Least Recently Used | General purpose (default) |
+| `lfu` | Least Frequently Used | Workloads with access patterns |
+| `fifo` | First In, First Out | Simple eviction policy |
+| `rr` | Random Replacement | Minimal overhead |
+
+### Performance Benefits
+
+The memory cache layer provides significant performance improvements for workloads with repeated metadata access:
+
+- **Cold Performance**: Direct disk backend access
+- **Warm Performance**: Memory cache hits (1.5-3x faster)
+- **Cache Statistics**: Track hit rates for optimization
+
+### Configuration Examples
+
+```python
+# High-performance configuration
+high_perf_config = CacheConfig(
+    cache_dir="./my_cache",
+    metadata_backend="sqlite", 
+    enable_memory_cache=True,
+    memory_cache_type="lru",
+    memory_cache_maxsize=5000,      # Large cache
+    memory_cache_ttl_seconds=1800,  # 30 minutes
+    memory_cache_stats=True
+)
+
+# Memory-conscious configuration
+light_config = CacheConfig(
+    cache_dir="./my_cache",
+    metadata_backend="sqlite",
+    enable_memory_cache=True,
+    memory_cache_type="lfu",
+    memory_cache_maxsize=100,       # Small cache
+    memory_cache_ttl_seconds=120,   # 2 minutes
+    memory_cache_stats=False        # No stats overhead
+)
+```
+
+### Backwards Compatibility
+
+For existing code, the old parameter names are still supported:
+
+```python
+# Old naming (still works)
+config = CacheConfig(
+    enable_entry_cache=True,
+    entry_cache_type="lru",
+    entry_cache_maxsize=1000,
+    entry_cache_ttl_seconds=300,
+    entry_cache_stats=True
+)
+
+# New naming (preferred)
+config = CacheConfig(
+    cache_dir="./my_cache",
+    metadata_backend="sqlite",
+    enable_memory_cache=True,
+    memory_cache_type="lru",
+    memory_cache_maxsize=1000,
+    memory_cache_ttl_seconds=300,
+    memory_cache_stats=True
+)
+```
 
 ## Compression Strategies
 

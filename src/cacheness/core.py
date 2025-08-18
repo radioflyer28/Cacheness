@@ -72,21 +72,30 @@ class UnifiedCache:
 
     def _init_metadata_backend(self, metadata_backend):
         """Initialize the metadata backend."""
+        # Import here to avoid circular imports
+        from .metadata import create_metadata_backend, SQLALCHEMY_AVAILABLE
+        
         actual_backend = "unknown"  # Default value
         if metadata_backend is not None:
             self.metadata_backend = metadata_backend
             actual_backend = "custom"
         else:
-            # Import here to avoid circular imports
-            from .metadata import create_metadata_backend, SQLALCHEMY_AVAILABLE
+            pass  # Will be determined below
 
         # Determine backend based on config and availability
         if self.config.metadata.metadata_backend == "json":
             # Explicitly requested JSON
             self.metadata_backend = create_metadata_backend(
-                "json", metadata_file=self.cache_dir / "cache_metadata.json"
+                "json", 
+                metadata_file=self.cache_dir / "cache_metadata.json",
+                config=self.config.metadata
             )
             actual_backend = "json"
+        elif self.config.metadata.metadata_backend == "memory":
+            # Explicitly requested in-memory backend
+            self.metadata_backend = create_metadata_backend("memory", config=self.config.metadata)
+            actual_backend = "memory"
+            logger.info("⚡ Using ultra-fast in-memory backend (no persistence)")
         elif self.config.metadata.metadata_backend == "sqlite":
             # Explicitly requested SQLite
             if not SQLALCHEMY_AVAILABLE:
@@ -96,8 +105,18 @@ class UnifiedCache:
             self.metadata_backend = create_metadata_backend(
                 "sqlite",
                 db_file=str(self.cache_dir / self.config.metadata.sqlite_db_file),
+                config=self.config.metadata
             )
             actual_backend = "sqlite"
+        elif self.config.metadata.metadata_backend == "sqlite_memory":
+            # Explicitly requested in-memory SQLite
+            if not SQLALCHEMY_AVAILABLE:
+                raise ImportError(
+                    "SQLAlchemy is required for in-memory SQLite backend but is not available. Install with: uv add sqlalchemy"
+                )
+            self.metadata_backend = create_metadata_backend("sqlite_memory", config=self.config.metadata)
+            actual_backend = "sqlite_memory"
+            logger.info("⚡ Using in-memory SQLite backend (no persistence)")
         else:
             # Auto mode: prefer SQLite, fallback to JSON
             if SQLALCHEMY_AVAILABLE:
@@ -107,6 +126,7 @@ class UnifiedCache:
                         db_file=str(
                             self.cache_dir / self.config.metadata.sqlite_db_file
                         ),
+                        config=self.config.metadata
                     )
                     actual_backend = "sqlite"
                     logger.info(
@@ -115,13 +135,17 @@ class UnifiedCache:
                 except Exception as e:
                     logger.warning(f"SQLite backend failed, falling back to JSON: {e}")
                     self.metadata_backend = create_metadata_backend(
-                        "json", metadata_file=self.cache_dir / "cache_metadata.json"
+                        "json", 
+                        metadata_file=self.cache_dir / "cache_metadata.json",
+                        config=self.config.metadata
                     )
                     actual_backend = "json"
             else:
                 logger.info("📝 SQLModel not available, using JSON backend")
                 self.metadata_backend = create_metadata_backend(
-                    "json", metadata_file=self.cache_dir / "cache_metadata.json"
+                    "json", 
+                    metadata_file=self.cache_dir / "cache_metadata.json",
+                    config=self.config.metadata
                 )
                 actual_backend = "json"  # Store the actual backend used for reporting
         self.actual_backend = actual_backend
@@ -525,6 +549,8 @@ class UnifiedCache:
             logger.info(
                 f"Cached {handler.data_type} {cache_key} ({file_size_mb:.3f}MB) {format_info}: {description}"
             )
+            
+            return cache_key
 
         except Exception as e:
             logger.error(f"Failed to cache {handler.data_type}: {e}")

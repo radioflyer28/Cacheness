@@ -56,18 +56,37 @@ class CacheMetadataConfig:
     )
     enable_cache_stats: bool = True  # Track cache hit/miss statistics
     auto_cleanup_expired: bool = True  # Automatically clean up expired entries
+    
+    # Memory cache layer (sits between application and disk-persistent backends)
+    enable_memory_cache: bool = False  # Enable in-memory caching of disk-stored metadata entries
+    memory_cache_type: str = "lru"  # "lru", "lfu", "fifo", "rr" (random replacement)
+    memory_cache_maxsize: int = 1000  # Maximum number of metadata entries to cache in memory
+    memory_cache_ttl_seconds: float = 300  # 5 minutes TTL for memory-cached entries
+    memory_cache_stats: bool = False  # Enable cache hit/miss statistics for memory cache layer
 
     def __post_init__(self):
         """Validate metadata backend configuration."""
-        if self.metadata_backend not in ["auto", "json", "sqlite"]:
+        if self.metadata_backend not in ["auto", "memory", "json", "sqlite", "sqlite_memory"]:
             raise ValueError(f"Invalid metadata backend: {self.metadata_backend}")
 
         if self.default_ttl_hours is not None and self.default_ttl_hours <= 0:
             raise ValueError("default_ttl_hours must be positive")
+            
+        # Validate memory cache layer configuration
+        if self.memory_cache_type not in ["lru", "lfu", "fifo", "rr"]:
+            raise ValueError(f"Invalid memory_cache_type: {self.memory_cache_type}")
+            
+        if self.memory_cache_maxsize <= 0:
+            raise ValueError("memory_cache_maxsize must be positive")
+            
+        if self.memory_cache_ttl_seconds <= 0:
+            raise ValueError("memory_cache_ttl_seconds must be positive")
 
         logger.debug(f"Metadata backend configured: {self.metadata_backend}")
         logger.debug(f"Store cache_key_params: {self.store_cache_key_params}")
-        if self.metadata_backend in ["auto", "sqlite"]:
+        if self.memory_cache_type and self.enable_memory_cache:
+            logger.debug(f"Memory cache layer: {self.memory_cache_type} (maxsize={self.memory_cache_maxsize}, ttl={self.memory_cache_ttl_seconds}s)")
+        if self.metadata_backend in ["auto", "sqlite", "sqlite_memory"]:
             logger.debug(f"SQLite database file: {self.sqlite_db_file}")
 
 
@@ -282,6 +301,12 @@ class CacheConfig:
         # Security parameters
         delete_invalid_signatures: Optional[bool] = None,
         use_in_memory_key: Optional[bool] = None,
+        # Memory cache layer parameters (sits between application and disk backends)
+        enable_memory_cache: Optional[bool] = None,
+        memory_cache_type: Optional[str] = None,
+        memory_cache_maxsize: Optional[int] = None,
+        memory_cache_ttl_seconds: Optional[float] = None,
+        memory_cache_stats: Optional[bool] = None,
         **kwargs,
     ):
         """Initialize configuration with backwards compatibility support."""
@@ -357,6 +382,18 @@ class CacheConfig:
             self.security.delete_invalid_signatures = delete_invalid_signatures
         if use_in_memory_key is not None:
             self.security.use_in_memory_key = use_in_memory_key
+
+        # Map memory cache layer configuration parameters
+        if enable_memory_cache is not None:
+            self.metadata.enable_memory_cache = enable_memory_cache
+        if memory_cache_type is not None:
+            self.metadata.memory_cache_type = memory_cache_type
+        if memory_cache_maxsize is not None:
+            self.metadata.memory_cache_maxsize = memory_cache_maxsize
+        if memory_cache_ttl_seconds is not None:
+            self.metadata.memory_cache_ttl_seconds = memory_cache_ttl_seconds
+        if memory_cache_stats is not None:
+            self.metadata.memory_cache_stats = memory_cache_stats
 
         # Handle handler configuration and compression parameters
         for key, value in kwargs.items():

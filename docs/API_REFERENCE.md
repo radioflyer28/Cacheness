@@ -243,7 +243,7 @@ class CacheStorageConfig:
 
 ### `CacheMetadataConfig`
 
-Configuration for metadata storage backend.
+Configuration for metadata storage backend and memory cache layer.
 
 ```python
 @dataclass
@@ -252,13 +252,33 @@ class CacheMetadataConfig:
     database_url: Optional[str] = None
     store_cache_key_params: bool = True
     verify_cache_integrity: bool = True
+    # Memory cache layer for disk-persistent backends
+    enable_memory_cache: bool = False
+    memory_cache_type: str = "lru"
+    memory_cache_maxsize: int = 1000
+    memory_cache_ttl_seconds: float = 300.0
+    memory_cache_stats: bool = False
 ```
 
-**Fields:**
+**Core Fields:**
 - `backend` (str): Metadata backend ("json" or "sqlite")
 - `database_url` (Optional[str]): SQLite database path (auto-generated if None)
 - `store_cache_key_params` (bool): Whether to store cache key parameters
 - `verify_cache_integrity` (bool): Whether to verify file integrity
+
+**Memory Cache Layer Fields:**
+- `enable_memory_cache` (bool): Enable memory cache layer for disk backends (SQLite/JSON)
+- `memory_cache_type` (str): Cache type ("lru", "lfu", "fifo", "rr")
+- `memory_cache_maxsize` (int): Maximum number of cached metadata entries
+- `memory_cache_ttl_seconds` (float): Time-to-live for cached entries in seconds
+- `memory_cache_stats` (bool): Enable cache hit/miss statistics tracking
+
+**Memory Cache Architecture:**
+```
+Application → Memory Cache Layer → Disk Backend (JSON/SQLite)
+```
+
+The memory cache layer provides a fast in-memory cache on top of disk-persistent metadata backends to avoid repeated disk I/O operations. This is separate from and complementary to the pure in-memory backend.
 
 ### `CompressionConfig`
 
