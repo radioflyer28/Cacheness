@@ -41,8 +41,8 @@ Example Usage:
 """
 
 from abc import ABC, abstractmethod
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from datetime import datetime, timedelta, timezone, date
+from typing import Any, Dict, List, Optional, Union, Callable, TYPE_CHECKING
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -160,6 +160,9 @@ class SqlCache:
         table: "Table",
         data_adapter: SqlCacheAdapter,
         ttl_hours: int = 24,
+        time_increment: Optional[Union[str, timedelta, int]] = None,
+        ordered_increment: Optional[Union[int, float]] = None,
+        gap_detector: Optional[Callable] = None,
         **kwargs
     ):
         """
@@ -181,6 +184,9 @@ class SqlCache:
             table: SQLAlchemy Table object (avoid autoincrement=True for primary keys)
             data_adapter: Data adapter for fetching external data
             ttl_hours: Cache TTL in hours
+            time_increment: Optional time increment (e.g., timedelta(minutes=5), "5min")
+            ordered_increment: Optional ordered data increment (e.g., 1, 10, 100)
+            gap_detector: Optional custom gap detection function
             **kwargs: Additional arguments for SQLAlchemy engine
             
         Returns:
@@ -193,10 +199,16 @@ class SqlCache:
             ...     Column('date', Date, primary_key=True),
             ...     Column('value', Float)
             ... )
-            >>> cache = SqlCache.with_duckdb("data.db", table, adapter)
+            >>> cache = SqlCache.with_duckdb("data.db", table, adapter, 
+            ...                               time_increment=timedelta(minutes=5))
         """
         db_url = f"duckdb:///{db_path}"
-        return cls(db_url, table, data_adapter, ttl_hours, **kwargs)
+        return cls(db_url, table, data_adapter, ttl_hours, 
+                  engine_kwargs=kwargs.get('engine_kwargs'),
+                  echo=kwargs.get('echo', False),
+                  time_increment=time_increment, 
+                  ordered_increment=ordered_increment,
+                  gap_detector=gap_detector)
     
     @classmethod
     def with_sqlite(
@@ -205,6 +217,9 @@ class SqlCache:
         table: "Table", 
         data_adapter: SqlCacheAdapter,
         ttl_hours: int = 24,
+        time_increment: Optional[Union[str, timedelta, int]] = None,
+        ordered_increment: Optional[Union[int, float]] = None,
+        gap_detector: Optional[Callable] = None,
         **kwargs
     ):
         """
@@ -221,6 +236,11 @@ class SqlCache:
             table: SQLAlchemy Table object
             data_adapter: Data adapter for fetching external data
             ttl_hours: Cache TTL in hours
+            table: SQLAlchemy Table object
+            data_adapter: Data adapter for fetching external data
+            ttl_hours: Cache TTL in hours
+            time_increment: Optional time increment (e.g., timedelta(minutes=5), "5min")
+            ordered_increment: Optional ordered data increment (e.g., 1, 10, 100)
             **kwargs: Additional arguments for SQLAlchemy engine
             
         Returns:
@@ -230,7 +250,12 @@ class SqlCache:
             db_url = "sqlite:///:memory:"
         else:
             db_url = f"sqlite:///{db_path}"
-        return cls(db_url, table, data_adapter, ttl_hours, **kwargs)
+        return cls(db_url, table, data_adapter, ttl_hours,
+                  engine_kwargs=kwargs.get('engine_kwargs'),
+                  echo=kwargs.get('echo', False),
+                  time_increment=time_increment,
+                  ordered_increment=ordered_increment,
+                  gap_detector=gap_detector)
     
     @classmethod
     def with_postgresql(
@@ -239,6 +264,9 @@ class SqlCache:
         table: "Table",
         data_adapter: SqlCacheAdapter,
         ttl_hours: int = 24,
+        time_increment: Optional[Union[str, timedelta, int]] = None,
+        ordered_increment: Optional[Union[int, float]] = None,
+        gap_detector: Optional[Callable] = None,
         **kwargs
     ):
         """
@@ -256,12 +284,19 @@ class SqlCache:
             table: SQLAlchemy Table object
             data_adapter: Data adapter for fetching external data
             ttl_hours: Cache TTL in hours
+            time_increment: Optional time increment (e.g., timedelta(minutes=5), "5min")
+            ordered_increment: Optional ordered data increment (e.g., 1, 10, 100)
             **kwargs: Additional arguments for SQLAlchemy engine
             
         Returns:
             SqlCache: Cache instance with PostgreSQL backend
         """
-        return cls(connection_string, table, data_adapter, ttl_hours, **kwargs)
+        return cls(connection_string, table, data_adapter, ttl_hours,
+                  engine_kwargs=kwargs.get('engine_kwargs'),
+                  echo=kwargs.get('echo', False),
+                  time_increment=time_increment,
+                  ordered_increment=ordered_increment,
+                  gap_detector=gap_detector)
     
     def __init__(
         self,
@@ -270,7 +305,10 @@ class SqlCache:
         data_adapter: SqlCacheAdapter,
         ttl_hours: int = 24,
         echo: bool = False,
-        engine_kwargs: Optional[Dict[str, Any]] = None
+        engine_kwargs: Optional[Dict[str, Any]] = None,
+        time_increment: Optional[Union[str, timedelta, int]] = None,
+        ordered_increment: Optional[Union[int, float]] = None,
+        gap_detector: Optional[Callable] = None
     ):
         """
         Initialize the SQL pull-through cache.
@@ -292,6 +330,17 @@ class SqlCache:
             ttl_hours: Cache TTL in hours (0 for no expiration)
             echo: Whether to echo SQL statements for debugging
             engine_kwargs: Additional arguments for SQLAlchemy engine
+            time_increment: Optional time increment for time-series data:
+                          - timedelta(minutes=5) for 5-minute intervals
+                          - "5min", "30sec", "2hour" for common intervals
+                          - 300 (seconds) for numeric specification
+                          - None to auto-detect from data (default)
+            ordered_increment: Optional increment for ordered data (e.g., 1, 10, 100)
+                             - None to auto-detect from data (default)
+            gap_detector: Optional custom gap detection function. If provided, this function
+                        will be called instead of the built-in gap detection logic.
+                        Signature: gap_detector(query_params, cached_data, cache_instance) -> List[Dict]
+                        Should return a list of parameter dictionaries for missing data ranges.
         """
         check_dependencies()
         
@@ -314,6 +363,11 @@ class SqlCache:
         self.data_adapter = data_adapter
         self.ttl_hours = ttl_hours
         
+        # Store user-specified increments for intelligent gap detection
+        self.time_increment = self._parse_time_increment(time_increment)
+        self.ordered_increment = ordered_increment
+        self.gap_detector = gap_detector
+        
         # Set up table with cache metadata columns
         self.table = table
         self._add_cache_columns()
@@ -326,6 +380,54 @@ class SqlCache:
         
         # Cache table information for performance
         self._setup_query_helpers()
+    
+    def _parse_time_increment(self, time_increment: Optional[Union[str, timedelta, int]]) -> Optional[timedelta]:
+        """Parse user-provided time increment into timedelta object."""
+        if time_increment is None:
+            return None
+        
+        if isinstance(time_increment, timedelta):
+            return time_increment
+        
+        if isinstance(time_increment, (int, float)):
+            # Assume seconds
+            return timedelta(seconds=time_increment)
+        
+        if isinstance(time_increment, str):
+            # Parse string formats like "5min", "30sec", "2hour"
+            time_increment = time_increment.lower().strip()
+            
+            # Extract number and unit
+            import re
+            match = re.match(r'^(\d+(?:\.\d+)?)([a-z]+)$', time_increment)
+            if not match:
+                raise ValueError(f"Invalid time increment format: {time_increment}")
+            
+            value, unit = match.groups()
+            value = float(value)
+            
+            # Map units to timedelta arguments
+            unit_map = {
+                'sec': {'seconds': value},
+                'second': {'seconds': value},
+                'seconds': {'seconds': value},
+                'min': {'minutes': value},
+                'minute': {'minutes': value},
+                'minutes': {'minutes': value},
+                'hour': {'hours': value},
+                'hours': {'hours': value},
+                'day': {'days': value},
+                'days': {'days': value},
+                'week': {'weeks': value},
+                'weeks': {'weeks': value},
+            }
+            
+            if unit not in unit_map:
+                raise ValueError(f"Unsupported time unit: {unit}")
+            
+            return timedelta(**unit_map[unit])
+        
+        raise ValueError(f"Unsupported time increment type: {type(time_increment)}")
     
     def _handle_duckdb_compatibility(self):
         """
@@ -611,29 +713,628 @@ class SqlCache:
         cached_data: 'pd.DataFrame'
     ) -> List[Dict[str, Any]]:
         """
-        Find missing data ranges - this method should be overridden by
-        specific implementations or the data adapter should provide this logic.
+        Find missing data ranges by analyzing query parameters vs cached data.
         
-        Default implementation assumes all data is missing if cache is empty.
+        This implementation provides multiple ways to customize gap detection:
+        
+        1. Custom Gap Detector Function: Pass a gap_detector function to the constructor
+           that implements your specific logic for finding missing data ranges.
+           
+        2. Subclass Override: Override this method in a subclass for complex scenarios
+           that need access to the full SqlCache instance state.
+           
+        3. Built-in Intelligence: Use the sophisticated built-in gap detection that
+           handles time-series data, ordered data, arbitrary increments, etc.
+        
+        Args:
+            query_params: Parsed query parameters from the adapter
+            cached_data: Current cached data matching the query
+            
+        Returns:
+            List of parameter dictionaries for fetching missing data ranges
         """
+        # Use custom gap detector if provided
+        if self.gap_detector is not None:
+            try:
+                return self.gap_detector(query_params, cached_data, self)
+            except Exception as e:
+                # Fallback to built-in logic if custom detector fails
+                print(f"Warning: Custom gap detector failed ({e}), using built-in logic")
+        
+        # Use built-in intelligent gap detection
         if cached_data.empty:
-            # Convert query params back to fetch format
-            fetch_params = {}
-            for key, value in query_params.items():
-                if isinstance(value, dict):
-                    if 'start' in value and 'end' in value:
-                        fetch_params[f'{key}_start'] = value['start']
-                        fetch_params[f'{key}_end'] = value['end']
-                    else:
-                        fetch_params[key] = value
+            # No cached data - fetch everything
+            return [self._convert_query_to_fetch_params(query_params)]
+        
+        # Check if cached data covers the requested query parameters
+        missing_ranges = self._detect_range_gaps(query_params, cached_data)
+        
+        if missing_ranges:
+            return [self._convert_query_to_fetch_params(params) for params in missing_ranges]
+        
+        # All requested data is already cached
+        return []
+    
+    def _detect_range_gaps(self, query_params: Dict[str, Any], cached_data: 'pd.DataFrame') -> List[Dict[str, Any]]:
+        """
+        Intelligent gap detection for time series data with overlapping and non-overlapping ranges.
+        
+        This implementation:
+        1. Identifies the data granularity (hourly, daily, etc.)
+        2. Detects gaps within cached data
+        3. Handles overlapping and adjacent ranges intelligently
+        4. Adds safety margins to avoid accidental gaps
+        5. Consolidates nearby ranges to minimize fetch calls
+        
+        Returns list of missing range parameters that need to be fetched.
+        """
+        missing_ranges = []
+        
+        # Find the primary time/date column for gap analysis
+        column_info = self._identify_time_column(query_params, cached_data)
+        if not column_info:
+            # No ordered column found - use simple overlap detection
+            return self._simple_overlap_detection(query_params, cached_data)
+        
+        column_name = column_info['column']
+        column_type = column_info['column_type']
+        requested_start = column_info['requested_start']
+        requested_end = column_info['requested_end']
+        
+        # Analyze cached data coverage
+        cache_analysis = self._analyze_cached_data(cached_data, column_name, query_params, column_type)
+        
+        if not cache_analysis['has_data']:
+            # No relevant cached data - fetch the requested range with margin
+            if column_type == 'time':
+                expanded_range = self._add_safety_margin(
+                    requested_start, requested_end, cache_analysis['granularity']
+                )
+            else:
+                # For ordered data, add small buffer
+                expanded_range = self._add_ordered_margin(requested_start, requested_end)
+            return [self._create_fetch_params(query_params, column_name, expanded_range)]
+        
+        # Detect gaps and missing ranges
+        gaps = self._detect_gaps(
+            requested_start, requested_end,
+            cache_analysis['cached_start'], cache_analysis['cached_end'],
+            column_type, cache_analysis.get('granularity', 'day'), 
+            cached_data, column_name, query_params
+        )
+        
+        # Consolidate nearby gaps to minimize fetch calls
+        if column_type == 'time':
+            consolidated_gaps = self._consolidate_gaps(gaps, cache_analysis.get('granularity', 'day'))
+        else:
+            consolidated_gaps = self._consolidate_ordered_gaps(gaps)
+        
+        # Convert gaps to fetch parameters
+        for gap_start, gap_end in consolidated_gaps:
+            if column_type == 'time':
+                expanded_range = self._add_safety_margin(gap_start, gap_end, cache_analysis.get('granularity', 'day'))
+            else:
+                expanded_range = self._add_ordered_margin(gap_start, gap_end)
+            missing_ranges.append(self._create_fetch_params(query_params, column_name, expanded_range))
+        
+        return missing_ranges
+    
+    def _identify_time_column(self, query_params: Dict[str, Any], cached_data: 'pd.DataFrame') -> Optional[Dict[str, Any]]:
+        """Identify the primary time/date column and extract range information."""
+        for param_name, param_value in query_params.items():
+            if not isinstance(param_value, dict):
+                continue
+                
+            if 'start' not in param_value or 'end' not in param_value:
+                continue
+            
+            # Check if this looks like a time column
+            if any(keyword in param_name.lower() for keyword in ['date', 'time', 'timestamp']):
+                return {
+                    'column': param_name,
+                    'requested_start': param_value['start'],
+                    'requested_end': param_value['end'],
+                    'column_type': 'time'
+                }
+                
+            # If column exists in cached data, check if it contains time-like data
+            if param_name in cached_data.columns and not cached_data.empty:
+                sample_value = cached_data[param_name].iloc[0]
+                if self._is_time_like(sample_value):
+                    return {
+                        'column': param_name,
+                        'requested_start': param_value['start'],
+                        'requested_end': param_value['end'],
+                        'column_type': 'time'
+                    }
+                    
+            # Check if this looks like an ordered/incrementing column (order_id, sequence, etc.)
+            if any(keyword in param_name.lower() for keyword in ['order', 'id', 'sequence', 'number', 'index']):
+                return {
+                    'column': param_name,
+                    'requested_start': param_value['start'],
+                    'requested_end': param_value['end'],
+                    'column_type': 'ordered'
+                }
+                
+            # If column exists and contains numeric/ordered data, treat as ordered
+            if param_name in cached_data.columns and not cached_data.empty:
+                sample_value = cached_data[param_name].iloc[0]
+                if self._is_ordered_like(sample_value):
+                    return {
+                        'column': param_name,
+                        'requested_start': param_value['start'],
+                        'requested_end': param_value['end'],
+                        'column_type': 'ordered'
+                    }
+        
+        return None
+    
+    def _is_time_like(self, value) -> bool:
+        """Check if a value looks like a time/date."""
+        return isinstance(value, (date, datetime)) or str(type(value)).find('datetime') != -1
+    
+    def _is_ordered_like(self, value) -> bool:
+        """Check if a value looks like an ordered/incrementing value (int, float, etc.)."""
+        return isinstance(value, (int, float)) or str(type(value)).find('int') != -1 or str(type(value)).find('float') != -1
+    
+    def _analyze_cached_data(self, cached_data: 'pd.DataFrame', column_name: str, query_params: Dict[str, Any], column_type: str = 'time') -> Dict[str, Any]:
+        """Analyze cached data to understand granularity and coverage."""
+        
+        # Filter cached data to match other query parameters (exclude the ordered column)
+        filtered_cache = self._filter_cached_data_by_non_time_params(cached_data, query_params, column_name)
+        
+        if filtered_cache.empty:
+            return {
+                'has_data': False,
+                'granularity': 'day' if column_type == 'time' else 'unit',
+                'cached_start': None,
+                'cached_end': None
+            }
+        
+        # Get the actual range of cached data
+        cached_start = filtered_cache[column_name].min()
+        cached_end = filtered_cache[column_name].max()
+        
+        # Detect data granularity
+        if column_type == 'time':
+            granularity = self._detect_granularity(filtered_cache, column_name)
+        else:
+            granularity = self._detect_ordered_granularity(filtered_cache, column_name)
+        
+        return {
+            'has_data': True,
+            'granularity': granularity,
+            'cached_start': cached_start,
+            'cached_end': cached_end,
+            'filtered_data': filtered_cache
+        }
+    
+    def _filter_cached_data_by_non_time_params(self, cached_data: 'pd.DataFrame', query_params: Dict[str, Any], time_column: str) -> 'pd.DataFrame':
+        """Filter cached data by non-time parameters to get relevant subset."""
+        filtered = cached_data.copy()
+        
+        for param_name, param_value in query_params.items():
+            if param_name == time_column:
+                continue  # Skip time column
+                
+            if param_name not in cached_data.columns:
+                continue
+                
+            if isinstance(param_value, dict):
+                # Skip complex conditions for now - could be enhanced later
+                continue
+            elif isinstance(param_value, (list, tuple)):
+                # IN clause
+                filtered = filtered[filtered[param_name].isin(param_value)]
+            else:
+                # Exact match
+                filtered = filtered[filtered[param_name] == param_value]
+        
+        return filtered
+    
+    def _detect_granularity(self, data: 'pd.DataFrame', time_column: str) -> Union[str, timedelta]:
+        """Detect the time granularity of the data (hour, day, week, etc.) or use user-specified increment."""
+        
+        # If user provided a time increment, use it directly
+        if self.time_increment is not None:
+            return self.time_increment
+        
+        # Auto-detect from data
+        if len(data) < 2:
+            return 'day'  # default
+        
+        # Sort by time column and calculate differences
+        sorted_data = data.sort_values(time_column)
+        time_values = sorted_data[time_column].values
+        
+        if len(time_values) < 2:
+            return 'day'
+        
+        # Calculate time differences
+        try:
+            # Try to get time differences
+            if hasattr(time_values[0], '__sub__'):
+                # Direct subtraction for datetime objects
+                time_diffs = [time_values[i] - time_values[i-1] for i in range(1, len(time_values))]
+                
+                # Find the most common difference (mode)
+                if time_diffs:
+                    # Calculate actual timedelta differences
+                    valid_diffs = [diff for diff in time_diffs if diff is not None]
+                    if valid_diffs:
+                        # Use the most frequent difference
+                        from collections import Counter
+                        diff_counter = Counter(valid_diffs)
+                        most_common_diff = diff_counter.most_common(1)[0][0]
+                        
+                        # Return the actual timedelta for precise gap detection
+                        if hasattr(most_common_diff, 'total_seconds'):
+                            return most_common_diff
+            
+            # Fallback to legacy string-based detection
+            return self._legacy_granularity_detection(data, time_column)
+                
+        except Exception:
+            # If anything goes wrong, default to daily
+            return 'day'
+    
+    def _legacy_granularity_detection(self, data: 'pd.DataFrame', time_column: str) -> str:
+        """Legacy granularity detection for backward compatibility."""
+        try:
+            sorted_data = data.sort_values(time_column)
+            time_values = sorted_data[time_column].values
+            
+            if len(time_values) < 2:
+                return 'day'
+            
+            time_diffs = [time_values[i] - time_values[i-1] for i in range(1, len(time_values))]
+            most_common_diff = time_diffs[0] if time_diffs else None
+            
+            if most_common_diff is None:
+                return 'day'
+            
+            # Convert to timedelta for analysis
+            if hasattr(most_common_diff, 'days'):
+                days = most_common_diff.days
+                seconds = getattr(most_common_diff, 'seconds', 0)
+            else:
+                # Try to convert to numeric days
+                try:
+                    days = float(most_common_diff)
+                    seconds = 0
+                except (ValueError, TypeError):
+                    return 'day'
+            
+            # Classify granularity based on time intervals
+            total_seconds = days * 86400 + seconds
+            
+            if total_seconds <= 60:         # <= 1 minute
+                return 'minute'
+            elif total_seconds <= 3600:     # <= 1 hour  
+                return 'hour'
+            elif total_seconds <= 86400:    # <= 1 day
+                return 'day'
+            elif 6 * 86400 <= total_seconds <= 8 * 86400:  # Around a week
+                return 'week'
+            elif 28 * 86400 <= total_seconds <= 32 * 86400:  # Around a month
+                return 'month'
+            else:
+                return 'day'  # default fallback
+                
+        except Exception:
+            return 'day'
+    
+    def _detect_gaps(self, requested_start, requested_end, cached_start, cached_end, 
+                     column_type: str, granularity: str, cached_data: 'pd.DataFrame', 
+                     column_name: str, query_params: Dict[str, Any]) -> List[tuple]:
+        """Detect specific gaps that need to be fetched (works for time and ordered data)."""
+        gaps = []
+        
+        # Gap before cached data
+        if requested_start < cached_start:
+            gaps.append((requested_start, min(requested_end, cached_start)))
+        
+        # Gap after cached data  
+        if requested_end > cached_end:
+            gaps.append((max(requested_start, cached_end), requested_end))
+        
+        # For ordered data, we might want to check for internal gaps
+        # For time data, gaps within cached data range (missing data points)
+        if requested_start < cached_end and requested_end > cached_start:
+            if column_type == 'time':
+                internal_gaps = self._find_internal_gaps(
+                    max(requested_start, cached_start),
+                    min(requested_end, cached_end),
+                    cached_data, column_name, granularity, query_params
+                )
+                gaps.extend(internal_gaps)
+            # For ordered data, we assume continuous ranges for now
+            # Could be enhanced to detect missing order IDs within ranges
+        
+        return gaps
+    
+    def _detect_ordered_granularity(self, data: 'pd.DataFrame', column_name: str) -> Union[str, float]:
+        """Detect the granularity of ordered data (unit increment, batch size, etc.) or use user-specified increment."""
+        
+        # If user provided an ordered increment, use it directly
+        if self.ordered_increment is not None:
+            return self.ordered_increment
+        
+        # Auto-detect from data
+        if len(data) < 2:
+            return 'unit'  # default for ordered data
+        
+        # Sort by the ordered column and calculate differences
+        sorted_data = data.sort_values(column_name)
+        values = sorted_data[column_name].values
+        
+        if len(values) < 2:
+            return 'unit'
+        
+        try:
+            # Calculate differences between consecutive values
+            diffs = [values[i] - values[i-1] for i in range(1, len(values))]
+            
+            # Find the most common difference (mode)
+            if diffs:
+                from collections import Counter
+                diff_counter = Counter(diffs)
+                most_common_diff = diff_counter.most_common(1)[0][0]
+                
+                # Return the actual increment value for precise gap detection
+                if isinstance(most_common_diff, (int, float)) and most_common_diff > 0:
+                    return float(most_common_diff)
+                
+                # Fallback to legacy classification
+                avg_diff = sum(diffs) / len(diffs)
+                
+                if avg_diff <= 1:
+                    return 'unit'      # Increment by 1
+                elif avg_diff <= 10:
+                    return 'batch_10'  # Increment by ~10
+                elif avg_diff <= 100:
+                    return 'batch_100' # Increment by ~100
+                else:
+                    return 'batch_large' # Large increments
+            
+            return 'unit'
+            
+        except Exception:
+            return 'unit'
+    
+    def _add_ordered_margin(self, start, end) -> tuple:
+        """Add safety margins for ordered data to avoid gaps."""
+        try:
+            # Add small margin for ordered data
+            margin = max(1, int((end - start) * 0.01))  # 1% margin, minimum 1
+            safe_start = start - margin
+            safe_end = end + margin
+            return (safe_start, safe_end)
+        except (TypeError, ValueError):
+            # If we can't calculate margin, return original range
+            return (start, end)
+    
+    def _consolidate_ordered_gaps(self, gaps: List[tuple]) -> List[tuple]:
+        """Consolidate nearby gaps for ordered data to minimize fetch calls."""
+        if not gaps:
+            return []
+        
+        # Sort gaps by start value
+        sorted_gaps = sorted(gaps, key=lambda x: x[0])
+        consolidated = []
+        
+        current_start, current_end = sorted_gaps[0]
+        
+        for gap_start, gap_end in sorted_gaps[1:]:
+            try:
+                # For ordered data, consolidate if gaps are close (within 20% of range)
+                gap_size = gap_start - current_end
+                range_size = current_end - current_start
+                
+                if gap_size <= max(10, range_size * 0.2):  # Consolidate if close
+                    current_end = max(current_end, gap_end)
+                else:
+                    consolidated.append((current_start, current_end))
+                    current_start, current_end = gap_start, gap_end
+            except (TypeError, ValueError):
+                # If we can't calculate, don't consolidate
+                consolidated.append((current_start, current_end))
+                current_start, current_end = gap_start, gap_end
+        
+        consolidated.append((current_start, current_end))
+        return consolidated
+    
+    def _find_internal_gaps(self, start, end, cached_data: 'pd.DataFrame', 
+                           time_column: str, granularity: str, query_params: Dict[str, Any]) -> List[tuple]:
+        """Find gaps within the cached data range."""
+        # This is simplified - in practice, you might want to:
+        # 1. Generate expected time series based on granularity
+        # 2. Compare with actual cached data
+        # 3. Identify missing time points
+        # 4. Group consecutive missing points into ranges
+        
+        # For now, assume no internal gaps (conservative approach)
+        # Real implementation would check for missing data points
+        return []
+    
+    def _add_safety_margin(self, start, end, granularity: Union[str, timedelta, float]) -> tuple:
+        """Add safety margins to avoid accidental gaps."""
+        from datetime import timedelta
+        
+        # Determine margin based on granularity type
+        if isinstance(granularity, timedelta):
+            # Use the user-specified time increment
+            margin = granularity
+        elif isinstance(granularity, (int, float)):
+            # Ordered data - add a small numeric margin
+            margin_size = max(1, int(granularity * 0.1))  # 10% of increment, minimum 1
+            safe_start = start - margin_size if isinstance(start, (int, float)) else start
+            safe_end = end + margin_size if isinstance(end, (int, float)) else end
+            return (safe_start, safe_end)
+        else:
+            # Legacy string-based granularity
+            margin_map = {
+                'minute': timedelta(minutes=1),
+                'hour': timedelta(hours=1),
+                'day': timedelta(days=1), 
+                'week': timedelta(days=1),
+                'month': timedelta(days=2),
+                'unit': 1,          # For ordered data
+                'batch_10': 2,      # Small margin
+                'batch_100': 10,    # Medium margin
+                'batch_large': 50   # Large margin
+            }
+            
+            margin = margin_map.get(granularity, timedelta(days=1))
+            
+            # Handle ordered data margins
+            if isinstance(margin, (int, float)):
+                safe_start = start - margin if isinstance(start, (int, float)) else start
+                safe_end = end + margin if isinstance(end, (int, float)) else end
+                return (safe_start, safe_end)
+        
+        # Add time-based margin
+        safe_start = start - margin if hasattr(start, '__sub__') else start
+        safe_end = end + margin if hasattr(end, '__add__') else end
+        
+        return (safe_start, safe_end)
+    
+    def _consolidate_gaps(self, gaps: List[tuple], granularity: Union[str, timedelta, float]) -> List[tuple]:
+        """Consolidate nearby gaps to minimize fetch calls."""
+        if not gaps:
+            return []
+        
+        # Sort gaps by start time
+        sorted_gaps = sorted(gaps, key=lambda x: x[0])
+        consolidated = []
+        
+        current_start, current_end = sorted_gaps[0]
+        
+        for gap_start, gap_end in sorted_gaps[1:]:
+            # Check if gaps are close enough to consolidate
+            if self._should_consolidate_gaps(current_end, gap_start, granularity):
+                # Extend current gap
+                current_end = max(current_end, gap_end)
+            else:
+                # Start new gap
+                consolidated.append((current_start, current_end))
+                current_start, current_end = gap_start, gap_end
+        
+        consolidated.append((current_start, current_end))
+        return consolidated
+    
+    def _should_consolidate_gaps(self, end1, start2, granularity: Union[str, timedelta, float]) -> bool:
+        """Determine if two gaps should be consolidated."""
+        from datetime import timedelta
+        
+        try:
+            # Calculate gap size
+            gap_size = start2 - end1
+            
+            # Determine threshold based on granularity type
+            if isinstance(granularity, timedelta):
+                # Use 3x the time increment as threshold
+                threshold = granularity * 3
+                return gap_size <= threshold
+            elif isinstance(granularity, (int, float)):
+                # For ordered data, consolidate if gap is small relative to increment
+                threshold = granularity * 3
+                return gap_size <= threshold
+            else:
+                # Legacy string-based thresholds
+                threshold_map = {
+                    'minute': timedelta(minutes=10),
+                    'hour': timedelta(hours=6),    # Consolidate if < 6 hours apart
+                    'day': timedelta(days=3),      # Consolidate if < 3 days apart
+                    'week': timedelta(days=7),     # Consolidate if < 1 week apart
+                    'month': timedelta(days=14),   # Consolidate if < 2 weeks apart
+                    'unit': 5,                     # For ordered data
+                    'batch_10': 30,
+                    'batch_100': 300,
+                    'batch_large': 1000
+                }
+                
+                threshold = threshold_map.get(granularity, timedelta(days=3))
+                
+                # Handle ordered data thresholds
+                if isinstance(threshold, (int, float)):
+                    return gap_size <= threshold
+                else:
+                    return gap_size <= threshold
+                    
+        except (TypeError, AttributeError):
+            # Can't calculate difference - don't consolidate
+            return False
+    
+    def _create_fetch_params(self, query_params: Dict[str, Any], time_column: str, time_range: tuple) -> Dict[str, Any]:
+        """Create fetch parameters for a specific time range."""
+        fetch_params = {}
+        
+        for key, value in query_params.items():
+            if key == time_column:
+                # Replace with the specific time range
+                fetch_params[f'{key}_start'] = time_range[0]
+                fetch_params[f'{key}_end'] = time_range[1]
+            elif isinstance(value, dict):
+                if 'start' in value and 'end' in value:
+                    fetch_params[f'{key}_start'] = value['start']
+                    fetch_params[f'{key}_end'] = value['end']
                 else:
                     fetch_params[key] = value
-            
-            return [fetch_params]
+            else:
+                fetch_params[key] = value
         
-        # If we have cached data, assume it's complete
-        # Subclasses should override this for more sophisticated logic
+        return fetch_params
+    
+    def _simple_overlap_detection(self, query_params: Dict[str, Any], cached_data: 'pd.DataFrame') -> List[Dict[str, Any]]:
+        """Fallback to simple overlap detection when no time column is identified."""
+        # Check each range parameter in the query
+        for param_name, param_value in query_params.items():
+            if not isinstance(param_value, dict):
+                continue
+                
+            if 'start' not in param_value or 'end' not in param_value:
+                continue
+                
+            # Check if this column exists in cached data
+            if param_name not in cached_data.columns:
+                # Column doesn't exist in cache - need to fetch
+                return [query_params]
+                
+            # Get the range of cached data for this column
+            cached_min = cached_data[param_name].min()
+            cached_max = cached_data[param_name].max()
+            
+            requested_start = param_value['start']
+            requested_end = param_value['end']
+            
+            # Check if requested range is completely outside cached range
+            if requested_end < cached_min or requested_start > cached_max:
+                # Non-overlapping range - need to fetch
+                return [query_params]
+                
+            # Check if requested range extends beyond cached range
+            if requested_start < cached_min or requested_end > cached_max:
+                # Partial overlap - fetch the entire requested range for safety
+                return [query_params]
+        
         return []
+    
+    def _convert_query_to_fetch_params(self, query_params: Dict[str, Any]) -> Dict[str, Any]:
+        """Convert internal query parameters to fetch_data format."""
+        fetch_params = {}
+        for key, value in query_params.items():
+            if isinstance(value, dict):
+                if 'start' in value and 'end' in value:
+                    fetch_params[f'{key}_start'] = value['start']
+                    fetch_params[f'{key}_end'] = value['end']
+                else:
+                    fetch_params[key] = value
+            else:
+                fetch_params[key] = value
+        
+        return fetch_params
     
     def invalidate_cache(self, **query_params):
         """

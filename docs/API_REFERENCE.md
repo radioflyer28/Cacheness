@@ -2,6 +2,222 @@
 
 Complete reference for all cacheness classes, methods, and configuration options.
 
+## SQL Cache Classes
+
+### `SqlCache`
+
+SQL pull-through cache for intelligent data fetching and caching.
+
+```python
+class SqlCache:
+    def __init__(
+        self,
+        db_url: str,
+        table: Table,
+        data_adapter: SqlCacheAdapter,
+        ttl_hours: int = 24,
+        echo: bool = False,
+        engine_kwargs: Optional[dict] = None,
+        time_increment: Optional[Union[str, timedelta, int]] = None,
+        ordered_increment: Optional[Union[int, float]] = None,
+        gap_detector: Optional[Callable] = None
+    )
+```
+
+**Parameters:**
+- `db_url` (str): Database URL (e.g., "duckdb:///data.db", "sqlite:///cache.db")
+- `table` (Table): SQLAlchemy Table definition
+- `data_adapter` (SqlCacheAdapter): Adapter for fetching external data
+- `ttl_hours` (int): Time-to-live in hours for cached entries
+- `echo` (bool): Whether to echo SQL statements
+- `engine_kwargs` (Optional[dict]): Additional SQLAlchemy engine parameters
+- `time_increment` (Optional[Union[str, timedelta, int]]): Expected time increment for data
+  - `timedelta` objects: `timedelta(minutes=5)`
+  - String formats: `"30sec"`, `"5min"`, `"2hour"`
+  - Numeric seconds: `300` (5 minutes)
+- `ordered_increment` (Optional[Union[int, float]]): Expected increment for ordered data (e.g., order IDs)
+- `gap_detector` (Optional[Callable]): Custom gap detection function with signature:
+  `gap_detector(query_params, cached_data, cache_instance) -> List[Dict]`
+
+#### Factory Methods
+
+##### `SqlCache.with_sqlite(db_path, table, data_adapter, **kwargs)`
+Create cache with SQLite backend.
+
+```python
+cache = SqlCache.with_sqlite(
+    db_path="cache.db",
+    table=table_definition,
+    data_adapter=adapter,
+    ttl_hours=24,
+    time_increment=timedelta(minutes=5),
+    gap_detector=custom_detector
+)
+```
+
+##### `SqlCache.with_duckdb(db_path, table, data_adapter, **kwargs)`
+Create cache with DuckDB backend for analytical workloads.
+
+```python
+cache = SqlCache.with_duckdb(
+    db_path="analytics.db",
+    table=table_definition,
+    data_adapter=adapter,
+    time_increment="15sec",
+    ordered_increment=1
+)
+```
+
+##### `SqlCache.with_postgresql(db_url, table, data_adapter, **kwargs)`
+Create cache with PostgreSQL backend for production environments.
+
+```python
+cache = SqlCache.with_postgresql(
+    db_url="postgresql://user:pass@host/db",
+    table=table_definition,
+    data_adapter=adapter,
+    gap_detector=lambda q, c, i: []  # Simple custom detector
+)
+```
+
+#### Methods
+
+##### `get_data(**query_params) -> pd.DataFrame`
+Main pull-through cache method.
+
+**Parameters:**
+- `**query_params`: Query parameters passed to data adapter
+
+**Returns:**
+- `pd.DataFrame`: Complete dataset from cache and external source
+
+##### `get_cache_stats() -> dict`
+Get cache statistics.
+
+**Returns:**
+- Dictionary with cache statistics
+
+##### `cleanup_expired() -> int`
+Remove expired entries.
+
+**Returns:**
+- Number of entries removed
+
+##### `clear_cache() -> int`
+Remove all entries.
+
+**Returns:**
+- Number of entries removed
+
+### `SqlCacheAdapter`
+
+Abstract base class for data adapters.
+
+```python
+class SqlCacheAdapter(ABC):
+    @abstractmethod
+    def get_table_definition(self) -> Table:
+        """Return SQLAlchemy Table definition."""
+        pass
+    
+    @abstractmethod
+    def parse_query_params(self, **kwargs) -> Dict[str, Any]:
+        """Parse query parameters for gap detection."""
+        pass
+    
+    @abstractmethod
+    def fetch_data(self, **kwargs) -> pd.DataFrame:
+        """Fetch data from external source."""
+        pass
+```
+
+#### Methods
+
+##### `get_table_definition() -> Table`
+Return SQLAlchemy Table definition for the cached data.
+
+##### `parse_query_params(**kwargs) -> Dict[str, Any]`
+Parse incoming query parameters into format expected by gap detection.
+
+**Example:**
+```python
+def parse_query_params(self, **kwargs):
+    return {
+        'symbol': kwargs['symbol'],
+        'date': {
+            'start': kwargs['start_date'],
+            'end': kwargs['end_date']
+        }
+    }
+```
+
+##### `fetch_data(**kwargs) -> pd.DataFrame`
+Fetch data from external source (API, database, etc.).
+
+**Parameters:**
+- `**kwargs`: Parameters for data fetching
+
+**Returns:**
+- `pd.DataFrame`: Fetched data
+
+### Custom Gap Detection
+
+Custom gap detectors provide flexible control over when to fetch missing data.
+
+#### Function Signature
+
+```python
+def custom_gap_detector(
+    query_params: Dict[str, Any],
+    cached_data: pd.DataFrame, 
+    cache_instance: SqlCache
+) -> List[Dict[str, Any]]:
+    """
+    Custom gap detection function.
+    
+    Args:
+        query_params: Parsed query parameters from adapter
+        cached_data: Currently cached data matching the query
+        cache_instance: SqlCache instance providing access to:
+            - cache_instance.time_increment: User-specified time increment
+            - cache_instance.ordered_increment: User-specified ordered increment
+            - cache_instance._detect_granularity(): Built-in time detection
+            - cache_instance._detect_ordered_granularity(): Built-in ordered detection
+            - cache_instance._convert_query_to_fetch_params(): Parameter conversion
+    
+    Returns:
+        List of fetch parameter dictionaries. Empty list means no fetch needed.
+    """
+    pass
+```
+
+#### Example Custom Detectors
+
+```python
+# Always fetch (useful for testing)
+def always_fetch(query_params, cached_data, cache_instance):
+    return [cache_instance._convert_query_to_fetch_params(query_params)]
+
+# Conservative detector (only fetch if no data)
+def conservative_detector(query_params, cached_data, cache_instance):
+    if cached_data.empty:
+        return [cache_instance._convert_query_to_fetch_params(query_params)]
+    return []
+
+# Increment-aware detector
+def increment_detector(query_params, cached_data, cache_instance):
+    # Access increment settings
+    time_inc = cache_instance.time_increment
+    order_inc = cache_instance.ordered_increment
+    
+    # Use settings for custom logic
+    if time_inc and time_inc < timedelta(minutes=1):
+        # High-frequency logic
+        pass
+    
+    return []  # Your logic here
+```
+
 ## Core Classes
 
 ### `cacheness` Class

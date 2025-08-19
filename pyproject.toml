@@ -1,6 +1,6 @@
 [project]
 name = "cacheness"
-version = "0.3.10"
+version = "0.3.11"
 description = "High-performance disk caching library using Blosc compression, geared toward numpy arrays and dataframes and pickle-ing for everything else."
 readme = "README.md"
 authors = [
@@ -11,6 +11,27 @@ dependencies = [
     "cachetools>=6.1.0",
     "xxhash>=3.5.0",
 ]
+
+[project.optional-dependencies]
+recommended = [
+    "numpy>=2.0.0",
+    "blosc2>=3.5.1",
+    "pandas>=2.0.0",
+    "pyarrow>=21.0.0",
+    "sqlalchemy>=2.0.0",
+    "duckdb-engine>=0.16.0",
+    "orjson>=3.8.0",
+    "dill>=0.4.0",
+]
+dataframes = [
+    "pandas>=2.0.0",
+    "polars>=1.30.0",
+    "pyarrow>=21.0.0",
+]
+tensorflow = [
+    "tensorflow>=2.0.0",
+]
+
 
 [dependency-groups]
 recommended = [
@@ -39,9 +60,6 @@ dev = [
 ]
 tensorflow = [
     "tensorflow>=2.0.0",
-]
-dill = [
-    "dill>=0.4.0",
 ]
 
 [build-system]

@@ -81,7 +81,9 @@ cache = SqlCache(
     db_url="stocks.db",  # DuckDB file
     table=stock_table,
     data_adapter=StockSqlCacheAdapter(),
-    ttl_hours=24
+    ttl_hours=24,
+    time_increment=timedelta(minutes=5),  # Optional: specify data increment
+    gap_detector=None  # Optional: custom gap detection function
 )
 
 # Get data (automatically fetches missing data)
@@ -94,11 +96,69 @@ data = cache.get_data(
 print(f"Retrieved {len(data)} records")
 ```
 
-## Advanced Usage
+## Advanced Configuration
+
+### Custom Gap Detection
+
+For precise control over when data should be fetched, implement custom gap detection:
+
+```python
+def intelligent_gap_detector(query_params, cached_data, cache_instance):
+    """Custom gap detection with access to increment settings."""
+    
+    # Access user-specified increments
+    time_increment = cache_instance.time_increment
+    ordered_increment = cache_instance.ordered_increment
+    
+    if cached_data.empty:
+        return [cache_instance._convert_query_to_fetch_params(query_params)]
+    
+    # Custom logic based on your data patterns
+    # Return [] for no fetch, or list of fetch parameter dicts
+    return []
+
+# Use with cache
+cache = SqlCache.with_sqlite(
+    db_path="cache.db",
+    table=table,
+    data_adapter=adapter,
+    gap_detector=intelligent_gap_detector
+)
+```
+
+### Increment Specification
+
+Specify known data increments for optimal gap detection:
+
+```python
+# Time-based increments
+cache = SqlCache.with_sqlite(
+    db_path="sensor_data.db",
+    table=sensor_table,
+    data_adapter=adapter,
+    time_increment=timedelta(minutes=5)  # Data every 5 minutes
+)
+
+# String format increments
+cache = SqlCache.with_sqlite(
+    db_path="logs.db",
+    table=log_table,
+    data_adapter=adapter,
+    time_increment="30sec"  # Every 30 seconds
+)
+
+# Ordered data increments
+cache = SqlCache.with_sqlite(
+    db_path="orders.db",
+    table=order_table,
+    data_adapter=adapter,
+    ordered_increment=10  # Order IDs increment by 10
+)
+```
 
 ### Custom Missing Data Detection
 
-For time-series data, you'll want to implement intelligent gap detection:
+For time-series data, implement intelligent gap detection:
 
 ```python
 class TimeSeriesCache(SqlCache):

@@ -73,11 +73,31 @@ wheels = [
 
 [[package]]
 name = "cacheness"
-version = "0.3.10"
+version = "0.3.11"
 source = { editable = "." }
 dependencies = [
     { name = "cachetools" },
     { name = "xxhash" },
+]
+
+[package.optional-dependencies]
+dataframes = [
+    { name = "pandas" },
+    { name = "polars" },
+    { name = "pyarrow" },
+]
+recommended = [
+    { name = "blosc2" },
+    { name = "dill" },
+    { name = "duckdb-engine" },
+    { name = "numpy" },
+    { name = "orjson" },
+    { name = "pandas" },
+    { name = "pyarrow" },
+    { name = "sqlalchemy" },
+]
+tensorflow = [
+    { name = "tensorflow" },
 ]
 
 [package.dev-dependencies]
@@ -90,9 +110,6 @@ dev = [
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "ruff" },
-]
-dill = [
-    { name = "dill" },
 ]
 recommended = [
     { name = "blosc2" },
@@ -114,9 +131,22 @@ tensorflow = [
 
 [package.metadata]
 requires-dist = [
+    { name = "blosc2", marker = "extra == 'recommended'", specifier = ">=3.5.1" },
     { name = "cachetools", specifier = ">=6.1.0" },
+    { name = "dill", marker = "extra == 'recommended'", specifier = ">=0.4.0" },
+    { name = "duckdb-engine", marker = "extra == 'recommended'", specifier = ">=0.16.0" },
+    { name = "numpy", marker = "extra == 'recommended'", specifier = ">=2.0.0" },
+    { name = "orjson", marker = "extra == 'recommended'", specifier = ">=3.8.0" },
+    { name = "pandas", marker = "extra == 'dataframes'", specifier = ">=2.0.0" },
+    { name = "pandas", marker = "extra == 'recommended'", specifier = ">=2.0.0" },
+    { name = "polars", marker = "extra == 'dataframes'", specifier = ">=1.30.0" },
+    { name = "pyarrow", marker = "extra == 'dataframes'", specifier = ">=21.0.0" },
+    { name = "pyarrow", marker = "extra == 'recommended'", specifier = ">=21.0.0" },
+    { name = "sqlalchemy", marker = "extra == 'recommended'", specifier = ">=2.0.0" },
+    { name = "tensorflow", marker = "extra == 'tensorflow'", specifier = ">=2.0.0" },
     { name = "xxhash", specifier = ">=3.5.0" },
 ]
+provides-extras = ["recommended", "dataframes", "tensorflow"]
 
 [package.metadata.requires-dev]
 dataframes = [
@@ -129,7 +159,6 @@ dev = [
     { name = "pytest-cov", specifier = ">=6.2.1" },
     { name = "ruff", specifier = ">=0.12.8" },
 ]
-dill = [{ name = "dill", specifier = ">=0.4.0" }]
 recommended = [
     { name = "blosc2", specifier = ">=3.5.1" },
     { name = "dill", specifier = ">=0.4.0" },
