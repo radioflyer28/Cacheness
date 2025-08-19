@@ -14,6 +14,8 @@ Welcome to the Cacheness documentation! This high-performance caching library pr
 - **[Performance Guide](PERFORMANCE.md)** - Optimization strategies and benchmarks
 - **[Custom Metadata](CUSTOM_METADATA.md)** - Working with SQLite backend and custom fields
 - **[SQL Cache Reference](SQL_CACHE.md)** - Pull-through cache with intelligent gap detection
+- **[Custom Gap Detection](CUSTOM_GAP_DETECTION.md)** - Custom gap detection logic for SqlCache
+- **[Arbitrary Time Increments](ARBITRARY_TIME_INCREMENTS.md)** - User-specified time increments for SqlCache
 
 ## Specialized Handlers
 
