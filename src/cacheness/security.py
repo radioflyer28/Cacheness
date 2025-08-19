@@ -39,7 +39,7 @@ class CacheEntrySigner:
     """
     
     # Default enhanced fields (previously "enhanced" security level)
-    DEFAULT_SIGNED_FIELDS = ["cache_key", "file_hash", "data_type", "file_size", "created_at", "prefix"]
+    DEFAULT_SIGNED_FIELDS = ["cache_key", "data_type", "prefix", "file_size", "file_hash", "object_type", "storage_format", "serializer", "compression_codec", "actual_path", "created_at"]
     
     def __init__(self, key_file_path: Path, custom_fields: Optional[List[str]] = None, 
                  use_in_memory_key: bool = False):
