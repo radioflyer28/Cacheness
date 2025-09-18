@@ -1,4 +1,5 @@
 import tempfile
+import pytest
 import numpy as np
 
 from cacheness import cacheness, CacheConfig

@@ -4,13 +4,13 @@ Test the hash_path_content configuration option.
 """
 
 import tempfile
-import unittest
+import pytest
 from pathlib import Path
 
 from cacheness import cacheness, CacheConfig
 
 
-class TestPathHashingConfig(unittest.TestCase):
+class TestPathHashingConfig:
     """Test that the hash_path_content configuration option works correctly."""
 
     def test_hash_path_content_enabled(self):
@@ -44,8 +44,8 @@ class TestPathHashingConfig(unittest.TestCase):
 
             # Should be able to retrieve with file2 (same content, different path)
             result = cache.get(input_file=file2_path)
-            self.assertIsNotNone(result)
-            self.assertEqual(result, test_data)
+            assert result is not None
+            assert result == test_data
 
     def test_hash_path_content_disabled(self):
         """Test that with hash_path_content=False, files with same content but different paths produce cache misses."""
@@ -78,7 +78,7 @@ class TestPathHashingConfig(unittest.TestCase):
 
             # Should NOT be able to retrieve with file2 (different path, filename-based hashing)
             result = cache.get(input_file=file2_path)
-            self.assertIsNone(result)
+            assert result is None
 
     def test_hash_path_content_disabled_same_path_works(self):
         """Test that with hash_path_content=False, the same path still works."""
@@ -99,8 +99,8 @@ class TestPathHashingConfig(unittest.TestCase):
             cache.put(test_data, description="Test same path", input_file=file_path)
             result = cache.get(input_file=file_path)
 
-            self.assertIsNotNone(result)
-            self.assertEqual(result, test_data)
+            assert result is not None
+            assert result == test_data
 
     def test_hash_path_content_disabled_content_change_not_detected(self):
         """Test that with hash_path_content=False, content changes are not detected."""
@@ -124,14 +124,14 @@ class TestPathHashingConfig(unittest.TestCase):
 
             # Should still find cached data (content change not detected with filename-based hashing)
             result = cache.get(input_file=file_path)
-            self.assertIsNotNone(result)
-            self.assertEqual(result, test_data1)  # Original data should be returned
+            assert result is not None
+            assert result == test_data1  # Original data should be returned
 
     def test_default_config_enables_content_hashing(self):
         """Test that the default configuration enables content hashing."""
         config = CacheConfig()
-        self.assertTrue(config.hash_path_content)
+        assert config.hash_path_content
 
 
 if __name__ == "__main__":
-    unittest.main()
+    pytest.main([__file__])

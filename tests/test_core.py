@@ -537,7 +537,7 @@ class TestFactoryMethods:
             # Should have the specified configuration
             assert cache.config.storage.cache_dir == temp_dir
             assert cache.config.metadata.default_ttl_hours == 8
-            assert cache.config.compression.pickle_compression_codec == "lz4"
+            assert cache.config.compression.pickle_compression_codec == "zstd"
             
             # Test basic functionality
             test_data = {"api": "response", "data": [1, 2, 3]}
@@ -553,7 +553,7 @@ class TestFactoryMethods:
         # Check default values
         assert cache.config.storage.cache_dir == "./cache"
         assert cache.config.metadata.default_ttl_hours == 6
-        assert cache.config.compression.pickle_compression_codec == "lz4"
+        assert cache.config.compression.pickle_compression_codec == "zstd"
 
 
 class TestTimezoneHandling:

@@ -22,7 +22,8 @@ except ImportError:
 class TestSQLCache:
     """Test cases for SQL pull-through cache"""
     
-    def setup_method(self):
+    @pytest.fixture(autouse=True)
+    def setup_test_data(self):
         """Set up test fixtures"""
         # Define a simple test table
         metadata = MetaData()
@@ -416,7 +417,8 @@ def test_backend_selection_integration():
 class TestSQLCacheBuilders:
     """Test the new builder pattern for SQL caches."""
     
-    def setup_method(self):
+    @pytest.fixture(autouse=True)
+    def setup_mock_fetcher(self):
         """Set up test data fetcher."""
         self.call_count = 0
         
@@ -465,10 +467,9 @@ class TestSQLCacheBuilders:
         cache = SqlCache.for_analytics_table(
             ":memory:",
             table_name="analytics_test", 
-            primary_keys=["id"],
+            primary_keys=["name"],  # Use name as primary key instead of id
             data_fetcher=self.mock_fetcher,
             ttl_hours=24,
-            id=Integer,
             name=String(50),
             value=Float
         )

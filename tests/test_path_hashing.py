@@ -4,13 +4,13 @@ Test Path content hashing functionality.
 """
 
 import tempfile
-import unittest
+import pytest
 from pathlib import Path
 
 from cacheness import cacheness, CacheConfig
 
 
-class TestPathHashing(unittest.TestCase):
+class TestPathHashing:
     """Test that Path objects are hashed by content, not path string."""
 
     def test_same_content_different_paths_retrieval(self):
@@ -36,8 +36,8 @@ class TestPathHashing(unittest.TestCase):
 
             # Should be able to retrieve with file2 (same content, different path)
             result = cache.get(input_file=file2_path)
-            self.assertIsNotNone(result)
-            self.assertEqual(result, test_data)
+            assert result is not None
+            assert result == test_data
 
     def test_different_content_cache_miss(self):
         """Test that files with different content produce cache misses."""
@@ -59,7 +59,7 @@ class TestPathHashing(unittest.TestCase):
 
             # Should NOT be able to retrieve with file2 (different content)
             result = cache.get(input_file=file2_path)
-            self.assertIsNone(result)
+            assert result is None
 
     def test_file_modification_invalidates_cache(self):
         """Test that cache invalidates when file content changes."""
@@ -75,21 +75,21 @@ class TestPathHashing(unittest.TestCase):
 
             cache.put(test_data1, description="Version 1", input_file=test_file)
             result1 = cache.get(input_file=test_file)
-            self.assertIsNotNone(result1)
+            assert result1 is not None
 
             # Modify file content
             test_file.write_text("Modified content")
 
             # Should not find cached data (different content hash)
             result2 = cache.get(input_file=test_file)
-            self.assertIsNone(result2)
+            assert result2 is None
 
             # Cache new data with modified file
             test_data2 = {"version": 2, "data": "second"}
             cache.put(test_data2, description="Version 2", input_file=test_file)
             result3 = cache.get(input_file=test_file)
-            self.assertIsNotNone(result3)
-            self.assertEqual(result3, test_data2)
+            assert result3 is not None
+            assert result3 == test_data2
 
     def test_directory_content_hashing(self):
         """Test that directories are hashed based on their contents."""
@@ -116,8 +116,8 @@ class TestPathHashing(unittest.TestCase):
 
             # Should find with dir2 (same content structure)
             result = cache.get(input_dir=dir2)
-            self.assertIsNotNone(result)
-            self.assertEqual(result, test_data)
+            assert result is not None
+            assert result == test_data
 
     def test_missing_file_handling(self):
         """Test handling of missing files."""
@@ -133,9 +133,9 @@ class TestPathHashing(unittest.TestCase):
                 test_data, description="Missing file test", input_file=missing_file
             )
             result = cache.get(input_file=missing_file)
-            self.assertIsNotNone(result)
-            self.assertEqual(result, test_data)
+            assert result is not None
+            assert result == test_data
 
 
 if __name__ == "__main__":
-    unittest.main()
+    pytest.main([__file__])

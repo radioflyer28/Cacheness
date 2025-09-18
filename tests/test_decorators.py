@@ -456,42 +456,49 @@ class TestFactoryMethods:
 
     def test_cached_for_api(self):
         """Test @cached.for_api() decorator."""
-        call_count = 0
+        # Use temporary directory to ensure clean cache state
+        import tempfile
+        
+        with tempfile.TemporaryDirectory() as temp_dir:
+            call_count = 0
 
-        @cached.for_api(ttl_hours=1)
-        def fetch_api_data(endpoint):
-            nonlocal call_count
-            call_count += 1
-            return {"endpoint": endpoint, "data": "response"}
+            @cached.for_api(ttl_hours=1, cache_dir=temp_dir)
+            def fetch_api_data(endpoint):
+                nonlocal call_count
+                call_count += 1
+                return {"endpoint": endpoint, "data": "response"}
 
-        # First call should execute function
-        result1 = fetch_api_data("users")
-        assert result1 == {"endpoint": "users", "data": "response"}
-        assert call_count == 1
+            # First call should execute function
+            result1 = fetch_api_data("users")
+            assert result1 == {"endpoint": "users", "data": "response"}
+            assert call_count == 1
 
-        # Second call should hit cache
-        result2 = fetch_api_data("users")
-        assert result2 == {"endpoint": "users", "data": "response"}
-        assert call_count == 1  # No additional calls
+            # Second call should hit cache
+            result2 = fetch_api_data("users")
+            assert result2 == {"endpoint": "users", "data": "response"}
+            assert call_count == 1  # No additional calls
 
-        # Different endpoint should execute function
-        result3 = fetch_api_data("posts")
-        assert result3 == {"endpoint": "posts", "data": "response"}
-        assert call_count == 2
+            # Different endpoint should execute function
+            result3 = fetch_api_data("posts")
+            assert result3 == {"endpoint": "posts", "data": "response"}
+            assert call_count == 2
 
     def test_cached_for_api_error_handling(self):
         """Test that @cached.for_api() has error handling enabled by default."""
+        # Use temporary directory to ensure clean cache state
+        import tempfile
         
-        @cached.for_api()
-        def might_fail():
-            return "success"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            @cached.for_api(cache_dir=temp_dir)
+            def might_fail():
+                return "success"
 
-        # This should work normally
-        result = might_fail()
-        assert result == "success"
+            # This should work normally
+            result = might_fail()
+            assert result == "success"
 
-        # The decorator should have ignore_errors=True by default
-        # We can't easily test cache errors without mocking, but we can verify
-        # the decorator was created with the right parameters
-        assert hasattr(might_fail, 'cache_clear')
-        assert hasattr(might_fail, 'cache_info')
+            # The decorator should have ignore_errors=True by default
+            # We can't easily test cache errors without mocking, but we can verify
+            # the decorator was created with the right parameters
+            assert hasattr(might_fail, 'cache_clear')
+            assert hasattr(might_fail, 'cache_info')

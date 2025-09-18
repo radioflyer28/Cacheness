@@ -21,7 +21,8 @@ except ImportError:
 class TestDocumentationExamples:
     """Test that all documentation examples work correctly"""
     
-    def setup_method(self):
+    @pytest.fixture(autouse=True)
+    def setup_tables(self):
         """Set up test fixtures for documentation examples"""
         # Stock table from README example
         metadata = MetaData()

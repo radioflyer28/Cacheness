@@ -18,7 +18,8 @@ from cacheness.config import CacheConfig
 class TestTensorFlowTensorHandler:
     """Test the TensorFlow tensor handler functionality."""
 
-    def setup_method(self):
+    @pytest.fixture(autouse=True)
+    def setup_handler(self):
         """Set up test fixtures."""
         self.config = CacheConfig()
         self.handler = TensorFlowTensorHandler()

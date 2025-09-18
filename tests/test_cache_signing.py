@@ -2,12 +2,53 @@
 Tests for cache entry signing and invalid signature deletion configuration.
 """
 
+import pytest
 import tempfile
 import shutil
 from pathlib import Path
 
 from cacheness.core import UnifiedCache
 from cacheness.config import CacheConfig, SecurityConfig
+
+
+@pytest.fixture
+def temp_cache_signing_enabled():
+    """Fixture to create a temporary cache with entry signing enabled."""
+    temp_dir = Path(tempfile.mkdtemp())
+    try:
+        config = CacheConfig(
+            cache_dir=str(temp_dir / "cache"),
+            security=SecurityConfig(
+                enable_entry_signing=True,
+                delete_invalid_signatures=True,
+                allow_unsigned_entries=True
+            )
+        )
+        cache = UnifiedCache(config)
+        yield cache, temp_dir
+    finally:
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir)
+
+
+@pytest.fixture
+def temp_cache_delete_disabled():
+    """Fixture to create a temporary cache with delete_invalid_signatures disabled."""
+    temp_dir = Path(tempfile.mkdtemp())
+    try:
+        config = CacheConfig(
+            cache_dir=str(temp_dir / "cache"),
+            security=SecurityConfig(
+                enable_entry_signing=True,
+                delete_invalid_signatures=False,
+                allow_unsigned_entries=True
+            )
+        )
+        cache = UnifiedCache(config)
+        yield cache, temp_dir
+    finally:
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir)
 
 
 class TestDeleteInvalidSignatures:
@@ -32,50 +73,22 @@ class TestDeleteInvalidSignatures:
         config_via_security = CacheConfig(security=security_config)
         assert not config_via_security.security.delete_invalid_signatures
     
-    def test_basic_signing_functionality(self):
+    def test_basic_signing_functionality(self, temp_cache_signing_enabled, temp_cache_delete_disabled):
         """Test that basic signing functionality works with both config values."""
-        temp_dir = Path(tempfile.mkdtemp())
+        cache1, temp_dir1 = temp_cache_signing_enabled
+        cache2, temp_dir2 = temp_cache_delete_disabled
         
-        try:
-            # Test with delete_invalid_signatures=True (default)
-            config1 = CacheConfig(
-                cache_dir=str(temp_dir / "cache1"),
-                security=SecurityConfig(
-                    enable_entry_signing=True,
-                    delete_invalid_signatures=True,
-                    allow_unsigned_entries=True
-                )
-            )
-            
-            cache1 = UnifiedCache(config1)
-            
-            # Store and retrieve data
-            test_data = {"message": "Hello, World!", "numbers": [1, 2, 3, 4, 5]}
-            cache_key = cache1.put(test_data, description="Test data with signing")
-            retrieved_data = cache1.get(cache_key=cache_key)
-            assert retrieved_data == test_data
-            
-            # Test with delete_invalid_signatures=False
-            config2 = CacheConfig(
-                cache_dir=str(temp_dir / "cache2"),
-                security=SecurityConfig(
-                    enable_entry_signing=True,
-                    delete_invalid_signatures=False,
-                    allow_unsigned_entries=True
-                )
-            )
-            
-            cache2 = UnifiedCache(config2)
-            
-            # Store and retrieve data
-            test_data2 = {"message": "Second test", "value": 42}
-            cache_key2 = cache2.put(test_data2, description="Test data for retention test")
-            retrieved_data2 = cache2.get(cache_key=cache_key2)
-            assert retrieved_data2 == test_data2
-            
-        finally:
-            if temp_dir.exists():
-                shutil.rmtree(temp_dir)
+        # Store and retrieve data with delete_invalid_signatures=True
+        test_data = {"message": "Hello, World!", "numbers": [1, 2, 3, 4, 5]}
+        cache_key = cache1.put(test_data, description="Test data with signing")
+        retrieved_data = cache1.get(cache_key=cache_key)
+        assert retrieved_data == test_data
+        
+        # Store and retrieve data with delete_invalid_signatures=False
+        test_data2 = {"message": "Second test", "value": 42}
+        cache_key2 = cache2.put(test_data2, description="Test data for retention test")
+        retrieved_data2 = cache2.get(cache_key=cache_key2)
+        assert retrieved_data2 == test_data2
     
     def test_config_logging(self):
         """Test that the security configuration logs the delete_invalid_signatures setting."""

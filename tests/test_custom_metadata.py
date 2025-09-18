@@ -233,7 +233,8 @@ class TestCustomMetadataModels:
 class TestCacheIntegration:
     """Test integration with the cache system."""
 
-    def setup_method(self):
+    @pytest.fixture(autouse=True)
+    def setup_dynamic_metadata_class(self):
         """Set up each test method with unique table names."""
         import uuid
 
@@ -568,7 +569,8 @@ class TestCacheMetadataLink:
 class TestAdvancedQuerying:
     """Test advanced querying capabilities."""
 
-    def setup_method(self):
+    @pytest.fixture(autouse=True)
+    def setup_advanced_query_metadata_class(self):
         """Set up test data for advanced querying."""
         import uuid
 

@@ -2,6 +2,7 @@
 Tests for parallel hashing utilities in the utils module.
 """
 
+import pytest
 import tempfile
 from pathlib import Path
 

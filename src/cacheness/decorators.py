@@ -10,8 +10,8 @@ import functools
 import xxhash
 from typing import Any, Callable, Optional, Union, Dict, Tuple, cast
 
-from .core import UnifiedCache, CacheConfig
-from .serialization import serialize_for_cache_key
+from .core import UnifiedCache, CacheConfig, _normalize_function_args
+from .serialization import create_unified_cache_key
 
 
 def _generate_cache_key(
@@ -23,6 +23,8 @@ def _generate_cache_key(
 ) -> str:
     """
     Generate a cache key for a function call using unified serialization.
+
+    This uses the same key generation system as UnifiedCache to ensure consistency.
 
     Args:
         func: The function being cached
@@ -39,18 +41,18 @@ def _generate_cache_key(
     func_module = getattr(func, "__module__", "unknown")
     func_id = f"{func_module}.{func_name}"
 
-    # Serialize arguments using unified approach with config
-    args_str = serialize_for_cache_key(args, config)
-    kwargs_str = serialize_for_cache_key(kwargs, config)
-
-    # Combine all components
+    # Normalize arguments to consistent parameter mapping
+    normalized_params = _normalize_function_args(func, args, kwargs)
+    
+    # Add function identification to parameters for uniqueness
+    enhanced_params = {**normalized_params, "__function__": func_id}
+    
+    # Add key prefix if provided
     if key_prefix:
-        cache_key_base = f"{key_prefix}:{func_id}:args:{args_str}:kwargs:{kwargs_str}"
-    else:
-        cache_key_base = f"{func_id}:args:{args_str}:kwargs:{kwargs_str}"
-
-    # Hash for consistent length and characters
-    return xxhash.xxh3_64(cache_key_base.encode()).hexdigest()
+        enhanced_params["__key_prefix__"] = key_prefix
+    
+    # Use the same unified cache key generation as UnifiedCache
+    return create_unified_cache_key(enhanced_params, config)
 
 
 class cached:
@@ -124,8 +126,9 @@ class cached:
                 if self.key_func:
                     cache_key = self.key_func(func, args, kwargs)
                 else:
+                    cache_instance = cast(UnifiedCache, self.cache_instance)
                     cache_key = _generate_cache_key(
-                        func, args, kwargs, self.key_prefix, self.cache_instance.config
+                        func, args, kwargs, self.key_prefix, cache_instance.config
                     )
             except Exception as e:
                 if self.ignore_errors:
@@ -177,8 +180,9 @@ class cached:
             if self.key_func:
                 return self.key_func(func, args, kwargs)
             else:
+                cache_instance = cast(UnifiedCache, self.cache_instance)
                 return _generate_cache_key(
-                    func, args, kwargs, self.key_prefix, self.cache_instance.config
+                    func, args, kwargs, self.key_prefix, cache_instance.config
                 )
 
         # Attach methods (these will be available as wrapper.cache_clear(), etc.)

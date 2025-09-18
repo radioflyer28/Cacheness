@@ -5,6 +5,9 @@ Test for store_cache_key_params configuration option
 
 import tempfile
 from pathlib import Path
+
+import pytest
+
 from cacheness.core import UnifiedCache
 from cacheness.config import CacheConfig
 

@@ -8,17 +8,53 @@ operations to specialized handlers.
 """
 
 import xxhash
+import inspect
 import threading
 import logging
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Callable, Tuple
 
 from .config import CacheConfig, _DEFAULT_TTL, create_cache_config
 from .handlers import HandlerRegistry
 from .serialization import create_unified_cache_key
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_function_args(func: Callable, args: Tuple, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Normalize function call arguments to consistent parameter mapping.
+    
+    This ensures that func(1, 2, 10), func(a=1, b=2, c=10), and func(1, b=2, c=10)
+    all produce the same cache key when they represent the same logical call.
+    
+    Args:
+        func: The function being called
+        args: Positional arguments
+        kwargs: Keyword arguments
+        
+    Returns:
+        Normalized parameter dictionary
+    """
+    try:
+        # Use inspect.signature to normalize calling conventions
+        sig = inspect.signature(func)
+        bound = sig.bind(*args, **kwargs)
+        bound.apply_defaults()
+        return bound.arguments
+    except Exception:
+        # Fallback: convert to consistent dict format if signature inspection fails
+        param_dict = {}
+        
+        # Add positional args with generic names
+        for i, arg in enumerate(args):
+            param_dict[f"__arg_{i}"] = arg
+        
+        # Add keyword args
+        param_dict.update(kwargs)
+        
+        return param_dict
 
 
 class UnifiedCache:

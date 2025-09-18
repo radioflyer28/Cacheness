@@ -2,6 +2,7 @@
 Tests for unified serialization system.
 """
 
+import pytest
 import numpy as np
 from pathlib import Path
 from cacheness.serialization import serialize_for_cache_key, create_unified_cache_key
