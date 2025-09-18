@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict
 
-from cacheness.utils import hash_directory_parallel, _hash_directory_sequential
+from cacheness.file_hashing import hash_directory_parallel, _hash_directory_sequential
 
 
 class ThresholdBenchmark:

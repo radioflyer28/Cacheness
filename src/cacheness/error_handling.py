@@ -148,7 +148,8 @@ def cache_operation_context(operation: str, **context):
         logger.error(
             f"Unexpected error in cache operation: {operation} - {e}", extra=context
         )
-        raise CacheError(f"Operation '{operation}' failed: {e}", context) from e
+        # Let decorators handle error type conversion - just re-raise
+        raise
 
 
 def log_cache_performance(func: Callable) -> Callable:

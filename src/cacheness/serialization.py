@@ -15,7 +15,7 @@ def _serialize_path_object(obj: Any, config: Optional[Any] = None) -> Optional[s
     try:
         # Import Path and utilities here to avoid circular imports
         from pathlib import Path
-        from .utils import hash_file_content, hash_directory_parallel
+        from .file_hashing import hash_file_content, hash_directory_parallel
 
         if isinstance(obj, Path):
             # Check if we should hash content or just use path string

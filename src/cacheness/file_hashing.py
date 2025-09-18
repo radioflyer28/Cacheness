@@ -28,10 +28,10 @@ def _hash_single_file(file_info: Tuple[Path, Path]) -> Tuple[str, str]:
         Tuple of (relative_path_string, content_hash)
     """
     file_path, base_path = file_info
+    # Get relative path first (always needed)
+    rel_path = str(file_path.relative_to(base_path))
+    
     try:
-        # Get relative path
-        rel_path = str(file_path.relative_to(base_path))
-
         # Hash the file content
         hasher = xxhash.xxh3_64()
         with open(file_path, "rb") as f:
@@ -49,7 +49,7 @@ def _hash_single_file(file_info: Tuple[Path, Path]) -> Tuple[str, str]:
 
 
 def hash_directory_parallel(
-    directory_path: Path, max_workers: Optional[int] = None
+    directory_path: Optional[Path], max_workers: Optional[int] = None
 ) -> str:
     """
     Hash a directory's contents using parallel processing for better performance.
@@ -61,6 +61,13 @@ def hash_directory_parallel(
     Returns:
         Hex string hash of the directory contents
     """
+    # Validate input first
+    if directory_path is None:
+        return f"missing_directory:None"
+    
+    if not isinstance(directory_path, Path):
+        directory_path = Path(directory_path)
+    
     if not directory_path.exists() or not directory_path.is_dir():
         return f"missing_directory:{str(directory_path)}"
 
@@ -194,7 +201,7 @@ def _hash_directory_sequential(
     return final_hasher.hexdigest()
 
 
-def hash_file_content(file_path: Path) -> str:
+def hash_file_content(file_path: Optional[Path]) -> str:
     """
     Hash a single file's content.
 
@@ -204,6 +211,13 @@ def hash_file_content(file_path: Path) -> str:
     Returns:
         Hex string hash of the file content
     """
+    # Validate input first
+    if file_path is None:
+        return f"missing_file:None"
+    
+    if not isinstance(file_path, Path):
+        file_path = Path(file_path)
+    
     if not file_path.exists():
         return f"missing_file:{str(file_path)}"
 

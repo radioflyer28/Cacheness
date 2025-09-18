@@ -224,6 +224,10 @@ class MetadataBackend(ABC):
         """Remove all cache entries and return count removed."""
         pass
 
+    def close(self):
+        """Close and clean up any resources (default implementation does nothing)."""
+        pass
+
 
 def create_entry_cache(cache_type: str, maxsize: int, ttl_seconds: float):
     """Create a cache instance based on configuration."""
@@ -439,6 +443,18 @@ class CachedMetadataBackend(MetadataBackend):
         
         return count
 
+    def close(self):
+        """Close and clean up resources including the wrapped backend."""
+        # Clear memory cache if it exists
+        if self._memory_cache is not None:
+            with self._lock:
+                self._memory_cache.clear()
+                logger.debug("Memory cache cleared during close")
+        
+        # Close the wrapped backend
+        if hasattr(self.backend, 'close'):
+            self.backend.close()
+
 
 class InMemoryBackend(MetadataBackend):
     """Ultra-fast in-memory metadata backend optimized for maximum PUT/GET performance.
@@ -637,6 +653,11 @@ class InMemoryBackend(MetadataBackend):
     def save_metadata(self, metadata: Dict[str, Any]):
         """Save complete metadata structure (in-memory backend doesn't persist data)."""
         # In-memory backend doesn't persist - no-op
+        pass
+
+    def close(self):
+        """Close and clean up resources (in-memory backend has no external resources)."""
+        # No external resources to clean up for in-memory backend
         pass
 
 
@@ -900,6 +921,23 @@ class JsonBackend(MetadataBackend):
             
             self._save_to_disk()
             return entry_count
+
+    def load_metadata(self) -> Dict[str, Any]:
+        """Load complete metadata structure."""
+        with self._lock:
+            return self._metadata.copy()
+
+    def save_metadata(self, metadata: Dict[str, Any]):
+        """Save complete metadata structure."""
+        with self._lock:
+            self._metadata = metadata
+            self._save_to_disk()
+
+    def close(self):
+        """Close and clean up resources (JSON backend saves any pending changes)."""
+        with self._lock:
+            # Ensure any pending changes are saved to disk
+            self._save_to_disk()
 
 
 class SqliteBackend(MetadataBackend):
@@ -1331,6 +1369,26 @@ class SqliteBackend(MetadataBackend):
         """Save complete metadata structure (SQLite backend operates on individual entries)."""
         # SQLite backend doesn't use bulk metadata operations - no-op
         pass
+
+    def close(self):
+        """Close all database connections and clean up resources."""
+        if hasattr(self, 'engine') and self.engine:
+            # Close all connections in the pool
+            self.engine.dispose()
+            logger.debug("SQLite engine disposed and connections closed")
+
+    def __del__(self):
+        """Ensure connections are closed when the backend is garbage collected."""
+        self.close()
+
+    def __enter__(self):
+        """Context manager entry."""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit - ensure connections are closed."""
+        self.close()
+        return False
 
 
 def create_metadata_backend(backend_type: str = "auto", **kwargs) -> MetadataBackend:
