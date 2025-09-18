@@ -19,9 +19,117 @@ The SQL cache is perfect for scenarios where you need to:
 - **TTL Support**: Configurable expiration with automatic cleanup
 - **Cache Statistics**: Built-in monitoring and management tools
 
+# SQL Pull-Through Cache
+
+The SQL pull-through cache provides an intelligent caching layer that automatically fetches missing data from external sources and stores it in a local database for fast subsequent access.
+
+## Overview
+
+The SQL cache is perfect for scenarios where you need to:
+- Cache time-series data from APIs (stock prices, sensor data, etc.)
+- Implement smart partial data fetching
+- Have database-level querying capabilities on cached data
+- Ensure data consistency with automatic upsert operations
+
+## Key Features
+
+- **Intelligent Backend Selection**: Automatically chooses SQLite vs DuckDB based on access patterns
+- **Simple Builder Pattern**: No inheritance required - just provide a function
+- **Multi-Database Support**: Works with SQLite, DuckDB, PostgreSQL, and more
+- **Intelligent Gap Detection**: Automatically identifies missing data ranges
+- **Upsert Operations**: Handles conflicts gracefully with database-specific optimizations
+- **TTL Support**: Configurable expiration with automatic cleanup
+- **Cache Statistics**: Built-in monitoring and management tools
+
 ## Quick Start
 
-### 1. Define Your Table Schema
+### Simple Builder Pattern (Recommended)
+
+#### For Individual Record Lookups
+```python
+from cacheness.sql_cache import SqlCache
+from sqlalchemy import Integer, String, Float
+
+def fetch_user_data(user_id):
+    """Fetch user data from API - just return a DataFrame."""
+    api_data = requests.get(f"/api/users/{user_id}").json()
+    return pd.DataFrame([api_data])
+
+# Creates SQLite cache optimized for row-wise lookups
+user_cache = SqlCache.for_lookup_table(
+    "users.db",
+    primary_keys=["user_id"],
+    data_fetcher=fetch_user_data,
+    ttl_hours=12,
+    user_id=Integer,
+    name=String(100),
+    email=String(255)
+)
+
+# Use it
+user_data = user_cache.get_data(user_id=123)
+```
+
+#### For Time-Series Data
+```python
+def fetch_stock_prices(symbol, start_date, end_date):
+    """Fetch stock data from API."""
+    return yfinance_client.get_data(symbol, start_date, end_date)
+
+# Creates DuckDB cache optimized for analytical queries  
+stock_cache = SqlCache.for_timeseries(
+    "stocks.db",
+    data_fetcher=fetch_stock_prices,
+    ttl_hours=24,
+    price=Float,
+    volume=Integer,
+    market_cap=Float
+)
+
+# Use it
+stock_data = stock_cache.get_data(
+    symbol="AAPL", 
+    start_date="2024-01-01", 
+    end_date="2024-01-31"
+)
+```
+
+#### For Analytics Workloads
+```python
+def fetch_sales_data(department, quarter):
+    """Fetch sales analytics from data warehouse."""
+    return warehouse_client.get_sales(department, quarter)
+
+# Creates DuckDB cache optimized for bulk analytical queries
+sales_cache = SqlCache.for_analytics_table(
+    "sales.db",
+    primary_keys=["department", "quarter"],
+    data_fetcher=fetch_sales_data,
+    ttl_hours=48,
+    department=String(50),
+    quarter=Integer,
+    revenue=Float,
+    profit_margin=Float
+)
+
+# Use it
+q1_sales = sales_cache.get_data(department="Engineering", quarter=1)
+```
+
+### Builder Method Reference
+
+| **Method** | **Database** | **Best For** | **TTL Default** |
+|------------|--------------|--------------|-----------------|
+| `for_lookup_table()` | SQLite | Individual record access | 12 hours |
+| `for_analytics_table()` | DuckDB | Bulk queries, reports | 12 hours |
+| `for_timeseries()` | DuckDB | Historical time-series | 24 hours |
+| `for_realtime_timeseries()` | SQLite | Real-time data updates | 1 hour |
+
+## Advanced Configuration
+
+### Custom Table Schemas (Advanced)
+
+For more control over table structure, you can define schemas manually using SQLAlchemy:
 
 ```python
 from sqlalchemy import MetaData, Table, Column, String, Date, Float, Index
@@ -39,64 +147,18 @@ stock_table = Table(
     # Add indexes for performance
     Index('idx_symbol_date', 'symbol', 'date')
 )
-```
 
-### 2. Create a Data Adapter
+def fetch_stock_data(symbol, start_date, end_date):
+    """Your data fetching logic here."""
+    return fetch_from_api(symbol, start_date, end_date)
 
-```python
-from cacheness.sql_cache import SqlCacheAdapter
-import pandas as pd
-
-class StockSqlCacheAdapter(SqlCacheAdapter):
-    def get_table_definition(self):
-        return stock_table
-    
-    def parse_query_params(self, **kwargs):
-        return {
-            'symbol': kwargs['symbol'],
-            'date': {
-                'start': kwargs['start_date'],
-                'end': kwargs['end_date']
-            }
-        }
-    
-    def fetch_data(self, **kwargs):
-        # Your API call logic here
-        symbol = kwargs['symbol']
-        start_date = kwargs['start_date']
-        end_date = kwargs['end_date']
-        
-        # Fetch from external API
-        data = fetch_stock_data_from_api(symbol, start_date, end_date)
-        return pd.DataFrame(data)
-```
-
-### 3. Create and Use the Cache
-
-```python
-from cacheness.sql_cache import SqlCache
-
-# Create cache instance
-cache = SqlCache(
-    db_url="stocks.db",  # DuckDB file
-    table=stock_table,
-    data_adapter=StockSqlCacheAdapter(),
-    ttl_hours=24,
-    time_increment=timedelta(minutes=5),  # Optional: specify data increment
-    gap_detector=None  # Optional: custom gap detection function
+# Use the custom table with builder pattern
+cache = SqlCache.for_timeseries(
+    "custom_stocks.db",
+    data_fetcher=fetch_stock_data,
+    table=stock_table  # Use custom table
 )
-
-# Get data (automatically fetches missing data)
-data = cache.get_data(
-    symbol="AAPL",
-    start_date="2024-01-01",
-    end_date="2024-01-31"
-)
-
-print(f"Retrieved {len(data)} records")
 ```
-
-## Advanced Configuration
 
 ### Custom Gap Detection
 
@@ -118,11 +180,11 @@ def intelligent_gap_detector(query_params, cached_data, cache_instance):
     return []
 
 # Use with cache
-cache = SqlCache.with_sqlite(
-    db_path="cache.db",
-    table=table,
-    data_adapter=adapter,
-    gap_detector=intelligent_gap_detector
+cache = SqlCache.for_timeseries(
+    "sensor_data.db",
+    data_fetcher=fetch_sensor_data,
+    gap_detector=intelligent_gap_detector,
+    time_increment=timedelta(minutes=5)  # Data every 5 minutes
 )
 ```
 
@@ -131,81 +193,32 @@ cache = SqlCache.with_sqlite(
 Specify known data increments for optimal gap detection:
 
 ```python
+from datetime import timedelta
+
 # Time-based increments
-cache = SqlCache.with_sqlite(
-    db_path="sensor_data.db",
-    table=sensor_table,
-    data_adapter=adapter,
+cache = SqlCache.for_timeseries(
+    "sensor_data.db",
+    data_fetcher=fetch_sensor_data,
     time_increment=timedelta(minutes=5)  # Data every 5 minutes
 )
 
-# String format increments
-cache = SqlCache.with_sqlite(
-    db_path="logs.db",
-    table=log_table,
-    data_adapter=adapter,
+# String format increments  
+cache = SqlCache.for_realtime_timeseries(
+    "logs.db",
+    data_fetcher=fetch_log_data,
     time_increment="30sec"  # Every 30 seconds
 )
 
 # Ordered data increments
-cache = SqlCache.with_sqlite(
-    db_path="orders.db",
-    table=order_table,
-    data_adapter=adapter,
-    ordered_increment=10  # Order IDs increment by 10
+cache = SqlCache.for_lookup_table(
+    "orders.db", 
+    primary_keys=["order_id"],
+    data_fetcher=fetch_order_data,
+    ordered_increment=10,  # Order IDs increment by 10
+    order_id=Integer,
+    customer_id=Integer,
+    amount=Float
 )
-```
-
-### Custom Missing Data Detection
-
-For time-series data, implement intelligent gap detection:
-
-```python
-class TimeSeriesCache(SqlCache):
-    def _find_missing_data(self, query_params, cached_data):
-        """Find missing date ranges"""
-        if cached_data.empty:
-            return [query_params]  # Fetch everything
-        
-        # Find gaps in time series
-        expected_dates = pd.date_range(
-            query_params['start_date'],
-            query_params['end_date'],
-            freq='D'
-        )
-        
-        cached_dates = set(cached_data['date'])
-        missing_dates = set(expected_dates) - cached_dates
-        
-        # Group consecutive dates into ranges
-        return self._group_into_ranges(missing_dates, query_params)
-```
-
-### Database-Specific Optimizations
-
-The cache automatically uses database-specific upsert operations:
-
-- **SQLite/DuckDB**: `INSERT ... ON CONFLICT DO UPDATE`
-- **PostgreSQL**: `INSERT ... ON CONFLICT DO UPDATE`
-- **Other databases**: Fallback to individual operations
-
-### Complex Query Parameters
-
-Support rich query patterns:
-
-```python
-def parse_query_params(self, **kwargs):
-    return {
-        'symbol': kwargs['symbol'],
-        'date': {
-            'start': kwargs['start_date'],
-            'end': kwargs['end_date']
-        },
-        'price': {
-            'gte': kwargs.get('min_price'),  # Greater than or equal
-            'lte': kwargs.get('max_price')   # Less than or equal
-        }
-    }
 ```
 
 ## Cache Management
@@ -235,50 +248,91 @@ cache.clear_cache()
 
 ## Configuration Options
 
-### Database URLs
+### Database Backend Selection
 
-The cache supports various database backends with different optimization profiles:
+The builder methods automatically select the optimal database backend:
 
 ```python
-# DuckDB - Optimized for analytical/columnar workloads
-cache = SqlCache.with_duckdb("analytics.db", table, adapter)
-
-# SQLite - Optimized for transactional/row-wise operations  
-cache = SqlCache.with_sqlite("cache.db", table, adapter)
-
-# PostgreSQL - Production-ready with high concurrency
-cache = SqlCache.with_postgresql(
-    "postgresql://user:pass@localhost/db", table, adapter
+# Automatically uses SQLite (optimized for individual lookups)
+user_cache = SqlCache.for_lookup_table(
+    "users.db",
+    primary_keys=["user_id"],
+    data_fetcher=fetch_user_data,
+    user_id=Integer,
+    name=String(100)
 )
 
-# Manual URL specification
-cache = SqlCache("duckdb:///data.db", table, adapter)
-cache = SqlCache("sqlite:///cache.db", table, adapter)
+# Automatically uses DuckDB (optimized for analytics)
+sales_cache = SqlCache.for_analytics_table(
+    "sales.db",
+    primary_keys=["department", "quarter"],
+    data_fetcher=fetch_sales_data,
+    department=String(50),
+    revenue=Float
+)
 
-# In-memory (for testing)
-cache = SqlCache.with_sqlite(":memory:", table, adapter)
+# Automatically uses DuckDB (optimized for time-series)
+stock_cache = SqlCache.for_timeseries(
+    "stocks.db",
+    data_fetcher=fetch_stock_data,
+    price=Float,
+    volume=Integer
+)
+
+# Automatically uses SQLite (optimized for real-time updates)
+sensor_cache = SqlCache.for_realtime_timeseries(
+    "sensors.db",
+    data_fetcher=fetch_sensor_data,
+    temperature=Float,
+    humidity=Float
+)
 ```
 
-## Database Backend Selection
+### Manual Database Specification
 
-The SQL pull-through cache supports multiple database backends, each optimized for different workload patterns. Choose the backend that best matches your use case:
+For advanced use cases, you can specify the database type explicitly:
+
+```python
+# Force DuckDB for a lookup table (unusual but possible)
+cache = SqlCache.for_lookup_table(
+    "duckdb:///users.db",  # Explicit DuckDB URL
+    primary_keys=["user_id"],
+    data_fetcher=fetch_user_data,
+    user_id=Integer,
+    name=String(100)
+)
+
+# PostgreSQL for production deployment
+cache = SqlCache.for_timeseries(
+    "postgresql://user:pass@localhost/production_db",
+    data_fetcher=fetch_stock_data,
+    price=Float,
+    volume=Integer
+)
+
+# In-memory for testing
+cache = SqlCache.for_lookup_table(
+    "sqlite:///:memory:",
+    primary_keys=["id"],
+    data_fetcher=fetch_test_data,
+    id=Integer,
+    value=String(50)
+)
+```
+
+## Database Backend Details
 
 ### DuckDB - Analytical Workloads
 
-```python
-cache = SqlCache.with_duckdb("analytics.db", table, adapter)
-```
+**Automatically Selected For:**
+- `SqlCache.for_analytics_table()`
+- `SqlCache.for_timeseries()`
 
 **Strengths:**
 - **Columnar storage** optimized for analytical queries
-- **Fast aggregations** across large datasets
+- **Fast aggregations** across large datasets  
 - **Vectorized execution** for time-series operations
 - **Memory-efficient** for analytical workloads
-
-**Limitations:**
-- **No auto-incrementing primary keys** (no SERIAL type support)
-- **Use composite primary keys** or set `autoincrement=False`
-- **Optimized for read-heavy workloads** (analytical focus)
 
 **Best Use Cases:**
 - Time-series data analysis and reporting
@@ -286,141 +340,111 @@ cache = SqlCache.with_duckdb("analytics.db", table, adapter)
 - Data science workflows with pandas/numpy
 - OLAP-style queries and data exploration
 
-**Example - Financial Analytics (DuckDB-Compatible Table):**
+**Example:**
 ```python
-# Define table with composite primary key (DuckDB compatible)
-stock_table = Table(
-    'stock_prices', metadata,
-    Column('symbol', String(10), primary_key=True),  # No autoincrement
-    Column('date', Date, primary_key=True),           # Composite key
-    Column('close', Float),
-    Column('volume', Float)
+def fetch_stock_data(symbol, start_date, end_date):
+    return yfinance_client.get_data(symbol, start_date, end_date)
+
+# Uses DuckDB automatically
+stock_cache = SqlCache.for_timeseries(
+    "market_analytics.db",
+    data_fetcher=fetch_stock_data,
+    ttl_hours=24,
+    symbol=String(10),
+    date=Date,
+    close=Float,
+    volume=Float
 )
 
-# Perfect for analyzing stock market data
-cache = SqlCache.with_duckdb(
-    "market_analytics.db", 
-    stock_table, 
-    YahooFinanceAdapter(),
-    ttl_hours=24
-)
-
-# Efficient queries like: SELECT AVG(close) FROM stocks WHERE date > '2024-01-01'
-quarterly_data = cache.get_data(symbol="AAPL", start_date="2024-01-01", end_date="2024-03-31")
-```
-
-**⚠️ DuckDB Table Design Guidelines:**
-```python
-# ❌ Avoid: Auto-incrementing primary keys
-bad_table = Table('data', metadata,
-    Column('id', Integer, primary_key=True, autoincrement=True),  # Will fail!
-    Column('value', Float)
-)
-
-# ✅ Good: Composite primary keys or explicit autoincrement=False
-good_table = Table('data', metadata,
-    Column('symbol', String(10), primary_key=True),
-    Column('date', Date, primary_key=True),  # Composite key works
-    Column('value', Float)
-)
-
-# ✅ Alternative: Explicit autoincrement=False
-alternative_table = Table('data', metadata,
-    Column('id', Integer, primary_key=True, autoincrement=False),  # Explicit
-    Column('value', Float)
+# Efficient for analytical queries
+quarterly_data = stock_cache.get_data(
+    symbol="AAPL", 
+    start_date="2024-01-01", 
+    end_date="2024-03-31"
 )
 ```
 
 ### SQLite - Transactional Workloads
 
-```python
-cache = SqlCache.with_sqlite("cache.db", table, adapter)
-```
+**Automatically Selected For:**
+- `SqlCache.for_lookup_table()`
+- `SqlCache.for_realtime_timeseries()`
 
 **Strengths:**
-- **ACID compliance** with full transaction support
-- **Row-wise optimizations** for transactional operations  
-- **Simple deployment** with zero configuration
-- **Excellent concurrent read** performance
+- **Row-wise storage** optimized for OLTP operations
+- **Fast individual record access** and updates
+- **ACID compliance** with strong consistency
+- **Auto-incrementing primary keys** support
 
 **Best Use Cases:**
-- Transactional applications requiring data consistency
-- Row-by-row data processing workflows
-- Applications with moderate concurrent access
-- Simple deployment scenarios
+- Individual record lookups and updates
+- Real-time data ingestion with frequent writes
+- Configuration and metadata caching
+- Small to medium-sized datasets
 
-**Example - User Session Cache:**
+**Example:**
 ```python
-# Perfect for user session data that needs ACID guarantees
-cache = SqlCache.with_sqlite(
-    "user_sessions.db",
-    session_table,
-    SessionAPIAdapter(),
-    ttl_hours=6
+def fetch_user_data(user_id):
+    return api_client.get_user(user_id)
+
+# Uses SQLite automatically  
+user_cache = SqlCache.for_lookup_table(
+    "users.db",
+    primary_keys=["user_id"],
+    data_fetcher=fetch_user_data,
+    ttl_hours=12,
+    user_id=Integer,
+    name=String(100),
+    email=String(255),
+    created_at=DateTime
 )
 
-# Reliable for operations like: INSERT OR REPLACE INTO sessions...
-user_session = cache.get_data(user_id=12345, session_date="2024-01-15")
+# Efficient for individual lookups
+user = user_cache.get_data(user_id=123)
 ```
 
-### PostgreSQL - Production Environments
+## Performance Guidelines
+
+### When to Use Each Builder Method
+
+| **Data Pattern** | **Builder Method** | **Database** | **Why** |
+|------------------|-------------------|--------------|---------|
+| User profiles, config data | `for_lookup_table()` | SQLite | Fast individual record access |
+| Real-time metrics, IoT data | `for_realtime_timeseries()` | SQLite | Optimized for frequent writes |
+| Historical analysis, reporting | `for_timeseries()` | DuckDB | Columnar analytics performance |
+| Aggregations, data science | `for_analytics_table()` | DuckDB | Vectorized analytical queries |
+
+### Performance Tips
+
+1. **Use appropriate primary keys** for your access patterns
+2. **Set reasonable TTL values** to balance freshness and performance  
+3. **Consider data volume** when choosing between SQLite and DuckDB
+4. **Use composite primary keys** for multi-dimensional data
+5. **Implement efficient data fetchers** to minimize external API calls
+
+## Legacy API Reference
+
+For backward compatibility, the original adapter-based API is still supported:
 
 ```python
-cache = SqlCache.with_postgresql(
-    "postgresql://user:pass@host:5432/dbname", 
-    table, 
-    adapter
-)
+from cacheness.sql_cache import SqlCacheAdapter, SqlCache
+from sqlalchemy import Table, Column, Integer, String, Float
+
+# Legacy adapter pattern (still supported)
+class MyAdapter(SqlCacheAdapter):
+    def get_table_definition(self):
+        return Table('data', metadata, 
+                    Column('id', Integer, primary_key=True),
+                    Column('value', Float))
+    
+    def fetch_data(self, **kwargs):
+        return fetch_from_external_source(**kwargs)
+
+# Legacy cache creation  
+cache = SqlCache("sqlite:///cache.db", adapter=MyAdapter())
 ```
 
-**Strengths:**
-- **High concurrency** with advanced locking mechanisms
-- **Advanced SQL features** (CTEs, window functions, etc.)
-- **Horizontal scaling** capabilities
-- **Enterprise-grade reliability** and monitoring
-
-**Best Use Cases:**
-- Production systems with high concurrent access
-- Complex queries requiring advanced SQL features
-- Multi-user applications with heavy read/write loads
-- Enterprise environments requiring high availability
-
-**Example - Multi-Tenant API Cache:**
-```python
-# Perfect for production API caching with multiple concurrent users
-cache = SqlCache.with_postgresql(
-    "postgresql://cache_user:password@prod-db:5432/api_cache",
-    api_data_table,
-    ThirdPartyAPIAdapter(),
-    ttl_hours=12
-)
-
-# Handles concurrent access from multiple application instances
-api_response = cache.get_data(endpoint="weather", location="NYC", timestamp="2024-01-15T10:00:00")
-```
-
-### In-Memory SQLite - Testing & Development
-
-```python
-cache = SqlCache.with_sqlite(":memory:", table, adapter)
-```
-
-**Perfect for:**
-- Unit testing and development
-- Temporary data processing pipelines
-- Proof-of-concept implementations
-- CI/CD environments
-
-### Backend Comparison Matrix
-
-| Feature | DuckDB | SQLite | PostgreSQL | In-Memory SQLite |
-|---------|--------|--------|------------|------------------|
-| **Query Performance** | ⭐⭐⭐⭐⭐ (Analytics) | ⭐⭐⭐ (Row-wise) | ⭐⭐⭐⭐ (Mixed) | ⭐⭐⭐⭐⭐ (Memory) |
-| **Concurrency** | ⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐ |
-| **Deployment Complexity** | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐ | ⭐⭐⭐⭐⭐ |
-| **ACID Compliance** | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ |
-| **Analytics Workloads** | ⭐⭐⭐⭐⭐ | ⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐⭐ |
-| **Transactional Workloads** | ⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ |
+**Note:** The new builder pattern is recommended for all new code as it's simpler and more maintainable.
 | **Auto-increment Support** | ❌ (Use composite keys) | ✅ | ✅ | ✅ |
 | **Production Readiness** | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐ |
 
@@ -444,6 +468,10 @@ Do you need production-grade concurrency (100+ concurrent users)?
 
 Each backend includes database-specific optimizations:
 
+## Database Optimizations
+
+The cache automatically applies database-specific optimizations:
+
 #### DuckDB Optimizations
 - Vectorized upsert operations for bulk data
 - Columnar storage for time-series data
@@ -459,28 +487,49 @@ Each backend includes database-specific optimizations:
 - Connection pooling support
 - Advanced index types (GIN, GiST)
 
-### Backend Performance Guide
+### Performance Comparison
 
-| Backend | `list_entries()` | `get_stats()` | `cleanup_expired()` |
-|---------|------------------|---------------|-------------------|
-| **DuckDB** | **1.8ms** | **3.2ms** | **8ms** |
-| **SQLite** | **2.3ms** | **4.1ms** | **12ms** |
-| **PostgreSQL** | **3.1ms** | **5.2ms** | **15ms** |
-| **In-Memory** | **0.5ms** | **0.8ms** | **2ms** |
+| Backend | Individual Lookups | Bulk Analytics | Real-time Updates |
+|---------|-------------------|----------------|-------------------|
+| **SQLite** | **Excellent** | Good | **Excellent** |
+| **DuckDB** | Good | **Excellent** | Good |
+| **PostgreSQL** | **Excellent** | **Excellent** | **Excellent** |
+| **In-Memory** | **Excellent** | **Excellent** | **Excellent** |
 
-*Performance measured with 10k+ entries on modern hardware*
+*Performance depends on data volume and query patterns*
 
 ### TTL Configuration
 
+All builder methods support TTL configuration:
+
 ```python
-# No expiration
-cache = SqlCache(..., ttl_hours=0)
+# Short TTL for real-time data
+cache = SqlCache.for_realtime_timeseries(
+    "sensors.db", 
+    data_fetcher=fetch_sensor_data,
+    ttl_hours=1,  # Refresh every hour
+    temperature=Float
+)
 
-# 1 hour expiration
-cache = SqlCache(..., ttl_hours=1)
+# Long TTL for historical data
+cache = SqlCache.for_analytics_table(
+    "reports.db",
+    primary_keys=["department", "quarter"], 
+    data_fetcher=fetch_quarterly_data,
+    ttl_hours=168,  # Refresh weekly
+    department=String(50),
+    revenue=Float
+)
 
-# Daily refresh
-cache = SqlCache(..., ttl_hours=24)
+# No expiration for static data
+cache = SqlCache.for_lookup_table(
+    "config.db",
+    primary_keys=["setting_name"],
+    data_fetcher=fetch_config_data,
+    ttl_hours=0,  # Never expire
+    setting_name=String(100),
+    setting_value=String(500)
+)
 ```
 
 ## Dependencies
@@ -494,24 +543,61 @@ pip install 'cacheness[sql]'
 # Or install manually
 pip install sqlalchemy pandas
 
-# For DuckDB support (recommended)
+# For DuckDB support (recommended for analytics)
 pip install duckdb-engine
 ```
 
 ## Complete Example
 
-See `examples/stock_cache_example.py` for a complete working example with:
-- Yahoo Finance integration
-- Intelligent missing data detection
-- Cache statistics and management
-- Error handling and logging
+Here's a complete working example using the new builder pattern:
+
+```python
+import pandas as pd
+from cacheness.sql_cache import SqlCache
+from sqlalchemy import String, Float, Date
+import yfinance as yf
+
+def fetch_stock_data(symbol, start_date, end_date):
+    """Fetch stock data from Yahoo Finance."""
+    ticker = yf.Ticker(symbol)
+    data = ticker.history(start=start_date, end=end_date)
+    
+    # Reset index to make date a column
+    data = data.reset_index()
+    data['symbol'] = symbol
+    return data[['symbol', 'Date', 'Close', 'Volume']]
+
+# Create optimized time-series cache
+stock_cache = SqlCache.for_timeseries(
+    "stocks.db",
+    data_fetcher=fetch_stock_data,
+    ttl_hours=24,
+    symbol=String(10),
+    Date=Date,
+    Close=Float,
+    Volume=Float
+)
+
+# Use the cache
+apple_data = stock_cache.get_data(
+    symbol="AAPL",
+    start_date="2024-01-01", 
+    end_date="2024-01-31"
+)
+
+print(f"Retrieved {len(apple_data)} records for AAPL")
+
+# Get cache statistics
+stats = stock_cache.get_cache_stats()
+print(f"Total records in cache: {stats['total_records']}")
+```
 
 ## Performance Tips
 
-1. **Use Indexes**: Add appropriate indexes to your table definition
-2. **Batch Operations**: The cache automatically batches upsert operations
-3. **Choose the Right Database**: DuckDB for analytics, SQLite for simplicity
-4. **Optimize TTL**: Balance freshness vs. API call costs
+1. **Choose the Right Builder Method**: Match your access pattern to the builder method
+2. **Set Appropriate TTL**: Balance data freshness vs. API call costs  
+3. **Use Composite Primary Keys**: For multi-dimensional data access
+4. **Implement Efficient Fetchers**: Minimize external API calls
 5. **Monitor Cache Stats**: Use built-in statistics to optimize performance
 
 ## Error Handling
@@ -522,7 +608,7 @@ The cache includes comprehensive error handling:
 from cacheness.sql_cache import SQLCacheError, MissingDependencyError
 
 try:
-    data = cache.get_data(symbol="AAPL", start_date="2024-01-01")
+    data = stock_cache.get_data(symbol="AAPL", start_date="2024-01-01", end_date="2024-01-31")
 except SQLCacheError as e:
     print(f"Cache error: {e}")
 except MissingDependencyError as e:

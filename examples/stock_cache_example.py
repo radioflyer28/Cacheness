@@ -1,13 +1,13 @@
 """
-Stock Data Cache Example
+Stock Data Cache Example - New Builder Pattern
 
 This example demonstrates how to create a pull-through cache for stock market data
-using the SQLAlchemy-based SQL cache. The cache automatically fetches missing data
+using the new simplified builder pattern. The cache automatically fetches missing data
 from Yahoo Finance and stores it locally for fast subsequent access.
 
 Key Features Demonstrated:
-- Table schema definition with SQLAlchemy
-- Custom data adapter implementation
+- Simple function-based data fetching (no inheritance needed)
+- Automatic database selection (DuckDB for time-series)
 - Intelligent missing data detection for time series
 - Automatic upsert operations
 - Cache statistics and management
@@ -21,13 +21,11 @@ Usage:
 
 import pandas as pd
 from datetime import datetime
-from sqlalchemy import (
-    MetaData, Table, Column, String, Date, Float, BigInteger, Index
-)
+from sqlalchemy import String, Date, Float, BigInteger
 
 # Import the SQL cache components
 try:
-    from cacheness.sql_cache import SqlCache, SqlCacheAdapter
+    from cacheness.sql_cache import SqlCache
 except ImportError:
     print("Error: cacheness SQL cache not available")
     print("Make sure SQLAlchemy is installed: pip install 'cacheness[sql]'")
@@ -41,280 +39,154 @@ except ImportError:
     exit(1)
 
 
-# Define the stock table schema
-metadata = MetaData()
-
-stock_table = Table(
-    'stock_prices',
-    metadata,
-    Column('symbol', String(10), primary_key=True, nullable=False),
-    Column('date', Date, primary_key=True, nullable=False),
-    Column('open', Float),
-    Column('high', Float),
-    Column('low', Float),
-    Column('close', Float),
-    Column('volume', BigInteger),
-    Column('adjusted_close', Float),
-    
-    # Add indexes for better query performance
-    Index('idx_symbol_date', 'symbol', 'date'),
-    Index('idx_symbol', 'symbol'),
-    Index('idx_date', 'date')
-)
-
-
-class StockSqlCacheAdapter(SqlCacheAdapter):
+def fetch_stock_data(symbol, start_date, end_date):
     """
-    Data adapter for fetching stock market data from Yahoo Finance.
+    Fetch stock data from Yahoo Finance API.
+    
+    This is a simple function that returns a DataFrame - no inheritance needed!
+    
+    Args:
+        symbol: Stock symbol (e.g., 'AAPL')
+        start_date: Start date for data range
+        end_date: End date for data range
+        
+    Returns:
+        pd.DataFrame: Stock data with columns [symbol, date, open, high, low, close, volume, adjusted_close]
     """
+    print(f"🔄 Fetching {symbol} data from {start_date} to {end_date}")
     
-    def get_table_definition(self) -> Table:
-        """Return the stock table definition"""
-        return stock_table
-    
-    def parse_query_params(self, **kwargs) -> dict:
-        """
-        Parse and validate stock query parameters.
+    try:
+        # Create ticker object
+        ticker = yf.Ticker(symbol)
         
-        Expected parameters:
-        - symbol: Stock symbol (e.g., 'AAPL')
-        - start_date: Start date for data range
-        - end_date: End date for data range
-        """
-        if 'symbol' not in kwargs:
-            raise ValueError("Symbol is required")
+        # Fetch historical data
+        data = ticker.history(start=start_date, end=end_date)
         
-        if 'start_date' not in kwargs or 'end_date' not in kwargs:
-            raise ValueError("Both start_date and end_date are required")
-        
-        return {
-            'symbol': kwargs['symbol'].upper(),
-            'date': {
-                'start': pd.to_datetime(kwargs['start_date']).date(),
-                'end': pd.to_datetime(kwargs['end_date']).date()
-            }
-        }
-    
-    def fetch_data(self, **kwargs) -> pd.DataFrame:
-        """
-        Fetch stock data from Yahoo Finance API.
-        
-        Args:
-            symbol: Stock symbol
-            start_date: Start date (YYYY-MM-DD format)
-            end_date: End date (YYYY-MM-DD format)
-            
-        Returns:
-            pd.DataFrame: Stock data with columns matching the table schema
-        """
-        symbol = kwargs.get('symbol')
-        start_date = kwargs.get('start_date')
-        end_date = kwargs.get('end_date')
-        
-        print(f"Fetching {symbol} data from {start_date} to {end_date}")
-        
-        try:
-            ticker = yf.Ticker(symbol)
-            data = ticker.history(start=start_date, end=end_date)
-            
-            if not data.empty:
-                # Reset index to get Date as a column
-                data = data.reset_index()
-                data['symbol'] = symbol
-                
-                # Clean column names to match our table schema
-                column_mapping = {
-                    'Date': 'date',
-                    'Open': 'open',
-                    'High': 'high',
-                    'Low': 'low',
-                    'Close': 'close',
-                    'Volume': 'volume',
-                    'Adj Close': 'adjusted_close'
-                }
-                data = data.rename(columns=column_mapping)
-                
-                # Convert date to date type (remove time component)
-                if 'date' in data.columns:
-                    data['date'] = data['date'].dt.date
-                
-                # Select only columns that exist in our table
-                table_cols = [col.name for col in stock_table.columns]
-                available_cols = [col for col in table_cols if col in data.columns]
-                data = data[available_cols]
-                
-                print(f"Retrieved {len(data)} records for {symbol}")
-            else:
-                print(f"No data found for {symbol}")
-            
-            return data
-            
-        except Exception as e:
-            print(f"Error fetching {symbol}: {e}")
+        if data.empty:
+            print(f"⚠️  No data available for {symbol} in the specified date range")
             return pd.DataFrame()
+        
+        # Reset index to make Date a column
+        data = data.reset_index()
+        
+        # Add symbol column
+        data['symbol'] = symbol.upper()
+        
+        # Rename columns to match our cache schema
+        data = data.rename(columns={
+            'Date': 'date',
+            'Open': 'open',
+            'High': 'high', 
+            'Low': 'low',
+            'Close': 'close',
+            'Volume': 'volume',
+            'Adj Close': 'adjusted_close'
+        })
+        
+        # Select only the columns we need
+        columns = ['symbol', 'date', 'open', 'high', 'low', 'close', 'volume', 'adjusted_close']
+        data = data[columns]
+        
+        print(f"✅ Fetched {len(data)} records for {symbol}")
+        return data
+        
+    except Exception as e:
+        print(f"❌ Error fetching data for {symbol}: {e}")
+        return pd.DataFrame()
 
 
-class StockCache(SqlCache):
-    """
-    Stock-specific cache implementation with intelligent missing data detection.
-    """
-    
-    def __init__(self, db_path: str = "stock_cache.db", ttl_hours: int = 24):
-        """
-        Initialize stock cache.
-        
-        Args:
-            db_path: Path to the database file
-            ttl_hours: Cache TTL in hours (24 hours = refresh daily)
-        """
-        adapter = StockSqlCacheAdapter()
-        super().__init__(
-            db_url=f"duckdb:///{db_path}",
-            table=adapter.get_table_definition(),
-            data_adapter=adapter,
-            ttl_hours=ttl_hours
-        )
-    
-    def _find_missing_data(
-        self, 
-        query_params: dict, 
-        cached_data: pd.DataFrame
-    ) -> list:
-        """
-        Find missing date ranges for stock data.
-        
-        This method analyzes the requested date range and existing cached data
-        to determine what data needs to be fetched from the external source.
-        """
-        symbol = query_params['symbol']
-        date_range = query_params['date']
-        start_date = pd.to_datetime(date_range['start'])
-        end_date = pd.to_datetime(date_range['end'])
-        
-        if cached_data.empty:
-            # No cached data, fetch everything
-            return [{
-                'symbol': symbol,
-                'start_date': start_date.strftime('%Y-%m-%d'),
-                'end_date': end_date.strftime('%Y-%m-%d')
-            }]
-        
-        # Find missing business days (stock market doesn't trade on weekends)
-        expected_dates = set(pd.bdate_range(start_date, end_date))
-        cached_dates = set(cached_data['date'])
-        missing_dates = expected_dates - cached_dates
-        
-        if not missing_dates:
-            return []
-        
-        # Group consecutive missing dates into ranges to minimize API calls
-        sorted_missing = sorted(missing_dates)
-        ranges = []
-        
-        if sorted_missing:
-            range_start = sorted_missing[0]
-            range_end = sorted_missing[0]
-            
-            for date in sorted_missing[1:]:
-                # Allow gaps of up to 3 days (for weekends)
-                if (date - range_end).days <= 3:
-                    range_end = date
-                else:
-                    # End current range and start a new one
-                    ranges.append({
-                        'symbol': symbol,
-                        'start_date': range_start.strftime('%Y-%m-%d'),
-                        'end_date': range_end.strftime('%Y-%m-%d')
-                    })
-                    range_start = date
-                    range_end = date
-            
-            # Add the final range
-            ranges.append({
-                'symbol': symbol,
-                'start_date': range_start.strftime('%Y-%m-%d'),
-                'end_date': range_end.strftime('%Y-%m-%d')
-            })
-        
-        return ranges
-
-
-def demo_stock_cache():
+def demonstrate_stock_cache():
     """Demonstrate the stock cache functionality"""
-    print("Stock Data Cache Demo")
+    
+    print("🚀 Stock Cache Example - New Builder Pattern")
     print("=" * 50)
     
-    # Create cache instance
-    cache = StockCache("stock_demo.db", ttl_hours=24)
-    
-    # Define some test queries
-    test_queries = [
-        {
-            'symbol': 'AAPL',
-            'start_date': '2024-01-01',
-            'end_date': '2024-01-31',
-            'description': 'Apple stock for January 2024'
-        },
-        {
-            'symbol': 'GOOGL',
-            'start_date': '2024-01-15',
-            'end_date': '2024-02-15',
-            'description': 'Google stock for mid-Jan to mid-Feb 2024'
-        },
-        {
-            'symbol': 'AAPL',
-            'start_date': '2024-01-15',
-            'end_date': '2024-01-25',
-            'description': 'Apple stock subset (should hit cache)'
-        }
-    ]
-    
-    for i, query in enumerate(test_queries, 1):
-        print(f"\nQuery {i}: {query['description']}")
-        print(f"Symbol: {query['symbol']}, Range: {query['start_date']} to {query['end_date']}")
+    # Create cache using the new builder pattern - it's that simple!
+    print("📦 Creating stock cache...")
+    stock_cache = SqlCache.for_timeseries(
+        "stock_cache.db",  # DuckDB automatically selected for time-series
+        data_fetcher=fetch_stock_data,
+        ttl_hours=24,  # Refresh daily
         
+        # Define schema inline - no table definition needed
+        symbol=String(10),
+        date=Date,
+        open=Float,
+        high=Float,
+        low=Float,
+        close=Float,
+        volume=BigInteger,
+        adjusted_close=Float
+    )
+    
+    print("✅ Cache created! Using DuckDB for optimal time-series performance")
+    print()
+    
+    # Test symbols and date ranges
+    symbols = ["AAPL", "GOOGL", "TSLA"]
+    
+    for symbol in symbols:
+        print(f"📈 Getting {symbol} data...")
+        
+        # First call - will fetch from API
         start_time = datetime.now()
+        data = stock_cache.get_data(
+            symbol=symbol,
+            start_date="2024-01-01", 
+            end_date="2024-01-31"
+        )
+        first_duration = (datetime.now() - start_time).total_seconds()
         
-        # Get data (will fetch from API or cache as needed)
-        data = cache.get_data(**{k: v for k, v in query.items() if k != 'description'})
+        print(f"   📊 Retrieved {len(data)} records in {first_duration:.2f}s (API fetch)")
         
-        end_time = datetime.now()
-        elapsed = (end_time - start_time).total_seconds()
+        # Second call - should be instant from cache
+        start_time = datetime.now()
+        cached_data = stock_cache.get_data(
+            symbol=symbol,
+            start_date="2024-01-01",
+            end_date="2024-01-31"
+        )
+        second_duration = (datetime.now() - start_time).total_seconds()
         
-        print(f"Retrieved {len(data)} records in {elapsed:.2f}s")
-        
-        if not data.empty:
-            print(f"Date range: {data['date'].min()} to {data['date'].max()}")
-            print(f"Price range: ${data['close'].min():.2f} - ${data['close'].max():.2f}")
+        print(f"   ⚡ Retrieved {len(cached_data)} records in {second_duration:.4f}s (cached)")
+        print(f"   🔥 Cache speedup: {first_duration/second_duration:.1f}x faster!")
+        print()
+    
+    # Demonstrate partial fetching
+    print("🔍 Testing intelligent gap detection...")
+    print("   Requesting extended date range (will fetch only missing data)")
+    
+    start_time = datetime.now()
+    extended_data = stock_cache.get_data(
+        symbol="AAPL",
+        start_date="2024-01-01",  # Cached
+        end_date="2024-02-15"     # Will fetch new data
+    )
+    gap_duration = (datetime.now() - start_time).total_seconds()
+    
+    print(f"   📈 Extended data: {len(extended_data)} records in {gap_duration:.2f}s")
+    print("   ✨ Only fetched missing data - cache intelligence at work!")
+    print()
     
     # Show cache statistics
-    print("\nCache Statistics:")
-    print("=" * 30)
-    stats = cache.get_cache_stats()
-    for key, value in stats.items():
-        print(f"{key}: {value}")
+    print("📊 Cache Statistics:")
+    print("-" * 20)
+    stats = stock_cache.get_cache_stats()
+    print(f"   Total entries: {stats['total_records']}")
+    print(f"   Database size: {stats.get('database_size', 'N/A')}")
+    print()
     
-    # Demonstrate cache management
-    print("\nCache Management Demo:")
-    print("=" * 30)
+    # Show some actual data
+    print("📋 Sample Data (AAPL recent):")
+    print("-" * 30)
+    sample = extended_data.tail(3)[['date', 'close', 'volume']]
+    for _, row in sample.iterrows():
+        print(f"   {row['date']}: ${row['close']:.2f} (vol: {row['volume']:,})")
+    print()
     
-    # Show expired entries cleanup
-    expired_count = cache.cleanup_expired()
-    print(f"Cleaned up {expired_count} expired entries")
-    
-    # Demonstrate invalidation
-    print("Invalidating Apple data...")
-    invalidated = cache.invalidate_cache(symbol='AAPL')
-    print(f"Invalidated {invalidated} entries")
-    
-    # Updated stats
-    stats = cache.get_cache_stats()
-    print(f"Total records after cleanup: {stats['total_records']}")
-    
-    # Clean up
-    cache.close()
-    print("\nDemo completed!")
+    print("🎉 Demo complete! The cache will persist between runs.")
+    print("💡 Try running this script again to see instant cache performance.")
 
 
 if __name__ == "__main__":
-    demo_stock_cache()
+    demonstrate_stock_cache()

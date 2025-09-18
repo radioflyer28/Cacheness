@@ -151,11 +151,42 @@ class UnifiedCache:
         self.actual_backend = actual_backend
 
     def _supports_custom_metadata(self) -> bool:
-        """Check if the current configuration supports custom metadata."""
+        """Check if custom metadata is supported (requires SQLite backend and SQLAlchemy)."""
         return (
             self.actual_backend == "sqlite"
             and hasattr(self, "_custom_metadata_enabled")
             and self._custom_metadata_enabled
+        )
+
+    def _normalize_custom_metadata(self, custom_metadata):
+        """
+        Normalize custom_metadata input to a list of metadata objects.
+        
+        Supports:
+        - Single metadata object: custom_metadata=experiment_metadata
+        - List of objects: custom_metadata=[experiment_metadata, performance_metadata]
+        - Tuple of objects: custom_metadata=(experiment_metadata, performance_metadata)
+        - Dictionary (legacy): custom_metadata={"experiments": experiment_metadata}
+        """
+        if custom_metadata is None:
+            return []
+        
+        # Check if it's a single metadata object (has _schema_name attribute)
+        if hasattr(custom_metadata, '_schema_name') or hasattr(type(custom_metadata), '_schema_name'):
+            return [custom_metadata]
+        
+        # Check if it's a list or tuple of metadata objects
+        if isinstance(custom_metadata, (list, tuple)):
+            return list(custom_metadata)
+        
+        # Check if it's a dictionary (legacy format)
+        if isinstance(custom_metadata, dict):
+            return list(custom_metadata.values())
+        
+        # Invalid format
+        raise ValueError(
+            f"Invalid custom_metadata format. Expected metadata object, list/tuple of objects, "
+            f"or dictionary, got {type(custom_metadata)}"
         )
 
     def _init_custom_metadata_support(self):
@@ -192,15 +223,20 @@ class UnifiedCache:
             logger.warning(f"Failed to initialize entry signer: {e}")
             self.signer = None
 
-    def _store_custom_metadata(self, cache_key: str, custom_metadata: Dict[str, Any]):
+    def _store_custom_metadata(self, cache_key: str, custom_metadata):
         """Store custom metadata using link table architecture."""
         if not self._supports_custom_metadata():
             logger.warning("Custom metadata not supported - requires SQLite backend")
             return
 
         try:
-            from .custom_metadata import get_custom_metadata_model, CacheMetadataLink
+            from .custom_metadata import get_custom_metadata_model, CacheMetadataLink, get_schema_name_for_model
             from .metadata import Base
+
+            # Normalize custom_metadata to iterable of metadata objects
+            metadata_objects = self._normalize_custom_metadata(custom_metadata)
+            if not metadata_objects:
+                return
 
             # Get SQLAlchemy session from the metadata backend
             if hasattr(self.metadata_backend, "SessionLocal"):
@@ -208,7 +244,15 @@ class UnifiedCache:
                     # Create tables if they don't exist
                     Base.metadata.create_all(self.metadata_backend.engine)
 
-                    for schema_name, metadata_instance in custom_metadata.items():
+                    for metadata_instance in metadata_objects:
+                        # Get schema name from the metadata object's class
+                        schema_name = getattr(type(metadata_instance), '_schema_name', None)
+                        if not schema_name:
+                            logger.warning(
+                                f"Metadata object {type(metadata_instance).__name__} is not properly registered"
+                            )
+                            continue
+
                         model_class = get_custom_metadata_model(schema_name)
                         if not model_class:
                             logger.warning(
@@ -454,7 +498,7 @@ class UnifiedCache:
         data: Any,
         prefix: str = "",
         description: str = "",
-        custom_metadata: Optional[Dict[str, Any]] = None,
+        custom_metadata=None,
         **kwargs,
     ):
         """
@@ -464,7 +508,11 @@ class UnifiedCache:
             data: Data to cache (DataFrame, array, or general object)
             prefix: Descriptive prefix prepended to the cache filename
             description: Human-readable description
-            custom_metadata: Dict mapping schema names to metadata instances
+            custom_metadata: Custom metadata for the cache entry. Supports:
+                           - Single metadata object: experiment_metadata
+                           - List of objects: [experiment_metadata, performance_metadata]
+                           - Tuple of objects: (experiment_metadata, performance_metadata)
+                           - Dictionary (legacy): {"experiments": experiment_metadata}
             **kwargs: Parameters identifying this data
         """
         # Get appropriate handler
@@ -779,6 +827,38 @@ class UnifiedCache:
             entry["expired"] = self._is_expired(entry["cache_key"])
 
         return entries
+
+    # Factory methods for common use cases
+    @classmethod
+    def for_api(
+        cls,
+        cache_dir: Optional[str] = None,
+        ttl_hours: int = 6,
+        ignore_errors: bool = True,
+        **kwargs
+    ) -> "UnifiedCache":
+        """
+        Create a cache optimized for API requests.
+        
+        Defaults:
+        - TTL: 6 hours (good for most API data)
+        - ignore_errors: True (don't fail if cache has issues)
+        - Compression: LZ4 (fast for JSON/text data)
+        
+        Args:
+            cache_dir: Cache directory (default: ./cache)
+            ttl_hours: Time-to-live in hours
+            ignore_errors: Continue on cache errors
+            **kwargs: Additional config options
+        """
+        config = create_cache_config(
+            cache_dir=cache_dir or "./cache",
+            default_ttl_hours=ttl_hours,
+            pickle_compression_codec="zstd",  # Fast for JSON/text
+            pickle_compression_level=3,
+            **kwargs
+        )
+        return cls(config)
 
 
 # Global cache instance for convenience

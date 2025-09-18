@@ -41,6 +41,8 @@ class SqlCache:
 
 #### Factory Methods
 
+##### Classic Factory Methods
+
 ##### `SqlCache.with_sqlite(db_path, table, data_adapter, **kwargs)`
 Create cache with SQLite backend.
 
@@ -77,6 +79,66 @@ cache = SqlCache.with_postgresql(
     table=table_definition,
     data_adapter=adapter,
     gap_detector=lambda q, c, i: []  # Simple custom detector
+)
+```
+
+##### New Builder Methods (Recommended)
+
+##### `SqlCache.for_lookup_table(db_path, data_fetcher, **columns)`
+Create cache for individual record lookups (uses SQLite).
+
+```python
+cache = SqlCache.for_lookup_table(
+    "users.db",
+    primary_keys=["user_id"],
+    data_fetcher=fetch_user_data,
+    ttl_hours=12,
+    user_id=Integer,
+    name=String(100),
+    email=String(255)
+)
+```
+
+##### `SqlCache.for_analytics_table(db_path, data_fetcher, **columns)`
+Create cache for bulk analytical queries (uses DuckDB).
+
+```python
+cache = SqlCache.for_analytics_table(
+    "analytics.db", 
+    primary_keys=["department", "month"],
+    data_fetcher=fetch_sales_data,
+    ttl_hours=24,
+    department=String(50),
+    revenue=Float,
+    headcount=Integer
+)
+```
+
+##### `SqlCache.for_timeseries(db_path, data_fetcher, **columns)`
+Create cache for historical timeseries analysis (uses DuckDB).
+
+```python
+cache = SqlCache.for_timeseries(
+    "historical.db",
+    data_fetcher=fetch_historical_prices,
+    ttl_hours=48,
+    price=Float,
+    volume=Integer,
+    market_cap=Float
+)
+```
+
+##### `SqlCache.for_realtime_timeseries(db_path, data_fetcher, **columns)`
+Create cache for real-time timeseries data (uses SQLite).
+
+```python
+cache = SqlCache.for_realtime_timeseries(
+    "realtime.db",
+    data_fetcher=fetch_live_prices,
+    ttl_hours=1,
+    price=Float,
+    bid=Float,
+    ask=Float
 )
 ```
 
@@ -335,6 +397,25 @@ Get cache statistics.
 **Returns:**
 - Dictionary with cache statistics including total entries, size, hit rate, etc.
 
+#### Factory Methods
+
+##### `cacheness.for_api(cache_dir=None, ttl_hours=6, **kwargs)`
+Create a cache instance optimized for API requests.
+
+**Parameters:**
+- `cache_dir` (Optional[str]): Cache directory (default: "./cache")
+- `ttl_hours` (int): Default TTL in hours (default: 6)
+- `**kwargs`: Additional configuration options
+
+**Returns:**
+- `cacheness`: Configured cache instance with LZ4 compression for fast JSON/text caching
+
+**Example:**
+```python
+api_cache = cacheness.for_api(cache_dir="./api_cache", ttl_hours=4)
+api_cache.put({"users": [...]}, endpoint="users", version="v1")
+```
+
 ##### `cleanup_expired() -> int`
 Remove all expired entries from the cache.
 
@@ -384,6 +465,24 @@ def get_weather(city: str, units: str = "metric"):
 weather = get_weather("London")  # Cache miss - calls API
 weather = get_weather("London")  # Cache hit - returns cached result
 ```
+
+### Factory Decorators
+
+#### `@cached.for_api()`
+
+Decorator optimized for API requests with error handling.
+
+```python
+@cached.for_api(ttl_hours=6, ignore_errors=True)
+def fetch_user_data(user_id):
+    response = requests.get(f"/api/users/{user_id}")
+    return response.json()
+```
+
+**Parameters:**
+- `ttl_hours` (int): Time-to-live in hours (default: 6)
+- `ignore_errors` (bool): Continue on cache errors (default: True)
+- Uses LZ4 compression optimized for JSON/text data
 
 ### `@cache_if`
 

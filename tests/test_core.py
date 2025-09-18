@@ -523,6 +523,39 @@ class TestCacheness:
         assert current_utc.tzinfo == timezone.utc  # Verify we're using UTC
 
 
+class TestFactoryMethods:
+    """Test factory methods for creating specialized cache instances."""
+
+    def test_for_api_factory(self):
+        """Test cacheness.for_api() factory method."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache = cacheness.for_api(cache_dir=temp_dir, ttl_hours=8)
+            
+            # Should be a UnifiedCache instance
+            assert isinstance(cache, cacheness)
+            
+            # Should have the specified configuration
+            assert cache.config.storage.cache_dir == temp_dir
+            assert cache.config.metadata.default_ttl_hours == 8
+            assert cache.config.compression.pickle_compression_codec == "lz4"
+            
+            # Test basic functionality
+            test_data = {"api": "response", "data": [1, 2, 3]}
+            cache.put(test_data, endpoint="test")
+            
+            retrieved = cache.get(endpoint="test")
+            assert retrieved == test_data
+
+    def test_for_api_default_values(self):
+        """Test default values for for_api factory."""
+        cache = cacheness.for_api()
+        
+        # Check default values
+        assert cache.config.storage.cache_dir == "./cache"
+        assert cache.config.metadata.default_ttl_hours == 6
+        assert cache.config.compression.pickle_compression_codec == "lz4"
+
+
 class TestTimezoneHandling:
     """Test timezone handling in core cache functionality"""
 

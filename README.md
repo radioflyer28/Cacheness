@@ -69,34 +69,24 @@ result2 = expensive_computation(5)  # Retrieved from cache
 For intelligent API caching with automatic gap detection and database backend selection:
 
 ```python
-```python
-from cacheness import SqlCache, SqlCacheAdapter
-from sqlalchemy import Table, Column, String, Date, Float, MetaData
+from cacheness.sql_cache import SqlCache
+from sqlalchemy import Float, Integer
 
-# Define table schema
-metadata = MetaData()
-stock_table = Table(
-    'stock_prices', metadata,
-    Column('symbol', String(10), primary_key=True),
-    Column('date', Date, primary_key=True),
-    Column('close', Float)
+# Simple function-based approach (no inheritance required!)
+def fetch_stock_data(symbol, start_date, end_date):
+    # Your API logic here - return DataFrame
+    return api_client.get_historical_data(symbol, start_date, end_date)
+
+# Create cache with builder pattern - chooses optimal database backend
+cache = SqlCache.for_timeseries(
+    "stocks.db",  # Uses DuckDB for analytical workloads
+    data_fetcher=fetch_stock_data,
+    price=Float,
+    volume=Integer
 )
 
-# Create data adapter
-class StockAdapter(SqlCacheAdapter):
-    def get_table_definition(self):
-        return stock_table
-    
-    def fetch_data(self, **kwargs):
-        # Your API logic here
-        return fetch_stock_data(kwargs['symbol'], kwargs['start_date'])
-    
-    def parse_query_params(self, **kwargs):
-        return {'symbol': kwargs['symbol'], 'date': {'start': kwargs['start_date']}}
-
-# Choose backend based on workload:
-# DuckDB for analytical/columnar workloads (time-series analysis, aggregations)
-cache = SqlCache.with_duckdb("stocks.db", stock_table, StockAdapter())
+# Automatic gap detection and caching
+data = cache.get_data(symbol="AAPL", start_date="2024-01-01", end_date="2024-01-31")
 ```
 
 # SQLite for transactional/row-wise operations (ACID compliance, moderate concurrency)
@@ -109,50 +99,75 @@ cache = SqlCache.with_postgresql("postgresql://...", stock_table, StockAdapter()
 data = cache.get_data(symbol="AAPL", start_date="2024-01-01")
 ```
 
-## Database Backend Selection
+## Intelligent Storage & Access Patterns
 
-The SQL pull-through cache supports multiple database backends optimized for different workload characteristics:
+Cacheness automatically optimizes storage and backend selection based on your data and access patterns.
 
-### DuckDB Backend - Analytical Workloads
+### UnifiedCache - Intelligent Function Caching
 ```python
-# Optimized for columnar efficiency: time-series analysis, aggregations, data science
-cache = SqlCache.with_duckdb("analytics.db", table, adapter)
-```
-**Best for:**
-- Time-series data analysis and aggregations
-- Large dataset processing with analytical queries
-- Data science workflows requiring columnar operations
-- OLAP-style workloads
+from cacheness import cached
 
-### SQLite Backend - Transactional Workloads  
+# Automatically chooses optimal storage format:
+# • DataFrames → Parquet format
+# • NumPy arrays → Blosc compression  
+# • Custom objects → Pickle serialization
+# • API responses → LZ4 compression
+
+@cached()  # Works with any Python object
+def process_data(df):
+    return df.groupby('category').sum()
+
+@cached.for_api()  # Optimized for API responses
+def fetch_user_data(user_id):
+    return requests.get(f"/api/users/{user_id}").json()
+```
+
+### SqlCache - Access-Pattern-Optimized Caching
 ```python
-# Optimized for row-wise transactional efficiency: ACID compliance, moderate concurrency
-cache = SqlCache.with_sqlite("cache.db", table, adapter)
+from cacheness.sql_cache import SqlCache
+from sqlalchemy import Float, Integer
+
+# Individual record lookups → SQLite (row-wise optimization)
+user_cache = SqlCache.for_lookup_table(
+    "users.db", 
+    data_fetcher=fetch_user_profile,
+    user_id=Integer,
+    name=String(100)
+)
+
+# Bulk analytics → DuckDB (columnar optimization)  
+analytics_cache = SqlCache.for_analytics_table(
+    "analytics.db",
+    data_fetcher=fetch_sales_data,
+    department=String(50),
+    revenue=Float
+)
+
+# Real-time data → SQLite (fast updates)
+realtime_cache = SqlCache.for_realtime_timeseries(
+    "prices.db",
+    data_fetcher=fetch_live_prices,
+    price=Float,
+    volume=Integer
+)
+
+# Historical analysis → DuckDB (analytical queries)
+historical_cache = SqlCache.for_timeseries(
+    "history.db", 
+    data_fetcher=fetch_historical_data,
+    price=Float,
+    volume=Integer
+)
 ```
-**Best for:**
-- Row-wise operations and transactional workloads
-- ACID compliance requirements
-- Moderate concurrent access patterns
-- Simple deployment and maintenance
 
-### PostgreSQL Backend - Production Environments
-```python
-# Full-featured production database: high concurrency, advanced SQL features
-cache = SqlCache.with_postgresql("postgresql://user:pass@host/db", table, adapter)
-```
-**Best for:**
-- Production environments with high concurrency
-- Advanced SQL features and complex queries
-- Horizontal scaling requirements
-- Enterprise-grade reliability
+### Backend Selection Guide
 
-### Backend Comparison
-
-| Backend | Best Use Case | Concurrency | Deployment | Query Performance |
-|---------|---------------|-------------|------------|------------------|
-| **DuckDB** | Analytics & Data Science | Low-Medium | Simple | Excellent (Analytical) |
-| **SQLite** | Transactional Apps | Medium | Very Simple | Good (Row-wise) |
-| **PostgreSQL** | Production Systems | High | Complex | Excellent (All types) |
+| **Access Pattern** | **Method** | **Database** | **Optimized For** |
+|-------------------|------------|--------------|-------------------|
+| Individual lookups | `for_lookup_table()` | SQLite | Row-wise access, transactions |
+| Bulk analytics | `for_analytics_table()` | DuckDB | Columnar queries, aggregations |
+| Real-time data | `for_realtime_timeseries()` | SQLite | Fast updates, recent data |
+| Historical analysis | `for_timeseries()` | DuckDB | Time-series analytics |
 
 ## Core Concepts
 

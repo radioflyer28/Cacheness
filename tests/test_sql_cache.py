@@ -410,3 +410,126 @@ def test_backend_selection_integration():
     # Test PostgreSQL method with fallback URL
     cache_pg = SqlCache.with_postgresql("sqlite:///:memory:", simple_table, adapter)
     cache_pg.close()
+
+
+@pytest.mark.skipif(not HAS_SQL_CACHE, reason="SQLAlchemy not available")
+class TestSQLCacheBuilders:
+    """Test the new builder pattern for SQL caches."""
+    
+    def setup_method(self):
+        """Set up test data fetcher."""
+        self.call_count = 0
+        
+        def mock_fetcher(**kwargs):
+            self.call_count += 1
+            return pd.DataFrame([
+                {'id': 1, 'name': 'test', 'value': 42.0},
+                {'id': 2, 'name': 'demo', 'value': 24.0}
+            ])
+        
+        self.mock_fetcher = mock_fetcher
+    
+    def test_for_lookup_table_builder(self):
+        """Test SqlCache.for_lookup_table() builder."""
+        from sqlalchemy import Integer, String, Float
+        
+        cache = SqlCache.for_lookup_table(
+            ":memory:",
+            table_name="lookup_test",
+            primary_keys=["id"],
+            data_fetcher=self.mock_fetcher,
+            ttl_hours=1,
+            id=Integer,
+            name=String(50),
+            value=Float
+        )
+        
+        try:
+            # Test that it works
+            data = cache.get_data(filter_key="test")
+            assert len(data) == 2
+            assert self.call_count == 1
+            
+            # Test caching
+            data2 = cache.get_data(filter_key="test")
+            assert len(data2) == 2
+            assert self.call_count == 1  # Should be cached
+            
+        finally:
+            cache.close()
+    
+    def test_for_analytics_table_builder(self):
+        """Test SqlCache.for_analytics_table() builder."""
+        from sqlalchemy import Integer, String, Float
+        
+        cache = SqlCache.for_analytics_table(
+            ":memory:",
+            table_name="analytics_test", 
+            primary_keys=["id"],
+            data_fetcher=self.mock_fetcher,
+            ttl_hours=24,
+            id=Integer,
+            name=String(50),
+            value=Float
+        )
+        
+        try:
+            # Test that it works
+            data = cache.get_data(category="analytics")
+            assert len(data) == 2
+            assert self.call_count == 1
+            
+        finally:
+            cache.close()
+    
+    def test_for_timeseries_builder(self):
+        """Test SqlCache.for_timeseries() builder."""
+        from sqlalchemy import Float, Integer
+        
+        def timeseries_fetcher(**kwargs):
+            symbol = kwargs.get('symbol', 'TEST')
+            return pd.DataFrame([
+                {'symbol': symbol, 'date': date(2024, 1, 1), 'price': 100.0, 'volume': 1000},
+                {'symbol': symbol, 'date': date(2024, 1, 2), 'price': 101.0, 'volume': 1100}
+            ])
+        
+        cache = SqlCache.for_timeseries(
+            ":memory:",
+            data_fetcher=timeseries_fetcher,
+            price=Float,
+            volume=Integer
+        )
+        
+        try:
+            data = cache.get_data(symbol="AAPL", start_date="2024-01-01", end_date="2024-01-02")
+            assert len(data) == 2
+            assert data.iloc[0]['symbol'] == 'AAPL'
+            
+        finally:
+            cache.close()
+    
+    def test_for_realtime_timeseries_builder(self):
+        """Test SqlCache.for_realtime_timeseries() builder."""
+        from sqlalchemy import Float, Integer
+        
+        def realtime_fetcher(**kwargs):
+            symbol = kwargs.get('symbol', 'TEST')
+            return pd.DataFrame([
+                {'symbol': symbol, 'date': date.today(), 'price': 100.0, 'volume': 1000}
+            ])
+        
+        cache = SqlCache.for_realtime_timeseries(
+            ":memory:",
+            data_fetcher=realtime_fetcher,
+            ttl_hours=1,
+            price=Float,
+            volume=Integer
+        )
+        
+        try:
+            data = cache.get_data(symbol="BTCUSD", start_date=str(date.today()), end_date=str(date.today()))
+            assert len(data) == 1
+            assert data.iloc[0]['symbol'] == 'BTCUSD'
+            
+        finally:
+            cache.close()

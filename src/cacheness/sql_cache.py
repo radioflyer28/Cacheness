@@ -1452,6 +1452,365 @@ class SqlCache:
         if hasattr(self, 'engine'):
             self.engine.dispose()
 
+    @classmethod
+    def for_timeseries(
+        cls,
+        db_path: str,
+        table_name: str = "timeseries_cache",
+        symbol_column: str = "symbol",
+        date_column: str = "date", 
+        data_fetcher: Optional[Callable] = None,
+        ttl_hours: int = 24,
+        **kwargs
+    ) -> "SqlCache":
+        """
+        Create a SQL cache for analytical timeseries data (uses DuckDB).
+        
+        Optimized for:
+        - Historical analysis and backtesting
+        - Aggregations over time ranges
+        - Bulk timeseries processing
+        - Data science and reporting workloads
+        
+        Args:
+            db_path: Database file path (will use DuckDB backend)
+            table_name: Name for the cache table
+            symbol_column: Column name for the symbol/ticker
+            date_column: Column name for the date
+            data_fetcher: Function that fetches data (symbol, start_date, end_date) -> DataFrame
+            ttl_hours: Cache TTL in hours
+            **kwargs: Additional columns as name:type pairs (e.g. price=Float, volume=Integer)
+            
+        Example:
+            def fetch_stock_data(symbol, start_date, end_date):
+                # Your API call here - returns large datasets
+                return pd.DataFrame(...)
+            
+            cache = SqlCache.for_timeseries(
+                "stocks.db",  # Uses DuckDB for analytics
+                data_fetcher=fetch_stock_data,
+                price=Float,
+                volume=Integer
+            )
+        """
+        from sqlalchemy import Table, Column, String, Date, MetaData
+        
+        # Force DuckDB for analytical timeseries (default behavior for simple paths)
+        if db_path.startswith('sqlite://'):
+            # If user explicitly wants SQLite, we respect that but warn
+            import warnings
+            warnings.warn(
+                "SQLite specified for analytical timeseries. Consider for_realtime_timeseries() "
+                "for real-time lookups or use DuckDB for better analytical performance.",
+                UserWarning
+            )
+        
+        # Create table schema
+        metadata = MetaData()
+        columns = [
+            Column(symbol_column, String(20), primary_key=True),
+            Column(date_column, Date, primary_key=True),
+        ]
+        
+        # Add custom columns from kwargs
+        for col_name, col_type in kwargs.items():
+            if col_name not in ['ttl_hours', 'data_fetcher']:
+                columns.append(Column(col_name, col_type))
+        
+        table = Table(table_name, metadata, *columns)
+        
+        # Create simple adapter using the function
+        class SimpleTimeseriesAdapter(SqlCacheAdapter):
+            def get_table_definition(self):
+                return table
+                
+            def fetch_data(self, **fetch_kwargs):
+                if data_fetcher is None:
+                    raise ValueError("data_fetcher function is required")
+                return data_fetcher(**fetch_kwargs)
+                
+            def parse_query_params(self, **query_kwargs):
+                return query_kwargs
+        
+        return cls(db_path, table, SimpleTimeseriesAdapter(), ttl_hours=ttl_hours)
+
+    @classmethod
+    def for_realtime_timeseries(
+        cls,
+        db_path: str,
+        table_name: str = "realtime_timeseries_cache",
+        symbol_column: str = "symbol",
+        date_column: str = "date", 
+        data_fetcher: Optional[Callable] = None,
+        ttl_hours: int = 1,  # Shorter TTL for real-time data
+        **kwargs
+    ) -> "SqlCache":
+        """
+        Create a SQL cache for real-time timeseries data (uses SQLite).
+        
+        Optimized for:
+        - Recent data lookups (last hour, day, week)
+        - Real-time updates and streaming data
+        - Quick individual symbol/date queries
+        - Low-latency transactional access
+        
+        Args:
+            db_path: Database file path (will use SQLite backend)
+            table_name: Name for the cache table
+            symbol_column: Column name for the symbol/ticker
+            date_column: Column name for the date
+            data_fetcher: Function that fetches data (symbol, start_date, end_date) -> DataFrame
+            ttl_hours: Cache TTL in hours (default 1hr for real-time)
+            **kwargs: Additional columns as name:type pairs
+            
+        Example:
+            def fetch_live_prices(symbol, start_date, end_date):
+                # Your real-time API call - small, frequent updates
+                return pd.DataFrame(...)
+            
+            cache = SqlCache.for_realtime_timeseries(
+                "live_prices.db",  # Uses SQLite for fast lookups
+                data_fetcher=fetch_live_prices,
+                ttl_hours=1,  # Fresh data
+                price=Float,
+                bid=Float,
+                ask=Float
+            )
+        """
+        from sqlalchemy import Table, Column, String, Date, MetaData
+        
+        # Force SQLite backend for real-time access
+        if not db_path.startswith(('sqlite://', 'postgresql://')):
+            db_path = f"sqlite:///{db_path}"
+        
+        # Create table schema
+        metadata = MetaData()
+        columns = [
+            Column(symbol_column, String(20), primary_key=True),
+            Column(date_column, Date, primary_key=True),
+        ]
+        
+        # Add custom columns from kwargs
+        for col_name, col_type in kwargs.items():
+            if col_name not in ['ttl_hours', 'data_fetcher']:
+                columns.append(Column(col_name, col_type))
+        
+        table = Table(table_name, metadata, *columns)
+        
+        # Create simple adapter using the function
+        class SimpleRealtimeAdapter(SqlCacheAdapter):
+            def get_table_definition(self):
+                return table
+                
+            def fetch_data(self, **fetch_kwargs):
+                if data_fetcher is None:
+                    raise ValueError("data_fetcher function is required")
+                return data_fetcher(**fetch_kwargs)
+                
+            def parse_query_params(self, **query_kwargs):
+                return query_kwargs
+        
+        return cls(db_path, table, SimpleRealtimeAdapter(), ttl_hours=ttl_hours)
+
+    @classmethod  
+    def for_lookup_table(
+        cls,
+        db_path: str,
+        table_name: str = "lookup_cache",
+        primary_keys: Optional[List[str]] = None,
+        data_fetcher: Optional[Callable] = None,
+        ttl_hours: int = 12,
+        **columns
+    ) -> "SqlCache":
+        """
+        Create a SQL cache for row-wise lookups (uses SQLite).
+        
+        Optimized for:
+        - Individual record lookups by primary key
+        - User profiles, product details, session data
+        - Transactional access patterns
+        - Real-time updates and small queries
+        
+        Args:
+            db_path: Database file path (will use SQLite backend)
+            table_name: Name for the cache table  
+            primary_keys: List of column names to use as primary keys
+            data_fetcher: Function that fetches data (**kwargs) -> DataFrame
+            ttl_hours: Cache TTL in hours
+            **columns: Column definitions as name=type pairs
+            
+        Example:
+            def fetch_user_profile(user_id):
+                return pd.DataFrame([{
+                    'user_id': user_id,
+                    'name': 'John Doe', 
+                    'email': 'john@example.com'
+                }])
+            
+            cache = SqlCache.for_lookup_table(
+                "users.db",
+                primary_keys=["user_id"],
+                data_fetcher=fetch_user_profile,
+                user_id=Integer,
+                name=String(100),
+                email=String(255)
+            )
+        """
+        from sqlalchemy import Table, Column, MetaData
+        
+        if not columns:
+            raise ValueError("At least one column must be specified")
+        if primary_keys is None:
+            primary_keys = [list(columns.keys())[0]]  # Use first column as PK
+            
+        # Force SQLite backend for row-wise access
+        if not db_path.startswith(('sqlite://', 'postgresql://')):
+            db_path = f"sqlite:///{db_path}"
+            
+        # Create table schema
+        metadata = MetaData()
+        table_columns = []
+        
+        for col_name, col_type in columns.items():
+            is_primary = col_name in primary_keys
+            table_columns.append(Column(col_name, col_type, primary_key=is_primary))
+        
+        table = Table(table_name, metadata, *table_columns)
+        
+        # Create simple adapter
+        class SimpleLookupAdapter(SqlCacheAdapter):
+            def get_table_definition(self):
+                return table
+                
+            def fetch_data(self, **fetch_kwargs):
+                if data_fetcher is None:
+                    raise ValueError("data_fetcher function is required")
+                return data_fetcher(**fetch_kwargs)
+                
+            def parse_query_params(self, **query_kwargs):
+                return query_kwargs
+        
+        return cls(db_path, table, SimpleLookupAdapter(), ttl_hours=ttl_hours)
+
+    @classmethod  
+    def for_analytics_table(
+        cls,
+        db_path: str,
+        table_name: str = "analytics_cache",
+        primary_keys: Optional[List[str]] = None,
+        data_fetcher: Optional[Callable] = None,
+        ttl_hours: int = 12,
+        **columns
+    ) -> "SqlCache":
+        """
+        Create a SQL cache for analytical queries (uses DuckDB).
+        
+        Optimized for:
+        - Aggregations, GROUP BY, analytical queries
+        - Bulk data processing and filtering
+        - Reporting and data science workloads
+        - Large dataset operations
+        
+        Args:
+            db_path: Database file path (will use DuckDB backend)
+            table_name: Name for the cache table  
+            primary_keys: List of column names to use as primary keys
+            data_fetcher: Function that fetches data (**kwargs) -> DataFrame
+            ttl_hours: Cache TTL in hours
+            **columns: Column definitions as name=type pairs
+            
+        Example:
+            def fetch_sales_data(start_date, end_date):
+                return pd.DataFrame([...])  # Large dataset
+            
+            cache = SqlCache.for_analytics_table(
+                "sales.db",
+                primary_keys=["transaction_id"],
+                data_fetcher=fetch_sales_data,
+                transaction_id=Integer,
+                product_id=Integer,
+                amount=Float,
+                sale_date=Date
+            )
+        """
+        from sqlalchemy import Table, Column, MetaData
+        
+        if not columns:
+            raise ValueError("At least one column must be specified")
+        if primary_keys is None:
+            primary_keys = [list(columns.keys())[0]]  # Use first column as PK
+            
+        # Force DuckDB backend for analytical access
+        if not db_path.startswith(('duckdb://', 'postgresql://')):
+            # Simple file path gets DuckDB
+            if '://' not in db_path:
+                pass  # Keep as simple path, defaults to DuckDB
+            else:
+                db_path = f"duckdb:///{db_path}"
+            
+        # Create table schema
+        metadata = MetaData()
+        table_columns = []
+        
+        for col_name, col_type in columns.items():
+            is_primary = col_name in primary_keys
+            table_columns.append(Column(col_name, col_type, primary_key=is_primary))
+        
+        table = Table(table_name, metadata, *table_columns)
+        
+        # Create simple adapter
+        class SimpleAnalyticsAdapter(SqlCacheAdapter):
+            def get_table_definition(self):
+                return table
+                
+            def fetch_data(self, **fetch_kwargs):
+                if data_fetcher is None:
+                    raise ValueError("data_fetcher function is required")
+                return data_fetcher(**fetch_kwargs)
+                
+            def parse_query_params(self, **query_kwargs):
+                return query_kwargs
+        
+        return cls(db_path, table, SimpleAnalyticsAdapter(), ttl_hours=ttl_hours)
+
+    @classmethod  
+    def for_table(
+        cls,
+        db_path: str,
+        table_name: str = "table_cache",
+        primary_keys: Optional[List[str]] = None,
+        data_fetcher: Optional[Callable] = None,
+        ttl_hours: int = 12,
+        **columns
+    ) -> "SqlCache":
+        """
+        Create a SQL cache for generic tabular data (backward compatibility).
+        
+        This method is kept for backward compatibility. Consider using:
+        - for_lookup_table() for row-wise access (SQLite)
+        - for_analytics_table() for analytical queries (DuckDB)
+        
+        Args:
+            db_path: Database file path or URL
+            table_name: Name for the cache table  
+            primary_keys: List of column names to use as primary keys
+            data_fetcher: Function that fetches data (**kwargs) -> DataFrame
+            ttl_hours: Cache TTL in hours
+            **columns: Column definitions as name=type pairs
+        """
+        import warnings
+        warnings.warn(
+            "for_table() is deprecated. Use for_lookup_table() for row-wise access "
+            "or for_analytics_table() for analytical queries.",
+            DeprecationWarning,
+            stacklevel=2
+        )
+        
+        # Default to lookup table behavior (SQLite)
+        return cls.for_lookup_table(
+            db_path, table_name, primary_keys, data_fetcher, ttl_hours, **columns
+        )
+
 
 # Backward compatibility aliases
 SQLAlchemyDataAdapter = SqlCacheAdapter

@@ -209,6 +209,25 @@ class cached:
             "ignore_errors": self.ignore_errors,
         }
 
+    @classmethod
+    def for_api(cls, ttl_hours: int = 6, ignore_errors: bool = True, **kwargs):
+        """
+        Decorator optimized for API requests.
+        
+        Defaults:
+        - TTL: 6 hours (good for most API data)  
+        - ignore_errors: True (don't fail if cache has issues)
+        - Fast compression for JSON/text data
+        
+        Example:
+            @cached.for_api(ttl_hours=4)
+            def fetch_weather(city):
+                return requests.get(f"api.weather.com/{city}").json()
+        """
+        from .core import UnifiedCache
+        cache_instance = UnifiedCache.for_api(ttl_hours=ttl_hours, **kwargs)
+        return cls(cache_instance=cache_instance, ignore_errors=ignore_errors)
+
 
 def cache_function(
     func: Optional[Callable] = None, **kwargs
