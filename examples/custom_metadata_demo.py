@@ -6,7 +6,12 @@ Simple Custom Metadata Example
 This example demonstrates the core custom metadata functionality:
 1. Creating custom metadata schemas
 2. Storing cache entries with custom metadata (single or multiple types)
-3. Querying cache entries using custom metadata
+3. Querying cache entries using custom metadata (query_custom)
+4. Querying built-in cache metadata (query_meta)
+
+Two Query Methods:
+- query_custom(schema_name): Query dedicated custom metadata tables (SQLAlchemy models)
+- query_meta(**filters): Query built-in metadata stored with cache entries (requires store_cache_key_params=True)
 
 Supported custom_metadata formats:
 - Single object: custom_metadata=experiment_metadata
@@ -177,7 +182,7 @@ def main():
         print("=" * 45)
 
         # Query 1: Find all experiments by alice
-        query = cache.query_custom_metadata("experiments")
+        query = cache.query_custom("experiments")
         if query is not None:
             alice_experiments = query.filter(ExperimentMetadata.created_by == "alice").all()
             print(f"✅ Found {len(alice_experiments)} experiments by alice:")
@@ -208,12 +213,62 @@ def main():
             print("❌ Custom metadata querying not supported")
 
         # Query 5: Query performance metadata
-        perf_query = cache.query_custom_metadata("performance")
+        perf_query = cache.query_custom("performance")
         if perf_query is not None:
             long_running = perf_query.filter(PerformanceMetadata.training_time_seconds > 3600).all()
             print(f"\n✅ Found {len(long_running)} long-running experiments (> 1 hour):")
             for perf in long_running:
                 print(f"   - {perf.run_id}: {perf.training_time_seconds}s, {perf.memory_usage_mb:.1f}MB")
+
+        print("\n🔍 Querying Built-in Cache Metadata")
+        print("=" * 40)
+        
+        # Now let's also demonstrate query_meta() for built-in metadata
+        # First, create a new cache that stores cache key parameters
+        print("📝 Creating cache with parameter storage enabled...")
+        config_with_params = CacheConfig(
+            cache_dir=temp_dir,
+            metadata_backend="sqlite",
+            store_cache_key_params=True,  # Enable parameter storage
+        )
+        param_cache = cacheness(config_with_params)
+        
+        # Store some test data with parameters
+        param_cache.put("test_model_1", experiment="param_exp_1", model_type="xgboost", accuracy=0.95)
+        param_cache.put("test_model_2", experiment="param_exp_2", model_type="cnn", accuracy=0.88) 
+        param_cache.put("test_model_3", experiment="param_exp_3", model_type="random_forest", accuracy=0.92)
+        
+        # Query using built-in metadata
+        print("\n🔍 Querying by cache key parameters...")
+        
+        # First, let's see what parameters are actually stored
+        all_param_entries = param_cache.query_meta()
+        if all_param_entries:
+            print(f"✅ Found {len(all_param_entries)} total entries with stored parameters")
+            print("📋 Sample stored parameters:")
+            for i, entry in enumerate(all_param_entries[:2]):  # Show first 2
+                params = entry.get('cache_key_params', {})
+                print(f"   Entry {i+1}: {params}")
+        
+        # Query by model type (checking the actual format) 
+        xgboost_entries = param_cache.query_meta(model_type="str:xgboost")
+        if xgboost_entries:
+            print(f"\n✅ Found {len(xgboost_entries)} XGBoost entries:")
+            for entry in xgboost_entries:
+                params = entry.get('cache_key_params', {})
+                print(f"   - {entry['cache_key'][:12]}... (experiment: {params.get('experiment', 'N/A')})")
+        else:
+            print("\n🔍 No XGBoost entries found, trying different patterns...")
+        
+        # Query by experiment (with proper serialization format)
+        specific_exp = param_cache.query_meta(experiment="str:param_exp_1")
+        if specific_exp:
+            print(f"\n✅ Found {len(specific_exp)} entries for param_exp_1:")
+            for entry in specific_exp:
+                params = entry.get('cache_key_params', {})
+                print(f"   - {entry['description']} (model: {params.get('model_type', 'N/A')})")
+        else:
+            print("\n🔍 No entries found for param_exp_1 with str: prefix")
 
         print("\n📊 Cache Statistics")
         print("=" * 20)

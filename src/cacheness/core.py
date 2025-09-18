@@ -340,7 +340,7 @@ class UnifiedCache:
         except ImportError:
             return {}
 
-    def query_custom_metadata(self, schema_name: str):
+    def query_custom(self, schema_name: str):
         """
         Query custom metadata for a specific schema.
 
@@ -351,7 +351,7 @@ class UnifiedCache:
             SQLAlchemy query object for advanced querying, or None if not supported
 
         Example:
-            query = cache.query_custom_metadata("ml_experiments")
+            query = cache.query_custom("ml_experiments")
             high_accuracy = query.filter(MLExperimentMetadata.accuracy >= 0.9).all()
         """
         if not self._supports_custom_metadata():
@@ -378,6 +378,139 @@ class UnifiedCache:
                 return None
         except Exception as e:
             logger.error(f"Failed to create query for schema {schema_name}: {e}")
+            return None
+
+    def query_custom_metadata(self, schema_name: str):
+        """
+        Query custom metadata for a specific schema.
+        
+        **Deprecated:** Use query_custom() instead for shorter syntax.
+
+        Args:
+            schema_name: Name of the custom metadata schema to query
+
+        Returns:
+            SQLAlchemy query object for advanced querying, or None if not supported
+        """
+        logger.warning("query_custom_metadata() is deprecated, use query_custom() instead")
+        return self.query_custom(schema_name)
+
+    def query_meta(self, **filters):
+        """
+        Query built-in cache metadata using SQLite JSON1 extension.
+        
+        This method allows querying cache entries based on their stored cache_key_params
+        when store_cache_key_params=True is configured.
+
+        Args:
+            **filters: Key-value pairs to filter cache entries by their parameters
+                      Supports nested dictionary access with dot notation
+
+        Returns:
+            List of cache entries matching the filters, or None if not supported
+
+        Example:
+            # Configure cache to store parameters
+            config = CacheConfig(store_cache_key_params=True)
+            cache = cacheness(config)
+            
+            # Store some data
+            cache.put(model, experiment="exp_001", model_type="xgboost", accuracy=0.95)
+            cache.put(data, experiment="exp_002", model_type="cnn", accuracy=0.88)
+            
+            # Query by parameters  
+            xgb_experiments = cache.query_meta(model_type="xgboost")
+            high_accuracy = cache.query_meta(accuracy=0.9)  # >= comparison
+            specific_exp = cache.query_meta(experiment="exp_001")
+        """
+        if self.actual_backend != "sqlite":
+            logger.warning("query_meta() requires SQLite backend")
+            return None
+
+        if not self.config.metadata.store_cache_key_params:
+            logger.warning(
+                "query_meta() requires store_cache_key_params=True in cache configuration"
+            )
+            return None
+
+        if not hasattr(self.metadata_backend, "SessionLocal"):
+            logger.warning("SQLAlchemy session not available for query_meta()")
+            return None
+
+        try:
+            from sqlalchemy import text
+            
+            with self.metadata_backend.SessionLocal() as session:
+                # Build WHERE conditions using SQLite JSON1 extension
+                where_conditions = []
+                params = {}
+                
+                for key, value in filters.items():
+                    # Use JSON_EXTRACT for querying JSON fields
+                    param_name = f"param_{len(params)}"
+                    
+                    if isinstance(value, (int, float)):
+                        # For numeric values, try both direct match and >= comparison
+                        where_conditions.append(
+                            f"(JSON_EXTRACT(cache_key_params, '$.{key}') = :{param_name} OR "
+                            f"CAST(JSON_EXTRACT(cache_key_params, '$.{key}') AS REAL) >= :{param_name})"
+                        )
+                    else:
+                        # For string values, exact match
+                        where_conditions.append(
+                            f"JSON_EXTRACT(cache_key_params, '$.{key}') = :{param_name}"
+                        )
+                    
+                    params[param_name] = value
+
+                # Build the query
+                if where_conditions:
+                    where_clause = " AND ".join(where_conditions)
+                    query = f"""
+                        SELECT cache_key, description, data_type, created_at, accessed_at, 
+                               file_size, cache_key_params
+                        FROM cache_entries 
+                        WHERE cache_key_params IS NOT NULL AND ({where_clause})
+                        ORDER BY created_at DESC
+                    """
+                else:
+                    # No filters - return all entries with cache_key_params
+                    query = """
+                        SELECT cache_key, description, data_type, created_at, accessed_at,
+                               file_size, cache_key_params  
+                        FROM cache_entries
+                        WHERE cache_key_params IS NOT NULL
+                        ORDER BY created_at DESC
+                    """
+
+                result = session.execute(text(query), params)
+                
+                # Convert results to dictionaries
+                entries = []
+                for row in result:
+                    entry = {
+                        'cache_key': row.cache_key,
+                        'description': row.description,
+                        'data_type': row.data_type,
+                        'created_at': row.created_at.isoformat() if hasattr(row.created_at, 'isoformat') else str(row.created_at),
+                        'accessed_at': row.accessed_at.isoformat() if hasattr(row.accessed_at, 'isoformat') else str(row.accessed_at),
+                        'file_size': row.file_size,
+                    }
+                    
+                    # Parse cache_key_params JSON
+                    if row.cache_key_params:
+                        try:
+                            from .json_utils import loads as json_loads
+                            entry['cache_key_params'] = json_loads(row.cache_key_params)
+                        except Exception:
+                            entry['cache_key_params'] = {}
+                    
+                    entries.append(entry)
+                
+                return entries
+                
+        except Exception as e:
+            logger.error(f"Failed to query metadata: {e}")
             return None
 
     def get_custom_metadata_for_entry(
@@ -572,6 +705,10 @@ class UnifiedCache:
                         "file_hash": file_hash,
                     }
                     
+                    # Include cache_key_params in signature if they're being stored
+                    if self.config.metadata.store_cache_key_params:
+                        complete_entry_data["cache_key_params"] = kwargs
+                    
                     signature = self.signer.sign_entry(complete_entry_data)
                     metadata_dict["entry_signature"] = signature
                     
@@ -681,6 +818,11 @@ class UnifiedCache:
                         "actual_path": metadata.get("actual_path", ""),
                         "file_hash": metadata.get("file_hash"),
                     }
+                    
+                    # Include cache_key_params in verification if they exist
+                    cache_key_params = metadata.get("cache_key_params")
+                    if cache_key_params is not None:
+                        verify_entry_data["cache_key_params"] = cache_key_params
                     
                     if not self.signer.verify_entry(verify_entry_data, stored_signature):
                         if self.config.security.delete_invalid_signatures:

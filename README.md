@@ -649,7 +649,7 @@ experiment_metadata = MLExperimentMetadata(
 cache.put(model, experiment="exp_001", custom_metadata={"ml_experiments": experiment_metadata})
 
 # Query with SQL
-query = cache.query_custom_metadata("ml_experiments")
+query = cache.query_custom("ml_experiments")
 high_accuracy_models = query.filter(MLExperimentMetadata.accuracy >= 0.9).all()
 ```
 

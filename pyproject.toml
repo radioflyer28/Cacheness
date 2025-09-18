@@ -1,6 +1,6 @@
 [project]
 name = "cacheness"
-version = "0.3.12"
+version = "0.3.13"
 description = "High-performance disk caching library using Blosc compression, geared toward numpy arrays and dataframes and pickle-ing for everything else."
 readme = "README.md"
 authors = [
