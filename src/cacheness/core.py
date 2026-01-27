@@ -153,6 +153,31 @@ class UnifiedCache:
             self.metadata_backend = create_metadata_backend("sqlite_memory", config=self.config.metadata)
             actual_backend = "sqlite_memory"
             logger.info("⚡ Using in-memory SQLite backend (no persistence)")
+        elif self.config.metadata.metadata_backend == "postgresql":
+            # Explicitly requested PostgreSQL
+            if not SQLALCHEMY_AVAILABLE:
+                raise ImportError(
+                    "SQLAlchemy is required for PostgreSQL backend but is not available. Install with: uv add sqlalchemy"
+                )
+            # Get connection URL from options or raise error
+            backend_options = self.config.metadata.metadata_backend_options or {}
+            connection_url = backend_options.get("connection_url")
+            if not connection_url:
+                raise ValueError(
+                    "PostgreSQL backend requires 'connection_url' in metadata_backend_options"
+                )
+            self.metadata_backend = create_metadata_backend(
+                "postgresql",
+                connection_url=connection_url,
+                pool_size=backend_options.get("pool_size", 10),
+                max_overflow=backend_options.get("max_overflow", 20),
+                pool_pre_ping=backend_options.get("pool_pre_ping", True),
+                pool_recycle=backend_options.get("pool_recycle", 3600),
+                echo=backend_options.get("echo", False),
+                table_prefix=backend_options.get("table_prefix", ""),
+                config=self.config.metadata
+            )
+            actual_backend = "postgresql"
         else:
             # Auto mode: prefer SQLite, fallback to JSON
             if SQLALCHEMY_AVAILABLE:
@@ -187,9 +212,9 @@ class UnifiedCache:
         self.actual_backend = actual_backend
 
     def _supports_custom_metadata(self) -> bool:
-        """Check if custom metadata is supported (requires SQLite backend and SQLAlchemy)."""
+        """Check if custom metadata is supported (requires SQLite or PostgreSQL backend with SQLAlchemy)."""
         return (
-            self.actual_backend == "sqlite"
+            self.actual_backend in ("sqlite", "postgresql")
             and hasattr(self, "_custom_metadata_enabled")
             and self._custom_metadata_enabled
         )
@@ -226,11 +251,11 @@ class UnifiedCache:
         )
 
     def _init_custom_metadata_support(self):
-        """Initialize custom metadata support if SQLite backend is available."""
+        """Initialize custom metadata support if SQLite or PostgreSQL backend is available."""
         try:
             from .custom_metadata import is_custom_metadata_available
 
-            if is_custom_metadata_available() and self.actual_backend == "sqlite":
+            if is_custom_metadata_available() and self.actual_backend in ("sqlite", "postgresql"):
                 self._custom_metadata_enabled = True
                 logger.info("🏷️  Custom metadata support enabled")
             else:
@@ -262,11 +287,11 @@ class UnifiedCache:
     def _store_custom_metadata(self, cache_key: str, custom_metadata):
         """Store custom metadata using link table architecture."""
         if not self._supports_custom_metadata():
-            logger.warning("Custom metadata not supported - requires SQLite backend")
+            logger.warning("Custom metadata not supported - requires SQLite or PostgreSQL backend")
             return
 
         try:
-            from .custom_metadata import get_custom_metadata_model, CacheMetadataLink, get_schema_name_for_model
+            from .custom_metadata import get_custom_metadata_model, CacheMetadataLink, get_schema_name_for_model, get_all_custom_metadata_models
             from .metadata import Base
 
             # Normalize custom_metadata to iterable of metadata objects
@@ -277,8 +302,14 @@ class UnifiedCache:
             # Get SQLAlchemy session from the metadata backend
             if hasattr(self.metadata_backend, "SessionLocal"):
                 with self.metadata_backend.SessionLocal() as session:
-                    # Create tables if they don't exist
-                    Base.metadata.create_all(self.metadata_backend.engine)
+                    # Create only custom metadata tables and link table
+                    # This avoids conflicts with cache_entries/cache_stats tables
+                    # which are managed by the metadata backend
+                    tables_to_create = [CacheMetadataLink.__table__]
+                    for model_class in get_all_custom_metadata_models().values():
+                        if hasattr(model_class, "__table__") and model_class.__table__ is not None:
+                            tables_to_create.append(model_class.__table__)
+                    Base.metadata.create_all(self.metadata_backend.engine, tables=tables_to_create)
 
                     for metadata_instance in metadata_objects:
                         # Get schema name from the metadata object's class
@@ -404,7 +435,7 @@ class UnifiedCache:
         """
         if not self._supports_custom_metadata():
             logger.warning(
-                "Custom metadata querying not supported - requires SQLite backend"
+                "Custom metadata querying not supported - requires SQLite or PostgreSQL backend"
             )
             return []
 
@@ -466,7 +497,7 @@ class UnifiedCache:
         @contextmanager
         def _session_context():
             if not self._supports_custom_metadata():
-                raise ValueError("Custom metadata querying not supported - requires SQLite backend")
+                raise ValueError("Custom metadata querying not supported - requires SQLite or PostgreSQL backend")
 
             from .custom_metadata import get_custom_metadata_model
 

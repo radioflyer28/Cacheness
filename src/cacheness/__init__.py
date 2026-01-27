@@ -35,6 +35,31 @@ from .handlers import ArrayHandler, HandlerRegistry, ObjectHandler
 from .metadata import JsonBackend, create_metadata_backend
 from .interfaces import CacheHandler  # Export interface for custom handlers
 
+# Import config validation and file loading (Phase 2.4)
+from .config import (
+    CacheBlobConfig,
+    CacheMetadataConfig,
+    CacheStorageConfig,
+    CompressionConfig,
+    SerializationConfig,
+    HandlerConfig,
+    SecurityConfig,
+    ConfigValidationError,
+    validate_config,
+    validate_config_strict,
+    load_config_from_dict,
+    load_config_from_json,
+    save_config_to_json,
+    create_cache_config,
+)
+
+# YAML loading requires PyYAML - make it optional
+try:
+    from .config import load_config_from_yaml, save_config_to_yaml
+    _has_yaml_config = True
+except ImportError:
+    _has_yaml_config = False
+
 # Import optional components if available
 try:
     from .metadata import SqliteBackend
@@ -184,6 +209,22 @@ __all__ = [
     "cacheness",
     "CacheConfig",
     "get_cache",
+    # Sub-configuration classes (Phase 2.4)
+    "CacheBlobConfig",
+    "CacheMetadataConfig", 
+    "CacheStorageConfig",
+    "CompressionConfig",
+    "SerializationConfig",
+    "HandlerConfig",
+    "SecurityConfig",
+    # Configuration validation (Phase 2.4)
+    "ConfigValidationError",
+    "validate_config",
+    "validate_config_strict",
+    "load_config_from_dict",
+    "load_config_from_json",
+    "save_config_to_json",
+    "create_cache_config",
     # Handlers
     "HandlerRegistry",
     "ObjectHandler",
@@ -201,6 +242,13 @@ __all__ = [
     # Version info
     "__version__",
 ]
+
+# Add YAML config support if PyYAML available (Phase 2.4)
+if _has_yaml_config:
+    __all__.extend([
+        "load_config_from_yaml",
+        "save_config_to_yaml",
+    ])
 
 # Add backend registry functions if available (Phase 2.2)
 if _has_backend_registry:

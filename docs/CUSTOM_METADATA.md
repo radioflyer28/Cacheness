@@ -582,4 +582,134 @@ optimized_metadata = optimize_metadata_size(large_metadata)
 cache.put(data, key="example", metadata=optimized_metadata)
 ```
 
+## PostgreSQL Backend Compatibility
+
+Custom metadata works seamlessly with both SQLite and PostgreSQL metadata backends. This enables you to use structured custom metadata with production-grade PostgreSQL deployments.
+
+### Using Custom Metadata with PostgreSQL
+
+```python
+from cacheness import cacheness, CacheConfig
+from cacheness.config import CacheMetadataConfig
+
+# Configure cache with PostgreSQL metadata backend
+config = CacheConfig(
+    metadata=CacheMetadataConfig(
+        backend="postgresql",
+        connection_url="postgresql://user:password@localhost:5432/cacheness_db",
+        pool_size=10,
+        max_overflow=20
+    )
+)
+
+cache = cacheness(config=config)
+
+# Use custom metadata exactly the same as with SQLite
+cache.put(
+    data=model,
+    model_name="fraud_detector",
+    version="v1.0",
+    metadata={
+        "accuracy": 0.94,
+        "training_time_minutes": 45,
+        "author": "data_team"
+    }
+)
+
+# Retrieve with metadata
+result = cache.get_with_metadata(model_name="fraud_detector", version="v1.0")
+if result:
+    data, metadata = result
+    print(f"Accuracy: {metadata['accuracy']}")
+```
+
+### Custom SQLAlchemy Models with PostgreSQL
+
+For advanced use cases, you can define custom SQLAlchemy ORM models that work with both SQLite and PostgreSQL:
+
+```python
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey
+from cacheness.custom_metadata import custom_metadata_model
+from cacheness.metadata import Base
+
+@custom_metadata_model
+class MLExperiment(Base):
+    """Custom metadata table for ML experiments."""
+    __tablename__ = "ml_experiments"
+    
+    id = Column(Integer, primary_key=True)
+    cache_key = Column(String, ForeignKey("cache_metadata_links.cache_key"))
+    experiment_name = Column(String, nullable=False)
+    accuracy = Column(Float)
+    f1_score = Column(Float)
+    model_type = Column(String)
+    created_at = Column(DateTime)
+
+# The custom model works with both SQLite and PostgreSQL backends
+from cacheness import cacheness, CacheConfig
+from cacheness.config import CacheMetadataConfig
+
+# With PostgreSQL
+pg_config = CacheConfig(
+    metadata=CacheMetadataConfig(
+        backend="postgresql",
+        connection_url="postgresql://user:password@localhost:5432/cacheness_db"
+    )
+)
+pg_cache = cacheness(config=pg_config)
+
+# Or with SQLite (default)
+sqlite_cache = cacheness()
+
+# Both work identically with custom metadata models
+```
+
+### Migrating Custom Metadata Tables
+
+When using custom SQLAlchemy models, you can migrate the tables to your database:
+
+```python
+from cacheness.custom_metadata import migrate_custom_metadata_tables
+from sqlalchemy import create_engine
+
+# Create engine for your database
+engine = create_engine("postgresql://user:password@localhost:5432/cacheness_db")
+
+# Migrate only the custom metadata tables (not infrastructure tables)
+migrate_custom_metadata_tables(engine)
+```
+
+> **Note:** The migration function only creates custom metadata tables and the `CacheMetadataLink` table. Infrastructure tables (`cache_entries`, `cache_stats`) are managed separately by each backend.
+
+### Querying Custom Metadata with PostgreSQL
+
+Use `query_custom_session()` to perform advanced queries on your custom metadata:
+
+```python
+from cacheness.custom_metadata import query_custom_session
+from sqlalchemy import create_engine
+
+engine = create_engine("postgresql://user:password@localhost:5432/cacheness_db")
+
+with query_custom_session(engine) as session:
+    # Query high-accuracy experiments
+    high_accuracy = session.query(MLExperiment).filter(
+        MLExperiment.accuracy > 0.9
+    ).all()
+    
+    for exp in high_accuracy:
+        print(f"Experiment: {exp.experiment_name}, Accuracy: {exp.accuracy}")
+```
+
+### Backend Architecture Notes
+
+When using custom metadata with different backends:
+
+| Backend | Infrastructure Tables | Custom Metadata Tables |
+|---------|----------------------|------------------------|
+| SQLite | `cache_entries`, `cache_stats` (via `Base`) | Custom models + `cache_metadata_links` (via `Base`) |
+| PostgreSQL | `pg_cache_entries`, `pg_cache_stats` (via `PostgresBase`) | Custom models + `cache_metadata_links` (via `Base`) |
+
+Custom metadata models always inherit from `Base` (the SQLite declarative base), which allows them to work consistently across both backends. The cache infrastructure tables are managed separately to ensure proper isolation.
+
 Custom metadata transforms cacheness from a simple cache into a powerful data management and experiment tracking system. Use it to organize your cache, track data lineage, monitor quality, and enable sophisticated analysis of your cached artifacts.

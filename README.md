@@ -690,6 +690,66 @@ with cache.query_custom_session("ml_experiments") as query:
 
 For detailed metadata workflows, see the **[Custom Metadata Guide](docs/CUSTOM_METADATA.md)**.
 
+## Extending Cacheness
+
+Cacheness is designed to be extensible. Register custom handlers for new data types, or custom backends for specialized storage.
+
+### Custom Data Type Handlers
+
+```python
+from cacheness import register_handler, CacheHandler
+from pathlib import Path
+
+class ParquetHandler(CacheHandler):
+    @property
+    def data_type(self):
+        return "parquet"
+    
+    def can_handle(self, data):
+        import pandas as pd
+        return isinstance(data, pd.DataFrame)
+    
+    def put(self, data, file_path, config):
+        output = file_path.with_suffix(".parquet")
+        data.to_parquet(output, compression="snappy")
+        return {"storage_format": "parquet", "file_path": str(output)}
+    
+    def get(self, file_path, metadata):
+        import pandas as pd
+        return pd.read_parquet(file_path)
+
+# Register with highest priority
+register_handler(ParquetHandler(), priority=0)
+```
+
+### Custom Storage Backends
+
+```python
+from cacheness import register_metadata_backend, register_blob_backend
+
+# Register a custom metadata backend (Redis, DynamoDB, etc.)
+register_metadata_backend(
+    name="redis",
+    backend_class=RedisBackend,
+    description="Redis-based metadata storage",
+)
+
+# Register a custom blob backend (S3, GCS, Azure, etc.)
+register_blob_backend(
+    name="s3",
+    backend_class=S3BlobBackend,
+    description="Amazon S3 blob storage",
+)
+
+# Use in configuration
+config = CacheConfig(
+    metadata=CacheMetadataConfig(backend="redis", connection_url="redis://localhost"),
+    blob=CacheBlobConfig(backend="s3", bucket="my-cache-bucket"),
+)
+```
+
+For complete examples and interface documentation, see the **[Plugin Development Guide](docs/PLUGIN_DEVELOPMENT.md)**.
+
 
 ## Requirements
 
@@ -709,8 +769,10 @@ Missing optional dependencies are handled gracefully with automatic fallbacks.
 
 ## Documentation
 
+- **[Plugin Development Guide](docs/PLUGIN_DEVELOPMENT.md)** - Extending cacheness with custom handlers and backends
 - **[Security Guide](docs/SECURITY.md)** - Cache entry signing, integrity protection, and security best practices
 - **[Configuration Guide](docs/CONFIGURATION.md)** - Detailed configuration options and use cases
+- **[Backend Selection Guide](docs/BACKEND_SELECTION.md)** - Choosing between JSON, SQLite, and PostgreSQL backends
 - **[SQL Cache Guide](docs/SQL_CACHE.md)** - Pull-through cache for APIs and time-series data
 - **[Custom Metadata Guide](docs/CUSTOM_METADATA.md)** - Advanced metadata workflows with SQLAlchemy
 - **[Performance Guide](docs/PERFORMANCE.md)** - Optimization strategies and benchmarks

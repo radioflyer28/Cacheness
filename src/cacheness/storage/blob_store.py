@@ -111,10 +111,10 @@ class BlobStore:
         
         # Initialize metadata backend
         if backend is None or backend == "json":
-            self.backend = JsonBackend(self.cache_dir)
+            self.backend = JsonBackend(self.cache_dir / "cache_metadata.json")
         elif backend == "sqlite":
             from .backends import SqliteBackend
-            self.backend = SqliteBackend(self.cache_dir)
+            self.backend = SqliteBackend(self.cache_dir / "cache_metadata.db")
         elif isinstance(backend, MetadataBackend):
             self.backend = backend
         else:
@@ -259,7 +259,7 @@ class BlobStore:
         
         Args:
             key: The blob key
-            metadata: New metadata to merge with existing
+            metadata: New metadata to merge with existing nested metadata
             
         Returns:
             True if successful, False if blob not found
@@ -268,13 +268,16 @@ class BlobStore:
         if existing is None:
             return False
         
-        # Merge metadata (preserve core fields)
-        core_fields = {"cache_key", "data_type", "storage_format", "file_size", 
-                       "actual_path", "created_at"}
-        updated = {**existing}
-        for k, v in metadata.items():
-            if k not in core_fields:
-                updated[k] = v
+        # Get or create nested metadata dict
+        nested_meta = existing.get("metadata", {})
+        if not isinstance(nested_meta, dict):
+            nested_meta = {}
+        
+        # Merge user metadata into nested dict
+        nested_meta.update(metadata)
+        
+        # Update the entry
+        updated = {**existing, "metadata": nested_meta}
         
         self.backend.put_entry(key, updated)
         return True

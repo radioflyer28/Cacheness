@@ -29,19 +29,19 @@ Welcome to the Cacheness documentation! This high-performance caching library pr
 - **[TensorFlow Tensor Guide](TENSORFLOW_TENSOR_GUIDE.md)** - Native TensorFlow tensor caching
 - **[TensorFlow Handler Status](TENSORFLOW_HANDLER_STATUS.md)** - Handler implementation details
 
-## Storage Layer (New!)
+## Storage Layer
 
-Cacheness now provides a low-level `BlobStore` API for direct storage access without caching semantics:
+- **[BlobStore Guide](BLOB_STORE.md)** - Low-level storage API for non-caching use cases
+
+`BlobStore` provides direct key-value storage without caching semantics (no TTL, no eviction). Useful for ML model versioning, artifact storage, and data pipeline checkpoints.
 
 ```python
 from cacheness.storage import BlobStore
 
-store = BlobStore(cache_dir="./blobs", backend="sqlite")
-blob_id = store.put(data, metadata={"version": "1.0"})
-data = store.get(blob_id)
+store = BlobStore(cache_dir="./models", backend="sqlite")
+store.put(model, key="fraud_detector_v1", metadata={"accuracy": 0.95})
+model = store.get("fraud_detector_v1")
 ```
-
-Useful for ML model versioning, artifact storage, and data pipeline checkpoints.
 
 ## API Reference
 

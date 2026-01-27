@@ -1423,7 +1423,7 @@ def create_metadata_backend(backend_type: str = "auto", **kwargs) -> MetadataBac
     Factory function to create metadata backends with optional entry caching.
 
     Args:
-        backend_type: "auto", "memory", "sqlite", "json", or "sqlite_memory"
+        backend_type: "auto", "memory", "sqlite", "json", "sqlite_memory", or "postgresql"
                      "auto" prefers SQLite (file-based) if available, falls back to in-memory SQLite, then JSON
         **kwargs: Backend-specific configuration including optional 'config' for caching
 
@@ -1454,6 +1454,28 @@ def create_metadata_backend(backend_type: str = "auto", **kwargs) -> MetadataBac
             )
         echo = kwargs.get("echo", False)
         backend = SqliteBackend(":memory:", echo)  # In-memory SQLite database
+    elif backend_type == "postgresql":
+        # Import PostgresBackend from the storage backends
+        try:
+            from .storage.backends.postgresql_backend import PostgresBackend
+        except ImportError as e:
+            raise ImportError(
+                f"PostgreSQL backend is not available. Install with: pip install psycopg2-binary sqlalchemy. Error: {e}"
+            )
+        
+        connection_url = kwargs.get("connection_url")
+        if not connection_url:
+            raise ValueError("PostgreSQL backend requires 'connection_url' parameter")
+        
+        backend = PostgresBackend(
+            connection_url=connection_url,
+            pool_size=kwargs.get("pool_size", 10),
+            max_overflow=kwargs.get("max_overflow", 20),
+            pool_pre_ping=kwargs.get("pool_pre_ping", True),
+            pool_recycle=kwargs.get("pool_recycle", 3600),
+            echo=kwargs.get("echo", False),
+            table_prefix=kwargs.get("table_prefix", ""),
+        )
     elif backend_type == "auto":
         # Auto mode: prefer file-based SQLite > in-memory SQLite > JSON
         if SQLALCHEMY_AVAILABLE:
@@ -1478,7 +1500,7 @@ def create_metadata_backend(backend_type: str = "auto", **kwargs) -> MetadataBac
             metadata_file = kwargs.get("metadata_file", Path("cache_metadata.json"))
             backend = JsonBackend(metadata_file)
     else:
-        raise ValueError(f"Unknown backend type: {backend_type}. Supported: 'auto', 'memory', 'json', 'sqlite', 'sqlite_memory'")
+        raise ValueError(f"Unknown backend type: {backend_type}. Supported: 'auto', 'memory', 'json', 'sqlite', 'sqlite_memory', 'postgresql'")
     
     # Apply memory cache layer wrapper for disk-persistent backends (not memory)
     if (cache_config is not None and 

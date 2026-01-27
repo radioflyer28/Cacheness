@@ -894,9 +894,229 @@ export CACHENESS_DEFAULT_TTL_HOURS="168"  # 1 week
 export CACHENESS_BACKEND="sqlite"
 ```
 
-## Handler Interface
+---
 
-For implementing custom storage handlers:
+## Extensibility API
+
+Cacheness provides three extension points: handlers, metadata backends, and blob backends.
+
+> **For comprehensive examples**, see the [Plugin Development Guide](./PLUGIN_DEVELOPMENT.md).
+
+### Handler Registration
+
+Register custom handlers to support new data types.
+
+```python
+from cacheness import (
+    register_handler,
+    unregister_handler,
+    list_handlers,
+    CacheHandler,
+)
+```
+
+#### `register_handler(handler, priority=None, name=None)`
+
+Register a custom handler with the default registry.
+
+**Parameters:**
+- `handler` (CacheHandler): Handler instance implementing the CacheHandler interface
+- `priority` (int | None): Position in handler list (0 = highest priority, None = append)
+- `name` (str | None): Optional name for the handler (defaults to `handler.data_type`)
+
+**Example:**
+```python
+from cacheness import register_handler, CacheHandler
+
+class ParquetHandler(CacheHandler):
+    @property
+    def data_type(self):
+        return "parquet"
+    
+    def can_handle(self, data):
+        import pandas as pd
+        return isinstance(data, pd.DataFrame)
+    
+    def put(self, data, file_path, config):
+        output = file_path.with_suffix(".parquet")
+        data.to_parquet(output)
+        return {"storage_format": "parquet", "file_path": str(output)}
+    
+    def get(self, file_path, metadata):
+        import pandas as pd
+        return pd.read_parquet(file_path)
+
+# Register with highest priority
+register_handler(ParquetHandler(), priority=0)
+```
+
+#### `unregister_handler(handler_name) -> bool`
+
+Remove a handler from the registry.
+
+**Parameters:**
+- `handler_name` (str): The `data_type` of the handler to remove
+
+**Returns:** `True` if removed, `False` if not found
+
+#### `list_handlers() -> list`
+
+List all registered handlers.
+
+**Returns:** List of dicts with keys: `name`, `priority`, `class`, `is_builtin`
+
+```python
+for h in list_handlers():
+    print(f"{h['name']}: priority={h['priority']}, builtin={h['is_builtin']}")
+```
+
+---
+
+### Metadata Backend Registration
+
+Register custom metadata backends for specialized storage.
+
+```python
+from cacheness import (
+    register_metadata_backend,
+    unregister_metadata_backend,
+    get_metadata_backend,
+    list_metadata_backends,
+    MetadataBackend,  # Base class
+)
+```
+
+#### `register_metadata_backend(name, backend_class, description=None, required_packages=None)`
+
+Register a custom metadata backend.
+
+**Parameters:**
+- `name` (str): Unique identifier for the backend
+- `backend_class` (type): Class implementing `MetadataBackend` interface
+- `description` (str | None): Human-readable description
+- `required_packages` (list | None): List of required package names
+
+**Example:**
+```python
+from cacheness import register_metadata_backend, MetadataBackend
+
+class RedisBackend(MetadataBackend):
+    def __init__(self, connection_url: str, **kwargs):
+        import redis
+        self._client = redis.from_url(connection_url)
+    
+    # ... implement MetadataBackend methods
+
+register_metadata_backend(
+    name="redis",
+    backend_class=RedisBackend,
+    description="Redis-based metadata storage",
+    required_packages=["redis"],
+)
+```
+
+#### `get_metadata_backend(name, **kwargs) -> MetadataBackend`
+
+Get a backend instance by name.
+
+**Parameters:**
+- `name` (str): Backend name
+- `**kwargs`: Arguments passed to backend constructor
+
+#### `list_metadata_backends() -> list`
+
+List all registered metadata backends.
+
+**Returns:** List of dicts with keys: `name`, `description`, `required_packages`, `is_builtin`
+
+**Built-in Backends:**
+- `json` - JSON file storage (default)
+- `sqlite` - SQLite database
+- `postgresql` - PostgreSQL database
+- `memory` - In-memory storage
+
+---
+
+### Blob Backend Registration
+
+Register custom blob backends for data storage.
+
+```python
+from cacheness import (
+    register_blob_backend,
+    unregister_blob_backend,
+    get_blob_backend,
+    list_blob_backends,
+    BlobBackend,  # Base class
+    FilesystemBlobBackend,
+    InMemoryBlobBackend,
+)
+```
+
+#### `register_blob_backend(name, backend_class, description=None, required_packages=None)`
+
+Register a custom blob backend.
+
+**Example:**
+```python
+from cacheness import register_blob_backend, BlobBackend
+
+class S3BlobBackend(BlobBackend):
+    def __init__(self, bucket: str, prefix: str = "", **kwargs):
+        import boto3
+        self._s3 = boto3.client("s3")
+        self.bucket = bucket
+        self.prefix = prefix
+    
+    # ... implement BlobBackend methods
+
+register_blob_backend(
+    name="s3",
+    backend_class=S3BlobBackend,
+    description="Amazon S3 blob storage",
+    required_packages=["boto3"],
+)
+```
+
+#### `get_blob_backend(name, **kwargs) -> BlobBackend`
+
+Get a blob backend instance by name.
+
+#### `list_blob_backends() -> list`
+
+List all registered blob backends.
+
+**Built-in Backends:**
+- `filesystem` - Local file storage (default)
+- `memory` - In-memory storage
+
+---
+
+### Using Custom Backends in Configuration
+
+```python
+from cacheness import cacheness, CacheConfig, CacheMetadataConfig, CacheBlobConfig
+
+# Use registered backends by name
+config = CacheConfig(
+    metadata=CacheMetadataConfig(
+        backend="redis",
+        connection_url="redis://localhost:6379/0",
+    ),
+    blob=CacheBlobConfig(
+        backend="s3",
+        bucket="my-cache-bucket",
+    )
+)
+
+cache = cacheness(config=config)
+```
+
+---
+
+## Handler Interface (Legacy)
+
+> **Note:** The `StorageHandler` interface below is the legacy API. For new implementations, use `CacheHandler` as shown in the Extensibility API section above.
 
 ```python
 from cacheness.interfaces import StorageHandler
@@ -908,12 +1128,10 @@ class CustomHandler(StorageHandler):
     
     def save(self, data: Any, file_path: Path, config: CompressionConfig) -> None:
         """Save data to file_path."""
-        # Implementation here
         pass
     
     def load(self, file_path: Path, config: CompressionConfig) -> Any:
         """Load data from file_path."""
-        # Implementation here
         pass
     
     def get_file_extension(self) -> str:

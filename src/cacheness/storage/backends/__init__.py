@@ -8,6 +8,7 @@ Metadata Backends (Phase 2.2):
 - JsonBackend: Simple JSON file storage (no dependencies)
 - SqliteBackend: SQLite database with SQLAlchemy ORM (requires sqlalchemy)
 - MemoryBackend: In-memory storage for testing/ephemeral caches
+- PostgresBackend: PostgreSQL database for distributed caching (requires psycopg2/psycopg)
 
 Blob Storage Backends (Phase 2.3):
 - FilesystemBlobBackend: Local filesystem storage (default)
@@ -28,6 +29,10 @@ Usage:
     
     # In-memory backend
     backend = MemoryBackend()
+    
+    # PostgreSQL backend (requires psycopg2-binary or psycopg)
+    from cacheness.storage.backends import PostgresBackend
+    backend = PostgresBackend(connection_url="postgresql://localhost/cache")
     
     # Using the metadata registry
     from cacheness.storage.backends import (
@@ -77,6 +82,13 @@ try:
 except ImportError:
     _HAS_MEMORY = False
 
+# Conditionally import PostgresBackend
+try:
+    from .postgresql_backend import PostgresBackend
+    _HAS_POSTGRES = True
+except ImportError:
+    _HAS_POSTGRES = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -102,6 +114,10 @@ def _initialize_builtin_backends():
     # In-memory
     if _HAS_MEMORY:
         _metadata_backend_registry["memory"] = InMemoryBackend
+    
+    # PostgreSQL (if psycopg2/psycopg available)
+    if _HAS_POSTGRES:
+        _metadata_backend_registry["postgresql"] = PostgresBackend
 
 
 # Initialize on module load
@@ -235,8 +251,9 @@ def list_metadata_backends() -> list:
         json: JsonBackend (builtin=True)
         sqlite: SqliteBackend (builtin=True)
         memory: InMemoryBackend (builtin=True)
+        postgresql: PostgresBackend (builtin=True)
     """
-    builtin_names = {"json", "sqlite", "memory", "sqlite_memory"}
+    builtin_names = {"json", "sqlite", "memory", "sqlite_memory", "postgresql"}
     
     result = []
     for name, backend_class in _metadata_backend_registry.items():
@@ -294,3 +311,6 @@ if _HAS_SQLITE:
 
 if _HAS_MEMORY:
     __all__.append("InMemoryBackend")
+
+if _HAS_POSTGRES:
+    __all__.append("PostgresBackend")

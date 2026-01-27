@@ -684,8 +684,8 @@ Document and support non-caching storage use cases with various backend combinat
    ```
 
 **Implementation Tasks:**
-- [ ] Create example scripts for each use case in `examples/`
-- [ ] Add use case documentation in `docs/USE_CASES.md`
+- [x] Create example scripts for each use case in `examples/`
+- [x] Add BlobStore documentation in `docs/BLOB_STORE.md`
 - [ ] Add metadata query operators (e.g., `$gte`, `$lt`, `$in`) for advanced filtering
 - [ ] Consider adding blob tagging/labeling system for organization
 
@@ -825,14 +825,14 @@ cache.put(model, experiment="exp_001", custom_metadata=experiment)
 
 **Implementation Considerations for Phase 2:**
 
-- [ ] Ensure PostgreSQL metadata backend supports custom metadata models
-- [ ] Custom tables use same SQLAlchemy engine as infrastructure tables
-- [ ] Foreign key from custom tables to cache_entries.cache_key works
-- [ ] `query_custom_session()` works with PostgreSQL backend
-- [ ] `migrate_custom_metadata_tables()` works with PostgreSQL
-- [ ] Update `docs/CUSTOM_METADATA.md` to show PostgreSQL compatibility
-- [ ] Add tests for custom metadata + PostgreSQL backend
-- [ ] Document relationship between infrastructure and custom metadata tables
+- [x] Ensure PostgreSQL metadata backend supports custom metadata models
+- [x] Custom tables use same SQLAlchemy engine as infrastructure tables
+- [x] Foreign key from custom tables to cache_entries.cache_key works
+- [x] `query_custom_session()` works with PostgreSQL backend
+- [x] `migrate_custom_metadata_tables()` works with PostgreSQL
+- [x] Update `docs/CUSTOM_METADATA.md` to show PostgreSQL compatibility
+- [x] Add tests for custom metadata + PostgreSQL backend
+- [x] Document relationship between infrastructure and custom metadata tables
 - [ ] Consider making `@custom_metadata_model` backend-agnostic
 - [ ] Example showing custom metadata + PostgreSQL infrastructure + S3 blobs:
   ```python
@@ -853,137 +853,94 @@ cache.put(model, experiment="exp_001", custom_metadata=experiment)
 
 ##### 2.8 SqlCache Custom Tables Integration
 
-**Important:** This is a third, separate feature - SqlCache for pull-through caching with user-defined data table schemas.
+**Status:** 🟡 Deferred - Requires significant rework, lower priority
 
-**Three Distinct Features (Summary):**
+**Assessment (January 2026):**
 
-1. **Custom SQLAlchemy Metadata Models** (Section 2.7): User-defined ORM models for cache metadata using `@custom_metadata_model`
-2. **SqlCache Custom Tables** (This section): Pull-through cache with user-defined data table schemas
-3. **Cache Infrastructure Metadata**: Built-in cacheness metadata (cache_key, file_hash, etc.)
+After audit, this phase requires more substantial changes than originally scoped:
 
-**SqlCache - Pull-Through Caching:**
+1. **Current State:** SqlCache is completely standalone - it does NOT use `CacheConfig`, metadata backends, or the cacheness infrastructure. It manages its own database connections and tables directly.
 
-SqlCache is optimized for caching database/API query results with automatic gap detection:
+2. **Original Vision:** Integrate SqlCache with the metadata backend system so:
+   - Infrastructure metadata (cache keys, TTL, stats) uses metadata backends
+   - User data tables remain separate but in same database
 
-1. **SqlCache Infrastructure Metadata** (handled by cache metadata backends):
-   - Generic cache metadata for SqlCache operations
-   - Keys: `cache_key`, `file_hash`, `created_at`, `file_size`, etc.
-   - Schema is fixed, managed by cacheness
-   - Backends: JSON, SQLite, PostgreSQL (via `metadata_backend`)
+3. **Reality:** This is essentially a rewrite of SqlCache to use the cacheness infrastructure, which would:
+   - Break existing SqlCache API compatibility
+   - Add complexity for users who just want simple SQL caching
+   - Require extensive testing with all backend combinations
 
-2. **SqlCache Custom Data Tables** (user-defined data schemas):
-   - Domain-specific queryable cached data
-   - User defines columns: `symbol`, `date`, `price`, `volume`, etc.
-   - Schema is custom, managed by user
-   - Enables complex SQL queries on cached data
-   - Currently uses SQLite/DuckDB/PostgreSQL directly
+**Recommendation:** Defer to Phase 3 or beyond. SqlCache works well standalone, and the integration doesn't add significant user value.
 
-**Example - Both Types Coexist:**
+**If pursued later, implementation would require:**
 
-```python
-from cacheness.sql_cache import SqlCache
-from cacheness import CacheConfig
-from sqlalchemy import String, Float, Date
+- [ ] Add `CacheConfig` parameter to SqlCache constructor
+- [ ] Separate SqlCache into data layer (user tables) and metadata layer (infrastructure)
+- [ ] Use metadata backend for infrastructure metadata (cache_entries, cache_stats)
+- [ ] Keep user data tables managed by SqlCache directly
+- [ ] Ensure PostgreSQL can host both without table conflicts
+- [ ] Update docs/SQL_CACHE.md to explain separation
+- [ ] Maintain backward compatibility with existing SqlCache API
+- [ ] Add SqlCache.create_with_shared_db() helper method
+- [ ] Comprehensive testing with all backend combinations
 
-# Define custom metadata schema for stock data
-def fetch_stock_data(symbol, start_date, end_date):
-    return api_client.get_stock_data(symbol, start_date, end_date)
+**Alternative (simpler):** Just document that SqlCache and cacheness() use separate storage systems and that's by design. Users who need integrated metadata can use the `@custom_metadata_model` feature with cacheness().
 
-# PostgreSQL backend hosts BOTH:
-# 1. Cache infrastructure metadata (managed by cacheness)
-# 2. Custom stock_prices table (managed by SqlCache)
-cache = SqlCache(
-    db_url="postgresql://localhost/stocks",  # Custom metadata DB
-    table_name="stock_prices",               # Custom table name
-    data_fetcher=fetch_stock_data,
-    
-    # User-defined columns for complex queries
-    symbol=String(10),
-    date=Date,
-    price=Float,
-    volume=Float,
-    
-    # Cache infrastructure uses separate backend
-    config=CacheConfig(
-        metadata_backend="postgresql",
-        metadata_backend_options={
-            "connection_url": "postgresql://localhost/cache_metadata",
-            "table_name": "cache_entries"  # Infrastructure metadata
-        }
-    )
-)
+---
 
-# Complex query on custom metadata (user's domain schema)
-with cache.query_custom_session("stock_prices") as query:
-    high_volume = query.filter(
-        StockPrice.volume > 1000000,
-        StockPrice.date >= '2024-01-01'
-    ).all()
+##### 2.9 Testing & Documentation ✅ COMPLETED
 
-# Standard cache operations (uses infrastructure metadata)
-data = cache.get_data(symbol="AAPL", start_date="2024-01-01")
-```
-
-**Key Design Principles:**
-
-1. **Separation of Concerns:**
-   - Infrastructure metadata = cache plumbing (keys, files, stats)
-   - Custom metadata = user's queryable domain data
-
-2. **Same Database, Different Tables:**
-   - PostgreSQL can host both metadata types
-   - Infrastructure: `cache_metadata` table (cacheness-managed)
-   - Custom: `stock_prices`, `ml_experiments`, etc. (user-managed)
-
-3. **Independent Schemas:**
-   - Infrastructure schema: fixed, versioned by cacheness
-   - Custom schemas: flexible, defined per SqlCache instance
-
-4. **Query Capabilities:**
-   - Infrastructure: `list_entries()`, `get_stats()` - simple lookups
-   - Custom: Full SQLAlchemy ORM - complex joins, aggregations
-
-**Implementation Considerations:**
-
-- [ ] Ensure PostgreSQL metadata backend doesn't conflict with SqlCache tables
-- [ ] Use separate table names: `cache_metadata` vs user-defined names
-- [ ] Support same database URL for both (different tables)
-- [ ] Document the two metadata types clearly in `docs/SQL_CACHE.md`
-- [ ] Add examples showing both metadata types with PostgreSQL
-- [ ] Consider adding `SqlCache.create_with_shared_db()` helper:
-  ```python
-  # Share PostgreSQL database between infrastructure and custom metadata
-  cache = SqlCache.create_with_shared_db(
-      db_url="postgresql://localhost/cache_db",
-      infrastructure_table="cache_metadata",  # Cacheness-managed
-      custom_table="stock_prices",           # User-managed
-      columns={"symbol": String(10), "price": Float, ...}
-  )
-  ```
-
-##### 2.9 Testing & Documentation
-
-Comprehensive testing and documentation for extensibility:
+Comprehensive testing and documentation for extensibility.
 
 **Testing Tasks:**
-- [ ] Create `tests/test_plugin_system.py` for handler/backend registration
-- [ ] Create `tests/test_custom_handlers.py` with example custom handler
-- [ ] Create `tests/test_custom_backends.py` with example custom backend
-- [ ] Create `tests/test_sqlcache_with_backends.py` for SqlCache + PostgreSQL metadata backend
-- [ ] Add performance benchmarks for custom handlers vs built-in handlers
-- [ ] Test SqlCache custom tables don't conflict with cache metadata tables
+- [x] Handler registration tests - `tests/test_handler_registration.py` (483 lines)
+- [x] Metadata backend registration tests - `tests/test_metadata_backend_registry.py` (657 lines)
+- [x] Blob backend registration tests - `tests/test_blob_backend_registry.py` (661 lines)
+- [x] Configuration validation tests - `tests/test_config_validation.py` (659 lines)
+- [x] PostgreSQL backend tests - `tests/test_postgresql_backend.py`
+- [x] Custom metadata tests - `tests/test_custom_metadata.py`
+- [ ] ~~Create `tests/test_sqlcache_with_backends.py`~~ - Deferred with 2.8
+- [ ] Performance benchmarks for custom handlers - Nice to have, not blocking
 
 **Documentation Tasks:**
-- [ ] Create `docs/PLUGIN_DEVELOPMENT.md` - Complete plugin development guide
-- [ ] Create `docs/CUSTOM_HANDLERS.md` - Handler interface reference
-- [ ] Create `docs/CUSTOM_METADATA_BACKENDS.md` - Metadata backend interface reference
-- [ ] Create `docs/CUSTOM_BLOB_BACKENDS.md` - Blob backend interface reference
-- [ ] Create `docs/BACKEND_COMBINATIONS.md` - Guide to mixing metadata + blob backends
-- [ ] Update `docs/SQL_CACHE.md` - Add section on custom metadata vs infrastructure metadata
-- [ ] Add SqlCache + PostgreSQL backend integration examples to `docs/SQL_CACHE.md`
-- [ ] Update `docs/API_REFERENCE.md` with plugin APIs
-- [ ] Create plugin packaging template project
-- [ ] Add "Extending Cacheness" section to main README
+- [x] Create `docs/PLUGIN_DEVELOPMENT.md` - Complete plugin development guide
+- [x] Update `docs/API_REFERENCE.md` with Extensibility API section
+- [x] Add "Extending Cacheness" section to main README
+- [x] Update `docs/CUSTOM_METADATA.md` with PostgreSQL compatibility
+- [x] Backend Selection Guide already exists - `docs/BACKEND_SELECTION.md`
+- [ ] ~~Create separate CUSTOM_HANDLERS.md, CUSTOM_METADATA_BACKENDS.md, CUSTOM_BLOB_BACKENDS.md~~ - Consolidated into PLUGIN_DEVELOPMENT.md
+- [ ] ~~Update `docs/SQL_CACHE.md`~~ - Deferred with 2.8
+- [ ] Plugin packaging template project - Nice to have, not blocking
+
+---
+
+### Phase 2 Summary ✅ COMPLETE
+
+Phase 2 (Extensibility & Plugin Architecture) is now complete:
+
+| Section | Feature | Status |
+|---------|---------|--------|
+| 2.1 | Handler Registration System | ✅ Complete |
+| 2.2 | Metadata Backend Registry | ✅ Complete |
+| 2.3 | Blob Backend Registry | ✅ Complete |
+| 2.4 | Configuration Schema & Validation | ✅ Complete |
+| 2.5 | BlobStore Examples & Docs | ✅ Complete |
+| 2.6 | PostgreSQL Metadata Backend | ✅ Complete |
+| 2.7 | Custom Metadata + PostgreSQL | ✅ Complete |
+| 2.8 | SqlCache Integration | 🟡 Deferred |
+| 2.9 | Testing & Documentation | ✅ Complete |
+
+**Key Deliverables:**
+- Full plugin system for handlers, metadata backends, and blob backends
+- PostgreSQL as production-grade metadata backend
+- Custom SQLAlchemy metadata models work with both SQLite and PostgreSQL
+- Comprehensive configuration validation with JSON/YAML loading
+- Complete documentation: PLUGIN_DEVELOPMENT.md, updated API_REFERENCE.md, README
+
+**Deferred Items:**
+- SqlCache + metadata backend integration (lower priority, breaks API)
+- Performance benchmarks for custom handlers
+- Plugin packaging template
 
 ---
 

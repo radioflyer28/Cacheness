@@ -430,8 +430,22 @@ def migrate_custom_metadata_tables(engine=None):
                 logger.warning("Could not access cache engine for migration")
                 return
 
-        # Create all tables (safe to call multiple times)
-        Base.metadata.create_all(engine)
+        # Create only the custom metadata tables and link table
+        # This avoids conflicts with cache_entries/cache_stats tables
+        # which may be managed by different backends (SQLite vs PostgreSQL)
+        tables_to_create = []
+        
+        # Add the link table
+        if CacheMetadataLink.__table__ is not None:
+            tables_to_create.append(CacheMetadataLink.__table__)
+        
+        # Add all registered custom metadata model tables
+        for schema_name, model_class in _custom_metadata_registry.items():
+            if hasattr(model_class, "__table__") and model_class.__table__ is not None:
+                tables_to_create.append(model_class.__table__)
+        
+        # Create only the specified tables (safe to call multiple times)
+        Base.metadata.create_all(engine, tables=tables_to_create)
 
         logger.info(
             f"✅ Custom metadata tables migrated for {len(_custom_metadata_registry)} schemas"
