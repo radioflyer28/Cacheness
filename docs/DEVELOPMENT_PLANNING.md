@@ -206,6 +206,16 @@ cache = cacheness()
 cache.put(data, model="xgboost", version="1.0")
 ```
 
+**Status:** ✅ Phase 1 Complete (2026-01-27)
+
+The storage subpackage has been created with:
+- `cacheness/storage/` - Main storage layer package
+- `cacheness/storage/backends/` - Metadata backend implementations (JSON, SQLite)
+- `cacheness/storage/handlers/` - Type-aware serialization handlers
+- `cacheness/storage/compression.py` - Compression utilities
+- `cacheness/storage/security.py` - HMAC signing
+- `cacheness/storage/blob_store.py` - New `BlobStore` class for direct storage access
+
 #### Phase 2: Stabilize Storage API (Medium Risk)
 1. Document storage layer as semi-public API
 2. Gather feedback on interface design
@@ -627,4 +637,5 @@ if result.signature_valid == False:
 | 2026-01-23 | Fixed: Decorator cache never closed (Med #5) - Added atexit cleanup | Code Review |
 | 2026-01-23 | Fixed: Custom signed fields validation (Low #6) - Added field validation | Code Review |
 | 2026-01-23 | Fixed: Inconsistent exception handling (Low #7) - Improved error types | Code Review |
+| 2026-01-27 | Architecture: Phase 1 complete - Created `storage/` subpackage with `BlobStore` API | Code Review |
 

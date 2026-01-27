@@ -59,6 +59,14 @@ __version__ = "0.3.14"
 __author__ = "radioflyer28"
 __email__ = "akgithub.2drwc@aleeas.com"
 
+# Import storage layer components for convenience
+# These are also available via `from cacheness.storage import ...`
+try:
+    from .storage import BlobStore
+    _has_blob_store = True
+except ImportError:
+    _has_blob_store = False
+
 __all__ = [
     # Core classes
     "cacheness",
@@ -76,6 +84,10 @@ __all__ = [
     # Version info
     "__version__",
 ]
+
+# Add BlobStore if available (new storage layer API)
+if _has_blob_store:
+    __all__.append("BlobStore")
 
 # Add metadata backends to exports if available
 if _has_metadata_backends:
