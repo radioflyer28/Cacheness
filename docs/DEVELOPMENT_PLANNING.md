@@ -914,9 +914,9 @@ Comprehensive testing and documentation for extensibility.
 
 ---
 
-### Phase 2 Summary ✅ COMPLETE
+### Phase 2 Summary
 
-Phase 2 (Extensibility & Plugin Architecture) is now complete:
+Phase 2 (Extensibility & Plugin Architecture) status:
 
 | Section | Feature | Status |
 |---------|---------|--------|
@@ -929,8 +929,9 @@ Phase 2 (Extensibility & Plugin Architecture) is now complete:
 | 2.7 | Custom Metadata + PostgreSQL | ✅ Complete |
 | 2.8 | SqlCache Integration | 🟡 Deferred |
 | 2.9 | Testing & Documentation | ✅ Complete |
+| 2.10 | S3 Blob Backend | 🚧 In Progress |
 
-**Key Deliverables:**
+**Key Deliverables (2.1-2.9):**
 - Full plugin system for handlers, metadata backends, and blob backends
 - PostgreSQL as production-grade metadata backend
 - Custom SQLAlchemy metadata models work with both SQLite and PostgreSQL
@@ -941,6 +942,276 @@ Phase 2 (Extensibility & Plugin Architecture) is now complete:
 - SqlCache + metadata backend integration (lower priority, breaks API)
 - Performance benchmarks for custom handlers
 - Plugin packaging template
+
+---
+
+##### 2.10 S3 Blob Backend
+
+**Status:** 🚧 In Progress (Core Implementation Complete)
+
+**Purpose:** Cloud-native blob storage using Amazon S3 or S3-compatible services (MinIO, etc.)
+
+**Use Case:** Production distributed caching environments requiring:
+- Shared blob storage across multiple machines/workers
+- Durability and redundancy of cloud storage
+- Scalable storage without local disk constraints
+- MinIO compatibility for on-premises S3-compatible storage
+
+**Design Principles:**
+
+1. **S3 ETag Integration:**
+   - S3 ETags are stored as separate metadata field (`s3_etag`)
+   - ETags are NOT the same as cacheness file/content hash
+   - Content hash is computed client-side before upload for integrity
+   - ETag is server-side (S3's MD5 or multipart hash) for S3 consistency checks
+   - Both are stored: `file_hash` (cacheness) + `s3_etag` (S3)
+
+2. **Backend Compatibility Validation:**
+   - **Allowed:** PostgreSQL metadata + S3 blobs (distributed)
+   - **Allowed:** Memory metadata + Memory blobs (testing)
+   - **NOT Allowed:** SQLite metadata + S3 blobs (local + remote mismatch)
+   - **NOT Allowed:** JSON metadata + S3 blobs (local + remote mismatch)
+   - Configuration validation enforces these rules at initialization
+
+3. **boto3 and MinIO Compatibility:**
+   - Uses boto3 as the S3 client library
+   - Supports custom `endpoint_url` for MinIO/S3-compatible services
+   - Standard AWS credential chain (env vars, IAM roles, credential files)
+
+4. **Git-Style Directory Sharding:**
+   - Avoids filesystem/S3 performance issues from too many files in one directory
+   - Uses leading characters of `file_hash` as subdirectory (like Git's `.git/objects/`)
+   - Configurable `shard_chars` option (default: 2, matching Git)
+   - Full hash is always the filename for easy lookup
+   - Example: hash `abc123def456...` → `ab/abc123def456.blob`
+   - Works with both S3 and Filesystem blob backends
+   - S3 benefits: faster LIST operations, better partitioning
+   - Filesystem benefits: avoids inode limits, better fs performance
+
+**Configuration Example:**
+
+```python
+from cacheness import cacheness, CacheConfig
+from cacheness.config import CacheMetadataConfig, CacheBlobConfig
+
+# Production: PostgreSQL + S3
+config = CacheConfig(
+    metadata=CacheMetadataConfig(
+        backend="postgresql",
+        connection_url="postgresql://user:pass@db.example.com/cache",
+    ),
+    blob=CacheBlobConfig(
+        backend="s3",
+        bucket="my-cache-bucket",
+        prefix="cache/v1/",  # Optional key prefix
+        region="us-east-1",
+        shard_chars=2,  # Git-style: ab/abc123... (default=2)
+        # For MinIO or S3-compatible:
+        # endpoint_url="http://minio.local:9000",
+        # use_ssl=False,
+    )
+)
+
+cache = cacheness(config=config)
+
+# Store data - blob goes to S3, metadata to PostgreSQL
+cache.put(model, experiment="exp_001")
+
+# Metadata includes both hashes:
+# {
+#     "cache_key": "abc123...",
+#     "file_hash": "xxhash_content_hash",  # Cacheness-computed
+#     "s3_etag": "\"d41d8cd98f00b204...\"",  # S3-provided
+#     "s3_bucket": "my-cache-bucket",
+#     "s3_key": "cache/v1/ab/abc123def456.blob",  # Sharded path
+#     ...
+# }
+```
+
+**MinIO Example:**
+
+```python
+# On-premises MinIO deployment
+config = CacheConfig(
+    metadata=CacheMetadataConfig(
+        backend="postgresql",
+        connection_url="postgresql://localhost/cache",
+    ),
+    blob=CacheBlobConfig(
+        backend="s3",
+        bucket="local-cache",
+        endpoint_url="http://minio.internal:9000",
+        use_ssl=False,
+        access_key="minioadmin",  # Or use env vars
+        secret_key="minioadmin",
+    )
+)
+```
+
+**Backend Compatibility Matrix:**
+
+| Metadata Backend | Blob Backend | Allowed | Reason |
+|------------------|--------------|---------|--------|
+| PostgreSQL | S3 | ✅ Yes | Both distributed/remote |
+| PostgreSQL | Filesystem | ✅ Yes | Shared metadata, local blobs |
+| SQLite | Filesystem | ✅ Yes | Both local |
+| SQLite | S3 | ❌ No | Local metadata + remote blobs |
+| JSON | S3 | ❌ No | Local metadata + remote blobs |
+| Memory | Memory | ✅ Yes | Both ephemeral (testing) |
+| Memory | S3 | ❌ No | Ephemeral metadata + persistent blobs |
+
+**Implementation Tasks:**
+
+- [x] Create `S3BlobBackend` class implementing `BlobBackend` interface
+- [x] Add boto3 as optional dependency (`pip install cacheness[s3]`)
+- [x] Implement S3 operations: put, get, delete, exists, list_keys
+- [ ] Handle multipart uploads for large blobs (>5GB)
+- [x] Store and track S3 ETags in metadata
+- [ ] Add `s3_etag` field to metadata schema
+- [x] Implement backend compatibility validation in `CacheConfig`
+- [x] Add validation error for incompatible backend combinations
+- [x] Support custom endpoint_url for MinIO compatibility
+- [x] Support AWS credential chain (env vars, IAM, credential files)
+- [x] Handle S3 errors gracefully (network, permissions, bucket not found)
+- [ ] Add retry logic with exponential backoff for transient failures
+- [x] Implement Git-style directory sharding with configurable `shard_chars`
+- [x] Add `shard_chars` config option to `CacheBlobConfig` (default: 2)
+- [x] Apply sharding to both S3 and Filesystem blob backends
+- [x] Create `tests/test_s3_blob_backend.py` with moto mocking
+- [x] Add tests for directory sharding (0, 1, 2, 3+ chars)
+- [ ] Create integration tests for MinIO (optional, CI environment)
+- [ ] Update `docs/PLUGIN_DEVELOPMENT.md` with S3 backend example
+- [ ] Create `docs/S3_BACKEND.md` with setup and configuration guide
+- [ ] Add S3 example to `examples/` directory
+
+**S3BlobBackend Interface:**
+
+```python
+class S3BlobBackend(BlobBackend):
+    """S3-compatible blob storage backend."""
+    
+    def __init__(
+        self,
+        bucket: str,
+        prefix: str = "",
+        region: str = "us-east-1",
+        endpoint_url: Optional[str] = None,  # For MinIO
+        use_ssl: bool = True,
+        access_key: Optional[str] = None,  # Falls back to boto3 credential chain
+        secret_key: Optional[str] = None,
+        shard_chars: int = 2,  # Git-style: use first N chars as subdirectory
+        **kwargs
+    ):
+        ...
+    
+    def _get_sharded_key(self, file_hash: str) -> str:
+        """
+        Get the sharded S3 key for a file hash.
+        
+        Example (shard_chars=2):
+            file_hash = "abc123def456..."
+            returns: "ab/abc123def456.blob"
+        
+        Example (shard_chars=0, disabled):
+            returns: "abc123def456.blob"
+        """
+        if self.shard_chars > 0:
+            shard_dir = file_hash[:self.shard_chars]
+            return f"{self.prefix}{shard_dir}/{file_hash}.blob"
+        return f"{self.prefix}{file_hash}.blob"
+    
+    def put(self, key: str, data: bytes) -> dict:
+        """
+        Upload blob to S3.
+        
+        Returns:
+            dict with 's3_key', 's3_etag', 's3_bucket', 's3_version_id' (if versioned)
+        """
+        ...
+    
+    def get(self, key: str) -> Optional[bytes]:
+        """Download blob from S3."""
+        ...
+    
+    def delete(self, key: str) -> bool:
+        """Delete blob from S3."""
+        ...
+    
+    def exists(self, key: str) -> bool:
+        """Check if blob exists in S3."""
+        ...
+    
+    def list_keys(self, prefix: Optional[str] = None) -> List[str]:
+        """List blob keys in S3 bucket."""
+        ...
+    
+    def get_etag(self, key: str) -> Optional[str]:
+        """Get S3 ETag for a blob (HEAD request)."""
+        ...
+    
+    def verify_etag(self, key: str, expected_etag: str) -> bool:
+        """Verify blob integrity via ETag comparison."""
+        ...
+```
+
+**Directory Sharding:**
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     GIT-STYLE DIRECTORY SHARDING                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  file_hash: "abc123def456789..."                                │
+│                                                                  │
+│  shard_chars=0 (disabled):     shard_chars=2 (default/Git):     │
+│  ─────────────────────────     ────────────────────────────     │
+│  prefix/abc123def456.blob      prefix/ab/abc123def456.blob      │
+│                                                                  │
+│  shard_chars=3:                shard_chars=4:                   │
+│  ────────────────              ────────────────                 │
+│  prefix/abc/abc123def456.blob  prefix/abc1/abc123def456.blob    │
+│                                                                  │
+│  Benefits:                                                       │
+│  • S3: Faster LIST operations, better request distribution      │
+│  • Filesystem: Avoids ext4 ~10K file/dir limit, better perf     │
+│  • With shard_chars=2: max 256 dirs (00-ff for hex hashes)      │
+│  • Matches Git's proven .git/objects/ organization              │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**ETag vs Content Hash:**
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     INTEGRITY VERIFICATION                       │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  file_hash (cacheness)          s3_etag (S3)                    │
+│  ─────────────────────          ────────────                    │
+│  • Computed client-side         • Computed server-side          │
+│  • xxhash of content            • MD5 (single upload)           │
+│  • Consistent across backends   • Multipart hash (>5GB)         │
+│  • Used for cache key gen       • Used for S3 consistency       │
+│  • Stored in metadata           • Stored in metadata            │
+│                                                                  │
+│  Use Cases:                     Use Cases:                       │
+│  • Deduplication                • Verify upload success          │
+│  • Cache hit detection          • Conditional GET/PUT            │
+│  • Cross-backend integrity      • S3 versioning/replication     │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Dependencies:**
+
+```toml
+# pyproject.toml
+[project.optional-dependencies]
+s3 = ["boto3>=1.26.0"]
+recommended = ["sqlalchemy>=2.0", "orjson", "blosc2", "psycopg[binary]>=3.1"]
+cloud = ["boto3>=1.26.0", "psycopg[binary]>=3.1"]  # S3 + PostgreSQL
+```
 
 ---
 

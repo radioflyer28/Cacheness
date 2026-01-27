@@ -281,6 +281,13 @@ from .blob_backends import (
     list_blob_backends,
 )
 
+# Conditionally import S3BlobBackend
+try:
+    from .s3_backend import S3BlobBackend, BOTO3_AVAILABLE
+    _HAS_S3 = BOTO3_AVAILABLE
+except ImportError:
+    _HAS_S3 = False
+
 
 __all__ = [
     # Metadata Backend - Base interface
@@ -314,3 +321,6 @@ if _HAS_MEMORY:
 
 if _HAS_POSTGRES:
     __all__.append("PostgresBackend")
+
+if _HAS_S3:
+    __all__.append("S3BlobBackend")

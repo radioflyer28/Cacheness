@@ -128,6 +128,11 @@ class CacheBlobConfig:
     use_atomic_writes: bool = True  # Use temp file + rename for atomic writes
     create_subdirectories: bool = True  # Create subdirectories based on blob ID
     
+    # Git-style directory sharding (applies to filesystem, S3, and compatible backends)
+    # Uses leading characters of blob ID as subdirectory, like Git's .git/objects/
+    # Example with shard_chars=2: "abc123..." -> "ab/abc123..."
+    shard_chars: int = 2  # Number of leading chars for directory sharding (0 to disable)
+    
     # Streaming options
     stream_threshold_bytes: int = 10 * 1024 * 1024  # 10MB - use streaming for larger blobs
     
@@ -140,6 +145,12 @@ class CacheBlobConfig:
         
         if self.stream_threshold_bytes < 0:
             raise ValueError("stream_threshold_bytes must be non-negative")
+        
+        if self.shard_chars < 0:
+            raise ValueError("shard_chars must be non-negative")
+        
+        if self.shard_chars > 8:
+            raise ValueError("shard_chars must be <= 8 (excessive sharding not recommended)")
             
         logger.debug(f"Blob backend configured: {self.blob_backend}")
         if self.blob_backend_options:
@@ -530,7 +541,47 @@ class CacheConfig:
 
     def __post_init__(self):
         """Validate overall configuration consistency."""
+        # Validate backend compatibility
+        self._validate_backend_compatibility()
+        
         logger.info("Cache configuration initialized with focused sub-configurations")
+    
+    def _validate_backend_compatibility(self):
+        """
+        Validate that metadata and blob backend combinations are compatible.
+        
+        Rules:
+        - Local metadata (sqlite, json) should not be combined with remote blobs (s3)
+        - Memory metadata should not be combined with persistent remote blobs
+        - This prevents inconsistent state where metadata is lost but blobs remain
+        
+        Raises:
+            ValueError: If backend combination is incompatible
+        """
+        metadata_backend = self.metadata.metadata_backend
+        blob_backend = self.blob.blob_backend
+        
+        # Define backend categories
+        local_metadata_backends = {"sqlite", "sqlite_memory", "json", "auto"}
+        remote_blob_backends = {"s3", "azure", "gcs"}  # S3 and future cloud backends
+        ephemeral_metadata_backends = {"memory"}
+        persistent_blob_backends = {"filesystem", "s3", "azure", "gcs"}
+        
+        # Check for incompatible combinations
+        if metadata_backend in local_metadata_backends and blob_backend in remote_blob_backends:
+            raise ValueError(
+                f"Incompatible backend combination: local metadata backend '{metadata_backend}' "
+                f"cannot be used with remote blob backend '{blob_backend}'. "
+                f"Use 'postgresql' metadata backend for remote blob storage to ensure "
+                f"distributed consistency."
+            )
+        
+        if metadata_backend in ephemeral_metadata_backends and blob_backend in remote_blob_backends:
+            raise ValueError(
+                f"Incompatible backend combination: ephemeral metadata backend '{metadata_backend}' "
+                f"should not be used with remote blob backend '{blob_backend}'. "
+                f"Memory metadata would be lost on restart while blobs persist in '{blob_backend}'."
+            )
 
     # Add property accessors for backwards compatibility
     @property

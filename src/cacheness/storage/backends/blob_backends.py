@@ -207,20 +207,27 @@ class FilesystemBlobBackend(BlobBackend):
     This is the default backend that stores blobs as files in a directory.
     Blob paths are absolute filesystem paths.
     
+    Supports Git-style directory sharding to avoid overloading directories
+    with too many files. With shard_chars=2 (default), blob IDs are stored as:
+        "abc123..." -> "ab/abc123..."
+    
     Attributes:
         base_dir: Root directory for blob storage
+        shard_chars: Number of leading characters for directory sharding (0 to disable)
     """
 
-    def __init__(self, base_dir: Union[str, Path]):
+    def __init__(self, base_dir: Union[str, Path], shard_chars: int = 2):
         """
         Initialize filesystem blob backend.
         
         Args:
             base_dir: Directory where blobs will be stored
+            shard_chars: Number of leading chars for Git-style sharding (default: 2)
         """
         self.base_dir = Path(base_dir)
+        self.shard_chars = shard_chars
         self.base_dir.mkdir(parents=True, exist_ok=True)
-        logger.debug(f"FilesystemBlobBackend initialized at {self.base_dir}")
+        logger.debug(f"FilesystemBlobBackend initialized at {self.base_dir} (shard_chars={shard_chars})")
 
     def write_blob(self, blob_id: str, data: bytes) -> str:
         """Write blob to filesystem."""
@@ -297,9 +304,23 @@ class FilesystemBlobBackend(BlobBackend):
         return -1
 
     def _get_blob_path(self, blob_id: str) -> Path:
-        """Convert blob ID to filesystem path."""
+        """
+        Convert blob ID to filesystem path with Git-style directory sharding.
+        
+        With shard_chars=2 (default):
+            "abc123def456" -> base_dir/ab/abc123def456
+        
+        With shard_chars=0 (disabled):
+            "abc123def456" -> base_dir/abc123def456
+        """
         # Sanitize blob_id to prevent path traversal
         safe_id = blob_id.replace("..", "__").replace("/", os.sep).replace("\\", os.sep)
+        
+        # Apply Git-style sharding if enabled
+        if self.shard_chars > 0 and len(safe_id) >= self.shard_chars:
+            shard_dir = safe_id[:self.shard_chars]
+            return self.base_dir / shard_dir / safe_id
+        
         return self.base_dir / safe_id
 
 
