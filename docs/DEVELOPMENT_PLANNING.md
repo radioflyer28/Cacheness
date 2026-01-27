@@ -1,6 +1,24 @@
 # Development Planning
 
-This document tracks potential bugs, issues, and design improvements identified during code review. Items are prioritized by severity and impact.
+This document tracks the architectural evolution and future development roadmap for Cacheness.
+
+## 📋 Document Navigation
+
+**Quick Links:**
+- [Phase 1: Storage Layer Separation](#phase-1-storage-layer-separation-low-risk) (✅ Complete)
+- [Phase 2: Extensibility & Plugins](#phase-2-plugin-architecture--extensibility-medium-risk) (🚧 In Planning)
+- [Phase 2 Implementation Roadmap](#recommendations-for-phase-2-implementation-order) (Start here for what's next!)
+- [Bug Tracking](#-bug-tracking) (Historical - most fixed)
+- [Feasibility Review](#phase-2-feasibility-review) (Technical analysis)
+
+## Document Overview
+
+- **Completed Work**: Phase 1 storage layer refactoring (✅ Complete Jan 2026)
+- **Active Planning**: Phase 2 extensibility features (handlers, metadata backends, blob backends) - 9-12 month effort
+- **Bug Tracking**: Issues identified during code review (most ✅ Fixed)
+- **Design Decisions**: Manual registration over auto-discovery plugins
+
+**For New Contributors**: Jump to [Phase 2 Implementation Roadmap](#recommendations-for-phase-2-implementation-order) to see what's planned next.
 
 ---
 
@@ -185,7 +203,9 @@ For enterprise/team use cases, the blob storage could become a service:
 
 ### Recommended Migration Path
 
-#### Phase 1: Internal Reorganization (Low Risk)
+<a id="phase-1-storage-layer-separation-low-risk"></a>
+#### Phase 1: Storage Layer Separation (Low Risk)
+
 1. Create `storage/` sub-package with clean interfaces
 2. Move handlers, backends, compression into storage
 3. Update imports (maintain backward compatibility in `__init__.py`)
@@ -216,14 +236,756 @@ The storage subpackage has been created with:
 - `cacheness/storage/security.py` - HMAC signing
 - `cacheness/storage/blob_store.py` - New `BlobStore` class for direct storage access
 
-#### Phase 2: Stabilize Storage API (Medium Risk)
-1. Document storage layer as semi-public API
-2. Gather feedback on interface design
-3. Add storage-specific tests
-4. Consider use cases beyond caching:
-   - ML model versioning
-   - Artifact storage
-   - Data pipeline checkpoints
+<a id="phase-2-plugin-architecture--extensibility-medium-risk"></a>
+#### Phase 2: Plugin Architecture & Extensibility (Medium Risk)
+
+**Goal:** Enable developers to add custom type handlers, metadata backends, and blob storage backends without modifying core library code.
+
+**Key Architectural Insight:** Separate metadata storage (queryable cache index) from blob storage (actual cached data). These are orthogonal concerns that should have independent plugin systems.
+
+**Three Existing Metadata Features to Preserve:**
+
+1. **Cache Infrastructure Metadata** - Built-in cacheness metadata (cache_key, file_hash, created_at, etc.)
+2. **Custom SQLAlchemy Metadata** - User-defined ORM models via `@custom_metadata_model` decorator (Section 2.7)
+3. **SqlCache Custom Tables** - Pull-through cache with user-defined data schemas (Section 2.8)
+
+**Status:** 🚧 In Planning
+
+**Design Decision: Manual Registration Over Auto-Discovery**
+
+After evaluating both plugin approaches, we've decided to use **manual registration** rather than setuptools entry point auto-discovery:
+
+**Chosen Approach (Manual Registration):**
+```python
+# Users explicitly register handlers/backends
+from cacheness import register_handler, register_blob_backend
+from my_package import MyCustomHandler, MyS3Backend
+
+register_handler("parquet", MyCustomHandler)
+register_blob_backend("s3", MyS3Backend)
+```
+
+**Deferred Approach (Auto-Discovery via Entry Points):**
+```python
+# Auto-loads from installed packages - deferred to future if needed
+# [project.entry-points."cacheness.handlers"]
+# parquet = "my_package:MyCustomHandler"
+```
+
+**Rationale:**
+- **Simplicity:** Manual registration is straightforward; no entry point scanning overhead
+- **Explicit control:** No "magic" auto-discovery; clear registration trail
+- **Sufficient for now:** Most users will write handlers for internal use, not distribute as packages
+- **Ecosystem readiness:** Wait for community demand before adding plugin infrastructure
+- **Easy migration:** Registration API can later support entry points without breaking changes
+
+**If future usage warrants a plugin system:**
+- Implement entry point discovery as optional feature
+- Keep manual registration as primary API
+- Add plugin security, versioning, marketplace features
+
+**Planned Features:**
+
+##### 2.1 Handler Registration System
+
+Allow external packages to register custom type handlers:
+
+```python
+# User's custom package: myproject/custom_handlers.py
+from cacheness.interfaces import CacheHandler
+from cacheness.storage import HandlerRegistry
+
+class MyCustomDataTypeHandler(CacheHandler):
+    """Handler for proprietary data format."""
+    
+    def can_handle(self, data: Any) -> bool:
+        return isinstance(data, MyCustomDataType)
+    
+    def put(self, data: Any, file_path: Path, config: Any) -> Dict[str, Any]:
+        # Custom serialization logic
+        ...
+    
+    def get(self, file_path: Path, metadata: Dict[str, Any]) -> Any:
+        # Custom deserialization logic
+        ...
+    
+    def get_file_extension(self, config: Any) -> str:
+        return ".custom"
+    
+    @property
+    def data_type(self) -> str:
+        return "my_custom_type"
+
+# Register handler programmatically
+from cacheness import cacheness
+
+cache = cacheness()
+cache.handler_registry.register_handler(MyCustomDataTypeHandler(), priority=0)
+
+# Or via configuration
+from cacheness import CacheConfig, HandlerConfig
+
+config = CacheConfig(
+    handlers=HandlerConfig(
+        custom_handlers=[MyCustomDataTypeHandler],
+        handler_priority=["my_custom_type", "pandas_dataframes", "numpy_arrays", "object_pickle"]
+    )
+)
+cache = cacheness(config)
+```
+
+**Implementation Tasks:**
+- [ ] Add `register_handler(handler, priority=None)` method to HandlerRegistry
+- [ ] Add `unregister_handler(handler_name)` method to HandlerRegistry
+- [ ] Add `list_handlers()` method to show registered handlers and priority order
+- [ ] Support handler instantiation from class references in config
+- [ ] Add validation for custom handlers (must implement required methods)
+- [ ] Create handler plugin example in `examples/custom_handler_plugin.py`
+- [ ] Document handler interface contract in `docs/CUSTOM_HANDLERS.md`
+
+##### 2.2 Metadata Backend Plugin System
+
+Allow external packages to register custom metadata backends (for cache index/queries):
+
+```python
+# User's custom package: myproject/custom_backends.py
+from cacheness.storage.backends.base import MetadataBackend
+
+class PostgresBackend(MetadataBackend):
+    """PostgreSQL metadata backend for distributed caching."""
+    
+    def __init__(self, connection_url: str):
+        self.engine = create_engine(connection_url)
+        # Setup tables, etc.
+    
+    def load_metadata(self) -> Dict[str, Any]:
+        # Load from PostgreSQL
+        ...
+    
+    def save_metadata(self, metadata: Dict[str, Any]):
+        # Save to PostgreSQL
+        ...
+    
+    # ... implement other required methods
+
+# Register backend programmatically
+from cacheness import cacheness
+from cacheness.storage.backends import register_backend
+
+register_backend("postgresql", PostgresBackend)
+
+# Use in cache creation
+cache = cacheness(config=CacheConfig(
+    metadata_backend="postgresql",
+    backend_options={"connection_url": "postgresql://user:pass@host/db"}
+))
+
+# Or pass instance directly
+postgres_backend = PostgresBackend("postgresql://...")
+cache = cacheness(metadata_backend=postgres_backend)
+```
+
+**Implementation Tasks:**
+- [ ] Create metadata backend registry system in `storage/backends/__init__.py`
+- [ ] Add `register_metadata_backend(name, backend_class)` function
+- [ ] Add `get_metadata_backend(name, **options)` factory function
+- [ ] Support `backend_options` in CacheConfig for backend-specific parameters
+- [ ] Add validation for custom backends (must implement MetadataBackend interface)
+- [ ] Create PostgreSQL metadata backend as first external backend example
+- [ ] Document metadata backend interface in `docs/CUSTOM_METADATA_BACKENDS.md`
+
+##### 2.3 Blob Storage Backend Registry System
+
+**Current State:** Blob storage is hardcoded to filesystem (`cache_dir` parameter). All cached data files are stored locally.
+
+**Goal:** Abstract blob storage to support cloud storage backends while keeping metadata backends independent.
+
+**Architecture:**
+
+```python
+# Separate concerns: Metadata vs Blob Storage
+┌─────────────────────────────────────┐
+│     Metadata Backend (Index)        │
+│  - JSON (local file)                │
+│  - SQLite (local database)          │
+│  - PostgreSQL (distributed)         │
+│  → Stores: cache keys, metadata,   │
+│    file paths, statistics           │
+└─────────────────────────────────────┘
+              ↕
+       (references)
+              ↕
+┌─────────────────────────────────────┐
+│     Blob Storage Backend (Data)     │
+│  - Filesystem (local directory)     │
+│  - S3 (cloud storage)               │
+│  - Azure Blob (cloud storage)       │
+│  - GCS (cloud storage)              │
+│  → Stores: actual cached data       │
+└─────────────────────────────────────┘
+```
+
+**Example Combinations:**
+
+```python
+from cacheness import cacheness, CacheConfig
+
+# Combination 1: SQLite metadata + Filesystem blobs (current default)
+config = CacheConfig(
+    cache_dir="./cache",           # Filesystem for blobs
+    metadata_backend="sqlite"      # SQLite for metadata
+)
+
+# Combination 2: PostgreSQL metadata + S3 blobs (distributed team cache)
+config = CacheConfig(
+    metadata_backend="postgresql",
+    metadata_backend_options={
+        "connection_url": "postgresql://cache-db.example.com/cache"
+    },
+    blob_backend="s3",
+    blob_backend_options={
+        "bucket": "team-cache-blobs",
+        "region": "us-west-2"
+    }
+)
+
+# Combination 3: SQLite metadata + S3 blobs (serverless/Lambda)
+config = CacheConfig(
+    cache_dir="/tmp/metadata",     # Ephemeral local SQLite
+    metadata_backend="sqlite",
+    blob_backend="s3",             # Persistent S3 storage
+    blob_backend_options={"bucket": "lambda-cache"}
+)
+
+# Combination 4: In-memory metadata + S3 blobs (testing/temporary)
+config = CacheConfig(
+    metadata_backend="memory",     # Ephemeral metadata
+    blob_backend="s3",             # Persistent blobs
+    blob_backend_options={"bucket": "test-cache"}
+)
+
+# Combination 5: SqlCache with custom metadata + shared PostgreSQL
+from cacheness.sql_cache import SqlCache
+
+cache = SqlCache(
+    db_url="postgresql://localhost/shared_db",
+    table_name="ml_experiments",        # Custom queryable metadata
+    data_fetcher=train_model,
+    
+    # User-defined columns for SQL queries
+    model_type=String(50),
+    accuracy=Float,
+    training_date=Date,
+    
+    config=CacheConfig(
+        metadata_backend="postgresql",  # Infrastructure metadata
+        metadata_backend_options={
+            "connection_url": "postgresql://localhost/shared_db",
+            "table_name": "cache_metadata"  # Different table, same DB
+        },
+        blob_backend="s3",              # Blobs in S3
+        blob_backend_options={"bucket": "ml-models"}
+    )
+)
+```
+
+**Implementation Plan:**
+
+```python
+# cacheness/storage/backends/blob_backends.py
+from abc import ABC, abstractmethod
+from typing import BinaryIO, Optional
+from pathlib import Path
+
+class BlobBackend(ABC):
+    """Abstract interface for blob storage backends."""
+    
+    @abstractmethod
+    def write_blob(self, blob_id: str, data: bytes) -> str:
+        """Write blob data, return storage path/URL."""
+        pass
+    
+    @abstractmethod
+    def read_blob(self, blob_path: str) -> bytes:
+        """Read blob data from storage path/URL."""
+        pass
+    
+    @abstractmethod
+    def delete_blob(self, blob_path: str) -> bool:
+        """Delete blob from storage."""
+        pass
+    
+    @abstractmethod
+    def exists(self, blob_path: str) -> bool:
+        """Check if blob exists."""
+        pass
+    
+    @abstractmethod
+    def write_blob_stream(self, blob_id: str, stream: BinaryIO) -> str:
+        """Write blob from stream (for large objects)."""
+        pass
+    
+    @abstractmethod
+    def read_blob_stream(self, blob_path: str) -> BinaryIO:
+        """Read blob as stream (for large objects)."""
+        pass
+
+class FilesystemBlobBackend(BlobBackend):
+    """Current filesystem-based blob storage (refactored)."""
+    
+    def __init__(self, base_dir: str):
+        self.base_dir = Path(base_dir)
+        self.base_dir.mkdir(parents=True, exist_ok=True)
+    
+    def write_blob(self, blob_id: str, data: bytes) -> str:
+        blob_path = self.base_dir / blob_id
+        blob_path.parent.mkdir(parents=True, exist_ok=True)
+        blob_path.write_bytes(data)
+        return str(blob_path)
+    
+    def read_blob(self, blob_path: str) -> bytes:
+        return Path(blob_path).read_bytes()
+    
+    # ... other methods
+
+# Registry system
+_blob_backends = {
+    "filesystem": FilesystemBlobBackend,
+}
+
+def register_blob_backend(name: str, backend_class: type):
+    """Register a custom blob storage backend."""
+    if not issubclass(backend_class, BlobBackend):
+        raise ValueError(f"{backend_class} must inherit from BlobBackend")
+    _blob_backends[name] = backend_class
+
+def get_blob_backend(name: str, **options) -> BlobBackend:
+    """Get blob backend instance by name."""
+    if name not in _blob_backends:
+        raise ValueError(f"Unknown blob backend: {name}")
+    return _blob_backends[name](**options)
+```
+
+**Implementation Tasks:**
+- [ ] Create `BlobBackend` abstract base class in `storage/backends/blob_backends.py`
+- [ ] Refactor current file I/O in handlers to use `FilesystemBlobBackend`
+- [ ] Create blob backend registry system (`register_blob_backend`, `get_blob_backend`)
+- [ ] Add `blob_backend` and `blob_backend_options` to `CacheConfig`
+- [ ] Update `UnifiedCache` to accept blob backend parameter
+- [ ] Update `BlobStore` to accept blob backend parameter
+- [ ] Ensure metadata backend stores blob paths/URLs, not file handles
+- [ ] Add streaming support for large blobs (avoid loading entire blob in memory)
+- [ ] Create `FilesystemBlobBackend` as default implementation
+- [ ] Document blob backend interface in `docs/CUSTOM_BLOB_BACKENDS.md`
+- [ ] Add tests for blob backend abstraction
+- [ ] Add example showing custom blob backend in `examples/custom_blob_backend.py`
+
+##### 2.4 Configuration Schema & Validation
+
+Standardize configuration for easier plugin integration:
+
+```python
+from cacheness import CacheConfig
+from cacheness.config import validate_config
+
+# Define config with custom backends
+config = CacheConfig(
+    cache_dir="./cache",
+    metadata_backend="postgresql",
+    backend_options={
+        "connection_url": "postgresql://...",
+        "pool_size": 10
+    },
+    blob_backend="s3",
+    blob_backend_options={
+        "bucket": "my-cache",
+        "region": "us-west-2"
+    }
+)
+
+# Validate configuration
+errors = validate_config(config)
+if errors:
+    raise ValueError(f"Invalid config: {errors}")
+```
+
+**Implementation Tasks:**
+- [ ] Add `backend_options: Dict[str, Any]` to CacheConfig
+- [ ] Add `blob_backend: Union[str, BlobBackend]` to CacheConfig
+- [ ] Add `blob_backend_options: Dict[str, Any]` to CacheConfig
+- [ ] Create `validate_config()` function with detailed error messages
+- [ ] Add JSON Schema for configuration validation
+- [ ] Support configuration from YAML/JSON files
+
+##### 2.5 Use Cases Beyond Caching
+
+Document and support non-caching storage use cases with various backend combinations.
+
+**Note:** These examples use `BlobStore` for simple key-value storage. For queryable domain-specific metadata, use `SqlCache` with custom table schemas (see section 2.6).
+
+1. **ML Model Versioning**
+   ```python
+   from cacheness.storage import BlobStore
+   
+   model_store = BlobStore(
+       cache_dir="./models",
+       backend="postgresql",  # Queryable metadata
+       content_addressable=True  # Deduplicate identical models
+   )
+   
+   # Store model with version metadata
+   model_id = model_store.put(
+       model,
+       key=f"fraud_detector_v{version}",
+       metadata={
+           "accuracy": 0.95,
+           "training_date": datetime.now().isoformat(),
+           "dataset_hash": dataset_hash,
+           "hyperparameters": {...}
+       }
+   )
+   
+   # Query models by accuracy
+   best_models = model_store.list(metadata_filter={"accuracy": {"$gte": 0.9}})
+   ```
+
+2. **Artifact Storage in Data Pipelines**
+   ```python
+   # Store intermediate pipeline results
+   pipeline_store = BlobStore(cache_dir="./pipeline_artifacts")
+   
+   # Step 1
+   raw_data = extract_data()
+   pipeline_store.put(raw_data, key=f"raw_data_{run_id}")
+   
+   # Step 2
+   processed_data = transform(raw_data)
+   pipeline_store.put(
+       processed_data,
+       key=f"processed_data_{run_id}",
+       metadata={"depends_on": f"raw_data_{run_id}"}
+   )
+   ```
+
+3. **Checkpoint Storage for Long-Running Tasks**
+   ```python
+   checkpoint_store = BlobStore(cache_dir="./checkpoints")
+   
+   for epoch in range(100):
+       train_epoch(model)
+       
+       # Save checkpoint every 10 epochs
+       if epoch % 10 == 0:
+           checkpoint_store.put(
+               model.state_dict(),
+               key=f"checkpoint_epoch_{epoch}",
+               metadata={"epoch": epoch, "loss": current_loss}
+           )
+   ```
+
+**Implementation Tasks:**
+- [ ] Create example scripts for each use case in `examples/`
+- [ ] Add use case documentation in `docs/USE_CASES.md`
+- [ ] Add metadata query operators (e.g., `$gte`, `$lt`, `$in`) for advanced filtering
+- [ ] Consider adding blob tagging/labeling system for organization
+
+##### 2.7 Custom SQLAlchemy Metadata Models Integration
+
+**Important:** Preserve existing functionality for users to define custom SQLAlchemy metadata schemas alongside cache infrastructure metadata.
+
+**Three Types of Metadata in Cacheness:**
+
+1. **Cache Infrastructure Metadata** (handled by metadata backends):
+   - Generic cache metadata for all cache operations
+   - Keys: `cache_key`, `file_hash`, `created_at`, `file_size`, etc.
+   - Schema is fixed, managed by cacheness
+   - Backends: JSON, SQLite, PostgreSQL (via `metadata_backend`)
+   - Used by: `cacheness()`, `BlobStore`
+
+2. **Custom SQLAlchemy Metadata** (user-defined ORM models - existing feature):
+   - User defines SQLAlchemy ORM models with `@custom_metadata_model` decorator
+   - Strongly-typed, queryable columns: `experiment_id`, `model_type`, `accuracy`, etc.
+   - Schema is custom, managed by user
+   - Enables complex SQLAlchemy queries on cache metadata
+   - Currently works with SQLite backend only
+   - Used by: `cacheness()` with `custom_metadata` parameter
+
+3. **SqlCache Custom Tables** (domain-specific data tables):
+   - Separate feature for pull-through caching
+   - User defines columns for cached data itself
+   - Used by: `SqlCache` class
+
+**Example - Custom SQLAlchemy Metadata (Existing Feature):**
+
+```python
+from cacheness import cacheness, CacheConfig
+from cacheness.custom_metadata import custom_metadata_model, CustomMetadataBase
+from cacheness.metadata import Base
+from sqlalchemy import Column, String, Float, Integer
+
+# Define custom metadata schema with SQLAlchemy ORM
+@custom_metadata_model("experiments")
+class ExperimentMetadata(Base, CustomMetadataBase):
+    """Custom queryable metadata for ML experiments."""
+    
+    __tablename__ = "custom_experiments"
+    
+    experiment_id = Column(String(100), nullable=False, unique=True, index=True)
+    model_type = Column(String(50), nullable=False, index=True)
+    accuracy = Column(Float, nullable=False, index=True)
+    epochs = Column(Integer, nullable=False, index=True)
+    created_by = Column(String(100), nullable=False, index=True)
+
+# Create cache with SQLite backend (required for custom metadata)
+config = CacheConfig(
+    cache_dir="./cache",
+    metadata_backend="sqlite"
+)
+cache = cacheness(config)
+
+# Store data with custom metadata
+experiment = ExperimentMetadata(
+    experiment_id="exp_001",
+    model_type="xgboost",
+    accuracy=0.95,
+    epochs=100,
+    created_by="alice"
+)
+
+cache.put(
+    trained_model,
+    experiment="exp_001",
+    custom_metadata=experiment  # Custom SQLAlchemy object
+)
+
+# Query with SQLAlchemy ORM
+with cache.query_custom_session("experiments") as query:
+    alice_experiments = query.filter(
+        ExperimentMetadata.created_by == "alice",
+        ExperimentMetadata.accuracy >= 0.9
+    ).all()
+    
+    for exp in alice_experiments:
+        print(f"{exp.experiment_id}: {exp.model_type} - {exp.accuracy}")
+```
+
+**How It Works Today (SQLite backend):**
+
+```
+SQLite Database (cache_metadata.db)
+├── cache_entries table          # Infrastructure metadata (cacheness-managed)
+│   ├── cache_key
+│   ├── file_hash
+│   ├── created_at
+│   ├── file_size
+│   └── ...
+│
+├── custom_experiments table     # User-defined metadata (user-managed)
+│   ├── cache_key (FK)
+│   ├── experiment_id
+│   ├── model_type
+│   ├── accuracy
+│   └── created_by
+│
+└── custom_performance table     # Another user-defined schema
+    ├── cache_key (FK)
+    ├── run_id
+    ├── training_time_seconds
+    └── memory_usage_mb
+```
+
+**PostgreSQL Backend Compatibility:**
+
+When implementing PostgreSQL metadata backend, ensure custom metadata models continue to work:
+
+```python
+from cacheness import cacheness, CacheConfig
+
+# Custom metadata models + PostgreSQL backend
+config = CacheConfig(
+    metadata_backend="postgresql",
+    metadata_backend_options={
+        "connection_url": "postgresql://localhost/cache",
+        "table_name": "cache_entries"  # Infrastructure table
+    }
+)
+
+cache = cacheness(config)
+
+# Custom metadata tables created in same database
+experiment = ExperimentMetadata(
+    experiment_id="exp_001",
+    model_type="xgboost",
+    accuracy=0.95
+)
+
+cache.put(model, experiment="exp_001", custom_metadata=experiment)
+# Creates both tables: cache_entries + custom_experiments
+```
+
+**Implementation Considerations for Phase 2:**
+
+- [ ] Ensure PostgreSQL metadata backend supports custom metadata models
+- [ ] Custom tables use same SQLAlchemy engine as infrastructure tables
+- [ ] Foreign key from custom tables to cache_entries.cache_key works
+- [ ] `query_custom_session()` works with PostgreSQL backend
+- [ ] `migrate_custom_metadata_tables()` works with PostgreSQL
+- [ ] Update `docs/CUSTOM_METADATA.md` to show PostgreSQL compatibility
+- [ ] Add tests for custom metadata + PostgreSQL backend
+- [ ] Document relationship between infrastructure and custom metadata tables
+- [ ] Consider making `@custom_metadata_model` backend-agnostic
+- [ ] Example showing custom metadata + PostgreSQL infrastructure + S3 blobs:
+  ```python
+  config = CacheConfig(
+      metadata_backend="postgresql",      # Both infrastructure + custom metadata
+      metadata_backend_options={
+          "connection_url": "postgresql://localhost/cache"
+      },
+      blob_backend="s3",                  # Blobs in S3
+      blob_backend_options={"bucket": "ml-cache"}
+  )
+  
+  cache = cacheness(config)
+  cache.put(model, custom_metadata=ExperimentMetadata(...))
+  # PostgreSQL: cache_entries + custom_experiments tables
+  # S3: actual model blob
+  ```
+
+##### 2.8 SqlCache Custom Tables Integration
+
+**Important:** This is a third, separate feature - SqlCache for pull-through caching with user-defined data table schemas.
+
+**Three Distinct Features (Summary):**
+
+1. **Custom SQLAlchemy Metadata Models** (Section 2.7): User-defined ORM models for cache metadata using `@custom_metadata_model`
+2. **SqlCache Custom Tables** (This section): Pull-through cache with user-defined data table schemas
+3. **Cache Infrastructure Metadata**: Built-in cacheness metadata (cache_key, file_hash, etc.)
+
+**SqlCache - Pull-Through Caching:**
+
+SqlCache is optimized for caching database/API query results with automatic gap detection:
+
+1. **SqlCache Infrastructure Metadata** (handled by cache metadata backends):
+   - Generic cache metadata for SqlCache operations
+   - Keys: `cache_key`, `file_hash`, `created_at`, `file_size`, etc.
+   - Schema is fixed, managed by cacheness
+   - Backends: JSON, SQLite, PostgreSQL (via `metadata_backend`)
+
+2. **SqlCache Custom Data Tables** (user-defined data schemas):
+   - Domain-specific queryable cached data
+   - User defines columns: `symbol`, `date`, `price`, `volume`, etc.
+   - Schema is custom, managed by user
+   - Enables complex SQL queries on cached data
+   - Currently uses SQLite/DuckDB/PostgreSQL directly
+
+**Example - Both Types Coexist:**
+
+```python
+from cacheness.sql_cache import SqlCache
+from cacheness import CacheConfig
+from sqlalchemy import String, Float, Date
+
+# Define custom metadata schema for stock data
+def fetch_stock_data(symbol, start_date, end_date):
+    return api_client.get_stock_data(symbol, start_date, end_date)
+
+# PostgreSQL backend hosts BOTH:
+# 1. Cache infrastructure metadata (managed by cacheness)
+# 2. Custom stock_prices table (managed by SqlCache)
+cache = SqlCache(
+    db_url="postgresql://localhost/stocks",  # Custom metadata DB
+    table_name="stock_prices",               # Custom table name
+    data_fetcher=fetch_stock_data,
+    
+    # User-defined columns for complex queries
+    symbol=String(10),
+    date=Date,
+    price=Float,
+    volume=Float,
+    
+    # Cache infrastructure uses separate backend
+    config=CacheConfig(
+        metadata_backend="postgresql",
+        metadata_backend_options={
+            "connection_url": "postgresql://localhost/cache_metadata",
+            "table_name": "cache_entries"  # Infrastructure metadata
+        }
+    )
+)
+
+# Complex query on custom metadata (user's domain schema)
+with cache.query_custom_session("stock_prices") as query:
+    high_volume = query.filter(
+        StockPrice.volume > 1000000,
+        StockPrice.date >= '2024-01-01'
+    ).all()
+
+# Standard cache operations (uses infrastructure metadata)
+data = cache.get_data(symbol="AAPL", start_date="2024-01-01")
+```
+
+**Key Design Principles:**
+
+1. **Separation of Concerns:**
+   - Infrastructure metadata = cache plumbing (keys, files, stats)
+   - Custom metadata = user's queryable domain data
+
+2. **Same Database, Different Tables:**
+   - PostgreSQL can host both metadata types
+   - Infrastructure: `cache_metadata` table (cacheness-managed)
+   - Custom: `stock_prices`, `ml_experiments`, etc. (user-managed)
+
+3. **Independent Schemas:**
+   - Infrastructure schema: fixed, versioned by cacheness
+   - Custom schemas: flexible, defined per SqlCache instance
+
+4. **Query Capabilities:**
+   - Infrastructure: `list_entries()`, `get_stats()` - simple lookups
+   - Custom: Full SQLAlchemy ORM - complex joins, aggregations
+
+**Implementation Considerations:**
+
+- [ ] Ensure PostgreSQL metadata backend doesn't conflict with SqlCache tables
+- [ ] Use separate table names: `cache_metadata` vs user-defined names
+- [ ] Support same database URL for both (different tables)
+- [ ] Document the two metadata types clearly in `docs/SQL_CACHE.md`
+- [ ] Add examples showing both metadata types with PostgreSQL
+- [ ] Consider adding `SqlCache.create_with_shared_db()` helper:
+  ```python
+  # Share PostgreSQL database between infrastructure and custom metadata
+  cache = SqlCache.create_with_shared_db(
+      db_url="postgresql://localhost/cache_db",
+      infrastructure_table="cache_metadata",  # Cacheness-managed
+      custom_table="stock_prices",           # User-managed
+      columns={"symbol": String(10), "price": Float, ...}
+  )
+  ```
+
+##### 2.9 Testing & Documentation
+
+Comprehensive testing and documentation for extensibility:
+
+**Testing Tasks:**
+- [ ] Create `tests/test_plugin_system.py` for handler/backend registration
+- [ ] Create `tests/test_custom_handlers.py` with example custom handler
+- [ ] Create `tests/test_custom_backends.py` with example custom backend
+- [ ] Create `tests/test_sqlcache_with_backends.py` for SqlCache + PostgreSQL metadata backend
+- [ ] Add performance benchmarks for custom handlers vs built-in handlers
+- [ ] Test SqlCache custom tables don't conflict with cache metadata tables
+
+**Documentation Tasks:**
+- [ ] Create `docs/PLUGIN_DEVELOPMENT.md` - Complete plugin development guide
+- [ ] Create `docs/CUSTOM_HANDLERS.md` - Handler interface reference
+- [ ] Create `docs/CUSTOM_METADATA_BACKENDS.md` - Metadata backend interface reference
+- [ ] Create `docs/CUSTOM_BLOB_BACKENDS.md` - Blob backend interface reference
+- [ ] Create `docs/BACKEND_COMBINATIONS.md` - Guide to mixing metadata + blob backends
+- [ ] Update `docs/SQL_CACHE.md` - Add section on custom metadata vs infrastructure metadata
+- [ ] Add SqlCache + PostgreSQL backend integration examples to `docs/SQL_CACHE.md`
+- [ ] Update `docs/API_REFERENCE.md` with plugin APIs
+- [ ] Create plugin packaging template project
+- [ ] Add "Extending Cacheness" section to main README
+
+---
 
 #### Phase 3: Evaluate Full Separation (Future Decision)
 1. Assess community adoption and feedback
@@ -236,6 +998,1071 @@ The storage subpackage has been created with:
    # After split (same import!)
    from cacheness.storage import BlobStore  # Now from cacheness-storage package
    ```
+
+---
+
+### Planned Backend Implementations
+
+#### PostgreSQL Metadata Backend
+
+**Purpose:** Metadata storage and querying (cache index)
+
+**Use Case:** Production environments requiring:
+- High concurrency (multiple workers, distributed systems)
+- Advanced querying (complex metadata filters, joins)
+- ACID transactions for metadata consistency
+- Centralized cache index across multiple machines
+
+**Note:** PostgreSQL can store:
+1. **Cache infrastructure metadata** (via `metadata_backend="postgresql"`): cache keys, file paths, statistics, etc.
+2. **SqlCache custom metadata tables** (via `SqlCache(db_url="postgresql://...")`): user-defined schemas for queryable data
+3. Both can coexist in same database, different tables
+
+Actual cached data (blobs) are stored separately via blob backends (filesystem, S3, etc.).
+
+**Implementation Plan:**
+
+```python
+# cacheness/storage/backends/postgresql.py (or as plugin package)
+from cacheness.storage.backends.base import MetadataBackend
+from sqlalchemy import create_engine, Table, Column, String, Integer, Float, DateTime, JSON
+from sqlalchemy.orm import sessionmaker
+from typing import Dict, Any, Optional, List
+
+class PostgresBackend(MetadataBackend):
+    """
+    PostgreSQL metadata backend for distributed caching.
+    
+    Features:
+    - Connection pooling for concurrent access
+    - JSON column for flexible metadata storage
+    - Indexes on cache_key and common query fields
+    - Optional table partitioning for large caches
+    """
+    
+    def __init__(
+        self,
+        connection_url: str,
+        table_name: str = "cache_metadata",
+        pool_size: int = 10,
+        max_overflow: int = 20,
+        pool_pre_ping: bool = True
+    ):
+        self.engine = create_engine(
+            connection_url,
+            pool_size=pool_size,
+            max_overflow=max_overflow,
+            pool_pre_ping=pool_pre_ping
+        )
+        self.table_name = table_name
+        self._setup_schema()
+        self.Session = sessionmaker(bind=self.engine)
+    
+    def _setup_schema(self):
+        """Create cache metadata table with indexes."""
+        # Similar to SqliteBackend but with PostgreSQL optimizations
+        ...
+    
+    def get_entry(self, cache_key: str) -> Optional[Dict[str, Any]]:
+        """Get entry with connection pooling."""
+        with self.Session() as session:
+            result = session.query(CacheEntry).filter_by(cache_key=cache_key).first()
+            return result.to_dict() if result else None
+    
+    # ... implement other MetadataBackend methods
+
+# Usage
+from cacheness import cacheness, CacheConfig
+
+config = CacheConfig(
+    cache_dir="./cache_blobs",  # Blobs still on filesystem
+    metadata_backend="postgresql",
+    backend_options={
+        "connection_url": "postgresql://user:pass@db.example.com:5432/cacheness",
+        "pool_size": 20,
+        "table_name": "ml_cache_metadata"
+    }
+)
+
+cache = cacheness(config)
+```
+
+**Implementation Checklist:**
+- [ ] Create `PostgresBackend` class implementing `MetadataBackend`
+- [ ] Add connection pooling configuration
+- [ ] Add table partitioning support for large caches (optional)
+- [ ] Add prepared statements for common queries (performance)
+- [ ] Support SSL/TLS connections
+- [ ] Add migration utilities from SQLite → PostgreSQL
+- [ ] Add monitoring/metrics hooks (query time, pool stats)
+- [ ] Ensure no table name conflicts with SqlCache custom tables
+- [ ] Support shared database with SqlCache (different table names)
+- [ ] Create `docs/POSTGRESQL_BACKEND.md` with deployment guide
+- [ ] Add integration tests with test PostgreSQL container
+- [ ] Add integration tests showing cache metadata + SqlCache custom tables
+- [ ] Benchmark vs SQLite for concurrent workloads
+
+**Dependencies:**
+- `psycopg2-binary` or `psycopg3` (PostgreSQL driver)
+- `sqlalchemy>=2.0` (already required for SQLite backend)
+
+---
+
+#### S3 Blob Storage Backend
+
+**Purpose:** Blob storage (actual cached data)
+
+**Use Case:** Cloud-native deployments requiring:
+- Unlimited storage capacity
+- Shared cache across ephemeral compute (AWS Lambda, ECS, Kubernetes)
+- Durability and replication
+- Separation of compute and storage
+
+**Implementation Plan:**
+
+```python
+# cacheness/storage/backends/s3_blob.py (or as plugin package)
+from cacheness.storage.backends.base import BlobBackend  # New abstract class
+from pathlib import Path
+from typing import Optional
+import boto3
+
+class S3BlobBackend(BlobBackend):
+    """
+    Amazon S3 blob storage backend.
+    
+    Features:
+    - Automatic multipart upload for large objects
+    - Client-side encryption (optional)
+    - Object lifecycle management (TTL via S3 lifecycle rules)
+    - Presigned URL generation for direct client access
+    """
+    
+    def __init__(
+        self,
+        bucket: str,
+        prefix: str = "cacheness/",
+        region: str = "us-east-1",
+        encryption: bool = False,
+        storage_class: str = "STANDARD"
+    ):
+        self.s3 = boto3.client('s3', region_name=region)
+        self.bucket = bucket
+        self.prefix = prefix
+        self.encryption = encryption
+        self.storage_class = storage_class
+    
+    def write_blob(self, blob_id: str, data: bytes) -> str:
+        """Upload blob to S3."""
+        key = f"{self.prefix}{blob_id}"
+        
+        extra_args = {"StorageClass": self.storage_class}
+        if self.encryption:
+            extra_args["ServerSideEncryption"] = "AES256"
+        
+        # Use multipart upload for large objects
+        if len(data) > 100 * 1024 * 1024:  # > 100MB
+            self._multipart_upload(key, data, extra_args)
+        else:
+            self.s3.put_object(
+                Bucket=self.bucket,
+                Key=key,
+                Body=data,
+                **extra_args
+            )
+        
+        return f"s3://{self.bucket}/{key}"
+    
+    def read_blob(self, blob_path: str) -> bytes:
+        """Download blob from S3."""
+        key = blob_path.replace(f"s3://{self.bucket}/", "")
+        response = self.s3.get_object(Bucket=self.bucket, Key=key)
+        return response['Body'].read()
+    
+    def delete_blob(self, blob_path: str):
+        """Delete blob from S3."""
+        key = blob_path.replace(f"s3://{self.bucket}/", "")
+        self.s3.delete_object(Bucket=self.bucket, Key=key)
+    
+    def exists(self, blob_path: str) -> bool:
+        """Check if blob exists in S3."""
+        try:
+            key = blob_path.replace(f"s3://{self.bucket}/", "")
+            self.s3.head_object(Bucket=self.bucket, Key=key)
+            return True
+        except self.s3.exceptions.NoSuchKey:
+            return False
+    
+    def get_presigned_url(self, blob_path: str, expires_in: int = 3600) -> str:
+        """Generate presigned URL for direct access."""
+        key = blob_path.replace(f"s3://{self.bucket}/", "")
+        return self.s3.generate_presigned_url(
+            'get_object',
+            Params={'Bucket': self.bucket, 'Key': key},
+            ExpiresIn=expires_in
+        )
+
+# Usage with BlobStore
+from cacheness.storage import BlobStore
+
+store = BlobStore(
+    blob_backend=S3BlobBackend(
+        bucket="my-ml-cache",
+        prefix="models/",
+        storage_class="INTELLIGENT_TIERING"  # Automatic cost optimization
+    ),
+    metadata_backend="postgresql",  # Metadata in PostgreSQL, blobs in S3
+    backend_options={
+        "connection_url": "postgresql://..."
+    }
+)
+
+# Store model in S3
+model_id = store.put(
+    trained_model,
+    key="fraud_detector_v2",
+    metadata={"accuracy": 0.95}
+)
+
+# Usage with UnifiedCache
+from cacheness import cacheness, CacheConfig
+
+cache = cacheness(config=CacheConfig(
+    blob_backend="s3",
+    blob_backend_options={
+        "bucket": "my-cache-bucket",
+        "prefix": "team-cache/",
+        "region": "us-west-2"
+    },
+    metadata_backend="postgresql",
+    backend_options={
+        "connection_url": "postgresql://..."
+    }
+))
+```
+
+**Implementation Checklist:**
+- [ ] Create `BlobBackend` abstract base class
+- [ ] Refactor current file-based storage to `FilesystemBlobBackend`
+- [ ] Create `S3BlobBackend` class
+- [ ] Add multipart upload/download for large blobs
+- [ ] Add streaming support (read/write without full memory load)
+- [ ] Support other S3-compatible services (MinIO, DigitalOcean Spaces, etc.)
+- [ ] Add retry logic with exponential backoff
+- [ ] Add client-side encryption option (using AWS KMS or custom keys)
+- [ ] Create `docs/S3_BLOB_BACKEND.md` with IAM policy examples
+- [ ] Add integration tests with LocalStack or MinIO
+- [ ] Benchmark vs filesystem for various blob sizes
+- [ ] Consider adding CloudFront CDN integration for read-heavy workloads
+
+**Dependencies:**
+- `boto3` (AWS SDK)
+- Optional: `s3transfer` for optimized transfers
+
+**Alternative Cloud Providers:**
+- Azure Blob Storage: `AzureBlobBackend` using `azure-storage-blob`
+- Google Cloud Storage: `GCSBlobBackend` using `google-cloud-storage`
+
+---
+
+<a id="phase-2-feasibility-review"></a>
+### Phase 2 Feasibility Review & Gap Analysis
+
+This section reviews the Phase 2 plan for practical implementation challenges and identifies overlooked features.
+
+#### ✅ High Feasibility (Low Risk)
+
+**Handler Plugin System (Section 2.1)**
+- **Assessment:** Very feasible - standard Python pattern
+- **Precedent:** Similar to Pytest plugins, Flask extensions
+- **Risk:** Low - handlers are stateless, well-defined interface
+- **Effort:** Small-Medium
+
+**Metadata Backend Registry (Section 2.2)**
+- **Assessment:** Feasible - factory pattern is well understood
+- **Precedent:** SQLAlchemy dialects, Django database backends
+- **Risk:** Low-Medium - needs careful connection pooling
+- **Effort:** Medium
+
+**Manual Registration API**
+- **Assessment:** Very feasible - simple factory pattern
+- **Precedent:** Matplotlib backends, logging handlers, unittest plugins
+- **Risk:** Very Low
+- **Effort:** Small
+- **Note:** Entry point auto-discovery deferred to future phase if ecosystem demand emerges
+
+#### ⚠️ Medium Feasibility (Needs Attention)
+
+**Blob Storage Backend Registry (Section 2.3)**
+- **Assessment:** Feasible but complex edge cases
+- **Gaps Identified:**
+  1. **Content hashing without download** (user-identified)
+     - S3 ETag for content verification
+     - Avoid downloading blobs just to verify integrity
+     - ETags may not match local hash algorithms (multipart uploads)
+  2. **Blob metadata/headers**
+     - Content-Type, Cache-Control, Content-Encoding headers
+     - S3 object metadata vs cacheness metadata
+  3. **Bandwidth optimization**
+     - Partial reads (byte ranges)
+     - Compression in transit
+     - CDN/edge caching layer
+  4. **Concurrent access patterns**
+     - Multiple processes reading same blob
+     - Optimistic locking for updates
+  5. **Local caching layer**
+     - Cache frequently accessed S3 blobs locally
+     - Configurable cache size, TTL
+  6. **Backend migration**
+     - Moving blobs from filesystem → S3
+     - Incremental migration strategy
+  7. **Cost tracking**
+     - Monitor S3 requests, bandwidth usage
+     - Configurable budget alerts
+- **Risk:** Medium - cloud storage has many edge cases
+- **Effort:** Large
+
+**PostgreSQL Metadata Backend (Planned Backend)**
+- **Assessment:** Feasible but operational complexity
+- **Gaps Identified:**
+  1. **Connection failure handling**
+     - Automatic retries with exponential backoff
+     - Circuit breaker pattern for failing connections
+  2. **Read replicas**
+     - Route reads to replicas, writes to primary
+     - Handle replication lag gracefully
+  3. **Schema migrations**
+     - Alembic integration for version management
+     - Zero-downtime migration strategy
+  4. **Maintenance operations**
+     - VACUUM, ANALYZE scheduling
+     - Index rebuilding
+     - Monitoring query performance
+  5. **Multi-tenancy**
+     - Schema-per-tenant vs table-per-tenant
+     - Row-level security
+- **Risk:** Medium - operational burden for users
+- **Effort:** Medium-Large
+
+**Configuration Schema & Validation (Section 2.5)**
+- **Assessment:** Straightforward but needs thought
+- **Gaps Identified:**
+  1. **Config file formats**
+     - YAML, TOML, JSON support
+     - Which format is primary?
+  2. **Environment variables**
+     - Override config with env vars
+     - Precedence rules (file vs env vs code)
+  3. **Secrets management**
+     - Don't store credentials in config files
+     - Integration with AWS Secrets Manager, HashiCorp Vault
+  4. **Config hot-reload**
+     - Watch config file for changes
+     - Graceful reconfiguration without restart
+  5. **Config validation error messages**
+     - Clear, actionable error messages
+     - Suggest corrections for common mistakes
+- **Risk:** Low-Medium
+- **Effort:** Medium
+
+#### 🔴 Challenging Areas (High Risk/Effort)
+
+**Streaming Support**
+- **Current Plan:** Mentioned but not detailed
+- **User Question:** Is this really necessary?
+- **Analysis:** 
+  - **Current architecture:** Handlers already work with file paths, not bytes in memory
+    - `ArrayHandler.put()` writes directly to disk: `np.savez(file_path, ...)`
+    - `DataFrameHandler.put()` writes directly to disk: `df.to_parquet(file_path, ...)`
+    - Handlers return file path, not data
+  - **The actual problem:** Blob backend methods use `bytes` in memory
+    - `write_blob(blob_id: str, data: bytes)` - requires loading file into memory
+    - `read_blob(blob_path: str) -> bytes` - loads entire file into memory
+  - **When is this a problem?**
+    - Large models (>1GB) - current approach loads into memory twice (handler write + S3 upload)
+    - Multi-GB datasets cached as Parquet files
+    - Limited memory environments (Lambda, containers)
+  
+  **Two Approaches:**
+  
+  **Approach 1: File-Based Blob Backend (Simpler, Recommended for Phase 2)**
+  ```python
+  class BlobBackend(ABC):
+      @abstractmethod
+      def write_blob_from_file(self, blob_id: str, file_path: Path) -> str:
+          """Upload file to blob storage without loading into memory."""
+          pass
+      
+      @abstractmethod
+      def read_blob_to_file(self, blob_path: str, file_path: Path):
+          """Download blob directly to file without loading into memory."""
+          pass
+  
+  class S3BlobBackend(BlobBackend):
+      def write_blob_from_file(self, blob_id: str, file_path: Path) -> str:
+          """Use boto3's upload_file (handles large files automatically)."""
+          key = f"{self.prefix}{blob_id}"
+          
+          # boto3 automatically uses multipart upload for large files
+          self.s3.upload_file(
+              Filename=str(file_path),
+              Bucket=self.bucket,
+              Key=key,
+              ExtraArgs={...}
+          )
+          return f"s3://{self.bucket}/{key}"
+      
+      def read_blob_to_file(self, blob_path: str, file_path: Path):
+          """Use boto3's download_file (streams automatically)."""
+          key = self._parse_s3_key(blob_path)
+          self.s3.download_file(self.bucket, key, str(file_path))
+  ```
+  
+  **Approach 2: Stream-Based (More Complex, Phase 2.3+)**
+  ```python
+  class BlobBackend(ABC):
+      @abstractmethod
+      def write_blob_stream(self, blob_id: str, stream: BinaryIO, size: int) -> str:
+          """Write blob from stream (for very large objects)."""
+          pass
+      
+      @abstractmethod
+      def read_blob_stream(self, blob_path: str) -> BinaryIO:
+          """Read blob as stream."""
+          pass
+  ```
+  
+  **Use Cases Where Streaming Actually Matters:**
+  - **Partial reads** - Read specific byte range from S3 (e.g., Parquet row groups)
+    - This is more about S3 range requests: `Range: bytes=0-1000000`
+    - Most useful for columnar formats (Parquet, Arrow)
+    - NOT needed for most caching use cases
+  - **Progressive processing** - Process data chunks as they download
+    - Useful for ETL pipelines
+    - NOT typical for caching (cache is atomic read/write)
+  - **Network streaming** - Stream data from API to S3 without local storage
+    - Edge case, not typical caching scenario
+
+- **Revised Assessment:**
+  - ✅ **File-based blob backend** (Approach 1): **Medium priority** - solves memory issue simply
+  - ❌ **True streaming** (Approach 2): **Low priority** - over-engineered for Phase 2
+  - ❌ **Partial reads** - **Not needed** for caching use cases (violates cache atomicity)
+  
+- **Recommendation:** 
+  - Phase 2.1: Add file-based methods to `BlobBackend` alongside bytes-based methods
+  - Handlers continue to work with files (no changes needed)
+  - Blob backends use file-based methods when available (boto3 handles large files)
+  - Skip true streaming for now - YAGNI (You Aren't Gonna Need It)
+  
+- **Risk:** Low (file-based approach is simple)
+- **Effort:** Small-Medium (mainly interface additions)
+
+**Plugin Security & Isolation**
+- **Current Plan:** Deferred - using manual registration instead of auto-discovery plugins
+- **Manual Registration Approach:**
+  - Users explicitly import and register handlers/backends
+  - No automatic plugin loading = simpler security model
+  - Registration conflicts handled explicitly at registration time
+  - Version compatibility managed via standard Python packaging
+- **Future Plugin System (if needed):**
+  - Entry point discovery for third-party packages
+  - Sandboxing for untrusted plugins
+  - Plugin versioning constraints
+- **Risk:** Low (with manual registration)
+- **Effort:** Minimal for Phase 2
+- **Recommendation:** Defer auto-discovery plugins until ecosystem demand justifies complexity
+
+**Observability & Monitoring**
+- **Current Plan:** Mentioned for PostgreSQL only
+- **Gaps Identified:**
+  1. **Metrics collection**
+     - Cache hit/miss rates per handler
+     - Backend latency, error rates
+     - Blob storage costs (S3 requests, bandwidth)
+  2. **Distributed tracing**
+     - OpenTelemetry integration
+     - Trace cache operations across services
+  3. **Structured logging**
+     - JSON logs for log aggregation
+     - Correlation IDs for request tracking
+  4. **Health checks**
+     - Backend health endpoints
+     - Readiness/liveness probes for Kubernetes
+  5. **Alerting**
+     - Integration with Prometheus, Datadog, etc.
+     - Alert on high error rates, latency spikes
+- **Risk:** Medium
+- **Effort:** Medium-Large
+- **Recommendation:** Essential for production deployments, should be in Phase 2
+
+---
+
+#### Critical Missing Features
+
+**1. Content Hashing for Cloud Blob Backends** (High Priority)
+
+**Problem:** Cannot verify blob integrity without downloading entire blob.
+
+**Solution:**
+
+```python
+class BlobBackend(ABC):
+    """Extended with content hash support."""
+    
+    @abstractmethod
+    def get_blob_hash(self, blob_path: str, algorithm: str = "sha256") -> Optional[str]:
+        """
+        Get content hash without downloading blob.
+        
+        For S3: Use ETag (with caveats for multipart uploads)
+        For Azure: Use Content-MD5 header
+        For GCS: Use MD5 hash property
+        
+        Returns None if hash unavailable or algorithm unsupported.
+        """
+        pass
+
+class S3BlobBackend(BlobBackend):
+    def get_blob_hash(self, blob_path: str, algorithm: str = "sha256") -> Optional[str]:
+        \"\"\"
+        Get S3 ETag as content hash.
+        
+        Important: ETag != MD5 for multipart uploads (>100MB).
+        For multipart: ETag = MD5(concat(MD5(part1), MD5(part2), ...)) + "-{parts}"
+        
+        Solution: Store custom metadata with actual hash:
+        - x-amz-meta-sha256: actual SHA256 hash
+        - Computed during upload
+        \"\"\"
+        key = self._parse_s3_key(blob_path)
+        
+        # Try custom metadata first
+        response = self.s3.head_object(Bucket=self.bucket, Key=key)
+        if 'x-amz-meta-sha256' in response['Metadata']:
+            if algorithm == 'sha256':
+                return response['Metadata']['x-amz-meta-sha256']
+        
+        # Fallback to ETag (only reliable for single-part uploads)
+        etag = response['ETag'].strip('"')
+        if '-' not in etag:  # Single-part upload
+            if algorithm == 'md5':
+                return etag
+        
+        return None  # Hash unavailable for this algorithm
+    
+    def write_blob(self, blob_id: str, data: bytes) -> str:
+        \"\"\"Store blob with content hash in metadata.\"\"\"
+        import hashlib
+        
+        # Calculate hash before upload
+        sha256_hash = hashlib.sha256(data).hexdigest()
+        md5_hash = hashlib.md5(data).hexdigest()
+        
+        key = f"{self.prefix}{blob_id}"
+        
+        extra_args = {
+            "StorageClass": self.storage_class,
+            "Metadata": {
+                "sha256": sha256_hash,
+                "md5": md5_hash,
+                "original-size": str(len(data))
+            }
+        }
+        
+        self.s3.put_object(Bucket=self.bucket, Key=key, Body=data, **extra_args)
+        return f"s3://{self.bucket}/{key}"
+```
+
+**Implementation Tasks:**
+- [ ] Add `get_blob_hash()` to `BlobBackend` interface
+- [ ] Implement for S3BlobBackend with ETag + custom metadata
+- [ ] Implement for FilesystemBlobBackend (compute hash on demand)
+- [ ] Implement for AzureBlobBackend (Content-MD5 header)
+- [ ] Implement for GCSBlobBackend (MD5Hash property)
+- [ ] Update cache verification to use `get_blob_hash()` instead of downloading
+- [ ] Document multipart upload ETag quirks
+- [ ] Add tests for hash verification without download
+
+---
+
+**2. Retry & Resilience Strategies** (High Priority)
+
+**Problem:** Network failures, transient errors common with cloud backends.
+
+**Solution:**
+
+```python
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+
+class S3BlobBackend(BlobBackend):
+    def __init__(
+        self,
+        bucket: str,
+        max_retries: int = 3,
+        initial_backoff: float = 0.5,
+        max_backoff: float = 60.0,
+        circuit_breaker_threshold: int = 5
+    ):
+        self.max_retries = max_retries
+        self.initial_backoff = initial_backoff
+        self.max_backoff = max_backoff
+        self._circuit_breaker = CircuitBreaker(threshold=circuit_breaker_threshold)
+    
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=0.5, max=60),
+        retry=retry_if_exception_type((ClientError, ConnectionError))
+    )
+    def read_blob(self, blob_path: str) -> bytes:
+        \"\"\"Read with automatic retry on transient errors.\"\"\"
+        if not self._circuit_breaker.can_attempt():
+            raise CircuitBreakerOpenError("S3 backend unavailable")
+        
+        try:
+            key = self._parse_s3_key(blob_path)
+            response = self.s3.get_object(Bucket=self.bucket, Key=key)
+            data = response['Body'].read()
+            self._circuit_breaker.record_success()
+            return data
+        except Exception as e:
+            self._circuit_breaker.record_failure()
+            raise
+
+class CircuitBreaker:
+    \"\"\"Simple circuit breaker to prevent cascading failures.\"\"\"
+    
+    def __init__(self, threshold: int = 5, timeout: float = 60.0):
+        self.threshold = threshold
+        self.timeout = timeout
+        self.failures = 0
+        self.last_failure_time = None
+        self.state = "closed"  # closed, open, half-open
+    
+    def can_attempt(self) -> bool:
+        if self.state == "closed":
+            return True
+        
+        if self.state == "open":
+            # Check if timeout elapsed
+            if time.time() - self.last_failure_time > self.timeout:
+                self.state = "half-open"
+                return True
+            return False
+        
+        # half-open: allow one attempt
+        return True
+    
+    def record_success(self):
+        self.failures = 0
+        self.state = "closed"
+    
+    def record_failure(self):
+        self.failures += 1
+        self.last_failure_time = time.time()
+        
+        if self.failures >= self.threshold:
+            self.state = "open"
+```
+
+**Implementation Tasks:**
+- [ ] Add `tenacity` dependency for retry logic
+- [ ] Implement retry decorators for all blob backend methods
+- [ ] Add circuit breaker pattern for failing backends
+- [ ] Make retry config tunable (max_retries, backoff, jitter)
+- [ ] Add metrics for retry counts, circuit breaker state
+- [ ] Document retry behavior and configuration
+- [ ] Test with simulated network failures
+
+---
+
+**3. Local Caching Layer for Cloud Blob Backends** (Medium Priority)
+
+**Problem:** Reading frequently-accessed blobs from S3 adds latency and cost.
+
+**Solution:** With file-based blob backend interface, local caching becomes trivial - just coordinate between two blob backends!
+
+```python
+class CachedBlobBackend(BlobBackend):
+    """
+    Wrapper that adds local caching to any blob backend.
+    
+    Key insight: With file-based interface, local cache is just another blob backend!
+    - Local cache: FilesystemBlobBackend (fast, limited space)
+    - Remote storage: S3BlobBackend (slow, unlimited space)
+    - Both implement same interface!
+    
+    Benefits:
+    - Reduces latency (local disk faster than network)
+    - Reduces cost (fewer S3 API requests)
+    - Reduces bandwidth usage
+    """
+    
+    def __init__(
+        self,
+        upstream: BlobBackend,  # S3, Azure, GCS, etc.
+        cache_backend: BlobBackend,  # Typically FilesystemBlobBackend
+        max_cache_size_mb: int = 1000,
+        ttl_seconds: int = 3600
+    ):
+        self.upstream = upstream
+        self.cache = cache_backend  # Just another blob backend!
+        self.max_cache_size_mb = max_cache_size_mb
+        self.ttl_seconds = ttl_seconds
+        self._cache_index = self._load_cache_index()
+    
+    def read_blob_to_file(self, blob_path: str, file_path: Path):
+        """Read with local cache."""
+        # Check if cached locally
+        cache_blob_id = self._get_cache_id(blob_path)
+        
+        if cache_blob_id in self._cache_index:
+            timestamp = self._cache_index[cache_blob_id]['timestamp']
+            
+            # Check if cached copy is still valid
+            if time.time() - timestamp < self.ttl_seconds:
+                try:
+                    # Read from local cache (FilesystemBlobBackend)
+                    self.cache.read_blob_to_file(cache_blob_id, file_path)
+                    logger.debug(f"Cache hit: {blob_path}")
+                    return
+                except FileNotFoundError:
+                    # Cache entry exists but file missing - remove from index
+                    del self._cache_index[cache_blob_id]
+        
+        # Cache miss - fetch from upstream (S3BlobBackend)
+        logger.debug(f"Cache miss: {blob_path}")
+        self.upstream.read_blob_to_file(blob_path, file_path)
+        
+        # Store in local cache using same interface!
+        self._cache_locally(blob_path, file_path)
+    
+    def write_blob_from_file(self, blob_id: str, file_path: Path) -> str:
+        """Write to upstream and optionally cache locally."""
+        # Write to upstream (S3)
+        remote_path = self.upstream.write_blob_from_file(blob_id, file_path)
+        
+        # Also cache locally for subsequent reads
+        self._cache_locally(remote_path, file_path)
+        
+        return remote_path
+    
+    def _cache_locally(self, blob_path: str, file_path: Path):
+        """Store blob in local cache - just another write_blob_from_file call!"""
+        cache_blob_id = self._get_cache_id(blob_path)
+        
+        # Write to local cache using same blob backend interface
+        self.cache.write_blob_from_file(cache_blob_id, file_path)
+        
+        # Update index
+        file_size = file_path.stat().st_size
+        self._cache_index[cache_blob_id] = {
+            'blob_path': blob_path,
+            'size': file_size,
+            'timestamp': time.time()
+        }
+        
+        # Evict if cache too large
+        self._evict_if_needed()
+        self._save_cache_index()
+    
+    def _evict_if_needed(self):
+        """LRU eviction to stay under max_cache_size_mb."""
+        total_size_mb = sum(
+            entry['size'] for entry in self._cache_index.values()
+        ) / (1024 * 1024)
+        
+        if total_size_mb > self.max_cache_size_mb:
+            # Sort by timestamp (oldest first)
+            items = sorted(
+                self._cache_index.items(),
+                key=lambda x: x[1]['timestamp']
+            )
+            
+            # Evict until under limit
+            for cache_blob_id, entry in items:
+                if total_size_mb <= self.max_cache_size_mb * 0.9:  # 90% threshold
+                    break
+                
+                # Delete from cache backend (just a delete_blob call)
+                try:
+                    self.cache.delete_blob(cache_blob_id)
+                except Exception as e:
+                    logger.warning(f"Failed to evict {cache_blob_id}: {e}")
+                
+                del self._cache_index[cache_blob_id]
+                total_size_mb -= entry['size'] / (1024 * 1024)
+                logger.debug(f"Evicted from cache: {entry['blob_path']}")
+    
+    def _get_cache_id(self, blob_path: str) -> str:
+        """Generate cache ID from blob path."""
+        return hashlib.md5(blob_path.encode()).hexdigest()
+    
+    def _load_cache_index(self) -> Dict:
+        """Load cache index from disk (persists across restarts)."""
+        # Could store as JSON file or small SQLite DB
+        index_file = Path(self.cache.base_dir) / "cache_index.json"
+        if index_file.exists():
+            return json.loads(index_file.read_text())
+        return {}
+    
+    def _save_cache_index(self):
+        """Persist cache index to disk."""
+        index_file = Path(self.cache.base_dir) / "cache_index.json"
+        index_file.write_text(json.dumps(self._cache_index))
+
+# Usage - Clean and simple!
+s3_backend = S3BlobBackend(bucket="my-cache")
+local_cache = FilesystemBlobBackend(base_dir="/tmp/s3_cache")
+
+cached_s3 = CachedBlobBackend(
+    upstream=s3_backend,           # Remote storage (S3)
+    cache_backend=local_cache,     # Local cache (filesystem)
+    max_cache_size_mb=1000,        # 1GB local cache
+    ttl_seconds=3600               # 1 hour
+)
+
+# Now use it just like any blob backend!
+store = BlobStore(blob_backend=cached_s3, ...)
+
+# Or with cacheness
+cache = cacheness(config=CacheConfig(
+    blob_backend=cached_s3,
+    metadata_backend="sqlite"
+))
+```
+
+**Key Insight:** With file-based blob backend interface:
+- `FilesystemBlobBackend` and `S3BlobBackend` implement the same interface
+- `CachedBlobBackend` is just a coordinator between two backends
+- No special logic needed - just delegate to the right backend
+- Can even chain: `CachedBlobBackend(upstream=FailoverBlobBackend(S3, Azure), cache=Filesystem)`
+
+**Implementation Tasks:**
+- [ ] Create `CachedBlobBackend` wrapper class
+- [ ] Implement LRU eviction based on size
+- [ ] Add TTL expiration for cached entries
+- [ ] Persist cache index to survive restarts (JSON or SQLite)
+- [ ] Add cache hit/miss metrics
+- [ ] Make cache size and TTL configurable
+- [ ] Test cache effectiveness with benchmarks
+- [ ] Document when to use caching layer
+- [ ] Add example showing FilesystemBlobBackend as local cache for S3BlobBackend
+
+**Architecture Diagram:**
+
+```
+┌─────────────────────────────────────────────────┐
+│         CachedBlobBackend (Coordinator)         │
+├─────────────────────────────────────────────────┤
+│  read_blob_to_file():                           │
+│    1. Check cache_backend (Filesystem)          │
+│    2. If miss, fetch from upstream (S3)         │
+│    3. Store in cache_backend                    │
+│                                                  │
+│  write_blob_from_file():                        │
+│    1. Write to upstream (S3)                    │
+│    2. Also write to cache_backend               │
+└────────┬──────────────────────────┬─────────────┘
+         │                          │
+         ▼                          ▼
+┌────────────────────┐    ┌───────────────────┐
+│ FilesystemBlob     │    │  S3BlobBackend    │
+│ Backend            │    │  (upstream)       │
+│ (cache_backend)    │    │                   │
+│                    │    │                   │
+│ • Fast (local)     │    │ • Slow (network)  │
+│ • Limited (1GB)    │    │ • Unlimited       │
+│ • Ephemeral        │    │ • Persistent      │
+└────────────────────┘    └───────────────────┘
+```
+
+**This is much cleaner than the original design!**
+
+---
+
+**4. Blob Backend Failover & Redundancy** (Low-Medium Priority)
+
+**Problem:** Single backend failure makes entire cache unavailable.
+
+**Solution:**
+
+```python
+class FailoverBlobBackend(BlobBackend):
+    \"\"\"
+    Failover between multiple blob backends.
+    
+    Write to primary, fallback to secondary on failure.
+    Can also replicate writes to multiple backends.
+    \"\"\"
+    
+    def __init__(
+        self,
+        primary: BlobBackend,
+        fallback: BlobBackend,
+        replicate_writes: bool = False
+    ):
+        self.primary = primary
+        self.fallback = fallback
+        self.replicate_writes = replicate_writes
+    
+    def write_blob(self, blob_id: str, data: bytes) -> str:
+        \"\"\"Write to primary, optionally replicate to fallback.\"\"\"
+        try:
+            path = self.primary.write_blob(blob_id, data)
+            
+            if self.replicate_writes:
+                try:
+                    self.fallback.write_blob(blob_id, data)
+                except Exception as e:
+                    logger.warning(f"Replication to fallback failed: {e}")
+            
+            return path
+        except Exception as e:
+            logger.error(f"Primary write failed, trying fallback: {e}")
+            return self.fallback.write_blob(blob_id, data)
+    
+    def read_blob(self, blob_path: str) -> bytes:
+        \"\"\"Read from primary, fallback on failure.\"\"\"
+        try:
+            return self.primary.read_blob(blob_path)
+        except Exception as e:
+            logger.warning(f"Primary read failed, trying fallback: {e}")
+            return self.fallback.read_blob(blob_path)
+
+# Usage
+primary = S3BlobBackend(bucket="us-west-2-cache")
+fallback = S3BlobBackend(bucket="us-east-1-cache")
+failover_backend = FailoverBlobBackend(primary, fallback, replicate_writes=True)
+```
+
+**Implementation Tasks:**
+- [ ] Create `FailoverBlobBackend` wrapper class
+- [ ] Support N-way replication (not just primary/fallback)
+- [ ] Add health checks to detect backend failures
+- [ ] Implement read-after-write consistency checks
+- [ ] Add metrics for failover events
+- [ ] Test failover scenarios
+- [ ] Document when to use failover
+
+---
+
+**5. Blob Metadata & HTTP Headers** (Medium Priority)
+
+**Problem:** Need to store metadata with blobs (Content-Type, encoding, custom headers).
+
+**Solution:**
+
+```python
+class BlobBackend(ABC):
+    \"\"\"Extended with metadata support.\"\"\"
+    
+    @abstractmethod
+    def write_blob(
+        self,
+        blob_id: str,
+        data: bytes,
+        content_type: Optional[str] = None,
+        metadata: Optional[Dict[str, str]] = None,
+        cache_control: Optional[str] = None
+    ) -> str:
+        \"\"\"Write blob with optional HTTP metadata.\"\"\"
+        pass
+    
+    @abstractmethod
+    def get_blob_metadata(self, blob_path: str) -> Dict[str, Any]:
+        \"\"\"Get blob metadata without downloading content.\"\"\"
+        pass
+
+class S3BlobBackend(BlobBackend):
+    def write_blob(
+        self,
+        blob_id: str,
+        data: bytes,
+        content_type: Optional[str] = None,
+        metadata: Optional[Dict[str, str]] = None,
+        cache_control: Optional[str] = None
+    ) -> str:
+        key = f"{self.prefix}{blob_id}"
+        
+        extra_args = {
+            "StorageClass": self.storage_class
+        }
+        
+        if content_type:
+            extra_args["ContentType"] = content_type
+        
+        if cache_control:
+            extra_args["CacheControl"] = cache_control
+        
+        if metadata:
+            # S3 metadata keys must be lowercase
+            extra_args["Metadata"] = {k.lower(): v for k, v in metadata.items()}
+        
+        self.s3.put_object(Bucket=self.bucket, Key=key, Body=data, **extra_args)
+        return f"s3://{self.bucket}/{key}"
+    
+    def get_blob_metadata(self, blob_path: str) -> Dict[str, Any]:
+        \"\"\"Get S3 object metadata via HEAD request (no download).\"\"\"
+        key = self._parse_s3_key(blob_path)
+        response = self.s3.head_object(Bucket=self.bucket, Key=key)
+        
+        return {
+            "size": response["ContentLength"],
+            "content_type": response.get("ContentType"),
+            "cache_control": response.get("CacheControl"),
+            "etag": response["ETag"].strip('"'),
+            "last_modified": response["LastModified"],
+            "metadata": response.get("Metadata", {}),
+            "storage_class": response.get("StorageClass")
+        }
+```
+
+---
+
+#### Recommendations for Phase 2 Implementation Order
+
+**Phase 2.1 - Foundation** (2-3 months)
+1. Handler registration API (Section 2.1)
+2. Metadata backend registry (Section 2.2)
+3. Basic blob backend registry (Section 2.3) - filesystem only initially
+4. Configuration schema & validation (Section 2.4)
+5. Documentation for manual registration patterns
+
+**Phase 2.2 - Core Backends** (3-4 months)
+1. PostgreSQL metadata backend with retry logic
+2. S3 blob backend with content hashing (ETag + custom metadata)
+3. Retry & resilience patterns (tenacity, circuit breakers)
+4. Basic monitoring/metrics hooks
+5. Custom SQLAlchemy metadata + PostgreSQL compatibility (Section 2.7)
+
+**Phase 2.3 - Production Hardening** (2-3 months)
+1. Local caching layer for cloud blob backends
+2. Streaming support for large blobs
+3. Blob metadata & HTTP headers
+4. Failover & redundancy
+5. Observability & structured logging
+6. Performance benchmarking & optimization
+
+**Phase 2.4 - Advanced Features** (2-3 months)
+1. Alternative cloud providers (Azure, GCS)
+2. Blob migration utilities
+3. Cost tracking & budget alerts
+4. Multi-region support
+5. Documentation & examples
+
+**Total Estimated Effort:** 9-12 months for complete Phase 2
+
+**Deferred to Future Phases (if usage warrants):**
+- Entry point discovery / auto-loading plugin system
+- Plugin sandboxing & security
+- Plugin marketplace / registry
+
+**Risk Mitigation:**
+- Start with simpler backends (PostgreSQL, S3) before complex ones
+- Build wrappers (CachedBlobBackend, FailoverBlobBackend) for composability
+- Extensive testing with real cloud services (not just mocks)
+- Manual registration keeps architecture simple and explicit
+- Beta period with production users before 1.0 release
 
 ---
 
@@ -286,25 +2113,11 @@ class BlobStore(ABC):
 
 ---
 
-### Questions to Resolve
+## 🐛 Bug Tracking
 
-1. **Naming**: If split, what should the storage package be called?
-   - `blobcache-storage`
-   - `pyblobstore`
-   - `cacheness-core`
-   - Other?
+Most issues identified during code review have been fixed. Historical tracking below:
 
-2. **Scope**: Should storage layer include SQL pull-through cache, or is that a separate concern?
-
-3. **Backends**: Which backends should be in core vs. extras?
-   - Core: SQLite, JSON, Memory
-   - Extras: S3, Redis, PostgreSQL?
-
-4. **Versioning**: How to handle API versioning if split?
-
----
-
-## 🔴 High Severity Issues
+### 🔴 High Severity Issues (All Fixed)
 
 ### 1. Query Method Returns Unclosed Session ✅ FIXED
 
@@ -334,13 +2147,11 @@ with cache.query_custom_session("ml_experiments") as query:
     high_accuracy = query.filter(MLExperimentMetadata.accuracy >= 0.9).all()
 ```
 
-**Status:** ✅ Fixed
-
 ---
 
-## 🟠 Medium Severity Issues
+### 🟠 Medium Severity Issues (All Fixed)
 
-### 2. JSON Metadata File Corruption Risk ✅ FIXED
+#### 2. JSON Metadata File Corruption Risk ✅ FIXED
 
 **Location:** [src/cacheness/metadata.py#L697-731](../src/cacheness/metadata.py#L697-L731)
 
@@ -536,7 +2347,9 @@ ERROR: Failed to save JSON metadata: [Errno 2] No such file or directory
 
 ---
 
-## 🔧 Design Improvements
+## 🔧 Future Enhancement Ideas (Not Scheduled)
+
+These are potential improvements for consideration in future phases:
 
 ### 1. Add Session Context Manager API
 
@@ -611,18 +2424,35 @@ if result.signature_valid == False:
 
 ---
 
-## Priority Matrix
 
-| Issue | Severity | Effort | Status |
-|-------|----------|--------|--------|
-| Query Session Leak | High | Medium | ✅ Fixed |
-| JSON Atomic Writes | Medium | Low | ✅ Fixed |
-| Global Cache Leak on Reset | Medium | Low | ✅ Fixed |
-| Signature Field Mismatch | Medium | Low | ✅ Fixed |
-| Decorator Cache Cleanup | Medium | Low | ✅ Fixed |
-| Custom Fields Validation | Low | Low | ✅ Fixed |
-| Exception Handling Audit | Low | Medium | ✅ Fixed |
-| Test Cleanup Errors | Low | Low | ✅ Fixed |
+
+---
+
+## 📝 Summary for New Readers
+
+**Current Status (January 2026):**
+- ✅ **Phase 1 Complete**: Storage layer separated into `cacheness/storage/` subpackage
+- 🚧 **Phase 2 Planning**: Extensibility features designed, ready for implementation
+- ✅ **Bug Fixes**: All critical and medium severity issues resolved
+
+**Key Architectural Decisions:**
+1. **Monorepo approach**: Keep single package with clear module boundaries
+2. **Manual registration**: Simple explicit APIs over auto-discovery plugins
+3. **Separate concerns**: Metadata backends ≠ blob storage backends
+4. **File-based interface**: Blob backends use files, not streaming
+5. **Preserve existing features**: Three metadata types coexist harmoniously
+
+**Phase 2 Roadmap** (9-12 months):
+- **Phase 2.1** (2-3 months): Registration APIs, config validation
+- **Phase 2.2** (3-4 months): PostgreSQL metadata, S3 blobs, retry logic
+- **Phase 2.3** (2-3 months): Local caching, failover, observability
+- **Phase 2.4** (2-3 months): Azure/GCS, migration tools, cost tracking
+
+**Next Steps for Contributors:**
+1. Review [Phase 2 Implementation Roadmap](#recommendations-for-phase-2-implementation-order)
+2. Check out Section 2.1-2.9 for detailed feature specifications
+3. See [Feasibility Review](#phase-2-feasibility-review) for technical considerations
+4. Read design decision on [Manual Registration vs Plugins](#phase-2-plugin-architecture--extensibility-medium-risk)
 
 ---
 
@@ -638,4 +2468,7 @@ if result.signature_valid == False:
 | 2026-01-23 | Fixed: Custom signed fields validation (Low #6) - Added field validation | Code Review |
 | 2026-01-23 | Fixed: Inconsistent exception handling (Low #7) - Improved error types | Code Review |
 | 2026-01-27 | Architecture: Phase 1 complete - Created `storage/` subpackage with `BlobStore` API | Code Review |
+| 2026-01-27 | Architecture: Phase 2 planned - Registration APIs for handlers/backends, PostgreSQL/S3 backends | Code Review |
+| 2026-01-27 | Decision: Use manual registration over auto-discovery plugins (deferred to future if needed) | Code Review |
+| 2026-01-27 | Documentation: Added navigation, summary, cleaned up for new reader clarity | Code Review |
 

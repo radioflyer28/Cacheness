@@ -391,6 +391,36 @@ print(cached_tensor.shape)  # (2, 2)
 - **Multi-format Storage**: Optimized formats for different data types (NPZ, Parquet, compressed pickle)
 - **Intelligent Compression**: Automatic codec selection and parallel processing for large datasets
 
+### Low-Level Storage API
+
+For direct storage access without caching semantics (TTL, eviction), use the `BlobStore` API:
+
+```python
+from cacheness.storage import BlobStore
+
+# Create a blob store for ML model versioning
+store = BlobStore(cache_dir="./models", backend="sqlite", compression="lz4")
+
+# Store a model with metadata
+key = store.put(
+    model, 
+    key="xgboost_v1", 
+    metadata={"accuracy": 0.95, "author": "ml_team"}
+)
+
+# Retrieve by key
+model = store.get("xgboost_v1")
+
+# Query by metadata
+high_accuracy_models = store.list(metadata_filter={"accuracy": 0.95})
+
+# Context manager for automatic cleanup
+with BlobStore(cache_dir="./artifacts") as store:
+    store.put(data, key="artifact_1")
+```
+
+See [API_REFERENCE.md](docs/API_REFERENCE.md) for full `BlobStore` documentation.
+
 ## Security and Integrity
 
 ### Cache Entry Signing
@@ -417,7 +447,7 @@ cache = cacheness(config)
 ```
 
 **Default Signed Fields:**
-Signs 6 fields for enhanced security: `cache_key`, `file_hash`, `data_type`, `file_size`, `created_at`, `prefix`
+Signs 11 fields by default: `cache_key`, `data_type`, `prefix`, `file_size`, `file_hash`, `object_type`, `storage_format`, `serializer`, `compression_codec`, `actual_path`, `created_at`
 
 **Custom Field Selection:**
 ```python
@@ -432,7 +462,8 @@ config = CacheConfig(
 config = CacheConfig(
     security=SecurityConfig(
         custom_signed_fields=["cache_key", "file_hash", "data_type", "file_size", 
-                             "created_at", "prefix", "description", "actual_path"]
+                             "created_at", "prefix", "object_type", "storage_format",
+                             "serializer", "compression_codec", "actual_path"]
     )
 )
 

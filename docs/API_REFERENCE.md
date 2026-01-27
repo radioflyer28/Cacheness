@@ -2,6 +2,98 @@
 
 Complete reference for all cacheness classes, methods, and configuration options.
 
+## Storage Layer
+
+### `BlobStore`
+
+Low-level blob storage API without caching semantics (TTL, eviction). Useful for ML model versioning, artifact storage, and data pipeline checkpoints.
+
+```python
+from cacheness.storage import BlobStore
+
+class BlobStore:
+    def __init__(
+        self,
+        cache_dir: str = ".blobstore",
+        backend: Optional[Union[str, MetadataBackend]] = None,
+        compression: str = "lz4",
+        compression_level: int = 3,
+        content_addressable: bool = False
+    )
+```
+
+**Parameters:**
+- `cache_dir` (str): Directory for storing blobs and metadata
+- `backend` (str|MetadataBackend): Backend type ("json", "sqlite") or instance
+- `compression` (str): Compression codec (lz4, zstd, gzip, blosclz)
+- `compression_level` (int): Compression level (1-9)
+- `content_addressable` (bool): If True, use content hash as blob key
+
+#### Methods
+
+##### `put(data, key=None, metadata=None) -> str`
+Store a blob with optional metadata.
+
+**Parameters:**
+- `data` (Any): The data to store
+- `key` (Optional[str]): Optional key for the blob (auto-generated if None)
+- `metadata` (Optional[Dict]): Custom metadata to store with the blob
+
+**Returns:**
+- `str`: The blob key
+
+**Example:**
+```python
+store = BlobStore(cache_dir="./models")
+key = store.put(model, key="xgboost_v1", metadata={"accuracy": 0.95})
+```
+
+##### `get(key: str) -> Optional[Any]`
+Retrieve a blob by key.
+
+##### `get_metadata(key: str) -> Optional[Dict]`
+Get blob metadata without loading content.
+
+##### `update_metadata(key: str, metadata: Dict) -> bool`
+Update metadata for an existing blob.
+
+##### `delete(key: str) -> bool`
+Delete a blob and its metadata.
+
+##### `exists(key: str) -> bool`
+Check if a blob exists.
+
+##### `list(prefix=None, metadata_filter=None) -> List[str]`
+List blob keys with optional filtering.
+
+**Example:**
+```python
+# List all blobs
+all_keys = store.list()
+
+# Filter by prefix
+model_keys = store.list(prefix="model_")
+
+# Filter by metadata
+v1_models = store.list(metadata_filter={"version": "1.0"})
+```
+
+##### `clear() -> int`
+Remove all blobs.
+
+##### `close()`
+Close the blob store and release resources.
+
+**Example:**
+```python
+# Context manager usage (recommended)
+with BlobStore(cache_dir="./artifacts") as store:
+    store.put(data, key="artifact_1")
+    result = store.get("artifact_1")
+```
+
+---
+
 ## SQL Cache Classes
 
 ### `SqlCache`
@@ -396,6 +488,59 @@ Get cache statistics.
 
 **Returns:**
 - Dictionary with cache statistics including total entries, size, hit rate, etc.
+
+##### `query_custom(table_name: str, filters: Optional[Dict] = None) -> List[Any]`
+Query custom metadata entries from SQLite backend. Returns results directly with automatic session cleanup.
+
+**Parameters:**
+- `table_name` (str): Name of the custom metadata table
+- `filters` (Optional[Dict]): Simple equality filters to apply
+
+**Returns:**
+- `List`: List of matching entries
+
+**Example:**
+```python
+# Simple query - session automatically cleaned up
+results = cache.query_custom("ml_experiments")
+
+# With filters
+results = cache.query_custom("ml_experiments", {"model_type": "xgboost"})
+```
+
+##### `query_custom_session(table_name: str) -> ContextManager`
+Context manager for advanced custom metadata queries with SQLAlchemy. Guarantees session cleanup.
+
+**Parameters:**
+- `table_name` (str): Name of the custom metadata table
+
+**Returns:**
+- Context manager yielding a SQLAlchemy Query object
+
+**Example:**
+```python
+# Advanced filtering with context manager
+with cache.query_custom_session("ml_experiments") as query:
+    high_accuracy = query.filter(MLExperimentMetadata.accuracy >= 0.9).all()
+    sorted_results = query.order_by(MLExperimentMetadata.accuracy.desc()).limit(10).all()
+```
+
+##### `close()`
+Close the cache and release resources. Called automatically if using context manager.
+
+**Example:**
+```python
+# Manual close
+cache = cacheness()
+try:
+    cache.put(data, key="example")
+finally:
+    cache.close()
+
+# Or use context manager (recommended)
+with cacheness() as cache:
+    cache.put(data, key="example")
+```
 
 #### Factory Methods
 

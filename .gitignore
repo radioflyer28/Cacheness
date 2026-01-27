@@ -11,6 +11,8 @@ wheels/
 
 # Cache system
 *.db
+*.db-shm
+*.db-wal
 *.json
 *.pkl
 *.pkl.*

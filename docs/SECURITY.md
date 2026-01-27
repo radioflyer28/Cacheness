@@ -12,7 +12,7 @@ Cacheness provides cryptographic signing for cache metadata entries to prevent t
 from cacheness import cacheness, CacheConfig, SecurityConfig
 
 # Default configuration - signing enabled with enhanced field set
-cache = cacheness()  # ✅ Entry signing active with 6 security fields
+cache = cacheness()  # ✅ Entry signing active with 11 security fields
 
 # High-security configuration
 secure_config = CacheConfig(
@@ -37,16 +37,21 @@ cache = cacheness(secure_config)
 
 ### Default Signed Fields
 
-Cacheness signs **6 fields** by default for enhanced security:
+Cacheness signs **11 fields** by default for enhanced security:
 
 | Field | Purpose | Security Value |
 |-------|---------|----------------|
 | `cache_key` | Unique identifier | Prevents key substitution |
-| `file_hash` | Content integrity | Detects file tampering |
 | `data_type` | Type classification | Prevents type confusion |
-| `file_size` | Size verification | Detects partial corruption |
-| `created_at` | Timestamp | Prevents replay attacks |
 | `prefix` | Key prefix | Namespace protection |
+| `file_size` | Size verification | Detects partial corruption |
+| `file_hash` | Content integrity | Detects file tampering |
+| `object_type` | Original object type | Prevents type spoofing |
+| `storage_format` | Serialization format | Detects format tampering |
+| `serializer` | Serializer used | Prevents deserialize attacks |
+| `compression_codec` | Compression method | Detects compression tampering |
+| `actual_path` | File location | Prevents path substitution |
+| `created_at` | Timestamp | Prevents replay attacks |
 
 ### Custom Field Selection
 
@@ -65,7 +70,8 @@ paranoid_config = CacheConfig(
     security=SecurityConfig(
         custom_signed_fields=[
             "cache_key", "file_hash", "data_type", "file_size",
-            "created_at", "prefix", "description", "actual_path"
+            "created_at", "prefix", "description", "actual_path",
+            "object_type", "storage_format", "serializer", "compression_codec"
         ]
     )
 )
@@ -73,7 +79,7 @@ paranoid_config = CacheConfig(
 # Default enhanced security (recommended)
 enhanced_config = CacheConfig(
     security=SecurityConfig(
-        custom_signed_fields=None  # Uses default 6 fields
+        custom_signed_fields=None  # Uses default 11 fields
     )
 )
 ```
