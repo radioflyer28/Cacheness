@@ -55,6 +55,8 @@ class TestCachedDecorator:
             result3 = expensive_function(3, 7)
             assert result3 == 21
             assert call_count == 2
+            
+            cache_instance.close()
 
     def test_multiple_return_values_tuple(self):
         """Test caching function that returns tuple of multiple values."""
@@ -79,6 +81,8 @@ class TestCachedDecorator:
             result2 = multi_return_function(5)
             assert result2 == (5, 25, 125, "processed_5")
             assert call_count == 1  # No additional calls
+            
+            cache_instance.close()
 
     @pytest.mark.skipif(not PANDAS_AVAILABLE, reason="Pandas not available")
     def test_multiple_dataframes_return(self):
@@ -134,6 +138,8 @@ class TestCachedDecorator:
             assert train1.equals(train2)
             assert test1.equals(test2)
             assert meta1 == meta2
+            
+            cache_instance.close()
 
     def test_decorator_with_custom_ttl(self):
         """Test decorator with custom TTL."""
@@ -206,6 +212,8 @@ class TestCachedDecorator:
             # Verify it used the custom cache
             stats = custom_cache.get_stats()
             assert stats["total_entries"] >= 1
+            
+            custom_cache.close()
 
     def test_error_handling_ignore_errors_true(self):
         """Test decorator error handling with ignore_errors=True (default)."""
@@ -408,6 +416,8 @@ class TestDecoratorEdgeCases:
                 result1["level1"]["level2"]["arrays"][1],
                 result2["level1"]["level2"]["arrays"][1],
             )
+            
+            cache_instance.close()
 
     def test_function_with_defaults(self):
         """Test caching functions with default arguments."""
@@ -482,6 +492,9 @@ class TestFactoryMethods:
             result3 = fetch_api_data("posts")
             assert result3 == {"endpoint": "posts", "data": "response"}
             assert call_count == 2
+            
+            # Close the cache instance created by the decorator
+            fetch_api_data._cache_instance.close()
 
     def test_cached_for_api_error_handling(self):
         """Test that @cached.for_api() has error handling enabled by default."""
@@ -502,3 +515,6 @@ class TestFactoryMethods:
             # the decorator was created with the right parameters
             assert hasattr(might_fail, 'cache_clear')
             assert hasattr(might_fail, 'cache_info')
+            
+            # Close the cache instance created by the decorator
+            might_fail._cache_instance.close()

@@ -10,6 +10,7 @@ Fast Python disk cache with key-value store hashing and a "cachetools-like" deco
 - **Advanced compression** using Blosc2 and LZ4 for fast compression
 - **Multiple backends** with SQLite and JSON metadata support
 - **Performance-optimized** parallel processing for hashing large directories
+- **Cross-platform** fully compatible with Windows, Linux, and macOS
 
 ## Quick Start
 
@@ -648,9 +649,12 @@ experiment_metadata = MLExperimentMetadata(
 
 cache.put(model, experiment="exp_001", custom_metadata={"ml_experiments": experiment_metadata})
 
-# Query with SQL
-query = cache.query_custom("ml_experiments")
-high_accuracy_models = query.filter(MLExperimentMetadata.accuracy >= 0.9).all()
+# Simple query - returns list directly
+all_experiments = cache.query_custom("ml_experiments")
+
+# Advanced filtering with context manager (ensures proper session cleanup)
+with cache.query_custom_session("ml_experiments") as query:
+    high_accuracy_models = query.filter(MLExperimentMetadata.accuracy >= 0.9).all()
 ```
 
 For detailed metadata workflows, see the **[Custom Metadata Guide](docs/CUSTOM_METADATA.md)**.
@@ -679,7 +683,19 @@ Missing optional dependencies are handled gracefully with automatic fallbacks.
 - **[SQL Cache Guide](docs/SQL_CACHE.md)** - Pull-through cache for APIs and time-series data
 - **[Custom Metadata Guide](docs/CUSTOM_METADATA.md)** - Advanced metadata workflows with SQLAlchemy
 - **[Performance Guide](docs/PERFORMANCE.md)** - Optimization strategies and benchmarks
+- **[Cross-Platform Guide](docs/CROSS_PLATFORM_GUIDE.md)** - Development guide for all platforms
+- **[Windows Compatibility](docs/WINDOWS_COMPATIBILITY.md)** - Cross-platform development and Windows-specific considerations
 - **[API Reference](docs/API_REFERENCE.md)** - Complete API documentation
+
+## Platform Verification
+
+Verify Cacheness works on your platform:
+
+```bash
+python verify_platform.py
+```
+
+This script tests core functionality, SQLite backend, and resource cleanup on your system.
 
 ## License
 

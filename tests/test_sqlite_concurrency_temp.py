@@ -126,62 +126,62 @@ class TestSQLiteConcurrency:
                 store_cache_key_params=True
             )
             cache = UnifiedCache(config=config)
-            
-            results = {'strings': 0, 'numbers': 0, 'lists': 0}
-            results_lock = threading.Lock()
-            errors = []
-            
-            def mixed_data_worker(worker_id):
-                try:
-                    local_results = {'strings': 0, 'numbers': 0, 'lists': 0}
-                    
-                    for i in range(10):
-                        # Store different types of data
-                        if i % 3 == 0:
-                            cache.put(f"text_data_{worker_id}_{i}", worker=worker_id, dtype="string", item=i)
-                            local_results['strings'] += 1
-                        elif i % 3 == 1:
-                            cache.put(worker_id * 100 + i, worker=worker_id, dtype="number", item=i)
-                            local_results['numbers'] += 1
-                        else:
-                            cache.put([worker_id, i, "data"], worker=worker_id, dtype="list", item=i)
-                            local_results['lists'] += 1
+            try:
+                results = {'strings': 0, 'numbers': 0, 'lists': 0}
+                results_lock = threading.Lock()
+                errors = []
+                
+                def mixed_data_worker(worker_id):
+                    try:
+                        local_results = {'strings': 0, 'numbers': 0, 'lists': 0}
                         
-                        # Small random delay
-                        if random.random() < 0.1:
-                            time.sleep(0.001)
-                    
-                    # Update global results thread-safely
-                    with results_lock:
-                        for key in results:
-                            results[key] += local_results[key]
+                        for i in range(10):
+                            # Store different types of data
+                            if i % 3 == 0:
+                                cache.put(f"text_data_{worker_id}_{i}", worker=worker_id, dtype="string", item=i)
+                                local_results['strings'] += 1
+                            elif i % 3 == 1:
+                                cache.put(worker_id * 100 + i, worker=worker_id, dtype="number", item=i)
+                                local_results['numbers'] += 1
+                            else:
+                                cache.put([worker_id, i, "data"], worker=worker_id, dtype="list", item=i)
+                                local_results['lists'] += 1
                             
-                except Exception as e:
-                    errors.append(f"Worker {worker_id}: {e}")
-            
-            # Execute mixed operations
-            threads = []
-            num_workers = 5
-            for i in range(num_workers):
-                t = threading.Thread(target=mixed_data_worker, args=(i,))
-                threads.append(t)
-                t.start()
-            
-            for t in threads:
-                t.join()
-            
-            # Verify results
-            assert len(errors) == 0, f"Errors in mixed operations: {errors}"
-            assert results['strings'] > 0, "Should have string operations"
-            assert results['numbers'] > 0, "Should have number operations"
-            assert results['lists'] > 0, "Should have list operations"
-            
-            # Verify cache integrity
-            entries = cache.list_entries()
-            expected_total = sum(results.values())
-            assert len(entries) == expected_total, f"Expected {expected_total} entries, got {len(entries)}"
-            
-            cache.close()
+                            # Small random delay
+                            if random.random() < 0.1:
+                                time.sleep(0.001)
+                        
+                        # Update global results thread-safely
+                        with results_lock:
+                            for key in results:
+                                results[key] += local_results[key]
+                                
+                    except Exception as e:
+                        errors.append(f"Worker {worker_id}: {e}")
+                
+                # Execute mixed operations
+                threads = []
+                num_workers = 5
+                for i in range(num_workers):
+                    t = threading.Thread(target=mixed_data_worker, args=(i,))
+                    threads.append(t)
+                    t.start()
+                
+                for t in threads:
+                    t.join()
+                
+                # Verify results
+                assert len(errors) == 0, f"Errors in mixed operations: {errors}"
+                assert results['strings'] > 0, "Should have string operations"
+                assert results['numbers'] > 0, "Should have number operations"
+                assert results['lists'] > 0, "Should have list operations"
+                
+                # Verify cache integrity
+                entries = cache.list_entries()
+                expected_total = sum(results.values())
+                assert len(entries) == expected_total, f"Expected {expected_total} entries, got {len(entries)}"
+            finally:
+                cache.close()
 
     def test_high_concurrency_stress(self):
         """Stress test with high thread concurrency."""
@@ -610,6 +610,7 @@ if __name__ == "__main__":
             )
             temp_cache = UnifiedCache(config=config)
             test_instance.test_concurrent_put_operations(temp_cache)
+            temp_cache.close()
             print("✅ Concurrent put operations test passed")
         
         test_instance.test_concurrent_different_data_operations()

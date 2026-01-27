@@ -376,25 +376,37 @@ class UnifiedCache:
         except ImportError:
             return {}
 
-    def query_custom(self, schema_name: str):
+    def query_custom(self, schema_name: str, filters: Optional[Dict[str, Any]] = None) -> List[Any]:
         """
-        Query custom metadata for a specific schema.
+        Query custom metadata for a specific schema with automatic session cleanup.
+
+        This method provides safe querying with proper session lifecycle management.
+        For advanced queries requiring the SQLAlchemy query object directly, use
+        the query_custom_session() context manager instead.
 
         Args:
             schema_name: Name of the custom metadata schema to query
+            filters: Optional dict of field_name -> value for equality filtering
 
         Returns:
-            SQLAlchemy query object for advanced querying, or None if not supported
+            List of results (empty list if not supported or on error)
 
         Example:
-            query = cache.query_custom("ml_experiments")
-            high_accuracy = query.filter(MLExperimentMetadata.accuracy >= 0.9).all()
+            # Get all entries
+            results = cache.query_custom("ml_experiments")
+            
+            # Filter by field values
+            results = cache.query_custom("ml_experiments", {"model_type": "xgboost"})
+            
+            # For advanced filtering, use the context manager:
+            with cache.query_custom_session("ml_experiments") as query:
+                high_accuracy = query.filter(MLExperimentMetadata.accuracy >= 0.9).all()
         """
         if not self._supports_custom_metadata():
             logger.warning(
                 "Custom metadata querying not supported - requires SQLite backend"
             )
-            return None
+            return []
 
         try:
             from .custom_metadata import get_custom_metadata_model
@@ -402,21 +414,78 @@ class UnifiedCache:
             model_class = get_custom_metadata_model(schema_name)
             if not model_class:
                 logger.warning(f"Unknown custom metadata schema: {schema_name}")
-                return None
+                return []
 
             if hasattr(self.metadata_backend, "SessionLocal"):
-                session = self.metadata_backend.SessionLocal()
-                from sqlalchemy import select
-
-                return session.query(model_class)
+                # Use context manager to ensure proper session cleanup
+                with self.metadata_backend.SessionLocal() as session:
+                    query = session.query(model_class)
+                    
+                    # Apply optional filters
+                    if filters:
+                        for field_name, value in filters.items():
+                            if hasattr(model_class, field_name):
+                                query = query.filter(getattr(model_class, field_name) == value)
+                            else:
+                                logger.warning(f"Unknown filter field '{field_name}' for schema '{schema_name}'")
+                    
+                    return query.all()
             else:
                 logger.warning("SQLAlchemy session not available")
-                return None
+                return []
         except Exception as e:
-            logger.error(f"Failed to create query for schema {schema_name}: {e}")
-            return None
+            logger.error(f"Failed to query schema {schema_name}: {e}")
+            return []
 
-    def query_custom_metadata(self, schema_name: str):
+    def query_custom_session(self, schema_name: str):
+        """
+        Context manager for custom metadata queries with proper session cleanup.
+        
+        Use this for advanced queries that need direct access to the SQLAlchemy
+        query object for complex filtering, ordering, or joining.
+
+        Args:
+            schema_name: Name of the custom metadata schema to query
+
+        Yields:
+            SQLAlchemy query object for advanced querying
+
+        Raises:
+            ValueError: If schema not found or custom metadata not supported
+
+        Example:
+            with cache.query_custom_session("ml_experiments") as query:
+                # Complex filtering
+                high_accuracy = query.filter(
+                    MLExperimentMetadata.accuracy >= 0.9,
+                    MLExperimentMetadata.model_type == "xgboost"
+                ).order_by(MLExperimentMetadata.accuracy.desc()).limit(10).all()
+        """
+        from contextlib import contextmanager
+        
+        @contextmanager
+        def _session_context():
+            if not self._supports_custom_metadata():
+                raise ValueError("Custom metadata querying not supported - requires SQLite backend")
+
+            from .custom_metadata import get_custom_metadata_model
+
+            model_class = get_custom_metadata_model(schema_name)
+            if not model_class:
+                raise ValueError(f"Unknown custom metadata schema: {schema_name}")
+
+            if not hasattr(self.metadata_backend, "SessionLocal"):
+                raise ValueError("SQLAlchemy session not available")
+
+            session = self.metadata_backend.SessionLocal()
+            try:
+                yield session.query(model_class)
+            finally:
+                session.close()
+        
+        return _session_context()
+
+    def query_custom_metadata(self, schema_name: str, filters: Optional[Dict[str, Any]] = None) -> List[Any]:
         """
         Query custom metadata for a specific schema.
         
@@ -424,12 +493,13 @@ class UnifiedCache:
 
         Args:
             schema_name: Name of the custom metadata schema to query
+            filters: Optional dict of field_name -> value for equality filtering
 
         Returns:
-            SQLAlchemy query object for advanced querying, or None if not supported
+            List of results (empty list if not supported or on error)
         """
         logger.warning("query_custom_metadata() is deprecated, use query_custom() instead")
-        return self.query_custom(schema_name)
+        return self.query_custom(schema_name, filters)
 
     def query_meta(self, **filters):
         """
@@ -630,6 +700,51 @@ class UnifiedCache:
 
         return current_time > expiry_time
 
+    def _extract_signable_fields(
+        self, 
+        cache_key: str,
+        entry_data: Dict[str, Any], 
+        metadata: Dict[str, Any],
+        cache_key_params: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        Extract fields for signing/verification in a consistent manner.
+        
+        This ensures that the same fields are used during both put() and get()
+        to prevent signature mismatches.
+        
+        Args:
+            cache_key: The cache key
+            entry_data: The entry data dictionary (data_type, prefix, description, etc.)
+            metadata: The metadata dictionary from handler result
+            cache_key_params: Optional cache key parameters
+            
+        Returns:
+            Dictionary containing all fields that should be signed
+        """
+        # Build complete entry data with all signable fields
+        signable_data = {
+            "cache_key": cache_key,
+            "data_type": entry_data.get("data_type"),
+            "prefix": entry_data.get("prefix", ""),
+            "description": entry_data.get("description", ""),
+            "file_size": entry_data.get("file_size", 0),
+            "created_at": entry_data.get("created_at"),
+            "actual_path": metadata.get("actual_path", ""),
+            "file_hash": metadata.get("file_hash"),
+            # Include handler-specific metadata fields
+            "object_type": metadata.get("object_type"),
+            "storage_format": metadata.get("storage_format"),
+            "serializer": metadata.get("serializer"),
+            "compression_codec": metadata.get("compression_codec"),
+        }
+        
+        # Include cache_key_params if provided
+        if cache_key_params is not None:
+            signable_data["cache_key_params"] = cache_key_params
+            
+        return signable_data
+
     def _calculate_file_hash(self, file_path: Path) -> Optional[str]:
         """
         Calculate XXH3_64 hash of a cache file for integrity verification.
@@ -729,27 +844,20 @@ class UnifiedCache:
                     # Store without timezone info for consistency with database format
                     creation_timestamp_str = creation_timestamp.replace(tzinfo=None).isoformat()
                     
-                    # Create complete entry data for signing
-                    complete_entry_data = {
-                        "cache_key": cache_key,
-                        "data_type": handler.data_type,
-                        "prefix": prefix,
-                        "description": description,
-                        "file_size": result["file_size"],
-                        "created_at": creation_timestamp_str,  # Use consistent format
-                        "actual_path": result.get("actual_path", str(base_file_path)),
-                        "file_hash": file_hash,
-                    }
+                    # Store the creation timestamp in entry_data for the database
+                    entry_data["created_at"] = creation_timestamp_str
                     
-                    # Include cache_key_params in signature if they're being stored
-                    if self.config.metadata.store_cache_key_params:
-                        complete_entry_data["cache_key_params"] = kwargs
+                    # Use helper method for consistent field extraction
+                    cache_key_params = kwargs if self.config.metadata.store_cache_key_params else None
+                    complete_entry_data = self._extract_signable_fields(
+                        cache_key=cache_key,
+                        entry_data=entry_data,
+                        metadata=metadata_dict,
+                        cache_key_params=cache_key_params
+                    )
                     
                     signature = self.signer.sign_entry(complete_entry_data)
                     metadata_dict["entry_signature"] = signature
-                    
-                    # Store the creation timestamp in entry_data for the database
-                    entry_data["created_at"] = creation_timestamp_str
                     
                     logger.debug(f"Created signature for entry {cache_key}")
                     
@@ -773,8 +881,13 @@ class UnifiedCache:
             
             return cache_key
 
+        except (OSError, IOError) as e:
+            # I/O errors (disk full, permissions, etc.)
+            logger.error(f"Failed to cache {handler.data_type} (I/O error): {e}")
+            raise
         except Exception as e:
-            logger.error(f"Failed to cache {handler.data_type}: {e}")
+            # Include exception type for easier debugging
+            logger.error(f"Failed to cache {handler.data_type}: {type(e).__name__}: {e}")
             raise
 
     def get(
@@ -843,22 +956,14 @@ class UnifiedCache:
                 stored_signature = metadata.get("entry_signature")
                 
                 if stored_signature is not None:
-                    # Reconstruct entry data for verification
-                    verify_entry_data = {
-                        "cache_key": cache_key,
-                        "data_type": entry.get("data_type"),
-                        "prefix": entry.get("prefix", ""),
-                        "description": entry.get("description", ""),
-                        "file_size": entry.get("file_size", 0),
-                        "created_at": entry.get("created_at"),
-                        "actual_path": metadata.get("actual_path", ""),
-                        "file_hash": metadata.get("file_hash"),
-                    }
-                    
-                    # Include cache_key_params in verification if they exist
+                    # Use helper method for consistent field extraction
                     cache_key_params = metadata.get("cache_key_params")
-                    if cache_key_params is not None:
-                        verify_entry_data["cache_key_params"] = cache_key_params
+                    verify_entry_data = self._extract_signable_fields(
+                        cache_key=cache_key,
+                        entry_data=entry,
+                        metadata=metadata,
+                        cache_key_params=cache_key_params
+                    )
                     
                     if not self.signer.verify_entry(verify_entry_data, stored_signature):
                         if self.config.security.delete_invalid_signatures:
@@ -895,8 +1000,23 @@ class UnifiedCache:
             logger.debug(f"Cache hit ({data_type}): {cache_key}")
             return data
 
+        except FileNotFoundError as e:
+            # Cache file was deleted externally
+            logger.warning(f"Cache file missing for {cache_key}: {e}")
+            self.metadata_backend.remove_entry(cache_key)
+            self.metadata_backend.increment_misses()
+            return None
+        except (OSError, IOError) as e:
+            # I/O errors (disk full, permissions, etc.)
+            logger.warning(f"I/O error loading cached {data_type} {cache_key}: {e}")
+            self.metadata_backend.remove_entry(cache_key)
+            self.metadata_backend.increment_misses()
+            return None
         except Exception as e:
-            logger.warning(f"Failed to load cached {data_type} {cache_key}: {e}")
+            # Unexpected errors - log with more detail for debugging
+            logger.warning(
+                f"Failed to load cached {data_type} {cache_key}: {type(e).__name__}: {e}"
+            )
             self.metadata_backend.remove_entry(cache_key)
             self.metadata_backend.increment_misses()
             return None
@@ -1006,6 +1126,28 @@ class UnifiedCache:
 
         return entries
 
+    def close(self):
+        """Close all resources (database connections, etc.)."""
+        if hasattr(self, 'metadata_backend') and self.metadata_backend:
+            if hasattr(self.metadata_backend, 'close'):
+                self.metadata_backend.close()
+
+    def __del__(self):
+        """Ensure resources are cleaned up when the cache is garbage collected."""
+        try:
+            self.close()
+        except Exception:
+            pass  # Ignore errors during cleanup
+
+    def __enter__(self):
+        """Context manager entry."""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit - ensure resources are cleaned up."""
+        self.close()
+        return False
+
     # Factory methods for common use cases
     @classmethod
     def for_api(
@@ -1054,6 +1196,12 @@ def get_cache(
 
 
 def reset_cache(config: Optional[CacheConfig] = None, metadata_backend=None):
-    """Reset the global cache instance."""
+    """Reset the global cache instance, properly closing the previous one."""
     global _global_cache
+    # Close the existing cache to prevent connection leaks
+    if _global_cache is not None:
+        try:
+            _global_cache.close()
+        except Exception:
+            pass  # Ignore errors during cleanup
     _global_cache = UnifiedCache(config, metadata_backend)

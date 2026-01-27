@@ -116,7 +116,7 @@ class TestCacheWriterInterface:
                 return {
                     "storage_format": "json",
                     "file_size": 256,
-                    "actual_path": str(file_path.with_suffix(".json")),
+                    "actual_path": file_path.with_suffix(".json").as_posix(),
                     "metadata": {"timestamp": "2024-01-01"}
                 }
         
@@ -162,7 +162,8 @@ class TestCacheReaderInterface:
         class MetadataReader(CacheReader):
             def get(self, file_path: Path, metadata: Dict[str, Any]) -> Any:
                 format_type = metadata.get("storage_format", "unknown")
-                return f"Reading {file_path} as {format_type}"
+                # Use as_posix() for cross-platform path representation
+                return f"Reading {file_path.as_posix()} as {format_type}"
         
         reader = MetadataReader()
         result = reader.get(
@@ -723,7 +724,7 @@ class TestInterfaceContractCompliance:
                 return {"storage_format": "test", "file_size": 100, "actual_path": str(file_path), "metadata": {}}
             
             def get(self, file_path: Path, metadata: Dict[str, Any]) -> Any:
-                if str(file_path) == "/error":
+                if "error" in str(file_path):
                     raise CacheReadError("Cannot read file")
                 return "data"
             

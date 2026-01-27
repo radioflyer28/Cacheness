@@ -28,6 +28,7 @@ Usage:
     cache = UnifiedCache(metadata_backend=backend)
 """
 
+import os
 import threading
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone, timedelta
@@ -694,10 +695,33 @@ class JsonBackend(MetadataBackend):
         }
 
     def _save_to_disk(self):
-        """Save metadata to JSON file using high-performance orjson."""
+        """Save metadata to JSON file using atomic write pattern to prevent corruption."""
+        import tempfile
         try:
-            with open(self.metadata_file, "w") as f:
-                f.write(json_dumps(self._metadata, default=str))
+            # Check if parent directory exists (may have been deleted during cleanup)
+            if not self.metadata_file.parent.exists():
+                logger.debug(f"Metadata directory no longer exists: {self.metadata_file.parent}")
+                return
+                
+            # Write to temp file first, then rename for atomicity
+            fd, temp_path = tempfile.mkstemp(
+                suffix='.json.tmp', 
+                dir=self.metadata_file.parent,
+                prefix='cache_metadata_'
+            )
+            try:
+                with os.fdopen(fd, 'w') as f:
+                    f.write(json_dumps(self._metadata, default=str))
+                # Atomic rename (works on same filesystem)
+                import shutil
+                shutil.move(temp_path, self.metadata_file)
+            except Exception:
+                # Clean up temp file on failure
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+                raise
         except Exception as e:
             logger.error(f"Failed to save JSON metadata: {e}")
 
@@ -1375,6 +1399,9 @@ class SqliteBackend(MetadataBackend):
         if hasattr(self, 'engine') and self.engine:
             # Close all connections in the pool
             self.engine.dispose()
+            # On Windows, we need to be more aggressive
+            import gc
+            gc.collect()  # Force garbage collection to release file handles
             logger.debug("SQLite engine disposed and connections closed")
 
     def __del__(self):

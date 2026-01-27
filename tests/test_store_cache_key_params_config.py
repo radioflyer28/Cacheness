@@ -33,6 +33,8 @@ class TestStoreCacheKeyParamsConfig:
             entries = cache.list_entries()
             assert len(entries) == 1
             assert "cache_key_params" not in entries[0]["metadata"]
+            
+            cache.close()
 
     def test_explicit_enable_stores_params(self):
         """Test that explicitly enabling storage works."""
@@ -57,6 +59,8 @@ class TestStoreCacheKeyParamsConfig:
             assert len(entries) == 1
             assert "cache_key_params" in entries[0]["metadata"]
             assert entries[0]["metadata"]["cache_key_params"]["model"] == "str:llama"
+            
+            cache.close()
 
     def test_disable_doesnt_store_params(self):
         """Test that disabling storage prevents cache_key_params from being stored."""
@@ -80,6 +84,8 @@ class TestStoreCacheKeyParamsConfig:
             entries = cache.list_entries()
             assert len(entries) == 1
             assert "cache_key_params" not in entries[0]["metadata"]
+            
+            cache.close()
 
     def test_json_backend_respects_config(self):
         """Test that JSON backend also respects the configuration."""
@@ -112,6 +118,9 @@ class TestStoreCacheKeyParamsConfig:
 
             entries2 = cache2.list_entries()
             assert "cache_key_params" not in entries2[0]["metadata"]
+            
+            cache1.close()
+            cache2.close()
 
     def test_sub_config_access(self):
         """Test that the configuration can be accessed through sub-configuration objects."""
@@ -151,6 +160,8 @@ class TestStoreCacheKeyParamsConfig:
             # But metadata shouldn't include cache_key_params
             entries = cache.list_entries()
             assert "cache_key_params" not in entries[0]["metadata"]
+            
+            cache.close()
 
     def test_complex_params_handling(self):
         """Test that complex parameters are handled correctly when storage is enabled."""
@@ -186,3 +197,5 @@ class TestStoreCacheKeyParamsConfig:
                 "path_missing:" in stored_params["model_path"]
                 or "Path:" in stored_params["model_path"]
             )
+            
+            cache.close()

@@ -181,9 +181,8 @@ def main():
         print("\n🔍 Querying Cache with Custom Metadata")
         print("=" * 45)
 
-        # Query 1: Find all experiments by alice
-        query = cache.query_custom("experiments")
-        if query is not None:
+        # Query 1: Find all experiments by alice using context manager for advanced filtering
+        with cache.query_custom_session("experiments") as query:
             alice_experiments = query.filter(ExperimentMetadata.created_by == "alice").all()
             print(f"✅ Found {len(alice_experiments)} experiments by alice:")
             for exp in alice_experiments:
@@ -209,12 +208,9 @@ def main():
             print(f"\n✅ Found {len(trained_high_acc)} trained models with high accuracy:")
             for exp in trained_high_acc:
                 print(f"   - {exp.experiment_id}: {exp.model_type} ({exp.epochs} epochs, {exp.accuracy} accuracy)")
-        else:
-            print("❌ Custom metadata querying not supported")
 
         # Query 5: Query performance metadata
-        perf_query = cache.query_custom("performance")
-        if perf_query is not None:
+        with cache.query_custom_session("performance") as perf_query:
             long_running = perf_query.filter(PerformanceMetadata.training_time_seconds > 3600).all()
             print(f"\n✅ Found {len(long_running)} long-running experiments (> 1 hour):")
             for perf in long_running:

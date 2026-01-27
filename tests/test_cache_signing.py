@@ -26,6 +26,7 @@ def temp_cache_signing_enabled():
         )
         cache = UnifiedCache(config)
         yield cache, temp_dir
+        cache.close()
     finally:
         if temp_dir.exists():
             shutil.rmtree(temp_dir)
@@ -46,6 +47,7 @@ def temp_cache_delete_disabled():
         )
         cache = UnifiedCache(config)
         yield cache, temp_dir
+        cache.close()
     finally:
         if temp_dir.exists():
             shutil.rmtree(temp_dir)
@@ -195,6 +197,9 @@ class TestDeleteInvalidSignatures:
             retrieved = cache_memory.get(cache_key=cache_key)
             assert retrieved == test_data
             
+            cache_memory.close()
+            cache_persistent.close()
+            
         finally:
             if temp_dir.exists():
                 shutil.rmtree(temp_dir)
@@ -228,6 +233,9 @@ class TestDeleteInvalidSignatures:
             # Data should not be retrievable due to different in-memory key
             retrieved2 = cache2.get(cache_key=cache_key)
             assert retrieved2 is None, "Data should not be accessible after restart with in-memory key"
+            
+            cache2.close()
+            cache1.close()
             
         finally:
             if temp_dir.exists():

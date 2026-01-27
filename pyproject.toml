@@ -16,7 +16,7 @@ dependencies = [
 recommended = [
     "numpy>=2.0.0",
     "blosc2>=3.5.1",
-    "pandas>=2.0.0",
+    "pandas>=2.0.0,<4.0.0",
     "pyarrow>=21.0.0",
     "sqlalchemy>=2.0.0",
     "duckdb-engine>=0.16.0",
@@ -24,7 +24,7 @@ recommended = [
     "dill>=0.4.0",
 ]
 dataframes = [
-    "pandas>=2.0.0",
+    "pandas>=2.0.0,<4.0.0",
     "polars>=1.30.0",
     "pyarrow>=21.0.0",
 ]
@@ -37,7 +37,7 @@ tensorflow = [
 recommended = [
     "numpy>=2.0.0",
     "blosc2>=3.5.1",
-    "pandas>=2.0.0",
+    "pandas>=2.0.0,<4.0.0",
     "pyarrow>=21.0.0",
     "sqlalchemy>=2.0.0",
     "duckdb-engine>=0.16.0",
@@ -49,7 +49,7 @@ sql = [
      "sqlalchemy>=2.0.0",
 ]
 dataframes = [
-    "pandas>=2.0.0",
+    "pandas>=2.0.0,<4.0.0",
     "polars>=1.30.0",
     "pyarrow>=21.0.0",
 ]

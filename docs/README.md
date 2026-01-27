@@ -9,6 +9,12 @@ Welcome to the Cacheness documentation! This high-performance caching library pr
 - **[Backend Selection Guide](BACKEND_SELECTION.md)** - Choose JSON vs SQLite backend
 - **[Security Guide](SECURITY.md)** - Cache entry signing and security features
 
+## Platform Compatibility
+
+- **[Cross-Platform Guide](CROSS_PLATFORM_GUIDE.md)** - Development guide for all platforms (Windows, Linux, macOS)
+- **[Windows Compatibility](WINDOWS_COMPATIBILITY.md)** - Windows-specific considerations and troubleshooting
+- **[Pandas Compatibility](PANDAS_COMPATIBILITY.md)** - pandas 2.0-3.x version compatibility guide
+
 ## Advanced Features
 
 - **[Performance Guide](PERFORMANCE.md)** - Optimization strategies and benchmarks

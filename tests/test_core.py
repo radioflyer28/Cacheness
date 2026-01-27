@@ -45,9 +45,12 @@ class TestCacheConfig:
             SerializationConfig,
             HandlerConfig,
         )
-
+        
+        # Use a platform-agnostic path for testing
+        import tempfile
+        test_cache_dir = Path(tempfile.gettempdir()) / "test_cache"
         storage_config = CacheStorageConfig(
-            cache_dir="/tmp/test_cache", max_cache_size_mb=1000, cleanup_on_init=False
+            cache_dir=str(test_cache_dir), max_cache_size_mb=1000, cleanup_on_init=False
         )
         metadata_config = CacheMetadataConfig(
             default_ttl_hours=48, enable_metadata=False, metadata_backend="json"
@@ -66,7 +69,8 @@ class TestCacheConfig:
             handlers=handler_config,
         )
 
-        assert config.storage.cache_dir == "/tmp/test_cache"
+        # Compare using as_posix() for cross-platform compatibility
+        assert Path(config.storage.cache_dir).as_posix() == test_cache_dir.as_posix()
         assert config.metadata.default_ttl_hours == 48
         assert config.storage.max_cache_size_mb == 1000
         assert config.compression.parquet_compression == "gzip"
@@ -545,6 +549,8 @@ class TestFactoryMethods:
             
             retrieved = cache.get(endpoint="test")
             assert retrieved == test_data
+            
+            cache.close()
 
     def test_for_api_default_values(self):
         """Test default values for for_api factory."""
@@ -628,6 +634,8 @@ class TestMemoryCacheConfig:
                 assert stats['memory_cache_enabled'] is True
                 assert stats['memory_cache_type'] == 'lru'
                 assert stats['memory_cache_maxsize'] == 10
+            
+            cache.close()
 
     def test_memory_cache_cache_types(self):
         """Test different memory cache types."""

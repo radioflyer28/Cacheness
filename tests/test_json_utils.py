@@ -289,7 +289,8 @@ class TestJSONUtilsSpecialCases:
         """Test Path object serialization with custom default."""
         def path_serializer(obj):
             if isinstance(obj, Path):
-                return str(obj)
+                # Use as_posix() for cross-platform consistency
+                return obj.as_posix()
             raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
         
         data = {"path": Path("/test/path")}

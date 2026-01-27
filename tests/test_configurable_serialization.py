@@ -151,6 +151,8 @@ class TestHandlerConfiguration:
             # Should have standard handlers available
             handler_types = [type(h).__name__ for h in cache.handlers.handlers]
             assert "ObjectHandler" in handler_types
+            
+            cache.close()
 
     def test_disable_specific_handlers(self):
         """Test disabling specific data type handlers."""
@@ -168,6 +170,8 @@ class TestHandlerConfiguration:
             # Note: Handler availability depends on what's actually imported
             # This test mainly ensures configuration doesn't break
             assert isinstance(handler_types, list)
+            
+            cache.close()
 
     def test_custom_handler_priority(self):
         """Test custom handler priority order."""
@@ -190,6 +194,8 @@ class TestHandlerConfiguration:
             # Object handler should be first (if present)
             if "ObjectHandler" in handler_types:
                 assert handler_types[0] == "ObjectHandler"
+            
+            cache.close()
 
 
 class TestDecoratorWithConfiguration:
@@ -215,6 +221,8 @@ class TestDecoratorWithConfiguration:
             # Second call should hit cache
             result2 = process_data([1, 2, 3])
             assert result2 == result
+            
+            cache.close()
 
     def test_decorator_with_different_configs(self):
         """Test that different configurations produce different caching behavior."""
@@ -247,6 +255,10 @@ class TestDecoratorWithConfiguration:
 
                 assert result1 == "Config1: [1, 2, 3]"
                 assert result2 == "Config2: [1, 2, 3]"
+                
+                cache2.close()
+            
+            cache1.close()
 
 
 class TestRealWorldUseCases:
@@ -266,6 +278,8 @@ class TestRealWorldUseCases:
 
             result = compute([1, 2, 3, 4, 5])
             assert result == 15
+            
+            cache.close()
 
     def test_precision_optimized_config(self):
         """Test precision-optimized configuration."""
@@ -281,6 +295,8 @@ class TestRealWorldUseCases:
 
             result = process_complex_data([1, 2, 3])
             assert result == {"processed": True, "count": 3}
+            
+            cache.close()
 
     def test_dataframe_priority_config(self):
         """Test configuration optimized for DataFrame processing."""
@@ -309,3 +325,5 @@ class TestRealWorldUseCases:
 
             result = analyze_data("sample data")
             assert result == "Analysis: sample data"
+            
+            cache.close()

@@ -254,7 +254,11 @@ class TestCacheKeyConsistency:
             
             # For now, we'll document this as a known issue rather than asserting
             # TODO: Fix cache key generation to handle positional vs keyword parameter consistency
-            # assert call_count == 1  # This should pass once the issue is fixed    def test_cross_instance_consistency(self):
+            # assert call_count == 1  # This should pass once the issue is fixed
+            
+            cache.close()
+
+    def test_cross_instance_consistency(self):
         """Test that same parameters produce same keys across different cache instances."""
         with tempfile.TemporaryDirectory() as temp_dir1, \
              tempfile.TemporaryDirectory() as temp_dir2:
@@ -270,6 +274,9 @@ class TestCacheKeyConsistency:
             key2 = cache2._create_cache_key(params)
             
             assert key1 == key2
+            
+            cache2.close()
+            cache1.close()
 
     def test_complex_nested_structure_consistency(self):
         """Test consistency with deeply nested complex structures."""

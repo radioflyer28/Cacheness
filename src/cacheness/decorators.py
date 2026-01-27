@@ -6,12 +6,34 @@ This module provides decorators and utilities for function-level caching
 using the UnifiedCache system with automatic key generation.
 """
 
+import atexit
 import functools
+import weakref
 import xxhash
 from typing import Any, Callable, Optional, Union, Dict, Tuple, cast
 
 from .core import UnifiedCache, CacheConfig, _normalize_function_args
 from .serialization import create_unified_cache_key
+
+# Track decorator-created cache instances for cleanup
+_decorator_cache_instances: list[weakref.ref[UnifiedCache]] = []
+
+
+def _cleanup_decorator_caches():
+    """Clean up all decorator-created cache instances on exit."""
+    global _decorator_cache_instances
+    for ref in _decorator_cache_instances:
+        instance = ref()
+        if instance is not None:
+            try:
+                instance.close()
+            except Exception:
+                pass  # Ignore errors during cleanup
+    _decorator_cache_instances.clear()
+
+
+# Register cleanup on interpreter exit
+atexit.register(_cleanup_decorator_caches)
 
 
 def _generate_cache_key(
@@ -111,10 +133,14 @@ class cached:
         self.cache_instance = cache_instance
         self.key_func = key_func
         self.ignore_errors = ignore_errors
+        self._owns_cache = False  # Track if we created the cache instance
 
         # Create default cache instance if none provided
         if self.cache_instance is None:
             self.cache_instance = UnifiedCache()
+            self._owns_cache = True
+            # Track for cleanup using weak reference
+            _decorator_cache_instances.append(weakref.ref(self.cache_instance))
 
     def __call__(self, func: Callable) -> Callable:
         """Apply the caching decorator to a function."""
@@ -189,6 +215,7 @@ class cached:
         setattr(wrapper, "cache_clear", cache_clear)
         setattr(wrapper, "cache_info", cache_info)
         setattr(wrapper, "cache_key", cache_key)
+        setattr(wrapper, "_cache_instance", self.cache_instance)  # For cleanup in tests
 
         return wrapper
 
@@ -213,6 +240,19 @@ class cached:
             "ignore_errors": self.ignore_errors,
         }
 
+    def close(self):
+        """
+        Close the cache instance if this decorator owns it.
+        
+        Call this method to explicitly release resources when the decorated
+        function is no longer needed, especially in long-running applications.
+        """
+        if self._owns_cache and self.cache_instance is not None:
+            try:
+                self.cache_instance.close()
+            except Exception:
+                pass  # Ignore errors during cleanup
+
     @classmethod
     def for_api(cls, ttl_hours: int = 6, ignore_errors: bool = True, **kwargs):
         """
@@ -230,7 +270,11 @@ class cached:
         """
         from .core import UnifiedCache
         cache_instance = UnifiedCache.for_api(ttl_hours=ttl_hours, **kwargs)
-        return cls(cache_instance=cache_instance, ignore_errors=ignore_errors)
+        # Track for cleanup using weak reference
+        _decorator_cache_instances.append(weakref.ref(cache_instance))
+        decorator = cls(cache_instance=cache_instance, ignore_errors=ignore_errors)
+        decorator._owns_cache = True  # Mark as owned for explicit close()
+        return decorator
 
 
 def cache_function(
@@ -306,6 +350,8 @@ class CacheContext:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Exit the context."""
+        if self.cache_instance is not None:
+            self.cache_instance.close()
         self.cache_instance = None
 
     def cached(self, **kwargs) -> cached:

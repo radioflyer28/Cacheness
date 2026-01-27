@@ -67,7 +67,9 @@ class TestMetadataIntegration:
         config = CacheConfig(
             cache_dir=str(temp_dir), metadata_backend="json", cleanup_on_init=False
         )
-        return cacheness(config)
+        cache = cacheness(config)
+        yield cache
+        cache.close()
 
     @pytest.fixture
     def cache_sqlite(self, temp_dir):
@@ -75,7 +77,9 @@ class TestMetadataIntegration:
         config = CacheConfig(
             cache_dir=str(temp_dir), metadata_backend="sqlite", cleanup_on_init=False
         )
-        return cacheness(config)
+        cache = cacheness(config)
+        yield cache
+        cache.close()
 
     def test_metadata_storage_json(self, cache_json):
         """Test metadata storage with JSON backend."""

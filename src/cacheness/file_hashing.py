@@ -28,8 +28,8 @@ def _hash_single_file(file_info: Tuple[Path, Path]) -> Tuple[str, str]:
         Tuple of (relative_path_string, content_hash)
     """
     file_path, base_path = file_info
-    # Get relative path first (always needed)
-    rel_path = str(file_path.relative_to(base_path))
+    # Get relative path and normalize to forward slashes for cross-platform compatibility
+    rel_path = file_path.relative_to(base_path).as_posix()
     
     try:
         # Hash the file content
@@ -168,7 +168,8 @@ def _hash_directory_sequential(
     # First convert to (rel_path, file_path, base_path) tuples for sorting
     file_info_with_rel_paths = []
     for file_path, base_path in file_paths:
-        rel_path = str(file_path.relative_to(base_path))
+        # Normalize to forward slashes for cross-platform compatibility
+        rel_path = file_path.relative_to(base_path).as_posix()
         file_info_with_rel_paths.append((rel_path, file_path, base_path))
 
     # Sort by relative path (same sorting key as parallel method)

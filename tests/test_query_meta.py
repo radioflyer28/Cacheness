@@ -31,6 +31,7 @@ def temp_cache():
         )
         cache = UnifiedCache(config)
         yield cache
+        cache.close()
     finally:
         import shutil
         if Path(temp_dir).exists():
@@ -230,6 +231,8 @@ class TestQueryMeta:
             # query_meta should return None with warning
             result = no_params_cache.query_meta(experiment="exp_001")
             assert result is None
+            
+            no_params_cache.close()
         finally:
             shutil.rmtree(temp_dir)
 
@@ -430,6 +433,7 @@ class TestQueryMetaIntegration:
         yield
         
         # Clean up after each test
+        self.cache.close()
         import shutil
         if Path(self.temp_dir).exists():
             shutil.rmtree(self.temp_dir)

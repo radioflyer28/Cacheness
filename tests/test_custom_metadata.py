@@ -5,6 +5,7 @@ Unit tests for custom metadata functionality.
 import pytest
 import tempfile
 import shutil
+from pathlib import Path
 from sqlalchemy import Column, String, Float, Integer, DateTime
 
 from cacheness import cacheness, CacheConfig
@@ -42,11 +43,25 @@ def reset_registry():
 
 
 @pytest.fixture
-def temp_cache_dir():
+def temp_cache_dir(request):
     """Create a temporary cache directory."""
     temp_dir = tempfile.mkdtemp()
-    yield temp_dir
-    shutil.rmtree(temp_dir)
+    
+    def cleanup():
+        import time
+        import gc
+        gc.collect()  # Force garbage collection
+        time.sleep(0.2)  # Give SQLite time to release locks
+        if Path(temp_dir).exists():
+            try:
+                shutil.rmtree(temp_dir)
+            except PermissionError:
+                # If still locked, wait a bit more and try again
+                time.sleep(0.5)
+                shutil.rmtree(temp_dir)
+    
+    request.addfinalizer(cleanup)
+    return temp_dir
 
 
 @pytest.fixture
@@ -60,7 +75,9 @@ def cache_config(temp_cache_dir):
 @pytest.fixture
 def cache_instance(cache_config):
     """Create a cache instance for testing."""
-    return cacheness(cache_config)
+    cache = cacheness(cache_config)
+    yield cache
+    cache.close()
 
 
 class TestCustomMetadataAvailability:
@@ -348,22 +365,20 @@ class MLExperimentIntegrationMetadata_{unique_suffix}(Base, CustomMetadataBase):
                 custom_metadata={self.schema_name: metadata},
             )
 
-        # Query metadata
-        query = cache_instance.query_custom_metadata(self.schema_name)
-
-        # Test basic query
-        all_experiments = query.all()
+        # Test basic query - new API returns list directly
+        all_experiments = cache_instance.query_custom(self.schema_name)
         assert len(all_experiments) == 3
 
-        # Test filtered query
-        xgboost_experiments = query.filter(
-            self.MLExperimentMetadata.model_type == "xgboost"
-        ).all()
-        assert len(xgboost_experiments) == 2  # Experiments 0 and 2
+        # Test filtered query using context manager for advanced filtering
+        with cache_instance.query_custom_session(self.schema_name) as query:
+            xgboost_experiments = query.filter(
+                self.MLExperimentMetadata.model_type == "xgboost"
+            ).all()
+            assert len(xgboost_experiments) == 2  # Experiments 0 and 2
 
-        # Test accuracy filter
-        high_accuracy = query.filter(self.MLExperimentMetadata.accuracy >= 0.85).all()
-        assert len(high_accuracy) >= 1
+            # Test accuracy filter
+            high_accuracy = query.filter(self.MLExperimentMetadata.accuracy >= 0.85).all()
+            assert len(high_accuracy) >= 1
 
     def test_multiple_metadata_types(self, cache_instance):
         """Test storing multiple metadata types for the same cache entry."""
@@ -529,9 +544,9 @@ class TestErrorHandling:
         assert result == {"data": "test"}
 
     def test_query_nonexistent_schema(self, cache_instance):
-        """Test querying non-existent schema returns None."""
-        result = cache_instance.query_custom_metadata("nonexistent")
-        assert result is None
+        """Test querying non-existent schema returns empty list."""
+        result = cache_instance.query_custom("nonexistent")
+        assert result == []
 
     def test_get_metadata_for_nonexistent_entry(self, cache_instance):
         """Test getting metadata for non-existent cache entry."""
@@ -631,35 +646,35 @@ class AdvancedQueryTestMetadata_{unique_suffix}(Base, CustomMetadataBase):
                 custom_metadata={self.schema_name: metadata},
             )
 
-        query = cache_instance.query_custom_metadata(self.schema_name)
+        # Use context manager for advanced filtering
+        with cache_instance.query_custom_session(self.schema_name) as query:
+            # Test AND filtering
+            active_category_a = query.filter(
+                and_(
+                    self.AdvancedQueryMetadata.category == "A",
+                    self.AdvancedQueryMetadata.active == 1,
+                )
+            ).all()
+            assert len(active_category_a) == 1
+            assert active_category_a[0].name == "entry_1"
 
-        # Test AND filtering
-        active_category_a = query.filter(
-            and_(
-                self.AdvancedQueryMetadata.category == "A",
-                self.AdvancedQueryMetadata.active == 1,
-            )
-        ).all()
-        assert len(active_category_a) == 1
-        assert active_category_a[0].name == "entry_1"
+            # Test OR filtering
+            category_a_or_b = query.filter(
+                or_(
+                    self.AdvancedQueryMetadata.category == "A",
+                    self.AdvancedQueryMetadata.category == "B",
+                )
+            ).all()
+            assert len(category_a_or_b) == 3
 
-        # Test OR filtering
-        category_a_or_b = query.filter(
-            or_(
-                self.AdvancedQueryMetadata.category == "A",
-                self.AdvancedQueryMetadata.category == "B",
-            )
-        ).all()
-        assert len(category_a_or_b) == 3
-
-        # Test range filtering
-        medium_values = query.filter(
-            and_(
-                self.AdvancedQueryMetadata.value >= 15.0,
-                self.AdvancedQueryMetadata.value <= 21.0,
-            )
-        ).all()
-        assert len(medium_values) == 2
+            # Test range filtering
+            medium_values = query.filter(
+                and_(
+                    self.AdvancedQueryMetadata.value >= 15.0,
+                    self.AdvancedQueryMetadata.value <= 21.0,
+                )
+            ).all()
+            assert len(medium_values) == 2
 
     def test_ordering_and_limiting(self, cache_instance):
         """Test ordering and limiting query results."""
@@ -678,22 +693,22 @@ class AdvancedQueryTestMetadata_{unique_suffix}(Base, CustomMetadataBase):
                 custom_metadata={self.schema_name: metadata},
             )
 
-        query = cache_instance.query_custom_metadata(self.schema_name)
+        # Use context manager for advanced ordering and limiting
+        with cache_instance.query_custom_session(self.schema_name) as query:
+            # Test ordering by value (ascending)
+            ordered_asc = query.order_by(self.AdvancedQueryMetadata.value).all()
+            values_asc = [item.value for item in ordered_asc]
+            assert values_asc == sorted(values_asc)
 
-        # Test ordering by value (ascending)
-        ordered_asc = query.order_by(self.AdvancedQueryMetadata.value).all()
-        values_asc = [item.value for item in ordered_asc]
-        assert values_asc == sorted(values_asc)
+            # Test ordering by value (descending)
+            ordered_desc = query.order_by(self.AdvancedQueryMetadata.value.desc()).all()
+            values_desc = [item.value for item in ordered_desc]
+            assert values_desc == sorted(values_desc, reverse=True)
 
-        # Test ordering by value (descending)
-        ordered_desc = query.order_by(self.AdvancedQueryMetadata.value.desc()).all()
-        values_desc = [item.value for item in ordered_desc]
-        assert values_desc == sorted(values_desc, reverse=True)
-
-        # Test limiting results
-        limited = query.order_by(self.AdvancedQueryMetadata.value).limit(2).all()
-        assert len(limited) == 2
-        assert limited[0].value <= limited[1].value  # Should be ordered
+            # Test limiting results
+            limited = query.order_by(self.AdvancedQueryMetadata.value).limit(2).all()
+            assert len(limited) == 2
+            assert limited[0].value <= limited[1].value  # Should be ordered
 
 
 if __name__ == "__main__":

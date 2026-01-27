@@ -17,6 +17,7 @@ def temp_cache():
         config = CacheConfig(cache_dir=temp_dir, verify_cache_integrity=True)
         cache = cacheness(config)
         yield cache
+        cache.close()
 
 
 @pytest.fixture  
@@ -26,6 +27,7 @@ def temp_cache_no_integrity():
         config = CacheConfig(cache_dir=temp_dir, verify_cache_integrity=False)
         cache = cacheness(config)
         yield cache
+        cache.close()
 
 
 class TestCacheIntegrity:
@@ -168,6 +170,8 @@ class TestCacheIntegrity:
             retrieved_data = cache.get(test_key="value")
             assert retrieved_data is not None
             assert retrieved_data == test_data
+            
+            cache.close()
 
     def test_integrity_verification_disabled_skips_check(self):
         """Test that disabling verification skips integrity check completely."""
@@ -207,6 +211,9 @@ class TestCacheIntegrity:
                 # Expected - the handler will likely fail to parse corrupted data
                 # But the important thing is we didn't fail due to hash verification
                 pass
+            
+            cache_enabled.close()
+            cache_disabled.close()
 
     def test_file_hash_calculation_error_handling(self, temp_cache):
         """Test that file hash calculation handles errors gracefully."""

@@ -220,6 +220,14 @@ class HandlerConfig:
 class SecurityConfig:
     """Configuration for cache security and integrity."""
 
+    # Valid fields that can be signed (kept in sync with CacheEntrySigner.DEFAULT_SIGNED_FIELDS)
+    VALID_SIGNED_FIELDS = {
+        "cache_key", "file_hash", "data_type", "file_size", 
+        "created_at", "prefix", "description", "actual_path",
+        "object_type", "storage_format", "serializer", "compression_codec",
+        "cache_key_params"  # Optional field when store_cache_key_params=True
+    }
+
     # Entry signing for metadata integrity
     enable_entry_signing: bool = True
     signing_key_file: str = "cache_signing_key.bin"
@@ -241,6 +249,15 @@ class SecurityConfig:
         """Validate security configuration."""
         if self.signature_version < 1:
             raise ValueError("signature_version must be at least 1")
+        
+        # Validate custom_signed_fields if provided
+        if self.custom_signed_fields:
+            invalid_fields = set(self.custom_signed_fields) - self.VALID_SIGNED_FIELDS
+            if invalid_fields:
+                raise ValueError(
+                    f"Invalid signed fields: {invalid_fields}. "
+                    f"Valid fields are: {sorted(self.VALID_SIGNED_FIELDS)}"
+                )
 
         logger.debug(
             f"Security configured: signing={self.enable_entry_signing}, "

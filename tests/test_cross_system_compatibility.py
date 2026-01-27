@@ -53,6 +53,8 @@ class TestCrossSystemCompatibility:
             unified_key = cache._create_cache_key(enhanced_params)
             
             assert decorator_key == unified_key, f"Keys should match: decorator={decorator_key}, unified={unified_key}"
+            
+            cache.close()
 
     def test_decorator_cache_unified_retrieve(self):
         """Test that data cached by decorator can be retrieved by UnifiedCache."""
@@ -84,6 +86,8 @@ class TestCrossSystemCompatibility:
             cached_data = cache_instance.get(__decorator_cache_key=cache_instance._create_cache_key(enhanced_params))
             
             assert cached_data == 30, f"UnifiedCache should retrieve decorator's cached data: {cached_data}"
+            
+            cache_instance.close()
 
     def test_unified_cache_decorator_retrieve(self):
         """Test that data cached by UnifiedCache can be retrieved by decorator."""
@@ -127,6 +131,8 @@ class TestCrossSystemCompatibility:
             cached_result = process_data_decorated(test_items, sort=True, limit=5)
             
             assert cached_result == expected_result, f"Decorator should retrieve UnifiedCache's data: {cached_result}"
+            
+            cache_instance.close()
 
     def test_cross_compatibility_with_complex_data(self):
         """Test cross-compatibility with complex data types (NumPy arrays, etc)."""
@@ -165,6 +171,8 @@ class TestCrossSystemCompatibility:
             unified_result = cache_instance.get(__decorator_cache_key=cache_key)
             
             np.testing.assert_array_equal(unified_result, expected, "UnifiedCache should retrieve decorator's NumPy data")
+            
+            cache_instance.close()
 
     @pytest.mark.skipif(not PANDAS_AVAILABLE, reason="pandas not available")
     def test_cross_compatibility_with_dataframes(self):
@@ -211,6 +219,8 @@ class TestCrossSystemCompatibility:
             cached_result = decorated_df_process(test_df, column="A", operation="sum")
             
             assert cached_result == expected_result, f"Decorator should retrieve DataFrame processing result: {cached_result}"
+            
+            cache_instance.close()
 
     def test_parameter_normalization_consistency(self):
         """Test that parameter normalization is consistent between systems."""
@@ -243,6 +253,8 @@ class TestCrossSystemCompatibility:
                 unified_key = cache_instance._create_cache_key(enhanced_params)
                 
                 assert decorator_key == unified_key, f"Test case {i}: Keys should match for args={args}, kwargs={kwargs}"
+                
+                cache_instance.close()
 
     def test_cache_key_stability_across_systems(self):
         """Test that cache keys remain stable when switching between systems."""
@@ -283,6 +295,8 @@ class TestCrossSystemCompatibility:
             # Round 4: Verify original cache still works
             result3 = cached_stable_function(test_value, multiplier=2)
             assert result3 == expected_result, "Original decorator cache should still work"
+            
+            cache_instance.close()
 
     def test_different_functions_different_keys(self):
         """Test that different functions with same parameters produce different cache keys."""
@@ -321,3 +335,5 @@ class TestCrossSystemCompatibility:
             assert unified_key_a != unified_key_b, "UnifiedCache should also generate different keys for different functions"
             assert key_a == unified_key_a, "Decorator and UnifiedCache should generate same key for function_a"
             assert key_b == unified_key_b, "Decorator and UnifiedCache should generate same key for function_b"
+            
+            cache_instance.close()
