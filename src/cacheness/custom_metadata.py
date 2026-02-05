@@ -2,15 +2,15 @@
 Custom Metadata Models for Advanced Cache Querying
 =================================================
 
-This module provides SQLAlchemy-based custom metadata support using a link table
-architecture for flexible relationships between cache entries and metadata.
+This module provides SQLAlchemy-based custom metadata support with direct foreign key
+relationships to cache entries for simple, clear ownership.
 
 Features:
-- Link table pattern for flexible cache-metadata relationships
+- Direct foreign key to cache_entries for one-to-many relationships
 - Registry decorator pattern for clean schema definition
 - SQLAlchemy ORM models for type safety and advanced querying
 - Support for custom indexes and constraints
-- SQLite backend only (focused implementation)
+- Automatic cascade delete on cache entry removal
 
 Usage:
     from cacheness.custom_metadata import custom_metadata_model, CustomMetadataBase
@@ -97,78 +97,23 @@ _custom_metadata_registry: Dict[str, Type] = {}
 
 if SQLALCHEMY_AVAILABLE:
 
-    class CacheMetadataLink(Base):
-        """Link table connecting cache entries to custom metadata records."""
-
-        __tablename__ = "cache_metadata_links"
-
-        id = Column(Integer, primary_key=True, autoincrement=True)
-        cache_key = Column(
-            String(16),
-            ForeignKey("cache_entries.cache_key", ondelete="CASCADE"),
-            nullable=False,
-            index=True,
-        )
-        metadata_table = Column(String(100), nullable=False, index=True)
-        metadata_id = Column(Integer, nullable=False)
-        created_at = Column(
-            DateTime(timezone=True),
-            default=lambda: datetime.now(timezone.utc),
-            nullable=False,
-        )
-
-        # Constraints and indexes
-        __table_args__ = (
-            # Prevent duplicate links
-            UniqueConstraint(
-                "cache_key",
-                "metadata_table",
-                "metadata_id",
-                name="uq_cache_metadata_link",
-            ),
-            # Composite index for efficient lookups
-            Index("idx_cache_metadata_lookup", "cache_key", "metadata_table"),
-            # Index for cleanup operations
-            Index("idx_metadata_table_id", "metadata_table", "metadata_id"),
-        )
-
-        def __repr__(self):
-            return f"<CacheMetadataLink(cache_key={self.cache_key}, table={self.metadata_table}, id={self.metadata_id})>"
-
-        @classmethod
-        def cleanup_for_cache_key(cls, session, cache_key: str) -> int:
-            """Remove all metadata links for a given cache key."""
-            from sqlalchemy import delete
-
-            result = session.execute(delete(cls).where(cls.cache_key == cache_key))
-            return result.rowcount if result.rowcount else 0
-
-        @classmethod
-        def cleanup_orphaned_links(cls, session) -> int:
-            """Remove links pointing to non-existent cache entries."""
-            from sqlalchemy import delete, select
-            from .metadata import CacheEntry
-
-            # Find links with cache keys that don't exist in cache_entries
-            orphaned_subquery = (
-                select(cls.cache_key)
-                .select_from(cls)
-                .outerjoin(CacheEntry, cls.cache_key == CacheEntry.cache_key)
-                .where(CacheEntry.cache_key.is_(None))
-            )
-
-            result = session.execute(
-                delete(cls).where(cls.cache_key.in_(orphaned_subquery))
-            )
-            return result.rowcount if result.rowcount else 0
-
     class CustomMetadataBase:
-        """Base class for all custom metadata models."""
+        """Base class for all custom metadata models with direct FK to cache entries."""
 
         @declared_attr
         def id(cls):
             """Primary key for the metadata table."""
             return Column(Integer, primary_key=True, autoincrement=True)
+
+        @declared_attr
+        def cache_key(cls):
+            """Foreign key to cache_entries - each metadata record belongs to ONE cache entry."""
+            return Column(
+                String(16),
+                ForeignKey("cache_entries.cache_key", ondelete="CASCADE"),
+                nullable=False,
+                index=True,
+            )
 
         @declared_attr
         def created_at(cls):
@@ -190,13 +135,30 @@ if SQLALCHEMY_AVAILABLE:
             )
 
         def __repr__(self):
-            return f"<{self.__class__.__name__}(id={self.id})>"
+            cache_key_display = getattr(self, 'cache_key', 'N/A')
+            return f"<{self.__class__.__name__}(id={self.id}, cache_key={cache_key_display})>"
+
+        @classmethod
+        def cleanup_orphaned_metadata(cls, session) -> int:
+            """Remove metadata records with no corresponding cache entry."""
+            from sqlalchemy import delete, select
+            from .metadata import CacheEntry
+
+            # Find metadata with cache keys that don't exist in cache_entries
+            orphaned_subquery = (
+                select(cls.cache_key)
+                .select_from(cls)
+                .outerjoin(CacheEntry, cls.cache_key == CacheEntry.cache_key)
+                .where(CacheEntry.cache_key.is_(None))
+            )
+
+            result = session.execute(
+                delete(cls).where(cls.cache_key.in_(orphaned_subquery))
+            )
+            return result.rowcount if result.rowcount else 0
 
 else:
-    # Dummy classes when SQLAlchemy is not available
-    class CacheMetadataLink:
-        pass
-
+    # Dummy class when SQLAlchemy is not available
     class CustomMetadataBase:
         pass
 
@@ -205,8 +167,9 @@ def custom_metadata_model(schema_name: str):
     """
     Decorator to register a SQLAlchemy model as a custom metadata schema.
 
-    The model will be linked to cache entries via the cache_metadata_links table,
-    allowing for flexible many-to-many relationships and independent metadata management.
+    The model will have a direct foreign key to cache_entries.cache_key,
+    establishing a clear one-to-many relationship (one cache entry can have
+    many custom metadata records of different types).
 
     Args:
         schema_name: Unique name for the metadata schema
@@ -430,14 +393,10 @@ def migrate_custom_metadata_tables(engine=None):
                 logger.warning("Could not access cache engine for migration")
                 return
 
-        # Create only the custom metadata tables and link table
+        # Create only the custom metadata tables
         # This avoids conflicts with cache_entries/cache_stats tables
         # which may be managed by different backends (SQLite vs PostgreSQL)
         tables_to_create = []
-        
-        # Add the link table
-        if CacheMetadataLink.__table__ is not None:
-            tables_to_create.append(CacheMetadataLink.__table__)
         
         # Add all registered custom metadata model tables
         for schema_name, model_class in _custom_metadata_registry.items():
@@ -463,15 +422,19 @@ def migrate_custom_metadata_tables(engine=None):
         logger.error(f"Failed to migrate custom metadata tables: {e}")
 
 
-def cleanup_orphaned_metadata(engine=None) -> int:
+def cleanup_orphaned_metadata(engine=None, model_class=None) -> int:
     """
     Clean up orphaned custom metadata records that no longer have corresponding cache entries.
+    
+    With direct FK architecture, orphaned metadata should not exist (cascade delete handles it),
+    but this utility is provided for manual cleanup if needed (e.g., after FK constraint issues).
 
     Args:
         engine: SQLAlchemy engine (if None, will try to get from metadata backend)
+        model_class: Specific model class to clean (if None, cleans all registered models)
 
     Returns:
-        Number of orphaned links removed
+        Number of orphaned metadata records removed
     """
     if not SQLALCHEMY_AVAILABLE:
         logger.warning("SQLAlchemy not available, cannot cleanup orphaned metadata")
@@ -501,16 +464,23 @@ def cleanup_orphaned_metadata(engine=None) -> int:
         SessionLocal = sessionmaker(bind=engine)
 
         with SessionLocal() as session:
-            # Use the new cleanup method from CacheMetadataLink
-            orphaned_count = CacheMetadataLink.cleanup_orphaned_links(session)
+            total_cleaned = 0
+            
+            # Clean specific model or all registered models
+            models_to_clean = [model_class] if model_class else list(_custom_metadata_registry.values())
+            
+            for model in models_to_clean:
+                if hasattr(model, 'cleanup_orphaned_metadata'):
+                    count = model.cleanup_orphaned_metadata(session)
+                    total_cleaned += count
 
-            if orphaned_count > 0:
+            if total_cleaned > 0:
                 logger.info(
-                    f"🧹 Cleaned up {orphaned_count} orphaned custom metadata links"
+                    f"🧹 Cleaned up {total_cleaned} orphaned custom metadata records"
                 )
 
             session.commit()
-            return orphaned_count
+            return total_cleaned
 
     except Exception as e:
         logger.error(f"Failed to cleanup orphaned metadata: {e}")

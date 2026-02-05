@@ -1252,30 +1252,11 @@ class SqliteBackend(MetadataBackend):
             session.commit()
 
     def remove_entry(self, cache_key: str):
-        """Remove cache entry metadata and associated custom metadata links."""
+        """Remove cache entry metadata (custom metadata will cascade delete via FK)."""
         with self._lock, self.SessionLocal() as session:
-            # Delete cache entry (this will cascade to metadata links due to foreign key constraint)
+            # Delete cache entry - custom metadata records will cascade delete automatically
+            # due to ondelete="CASCADE" on the cache_key foreign key
             session.execute(delete(CacheEntry).where(CacheEntry.cache_key == cache_key))
-
-            # Explicit cleanup of custom metadata links (redundant but ensures consistency)
-            try:
-                from .custom_metadata import CacheMetadataLink
-
-                cleaned_count = CacheMetadataLink.cleanup_for_cache_key(
-                    session, cache_key
-                )
-                if cleaned_count > 0:
-                    logger.debug(
-                        f"Cleaned up {cleaned_count} custom metadata links for {cache_key}"
-                    )
-            except ImportError:
-                # Custom metadata not available, skip cleanup
-                pass
-            except Exception as e:
-                logger.warning(
-                    f"Failed to cleanup custom metadata links for {cache_key}: {e}"
-                )
-
             session.commit()
 
     def list_entries(self) -> List[Dict[str, Any]]:

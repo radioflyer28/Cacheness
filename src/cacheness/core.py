@@ -291,7 +291,7 @@ class UnifiedCache:
             return
 
         try:
-            from .custom_metadata import get_custom_metadata_model, CacheMetadataLink, get_schema_name_for_model, get_all_custom_metadata_models
+            from .custom_metadata import get_custom_metadata_model, get_schema_name_for_model, get_all_custom_metadata_models
             from .metadata import Base
 
             # Normalize custom_metadata to iterable of metadata objects
@@ -302,10 +302,10 @@ class UnifiedCache:
             # Get SQLAlchemy session from the metadata backend
             if hasattr(self.metadata_backend, "SessionLocal"):
                 with self.metadata_backend.SessionLocal() as session:
-                    # Create only custom metadata tables and link table
+                    # Create only custom metadata tables
                     # This avoids conflicts with cache_entries/cache_stats tables
                     # which are managed by the metadata backend
-                    tables_to_create = [CacheMetadataLink.__table__]
+                    tables_to_create = []
                     for model_class in get_all_custom_metadata_models().values():
                         if hasattr(model_class, "__table__") and model_class.__table__ is not None:
                             tables_to_create.append(model_class.__table__)
@@ -334,17 +334,11 @@ class UnifiedCache:
                             )
                             continue
 
+                        # Set the cache_key on the metadata instance (direct FK)
+                        metadata_instance.cache_key = cache_key
+
                         # Save the metadata instance
                         session.add(metadata_instance)
-                        session.flush()  # Get the ID
-
-                        # Create link table entry
-                        link = CacheMetadataLink(
-                            cache_key=cache_key,
-                            metadata_table=model_class.__tablename__,
-                            metadata_id=metadata_instance.id,
-                        )
-                        session.add(link)
 
                     session.commit()
                     logger.debug(f"Stored custom metadata for cache key {cache_key}")
@@ -357,41 +351,23 @@ class UnifiedCache:
             return {}
 
         try:
-            from .custom_metadata import get_custom_metadata_model, CacheMetadataLink
+            from .custom_metadata import get_custom_metadata_model
 
             if hasattr(self.metadata_backend, "SessionLocal"):
                 with self.metadata_backend.SessionLocal() as session:
-                    # Get all links for this cache key
                     from sqlalchemy import select
 
-                    links = (
-                        session.execute(
-                            select(CacheMetadataLink).where(
-                                CacheMetadataLink.cache_key == cache_key
-                            )
-                        )
-                        .scalars()
-                        .all()
-                    )
-
                     result = {}
-                    for link in links:
-                        # Find the schema name for this table
-                        for (
-                            schema_name,
-                            model_class,
-                        ) in self._get_registered_schemas().items():
-                            if model_class.__tablename__ == link.metadata_table:
-                                # Retrieve the metadata instance
-                                metadata_instance = session.execute(
-                                    select(model_class).where(
-                                        model_class.id == link.metadata_id
-                                    )
-                                ).scalar_one_or_none()
+                    # Query each registered schema for metadata with this cache_key
+                    for schema_name, model_class in self._get_registered_schemas().items():
+                        metadata_instance = session.execute(
+                            select(model_class).where(
+                                model_class.cache_key == cache_key
+                            )
+                        ).scalar_one_or_none()
 
-                                if metadata_instance:
-                                    result[schema_name] = metadata_instance
-                                break
+                        if metadata_instance:
+                            result[schema_name] = metadata_instance
 
                     return result
         except Exception as e:

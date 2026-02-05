@@ -573,6 +573,301 @@ Remove all entries from the cache.
 **Returns:**
 - `int`: Number of entries removed
 
+---
+
+## Custom Metadata
+
+Custom metadata allows you to define typed, queryable SQLAlchemy ORM models that link to cache entries. This provides structured metadata storage with advanced querying capabilities using SQLAlchemy ORM.
+
+### `@custom_metadata_model` Decorator
+
+Decorator for registering custom SQLAlchemy metadata models.
+
+```python
+from cacheness.custom_metadata import custom_metadata_model, CustomMetadataBase
+from cacheness.metadata import Base
+from sqlalchemy import Column, String, Float, Integer, DateTime, Boolean
+
+@custom_metadata_model("experiments")
+class ExperimentMetadata(Base, CustomMetadataBase):
+    """Custom metadata for ML experiments."""
+    
+    __tablename__ = "custom_ml_experiments"
+    
+    # cache_key FK inherited from CustomMetadataBase
+    experiment_id = Column(String(100), nullable=False, unique=True, index=True)
+    model_type = Column(String(50), nullable=False, index=True)
+    accuracy = Column(Float, nullable=False, index=True)
+    epochs = Column(Integer, nullable=False, index=True)
+    is_production = Column(Boolean, default=False)
+    created_at = Column(DateTime)
+```
+
+**Parameters:**
+- `schema_name` (str): Unique name for this metadata schema (used in queries)
+
+**Requirements:**
+- Must inherit from both `Base` and `CustomMetadataBase`
+- Table name should start with `custom_` prefix (validated with warning)
+- Add indexes to frequently queried columns for performance
+
+### `CustomMetadataBase` Mixin
+
+Base class that provides the `cache_key` foreign key for custom metadata models.
+
+```python
+class CustomMetadataBase:
+    """
+    Mixin that adds cache_key foreign key to custom metadata tables.
+    
+    Automatically adds:
+    - cache_key: String(16), ForeignKey("cache_entries.cache_key", ondelete="CASCADE")
+    - Indexed for fast lookups
+    - Cascade delete ensures metadata is removed when cache entry deleted
+    """
+```
+
+**Inherited Attributes:**
+- `cache_key` (str): Foreign key to `cache_entries.cache_key` with cascade delete
+
+### Storing Custom Metadata
+
+Use the `custom_metadata` parameter when calling `cache.put()`:
+
+```python
+# Store with single custom metadata
+experiment = ExperimentMetadata(
+    experiment_id="exp_001",
+    model_type="xgboost",
+    accuracy=0.95,
+    epochs=100
+)
+
+cache.put(
+    trained_model,
+    experiment="exp_001",
+    custom_metadata=experiment
+)
+
+# Store with multiple custom metadata types
+performance = PerformanceMetadata(
+    run_id="run_001",
+    training_time_seconds=120.5,
+    memory_usage_mb=2048.0
+)
+
+cache.put(
+    trained_model,
+    experiment="exp_001",
+    custom_metadata=[experiment, performance]  # List of metadata objects
+)
+```
+
+### Querying Custom Metadata
+
+#### `query_custom_session(schema_name) -> contextmanager`
+
+Get a SQLAlchemy query session for a specific custom metadata schema.
+
+**Parameters:**
+- `schema_name` (str): The registered schema name from `@custom_metadata_model`
+
+**Returns:**
+- Context manager yielding SQLAlchemy Query object
+
+**Example:**
+```python
+# Query with filters
+with cache.query_custom_session("experiments") as query:
+    high_accuracy = query.filter(
+        ExperimentMetadata.accuracy >= 0.95
+    ).all()
+    
+    for exp in high_accuracy:
+        print(f"{exp.experiment_id}: {exp.accuracy}")
+
+# Query with sorting
+with cache.query_custom_session("experiments") as query:
+    best_models = query.filter(
+        ExperimentMetadata.is_production == True
+    ).order_by(
+        ExperimentMetadata.accuracy.desc()
+    ).limit(10).all()
+
+# Query with aggregation
+from sqlalchemy import func
+
+with cache.query_custom_session("experiments") as query:
+    avg_accuracy = query.with_entities(
+        func.avg(ExperimentMetadata.accuracy)
+    ).scalar()
+    print(f"Average accuracy: {avg_accuracy:.3f}")
+```
+
+#### `get_custom_metadata_for_entry(**kwargs) -> Dict[str, Any]`
+
+Retrieve all custom metadata for a specific cache entry.
+
+**Parameters:**
+- `**kwargs`: Cache key parameters (same as used in `put()`)
+
+**Returns:**
+- `Dict[str, Any]`: Dictionary mapping schema names to metadata objects
+
+**Example:**
+```python
+# Get all custom metadata for an entry
+metadata = cache.get_custom_metadata_for_entry(experiment="exp_001")
+
+if "experiments" in metadata:
+    exp = metadata["experiments"]
+    print(f"Model: {exp.model_type}, Accuracy: {exp.accuracy}")
+
+if "performance" in metadata:
+    perf = metadata["performance"]
+    print(f"Training time: {perf.training_time_seconds}s")
+
+# Returns empty dict if entry doesn't exist
+meta = cache.get_custom_metadata_for_entry(nonexistent="key")
+print(meta)  # {}
+```
+
+### Correlating Across Custom Tables
+
+Use the `cache_key` foreign key to correlate data across multiple custom metadata tables:
+
+```python
+# Find high-accuracy experiments
+with cache.query_custom_session("experiments") as query:
+    high_acc_exps = query.filter(
+        ExperimentMetadata.accuracy >= 0.95
+    ).all()
+    cache_keys = {exp.cache_key for exp in high_acc_exps}
+
+# Get corresponding performance metrics
+with cache.query_custom_session("performance") as query:
+    perf_metrics = query.filter(
+        PerformanceMetadata.cache_key.in_(cache_keys)
+    ).all()
+    
+    for perf in perf_metrics:
+        print(f"{perf.run_id}: {perf.training_time_seconds}s")
+```
+
+### Migrating Custom Metadata Tables
+
+#### `migrate_custom_metadata_tables(engine=None)`
+
+Create custom metadata tables in the database.
+
+**Parameters:**
+- `engine` (Optional[Engine]): SQLAlchemy engine. If None, uses backend's engine.
+
+**Example:**
+```python
+from cacheness.custom_metadata import migrate_custom_metadata_tables
+
+# With cache instance
+cache = cacheness(config=config)
+if hasattr(cache.metadata_backend, 'engine'):
+    migrate_custom_metadata_tables(engine=cache.metadata_backend.engine)
+
+# With explicit engine
+from sqlalchemy import create_engine
+engine = create_engine("postgresql://user:pass@localhost/db")
+migrate_custom_metadata_tables(engine=engine)
+```
+
+### Cascade Deletion Behavior
+
+Custom metadata records are **automatically cascade-deleted** when the parent cache entry is removed:
+
+```python
+# Store with custom metadata
+cache.put(model, experiment="exp_001", custom_metadata=experiment)
+
+# Delete cache entry
+cache.invalidate(experiment="exp_001")
+
+# Custom metadata automatically deleted (cascade)
+meta = cache.get_custom_metadata_for_entry(experiment="exp_001")
+print(meta)  # {} (empty)
+```
+
+**Benefits:**
+- No orphaned metadata records
+- Clear ownership semantics (metadata belongs to cache entry)
+- Automatic cleanup - no manual maintenance needed
+- Better cache isolation
+
+### Backend Support
+
+Custom metadata works with:
+- **SQLite** (default) - single-file database, good for local development
+- **PostgreSQL** - production-grade, supports high concurrency
+
+Both backends work identically with custom metadata models.
+
+**Example with PostgreSQL:**
+```python
+from cacheness import cacheness, CacheConfig
+from cacheness.config import CacheMetadataConfig
+
+config = CacheConfig(
+    metadata=CacheMetadataConfig(
+        metadata_backend="postgresql",
+        metadata_backend_options={
+            "connection_url": "postgresql://user:pass@localhost/cacheness_db"
+        }
+    )
+)
+
+cache = cacheness(config=config)
+# Custom metadata works the same way
+cache.put(model, custom_metadata=experiment)
+```
+
+### Best Practices
+
+1. **Table Naming**: Use `custom_` prefix for table names
+   ```python
+   __tablename__ = "custom_ml_experiments"  # ✅ Good
+   ```
+
+2. **Add Indexes**: Index frequently queried columns
+   ```python
+   accuracy = Column(Float, index=True)  # ✅ Indexed
+   ```
+
+3. **Use Appropriate Types**: Choose correct SQLAlchemy column types
+   ```python
+   accuracy = Column(Float, index=True)        # Not String!
+   epochs = Column(Integer, index=True)        # Not String!
+   is_production = Column(Boolean)             # Not String!
+   ```
+
+4. **Separate Concerns**: Use multiple models for different metadata types
+   ```python
+   @custom_metadata_model("experiments")
+   class ExperimentMetadata(Base, CustomMetadataBase):
+       ...
+
+   @custom_metadata_model("performance")
+   class PerformanceMetadata(Base, CustomMetadataBase):
+       ...
+   ```
+
+5. **Query Efficiently**: Use SQLAlchemy's filtering, ordering, and aggregation
+   ```python
+   with cache.query_custom_session("experiments") as query:
+       results = query.filter(
+           ExperimentMetadata.accuracy >= 0.9,
+           ExperimentMetadata.created_by == "alice"
+       ).order_by(ExperimentMetadata.accuracy.desc()).all()
+   ```
+
+---
+
 ## Decorators
 
 ### `@cached`
