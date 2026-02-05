@@ -1199,6 +1199,43 @@ Each cache entry includes these built-in metadata fields:
 - `compression_info` (dict): Compression statistics
 - `cache_key_params` (dict): Original parameters used to generate key (if enabled)
 
+#### Backend-Specific Metadata Fields
+
+**S3 Blob Backend:**
+- `s3_etag` (Optional[str]): S3 ETag for blob integrity verification
+  - Stored when using S3 or S3-compatible blob storage backends
+  - Different from `file_hash` (cacheness content hash)
+  - ETag is S3's server-side hash (MD5 for single uploads, composite for multipart)
+  - Used for S3 consistency checks and conditional operations
+  - Example: `"d41d8cd98f00b204e9800998ecf8427e"`
+
+**File/Hash Fields:**
+- `file_hash` (Optional[str]): Cacheness content hash (XXH3_64)
+  - Client-side hash computed before upload
+  - Consistent across all blob backends
+  - Used for deduplication and cache key generation
+- `entry_signature` (Optional[str]): HMAC signature for metadata integrity
+  - Present when signing is enabled in configuration
+  - Protects against metadata tampering
+
+**Example:**
+```python
+# Query entry metadata
+entry = cache.get_entry("my_cache_key")
+metadata = entry.get("metadata", {})
+
+# Check if using S3 backend
+if "s3_etag" in metadata:
+    print(f"S3 ETag: {metadata['s3_etag']}")
+    print(f"Content Hash: {metadata.get('file_hash', 'N/A')}")
+    
+# List all S3-backed entries
+s3_entries = [
+    e for e in cache.list_entries()
+    if e.get("metadata", {}).get("s3_etag")
+]
+```
+
 ## Migration and Compatibility
 
 ### Version Compatibility

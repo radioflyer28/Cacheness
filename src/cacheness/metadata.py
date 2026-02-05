@@ -65,6 +65,8 @@ try:
         delete,
         desc,
         func,
+        text,
+        inspect,
     )
     from sqlalchemy.orm import sessionmaker, declarative_base
 
@@ -104,6 +106,9 @@ try:
         
         # Entry signature for metadata integrity protection
         entry_signature = Column(String(64), nullable=True)  # HMAC-SHA256 hex (64 chars)
+        
+        # S3 ETag for S3-backed blob storage (separate from file_hash)
+        s3_etag = Column(String(100), nullable=True)  # S3 ETag (MD5 or multipart hash)
 
         # Backend technical metadata (previously stored in metadata_json)
         object_type = Column(String(100), nullable=True)  # e.g., "<class 'int'>"
@@ -113,7 +118,12 @@ try:
         actual_path = Column(String(500), nullable=True)  # Full path to cache file
 
         # Original cache key parameters - only store, don't index (rarely queried)
-        cache_key_params = Column(Text, nullable=True)  # Removed index=True
+        # Only populated when store_full_metadata=True config option is enabled
+        cache_key_params = Column(Text, nullable=True)  # JSON-serialized kwargs used for cache key
+        
+        # User metadata dict - simple key-value metadata for filtering/querying
+        # Raw values stored for easy JSON_EXTRACT queries (not hashed like cache_key_params)
+        metadata_dict = Column(Text, nullable=True)  # JSON dict for query_meta() filtering
 
         # Optimized composite indexes for actual query patterns only
         __table_args__ = (
@@ -216,7 +226,7 @@ class MetadataBackend(ABC):
         pass
 
     @abstractmethod
-    def cleanup_expired(self, ttl_hours: int) -> int:
+    def cleanup_expired(self, ttl_seconds: float) -> int:
         """Remove expired entries and return count removed."""
         pass
 
@@ -433,8 +443,8 @@ class CachedMetadataBackend(MetadataBackend):
     def increment_misses(self):
         return self.backend.increment_misses()
     
-    def cleanup_expired(self, ttl_hours: int) -> int:
-        count = self.backend.cleanup_expired(ttl_hours)
+    def cleanup_expired(self, ttl_seconds: float) -> int:
+        count = self.backend.cleanup_expired(ttl_seconds)
         
         # Clear entire memory cache after cleanup (entries might be stale)
         if self._memory_cache is not None and count > 0:
@@ -610,13 +620,13 @@ class InMemoryBackend(MetadataBackend):
         with self._lock:
             self._cache_misses += 1
     
-    def cleanup_expired(self, ttl_hours: int) -> int:
+    def cleanup_expired(self, ttl_seconds: float) -> int:
         """Remove expired entries (simple entries structure)."""
-        if ttl_hours <= 0:
+        if ttl_seconds <= 0:
             return 0
             
         with self._lock:
-            cutoff_time = datetime.now(timezone.utc) - timedelta(hours=ttl_hours)
+            cutoff_time = datetime.now(timezone.utc) - timedelta(seconds=ttl_seconds)
             expired_keys = []
             
             # Find expired keys
@@ -901,13 +911,13 @@ class JsonBackend(MetadataBackend):
             self._metadata["cache_misses"] = self._metadata.get("cache_misses", 0) + 1
             self._save_to_disk()
 
-    def cleanup_expired(self, ttl_hours: int) -> int:
+    def cleanup_expired(self, ttl_seconds: float) -> int:
         """Remove expired entries and return count removed (simple entries structure)."""
         from datetime import timedelta
 
         with self._lock:
             expired_keys = []
-            cutoff_time = datetime.now(timezone.utc) - timedelta(hours=ttl_hours)
+            cutoff_time = datetime.now(timezone.utc) - timedelta(seconds=ttl_seconds)
             entries = self._metadata.get("entries", {})
 
             for cache_key, entry in entries.items():
@@ -1033,11 +1043,48 @@ class SqliteBackend(MetadataBackend):
 
         # Create tables
         Base.metadata.create_all(self.engine)
+        
+        # Run migrations for schema evolution
+        self._run_migrations()
 
         # Initialize stats if not exists
         self._init_stats()
 
         logger.info(f"✅ SQLAlchemy metadata backend initialized: {db_file}")
+
+    def _run_migrations(self):
+        """Run schema migrations to add missing columns to existing databases."""
+        with self.SessionLocal() as session:
+            # Check if cache_entries table exists
+            inspector = inspect(self.engine)
+            if "cache_entries" not in inspector.get_table_names():
+                return  # Table doesn't exist yet, will be created by create_all
+            
+            existing_columns = {col["name"] for col in inspector.get_columns("cache_entries")}
+            
+            # Migration 1: Add s3_etag column if missing
+            if "s3_etag" not in existing_columns:
+                logger.info("Migrating: Adding s3_etag column to cache_entries")
+                session.execute(text(
+                    "ALTER TABLE cache_entries ADD COLUMN s3_etag VARCHAR(100)"
+                ))
+                session.commit()
+            
+            # Migration 2: Add cache_key_params column if missing
+            if "cache_key_params" not in existing_columns:
+                logger.info("Migrating: Adding cache_key_params column to cache_entries")
+                session.execute(text(
+                    "ALTER TABLE cache_entries ADD COLUMN cache_key_params TEXT"
+                ))
+                session.commit()
+            
+            # Migration 3: Add metadata_dict column if missing
+            if "metadata_dict" not in existing_columns:
+                logger.info("Migrating: Adding metadata_dict column to cache_entries")
+                session.execute(text(
+                    "ALTER TABLE cache_entries ADD COLUMN metadata_dict TEXT"
+                ))
+                session.commit()
 
     def _init_stats(self):
         """Initialize cache stats if not exists."""
@@ -1094,6 +1141,8 @@ class SqliteBackend(MetadataBackend):
                 metadata["file_hash"] = entry.file_hash
             if entry.entry_signature is not None:
                 metadata["entry_signature"] = entry.entry_signature
+            if entry.s3_etag is not None:
+                metadata["s3_etag"] = entry.s3_etag
             
             # Only parse cache_key_params JSON if it exists (should be disabled by default)
             if entry.cache_key_params is not None:
@@ -1102,12 +1151,16 @@ class SqliteBackend(MetadataBackend):
                 except (ValueError, TypeError):
                     pass  # Skip malformed cache_key_params
 
+            # Ensure timestamps are always in UTC for consistency
+            created_at_utc = entry.created_at.astimezone(timezone.utc) if entry.created_at.tzinfo else entry.created_at.replace(tzinfo=timezone.utc)
+            accessed_at_utc = entry.accessed_at.astimezone(timezone.utc) if entry.accessed_at.tzinfo else entry.accessed_at.replace(tzinfo=timezone.utc)
+            
             return {
                 "description": entry.description,
                 "data_type": entry.data_type,
                 "prefix": entry.prefix,
-                "created_at": entry.created_at.isoformat(),
-                "accessed_at": entry.accessed_at.isoformat(),
+                "created_at": created_at_utc.isoformat(),
+                "accessed_at": accessed_at_utc.isoformat(),
                 "file_size": entry.file_size,
                 "metadata": metadata,
             }
@@ -1117,6 +1170,18 @@ class SqliteBackend(MetadataBackend):
         with self._lock, self.SessionLocal() as session:
             # Extract and process metadata fields efficiently
             metadata = entry_data.get("metadata", {}).copy()
+            
+            # Extract full metadata copy FIRST (before any pop() operations) if present
+            full_metadata_dict = metadata.pop("_full_metadata", None)
+            full_metadata_json = None
+            if full_metadata_dict is not None:
+                try:
+                    full_metadata_json = json_dumps(full_metadata_dict)
+                    logger.debug(f"Serialized full_metadata: {len(full_metadata_json)} chars")
+                except Exception as e:
+                    # If serialization fails, skip full_metadata
+                    logger.warning(f"Failed to serialize full_metadata JSON: {e}")
+                    full_metadata_json = None
             
             # Extract backend technical metadata to dedicated columns (not JSON)
             object_type = metadata.pop("object_type", None)
@@ -1128,28 +1193,14 @@ class SqliteBackend(MetadataBackend):
             # Extract security fields from metadata (remove from JSON to avoid duplication)
             file_hash = metadata.pop("file_hash", None)
             entry_signature = metadata.pop("entry_signature", None)
+            s3_etag = metadata.pop("s3_etag", None)  # S3 ETag if using S3 backend
+            # These fields are pre-serialized JSON strings from the caching layer
             cache_key_params = metadata.pop("cache_key_params", None)
+            metadata_dict_value = metadata.pop("metadata_dict", None)  # User metadata for querying
             
             # Remove redundant fields that are already stored as columns
             metadata.pop("prefix", None)  # Already stored in prefix column
             metadata.pop("data_type", None)  # Already stored in data_type column
-            
-            # Only serialize cache_key_params if absolutely necessary (should be off by default)
-            serialized_params = None
-            if cache_key_params is not None:
-                try:
-                    from .serialization import serialize_for_cache_key
-                    serializable_params = {
-                        key: serialize_for_cache_key(value) 
-                        for key, value in cache_key_params.items()
-                    }
-                    serialized_params = json_dumps(serializable_params)
-                except Exception:
-                    try:
-                        serialized_params = json_dumps(cache_key_params)
-                    except Exception:
-                        # If serialization fails, skip cache_key_params entirely
-                        serialized_params = None
             
             # Handle timestamps with proper defaults
             created_at = entry_data.get("created_at")
@@ -1170,11 +1221,11 @@ class SqliteBackend(MetadataBackend):
                 text("""
                     INSERT OR REPLACE INTO cache_entries 
                     (cache_key, description, data_type, prefix, file_size, 
-                     file_hash, entry_signature, cache_key_params, 
+                     file_hash, entry_signature, s3_etag, cache_key_params, metadata_dict,
                      object_type, storage_format, serializer, compression_codec, actual_path,
                      created_at, accessed_at)
                     VALUES (:cache_key, :description, :data_type, :prefix, :file_size, 
-                           :file_hash, :entry_signature, :cache_key_params, 
+                           :file_hash, :entry_signature, :s3_etag, :cache_key_params, :metadata_dict,
                            :object_type, :storage_format, :serializer, :compression_codec, :actual_path,
                            :created_at, :accessed_at)
                 """),
@@ -1186,7 +1237,9 @@ class SqliteBackend(MetadataBackend):
                     "file_size": entry_data.get("file_size", 0),
                     "file_hash": file_hash,
                     "entry_signature": entry_signature,
-                    "cache_key_params": serialized_params,
+                    "s3_etag": s3_etag,
+                    "cache_key_params": cache_key_params,
+                    "metadata_dict": metadata_dict_value,
                     "object_type": object_type,
                     "storage_format": storage_format,
                     "serializer": serializer,
@@ -1259,6 +1312,8 @@ class SqliteBackend(MetadataBackend):
                     entry_metadata["file_hash"] = entry.file_hash
                 if entry.entry_signature is not None:
                     entry_metadata["entry_signature"] = entry.entry_signature
+                if entry.s3_etag is not None:
+                    entry_metadata["s3_etag"] = entry.s3_etag
                 
                 # Only parse cache_key_params JSON if it exists (should be disabled by default)
                 if entry.cache_key_params is not None:
@@ -1347,11 +1402,11 @@ class SqliteBackend(MetadataBackend):
             )
             session.commit()
 
-    def cleanup_expired(self, ttl_hours: int) -> int:
+    def cleanup_expired(self, ttl_seconds: float) -> int:
         """Remove expired entries and return count removed."""
         from datetime import timedelta
 
-        cutoff_time = datetime.now(timezone.utc) - timedelta(hours=ttl_hours)
+        cutoff_time = datetime.now(timezone.utc) - timedelta(seconds=ttl_seconds)
 
         with self._lock, self.SessionLocal() as session:
             # Delete expired entries

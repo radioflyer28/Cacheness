@@ -778,6 +778,7 @@ Missing optional dependencies are handled gracefully with automatic fallbacks.
 - **[Performance Guide](docs/PERFORMANCE.md)** - Optimization strategies and benchmarks
 - **[Cross-Platform Guide](docs/CROSS_PLATFORM_GUIDE.md)** - Development guide for all platforms
 - **[Windows Compatibility](docs/WINDOWS_COMPATIBILITY.md)** - Cross-platform development and Windows-specific considerations
+- **[Local Test Environment Guide](docs/LOCAL_TEST_ENVIRONMENT.md)** - Docker Compose setup for PostgreSQL and S3 integration testing
 - **[API Reference](docs/API_REFERENCE.md)** - Complete API documentation
 
 ## Platform Verification

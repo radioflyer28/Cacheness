@@ -1067,7 +1067,13 @@ config = CacheConfig(
 - [x] Implement S3 operations: put, get, delete, exists, list_keys
 - [ ] Handle multipart uploads for large blobs (>5GB)
 - [x] Store and track S3 ETags in metadata
-- [ ] Add `s3_etag` field to metadata schema
+- [ ] **TODO: Add `s3_etag` field to metadata schema**
+  - [ ] Add s3_etag column to SQLite metadata backend (cache_entries table)
+  - [ ] Add s3_etag column to PostgreSQL metadata backend (cache_entries table)
+  - [ ] Store S3 ETag in metadata dict when S3BlobBackend is used
+  - [ ] Update metadata serialization to preserve s3_etag
+  - [ ] Add tests for s3_etag storage and retrieval
+  - [ ] Document s3_etag field in API reference
 - [x] Implement backend compatibility validation in `CacheConfig`
 - [x] Add validation error for incompatible backend combinations
 - [x] Support custom endpoint_url for MinIO compatibility
@@ -1080,6 +1086,13 @@ config = CacheConfig(
 - [x] Create `tests/test_s3_blob_backend.py` with moto mocking
 - [x] Add tests for directory sharding (0, 1, 2, 3+ chars)
 - [ ] Create integration tests for MinIO (optional, CI environment)
+- [ ] **TODO: Add `s3_etag` field to metadata schema**
+  - [ ] Add s3_etag column to SQLite metadata backend (cache_entries table)
+  - [ ] Add s3_etag column to PostgreSQL metadata backend (cache_entries table)
+  - [ ] Store S3 ETag in metadata dict when S3BlobBackend is used
+  - [ ] Update metadata serialization to preserve s3_etag
+  - [ ] Add tests for s3_etag storage and retrieval
+  - [ ] Document s3_etag field in API reference
 - [ ] Update `docs/PLUGIN_DEVELOPMENT.md` with S3 backend example
 - [ ] Create `docs/S3_BACKEND.md` with setup and configuration guide
 - [ ] Add S3 example to `examples/` directory
@@ -1212,6 +1225,55 @@ s3 = ["boto3>=1.26.0"]
 recommended = ["sqlalchemy>=2.0", "orjson", "blosc2", "psycopg[binary]>=3.1"]
 cloud = ["boto3>=1.26.0", "psycopg[binary]>=3.1"]  # S3 + PostgreSQL
 ```
+
+---
+
+##### 2.11 Backend Feature Parity Verification
+
+**Status:** ✅ Complete
+
+**Purpose:** Ensure complete feature parity between SQLite and PostgreSQL metadata backends.
+
+**Key Findings:**
+- ✅ **Technical metadata fields preserved:** s3_etag, actual_path, object_type, storage_format, serializer, compression_codec, file_hash, entry_signature
+- ⚠️ **Arbitrary metadata NOT preserved by default:** This is by design for performance (zero JSON parsing overhead)
+- ℹ️ **For arbitrary metadata:** Use `store_full_metadata=True` option (Section 2.13)
+- ℹ️ **For custom typed metadata:** Use custom metadata tables (Section 2.7)
+
+**Implementation Tasks:**
+
+- [x] Custom metadata tables (Section 2.7 - completed)
+- [x] query_custom_session() support (Section 2.7 - completed)
+- [x] Verify all metadata operations work identically on both backends
+- [x] Add comprehensive cross-backend compatibility tests (test_backend_parity.py - 11 tests passing)
+- [x] Document backend design decision (technical fields only by default)
+- [ ] Document backend differences in BACKEND_SELECTION.md (in progress)
+- [ ] Consider memory_cache layer compatibility with both backends
+
+---
+
+##### 2.12 TTL Unit Consistency
+
+**Status:** 🚧 Planned (BREAKING CHANGE)
+
+**Purpose:** Standardize TTL units throughout codebase for consistency and clarity.
+
+**Current State:** Mixed usage (ttl_hours, memory_cache_ttl_seconds)
+
+**Recommendation:** **Seconds** (most granular, standard in caching systems like Redis)
+
+**Alternative:** Keep hours for human-friendly config, convert internally
+
+**Implementation Tasks:**
+
+- [ ] **Decision needed**: Choose seconds, minutes, or hours as standard unit
+- [ ] Audit all TTL-related code: core.py, config.py, backends, sql_cache.py
+- [ ] Update configuration parameters (breaking change for users)
+- [ ] Add deprecation warnings for old parameter names
+- [ ] Update all documentation to reflect new TTL units
+- [ ] Update all tests to use new TTL parameters
+- [ ] Add migration guide for users upgrading
+- [ ] Consider adding helper methods: ttl_hours(), ttl_minutes(), ttl_seconds()
 
 ---
 
@@ -2656,6 +2718,81 @@ if result.signature_valid == False:
 
 ---
 
+### 2.13 Optional Arbitrary Metadata Storage
+
+**Status:** 📋 Planned
+**Priority:** Medium
+**Breaking Change:** No (opt-in feature)
+
+**Overview:**
+Currently, SQL backends (SQLite/PostgreSQL) only preserve known technical metadata fields in dedicated columns for performance. This feature adds an optional JSON column to store the complete metadata dictionary used to derive the cache key.
+
+**Purpose:**
+- **Debugging:** Inspect full metadata that generated cache keys
+- **Broad querying:** Query cache entries by any metadata field without JSON parsing overhead
+- **Separate from custom metadata tables:** This is for full metadata capture, not performant custom field queries
+
+**Implementation:**
+
+1. **Add optional JSON column to backends:**
+   ```python
+   # In CacheEntry and PgCacheEntry models
+   full_metadata = Column(JSON, nullable=True)  # Only populated if enabled
+   ```
+
+2. **Add configuration option:**
+   ```python
+   config = CachenessConfig(
+       metadata_backend="sqlite",
+       store_full_metadata=False,  # Default: disabled for performance
+   )
+   ```
+
+3. **Update put_entry() logic:**
+   ```python
+   def put_entry(self, cache_key: str, entry_data: Dict[str, Any]) -> None:
+       # Extract known technical fields as before
+       s3_etag = metadata.pop("s3_etag", None)
+       # ... other fields ...
+       
+       # Optionally store complete metadata copy
+       full_metadata = None
+       if self.config.store_full_metadata:
+           full_metadata = json.dumps(original_metadata)  # Before any pop() calls
+       
+       # Insert with full_metadata column
+   ```
+
+4. **Query capabilities:**
+   ```python
+   # Query by any metadata field (requires store_full_metadata=True)
+   entries = cache.query_meta(
+       "SELECT cache_key, full_metadata FROM cache_entries "
+       "WHERE json_extract(full_metadata, '$.custom_field') = 'value'"
+   )
+   ```
+
+**Trade-offs:**
+- **Default OFF:** No performance impact for existing users
+- **When enabled:** ~2x storage (technical fields + JSON), ~10% slower writes
+- **Not for custom metadata tables:** Use Section 2.7 for performant custom field queries with dedicated SQLAlchemy models
+
+**Distinction from Custom Metadata Tables:**
+- **Arbitrary metadata (this feature):** Stores complete metadata dict in JSON column for debugging/broad queries
+- **Custom metadata tables (Section 2.7):** User-defined SQLAlchemy models with typed columns for performant queries
+
+**Tasks:**
+- [ ] Add `full_metadata` JSON column to CacheEntry model (SQLite)
+- [ ] Add `full_metadata` JSON column to PgCacheEntry model (PostgreSQL)
+- [ ] Add `store_full_metadata` config option to CachenessConfig
+- [ ] Update put_entry() to conditionally store full metadata
+- [ ] Update get_entry() to optionally return full metadata
+- [ ] Add tests for full metadata storage/retrieval
+- [ ] Document trade-offs in BACKEND_SELECTION.md
+- [ ] Add examples showing debugging use cases
+
+---
+
 ## 📝 Summary for New Readers
 
 **Current Status (January 2026):**
@@ -2699,4 +2836,8 @@ if result.signature_valid == False:
 | 2026-01-27 | Architecture: Phase 2 planned - Registration APIs for handlers/backends, PostgreSQL/S3 backends | Code Review |
 | 2026-01-27 | Decision: Use manual registration over auto-discovery plugins (deferred to future if needed) | Code Review |
 | 2026-01-27 | Documentation: Added navigation, summary, cleaned up for new reader clarity | Code Review |
+| 2026-02-04 | Section 2.10 Complete: S3 ETag metadata storage in SQLite/PostgreSQL backends | Implementation |
+| 2026-02-04 | Section 2.11 Complete: Backend parity verification (11 tests passing) | Implementation |
+| 2026-02-04 | Section 2.13 Planned: Optional arbitrary metadata storage (opt-in JSON column) | Planning |
+| 2026-02-04 | Design Decision: Backends preserve technical fields only by default for performance | Architecture |
 

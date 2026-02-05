@@ -10,6 +10,7 @@ wheels/
 .venv
 
 # Cache system
+*.bin
 *.db
 *.db-shm
 *.db-wal
@@ -22,3 +23,11 @@ wheels/
 .DS_Store
 cache/cache_signing_key.bin
 delete_empty_files.sh
+
+# Local config overrides (keep example configs)
+config/local_*.yaml
+config/local_*.json
+config/my_*.yaml
+config/my_*.json
+docker-compose.override.yml
+.env

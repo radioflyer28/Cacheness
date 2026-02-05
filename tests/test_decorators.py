@@ -144,7 +144,7 @@ class TestCachedDecorator:
     def test_decorator_with_custom_ttl(self):
         """Test decorator with custom TTL."""
 
-        @cached(ttl_hours=1)
+        @cached(ttl_seconds=3600)
         def time_sensitive_function(x):
             return f"result_{x}"
 
@@ -199,7 +199,7 @@ class TestCachedDecorator:
         """Test decorator with custom cache instance."""
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            config = CacheConfig(cache_dir=temp_dir, default_ttl_hours=48)
+            config = CacheConfig(cache_dir=temp_dir, default_ttl_seconds=172800)
             custom_cache = cacheness(config)
 
             @cached(cache_instance=custom_cache)
@@ -266,7 +266,7 @@ class TestCacheFunctionInterface:
     def test_cache_function_with_args(self):
         """Test cache_function with arguments."""
 
-        @cache_function(ttl_hours=2, key_prefix="func_test")
+        @cache_function(ttl_seconds=7200, key_prefix="func_test")
         def configured_func(x):
             return x * 3
 
@@ -280,7 +280,7 @@ class TestCacheFunctionInterface:
             return a + b
 
         # Wrap the function with caching
-        cached_func = cache_function(existing_function, ttl_hours=1)  # type: ignore
+        cached_func = cache_function(existing_function, ttl_seconds=3600)  # type: ignore
 
         result1 = cached_func(2, 3)  # type: ignore
         result2 = cached_func(2, 3)  # type: ignore
@@ -323,7 +323,7 @@ class TestMemoizeDecorator:
         # The function should have ttl_hours=None (permanent)
         # This is implementation detail, but we can check via cache_info
         info = permanent_func.cache_info()  # type: ignore
-        assert info["ttl_hours"] is None
+        assert info["ttl_seconds"] is None
 
 
 class TestCacheContext:
@@ -332,7 +332,7 @@ class TestCacheContext:
     def test_cache_context_basic(self):
         """Test basic CacheContext usage."""
 
-        with CacheContext(default_ttl_hours=1) as ctx:
+        with CacheContext(default_ttl_seconds=3600) as ctx:
 
             @ctx.cached()
             def context_function(x):
@@ -472,7 +472,7 @@ class TestFactoryMethods:
         with tempfile.TemporaryDirectory() as temp_dir:
             call_count = 0
 
-            @cached.for_api(ttl_hours=1, cache_dir=temp_dir)
+            @cached.for_api(ttl_seconds=3600, cache_dir=temp_dir)
             def fetch_api_data(endpoint):
                 nonlocal call_count
                 call_count += 1

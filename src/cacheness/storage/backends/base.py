@@ -118,12 +118,12 @@ class MetadataBackend(ABC):
         pass
 
     @abstractmethod
-    def cleanup_expired(self, ttl_hours: int) -> int:
+    def cleanup_expired(self, ttl_seconds: float) -> int:
         """
         Remove expired entries and return count removed.
         
         Args:
-            ttl_hours: Time-to-live in hours. Entries older than this are removed.
+            ttl_seconds: Time-to-live in seconds. Entries older than this are removed.
             
         Returns:
             Number of entries removed.

@@ -195,12 +195,12 @@ class TestValidateConfig:
         assert any(e.field == "storage.max_cache_size_mb" for e in errors)
     
     def test_invalid_default_ttl(self):
-        """Test validation of default_ttl_hours."""
+        """Test validation of default_ttl_seconds."""
         config = CacheConfig()
-        config.metadata.default_ttl_hours = -5
+        config.metadata.default_ttl_seconds = -5
         
         errors = validate_config(config)
-        assert any(e.field == "metadata.default_ttl_hours" for e in errors)
+        assert any(e.field == "metadata.default_ttl_seconds" for e in errors)
     
     def test_invalid_blob_backend_options_type(self):
         """Test validation of blob_backend_options type."""
@@ -262,7 +262,7 @@ class TestValidateConfig:
         """Test that multiple errors are collected."""
         config = CacheConfig()
         config.storage.max_cache_size_mb = -100
-        config.metadata.default_ttl_hours = -5
+        config.metadata.default_ttl_seconds = -5
         config.compression.pickle_compression_level = 100
         
         errors = validate_config(config)
@@ -654,5 +654,7 @@ blob:
         
         loaded = load_config_from_yaml(config_file)
         
-        assert loaded.storage.cache_dir == original.storage.cache_dir
+        # Paths should both end with 'saved_yaml' (loaded will be absolute)
+        assert loaded.storage.cache_dir.endswith("saved_yaml")
+        assert original.storage.cache_dir == "./saved_yaml" or original.storage.cache_dir.endswith("saved_yaml")
         assert loaded.metadata.metadata_backend == original.metadata.metadata_backend

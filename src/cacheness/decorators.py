@@ -88,7 +88,7 @@ class cached:
             return x * y
 
         # With TTL
-        @cached(ttl_hours=6)
+        @cached(ttl_seconds=21600)
         def fetch_data():
             return requests.get("https://api.example.com").json()
 
@@ -112,7 +112,8 @@ class cached:
 
     def __init__(
         self,
-        ttl_hours: Optional[int] = None,
+        ttl_seconds: Optional[float] = None,
+        ttl_hours: Optional[int] = None,  # DEPRECATED: backward compatibility
         key_prefix: Optional[str] = None,
         cache_instance: Optional[UnifiedCache] = None,
         key_func: Optional[Callable[[Callable, Tuple, Dict], str]] = None,
@@ -122,13 +123,19 @@ class cached:
         Initialize the caching decorator.
 
         Args:
-            ttl_hours: Time-to-live in hours (uses cache default if None)
+            ttl_seconds: Time-to-live in seconds (uses cache default if None)
+            ttl_hours: DEPRECATED - Use ttl_seconds. Time-to-live in hours
             key_prefix: Prefix for cache keys (useful for versioning)
             cache_instance: Specific cache instance to use (creates default if None)
             key_func: Custom function for generating cache keys
             ignore_errors: If True, cache errors don't prevent function execution
         """
-        self.ttl_hours = ttl_hours
+        # Handle backward compatibility
+        if ttl_hours is not None and ttl_seconds is None:
+            self.ttl_seconds = ttl_hours * 3600
+        else:
+            self.ttl_seconds = ttl_seconds
+        
         self.key_prefix = key_prefix
         self.cache_instance = cache_instance
         self.key_func = key_func
@@ -166,8 +173,10 @@ class cached:
             # Try to get from cache using a synthetic parameter containing the cache key
             try:
                 cache_instance = cast(UnifiedCache, self.cache_instance)
+                # Convert ttl_seconds to ttl_hours for backward compatibility with _is_expired
+                ttl_hours = self.ttl_seconds / 3600 if self.ttl_seconds is not None else None
                 cached_result = cache_instance.get(
-                    ttl_hours=self.ttl_hours,
+                    ttl_hours=ttl_hours,
                     __decorator_cache_key=cache_key,  # Use synthetic parameter with the cache key
                 )
                 if cached_result is not None:
@@ -234,7 +243,7 @@ class cached:
         cache_instance = cast(UnifiedCache, self.cache_instance)
         return {
             "function": f"{func_module}.{func_name}",
-            "ttl_hours": self.ttl_hours,
+            "ttl_seconds": self.ttl_seconds,
             "key_prefix": self.key_prefix,
             "cache_dir": str(cache_instance.config.cache_dir),
             "ignore_errors": self.ignore_errors,

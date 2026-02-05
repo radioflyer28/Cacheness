@@ -141,6 +141,11 @@ tensorflow = [
 ]
 
 [package.dev-dependencies]
+cloud = [
+    { name = "boto3" },
+    { name = "psycopg", extra = ["binary"] },
+    { name = "sqlalchemy" },
+]
 dataframes = [
     { name = "pandas" },
     { name = "polars" },
@@ -152,6 +157,10 @@ dev = [
     { name = "pytest-cov" },
     { name = "ruff" },
 ]
+postgresql = [
+    { name = "psycopg", extra = ["binary"] },
+    { name = "sqlalchemy" },
+]
 recommended = [
     { name = "blosc2" },
     { name = "dill" },
@@ -161,6 +170,9 @@ recommended = [
     { name = "pandas" },
     { name = "pyarrow" },
     { name = "sqlalchemy" },
+]
+s3 = [
+    { name = "boto3" },
 ]
 sql = [
     { name = "duckdb-engine" },
@@ -196,6 +208,11 @@ requires-dist = [
 provides-extras = ["recommended", "dataframes", "tensorflow", "s3", "postgresql", "cloud"]
 
 [package.metadata.requires-dev]
+cloud = [
+    { name = "boto3", specifier = ">=1.26.0" },
+    { name = "psycopg", extras = ["binary"], specifier = ">=3.1.0" },
+    { name = "sqlalchemy", specifier = ">=2.0.0" },
+]
 dataframes = [
     { name = "pandas", specifier = ">=2.0.0,<4.0.0" },
     { name = "polars", specifier = ">=1.30.0" },
@@ -207,6 +224,10 @@ dev = [
     { name = "pytest-cov", specifier = ">=6.2.1" },
     { name = "ruff", specifier = ">=0.12.8" },
 ]
+postgresql = [
+    { name = "psycopg", extras = ["binary"], specifier = ">=3.1.0" },
+    { name = "sqlalchemy", specifier = ">=2.0.0" },
+]
 recommended = [
     { name = "blosc2", specifier = ">=3.5.1" },
     { name = "dill", specifier = ">=0.4.0" },
@@ -217,6 +238,7 @@ recommended = [
     { name = "pyarrow", specifier = ">=21.0.0" },
     { name = "sqlalchemy", specifier = ">=2.0.0" },
 ]
+s3 = [{ name = "boto3", specifier = ">=1.26.0" }]
 sql = [
     { name = "duckdb-engine", specifier = ">=0.16.0" },
     { name = "sqlalchemy", specifier = ">=2.0.0" },

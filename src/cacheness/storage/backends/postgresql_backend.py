@@ -128,6 +128,9 @@ if SQLALCHEMY_AVAILABLE:
         file_hash = Column(String(16), nullable=True)
         entry_signature = Column(String(64), nullable=True)
         
+        # S3 ETag for S3-backed blob storage (separate from file_hash)
+        s3_etag = Column(String(100), nullable=True)  # S3 ETag (MD5 or multipart hash)
+        
         # Backend technical metadata
         object_type = Column(String(100), nullable=True)
         storage_format = Column(String(20), nullable=True)
@@ -135,7 +138,7 @@ if SQLALCHEMY_AVAILABLE:
         compression_codec = Column(String(20), nullable=True)
         actual_path = Column(String(500), nullable=True)
         
-        # Cache key parameters (optional)
+        # Cache key parameters (optional, only populated when store_full_metadata=True)
         cache_key_params = Column(Text, nullable=True)
         
         __table_args__ = (
@@ -236,6 +239,9 @@ class PostgresBackend(MetadataBackend):
         # Create tables
         PostgresBase.metadata.create_all(self.engine)
         
+        # Run migrations for schema evolution
+        self._run_migrations()
+        
         # Initialize stats
         self._init_stats()
         
@@ -248,6 +254,39 @@ class PostgresBackend(MetadataBackend):
             parts = self.connection_url.split("@")
             return f"postgresql://***@{parts[-1]}"
         return self.connection_url
+    
+    def _run_migrations(self):
+        """Run schema migrations to add missing columns to existing databases."""
+        with self.SessionLocal() as session:
+            try:
+                # Check if cache_entries table exists
+                from sqlalchemy import inspect
+                inspector = inspect(self.engine)
+                if "cache_entries" not in inspector.get_table_names():
+                    return  # Table doesn't exist yet, will be created by create_all
+                
+                existing_columns = {col["name"] for col in inspector.get_columns("cache_entries")}
+                
+                # Migration 1: Add s3_etag column if missing
+                if "s3_etag" not in existing_columns:
+                    logger.info("Migrating: Adding s3_etag column to cache_entries")
+                    from sqlalchemy import text
+                    session.execute(text(
+                        "ALTER TABLE cache_entries ADD COLUMN s3_etag VARCHAR(100)"
+                    ))
+                    session.commit()
+                
+                # Migration 2: Add cache_key_params column if missing
+                if "cache_key_params" not in existing_columns:
+                    logger.info("Migrating: Adding cache_key_params column to cache_entries")
+                    from sqlalchemy import text
+                    session.execute(text(
+                        "ALTER TABLE cache_entries ADD COLUMN cache_key_params TEXT"
+                    ))
+                    session.commit()
+            except Exception as e:
+                logger.warning(f"Migration failed (may be expected if columns exist): {e}")
+                session.rollback()
     
     def _init_stats(self):
         """Initialize cache statistics if not exists."""
@@ -321,6 +360,9 @@ class PostgresBackend(MetadataBackend):
         # Extract nested metadata if present
         metadata = entry_data.get("metadata", {}).copy()
         
+        # Extract optional cache_key_params for storage if needed (disabled by default)
+        # No separate extraction needed - it's already in metadata
+        
         # Extract fields from nested metadata
         object_type = metadata.pop("object_type", None)
         storage_format = metadata.pop("storage_format", None)
@@ -329,20 +371,44 @@ class PostgresBackend(MetadataBackend):
         actual_path = metadata.pop("actual_path", None)
         file_hash = metadata.pop("file_hash", None)
         entry_signature = metadata.pop("entry_signature", None)
+        s3_etag = metadata.pop("s3_etag", None)  # S3 ETag if using S3 backend
         cache_key_params = metadata.pop("cache_key_params", None)
         
-        # Handle timestamps
+        # Handle timestamps - always use UTC
         created_at = entry_data.get("created_at")
         if isinstance(created_at, str):
             created_at = datetime.fromisoformat(created_at)
+            # If naive datetime, assume UTC
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+            else:
+                # Convert to UTC if different timezone
+                created_at = created_at.astimezone(timezone.utc)
         elif created_at is None:
             created_at = datetime.now(timezone.utc)
+        elif isinstance(created_at, datetime):
+            # Ensure it's UTC
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+            else:
+                created_at = created_at.astimezone(timezone.utc)
         
         accessed_at = entry_data.get("accessed_at")
         if isinstance(accessed_at, str):
             accessed_at = datetime.fromisoformat(accessed_at)
+            # If naive datetime, assume UTC
+            if accessed_at.tzinfo is None:
+                accessed_at = accessed_at.replace(tzinfo=timezone.utc)
+            else:
+                accessed_at = accessed_at.astimezone(timezone.utc)
         elif accessed_at is None:
             accessed_at = datetime.now(timezone.utc)
+        elif isinstance(accessed_at, datetime):
+            # Ensure it's UTC
+            if accessed_at.tzinfo is None:
+                accessed_at = accessed_at.replace(tzinfo=timezone.utc)
+            else:
+                accessed_at = accessed_at.astimezone(timezone.utc)
         
         # Serialize cache_key_params if present
         serialized_params = None
@@ -371,6 +437,7 @@ class PostgresBackend(MetadataBackend):
                     file_size=entry_data.get("file_size", 0),
                     file_hash=file_hash,
                     entry_signature=entry_signature,
+                    s3_etag=s3_etag,
                     object_type=object_type,
                     storage_format=storage_format,
                     serializer=serializer,
@@ -391,6 +458,7 @@ class PostgresBackend(MetadataBackend):
                 file_size=entry_data.get("file_size", 0),
                 file_hash=file_hash,
                 entry_signature=entry_signature,
+                s3_etag=s3_etag,
                 object_type=object_type,
                 storage_format=storage_format,
                 serializer=serializer,
@@ -407,8 +475,8 @@ class PostgresBackend(MetadataBackend):
             "description": entry.description or "",
             "data_type": entry.data_type,
             "prefix": entry.prefix or "",
-            "created_at": entry.created_at.isoformat() if entry.created_at else None,
-            "accessed_at": entry.accessed_at.isoformat() if entry.accessed_at else None,
+            "created_at": entry.created_at.astimezone(timezone.utc).isoformat() if entry.created_at else None,
+            "accessed_at": entry.accessed_at.astimezone(timezone.utc).isoformat() if entry.accessed_at else None,
             "file_size": entry.file_size or 0,
         }
         
@@ -428,6 +496,14 @@ class PostgresBackend(MetadataBackend):
             metadata["file_hash"] = entry.file_hash
         if entry.entry_signature:
             metadata["entry_signature"] = entry.entry_signature
+        if entry.s3_etag:
+            metadata["s3_etag"] = entry.s3_etag
+        if entry.actual_path:
+            metadata["actual_path"] = entry.actual_path
+        if entry.file_hash:
+            metadata["file_hash"] = entry.file_hash
+        if entry.entry_signature:
+            metadata["entry_signature"] = entry.entry_signature
         
         if metadata:
             result["metadata"] = metadata
@@ -435,7 +511,9 @@ class PostgresBackend(MetadataBackend):
         # Parse cache_key_params if present
         if entry.cache_key_params:
             try:
-                result["cache_key_params"] = json_loads(entry.cache_key_params)
+                if "metadata" not in result:
+                    result["metadata"] = {}
+                result["metadata"]["cache_key_params"] = json_loads(entry.cache_key_params)
             except Exception:
                 pass
         
@@ -532,12 +610,12 @@ class PostgresBackend(MetadataBackend):
                 session.rollback()
                 logger.warning(f"Failed to increment misses: {e}")
     
-    def cleanup_expired(self, ttl_hours: int) -> int:
+    def cleanup_expired(self, ttl_seconds: float) -> int:
         """Remove expired entries and return count removed."""
-        if ttl_hours <= 0:
+        if ttl_seconds <= 0:
             return 0
         
-        cutoff = datetime.now(timezone.utc) - __import__("datetime").timedelta(hours=ttl_hours)
+        cutoff = datetime.now(timezone.utc) - __import__("datetime").timedelta(seconds=ttl_seconds)
         
         with self._lock:
             with self.SessionLocal() as session:

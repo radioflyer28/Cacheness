@@ -537,7 +537,7 @@ class UnifiedCache:
         Query built-in cache metadata using SQLite JSON1 extension.
         
         This method allows querying cache entries based on their stored cache_key_params
-        when store_cache_key_params=True is configured.
+        when store_full_metadata=True is configured.
 
         Args:
             **filters: Key-value pairs to filter cache entries by their parameters
@@ -548,8 +548,8 @@ class UnifiedCache:
 
         Example:
             # Configure cache to store parameters
-            config = CacheConfig(store_cache_key_params=True)
-            cache = cacheness(config)
+            config = CacheConfig(store_full_metadata=True)
+            cache = Cacheness(config=config)
             
             # Store some data
             cache.put(model, experiment="exp_001", model_type="xgboost", accuracy=0.95)
@@ -564,9 +564,9 @@ class UnifiedCache:
             logger.warning("query_meta() requires SQLite backend")
             return None
 
-        if not self.config.metadata.store_cache_key_params:
+        if not self.config.metadata.store_full_metadata:
             logger.warning(
-                "query_meta() requires store_cache_key_params=True in cache configuration"
+                "query_meta() requires store_full_metadata=True in cache configuration"
             )
             return None
 
@@ -587,15 +587,14 @@ class UnifiedCache:
                     param_name = f"param_{len(params)}"
                     
                     if isinstance(value, (int, float)):
-                        # For numeric values, try both direct match and >= comparison
+                        # For numeric values, cast to REAL for proper comparison
                         where_conditions.append(
-                            f"(JSON_EXTRACT(cache_key_params, '$.{key}') = :{param_name} OR "
-                            f"CAST(JSON_EXTRACT(cache_key_params, '$.{key}') AS REAL) >= :{param_name})"
+                            f"CAST(JSON_EXTRACT(metadata_dict, '$.{key}') AS REAL) = :{param_name}"
                         )
                     else:
                         # For string values, exact match
                         where_conditions.append(
-                            f"JSON_EXTRACT(cache_key_params, '$.{key}') = :{param_name}"
+                            f"JSON_EXTRACT(metadata_dict, '$.{key}') = :{param_name}"
                         )
                     
                     params[param_name] = value
@@ -605,18 +604,18 @@ class UnifiedCache:
                     where_clause = " AND ".join(where_conditions)
                     query = f"""
                         SELECT cache_key, description, data_type, created_at, accessed_at, 
-                               file_size, cache_key_params
+                               file_size, metadata_dict
                         FROM cache_entries 
-                        WHERE cache_key_params IS NOT NULL AND ({where_clause})
+                        WHERE metadata_dict IS NOT NULL AND ({where_clause})
                         ORDER BY created_at DESC
                     """
                 else:
-                    # No filters - return all entries with cache_key_params
+                    # No filters - return all entries with metadata_dict
                     query = """
                         SELECT cache_key, description, data_type, created_at, accessed_at,
-                               file_size, cache_key_params  
+                               file_size, metadata_dict  
                         FROM cache_entries
-                        WHERE cache_key_params IS NOT NULL
+                        WHERE metadata_dict IS NOT NULL
                         ORDER BY created_at DESC
                     """
 
@@ -634,13 +633,13 @@ class UnifiedCache:
                         'file_size': row.file_size,
                     }
                     
-                    # Parse cache_key_params JSON
-                    if row.cache_key_params:
+                    # Parse metadata_dict JSON
+                    if row.metadata_dict:
                         try:
                             from .json_utils import loads as json_loads
-                            entry['cache_key_params'] = json_loads(row.cache_key_params)
+                            entry['metadata_dict'] = json_loads(row.metadata_dict)
                         except Exception:
-                            entry['cache_key_params'] = {}
+                            entry['metadata_dict'] = {}
                     
                     entries.append(entry)
                 
@@ -698,7 +697,12 @@ class UnifiedCache:
         return self.cache_dir / filename_base
 
     def _is_expired(self, cache_key: str, ttl_hours=_DEFAULT_TTL) -> bool:
-        """Check if cache entry is expired."""
+        """Check if cache entry is expired.
+        
+        Args:
+            cache_key: The cache key to check
+            ttl_hours: DEPRECATED - TTL in hours (for backward compatibility)
+        """
         entry = self.metadata_backend.get_entry(cache_key)
         if not entry:
             return True
@@ -707,12 +711,13 @@ class UnifiedCache:
         if ttl_hours is None:
             return False  # Never expires
         elif ttl_hours is _DEFAULT_TTL:
-            ttl = self.config.metadata.default_ttl_hours
+            ttl_seconds = self.config.metadata.default_ttl_seconds
         else:
-            ttl = ttl_hours
+            # Convert hours to seconds for backward compatibility
+            ttl_seconds = ttl_hours * 3600
 
         # Type guard to ensure ttl is numeric
-        assert isinstance(ttl, (int, float)), f"TTL must be numeric, got {type(ttl)}"
+        assert isinstance(ttl_seconds, (int, float)), f"TTL must be numeric, got {type(ttl_seconds)}"
 
         creation_time_str = entry["created_at"]
 
@@ -726,7 +731,7 @@ class UnifiedCache:
         if creation_time.tzinfo is None:
             creation_time = creation_time.replace(tzinfo=timezone.utc)
 
-        expiry_time = creation_time + timedelta(hours=ttl)
+        expiry_time = creation_time + timedelta(seconds=ttl_seconds)
         current_time = datetime.now(timezone.utc)
 
         return current_time > expiry_time
@@ -753,6 +758,21 @@ class UnifiedCache:
         Returns:
             Dictionary containing all fields that should be signed
         """
+        # Normalize created_at to ISO format string without timezone
+        # This ensures consistent signatures regardless of database format
+        created_at = entry_data.get("created_at")
+        if isinstance(created_at, datetime):
+            # Convert datetime to ISO string, removing timezone info for consistency
+            created_at = created_at.replace(tzinfo=None).isoformat()
+        elif isinstance(created_at, str):
+            # Parse and re-format to ensure consistency
+            try:
+                dt = datetime.fromisoformat(created_at)
+                created_at = dt.replace(tzinfo=None).isoformat()
+            except (ValueError, TypeError):
+                # If parsing fails, use as-is
+                pass
+        
         # Build complete entry data with all signable fields
         signable_data = {
             "cache_key": cache_key,
@@ -760,7 +780,7 @@ class UnifiedCache:
             "prefix": entry_data.get("prefix", ""),
             "description": entry_data.get("description", ""),
             "file_size": entry_data.get("file_size", 0),
-            "created_at": entry_data.get("created_at"),
+            "created_at": created_at,
             "actual_path": metadata.get("actual_path", ""),
             "file_hash": metadata.get("file_hash"),
             # Include handler-specific metadata fields
@@ -802,8 +822,8 @@ class UnifiedCache:
 
     def _cleanup_expired(self):
         """Remove expired cache entries."""
-        ttl = self.config.metadata.default_ttl_hours
-        removed_count = self.metadata_backend.cleanup_expired(ttl)
+        ttl_seconds = self.config.metadata.default_ttl_seconds
+        removed_count = self.metadata_backend.cleanup_expired(ttl_seconds)
 
         if removed_count > 0:
             logger.info(f"Cleaned up {removed_count} expired cache entries")
@@ -853,11 +873,27 @@ class UnifiedCache:
                 "file_hash": file_hash,  # Store file hash for verification
             }
 
-            # Only store cache_key_params if enabled in configuration
-            if self.config.metadata.store_cache_key_params:
-                metadata_dict["cache_key_params"] = (
-                    kwargs  # Store original key-value parameters for efficient querying
-                )
+            # Store complete cache key parameters as JSON for debugging/querying (if enabled)
+            # This captures the original kwargs used to derive the cache key
+            # Pre-serialize to JSON strings so backend can be standalone storage
+            if self.config.metadata.store_full_metadata:
+                from .serialization import serialize_for_cache_key
+                from .json_utils import dumps as json_dumps
+                try:
+                    # Serialize kwargs to a consistent, queryable format
+                    serializable_kwargs = {
+                        key: serialize_for_cache_key(value, self.config)
+                        for key, value in kwargs.items()
+                    }
+                    # Pre-serialize to JSON string - backend just stores strings
+                    metadata_dict["cache_key_params"] = json_dumps(serializable_kwargs)
+                    
+                    # Also store kwargs as metadata_dict (raw values for easy querying)
+                    # Pre-serialize to JSON string - backend just stores strings
+                    metadata_dict["metadata_dict"] = json_dumps(kwargs.copy())
+                except Exception as e:
+                    # If serialization fails, skip cache_key_params
+                    logger.warning(f"Failed to serialize cache_key_params: {e}")
 
             entry_data = {
                 "data_type": handler.data_type,
@@ -870,16 +906,16 @@ class UnifiedCache:
             # Sign the entry if signing is enabled
             if self.signer:
                 try:
-                    # Use consistent timestamp for both storage and signing
+                    # Use consistent timestamp for both storage and signing (always UTC)
                     creation_timestamp = datetime.now(timezone.utc)
-                    # Store without timezone info for consistency with database format
-                    creation_timestamp_str = creation_timestamp.replace(tzinfo=None).isoformat()
+                    # Store as UTC ISO format with timezone info
+                    creation_timestamp_str = creation_timestamp.isoformat()
                     
                     # Store the creation timestamp in entry_data for the database
                     entry_data["created_at"] = creation_timestamp_str
                     
                     # Use helper method for consistent field extraction
-                    cache_key_params = kwargs if self.config.metadata.store_cache_key_params else None
+                    cache_key_params = kwargs if self.config.metadata.store_full_metadata else None
                     complete_entry_data = self._extract_signable_fields(
                         cache_key=cache_key,
                         entry_data=entry_data,
@@ -1140,7 +1176,7 @@ class UnifiedCache:
             {
                 "cache_dir": str(self.cache_dir),
                 "max_size_mb": self.config.storage.max_cache_size_mb,
-                "default_ttl_hours": self.config.metadata.default_ttl_hours,
+                "default_ttl_seconds": self.config.metadata.default_ttl_seconds,
                 "backend_type": self.actual_backend,  # Report actual backend used
             }
         )
@@ -1184,7 +1220,7 @@ class UnifiedCache:
     def for_api(
         cls,
         cache_dir: Optional[str] = None,
-        ttl_hours: int = 6,
+        ttl_seconds: float = 21600,  # 6 hours
         ignore_errors: bool = True,
         **kwargs
     ) -> "UnifiedCache":
@@ -1192,19 +1228,19 @@ class UnifiedCache:
         Create a cache optimized for API requests.
         
         Defaults:
-        - TTL: 6 hours (good for most API data)
+        - TTL: 6 hours (21600 seconds, good for most API data)
         - ignore_errors: True (don't fail if cache has issues)
         - Compression: LZ4 (fast for JSON/text data)
         
         Args:
             cache_dir: Cache directory (default: ./cache)
-            ttl_hours: Time-to-live in hours
+            ttl_seconds: Time-to-live in seconds (default: 21600 = 6 hours)
             ignore_errors: Continue on cache errors
             **kwargs: Additional config options
         """
         config = create_cache_config(
             cache_dir=cache_dir or "./cache",
-            default_ttl_hours=ttl_hours,
+            default_ttl_seconds=ttl_seconds,
             pickle_compression_codec="zstd",  # Fast for JSON/text
             pickle_compression_level=3,
             **kwargs

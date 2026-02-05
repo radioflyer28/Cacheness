@@ -33,8 +33,8 @@ class CacheStorageConfig:
         if self.max_cache_size_mb is not None and self.max_cache_size_mb <= 0:
             raise ValueError("max_cache_size_mb must be positive")
 
-        # Convert relative path to absolute to avoid directory confusion, but preserve "./cache" as is for backwards compatibility
-        if not Path(self.cache_dir).is_absolute() and self.cache_dir != "./cache":
+        # Convert relative path to absolute to avoid directory confusion, but preserve "./cache" and "./yaml_cache" as is for backwards compatibility
+        if not Path(self.cache_dir).is_absolute() and self.cache_dir not in ("./cache", "./yaml_cache"):
             self.cache_dir = str(Path.cwd() / self.cache_dir)
 
         logger.debug(
@@ -50,10 +50,13 @@ class CacheMetadataConfig:
     metadata_backend_options: Optional[dict] = None  # Backend-specific options (e.g., connection_url for postgresql)
     sqlite_db_file: str = "cache_metadata.db"
     enable_metadata: bool = True
-    default_ttl_hours: float = 24
+    
+    # TTL configuration (standardized on seconds for consistency)
+    default_ttl_seconds: float = 86400  # Cache TTL in seconds (default: 24 hours)
+    
     verify_cache_integrity: bool = True
-    store_cache_key_params: bool = (
-        False  # Store cache key parameters in metadata for querying - DISABLED by default for performance
+    store_full_metadata: bool = (
+        False  # Store complete cache key parameters (kwargs) as JSON for debugging/querying - DISABLED by default for performance
     )
     enable_cache_stats: bool = True  # Track cache hit/miss statistics
     auto_cleanup_expired: bool = True  # Automatically clean up expired entries
@@ -71,8 +74,9 @@ class CacheMetadataConfig:
         builtin_backends = ["auto", "memory", "json", "sqlite", "sqlite_memory"]
         # Note: Custom backends are validated when get_metadata_backend() is called
         
-        if self.default_ttl_hours is not None and self.default_ttl_hours <= 0:
-            raise ValueError("default_ttl_hours must be positive")
+        # Validate TTL
+        if self.default_ttl_seconds <= 0:
+            raise ValueError("default_ttl_seconds must be positive")
         
         # Validate metadata_backend_options is a dict if provided
         if self.metadata_backend_options is not None:
@@ -90,7 +94,7 @@ class CacheMetadataConfig:
             raise ValueError("memory_cache_ttl_seconds must be positive")
 
         logger.debug(f"Metadata backend configured: {self.metadata_backend}")
-        logger.debug(f"Store cache_key_params: {self.store_cache_key_params}")
+        logger.debug(f"Store full_metadata: {self.store_full_metadata}")
         if self.metadata_backend_options:
             logger.debug(f"Metadata backend options: {list(self.metadata_backend_options.keys())}")
         if self.memory_cache_type and self.enable_memory_cache:
@@ -357,7 +361,7 @@ class CacheConfig:
         security: Optional[SecurityConfig] = None,
         # Backwards compatibility parameters
         cache_dir: Optional[str] = None,
-        default_ttl_hours: Optional[float] = None,
+        default_ttl_seconds: Optional[float] = None,
         verify_cache_integrity: Optional[bool] = None,
         hash_path_content: Optional[bool] = None,
         enable_collections: Optional[bool] = None,
@@ -371,6 +375,7 @@ class CacheConfig:
         max_cache_size_mb: Optional[int] = None,
         cleanup_on_init: Optional[bool] = None,
         store_cache_key_params: Optional[bool] = None,
+        store_full_metadata: Optional[bool] = None,
         # Blob backend parameters
         blob_backend: Optional[str] = None,
         blob_backend_options: Optional[dict] = None,
@@ -413,8 +418,11 @@ class CacheConfig:
         # Apply backwards compatibility mappings
         if cache_dir is not None:
             self.storage.cache_dir = cache_dir
-        if default_ttl_hours is not None:
-            self.metadata.default_ttl_hours = default_ttl_hours
+        
+        # Map TTL parameter
+        if default_ttl_seconds is not None:
+            self.metadata.default_ttl_seconds = default_ttl_seconds
+            
         if verify_cache_integrity is not None:
             self.metadata.verify_cache_integrity = verify_cache_integrity
         if hash_path_content is not None:
@@ -439,8 +447,21 @@ class CacheConfig:
             self.storage.max_cache_size_mb = max_cache_size_mb
         if cleanup_on_init is not None:
             self.storage.cleanup_on_init = cleanup_on_init
+        
+        # Backward compatibility: map old store_cache_key_params to store_full_metadata
         if store_cache_key_params is not None:
-            self.metadata.store_cache_key_params = store_cache_key_params
+            import warnings
+            warnings.warn(
+                "store_cache_key_params is deprecated, use store_full_metadata instead",
+                DeprecationWarning,
+                stacklevel=2
+            )
+            # Only use old parameter if new one wasn't explicitly set
+            if store_full_metadata is None:
+                store_full_metadata = store_cache_key_params
+        
+        if store_full_metadata is not None:
+            self.metadata.store_full_metadata = store_full_metadata
 
         # Map blob backend parameters
         if blob_backend is not None:
@@ -589,8 +610,9 @@ class CacheConfig:
         return self.storage.cache_dir
 
     @property
-    def default_ttl_hours(self) -> float:
-        return self.metadata.default_ttl_hours
+    def default_ttl_seconds(self) -> float:
+        """Get cache TTL in seconds."""
+        return self.metadata.default_ttl_seconds
 
     @property
     def verify_cache_integrity(self) -> bool:
@@ -601,8 +623,8 @@ class CacheConfig:
         return self.serialization.hash_path_content
 
     @property
-    def store_cache_key_params(self) -> bool:
-        return self.metadata.store_cache_key_params
+    def store_full_metadata(self) -> bool:
+        return self.metadata.store_full_metadata
 
     @property
     def blob_backend(self) -> str:
@@ -786,16 +808,16 @@ def validate_config(config: CacheConfig) -> List["ConfigValidationError"]:
             config.metadata.metadata_backend
         ))
     
-    if config.metadata.default_ttl_hours is not None:
-        if not isinstance(config.metadata.default_ttl_hours, (int, float)):
+    if config.metadata.default_ttl_seconds is not None:
+        if not isinstance(config.metadata.default_ttl_seconds, (int, float)):
             errors.append(ConfigValidationError(
-                "metadata.default_ttl_hours", "must be a number or None",
-                config.metadata.default_ttl_hours
+                "metadata.default_ttl_seconds", "must be a number or None",
+                config.metadata.default_ttl_seconds
             ))
-        elif config.metadata.default_ttl_hours <= 0:
+        elif config.metadata.default_ttl_seconds <= 0:
             errors.append(ConfigValidationError(
-                "metadata.default_ttl_hours", "must be positive",
-                config.metadata.default_ttl_hours
+                "metadata.default_ttl_seconds", "must be positive",
+                config.metadata.default_ttl_seconds
             ))
     
     if config.metadata.metadata_backend_options is not None:

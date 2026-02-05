@@ -62,12 +62,12 @@ class TestSQLCache:
             db_url="sqlite:///:memory:",  # In-memory SQLite
             table=self.test_table,
             data_adapter=self.adapter,
-            ttl_hours=24
+            ttl_seconds=86400
         )
         
         assert cache.table is not None
         assert cache.data_adapter is self.adapter
-        assert cache.ttl_hours == 24
+        assert cache.ttl_seconds == 86400
         
         cache.close()
     
@@ -85,7 +85,7 @@ class TestSQLCache:
             db_url="sqlite:///:memory:",
             table=self.test_table,
             data_adapter=self.adapter,
-            ttl_hours=24
+            ttl_seconds=86400
         )
         
         # Get data (should fetch from adapter)
@@ -104,7 +104,7 @@ class TestSQLCache:
             db_url="sqlite:///:memory:",
             table=self.test_table,
             data_adapter=self.adapter,
-            ttl_hours=24
+            ttl_seconds=86400
         )
         
         stats = cache.get_cache_stats()
@@ -122,7 +122,7 @@ class TestSQLCache:
             db_url="sqlite:///:memory:",
             table=self.test_table,
             data_adapter=self.adapter,
-            ttl_hours=24
+            ttl_seconds=86400
         )
         
         # Test cleanup operations
@@ -139,11 +139,11 @@ class TestSQLCache:
         """Test database backend selection class methods"""
         # Test SQLite backend selection
         cache_sqlite = SqlCache.with_sqlite(
-            ":memory:", self.test_table, self.adapter, ttl_hours=12
+            ":memory:", self.test_table, self.adapter, ttl_seconds=43200
         )
         
         assert cache_sqlite.engine.dialect.name == "sqlite"
-        assert cache_sqlite.ttl_hours == 12
+        assert cache_sqlite.ttl_seconds == 43200
         cache_sqlite.close()
         
         # Test DuckDB backend selection (if available)
@@ -208,7 +208,7 @@ class TestSQLCache:
         """Test TTL functionality and expiration logic"""
         # Create cache with short TTL for testing
         cache = SqlCache.with_sqlite(
-            ":memory:", self.test_table, self.adapter, ttl_hours=1  # 1 hour
+            ":memory:", self.test_table, self.adapter, ttl_seconds=3600  # 3600 seconds (1 hour)
         )
         
         # Test cleanup operations
@@ -291,7 +291,7 @@ class TestSQLCache:
         """Test that all timestamps use UTC timezone consistently"""
         # Create cache with timezone-aware table
         cache = SqlCache.with_sqlite(
-            ":memory:", self.test_table, self.adapter, ttl_hours=1
+            ":memory:", self.test_table, self.adapter, ttl_seconds=3600
         )
         
         # Verify cached_at and expires_at columns are timezone-aware
@@ -335,7 +335,7 @@ class TestSQLCache:
         """Test that TTL expiry logic uses consistent UTC timing"""
         # Create cache with TTL
         cache = SqlCache.with_sqlite(
-            ":memory:", self.test_table, self.adapter, ttl_hours=1
+            ":memory:", self.test_table, self.adapter, ttl_seconds=3600
         )
         
         # Test that cleanup_expired and query conditions use UTC consistently
@@ -440,7 +440,7 @@ class TestSQLCacheBuilders:
             table_name="lookup_test",
             primary_keys=["id"],
             data_fetcher=self.mock_fetcher,
-            ttl_hours=1,
+            ttl_seconds=3600,
             id=Integer,
             name=String(50),
             value=Float
@@ -469,7 +469,7 @@ class TestSQLCacheBuilders:
             table_name="analytics_test", 
             primary_keys=["name"],  # Use name as primary key instead of id
             data_fetcher=self.mock_fetcher,
-            ttl_hours=24,
+            ttl_seconds=86400,
             name=String(50),
             value=Float
         )
@@ -522,7 +522,7 @@ class TestSQLCacheBuilders:
         cache = SqlCache.for_realtime_timeseries(
             ":memory:",
             data_fetcher=realtime_fetcher,
-            ttl_hours=1,
+            ttl_seconds=3600,
             price=Float,
             volume=Integer
         )

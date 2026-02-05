@@ -110,7 +110,7 @@ class MockMetadataBackend(MetadataBackend):
     def increment_misses(self):
         self._misses += 1
     
-    def cleanup_expired(self, ttl_hours: int) -> int:
+    def cleanup_expired(self, ttl_seconds: float) -> int:
         return 0  # Mock doesn't track TTL
     
     def clear_all(self) -> int:
@@ -161,7 +161,7 @@ class AnotherMockBackend(MetadataBackend):
     def increment_misses(self):
         pass
     
-    def cleanup_expired(self, ttl_hours: int) -> int:
+    def cleanup_expired(self, ttl_seconds: float) -> int:
         return 0
     
     def clear_all(self) -> int:

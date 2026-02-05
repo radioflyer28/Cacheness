@@ -123,7 +123,7 @@ class TestDocumentationExamples:
                 ":memory:",
                 self.analytics_table,
                 adapter,
-                ttl_hours=24
+                ttl_seconds=86400
             )
             
             quarterly_data = cache.get_data(
@@ -166,7 +166,7 @@ class TestDocumentationExamples:
             ":memory:",
             self.session_table,
             adapter,
-            ttl_hours=6
+            ttl_seconds=21600
         )
         
         user_session = cache.get_data(user_id=12345, session_date="2024-01-15")
@@ -238,25 +238,25 @@ class TestDocumentationExamples:
         
         # Test TTL configurations from documentation
         
-        # No expiration (ttl_hours=0)
+        # No expiration (ttl_seconds=0)
         cache_no_exp = SqlCache.with_sqlite(
-            ":memory:", self.stock_table, adapter, ttl_hours=0
+            ":memory:", self.stock_table, adapter, ttl_seconds=0
         )
-        assert cache_no_exp.ttl_hours == 0
+        assert cache_no_exp.ttl_seconds == 0
         cache_no_exp.close()
         
-        # 1 hour expiration
+        # 3600 seconds (1 hour) expiration
         cache_1h = SqlCache.with_sqlite(
-            ":memory:", self.stock_table, adapter, ttl_hours=1
+            ":memory:", self.stock_table, adapter, ttl_seconds=3600
         )
-        assert cache_1h.ttl_hours == 1
+        assert cache_1h.ttl_seconds == 3600
         cache_1h.close()
         
         # Daily refresh (24 hours)
         cache_24h = SqlCache.with_sqlite(
-            ":memory:", self.stock_table, adapter, ttl_hours=24
+            ":memory:", self.stock_table, adapter, ttl_seconds=86400
         )
-        assert cache_24h.ttl_hours == 24
+        assert cache_24h.ttl_seconds == 86400
         cache_24h.close()
     
     def test_cache_operations_from_docs(self):

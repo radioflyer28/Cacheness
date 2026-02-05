@@ -1,0 +1,50 @@
+# Cacheness Test Configuration (YAML)
+# ⚠️  FOR LOCAL DEVELOPMENT/TESTING ONLY - DO NOT USE IN PRODUCTION ⚠️
+#
+# This configuration contains hardcoded credentials suitable ONLY for:
+# - Local Docker containers (docker-compose.yml)
+# - CI/CD integration testing
+# - Development environments
+#
+# For production, use:
+# - Environment variables for all sensitive values
+# - Proper secret management (AWS Secrets Manager, Azure Key Vault, etc.)
+# - Strong, randomly generated credentials
+# - Network security (VPC, firewalls, etc.)
+
+# Storage configuration
+storage:
+  cache_dir: "./cache"
+
+# Metadata backend configuration
+metadata:
+  metadata_backend: "postgresql"
+  metadata_backend_options:
+    connection_url: "postgresql+psycopg://cacheness:cacheness_dev_password@localhost:5432/cacheness_test"
+
+# Blob storage backend configuration
+blob:
+  blob_backend: "s3"
+  blob_backend_options:
+    bucket: "cache-bucket"
+    endpoint_url: "http://localhost:9000"
+    aws_access_key_id: "minioadmin"
+    aws_secret_access_key: "minioadmin"
+    region_name: "us-east-1"
+  shard_chars: 2
+
+# Security configuration
+security:
+  signing_key_file: "dev_test_key_do_not_use_in_production.bin"
+  allow_unsigned_entries: true  # Keep invalid entries for debugging
+
+# Serialization handlers
+handlers:
+  enable_dill_fallback: true
+  enable_tensorflow_tensors: true
+
+# Compression settings
+compression:
+  use_blosc2_arrays: true
+  blosc2_array_clevel: 5
+  pickle_compression_level: 5

@@ -1,0 +1,72 @@
+version: '3.8'
+
+# ⚠️  FOR LOCAL DEVELOPMENT/TESTING ONLY ⚠️
+# These services use hardcoded credentials suitable ONLY for localhost testing.
+# Never expose these ports to the internet or use these credentials in production.
+
+services:
+  # PostgreSQL for metadata backend testing
+  postgres:
+    image: postgres:16-alpine
+    container_name: cacheness-postgres
+    environment:
+      POSTGRES_DB: cacheness_test
+      POSTGRES_USER: cacheness
+      POSTGRES_PASSWORD: cacheness_dev_password  # Dev only - not for production!
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cacheness"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - cacheness-network
+
+  # MinIO for S3-compatible testing
+  minio:
+    image: minio/minio:latest
+    container_name: cacheness-minio
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"  # S3 API endpoint
+      - "9001:9001"  # Console
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - cacheness-network
+
+  # MinIO client to create test bucket on startup
+  minio-init:
+    image: minio/mc:latest
+    container_name: cacheness-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      /usr/bin/mc alias set minio http://minio:9000 minioadmin minioadmin &&
+      /usr/bin/mc mb minio/cache-bucket --ignore-existing &&
+      /usr/bin/mc mb minio/test-bucket --ignore-existing &&
+      exit 0
+      "
+    networks:
+      - cacheness-network
+
+volumes:
+  postgres_data:
+  minio_data:
+
+networks:
+  cacheness-network:
+    driver: bridge

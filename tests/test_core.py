@@ -21,7 +21,7 @@ class TestCacheConfig:
         config = CacheConfig()
 
         assert config.storage.cache_dir == "./cache"
-        assert config.metadata.default_ttl_hours == 24
+        assert config.metadata.default_ttl_seconds == 86400  # 24 hours in seconds
         assert config.storage.max_cache_size_mb == 2000
         assert config.compression.parquet_compression == "lz4"
         assert config.compression.npz_compression is True
@@ -34,7 +34,7 @@ class TestCacheConfig:
         assert config.compression.use_blosc2_arrays is True
         assert config.compression.blosc2_array_codec == "lz4"
         assert config.compression.blosc2_array_clevel == 5
-        assert config.metadata.store_cache_key_params is False  # New default for performance
+        # store_cache_key_params was removed in Section 2.13 (unified metadata)
 
     def test_custom_config(self):
         """Test custom configuration values."""
@@ -53,7 +53,7 @@ class TestCacheConfig:
             cache_dir=str(test_cache_dir), max_cache_size_mb=1000, cleanup_on_init=False
         )
         metadata_config = CacheMetadataConfig(
-            default_ttl_hours=48, enable_metadata=False, metadata_backend="json"
+            default_ttl_seconds=172800, enable_metadata=False, metadata_backend="json"
         )
         compression_config = CompressionConfig(
             parquet_compression="gzip", npz_compression=False
@@ -71,16 +71,14 @@ class TestCacheConfig:
 
         # Compare using as_posix() for cross-platform compatibility
         assert Path(config.storage.cache_dir).as_posix() == test_cache_dir.as_posix()
-        assert config.metadata.default_ttl_hours == 48
+        assert config.metadata.default_ttl_seconds == 172800  # 48 hours in seconds
         assert config.storage.max_cache_size_mb == 1000
         assert config.compression.parquet_compression == "gzip"
         assert config.compression.npz_compression is False
         assert config.metadata.enable_metadata is False
         assert config.storage.cleanup_on_init is False
         assert config.metadata.metadata_backend == "json"
-        assert (
-            config.metadata.store_cache_key_params is False
-        )  # New default for performance (was True)
+        # store_cache_key_params was removed in Section 2.13 - now using store_full_metadata
 
 
 class TestCacheness:
@@ -482,6 +480,7 @@ class TestCacheness:
             mock_datetime.fromisoformat = datetime.fromisoformat
             
             # Should not be expired with fresh timestamp (large TTL)
+            # _is_expired uses ttl_hours internally, so convert: 86400 seconds = 24 hours
             assert cache._is_expired(cache_key, ttl_hours=24) is False
             
             # Verify datetime.now was called with timezone.utc
@@ -501,9 +500,10 @@ class TestCacheness:
         
         with patch.object(cache.metadata_backend, 'get_entry', return_value=mock_entry):
             # Should be expired (created 2 hours ago, checking with 1 hour TTL)
+            # _is_expired uses ttl_hours internally: 3600 seconds = 1 hour
             assert cache._is_expired("test_key", ttl_hours=1) is True
             
-            # Should not be expired with longer TTL
+            # Should not be expired with longer TTL: 10800 seconds = 3 hours
             assert cache._is_expired("test_key", ttl_hours=3) is False
     
     def test_timezone_consistency_across_cache_operations(self, cache):
@@ -533,14 +533,14 @@ class TestFactoryMethods:
     def test_for_api_factory(self):
         """Test cacheness.for_api() factory method."""
         with tempfile.TemporaryDirectory() as temp_dir:
-            cache = cacheness.for_api(cache_dir=temp_dir, ttl_hours=8)
+            cache = cacheness.for_api(cache_dir=temp_dir, ttl_seconds=28800)
             
             # Should be a UnifiedCache instance
             assert isinstance(cache, cacheness)
             
             # Should have the specified configuration
             assert cache.config.storage.cache_dir == temp_dir
-            assert cache.config.metadata.default_ttl_hours == 8
+            assert cache.config.metadata.default_ttl_seconds == 28800  # 8 hours in seconds
             assert cache.config.compression.pickle_compression_codec == "zstd"
             
             # Test basic functionality
@@ -558,7 +558,7 @@ class TestFactoryMethods:
         
         # Check default values
         assert cache.config.storage.cache_dir == "./cache"
-        assert cache.config.metadata.default_ttl_hours == 6
+        assert cache.config.metadata.default_ttl_seconds == 21600  # 6 hours in seconds
         assert cache.config.compression.pickle_compression_codec == "zstd"
 
 
