@@ -159,7 +159,6 @@ class SqlCache:
         db_path: str,
         table: "Table",
         data_adapter: SqlCacheAdapter,
-        ttl_hours: Optional[int] = None,  # DEPRECATED: Use ttl_seconds
         ttl_seconds: Optional[float] = None,
         time_increment: Optional[Union[str, timedelta, int]] = None,
         ordered_increment: Optional[Union[int, float]] = None,
@@ -205,10 +204,7 @@ class SqlCache:
         """
         db_url = f"duckdb:///{db_path}"
         
-        # Handle backward compatibility for ttl_hours
         final_ttl_seconds = ttl_seconds if ttl_seconds is not None else 86400
-        if ttl_hours is not None and ttl_seconds is None:
-            final_ttl_seconds = ttl_hours * 3600  # Convert hours to seconds
         
         return cls(db_url, table, data_adapter, ttl_seconds=final_ttl_seconds, 
                   engine_kwargs=kwargs.get('engine_kwargs'),
@@ -223,7 +219,6 @@ class SqlCache:
         db_path: str,
         table: "Table", 
         data_adapter: SqlCacheAdapter,
-        ttl_hours: Optional[int] = None,  # DEPRECATED: Use ttl_seconds
         ttl_seconds: Optional[float] = None,
         time_increment: Optional[Union[str, timedelta, int]] = None,
         ordered_increment: Optional[Union[int, float]] = None,
@@ -243,10 +238,7 @@ class SqlCache:
             db_path: Path to SQLite database file (use ":memory:" for in-memory)
             table: SQLAlchemy Table object
             data_adapter: Data adapter for fetching external data
-            ttl_hours: DEPRECATED - Use ttl_seconds instead. Cache TTL in hours
-            ttl_seconds: Cache TTL in seconds
-            table: SQLAlchemy Table object
-            data_adapter: Data adapter for fetching external data
+            ttl_seconds: Cache TTL in seconds (default: 86400 = 24 hours)
             time_increment: Optional time increment (e.g., timedelta(minutes=5), "5min")
             ordered_increment: Optional ordered data increment (e.g., 1, 10, 100)
             **kwargs: Additional arguments for SQLAlchemy engine
@@ -259,10 +251,7 @@ class SqlCache:
         else:
             db_url = f"sqlite:///{db_path}"
         
-        # Handle backward compatibility for ttl_hours
         final_ttl_seconds = ttl_seconds if ttl_seconds is not None else 86400
-        if ttl_hours is not None and ttl_seconds is None:
-            final_ttl_seconds = ttl_hours * 3600  # Convert hours to seconds
         
         return cls(db_url, table, data_adapter, ttl_seconds=final_ttl_seconds,
                   engine_kwargs=kwargs.get('engine_kwargs'),
@@ -277,7 +266,6 @@ class SqlCache:
         connection_string: str,
         table: "Table",
         data_adapter: SqlCacheAdapter,
-        ttl_hours: Optional[int] = None,  # DEPRECATED: Use ttl_seconds
         ttl_seconds: Optional[float] = None,
         time_increment: Optional[Union[str, timedelta, int]] = None,
         ordered_increment: Optional[Union[int, float]] = None,
@@ -298,8 +286,7 @@ class SqlCache:
                              (e.g., "postgresql://user:pass@localhost/dbname")
             table: SQLAlchemy Table object
             data_adapter: Data adapter for fetching external data
-            ttl_hours: DEPRECATED - Use ttl_seconds instead. Cache TTL in hours
-            ttl_seconds: Cache TTL in seconds
+            ttl_seconds: Cache TTL in seconds (default: 86400 = 24 hours)
             time_increment: Optional time increment (e.g., timedelta(minutes=5), "5min")
             ordered_increment: Optional ordered data increment (e.g., 1, 10, 100)
             **kwargs: Additional arguments for SQLAlchemy engine
@@ -307,10 +294,7 @@ class SqlCache:
         Returns:
             SqlCache: Cache instance with PostgreSQL backend
         """
-        # Handle backward compatibility for ttl_hours
         final_ttl_seconds = ttl_seconds if ttl_seconds is not None else 86400
-        if ttl_hours is not None and ttl_seconds is None:
-            final_ttl_seconds = ttl_hours * 3600  # Convert hours to seconds
         
         return cls(connection_string, table, data_adapter, ttl_seconds=final_ttl_seconds,
                   engine_kwargs=kwargs.get('engine_kwargs'),
@@ -1801,7 +1785,7 @@ class SqlCache:
         table_name: str = "table_cache",
         primary_keys: Optional[List[str]] = None,
         data_fetcher: Optional[Callable] = None,
-        ttl_hours: int = 12,
+        ttl_seconds: float = 43200,  # 12 hours
         **columns
     ) -> "SqlCache":
         """
@@ -1816,7 +1800,7 @@ class SqlCache:
             table_name: Name for the cache table  
             primary_keys: List of column names to use as primary keys
             data_fetcher: Function that fetches data (**kwargs) -> DataFrame
-            ttl_hours: Cache TTL in hours
+            ttl_seconds: Cache TTL in seconds (default: 43200 = 12 hours)
             **columns: Column definitions as name=type pairs
         """
         import warnings
@@ -1829,7 +1813,7 @@ class SqlCache:
         
         # Default to lookup table behavior (SQLite)
         return cls.for_lookup_table(
-            db_path, table_name, primary_keys, data_fetcher, ttl_hours, **columns
+            db_path, table_name, primary_keys, data_fetcher, ttl_seconds, **columns
         )
 
 

@@ -61,7 +61,7 @@ def main():
     stock_cache = SqlCache.for_timeseries(
         "simple_stocks.db",
         data_fetcher=fetch_stock_data,
-        ttl_hours=4,  # Refresh every 4 hours
+        ttl_seconds=14400,  # 4 hours
         close_price=Float,
         volume=Integer
     )

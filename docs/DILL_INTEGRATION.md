@@ -468,7 +468,7 @@ result = cached_multiply(7)  # Returns 70
 from cacheness import cached
 
 # Cache function generators
-@cached(ttl_hours=24)
+@cached(ttl_seconds=86400)  # 24 hours
 def create_data_processor(mean=0, std=1):
     """Creates a data processing function with specific parameters."""
     import numpy as np
@@ -715,7 +715,7 @@ def create_processor_bad():
 
 ```python
 # For critical cached functions, validate after retrieval
-@cached(ttl_hours=48)
+@cached(ttl_seconds=172800)  # 48 hours
 def create_model_predictor(model_params):
     # Complex model creation
     return trained_model.predict

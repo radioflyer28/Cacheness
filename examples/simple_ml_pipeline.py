@@ -18,7 +18,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 
 # Use the new analytics-optimized decorator for ML workflows
-@cached.for_analytics(ttl_hours=48)  # Cache ML results for 2 days
+@cached.for_analytics(ttl_seconds=172800)  # 48 hours - Cache ML results for 2 days
 def create_dataset(n_samples=1000, n_features=20, random_state=42):
     """Create a synthetic dataset for ML."""
     print(f"🔬 Creating dataset: {n_samples} samples, {n_features} features")
@@ -33,7 +33,7 @@ def create_dataset(n_samples=1000, n_features=20, random_state=42):
     
     return pd.DataFrame(X), pd.Series(y)
 
-@cached.for_analytics(ttl_hours=168)  # Cache models for 1 week
+@cached.for_analytics(ttl_seconds=604800)  # 168 hours - Cache models for 1 week
 def train_model(X_train, y_train, n_estimators=100, random_state=42):
     """Train a Random Forest model."""
     print(f"🤖 Training model: {len(X_train)} samples, {n_estimators} trees")
@@ -47,7 +47,7 @@ def train_model(X_train, y_train, n_estimators=100, random_state=42):
     model.fit(X_train, y_train)
     return model
 
-@cached.for_lookup(ttl_hours=24)  # Cache predictions for 1 day
+@cached.for_lookup(ttl_seconds=86400)  # 24 hours - Cache predictions for 1 day
 def evaluate_model(model, X_test, y_test):
     """Evaluate model performance."""
     print(f"📊 Evaluating model on {len(X_test)} test samples")

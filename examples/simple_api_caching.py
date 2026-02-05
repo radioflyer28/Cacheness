@@ -14,14 +14,14 @@ import requests
 from cacheness import cached
 
 # Method 1: API-optimized decorator (easiest)
-@cached.for_api(ttl_hours=6)
+@cached.for_api(ttl_seconds=21600)  # 6 hours
 def get_weather(city):
     """Get weather with automatic caching."""
     print(f"Fetching weather for {city}...")  # Only shows on cache miss
     response = requests.get(f"https://api.weather.gov/weather/{city}")
     return response.json()
 
-@cached.for_api(ttl_hours=24) 
+@cached.for_api(ttl_seconds=86400)  # 24 hours
 def get_news(category="technology"):
     """Get news with daily caching."""
     print(f"Fetching {category} news...")
@@ -29,7 +29,7 @@ def get_news(category="technology"):
     return response.json()
 
 # Method 2: Regular decorator (also works)
-@cached(ttl_hours=4)
+@cached(ttl_seconds=14400)  # 4 hours
 def get_stock_price(symbol):
     """Get stock price with standard caching."""
     print(f"Fetching stock price for {symbol}...")

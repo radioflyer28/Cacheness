@@ -78,19 +78,21 @@ class MetadataBackend(ABC):
         pass
 
     @abstractmethod
-    def update_blob_data(self, cache_key: str, new_data: Any, handler, config) -> bool:
+    def update_entry_metadata(self, cache_key: str, updates: Dict[str, Any]) -> bool:
         """
-        Update blob data at existing cache_key without changing the key.
+        Update metadata fields for an existing cache entry.
         
-        This replaces the data stored at a cache_key while keeping the key immutable.
-        Updates derived metadata (file_size, content_hash, created_at) but cache_key
-        remains unchanged.
+        Updates derived metadata fields (file_size, content_hash, timestamps,
+        data_type, etc.) after blob data has been written by the cache layer.
+        The cache_key remains immutable.
+        
+        This method only updates metadata — blob I/O is handled by
+        UnifiedCache.update_data() before calling this method.
         
         Args:
             cache_key: The unique identifier for the cache entry to update
-            new_data: New data to store
-            handler: Handler instance for serialization
-            config: CacheConfig instance
+            updates: Dict of metadata fields to update (file_size, file_hash,
+                    actual_path, data_type, storage_format, serializer, etc.)
             
         Returns:
             bool: True if entry was updated, False if entry doesn't exist

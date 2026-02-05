@@ -27,7 +27,7 @@ class UserProfile:
     email: str
     preferences: dict
 
-@cached(ttl_hours=12)  # Stores as pickle - perfect for custom objects
+@cached(ttl_seconds=43200)  # 12 hours - Stores as pickle - perfect for custom objects
 def get_user_profile(user_id):
     """Custom object - cached with pickle."""
     print(f"🔍 Loading user profile: {user_id}")
@@ -38,7 +38,7 @@ def get_user_profile(user_id):
         preferences={"theme": "dark", "notifications": True}
     )
 
-@cached(ttl_hours=24)  # Stores as Parquet - optimized for DataFrames
+@cached(ttl_seconds=86400)  # 24 hours - Stores as Parquet - optimized for DataFrames
 def generate_analytics_data(department):
     """DataFrame - cached with Parquet format."""
     print(f"📊 Generating analytics for {department}")
@@ -49,13 +49,13 @@ def generate_analytics_data(department):
         'salary': np.random.normal(75000, 15000, 100)
     })
 
-@cached(ttl_hours=6)  # Stores with Blosc - optimized for NumPy
+@cached(ttl_seconds=21600)  # 6 hours - Stores with Blosc - optimized for NumPy
 def compute_matrix(size):
     """NumPy array - cached with Blosc compression."""
     print(f"🧮 Computing {size}x{size} matrix")
     return np.random.random((size, size))
 
-@cached.for_api(ttl_hours=4)  # Stores with LZ4 - fast for JSON
+@cached.for_api(ttl_seconds=14400)  # 4 hours - Stores with LZ4 - fast for JSON
 def fetch_api_data(endpoint):
     """API response - cached with fast LZ4 compression."""
     print(f"🌐 Fetching data from {endpoint}")

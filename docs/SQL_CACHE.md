@@ -60,7 +60,7 @@ user_cache = SqlCache.for_lookup_table(
     "users.db",
     primary_keys=["user_id"],
     data_fetcher=fetch_user_data,
-    ttl_hours=12,
+    ttl_seconds=43200,  # 12 hours
     user_id=Integer,
     name=String(100),
     email=String(255)
@@ -80,7 +80,7 @@ def fetch_stock_prices(symbol, start_date, end_date):
 stock_cache = SqlCache.for_timeseries(
     "stocks.db",
     data_fetcher=fetch_stock_prices,
-    ttl_hours=24,
+    ttl_seconds=86400,  # 24 hours
     price=Float,
     volume=Integer,
     market_cap=Float
@@ -105,7 +105,7 @@ sales_cache = SqlCache.for_analytics_table(
     "sales.db",
     primary_keys=["department", "quarter"],
     data_fetcher=fetch_sales_data,
-    ttl_hours=48,
+    ttl_seconds=172800,  # 48 hours
     department=String(50),
     quarter=Integer,
     revenue=Float,
@@ -349,7 +349,7 @@ def fetch_stock_data(symbol, start_date, end_date):
 stock_cache = SqlCache.for_timeseries(
     "market_analytics.db",
     data_fetcher=fetch_stock_data,
-    ttl_hours=24,
+    ttl_seconds=86400,  # 24 hours
     symbol=String(10),
     date=Date,
     close=Float,
@@ -392,7 +392,7 @@ user_cache = SqlCache.for_lookup_table(
     "users.db",
     primary_keys=["user_id"],
     data_fetcher=fetch_user_data,
-    ttl_hours=12,
+    ttl_seconds=43200,  # 12 hours
     user_id=Integer,
     name=String(100),
     email=String(255),
@@ -507,7 +507,7 @@ All builder methods support TTL configuration:
 cache = SqlCache.for_realtime_timeseries(
     "sensors.db", 
     data_fetcher=fetch_sensor_data,
-    ttl_hours=1,  # Refresh every hour
+    ttl_seconds=3600,  # Refresh every hour
     temperature=Float
 )
 
@@ -516,7 +516,7 @@ cache = SqlCache.for_analytics_table(
     "reports.db",
     primary_keys=["department", "quarter"], 
     data_fetcher=fetch_quarterly_data,
-    ttl_hours=168,  # Refresh weekly
+    ttl_seconds=604800,  # Refresh weekly
     department=String(50),
     revenue=Float
 )
@@ -526,7 +526,7 @@ cache = SqlCache.for_lookup_table(
     "config.db",
     primary_keys=["setting_name"],
     data_fetcher=fetch_config_data,
-    ttl_hours=0,  # Never expire
+    ttl_seconds=0,  # Never expire
     setting_name=String(100),
     setting_value=String(500)
 )
@@ -571,7 +571,7 @@ def fetch_stock_data(symbol, start_date, end_date):
 stock_cache = SqlCache.for_timeseries(
     "stocks.db",
     data_fetcher=fetch_stock_data,
-    ttl_hours=24,
+    ttl_seconds=86400,  # 24 hours
     symbol=String(10),
     Date=Date,
     Close=Float,

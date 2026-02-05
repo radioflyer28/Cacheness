@@ -192,7 +192,7 @@ dev_config = CacheConfig(
     cache_dir="./dev_cache",
     metadata_backend="json",       # Fast for small caches
     max_cache_size_mb=100,         # Keep it small
-    default_ttl_hours=1            # Short TTL for rapid iteration
+    default_ttl_seconds=3600       # Short TTL for rapid iteration (1 hour)
 )
 ```
 
@@ -206,7 +206,7 @@ prod_config = CacheConfig(
     cache_dir="/var/cache/myapp",
     metadata_backend="sqlite",     # Production-ready
     max_cache_size_mb=10000,      # Large cache
-    default_ttl_hours=24,         # Longer TTL
+    default_ttl_seconds=86400,    # Longer TTL (24 hours)
     verify_cache_integrity=True   # Extra safety
 )
 ```
@@ -221,7 +221,7 @@ perf_config = CacheConfig(
     cache_dir="./temp_cache",
     metadata_backend="memory",        # Ultra-fast in-memory storage
     max_cache_size_mb=5000,          # Large memory cache
-    default_ttl_hours=6              # Medium TTL
+    default_ttl_seconds=21600        # Medium TTL (6 hours)
 )
 ```
 
@@ -235,7 +235,7 @@ web_config = CacheConfig(
     cache_dir="/shared/cache",
     metadata_backend="sqlite",     # Concurrency-safe
     max_cache_size_mb=2000,
-    default_ttl_hours=12,
+    default_ttl_seconds=43200,  # 12 hours
     verify_cache_integrity=True   # Important for web apps
 )
 

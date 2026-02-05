@@ -118,6 +118,9 @@ class MockMetadataBackend(MetadataBackend):
         self._entries.clear()
         return count
     
+    def update_entry_metadata(self, cache_key, updates) -> bool:
+        return cache_key in self._entries
+
     def close(self) -> None:
         pass
 
@@ -160,7 +163,10 @@ class AnotherMockBackend(MetadataBackend):
     
     def increment_misses(self):
         pass
-    
+
+    def update_entry_metadata(self, cache_key, updates) -> bool:
+        return False
+
     def cleanup_expired(self, ttl_seconds: float) -> int:
         return 0
     

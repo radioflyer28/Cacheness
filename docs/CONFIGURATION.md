@@ -13,7 +13,7 @@ from cacheness import cacheness, CacheConfig
 config = CacheConfig(
     cache_dir="./my_cache",
     metadata_backend="sqlite",     # "sqlite", "json", or "auto"  
-    default_ttl_hours=48,          # Default TTL for entries
+    default_ttl_seconds=172800,     # Default TTL for entries (48 hours)
     max_cache_size_mb=5000,        # Maximum cache size
 )
 
@@ -54,7 +54,7 @@ config = CacheConfig(
         security_level="enhanced",
         delete_invalid_signatures=True
     ),
-    default_ttl_hours=48
+    default_ttl_seconds=172800  # 48 hours
 )
 
 cache = cacheness(config)
@@ -67,7 +67,7 @@ cache = cacheness(config)
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `cache_dir` | str | `"./cache"` | Cache directory path |
-| `default_ttl_hours` | int | `24` | Default time-to-live in hours |
+| `default_ttl_seconds` | int | `86400` | Default time-to-live in seconds (86400 = 24 hours) |
 | `max_cache_size_mb` | int | `2000` | Maximum cache size in MB |
 
 ### Storage Configuration (`CacheStorageConfig`)
@@ -189,7 +189,7 @@ ml_config = CacheConfig(
             "object_pickle"
         ]
     ),
-    default_ttl_hours=168  # 1 week
+    default_ttl_seconds=604800  # 1 week
 )
 ```
 
@@ -215,7 +215,7 @@ api_config = CacheConfig(
         enable_collections=False,    # Skip deep introspection
         max_tuple_recursive_length=3
     ),
-    default_ttl_hours=6  # Short TTL for API data
+    default_ttl_seconds=21600  # Short TTL for API data (6 hours)
 )
 ```
 
@@ -252,7 +252,7 @@ data_config = CacheConfig(
             "object_pickle"
         ]
     ),
-    default_ttl_hours=72  # 3 days
+    default_ttl_seconds=259200  # 3 days
 )
 ```
 
@@ -516,7 +516,7 @@ integrity_config = CacheConfig(
 ```python
 dev_config = CacheConfig(
     cache_dir="./dev_cache",
-    default_ttl_hours=2,                 # Short TTL
+    default_ttl_seconds=7200,             # Short TTL (2 hours)
     cleanup_on_init=True,                # Clean start
     metadata_backend="json",             # Simple backend
     max_cache_size_mb=500               # Small cache
@@ -547,7 +547,7 @@ prod_config = CacheConfig(
         use_in_memory_key=True,          # No key persistence in production
         delete_invalid_signatures=True   # Auto-cleanup
     ),
-    default_ttl_hours=168               # 1 week
+    default_ttl_seconds=604800           # 1 week
 )
 ```
 
@@ -556,7 +556,7 @@ prod_config = CacheConfig(
 ```python
 test_config = CacheConfig(
     cache_dir="./test_cache",
-    default_ttl_hours=None,             # No expiration during tests
+    default_ttl_seconds=None,           # No expiration during tests
     cleanup_on_init=True,               # Fresh cache for each test
     metadata_backend="json",            # Simple, no external dependencies
     max_cache_size_mb=100              # Small test cache
@@ -594,7 +594,7 @@ multiply_by_10 = partial(operator.mul, 10)
 cache.put(multiply_by_10, operation="partial_multiply")
 
 # Complex nested functions
-@cached(ttl_hours=24)
+@cached(ttl_seconds=86400)  # 24 hours
 def create_complex_processor():
     import numpy as np
     base_value = np.random.rand()

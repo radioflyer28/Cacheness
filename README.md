@@ -51,7 +51,7 @@ print(data)  # {"results": [1, 2, 3]}
 ```python
 from cacheness import cached
 
-@cached(ttl_hours=24)
+@cached(ttl_seconds=86400)  # 24 hours
 def expensive_computation(n):
     """This function will be automatically cached."""
     import time
@@ -209,7 +209,7 @@ from cacheness import cacheness, CacheConfig
 config = CacheConfig(
     cache_dir="./my_cache",
     metadata_backend="sqlite",     # "sqlite" (production), "json" (dev), or "auto"  
-    default_ttl_hours=48,          # Default TTL for entries
+    default_ttl_seconds=172800,      # Default TTL in seconds (48 hours)
     max_cache_size_mb=5000,        # Maximum cache size
 )
 
@@ -243,12 +243,12 @@ cached_df = cache.get(source="transactions", date_range="2024_q1")
 
 ```python
 # Cache function results with TTL
-@cached(ttl_hours=6)
+@cached(ttl_seconds=21600)  # 6 hours
 def fetch_weather_data(city, units="metric"):
     return api_call(f"weather/{city}", units=units)
 
 # Custom cache instance for specific use cases
-ml_cache = cacheness(CacheConfig(cache_dir="./ml_cache", default_ttl_hours=168))
+ml_cache = cacheness(CacheConfig(cache_dir="./ml_cache", default_ttl_seconds=604800))  # 1 week
 
 @cached(cache_instance=ml_cache)
 def train_model(data, hyperparams):
@@ -572,7 +572,7 @@ from cacheness import cacheness, CacheConfig
 config = CacheConfig(
     cache_dir="./my_cache",
     metadata_backend="sqlite",    # "sqlite" (recommended) or "json"
-    default_ttl_hours=48,         # Default TTL for entries
+    default_ttl_seconds=172800,     # Default TTL in seconds (48 hours)
     max_cache_size_mb=5000,       # Maximum cache size
     cleanup_on_init=True          # Clean expired entries on startup
 )
@@ -633,7 +633,7 @@ config = CacheConfig(
         use_blosc2_arrays=True,
         blosc2_array_codec="lz4"
     ),
-    default_ttl_hours=48
+    default_ttl_seconds=172800  # 48 hours in seconds
 )
 ```
 

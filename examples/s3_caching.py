@@ -7,7 +7,7 @@ from pathlib import Path
 # Initialize cache for S3 files
 s3_cache = cacheness(
     cache_dir="./s3_cache",
-    default_ttl_hours=72,  # Cache S3 files for 3 days
+    default_ttl_seconds=259200,  # 72 hours - Cache S3 files for 3 days
     max_cache_size_mb=5000,  # 5GB cache limit for large files
     metadata_config={
         "backend": "sqlite",  # Better performance for many files
@@ -91,7 +91,7 @@ class S3DataManager:
         # Download fresh copy
         return self.download_file(s3_key, version_id)
     
-    @cached(cache=s3_cache, ttl_hours=24, key_prefix="s3_file")
+    @cached(cache=s3_cache, ttl_seconds=86400, key_prefix="s3_file")  # 24 hours
     def download_file(self, s3_key, version_id=None):
         """Download file from S3 with caching."""
         try:
@@ -141,7 +141,7 @@ class S3DataManager:
         else:
             raise ValueError(f"Unsupported format: {file_format}")
 
-    @cached(cache=s3_cache, ttl_hours=48, key_prefix="s3_dataframe")
+    @cached(cache=s3_cache, ttl_seconds=172800, key_prefix="s3_dataframe")  # 48 hours
     def load_dataframe(self, s3_key, file_format="csv", **read_kwargs):
         """Load DataFrame from S3 with caching."""
         print(f"Loading DataFrame from S3: {s3_key}")
@@ -162,7 +162,7 @@ class S3DataManager:
         else:
             raise ValueError(f"Unsupported format: {file_format}")
     
-    @cached(cache=s3_cache, ttl_hours=168, key_prefix="s3_list")  # 1 week
+    @cached(cache=s3_cache, ttl_seconds=604800, key_prefix="s3_list")  # 168 hours - 1 week
     def list_files(self, prefix="", max_keys=1000, file_extension=None):
         """List S3 files with caching."""
         print(f"Listing S3 files with prefix: {prefix}")

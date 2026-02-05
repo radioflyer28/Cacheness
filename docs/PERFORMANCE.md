@@ -371,13 +371,13 @@ api_config = CacheConfig(
         enable_collections=False,        # Skip deep analysis
         max_tuple_recursive_length=3
     ),
-    default_ttl_hours=6
+    default_ttl_seconds=21600  # 6 hours
 )
 
 # Use with decorators for maximum performance
 from cacheness import cached
 
-@cached(cache_instance=cacheness(api_config), ttl_hours=1)
+@cached(cache_instance=cacheness(api_config), ttl_seconds=3600)  # 1 hour
 def fetch_api_data(endpoint, params):
     # Fast caching with minimal overhead
     return api_call(endpoint, params)
@@ -410,7 +410,7 @@ ml_config = CacheConfig(
             "object_pickle"            # Models and misc objects
         ]
     ),
-    default_ttl_hours=168             # 1 week
+    default_ttl_seconds=604800        # 1 week
 )
 ```
 
@@ -434,7 +434,7 @@ data_config = CacheConfig(
         pickle_compression_codec="zstd",
         pickle_compression_level=3          # Balanced for large objects
     ),
-    default_ttl_hours=72
+    default_ttl_seconds=259200  # 72 hours
 )
 ```
 
@@ -542,7 +542,7 @@ class PerformanceTracker:
 tracker = PerformanceTracker()
 
 # Measure cache performance
-@cached(ttl_hours=24)
+@cached(ttl_seconds=86400)  # 24 hours
 def expensive_computation(data):
     time.sleep(1)  # Simulate work
     return len(data)
@@ -586,16 +586,16 @@ cache.put(model, proj="customer", model="xgb", ver="2.1")
 
 ```python
 # Different TTL for different data types
-@cached(ttl_hours=1)      # Short: real-time data
+@cached(ttl_seconds=3600)      # Short: real-time data (1 hour)
 def get_stock_price(symbol): pass
 
-@cached(ttl_hours=24)     # Medium: daily data
+@cached(ttl_seconds=86400)     # Medium: daily data (24 hours)
 def get_weather_forecast(city): pass
 
-@cached(ttl_hours=168)    # Long: stable data
+@cached(ttl_seconds=604800)    # Long: stable data (1 week)
 def train_ml_model(data): pass
 
-@cached(ttl_hours=None)   # Permanent: reference data
+@cached(ttl_seconds=None)      # Permanent: reference data
 def load_country_codes(): pass
 ```
 

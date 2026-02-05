@@ -222,7 +222,7 @@ def demonstrate_real_world_use_case():
 
     ml_cache = UnifiedCache(ml_config)
 
-    @cached(cache_instance=ml_cache, ttl_hours=48)
+    @cached(cache_instance=ml_cache, ttl_seconds=172800)  # 48 hours
     def feature_engineering(raw_data, transformations, hyperparams):
         """Feature engineering with caching."""
         print("  🔧 Executing feature engineering...")
@@ -240,7 +240,7 @@ def demonstrate_real_world_use_case():
         time.sleep(0.2)  # Simulate processing time
         return features, target, metadata
 
-    @cached(cache_instance=ml_cache, ttl_hours=24)
+    @cached(cache_instance=ml_cache, ttl_seconds=86400)  # 24 hours
     def train_model(features, target, model_config):
         """Model training with caching."""
         print("  🤖 Training model...")

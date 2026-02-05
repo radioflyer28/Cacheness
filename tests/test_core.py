@@ -480,8 +480,7 @@ class TestCacheness:
             mock_datetime.fromisoformat = datetime.fromisoformat
             
             # Should not be expired with fresh timestamp (large TTL)
-            # _is_expired uses ttl_hours internally, so convert: 86400 seconds = 24 hours
-            assert cache._is_expired(cache_key, ttl_hours=24) is False
+            assert cache._is_expired(cache_key, ttl_seconds=86400) is False
             
             # Verify datetime.now was called with timezone.utc
             mock_datetime.now.assert_called_with(timezone.utc)
@@ -499,12 +498,11 @@ class TestCacheness:
         mock_entry = {"created_at": timestamp_iso, "description": "timezone test"}
         
         with patch.object(cache.metadata_backend, 'get_entry', return_value=mock_entry):
-            # Should be expired (created 2 hours ago, checking with 1 hour TTL)
-            # _is_expired uses ttl_hours internally: 3600 seconds = 1 hour
-            assert cache._is_expired("test_key", ttl_hours=1) is True
+            # Should be expired (created 2 hours ago, checking with 1 hour TTL = 3600 seconds)
+            assert cache._is_expired("test_key", ttl_seconds=3600) is True
             
-            # Should not be expired with longer TTL: 10800 seconds = 3 hours
-            assert cache._is_expired("test_key", ttl_hours=3) is False
+            # Should not be expired with longer TTL: 3 hours = 10800 seconds
+            assert cache._is_expired("test_key", ttl_seconds=10800) is False
     
     def test_timezone_consistency_across_cache_operations(self, cache):
         """Test that all cache operations use consistent UTC timezone handling"""

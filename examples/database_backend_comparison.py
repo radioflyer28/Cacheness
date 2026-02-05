@@ -110,7 +110,7 @@ def demonstrate_duckdb_backend():
         db_path="analytics_duckdb.db",
         table=analytics_table,
         data_adapter=AnalyticsSqlCacheAdapter(),
-        ttl_hours=24
+        ttl_seconds=86400  # 24 hours
     )
     
     print(f"✓ Created cache with backend: {cache.engine.dialect.name}")
@@ -154,7 +154,7 @@ def demonstrate_sqlite_backend():
         db_path="analytics_sqlite.db",
         table=analytics_table,
         data_adapter=AnalyticsSqlCacheAdapter(),
-        ttl_hours=24
+        ttl_seconds=86400  # 24 hours
     )
     
     print(f"✓ Created cache with backend: {cache.engine.dialect.name}")
@@ -202,7 +202,7 @@ def demonstrate_in_memory_sqlite():
         db_path=":memory:",  # In-memory database
         table=analytics_table,
         data_adapter=AnalyticsSqlCacheAdapter(),
-        ttl_hours=1  # Short TTL for temporary data
+        ttl_seconds=3600  # 1 hour - Short TTL for temporary data
     )
     
     print(f"✓ Created in-memory cache with backend: {cache.engine.dialect.name}")

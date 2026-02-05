@@ -40,7 +40,7 @@ def get_s3_config() -> dict:
 
 @pytest.fixture(scope="session")
 def postgres_available() -> bool:
-    """Check if PostgreSQL is available."""
+    """Check if PostgreSQL is available (with a short timeout)."""
     try:
         with psycopg.connect(
             dbname=os.getenv("POSTGRES_DB", "cacheness_test"),
@@ -48,6 +48,7 @@ def postgres_available() -> bool:
             password=os.getenv("POSTGRES_PASSWORD", "cacheness_dev_password"),
             host=os.getenv("POSTGRES_HOST", "localhost"),
             port=int(os.getenv("POSTGRES_PORT", "5432")),
+            connect_timeout=3,
         ):
             return True
     except Exception:
@@ -90,8 +91,9 @@ def postgres_clean_db(postgres_connection):
 
 @pytest.fixture(scope="session")
 def s3_available() -> bool:
-    """Check if MinIO/S3 is available."""
+    """Check if MinIO/S3 is available (with a short timeout)."""
     try:
+        from botocore.config import Config as BotoConfig
         config = get_s3_config()
         client = boto3.client(
             "s3",
@@ -99,6 +101,11 @@ def s3_available() -> bool:
             aws_access_key_id=config["access_key"],
             aws_secret_access_key=config["secret_key"],
             region_name=config["region"],
+            config=BotoConfig(
+                connect_timeout=3,
+                read_timeout=3,
+                retries={"max_attempts": 1},
+            ),
         )
         client.head_bucket(Bucket=config["bucket"])
         return True

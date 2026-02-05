@@ -17,27 +17,27 @@ from datetime import datetime
 # ===== Basic Configuration Examples =====
 
 # Example 1: Custom cache directory
-@cached.for_api(ttl_hours=6)
+@cached.for_api(ttl_seconds=21600)  # 6 hours
 def fetch_weather_default(city):
     """Uses default cache location."""
     print(f"🌤️  Fetching weather for {city} (default cache)")
     return {"city": city, "temp": 72, "conditions": "sunny"}
 
 # Example 2: Different cache directories for different purposes
-@cached.for_api(ttl_hours=4, cache_dir="./custom_weather_cache")
+@cached.for_api(ttl_seconds=14400, cache_dir="./custom_weather_cache")  # 4 hours
 def fetch_weather_custom(city):
     """Uses custom cache location."""
     print(f"🌤️  Fetching weather for {city} (custom cache)")
     return {"city": city, "temp": 68, "conditions": "cloudy"}
 
 # Example 3: Different TTL for different data types
-@cached(ttl_hours=2)  # Short TTL for user data (returns dict)
+@cached(ttl_seconds=7200)  # 2 hours - Short TTL for user data (returns dict)
 def get_user_status(user_id):
     """Get user status - changes frequently."""
     print(f"👤 Checking status for user {user_id}")
     return {"user_id": user_id, "status": "online", "last_seen": str(datetime.now())}
 
-@cached(ttl_hours=48)  # Long TTL for reports (returns DataFrame)
+@cached(ttl_seconds=172800)  # 48 hours - Long TTL for reports (returns DataFrame)
 def generate_monthly_report(month, year):
     """Generate monthly report - expensive, changes rarely."""
     print(f"📊 Generating report for {month}/{year}")

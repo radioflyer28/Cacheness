@@ -67,6 +67,7 @@ try:
         func,
         text,
         inspect,
+        case,
     )
     from sqlalchemy.orm import sessionmaker, declarative_base
 
@@ -187,7 +188,14 @@ class MetadataBackend(ABC):
 
     @abstractmethod
     def get_entry(self, cache_key: str) -> Optional[Dict[str, Any]]:
-        """Get specific cache entry metadata."""
+        """Get specific cache entry metadata (internal storage format).
+        
+        Returns a dict with internal field names:
+            description, data_type, prefix, created_at, accessed_at, 
+            file_size (bytes), metadata (nested dict)
+        
+        See also: list_entries() returns user-facing format with different keys.
+        """
         pass
 
     @abstractmethod
@@ -196,13 +204,54 @@ class MetadataBackend(ABC):
         pass
 
     @abstractmethod
-    def remove_entry(self, cache_key: str):
-        """Remove cache entry metadata."""
+    def remove_entry(self, cache_key: str) -> bool:
+        """Remove cache entry metadata.
+        
+        Returns:
+            bool: True if the entry existed and was removed, False if not found.
+        """
+        pass
+
+    @abstractmethod
+    def update_entry_metadata(self, cache_key: str, updates: Dict[str, Any]) -> bool:
+        """Update metadata fields for an existing cache entry.
+        
+        Updates derived metadata fields (file_size, content_hash, timestamps,
+        data_type, etc.) after blob data has been written by the cache layer.
+        The cache_key remains immutable.
+        
+        This method only updates metadata — blob I/O is handled by
+        UnifiedCache.update_data() before calling this method.
+        
+        Args:
+            cache_key: The unique identifier for the cache entry to update
+            updates: Dict of metadata fields to update. Expected keys include:
+                - file_size (int): New file size in bytes
+                - file_hash (str): New file hash
+                - content_hash (str): New content hash
+                - actual_path (str): New actual file path
+                - storage_format (str): New storage format
+                - data_type (str): New data type identifier
+                - serializer (str): Serializer used
+                - compression_codec (str): Compression codec used
+                - object_type (str): Object type identifier
+            
+        Returns:
+            bool: True if entry was updated, False if entry doesn't exist
+        """
         pass
 
     @abstractmethod
     def list_entries(self) -> List[Dict[str, Any]]:
-        """List all cache entries with metadata."""
+        """List all cache entries with metadata (user-facing format).
+        
+        Returns a list of dicts with user-facing field names:
+            cache_key, data_type, description, metadata (nested dict),
+            created (ISO string), last_accessed (ISO string), size_mb (float)
+        
+        Note: Field names differ from get_entry() — this format is used by
+        delete_where(), delete_matching(), and UnifiedCache.list_entries().
+        """
         pass
 
     @abstractmethod
@@ -241,23 +290,30 @@ class MetadataBackend(ABC):
 
 
 def create_entry_cache(cache_type: str, maxsize: int, ttl_seconds: float):
-    """Create a cache instance based on configuration."""
+    """Create a TTLCache for the memory cache layer.
+    
+    Uses cachetools.TTLCache which provides LRU eviction combined with
+    time-based expiration. The ``cache_type`` parameter is accepted for
+    forward-compatibility but currently only ``"lru"`` (the default) is
+    meaningfully distinct — all types create a TTLCache with LRU eviction.
+    
+    Args:
+        cache_type: Cache eviction strategy name (currently all map to TTLCache).
+        maxsize: Maximum number of entries in the memory cache.
+        ttl_seconds: Time-to-live for cached entries in seconds.
+    
+    Returns:
+        TTLCache instance, or None if cachetools is not installed.
+    """
     if not CACHETOOLS_AVAILABLE:
         return None
-        
-    if cache_type == "lru":
-        # Use TTLCache with LRU eviction for both size and TTL limits
-        return TTLCache(maxsize=maxsize, ttl=ttl_seconds)
-    elif cache_type == "lfu":
-        # LFU with TTL wrapper (manual TTL implementation)
-        return TTLCache(maxsize=maxsize, ttl=ttl_seconds)  # cachetools TTLCache uses LRU internally
-    elif cache_type == "fifo":
-        return TTLCache(maxsize=maxsize, ttl=ttl_seconds)  # TTLCache is good enough
-    elif cache_type == "rr":
-        return TTLCache(maxsize=maxsize, ttl=ttl_seconds)  # Random replacement with TTL
-    else:
-        logger.warning(f"Unknown cache type {cache_type}, using LRU")
-        return TTLCache(maxsize=maxsize, ttl=ttl_seconds)
+    
+    if cache_type not in ("lru", "lfu", "fifo", "rr"):
+        logger.warning(f"Unknown cache type '{cache_type}', using TTLCache (LRU)")
+    
+    # All types currently use TTLCache (LRU + TTL). cachetools does not
+    # provide LFU/FIFO/RR variants with built-in TTL support.
+    return TTLCache(maxsize=maxsize, ttl=ttl_seconds)
 
 
 class CachedMetadataBackend(MetadataBackend):
@@ -363,10 +419,10 @@ class CachedMetadataBackend(MetadataBackend):
                     self._memory_cache[entry_cache_key] = formatted_entry
                     logger.debug(f"Memory cache updated: {cache_key}")
     
-    def remove_entry(self, cache_key: str):
+    def remove_entry(self, cache_key: str) -> bool:
         """Remove cache entry metadata and invalidate memory cache."""
         # Remove from disk backend first
-        self.backend.remove_entry(cache_key)
+        removed = self.backend.remove_entry(cache_key)
         
         # Remove from memory cache if enabled
         if self._memory_cache is not None:
@@ -374,7 +430,22 @@ class CachedMetadataBackend(MetadataBackend):
                 entry_cache_key = self._cache_key_for_entry(cache_key)
                 self._memory_cache.pop(entry_cache_key, None)
                 logger.debug(f"Memory cache invalidated: {cache_key}")
+        
+        return removed
     
+    def update_entry_metadata(self, cache_key: str, updates: Dict[str, Any]) -> bool:
+        """Update entry metadata and invalidate memory cache entry."""
+        result = self.backend.update_entry_metadata(cache_key, updates)
+        
+        # Invalidate memory cache entry so next get_entry() fetches fresh metadata
+        if result and self._memory_cache is not None:
+            with self._lock:
+                entry_cache_key = self._cache_key_for_entry(cache_key)
+                self._memory_cache.pop(entry_cache_key, None)
+                logger.debug(f"Memory cache invalidated after metadata update: {cache_key}")
+        
+        return result
+
     def clear_all(self) -> int:
         """Remove all cache entries and clear memory cache."""
         count = self.backend.clear_all()
@@ -543,20 +614,21 @@ class InMemoryBackend(MetadataBackend):
             self._entries[cache_key] = entry
             
     
-    def remove_entry(self, cache_key: str):
+    def remove_entry(self, cache_key: str) -> bool:
         """Remove cache entry metadata with O(1) operations (simple unified entry)."""
         with self._lock:
-            self._entries.pop(cache_key, None)
+            return self._entries.pop(cache_key, None) is not None
     
-    def update_blob_data(self, cache_key: str, new_data: Any, handler, config) -> bool:
+    def update_entry_metadata(self, cache_key: str, updates: Dict[str, Any]) -> bool:
         """
-        Update blob data at existing cache_key without changing the key.
+        Update metadata fields for an existing cache entry.
+        
+        Only updates metadata — blob I/O is handled by UnifiedCache.update_data().
         
         Args:
             cache_key: The unique identifier for the cache entry to update
-            new_data: New data to store
-            handler: Handler instance for serialization
-            config: CacheConfig instance
+            updates: Dict of metadata fields to update (file_size, file_hash, 
+                    actual_path, data_type, storage_format, serializer, etc.)
             
         Returns:
             bool: True if entry was updated, False if entry doesn't exist
@@ -566,41 +638,24 @@ class InMemoryBackend(MetadataBackend):
             if not entry:
                 return False
             
-            # Get cache file path from metadata
-            from pathlib import Path
-            cache_dir = Path(config.storage.cache_dir)
-            prefix = entry.get("prefix", "")
-            if prefix:
-                base_file_path = cache_dir / f"{prefix}_{cache_key}"
-            else:
-                base_file_path = cache_dir / cache_key
-            
-            # Use handler to store the new data
-            result = handler.put(new_data, base_file_path, config)
-            
             # Update derived metadata (file_size, content_hash, created_at)
             now = datetime.now(timezone.utc)
             entry["created_at"] = now.isoformat()  # Reset timestamp
-            entry["file_size"] = result.get("file_size", 0)
             
-            # Update data_type and storage_format (might change with data type)
-            if hasattr(handler, "data_type"):
-                entry["data_type"] = handler.data_type
-            entry["storage_format"] = result.get("storage_format", entry.get("storage_format"))
-            if hasattr(handler, "serializer"):
-                entry["serializer"] = handler.serializer
+            if "file_size" in updates:
+                entry["file_size"] = updates["file_size"]
+            if "data_type" in updates:
+                entry["data_type"] = updates["data_type"]
+            if "storage_format" in updates:
+                entry["storage_format"] = updates.get("storage_format", entry.get("storage_format"))
+            if "serializer" in updates:
+                entry["serializer"] = updates["serializer"]
             
             # Update metadata dict with new values
             metadata = entry.get("metadata", {})
-            metadata.update({
-                "file_size": result.get("file_size", 0),
-                "content_hash": result.get("content_hash"),
-                "file_hash": result.get("file_hash"),
-                "actual_path": str(result.get("actual_path", base_file_path)),
-                "storage_format": result.get("storage_format", entry.get("storage_format")),
-            })
-            if hasattr(handler, "serializer"):
-                metadata["serializer"] = handler.serializer
+            for key in ("file_size", "content_hash", "file_hash", "actual_path", "storage_format", "serializer"):
+                if key in updates:
+                    metadata[key] = updates[key]
             entry["metadata"] = metadata
             
             return True
@@ -742,9 +797,6 @@ class JsonBackend(MetadataBackend):
         self.metadata_file = metadata_file
         self._lock = threading.Lock()
         self._metadata = self._load_from_disk()
-        self._pending_writes = {}
-        self._batch_size = 10  # Write after 10 operations
-        self._write_count = 0
 
     def _load_from_disk(self) -> Dict[str, Any]:
         """Load metadata from JSON file."""
@@ -792,14 +844,6 @@ class JsonBackend(MetadataBackend):
         except Exception as e:
             logger.error(f"Failed to save JSON metadata: {e}")
 
-    def _flush_pending_writes(self):
-        """Flush pending writes to disk."""
-        if self._pending_writes:
-            self._metadata.update(self._pending_writes)
-            self._pending_writes.clear()
-            self._save_to_disk()
-            self._write_count = 0
-
     def load_metadata(self) -> Dict[str, Any]:
         """Load complete metadata structure."""
         with self._lock:
@@ -843,32 +887,28 @@ class JsonBackend(MetadataBackend):
             
             # Store complete entry - simple and efficient
             self._metadata["entries"][cache_key] = entry
+            self._save_to_disk()
 
-            # Batch writes for better performance
-            self._write_count += 1
-            if self._write_count >= self._batch_size:
-                self._save_to_disk()
-                self._write_count = 0
-            else:
-                # For immediate consistency, still save to disk
-                self._save_to_disk()
-
-    def remove_entry(self, cache_key: str):
+    def remove_entry(self, cache_key: str) -> bool:
         """Remove cache entry metadata."""
         with self._lock:
-            if cache_key in self._metadata.get("entries", {}):
-                del self._metadata["entries"][cache_key]
-            self._save_to_disk()
+            entries = self._metadata.get("entries", {})
+            if cache_key in entries:
+                del entries[cache_key]
+                self._save_to_disk()
+                return True
+            return False
     
-    def update_blob_data(self, cache_key: str, new_data: Any, handler, config) -> bool:
+    def update_entry_metadata(self, cache_key: str, updates: Dict[str, Any]) -> bool:
         """
-        Update blob data at existing cache_key without changing the key.
+        Update metadata fields for an existing cache entry.
+        
+        Only updates metadata — blob I/O is handled by UnifiedCache.update_data().
         
         Args:
             cache_key: The unique identifier for the cache entry to update
-            new_data: New data to store
-            handler: Handler instance for serialization
-            config: CacheConfig instance
+            updates: Dict of metadata fields to update (file_size, file_hash, 
+                    actual_path, data_type, storage_format, serializer, etc.)
             
         Returns:
             bool: True if entry was updated, False if entry doesn't exist
@@ -879,41 +919,24 @@ class JsonBackend(MetadataBackend):
             if not entry:
                 return False
             
-            # Get cache file path from metadata
-            from pathlib import Path
-            cache_dir = Path(config.storage.cache_dir)
-            prefix = entry.get("prefix", "")
-            if prefix:
-                base_file_path = cache_dir / f"{prefix}_{cache_key}"
-            else:
-                base_file_path = cache_dir / cache_key
-            
-            # Use handler to store the new data
-            result = handler.put(new_data, base_file_path, config)
-            
             # Update derived metadata (file_size, content_hash, created_at)
             now = datetime.now(timezone.utc)
             entry["created_at"] = now.isoformat()  # Reset timestamp
-            entry["file_size"] = result.get("file_size", 0)
             
-            # Update data_type and storage_format (might change with data type)
-            if hasattr(handler, "data_type"):
-                entry["data_type"] = handler.data_type
-            entry["storage_format"] = result.get("storage_format", entry.get("storage_format"))
-            if hasattr(handler, "serializer"):
-                entry["serializer"] = handler.serializer
+            if "file_size" in updates:
+                entry["file_size"] = updates["file_size"]
+            if "data_type" in updates:
+                entry["data_type"] = updates["data_type"]
+            if "storage_format" in updates:
+                entry["storage_format"] = updates.get("storage_format", entry.get("storage_format"))
+            if "serializer" in updates:
+                entry["serializer"] = updates["serializer"]
             
             # Update metadata dict with new values
             metadata = entry.get("metadata", {})
-            metadata.update({
-                "file_size": result.get("file_size", 0),
-                "content_hash": result.get("content_hash"),
-                "file_hash": result.get("file_hash"),
-                "actual_path": str(result.get("actual_path", base_file_path)),
-                "storage_format": result.get("storage_format", entry.get("storage_format")),
-            })
-            if hasattr(handler, "serializer"):
-                metadata["serializer"] = handler.serializer
+            for key in ("file_size", "content_hash", "file_hash", "actual_path", "storage_format", "serializer"):
+                if key in updates:
+                    metadata[key] = updates[key]
             entry["metadata"] = metadata
             
             # Save to disk immediately for atomicity
@@ -1368,23 +1391,25 @@ class SqliteBackend(MetadataBackend):
             )
             session.commit()
 
-    def remove_entry(self, cache_key: str):
+    def remove_entry(self, cache_key: str) -> bool:
         """Remove cache entry metadata (custom metadata will cascade delete via FK)."""
         with self._lock, self.SessionLocal() as session:
             # Delete cache entry - custom metadata records will cascade delete automatically
             # due to ondelete="CASCADE" on the cache_key foreign key
-            session.execute(delete(CacheEntry).where(CacheEntry.cache_key == cache_key))
+            result = session.execute(delete(CacheEntry).where(CacheEntry.cache_key == cache_key))
             session.commit()
+            return result.rowcount > 0
     
-    def update_blob_data(self, cache_key: str, new_data: Any, handler, config) -> bool:
+    def update_entry_metadata(self, cache_key: str, updates: Dict[str, Any]) -> bool:
         """
-        Update blob data at existing cache_key without changing the key.
+        Update metadata fields for an existing cache entry.
+        
+        Only updates metadata — blob I/O is handled by UnifiedCache.update_data().
         
         Args:
             cache_key: The unique identifier for the cache entry to update
-            new_data: New data to store
-            handler: Handler instance for serialization
-            config: CacheConfig instance
+            updates: Dict of metadata fields to update (file_size, file_hash, 
+                    actual_path, data_type, storage_format, serializer, etc.)
             
         Returns:
             bool: True if entry was updated, False if entry doesn't exist
@@ -1398,36 +1423,28 @@ class SqliteBackend(MetadataBackend):
             if not entry:
                 return False
             
-            # Get cache file path from metadata
-            from pathlib import Path
-            cache_dir = Path(config.storage.cache_dir)
-            prefix = entry.prefix or ""
-            if prefix:
-                base_file_path = cache_dir / f"{prefix}_{cache_key}"
-            else:
-                base_file_path = cache_dir / cache_key
-            
-            # Use handler to store the new data
-            result = handler.put(new_data, base_file_path, config)
-            
             # Update derived metadata fields
             now = datetime.now(timezone.utc)
             entry.created_at = now  # Reset timestamp
-            entry.file_size = result.get("file_size", 0)
-            entry.file_hash = result.get("file_hash") or result.get("content_hash")
-            entry.actual_path = str(result.get("actual_path", base_file_path))
             
-            # Update data_type and storage_format (might change with data type)
-            if hasattr(handler, "data_type"):
-                entry.data_type = handler.data_type
-            if result.get("storage_format"):
-                entry.storage_format = result["storage_format"]
-            if hasattr(handler, "serializer"):
-                entry.serializer = handler.serializer
-            if result.get("compression_codec"):
-                entry.compression_codec = result["compression_codec"]
-            if result.get("object_type"):
-                entry.object_type = result["object_type"]
+            if "file_size" in updates:
+                entry.file_size = updates["file_size"]
+            if "file_hash" in updates:
+                entry.file_hash = updates["file_hash"]
+            elif "content_hash" in updates:
+                entry.file_hash = updates["content_hash"]
+            if "actual_path" in updates:
+                entry.actual_path = str(updates["actual_path"])
+            if "data_type" in updates:
+                entry.data_type = updates["data_type"]
+            if "storage_format" in updates:
+                entry.storage_format = updates["storage_format"]
+            if "serializer" in updates:
+                entry.serializer = updates["serializer"]
+            if "compression_codec" in updates:
+                entry.compression_codec = updates["compression_codec"]
+            if "object_type" in updates:
+                entry.object_type = updates["object_type"]
             
             session.commit()
             return True
@@ -1491,16 +1508,23 @@ class SqliteBackend(MetadataBackend):
             return result
 
     def get_stats(self) -> Dict[str, Any]:
-        """Get cache statistics."""
+        """Get cache statistics using SQL aggregates (no full table scan)."""
         with self.SessionLocal() as session:
-            # Get counts by data type
-            total_entries = session.execute(select(CacheEntry)).scalars().all()
+            # Single aggregation query — no Python-side iteration
+            row = session.execute(
+                select(
+                    func.count(CacheEntry.cache_key).label("total"),
+                    func.coalesce(func.sum(CacheEntry.file_size), 0).label("total_size"),
+                    func.count(case(
+                        (CacheEntry.data_type == "dataframe", 1),
+                    )).label("dataframe_count"),
+                    func.count(case(
+                        (CacheEntry.data_type == "array", 1),
+                    )).label("array_count"),
+                )
+            ).one()
 
-            dataframe_count = len(
-                [e for e in total_entries if e.data_type == "dataframe"]
-            )
-            array_count = len([e for e in total_entries if e.data_type == "array"])
-            total_size_mb = sum(e.file_size for e in total_entries) / (1024 * 1024)
+            total_size_mb = row.total_size / (1024 * 1024)
 
             # Get hit/miss stats
             stats = self._get_stats_row(session)
@@ -1511,9 +1535,9 @@ class SqliteBackend(MetadataBackend):
             )
 
             return {
-                "total_entries": len(total_entries),
-                "dataframe_entries": dataframe_count,
-                "array_entries": array_count,
+                "total_entries": row.total,
+                "dataframe_entries": row.dataframe_count,
+                "array_entries": row.array_count,
                 "total_size_mb": round(total_size_mb, 2),
                 "cache_hits": stats.cache_hits,
                 "cache_misses": stats.cache_misses,
@@ -1615,7 +1639,11 @@ class SqliteBackend(MetadataBackend):
 
     def __del__(self):
         """Ensure connections are closed when the backend is garbage collected."""
-        self.close()
+        try:
+            self.close()
+        except Exception:
+            # Suppress errors during interpreter shutdown
+            pass
 
     def __enter__(self):
         """Context manager entry."""

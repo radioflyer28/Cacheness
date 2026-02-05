@@ -28,7 +28,7 @@ class ProcessingResult:
     processed_items: List[str]
     stats: dict
 
-@cached(ttl_hours=12)
+@cached(ttl_seconds=43200)  # 12 hours
 def get_user_profile(user_id: int) -> UserProfile:
     """Get user profile (simulated expensive lookup)."""
     print(f"🔍 Loading profile for user {user_id}")
@@ -44,7 +44,7 @@ def get_user_profile(user_id: int) -> UserProfile:
         }
     )
 
-@cached(ttl_hours=24)
+@cached(ttl_seconds=86400)  # 24 hours
 def process_data(items: List[str]) -> ProcessingResult:
     """Process a list of items (simulated expensive operation)."""
     print(f"⚙️  Processing {len(items)} items")
@@ -64,7 +64,7 @@ def process_data(items: List[str]) -> ProcessingResult:
         stats=stats
     )
 
-@cached(ttl_hours=6)
+@cached(ttl_seconds=21600)  # 6 hours
 def complex_calculation(data: dict) -> dict:
     """Perform complex calculations on dictionary data."""
     print(f"🧮 Computing complex calculation for {len(data)} keys")

@@ -1,5 +1,5 @@
 """
-Test Management Operations: update_data() and update_blob_data()
+Test Management Operations: update_data() and update_entry_metadata()
 Phase 3: Sprint 1
 """
 
@@ -135,11 +135,11 @@ class TestUpdateData:
         assert created_after != created_before  # Timestamp should update
 
 
-class TestUpdateBlobDataBackends:
-    """Test update_blob_data() implementation in different backends."""
+class TestUpdateEntryMetadataBackends:
+    """Test update_entry_metadata() implementation in different backends."""
     
     def test_memory_backend_update(self, cache_dir):
-        """Test InMemoryBackend.update_blob_data()."""
+        """Test InMemoryBackend.update_entry_metadata()."""
         backend = InMemoryBackend()
         
         # Create entry
@@ -151,29 +151,17 @@ class TestUpdateBlobDataBackends:
             "metadata": {"content_hash": "abc123"}
         })
         
-        # Mock handler and config
-        class MockHandler:
-            data_type = "dict"
-            serializer = "pickle"
-            
-            def put(self, data, path, config):
-                return {
-                    "file_size": 200,
-                    "content_hash": "xyz789",
-                    "actual_path": str(path),
-                    "storage_format": "pickle"
-                }
-        
-        class MockConfig:
-            class storage:
-                cache_dir = str(cache_dir)
-        
-        # Update blob data
-        success = backend.update_blob_data(
+        # Update metadata (no handler/config — blob I/O is core.py's job)
+        success = backend.update_entry_metadata(
             cache_key="test_key",
-            new_data={"updated": True},
-            handler=MockHandler(),
-            config=MockConfig()
+            updates={
+                "file_size": 200,
+                "content_hash": "xyz789",
+                "actual_path": str(cache_dir / "test_key"),
+                "storage_format": "pickle",
+                "data_type": "dict",
+                "serializer": "pickle",
+            }
         )
         
         assert success is True
@@ -184,7 +172,7 @@ class TestUpdateBlobDataBackends:
         assert entry["metadata"]["content_hash"] == "xyz789"
     
     def test_json_backend_update(self, cache_dir):
-        """Test JsonBackend.update_blob_data()."""
+        """Test JsonBackend.update_entry_metadata()."""
         metadata_file = cache_dir / "metadata.json"
         cache_dir.mkdir(parents=True)
         
@@ -199,28 +187,16 @@ class TestUpdateBlobDataBackends:
             "metadata": {}
         })
         
-        # Mock handler and config
-        class MockHandler:
-            data_type = "dict"
-            serializer = "pickle"
-            
-            def put(self, data, path, config):
-                return {
-                    "file_size": 300,
-                    "content_hash": "new_hash",
-                    "storage_format": "pickle"
-                }
-        
-        class MockConfig:
-            class storage:
-                cache_dir = str(cache_dir)
-        
-        # Update blob data
-        success = backend.update_blob_data(
+        # Update metadata only
+        success = backend.update_entry_metadata(
             cache_key="test_key",
-            new_data={"new": "data"},
-            handler=MockHandler(),
-            config=MockConfig()
+            updates={
+                "file_size": 300,
+                "content_hash": "new_hash",
+                "storage_format": "pickle",
+                "data_type": "dict",
+                "serializer": "pickle",
+            }
         )
         
         assert success is True
@@ -230,7 +206,7 @@ class TestUpdateBlobDataBackends:
         assert entry["file_size"] == 300
     
     def test_sqlite_backend_update(self, cache_dir):
-        """Test SqliteBackend.update_blob_data()."""
+        """Test SqliteBackend.update_entry_metadata()."""
         db_file = cache_dir / "cache.db"
         cache_dir.mkdir(parents=True)
         
@@ -245,28 +221,16 @@ class TestUpdateBlobDataBackends:
             "metadata": {}
         })
         
-        # Mock handler and config
-        class MockHandler:
-            data_type = "dict"
-            serializer = "pickle"
-            
-            def put(self, data, path, config):
-                return {
-                    "file_size": 400,
-                    "content_hash": "sqlite_hash",
-                    "storage_format": "pickle"
-                }
-        
-        class MockConfig:
-            class storage:
-                cache_dir = str(cache_dir)
-        
-        # Update blob data
-        success = backend.update_blob_data(
+        # Update metadata only
+        success = backend.update_entry_metadata(
             cache_key="test_key",
-            new_data={"sqlite": "update"},
-            handler=MockHandler(),
-            config=MockConfig()
+            updates={
+                "file_size": 400,
+                "content_hash": "sqlite_hash",
+                "storage_format": "pickle",
+                "data_type": "dict",
+                "serializer": "pickle",
+            }
         )
         
         assert success is True
@@ -281,19 +245,9 @@ class TestUpdateBlobDataBackends:
         """Test updating nonexistent key returns False."""
         backend = InMemoryBackend()
         
-        class MockHandler:
-            def put(self, data, path, config):
-                return {}
-        
-        class MockConfig:
-            class storage:
-                cache_dir = str(cache_dir)
-        
-        success = backend.update_blob_data(
+        success = backend.update_entry_metadata(
             cache_key="nonexistent",
-            new_data={},
-            handler=MockHandler(),
-            config=MockConfig()
+            updates={"file_size": 100}
         )
         
         assert success is False

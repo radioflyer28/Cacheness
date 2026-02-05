@@ -939,21 +939,32 @@ cache.clone(
 
 ## Implementation Status (Revised)
 
+> **Last updated:** February 5, 2026 — Sprint 1-3 complete.
+
 ### Storage Backend (MetadataBackend, BlobStore)
-- [ ] Add `update_blob_data(cache_key, new_data)` - replace data at existing key
-- [ ] Add `delete_by_prefix()` / `delete_where()`
-- [x] Expose `get_entry()` in cache layer (already exists in backend)
-- [ ] Add `get_entries_batch()`
-- [ ] Add `delete_entries_batch()`
-- [ ] Add `copy_entry()` / `move_entry()` - **convenience methods** (built on CRUD: get + put [+ delete])
+- [x] Add `update_blob_data(cache_key, new_data, handler, config)` — ✅ Implemented in all backends + ABC
+- [x] Add `delete_where()` / `delete_matching()` — ✅ Implemented as `UnifiedCache.delete_where(filter_fn)` and `UnifiedCache.delete_matching(**kwargs)`
+- [x] Expose `get_entry()` in cache layer — ✅ Already exists
+- [x] Add `get_entries_batch()` — ✅ Implemented as `UnifiedCache.get_batch(**filter_kwargs)`
+- [x] Add `delete_entries_batch()` — ✅ Implemented as `UnifiedCache.delete_batch(**filter_kwargs)`
+- [ ] Add `copy_entry()` / `move_entry()` — **convenience methods** (deferred, built on CRUD: get + put [+ delete])
 
 ### Cache Layer (UnifiedCache)
-- [ ] Add `touch()` method with TTL parameter
-- [ ] Add `get_metadata()` method (delegates to backend)
-- [ ] Add convenience wrappers for bulk operations
-- [ ] Add `update_data()` method (delegates to backend.update_blob_data())
+- [x] Add `touch()` method — ✅ Implemented as `UnifiedCache.touch(cache_key=None, **kwargs)`
+- [x] Add `get_metadata()` method — ✅ Implemented (delegates to backend `get_entry()`)
+- [x] Add convenience wrappers for bulk operations — ✅ `touch_batch(**kwargs)`, `get_batch(**kwargs)`, `delete_batch(**kwargs)`
+- [x] Add `update_data()` method — ✅ Delegates to `backend.update_blob_data()`
 
-### Cross-Layer
+### API Name Mapping (Design Doc → Implementation)
+
+| Design Doc Name | Actual Implementation | Notes |
+|---|---|---|
+| `cache.replace()` | `cache.update_data()` | Replaces blob data at existing key |
+| `backend.delete_by_prefix()` | `cache.delete_where(filter_fn)` | More flexible filter-based approach |
+| — | `cache.delete_matching(**kwargs)` | Convenience wrapper over delete_where |
+| `cache.touch(ttl_seconds=...)` | `cache.touch(**kwargs)` | `ttl_seconds` removed — TTL is global |
+
+### Cross-Layer (Not Yet Implemented)
 - [ ] Export/Import functionality
 - [ ] Verify and Repair functionality
 

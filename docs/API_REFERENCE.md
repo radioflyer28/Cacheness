@@ -107,7 +107,7 @@ class SqlCache:
         db_url: str,
         table: Table,
         data_adapter: SqlCacheAdapter,
-        ttl_hours: int = 24,
+        ttl_seconds: int = 86400,
         echo: bool = False,
         engine_kwargs: Optional[dict] = None,
         time_increment: Optional[Union[str, timedelta, int]] = None,
@@ -120,7 +120,7 @@ class SqlCache:
 - `db_url` (str): Database URL (e.g., "duckdb:///data.db", "sqlite:///cache.db")
 - `table` (Table): SQLAlchemy Table definition
 - `data_adapter` (SqlCacheAdapter): Adapter for fetching external data
-- `ttl_hours` (int): Time-to-live in hours for cached entries
+- `ttl_seconds` (int): Time-to-live in seconds for cached entries (default: 86400 = 24 hours)
 - `echo` (bool): Whether to echo SQL statements
 - `engine_kwargs` (Optional[dict]): Additional SQLAlchemy engine parameters
 - `time_increment` (Optional[Union[str, timedelta, int]]): Expected time increment for data
@@ -143,7 +143,7 @@ cache = SqlCache.with_sqlite(
     db_path="cache.db",
     table=table_definition,
     data_adapter=adapter,
-    ttl_hours=24,
+    ttl_seconds=86400,  # 24 hours
     time_increment=timedelta(minutes=5),
     gap_detector=custom_detector
 )
@@ -184,7 +184,7 @@ cache = SqlCache.for_lookup_table(
     "users.db",
     primary_keys=["user_id"],
     data_fetcher=fetch_user_data,
-    ttl_hours=12,
+    ttl_seconds=43200,  # 12 hours
     user_id=Integer,
     name=String(100),
     email=String(255)
@@ -199,7 +199,7 @@ cache = SqlCache.for_analytics_table(
     "analytics.db", 
     primary_keys=["department", "month"],
     data_fetcher=fetch_sales_data,
-    ttl_hours=24,
+    ttl_seconds=86400,  # 24 hours
     department=String(50),
     revenue=Float,
     headcount=Integer
@@ -213,7 +213,7 @@ Create cache for historical timeseries analysis (uses DuckDB).
 cache = SqlCache.for_timeseries(
     "historical.db",
     data_fetcher=fetch_historical_prices,
-    ttl_hours=48,
+    ttl_seconds=172800,  # 48 hours
     price=Float,
     volume=Integer,
     market_cap=Float
@@ -227,7 +227,7 @@ Create cache for real-time timeseries data (uses SQLite).
 cache = SqlCache.for_realtime_timeseries(
     "realtime.db",
     data_fetcher=fetch_live_prices,
-    ttl_hours=1,
+    ttl_seconds=3600,  # 1 hour
     price=Float,
     bid=Float,
     ask=Float
@@ -544,12 +544,12 @@ with cacheness() as cache:
 
 #### Factory Methods
 
-##### `cacheness.for_api(cache_dir=None, ttl_hours=6, **kwargs)`
+##### `cacheness.for_api(cache_dir=None, ttl_seconds=21600, **kwargs)`
 Create a cache instance optimized for API requests.
 
 **Parameters:**
 - `cache_dir` (Optional[str]): Cache directory (default: "./cache")
-- `ttl_hours` (int): Default TTL in hours (default: 6)
+- `ttl_seconds` (int): Default TTL in seconds (default: 21600 = 6 hours)
 - `**kwargs`: Additional configuration options
 
 **Returns:**
@@ -557,7 +557,7 @@ Create a cache instance optimized for API requests.
 
 **Example:**
 ```python
-api_cache = cacheness.for_api(cache_dir="./api_cache", ttl_hours=4)
+api_cache = cacheness.for_api(cache_dir="./api_cache", ttl_seconds=14400)  # 4 hours
 api_cache.put({"users": [...]}, endpoint="users", version="v1")
 ```
 
@@ -627,14 +627,13 @@ if not success:
 
 > **Note:** Cache keys are immutable and derived from input params, not content. Use `update_data()` to refresh data at the same logical location. Use `put()` to create new entries.
 
-##### `touch(cache_key=None, ttl_seconds=None, **kwargs) -> bool`
+##### `touch(cache_key=None, **kwargs) -> bool`
 Update entry timestamp to extend TTL without reloading data.
 
-Resets the expiration timer, useful for keeping frequently accessed data alive or preventing expiration of long-running computations.
+Resets the creation timestamp to now, effectively giving the entry a full config-TTL extension. Useful for keeping frequently accessed data alive or preventing expiration of long-running computations.
 
 **Parameters:**
 - `cache_key` (Optional[str]): Direct cache key (if provided, `**kwargs` are ignored)
-- `ttl_seconds` (Optional[float]): New TTL in seconds (uses default if None)
 - `**kwargs`: Parameters identifying the cached data (used if `cache_key` is None)
 
 **Returns:**
@@ -675,7 +674,7 @@ deleted = cache.delete_where(
 
 # Delete all DataFrames
 deleted = cache.delete_where(
-    lambda e: e.get("data_type") == "pandas_dataframe"
+    lambda e: e.get("data_type") == "dataframe"
 )
 ```
 
@@ -1060,8 +1059,6 @@ Decorator for caching function results with intelligent TTL management.
 ```python
 def cached(
     cache_instance: Optional[cacheness] = None,
-    ttl_hours: Optional[float] = None,
-    ttl_minutes: Optional[float] = None,
     ttl_seconds: Optional[float] = None,
     cache_key_prefix: Optional[str] = None,
     include_defaults: bool = True,
@@ -1071,8 +1068,6 @@ def cached(
 
 **Parameters:**
 - `cache_instance` (Optional[cacheness]): Cache instance to use (uses global if None)
-- `ttl_hours` (Optional[float]): Time-to-live in hours
-- `ttl_minutes` (Optional[float]): Time-to-live in minutes  
 - `ttl_seconds` (Optional[float]): Time-to-live in seconds
 - `cache_key_prefix` (Optional[str]): Prefix for cache keys
 - `include_defaults` (bool): Whether to include default parameter values in cache key
@@ -1080,7 +1075,7 @@ def cached(
 
 **Example:**
 ```python
-@cached(ttl_hours=24, cache_key_prefix="weather")
+@cached(ttl_seconds=86400, cache_key_prefix="weather")  # 24 hours
 def get_weather(city: str, units: str = "metric"):
     return fetch_weather_api(city, units)
 
@@ -1096,14 +1091,14 @@ weather = get_weather("London")  # Cache hit - returns cached result
 Decorator optimized for API requests with error handling.
 
 ```python
-@cached.for_api(ttl_hours=6, ignore_errors=True)
+@cached.for_api(ttl_seconds=21600, ignore_errors=True)  # 6 hours
 def fetch_user_data(user_id):
     response = requests.get(f"/api/users/{user_id}")
     return response.json()
 ```
 
 **Parameters:**
-- `ttl_hours` (int): Time-to-live in hours (default: 6)
+- `ttl_seconds` (int): Time-to-live in seconds (default: 21600 = 6 hours)
 - `ignore_errors` (bool): Continue on cache errors (default: True)
 - Uses LZ4 compression optimized for JSON/text data
 
@@ -1115,7 +1110,7 @@ Conditional caching decorator that only caches when a condition is met.
 def cache_if(
     condition: Callable[[Any], bool],
     cache_instance: Optional[cacheness] = None,
-    ttl_hours: Optional[float] = None,
+    ttl_seconds: Optional[float] = None,
     **kwargs
 ) -> Callable
 ```
@@ -1126,7 +1121,7 @@ def cache_if(
 
 **Example:**
 ```python
-@cache_if(lambda result: result['status'] == 'success', ttl_hours=1)
+@cache_if(lambda result: result['status'] == 'success', ttl_seconds=3600)  # 1 hour
 def api_call(endpoint):
     response = requests.get(endpoint)
     return response.json()
@@ -1138,7 +1133,7 @@ Async version of the cached decorator.
 
 **Example:**
 ```python
-@cache_async(ttl_hours=2)
+@cache_async(ttl_seconds=7200)  # 2 hours
 async def fetch_data(url: str):
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as response:
@@ -1159,7 +1154,7 @@ class CacheConfig:
     compression: CompressionConfig = field(default_factory=CompressionConfig)
     serialization: SerializationConfig = field(default_factory=SerializationConfig)
     handlers: HandlerConfig = field(default_factory=HandlerConfig)
-    default_ttl_hours: Optional[float] = None
+    default_ttl_seconds: Optional[float] = None
 ```
 
 ### `CacheStorageConfig`
@@ -1342,13 +1337,13 @@ from cacheness import set_default_cache, CacheConfig
 # Configure default cache for all @cached decorators
 config = CacheConfig(
     storage=CacheStorageConfig(cache_dir="./project_cache"),
-    default_ttl_hours=24
+    default_ttl_seconds=86400  # 24 hours
 )
 
 set_default_cache(cacheness(config))
 
 # Now all @cached decorators use this configuration
-@cached(ttl_hours=2)
+@cached(ttl_seconds=7200)  # 2 hours
 def my_function():
     return expensive_computation()
 ```
@@ -1359,7 +1354,7 @@ The following environment variables can configure cacheness:
 
 - `CACHENESS_DIR`: Default cache directory
 - `CACHENESS_MAX_SIZE_MB`: Default maximum cache size in MB
-- `CACHENESS_DEFAULT_TTL_HOURS`: Default TTL in hours
+- `CACHENESS_DEFAULT_TTL_SECONDS`: Default TTL in seconds
 - `CACHENESS_BACKEND`: Default metadata backend ("json" or "sqlite")
 - `CACHENESS_COMPRESSION_CODEC`: Default compression codec
 - `CACHENESS_COMPRESSION_LEVEL`: Default compression level
@@ -1368,7 +1363,7 @@ The following environment variables can configure cacheness:
 ```bash
 export CACHENESS_DIR="/fast_ssd/cache"
 export CACHENESS_MAX_SIZE_MB="20000"
-export CACHENESS_DEFAULT_TTL_HOURS="168"  # 1 week
+export CACHENESS_DEFAULT_TTL_SECONDS="604800"  # 1 week
 export CACHENESS_BACKEND="sqlite"
 ```
 

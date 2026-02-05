@@ -533,15 +533,16 @@ class PostgresBackend(MetadataBackend):
                     logger.error(f"Failed to remove entry {cache_key}: {e}")
                     raise
     
-    def update_blob_data(self, cache_key: str, new_data: Any, handler, config) -> bool:
+    def update_entry_metadata(self, cache_key: str, updates: Dict[str, Any]) -> bool:
         """
-        Update blob data at existing cache_key without changing the key.
+        Update metadata fields for an existing cache entry.
+        
+        Only updates metadata — blob I/O is handled by UnifiedCache.update_data().
         
         Args:
             cache_key: The unique identifier for the cache entry to update
-            new_data: New data to store
-            handler: Handler instance for serialization
-            config: CacheConfig instance
+            updates: Dict of metadata fields to update (file_size, file_hash,
+                    actual_path, data_type, storage_format, serializer, etc.)
             
         Returns:
             bool: True if entry was updated, False if entry doesn't exist
@@ -557,38 +558,30 @@ class PostgresBackend(MetadataBackend):
                     if not entry:
                         return False
                     
-                    # Get cache file path from metadata
-                    from pathlib import Path
-                    cache_dir = Path(config.storage.cache_dir)
-                    prefix = entry.prefix or ""
-                    if prefix:
-                        base_file_path = cache_dir / f"{prefix}_{cache_key}"
-                    else:
-                        base_file_path = cache_dir / cache_key
-                    
-                    # Use handler to store the new data
-                    result = handler.put(new_data, base_file_path, config)
-                    
                     # Update derived metadata fields
                     now = datetime.now(timezone.utc)
                     entry.created_at = now  # Reset timestamp
-                    entry.file_size = result.get("file_size", 0)
-                    entry.file_hash = result.get("file_hash") or result.get("content_hash")
-                    entry.actual_path = str(result.get("actual_path", base_file_path))
                     
-                    # Update data_type and storage_format (might change with data type)
-                    if hasattr(handler, "data_type"):
-                        entry.data_type = handler.data_type
-                    if result.get("storage_format"):
-                        entry.storage_format = result["storage_format"]
-                    if hasattr(handler, "serializer"):
-                        entry.serializer = handler.serializer
-                    if result.get("compression_codec"):
-                        entry.compression_codec = result["compression_codec"]
-                    if result.get("object_type"):
-                        entry.object_type = result["object_type"]
-                    if result.get("s3_etag"):
-                        entry.s3_etag = result["s3_etag"]
+                    if "file_size" in updates:
+                        entry.file_size = updates["file_size"]
+                    if "file_hash" in updates:
+                        entry.file_hash = updates["file_hash"]
+                    elif "content_hash" in updates:
+                        entry.file_hash = updates["content_hash"]
+                    if "actual_path" in updates:
+                        entry.actual_path = str(updates["actual_path"])
+                    if "data_type" in updates:
+                        entry.data_type = updates["data_type"]
+                    if "storage_format" in updates:
+                        entry.storage_format = updates["storage_format"]
+                    if "serializer" in updates:
+                        entry.serializer = updates["serializer"]
+                    if "compression_codec" in updates:
+                        entry.compression_codec = updates["compression_codec"]
+                    if "object_type" in updates:
+                        entry.object_type = updates["object_type"]
+                    if "s3_etag" in updates:
+                        entry.s3_etag = updates["s3_etag"]
                     
                     session.commit()
                     return True
@@ -704,7 +697,7 @@ class PostgresBackend(MetadataBackend):
                         )
                         
                         session.commit()
-                        logger.info(f"Cleaned up {count} expired entries (TTL: {ttl_hours}h)")
+                        logger.info(f"Cleaned up {count} expired entries (TTL: {ttl_seconds}s)")
                     
                     return count
                     

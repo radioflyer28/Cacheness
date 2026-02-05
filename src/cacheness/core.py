@@ -107,61 +107,55 @@ class UnifiedCache:
         )
 
     def _init_metadata_backend(self, metadata_backend):
-        """Initialize the metadata backend."""
-        # Import here to avoid circular imports
+        """Initialize the metadata backend based on config or provided instance."""
         from .metadata import create_metadata_backend, SQLALCHEMY_AVAILABLE
         
-        actual_backend = "unknown"  # Default value
+        # User-provided backend takes priority
         if metadata_backend is not None:
             self.metadata_backend = metadata_backend
-            actual_backend = "custom"
-        else:
-            pass  # Will be determined below
-
-        # Determine backend based on config and availability
-        if self.config.metadata.metadata_backend == "json":
-            # Explicitly requested JSON
-            self.metadata_backend = create_metadata_backend(
-                "json", 
-                metadata_file=self.cache_dir / "cache_metadata.json",
-                config=self.config.metadata
+            self.actual_backend = "custom"
+            return
+        
+        requested = self.config.metadata.metadata_backend
+        
+        # Backends that require SQLAlchemy
+        _SQLALCHEMY_BACKENDS = {"sqlite", "sqlite_memory", "postgresql"}
+        
+        if requested in _SQLALCHEMY_BACKENDS and not SQLALCHEMY_AVAILABLE:
+            raise ImportError(
+                f"SQLAlchemy is required for {requested} backend but is not available. "
+                f"Install with: uv add sqlalchemy"
             )
-            actual_backend = "json"
-        elif self.config.metadata.metadata_backend == "memory":
-            # Explicitly requested in-memory backend
+        
+        if requested == "json":
+            self.metadata_backend = create_metadata_backend(
+                "json",
+                metadata_file=self.cache_dir / "cache_metadata.json",
+                config=self.config.metadata,
+            )
+            self.actual_backend = "json"
+            
+        elif requested == "memory":
             self.metadata_backend = create_metadata_backend("memory", config=self.config.metadata)
-            actual_backend = "memory"
+            self.actual_backend = "memory"
             logger.info("⚡ Using ultra-fast in-memory backend (no persistence)")
-        elif self.config.metadata.metadata_backend == "sqlite":
-            # Explicitly requested SQLite
-            if not SQLALCHEMY_AVAILABLE:
-                raise ImportError(
-                    "SQLAlchemy is required for SQLite backend but is not available. Install with: uv add sqlalchemy"
-                )
+            
+        elif requested == "sqlite":
             self.metadata_backend = create_metadata_backend(
                 "sqlite",
                 db_file=str(self.cache_dir / self.config.metadata.sqlite_db_file),
-                config=self.config.metadata
+                config=self.config.metadata,
             )
-            actual_backend = "sqlite"
-        elif self.config.metadata.metadata_backend == "sqlite_memory":
-            # Explicitly requested in-memory SQLite
-            if not SQLALCHEMY_AVAILABLE:
-                raise ImportError(
-                    "SQLAlchemy is required for in-memory SQLite backend but is not available. Install with: uv add sqlalchemy"
-                )
+            self.actual_backend = "sqlite"
+            
+        elif requested == "sqlite_memory":
             self.metadata_backend = create_metadata_backend("sqlite_memory", config=self.config.metadata)
-            actual_backend = "sqlite_memory"
+            self.actual_backend = "sqlite_memory"
             logger.info("⚡ Using in-memory SQLite backend (no persistence)")
-        elif self.config.metadata.metadata_backend == "postgresql":
-            # Explicitly requested PostgreSQL
-            if not SQLALCHEMY_AVAILABLE:
-                raise ImportError(
-                    "SQLAlchemy is required for PostgreSQL backend but is not available. Install with: uv add sqlalchemy"
-                )
-            # Get connection URL from options or raise error
-            backend_options = self.config.metadata.metadata_backend_options or {}
-            connection_url = backend_options.get("connection_url")
+            
+        elif requested == "postgresql":
+            opts = self.config.metadata.metadata_backend_options or {}
+            connection_url = opts.get("connection_url")
             if not connection_url:
                 raise ValueError(
                     "PostgreSQL backend requires 'connection_url' in metadata_backend_options"
@@ -169,47 +163,43 @@ class UnifiedCache:
             self.metadata_backend = create_metadata_backend(
                 "postgresql",
                 connection_url=connection_url,
-                pool_size=backend_options.get("pool_size", 10),
-                max_overflow=backend_options.get("max_overflow", 20),
-                pool_pre_ping=backend_options.get("pool_pre_ping", True),
-                pool_recycle=backend_options.get("pool_recycle", 3600),
-                echo=backend_options.get("echo", False),
-                table_prefix=backend_options.get("table_prefix", ""),
-                config=self.config.metadata
+                pool_size=opts.get("pool_size", 10),
+                max_overflow=opts.get("max_overflow", 20),
+                pool_pre_ping=opts.get("pool_pre_ping", True),
+                pool_recycle=opts.get("pool_recycle", 3600),
+                echo=opts.get("echo", False),
+                table_prefix=opts.get("table_prefix", ""),
+                config=self.config.metadata,
             )
-            actual_backend = "postgresql"
+            self.actual_backend = "postgresql"
+            
         else:
-            # Auto mode: prefer SQLite, fallback to JSON
-            if SQLALCHEMY_AVAILABLE:
-                try:
-                    self.metadata_backend = create_metadata_backend(
-                        "sqlite",
-                        db_file=str(
-                            self.cache_dir / self.config.metadata.sqlite_db_file
-                        ),
-                        config=self.config.metadata
-                    )
-                    actual_backend = "sqlite"
-                    logger.info(
-                        "🗄️  Using SQLite backend (auto-selected for better performance)"
-                    )
-                except Exception as e:
-                    logger.warning(f"SQLite backend failed, falling back to JSON: {e}")
-                    self.metadata_backend = create_metadata_backend(
-                        "json", 
-                        metadata_file=self.cache_dir / "cache_metadata.json",
-                        config=self.config.metadata
-                    )
-                    actual_backend = "json"
-            else:
-                logger.info("📝 SQLModel not available, using JSON backend")
+            # Auto mode: prefer SQLite if available, fallback to JSON
+            self._init_auto_backend(create_metadata_backend, SQLALCHEMY_AVAILABLE)
+    
+    def _init_auto_backend(self, create_metadata_backend, sqlalchemy_available: bool):
+        """Auto-select the best available metadata backend."""
+        if sqlalchemy_available:
+            try:
                 self.metadata_backend = create_metadata_backend(
-                    "json", 
-                    metadata_file=self.cache_dir / "cache_metadata.json",
-                    config=self.config.metadata
+                    "sqlite",
+                    db_file=str(self.cache_dir / self.config.metadata.sqlite_db_file),
+                    config=self.config.metadata,
                 )
-                actual_backend = "json"  # Store the actual backend used for reporting
-        self.actual_backend = actual_backend
+                self.actual_backend = "sqlite"
+                logger.info("🗄️  Using SQLite backend (auto-selected for better performance)")
+                return
+            except Exception as e:
+                logger.warning(f"SQLite backend failed, falling back to JSON: {e}")
+        else:
+            logger.info("📝 SQLModel not available, using JSON backend")
+        
+        self.metadata_backend = create_metadata_backend(
+            "json",
+            metadata_file=self.cache_dir / "cache_metadata.json",
+            config=self.config.metadata,
+        )
+        self.actual_backend = "json"
 
     def _supports_custom_metadata(self) -> bool:
         """Check if custom metadata is supported (requires SQLite or PostgreSQL backend with SQLAlchemy)."""
@@ -672,25 +662,23 @@ class UnifiedCache:
 
         return self.cache_dir / filename_base
 
-    def _is_expired(self, cache_key: str, ttl_hours=_DEFAULT_TTL) -> bool:
+    def _is_expired(self, cache_key: str, ttl_seconds=_DEFAULT_TTL) -> bool:
         """Check if cache entry is expired.
         
         Args:
             cache_key: The cache key to check
-            ttl_hours: DEPRECATED - TTL in hours (for backward compatibility)
+            ttl_seconds: TTL in seconds. None means never expire.
+                Use _DEFAULT_TTL sentinel to fall back to config default.
         """
         entry = self.metadata_backend.get_entry(cache_key)
         if not entry:
             return True
 
-        # Handle infinite TTL: if ttl_hours is explicitly None, never expire
-        if ttl_hours is None:
+        # Handle infinite TTL: if ttl_seconds is explicitly None, never expire
+        if ttl_seconds is None:
             return False  # Never expires
-        elif ttl_hours is _DEFAULT_TTL:
+        elif ttl_seconds is _DEFAULT_TTL:
             ttl_seconds = self.config.metadata.default_ttl_seconds
-        else:
-            # Convert hours to seconds for backward compatibility
-            ttl_seconds = ttl_hours * 3600
 
         # Type guard to ensure ttl is numeric
         assert isinstance(ttl_seconds, (int, float)), f"TTL must be numeric, got {type(ttl_seconds)}"
@@ -936,7 +924,7 @@ class UnifiedCache:
     def get(
         self,
         cache_key: Optional[str] = None,
-        ttl_hours: Optional[int] = None,
+        ttl_seconds: Optional[float] = None,
         prefix: str = "",
         **kwargs,
     ) -> Optional[Any]:
@@ -945,7 +933,7 @@ class UnifiedCache:
 
         Args:
             cache_key: Direct cache key (if provided, **kwargs are ignored)
-            ttl_hours: Custom TTL (overrides default)
+            ttl_seconds: Custom TTL in seconds (overrides default). None = never expire.
             prefix: Descriptive prefix prepended to the cache filename
             **kwargs: Parameters identifying the cached data (used if cache_key is None)
 
@@ -957,7 +945,7 @@ class UnifiedCache:
 
         # Check if entry exists and is not expired
         entry = self.metadata_backend.get_entry(cache_key)
-        if not entry or self._is_expired(cache_key, ttl_hours):
+        if not entry or self._is_expired(cache_key, ttl_seconds):
             self.metadata_backend.increment_misses()
             return None
 
@@ -1148,20 +1136,46 @@ class UnifiedCache:
         if cache_key is None:
             cache_key = self._create_cache_key(kwargs)
         
+        # Check if entry exists before doing any I/O
+        existing_entry = self.metadata_backend.get_entry(cache_key)
+        if not existing_entry:
+            logger.warning(f"⚠️ Cache entry not found for update: {cache_key[:16]}...")
+            return False
+        
         # Get appropriate handler for the data type
         handler = self.handlers.get_handler(data)
         
-        # Delegate to backend (storage layer)
-        success = self.metadata_backend.update_blob_data(
-            cache_key=cache_key,
-            new_data=data,
-            handler=handler,
-            config=self.config
-        )
+        # Reconstruct file path from existing metadata (blob I/O belongs here, not in metadata layer)
+        prefix = existing_entry.get("prefix", "")
+        base_file_path = self._get_cache_file_path(cache_key, prefix)
         
-        if not success:
-            logger.warning(f"⚠️ Cache entry not found for update: {cache_key[:16]}...")
-            return False
+        # Perform blob I/O: write new data to disk
+        result = handler.put(data, base_file_path, self.config)
+        
+        # Build metadata updates dict from handler result
+        updates = {
+            "file_size": result.get("file_size", 0),
+            "content_hash": result.get("content_hash"),
+            "file_hash": result.get("file_hash"),
+            "actual_path": str(result.get("actual_path", base_file_path)),
+            "storage_format": result.get("storage_format"),
+        }
+        if hasattr(handler, "data_type"):
+            updates["data_type"] = handler.data_type
+        if hasattr(handler, "serializer"):
+            updates["serializer"] = handler.serializer
+        if result.get("compression_codec"):
+            updates["compression_codec"] = result["compression_codec"]
+        if result.get("object_type"):
+            updates["object_type"] = result["object_type"]
+        if result.get("s3_etag"):
+            updates["s3_etag"] = result["s3_etag"]
+        
+        # Delegate metadata-only update to backend (no I/O in metadata layer)
+        success = self.metadata_backend.update_entry_metadata(
+            cache_key=cache_key,
+            updates=updates
+        )
         
         # Re-sign the entry if signing is enabled (security: signature must match updated data)
         if self.signer:
@@ -1204,31 +1218,26 @@ class UnifiedCache:
     def touch(
         self,
         cache_key: Optional[str] = None,
-        ttl_seconds: Optional[float] = None,
         **kwargs
     ) -> bool:
         """
         Update entry timestamp to extend TTL without reloading data.
         
-        This "touches" the cache entry to reset its expiration time, useful for
-        keeping frequently accessed data alive longer or preventing expiration
-        of long-running computations.
+        This "touches" the cache entry to reset its creation timestamp to now,
+        effectively extending the entry's lifetime by the full configured TTL.
+        Useful for keeping frequently accessed data alive or preventing
+        expiration of long-running computations.
         
         Args:
             cache_key: Direct cache key (if provided, **kwargs are ignored)
-            ttl_seconds: New TTL in seconds (uses default if None)
             **kwargs: Parameters identifying the cached data (used if cache_key is None)
         
         Returns:
             bool: True if entry exists and was touched, False if entry doesn't exist
             
         Example:
-            # Reset TTL to default
+            # Reset TTL to full default duration from now
             cache.touch(experiment="exp_001")
-            
-            # Extend TTL to 48 hours
-            from cacheness.ttl_helpers import hours
-            cache.touch(experiment="exp_001", ttl_seconds=hours(48))
             
             # Keep long-running computation alive
             for i in range(100):
@@ -1238,9 +1247,10 @@ class UnifiedCache:
         
         Note:
             - This is a cache-layer operation (TTL-aware)
-            - Storage backend updates timestamp, cache layer interprets it
-            - Does not reload or re-serialize data
-            - Much faster than get() + put()
+            - Resets ``created_at`` to now, giving a full config-TTL extension
+            - Does not reload or re-serialize data — much faster than get() + put()
+            - TTL duration is always determined by the global config
+              (``CacheMetadataConfig.default_ttl_seconds``)
         """
         if cache_key is None:
             cache_key = self._create_cache_key(kwargs)
@@ -1313,7 +1323,7 @@ class UnifiedCache:
             
             # Delete all DataFrames
             deleted = cache.delete_where(
-                lambda e: e.get("data_type") == "pandas_dataframe"
+                lambda e: e.get("data_type") == "dataframe"
             )
         """
         entries = self.list_entries()

@@ -106,7 +106,7 @@ def demonstrate_stock_cache():
     stock_cache = SqlCache.for_timeseries(
         "stock_cache.db",  # DuckDB automatically selected for time-series
         data_fetcher=fetch_stock_data,
-        ttl_hours=24,  # Refresh daily
+        ttl_seconds=86400,  # 24 hours - Refresh daily
         
         # Define schema inline - no table definition needed
         symbol=String(10),

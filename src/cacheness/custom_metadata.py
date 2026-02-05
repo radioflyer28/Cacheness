@@ -519,20 +519,14 @@ def export_custom_metadata_schema(
         # Generate DDL for the table
         table_ddl = str(CreateTable(model_class.__table__).compile(engine))
 
-        # Include link table DDL as well
-        link_table_ddl = str(CreateTable(CacheMetadataLink.__table__).compile(engine))
-
         full_ddl = f"""-- Custom Metadata Schema: {schema_name}
 -- Model: {model_class.__name__}
 -- Table: {model_class.__tablename__}
 
--- Main metadata table
+-- Metadata table (direct FK to cache_entries)
 {table_ddl};
 
--- Link table (shared across all schemas)
-{link_table_ddl};
-
--- Indexes and constraints are included in the table definitions above
+-- Indexes and constraints are included in the table definition above
 """
 
         if output_file:

@@ -15,7 +15,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 
 # Simple decorator-based caching for data processing
-@cached.for_api(ttl_hours=4)  # Optimized for API calls
+@cached.for_api(ttl_seconds=14400)  # 4 hours - Optimized for API calls
 def get_stock_data(symbol, days=30):
     """Simulate fetching stock data."""
     print(f"📈 Fetching {symbol} data for {days} days...")
@@ -28,7 +28,7 @@ def get_stock_data(symbol, days=30):
         'price': [100 + i for i in range(days)]
     })
 
-@cached.for_table(ttl_hours=1)  # Optimized for tabular data
+@cached.for_table(ttl_seconds=3600)  # 1 hour - Optimized for tabular data
 def expensive_calculation(data, multiplier=1.5):
     """Simulate expensive data processing."""
     print("🔢 Running expensive calculation...")

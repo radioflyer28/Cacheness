@@ -44,7 +44,7 @@ def main():
     cache = SqlCache.for_timeseries(
         "demo.db",
         data_fetcher=fetch_stock_data,
-        ttl_hours=2,
+        ttl_seconds=7200,  # 2 hours
         price=Float,      # Additional columns
         volume=Integer
     )

@@ -7,7 +7,7 @@ This document tracks the architectural evolution and future development roadmap 
 **Quick Links:**
 - [Phase 1: Storage Layer Separation](#phase-1-storage-layer-separation-low-risk) (✅ Complete)
 - [Phase 2: Extensibility & Plugins](#phase-2-plugin-architecture--extensibility-medium-risk) (🚧 In Planning)
-- [Phase 3: Management Operations](#phase-3-management-operations-api-medium-risk) (📋 Ready to Implement)
+- [Phase 3: Management Operations](#phase-3-management-operations-api-medium-risk) (� Sprints 1-3 Complete)
 - [Phase 2 Implementation Roadmap](#recommendations-for-phase-2-implementation-order) (Start here for what's next!)
 - [Bug Tracking](#-bug-tracking) (Historical - most fixed)
 - [Feasibility Review](#phase-2-feasibility-review) (Technical analysis)
@@ -16,7 +16,7 @@ This document tracks the architectural evolution and future development roadmap 
 
 - **Completed Work**: Phase 1 storage layer refactoring (✅ Complete Jan 2026)
 - **Active Planning**: Phase 2 extensibility features (handlers, metadata backends, blob backends) - 9-12 month effort
-- **Ready to Implement**: Phase 3 management operations (update, touch, bulk delete, batch ops) - 3-6 month effort
+- **In Progress**: Phase 3 management operations (update, touch, bulk delete, batch ops) — Sprints 1-3 complete
 - **Bug Tracking**: Issues identified during code review (most ✅ Fixed)
 - **Design Decisions**: Manual registration over auto-discovery plugins
 
@@ -952,7 +952,7 @@ Phase 2 (Extensibility & Plugin Architecture) status:
 
 **Goal:** Complete missing CRUD and management operations in storage backends and cache layer.
 
-**Status:** 📋 Ready to Implement (February 2026)
+**Status:** � Sprints 1-3 Complete (February 2026)
 
 **Effort Estimate:** 3-6 months
 
@@ -1767,21 +1767,19 @@ cloud = ["boto3>=1.26.0", "psycopg[binary]>=3.1"]  # S3 + PostgreSQL
 
 **Purpose:** Standardize TTL units throughout codebase for consistency and clarity.
 
-**Current State:** Mixed usage (ttl_hours, memory_cache_ttl_seconds)
+**Current State:** ✅ Completed — codebase now consistently uses `ttl_seconds` throughout. The deprecated `ttl_hours` parameter has been fully removed.
 
-**Recommendation:** **Seconds** (most granular, standard in caching systems like Redis)
-
-**Alternative:** Keep hours for human-friendly config, convert internally
+**Resolution:** **Seconds** was chosen as the standard unit (most granular, consistent with caching systems like Redis).
 
 **Implementation Tasks:**
 
-- [ ] **Decision needed**: Choose seconds, minutes, or hours as standard unit
-- [ ] Audit all TTL-related code: core.py, config.py, backends, sql_cache.py
-- [ ] Update configuration parameters (breaking change for users)
-- [ ] Update all documentation to reflect new TTL units
-- [ ] Update all tests to use new TTL parameters
+- [x] **Decision made**: Seconds chosen as standard unit
+- [x] Audit all TTL-related code: core.py, config.py, backends, sql_cache.py
+- [x] Update configuration parameters (breaking change for users)
+- [x] Update all documentation to reflect new TTL units
+- [x] Update all tests to use new TTL parameters
 - [ ] Add migration guide for users upgrading
-- [ ] Consider adding helper methods: ttl_hours(), ttl_minutes(), ttl_seconds()
+- [ ] Consider adding helper methods: `ttl_hours()`, `ttl_minutes()` convenience converters
 
 ---
 

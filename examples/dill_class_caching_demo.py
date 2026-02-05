@@ -326,7 +326,7 @@ def demonstrate_class_caching():
     config = CacheConfig(
         cache_dir="./cache_dill_demo",
         enable_dill_fallback=True,  # ⚠️ Security risk in production
-        default_ttl_hours=48
+        default_ttl_seconds=172800  # 48 hours
     )
     cache = cacheness(config)
     

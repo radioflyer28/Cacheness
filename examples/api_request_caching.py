@@ -12,7 +12,7 @@ from cacheness import cached, cacheness, CacheConfig
 # Initialize cache for API responses
 config = CacheConfig(
     cache_dir="./api_cache",
-    default_ttl_hours=24,  # Cache API responses for 24 hours
+    default_ttl_seconds=86400,  # 24 hours - Cache API responses
     metadata_backend="sqlite"
 )
 api_cache = cacheness(config)
@@ -25,7 +25,7 @@ class WeatherAPI:
         self.api_key = api_key
         self.base_url = "https://api.weatherapi.com/v1"
     
-    @cached(cache_instance=api_cache, ttl_hours=6, key_prefix="weather")
+    @cached(cache_instance=api_cache, ttl_seconds=21600, key_prefix="weather")  # 6 hours
     def get_current_weather(self, city, units="metric"):
         """Get current weather with 6-hour caching."""
         url = f"{self.base_url}/current.json"
@@ -40,7 +40,7 @@ class WeatherAPI:
         response.raise_for_status()
         return response.json()
     
-    @cached(cache_instance=api_cache, ttl_hours=168, key_prefix="forecast")  # 1 week
+    @cached(cache_instance=api_cache, ttl_seconds=604800, key_prefix="forecast")  # 168 hours - 1 week
     def get_7_day_forecast(self, city, include_hourly=False):
         """Get 7-day forecast with weekly caching."""
         url = f"{self.base_url}/forecast.json"
@@ -56,7 +56,7 @@ class WeatherAPI:
         response.raise_for_status()
         return response.json()
     
-    @cached(cache_instance=api_cache, ttl_hours=8760, key_prefix="historical")  # 1 year
+    @cached(cache_instance=api_cache, ttl_seconds=31536000, key_prefix="historical")  # 8760 hours - 1 year
     def get_historical_weather(self, city, date):
         """Get historical weather data with long-term caching."""
         url = f"{self.base_url}/history.json"

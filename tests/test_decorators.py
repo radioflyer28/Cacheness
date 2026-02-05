@@ -320,7 +320,7 @@ class TestMemoizeDecorator:
         result = permanent_func(10)
         assert result == "permanent_10"
 
-        # The function should have ttl_hours=None (permanent)
+        # The function should have ttl_seconds=None (permanent)
         # This is implementation detail, but we can check via cache_info
         info = permanent_func.cache_info()  # type: ignore
         assert info["ttl_seconds"] is None
