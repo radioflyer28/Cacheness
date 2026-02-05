@@ -538,252 +538,6 @@ class CachedMetadataBackend(MetadataBackend):
             self.backend.close()
 
 
-class InMemoryBackend(MetadataBackend):
-    """Ultra-fast in-memory metadata backend optimized for maximum PUT/GET performance.
-    
-    Uses a simple unified entry structure for minimal overhead:
-    - Single entries dict with complete entry data per key
-    - Entry structure matches SQLite backend schema at value level
-    - No I/O operations for maximum speed
-    - Thread-safe with minimal locking overhead
-    
-    Perfect for:
-    - High-frequency temporary caching
-    - Development and testing 
-    - Scenarios where persistence is not needed
-    - Maximum performance applications
-    """
-    
-    def __init__(self):
-        """Initialize in-memory backend with simple unified entry structure."""
-        self._lock = threading.RLock()  # Reentrant lock for thread safety
-        
-        # Simple unified dict: cache_key -> complete_entry
-        # Entry structure matches SQLite schema at the entry level
-        self._entries = {}
-        
-        # Simple statistics counters
-        self._cache_hits = 0
-        self._cache_misses = 0
-    
-    def get_entry(self, cache_key: str) -> Optional[Dict[str, Any]]:
-        """Get specific cache entry metadata with O(1) lookup (simple unified entry)."""
-        with self._lock:
-            return self._entries.get(cache_key)
-    
-    def put_entry(self, cache_key: str, entry_data: Dict[str, Any]):
-        """Store cache entry metadata with O(1) operations (simple unified entry)."""
-        with self._lock:
-            # Create complete entry structure matching SQLite schema at entry level
-            now = datetime.now(timezone.utc)
-            
-            # Handle timestamps
-            created_at = entry_data.get("created_at")
-            if isinstance(created_at, str):
-                try:
-                    created_at = datetime.fromisoformat(created_at).isoformat()
-                except ValueError:
-                    created_at = now.isoformat()
-            elif isinstance(created_at, datetime):
-                created_at = created_at.isoformat()
-            else:
-                created_at = now.isoformat()
-            
-            accessed_at = entry_data.get("accessed_at")
-            if isinstance(accessed_at, str):
-                try:
-                    accessed_at = datetime.fromisoformat(accessed_at).isoformat()
-                except ValueError:
-                    accessed_at = now.isoformat()
-            elif isinstance(accessed_at, datetime):
-                accessed_at = accessed_at.isoformat()
-            else:
-                accessed_at = now.isoformat()
-            
-            # Store complete entry structure matching SQLite schema
-            entry = {
-                "description": entry_data.get("description", ""),
-                "data_type": entry_data.get("data_type", "unknown"),
-                "prefix": entry_data.get("prefix", ""),
-                "created_at": created_at,
-                "accessed_at": accessed_at,
-                "file_size": entry_data.get("file_size", 0),
-                "metadata": entry_data.get("metadata", {}).copy(),
-            }
-            
-            self._entries[cache_key] = entry
-            
-    
-    def remove_entry(self, cache_key: str) -> bool:
-        """Remove cache entry metadata with O(1) operations (simple unified entry)."""
-        with self._lock:
-            return self._entries.pop(cache_key, None) is not None
-    
-    def update_entry_metadata(self, cache_key: str, updates: Dict[str, Any]) -> bool:
-        """
-        Update metadata fields for an existing cache entry.
-        
-        Only updates metadata — blob I/O is handled by UnifiedCache.update_data().
-        
-        Args:
-            cache_key: The unique identifier for the cache entry to update
-            updates: Dict of metadata fields to update (file_size, file_hash, 
-                    actual_path, data_type, storage_format, serializer, etc.)
-            
-        Returns:
-            bool: True if entry was updated, False if entry doesn't exist
-        """
-        with self._lock:
-            entry = self._entries.get(cache_key)
-            if not entry:
-                return False
-            
-            # Update derived metadata (file_size, content_hash, created_at)
-            now = datetime.now(timezone.utc)
-            entry["created_at"] = now.isoformat()  # Reset timestamp
-            
-            if "file_size" in updates:
-                entry["file_size"] = updates["file_size"]
-            if "data_type" in updates:
-                entry["data_type"] = updates["data_type"]
-            if "storage_format" in updates:
-                entry["storage_format"] = updates.get("storage_format", entry.get("storage_format"))
-            if "serializer" in updates:
-                entry["serializer"] = updates["serializer"]
-            
-            # Update metadata dict with new values
-            metadata = entry.get("metadata", {})
-            for key in ("file_size", "content_hash", "file_hash", "actual_path", "storage_format", "serializer"):
-                if key in updates:
-                    metadata[key] = updates[key]
-            entry["metadata"] = metadata
-            
-            return True
-    
-    def list_entries(self) -> List[Dict[str, Any]]:
-        """List all cache entries - pure in-memory, no caching needed (simple unified entries)."""
-        with self._lock:
-            entries = []
-            for cache_key, entry in self._entries.items():
-                # Simple direct access to complete entry structure
-                list_entry = {
-                    "cache_key": cache_key,
-                    "data_type": entry.get("data_type", "unknown"),
-                    "description": entry.get("description", ""),
-                    "metadata": entry.get("metadata", {}),
-                    "created": entry.get("created_at"),
-                    "last_accessed": entry.get("accessed_at"),
-                    "size_mb": round(entry.get("file_size", 0) / (1024 * 1024), 3),
-                }
-                entries.append(list_entry)
-            
-            # Sort by creation time (newest first)
-            entries.sort(key=lambda x: x["created"] or "", reverse=True)
-            return entries
-    
-    def get_stats(self) -> Dict[str, Any]:
-        """Get cache statistics (simple entries-based counting)."""
-        with self._lock:
-            entries = self._entries
-            total_entries = len(entries)
-            
-            # Calculate total size
-            total_size_mb = sum(entry.get("file_size", 0) for entry in entries.values()) / (1024 * 1024)
-            
-            # Count by data type
-            dataframe_count = sum(
-                1 for entry in entries.values()
-                if entry.get("data_type") == "dataframe"
-            )
-            array_count = sum(
-                1 for entry in entries.values()
-                if entry.get("data_type") == "array"
-            )
-            
-            # Cache hit rate
-            hits = self._cache_hits
-            misses = self._cache_misses
-            hit_rate = hits / (hits + misses) if (hits + misses) > 0 else 0.0
-            
-            return {
-                "total_entries": total_entries,
-                "dataframe_entries": dataframe_count,
-                "array_entries": array_count,
-                "total_size_mb": round(total_size_mb, 2),
-                "cache_hits": hits,
-                "cache_misses": misses,
-                "hit_rate": round(hit_rate, 3),
-            }
-    
-    def update_access_time(self, cache_key: str):
-        """Update last access time (simple unified entry structure)."""
-        with self._lock:
-            entry = self._entries.get(cache_key)
-            if entry is not None:
-                entry['accessed_at'] = datetime.now(timezone.utc).isoformat()
-    
-    def increment_hits(self):
-        """Increment cache hits counter."""
-        with self._lock:
-            self._cache_hits += 1
-    
-    def increment_misses(self):
-        """Increment cache misses counter."""
-        with self._lock:
-            self._cache_misses += 1
-    
-    def cleanup_expired(self, ttl_seconds: float) -> int:
-        """Remove expired entries (simple entries structure)."""
-        if ttl_seconds <= 0:
-            return 0
-            
-        with self._lock:
-            cutoff_time = datetime.now(timezone.utc) - timedelta(seconds=ttl_seconds)
-            expired_keys = []
-            
-            # Find expired keys
-            for cache_key, entry in self._entries.items():
-                created_at_str = entry.get('created_at')
-                if created_at_str:
-                    try:
-                        created_at = datetime.fromisoformat(created_at_str)
-                        if created_at < cutoff_time:
-                            expired_keys.append(cache_key)
-                    except (ValueError, TypeError):
-                        # Invalid timestamp, consider expired
-                        expired_keys.append(cache_key)
-            
-            # Remove expired entries
-            for cache_key in expired_keys:
-                self._entries.pop(cache_key, None)
-            
-            return len(expired_keys)
-    
-    def clear_all(self) -> int:
-        """Clear all entries (simple entries structure)."""
-        with self._lock:
-            count = len(self._entries)
-            self._entries.clear()
-            self._cache_hits = 0
-            self._cache_misses = 0
-            return count
-    
-    def load_metadata(self) -> Dict[str, Any]:
-        """Load complete metadata structure (in-memory backend doesn't persist data)."""
-        # In-memory backend doesn't persist - return empty dict
-        return {}
-    
-    def save_metadata(self, metadata: Dict[str, Any]):
-        """Save complete metadata structure (in-memory backend doesn't persist data)."""
-        # In-memory backend doesn't persist - no-op
-        pass
-
-    def close(self):
-        """Close and clean up resources (in-memory backend has no external resources)."""
-        # No external resources to clean up for in-memory backend
-        pass
-
-
 class JsonBackend(MetadataBackend):
     """JSON file-based metadata backend with batching support."""
 
@@ -1660,7 +1414,7 @@ def create_metadata_backend(backend_type: str = "auto", **kwargs) -> MetadataBac
     Factory function to create metadata backends with optional entry caching.
 
     Args:
-        backend_type: "auto", "memory", "sqlite", "json", "sqlite_memory", or "postgresql"
+        backend_type: "auto", "sqlite", "json", "sqlite_memory", or "postgresql"
                      "auto" prefers SQLite (file-based) if available, falls back to in-memory SQLite, then JSON
         **kwargs: Backend-specific configuration including optional 'config' for caching
 
@@ -1671,9 +1425,7 @@ def create_metadata_backend(backend_type: str = "auto", **kwargs) -> MetadataBac
     cache_config = kwargs.pop('config', None)
     
     # Create the base backend
-    if backend_type == "memory":
-        backend = InMemoryBackend()
-    elif backend_type == "json":
+    if backend_type == "json":
         metadata_file = kwargs.get("metadata_file", Path("cache_metadata.json"))
         backend = JsonBackend(metadata_file)
     elif backend_type == "sqlite":
@@ -1737,11 +1489,10 @@ def create_metadata_backend(backend_type: str = "auto", **kwargs) -> MetadataBac
             metadata_file = kwargs.get("metadata_file", Path("cache_metadata.json"))
             backend = JsonBackend(metadata_file)
     else:
-        raise ValueError(f"Unknown backend type: {backend_type}. Supported: 'auto', 'memory', 'json', 'sqlite', 'sqlite_memory', 'postgresql'")
+        raise ValueError(f"Unknown backend type: {backend_type}. Supported: 'auto', 'json', 'sqlite', 'sqlite_memory', 'postgresql'")
     
-    # Apply memory cache layer wrapper for disk-persistent backends (not memory)
+    # Apply memory cache layer wrapper for disk-persistent backends
     if (cache_config is not None and 
-        backend_type != "memory" and 
         hasattr(cache_config, 'enable_memory_cache') and 
         cache_config.enable_memory_cache):
         

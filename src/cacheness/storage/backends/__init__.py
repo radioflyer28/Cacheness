@@ -7,7 +7,6 @@ Pluggable backends for storing cache metadata and blob data.
 Metadata Backends (Phase 2.2):
 - JsonBackend: Simple JSON file storage (no dependencies)
 - SqliteBackend: SQLite database with SQLAlchemy ORM (requires sqlalchemy)
-- MemoryBackend: In-memory storage for testing/ephemeral caches
 - PostgresBackend: PostgreSQL database for distributed caching (requires psycopg2/psycopg)
 
 Blob Storage Backends (Phase 2.3):
@@ -19,16 +18,13 @@ Registry APIs:
 - Blobs: register_blob_backend(), get_blob_backend(), list_blob_backends()
 
 Usage:
-    from cacheness.storage.backends import JsonBackend, SqliteBackend, MemoryBackend
+    from cacheness.storage.backends import JsonBackend, SqliteBackend
     
     # JSON backend
     backend = JsonBackend(Path("cache_dir"))
     
     # SQLite backend
     backend = SqliteBackend(Path("cache_dir"))
-    
-    # In-memory backend
-    backend = MemoryBackend()
     
     # PostgreSQL backend (requires psycopg2-binary or psycopg)
     from cacheness.storage.backends import PostgresBackend
@@ -75,13 +71,6 @@ try:
 except ImportError:
     _HAS_SQLITE = False
 
-# Conditionally import InMemoryBackend
-try:
-    from cacheness.metadata import InMemoryBackend
-    _HAS_MEMORY = True
-except ImportError:
-    _HAS_MEMORY = False
-
 # Conditionally import PostgresBackend
 try:
     from .postgresql_backend import PostgresBackend
@@ -110,10 +99,6 @@ def _initialize_builtin_backends():
     # SQLite (if SQLAlchemy available)
     if _HAS_SQLITE:
         _metadata_backend_registry["sqlite"] = SqliteBackend
-    
-    # In-memory
-    if _HAS_MEMORY:
-        _metadata_backend_registry["memory"] = InMemoryBackend
     
     # PostgreSQL (if psycopg2/psycopg available)
     if _HAS_POSTGRES:
@@ -250,10 +235,9 @@ def list_metadata_backends() -> list:
         ...     print(f"{info['name']}: {info['class']} (builtin={info['is_builtin']})")
         json: JsonBackend (builtin=True)
         sqlite: SqliteBackend (builtin=True)
-        memory: InMemoryBackend (builtin=True)
         postgresql: PostgresBackend (builtin=True)
     """
-    builtin_names = {"json", "sqlite", "memory", "sqlite_memory", "postgresql"}
+    builtin_names = {"json", "sqlite", "sqlite_memory", "postgresql"}
     
     result = []
     for name, backend_class in _metadata_backend_registry.items():
@@ -315,9 +299,6 @@ __all__ = [
 
 if _HAS_SQLITE:
     __all__.append("SqliteBackend")
-
-if _HAS_MEMORY:
-    __all__.append("InMemoryBackend")
 
 if _HAS_POSTGRES:
     __all__.append("PostgresBackend")

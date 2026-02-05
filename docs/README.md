@@ -19,9 +19,6 @@ Welcome to the Cacheness documentation! This high-performance caching library pr
 
 - **[Performance Guide](PERFORMANCE.md)** - Optimization strategies and benchmarks
 - **[Custom Metadata](CUSTOM_METADATA.md)** - Working with SQLite backend and custom fields
-- **[SQL Cache Reference](SQL_CACHE.md)** - Pull-through cache with intelligent gap detection
-- **[Custom Gap Detection](CUSTOM_GAP_DETECTION.md)** - Custom gap detection logic for SqlCache
-- **[Arbitrary Time Increments](ARBITRARY_TIME_INCREMENTS.md)** - User-specified time increments for SqlCache
 
 ## Specialized Handlers
 
@@ -65,14 +62,6 @@ See the [Security Guide](SECURITY.md) for detailed configuration and best practi
 - **Arrays**: NumPy with blosc2 compression
 - **Objects**: Advanced serialization with dill fallback
 - **Tensors**: Native TensorFlow tensor support
-
-### SQL Pull-Through Cache
-- **Intelligent gap detection**: Automatically identifies missing data ranges
-- **Multi-database support**: SQLite, DuckDB, PostgreSQL optimizations
-- **Custom increment specification**: Support for time-series and ordered data
-- **Flexible customization**: Function-based and subclass-based gap detection
-
-See the [SQL Cache Reference](SQL_CACHE.md) for complete details and examples.
 
 ### Core Caching Backends
 
@@ -121,19 +110,6 @@ result = cache.get(experiment="ml_training", dataset="cifar10")
 if result is None:
     result = expensive_training_function()
     cache.put(result, experiment="ml_training", dataset="cifar10")
-
-# SQL Pull-Through Cache (see SQL_CACHE.md for complete examples)
-from cacheness.sql_cache import SqlCache
-
-cache = SqlCache.with_sqlite(
-    db_path="timeseries.db",
-    table=table_definition,
-    data_adapter=api_adapter,
-    time_increment="5min"  # Optional: specify data increment
-)
-
-# Automatically fetches missing data from API
-data = cache.get_data(symbol="AAPL", start_date="2024-01-01", end_date="2024-01-31")
 
 # Secure configuration
 secure_cache = cacheness(CacheConfig(

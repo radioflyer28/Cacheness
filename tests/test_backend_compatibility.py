@@ -50,15 +50,6 @@ class TestBackendCompatibility:
         )
         assert config.metadata.metadata_backend == "auto"
     
-    def test_memory_with_memory_allowed(self):
-        """Memory metadata + Memory blobs is allowed (both ephemeral, for testing)."""
-        config = CacheConfig(
-            metadata=CacheMetadataConfig(metadata_backend="memory"),
-            blob=CacheBlobConfig(blob_backend="memory"),
-        )
-        assert config.metadata.metadata_backend == "memory"
-        assert config.blob.blob_backend == "memory"
-    
     def test_postgresql_with_s3_allowed(self):
         """PostgreSQL metadata + S3 blobs is allowed (both distributed)."""
         config = CacheConfig(
@@ -76,14 +67,6 @@ class TestBackendCompatibility:
         )
         assert config.metadata.metadata_backend == "postgresql"
         assert config.blob.blob_backend == "filesystem"
-    
-    def test_memory_with_filesystem_allowed(self):
-        """Memory metadata + Filesystem blobs is allowed (testing with persistent blobs)."""
-        config = CacheConfig(
-            metadata=CacheMetadataConfig(metadata_backend="memory"),
-            blob=CacheBlobConfig(blob_backend="filesystem"),
-        )
-        assert config.metadata.metadata_backend == "memory"
     
     # =========================================================================
     # Invalid Combinations - Local Metadata + Remote Blobs
@@ -133,23 +116,6 @@ class TestBackendCompatibility:
             )
         
         assert "Incompatible backend combination" in str(exc_info.value)
-    
-    # =========================================================================
-    # Invalid Combinations - Ephemeral Metadata + Remote Blobs
-    # =========================================================================
-    
-    def test_memory_with_s3_rejected(self):
-        """Memory metadata + S3 blobs is NOT allowed."""
-        with pytest.raises(ValueError) as exc_info:
-            CacheConfig(
-                metadata=CacheMetadataConfig(metadata_backend="memory"),
-                blob=CacheBlobConfig(blob_backend="s3"),
-            )
-        
-        assert "Incompatible backend combination" in str(exc_info.value)
-        assert "ephemeral" in str(exc_info.value).lower()
-        assert "memory" in str(exc_info.value)
-        assert "s3" in str(exc_info.value)
     
     # =========================================================================
     # Future Cloud Backends (verify compatibility logic extends)
@@ -219,9 +185,6 @@ class TestCompatibilityMatrix:
     | sqlite           | s3           | ❌      | Local metadata + remote blobs |
     | json             | filesystem   | ✅      | Both local |
     | json             | s3           | ❌      | Local metadata + remote blobs |
-    | memory           | memory       | ✅      | Both ephemeral (testing) |
-    | memory           | filesystem   | ✅      | Ephemeral metadata, local blobs |
-    | memory           | s3           | ❌      | Ephemeral + persistent mismatch |
     | auto             | filesystem   | ✅      | Auto is local |
     | auto             | s3           | ❌      | Auto is local |
     """

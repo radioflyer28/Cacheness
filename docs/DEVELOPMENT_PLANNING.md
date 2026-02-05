@@ -33,7 +33,6 @@ This library began as a simple persistent cache solution. Over time, it evolved 
 - Blob management with compression (blosc2, lz4, zstd, gzip)
 - Type-aware serialization handlers (DataFrames, arrays, objects)
 - Security features (HMAC signing, integrity verification)
-- SQL pull-through caching with gap detection
 
 **Key Insight:** Most of the complexity lives in the **storage infrastructure**, not the caching logic itself. The actual "caching" semantics (TTL, eviction, key generation) are a thin layer on top of a sophisticated blob storage and metadata management system.
 
@@ -42,11 +41,11 @@ This library began as a simple persistent cache solution. Over time, it evolved 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                     USER-FACING APIs                             │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │
-│  │  cacheness  │  │  @cached    │  │  SqlCache               │  │
-│  │  (core.py)  │  │ (decorator) │  │  (pull-through cache)   │  │
-│  └──────┬──────┘  └──────┬──────┘  └───────────┬─────────────┘  │
-└─────────┼────────────────┼─────────────────────┼────────────────┘
+│  ┌─────────────┐  ┌─────────────┐                              │
+│  │  cacheness  │  │  @cached    │                              │
+│  │  (core.py)  │  │ (decorator) │                              │
+│  └──────┬──────┘  └──────┬──────┘                              │
+└─────────┼────────────────┼───────────────────────────────────────┘
           │                │                     │
           ▼                ▼                     ▼
 ┌─────────────────────────────────────────────────────────────────┐
@@ -80,7 +79,6 @@ This library began as a simple persistent cache solution. Over time, it evolved 
 |-------|-------|--------------|------------|
 | **Caching Semantics** | core.py (partial), decorators.py | ~400 | Low |
 | **Blob Storage** | handlers.py, compress_pickle.py, metadata.py | ~2,500 | High |
-| **SQL Pull-Through** | sql_cache.py | ~1,800 | High |
 | **Configuration** | config.py | ~550 | Medium |
 | **Security** | security.py | ~240 | Medium |
 | **Utilities** | serialization.py, file_hashing.py, etc. | ~800 | Medium |
@@ -122,12 +120,6 @@ cacheness/
 │   ├── ttl.py                 # TTL/expiration logic
 │   └── eviction.py            # Eviction policies
 │
-├── sql/                        # SQL pull-through cache
-│   ├── __init__.py
-│   ├── sql_cache.py
-│   ├── adapters.py
-│   └── gap_detection.py
-│
 └── __init__.py                 # Public API exports
 ```
 
@@ -160,7 +152,6 @@ blobcache_storage/
 cacheness/
 ├── unified_cache.py
 ├── decorators.py
-├── sql_cache.py
 └── __init__.py
 ```
 
@@ -245,11 +236,10 @@ The storage subpackage has been created with:
 
 **Key Architectural Insight:** Separate metadata storage (queryable cache index) from blob storage (actual cached data). These are orthogonal concerns that should have independent plugin systems.
 
-**Three Existing Metadata Features to Preserve:**
+**Two Existing Metadata Features to Preserve:**
 
 1. **Cache Infrastructure Metadata** - Built-in cacheness metadata (cache_key, file_hash, created_at, etc.)
 2. **Custom SQLAlchemy Metadata** - User-defined ORM models via `@custom_metadata_model` decorator (Section 2.7)
-3. **SqlCache Custom Tables** - Pull-through cache with user-defined data schemas (Section 2.8)
 
 **Status:** 🚧 In Planning
 
@@ -465,30 +455,6 @@ config = CacheConfig(
     blob_backend="s3",             # Persistent blobs
     blob_backend_options={"bucket": "test-cache"}
 )
-
-# Combination 5: SqlCache with custom metadata + shared PostgreSQL
-from cacheness.sql_cache import SqlCache
-
-cache = SqlCache(
-    db_url="postgresql://localhost/shared_db",
-    table_name="ml_experiments",        # Custom queryable metadata
-    data_fetcher=train_model,
-    
-    # User-defined columns for SQL queries
-    model_type=String(50),
-    accuracy=Float,
-    training_date=Date,
-    
-    config=CacheConfig(
-        metadata_backend="postgresql",  # Infrastructure metadata
-        metadata_backend_options={
-            "connection_url": "postgresql://localhost/shared_db",
-            "table_name": "cache_metadata"  # Different table, same DB
-        },
-        blob_backend="s3",              # Blobs in S3
-        blob_backend_options={"bucket": "ml-models"}
-    )
-)
 ```
 
 **Implementation Plan:**
@@ -623,8 +589,6 @@ if errors:
 
 Document and support non-caching storage use cases with various backend combinations.
 
-**Note:** These examples use `BlobStore` for simple key-value storage. For queryable domain-specific metadata, use `SqlCache` with custom table schemas (see section 2.6).
-
 1. **ML Model Versioning**
    ```python
    from cacheness.storage import BlobStore
@@ -711,11 +675,6 @@ Document and support non-caching storage use cases with various backend combinat
    - Enables complex SQLAlchemy queries on cache metadata
    - Currently works with SQLite backend only
    - Used by: `cacheness()` with `custom_metadata` parameter
-
-3. **SqlCache Custom Tables** (domain-specific data tables):
-   - Separate feature for pull-through caching
-   - User defines columns for cached data itself
-   - Used by: `SqlCache` class
 
 **Example - Custom SQLAlchemy Metadata (Existing Feature):**
 
@@ -853,40 +812,6 @@ cache.put(model, experiment="exp_001", custom_metadata=experiment)
   # S3: actual model blob
   ```
 
-##### 2.8 SqlCache Custom Tables Integration
-
-**Status:** 🟡 Deferred - Requires significant rework, lower priority
-
-**Assessment (January 2026):**
-
-After audit, this phase requires more substantial changes than originally scoped:
-
-1. **Current State:** SqlCache is completely standalone - it does NOT use `CacheConfig`, metadata backends, or the cacheness infrastructure. It manages its own database connections and tables directly.
-
-2. **Original Vision:** Integrate SqlCache with the metadata backend system so:
-   - Infrastructure metadata (cache keys, TTL, stats) uses metadata backends
-   - User data tables remain separate but in same database
-
-3. **Reality:** This is essentially a rewrite of SqlCache to use the cacheness infrastructure, which would:
-   - Break existing SqlCache API compatibility
-   - Add complexity for users who just want simple SQL caching
-   - Require extensive testing with all backend combinations
-
-**Recommendation:** Defer to Phase 3 or beyond. SqlCache works well standalone, and the integration doesn't add significant user value.
-
-**If pursued later, implementation would require:**
-
-- [ ] Add `CacheConfig` parameter to SqlCache constructor
-- [ ] Separate SqlCache into data layer (user tables) and metadata layer (infrastructure)
-- [ ] Use metadata backend for infrastructure metadata (cache_entries, cache_stats)
-- [ ] Keep user data tables managed by SqlCache directly
-- [ ] Ensure PostgreSQL can host both without table conflicts
-- [ ] Update docs/SQL_CACHE.md to explain separation
-- [ ] Maintain backward compatibility with existing SqlCache API
-- [ ] Add SqlCache.create_with_shared_db() helper method
-- [ ] Comprehensive testing with all backend combinations
-
-**Alternative (simpler):** Just document that SqlCache and cacheness() use separate storage systems and that's by design. Users who need integrated metadata can use the `@custom_metadata_model` feature with cacheness().
 
 ---
 
@@ -901,7 +826,6 @@ Comprehensive testing and documentation for extensibility.
 - [x] Configuration validation tests - `tests/test_config_validation.py` (659 lines)
 - [x] PostgreSQL backend tests - `tests/test_postgresql_backend.py`
 - [x] Custom metadata tests - `tests/test_custom_metadata.py`
-- [ ] ~~Create `tests/test_sqlcache_with_backends.py`~~ - Deferred with 2.8
 - [ ] Performance benchmarks for custom handlers - Nice to have, not blocking
 
 **Documentation Tasks:**
@@ -911,7 +835,6 @@ Comprehensive testing and documentation for extensibility.
 - [x] Update `docs/CUSTOM_METADATA.md` with PostgreSQL compatibility
 - [x] Backend Selection Guide already exists - `docs/BACKEND_SELECTION.md`
 - [ ] ~~Create separate CUSTOM_HANDLERS.md, CUSTOM_METADATA_BACKENDS.md, CUSTOM_BLOB_BACKENDS.md~~ - Consolidated into PLUGIN_DEVELOPMENT.md
-- [ ] ~~Update `docs/SQL_CACHE.md`~~ - Deferred with 2.8
 - [ ] Plugin packaging template project - Nice to have, not blocking
 
 ---
@@ -929,9 +852,8 @@ Phase 2 (Extensibility & Plugin Architecture) status:
 | 2.5 | BlobStore Examples & Docs | ✅ Complete |
 | 2.6 | PostgreSQL Metadata Backend | ✅ Complete |
 | 2.7 | Custom Metadata + PostgreSQL | ✅ Complete |
-| 2.8 | SqlCache Integration | 🟡 Deferred |
-| 2.9 | Testing & Documentation | ✅ Complete |
-| 2.10 | S3 Blob Backend | 🚧 In Progress |
+| 2.8 | Testing & Documentation | ✅ Complete |
+| 2.9 | S3 Blob Backend | 🚧 In Progress |
 
 **Key Deliverables (2.1-2.9):**
 - Full plugin system for handlers, metadata backends, and blob backends
@@ -941,7 +863,6 @@ Phase 2 (Extensibility & Plugin Architecture) status:
 - Complete documentation: PLUGIN_DEVELOPMENT.md, updated API_REFERENCE.md, README
 
 **Deferred Items:**
-- SqlCache + metadata backend integration (lower priority, breaks API)
 - Performance benchmarks for custom handlers
 - Plugin packaging template
 
@@ -1774,7 +1695,7 @@ cloud = ["boto3>=1.26.0", "psycopg[binary]>=3.1"]  # S3 + PostgreSQL
 **Implementation Tasks:**
 
 - [x] **Decision made**: Seconds chosen as standard unit
-- [x] Audit all TTL-related code: core.py, config.py, backends, sql_cache.py
+- [x] Audit all TTL-related code: core.py, config.py, backends
 - [x] Update configuration parameters (breaking change for users)
 - [x] Update all documentation to reflect new TTL units
 - [x] Update all tests to use new TTL parameters
@@ -2261,10 +2182,8 @@ meta = cache.get_metadata(experiment="exp_001")
 - ACID transactions for metadata consistency
 - Centralized cache index across multiple machines
 
-**Note:** PostgreSQL can store:
+**Note:** PostgreSQL stores:
 1. **Cache infrastructure metadata** (via `metadata_backend="postgresql"`): cache keys, file paths, statistics, etc.
-2. **SqlCache custom metadata tables** (via `SqlCache(db_url="postgresql://...")`): user-defined schemas for queryable data
-3. Both can coexist in same database, different tables
 
 Actual cached data (blobs) are stored separately via blob backends (filesystem, S3, etc.).
 
@@ -2343,11 +2262,8 @@ cache = cacheness(config)
 - [ ] Support SSL/TLS connections
 - [ ] Add migration utilities from SQLite → PostgreSQL
 - [ ] Add monitoring/metrics hooks (query time, pool stats)
-- [ ] Ensure no table name conflicts with SqlCache custom tables
-- [ ] Support shared database with SqlCache (different table names)
 - [ ] Create `docs/POSTGRESQL_BACKEND.md` with deployment guide
 - [ ] Add integration tests with test PostgreSQL container
-- [ ] Add integration tests showing cache metadata + SqlCache custom tables
 - [ ] Benchmark vs SQLite for concurrent workloads
 
 **Dependencies:**

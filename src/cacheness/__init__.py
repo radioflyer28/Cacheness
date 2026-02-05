@@ -71,16 +71,6 @@ try:
 except ImportError:
     _has_metadata_backends = False
 
-# Import SQL cache if SQLAlchemy is available
-try:
-    from .sql_cache import SqlCache, SqlCacheAdapter
-    _has_sql_cache = True
-    # Backward compatibility aliases  
-    SQLAlchemyPullThroughCache = SqlCache
-    SQLAlchemySqlCacheAdapter = SqlCacheAdapter
-except ImportError:
-    _has_sql_cache = False
-
 __version__ = "0.3.14"
 __author__ = "radioflyer28"
 __email__ = "akgithub.2drwc@aleeas.com"
@@ -283,9 +273,4 @@ if _has_metadata_backends:
         "JsonMetadataBackend", "SQLiteMetadataBackend"  # Backward compatibility
     ])
 
-# Add SQL cache to exports if available
-if _has_sql_cache:
-    __all__.extend([
-        "SqlCache", "SqlCacheAdapter",  # New simple names
-        "SQLAlchemyPullThroughCache", "SQLAlchemyDataAdapter"  # Backward compatibility
-    ])
+

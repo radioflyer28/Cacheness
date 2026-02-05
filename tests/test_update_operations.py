@@ -9,7 +9,7 @@ import numpy as np
 from pathlib import Path
 from cacheness import cacheness
 from cacheness.config import CacheConfig
-from cacheness.metadata import InMemoryBackend, JsonBackend, SqliteBackend
+from cacheness.metadata import JsonBackend, SqliteBackend
 
 
 @pytest.fixture
@@ -20,10 +20,10 @@ def cache_dir(tmp_path):
 
 @pytest.fixture
 def memory_cache(cache_dir):
-    """UnifiedCache with InMemoryBackend."""
+    """UnifiedCache with in-memory SQLite backend (fast, ephemeral)."""
     config = CacheConfig(
         cache_dir=str(cache_dir),
-        metadata_backend="memory",
+        metadata_backend="sqlite_memory",
         cleanup_on_init=False
     )
     # Disable signing for testing to avoid signature issues
@@ -139,8 +139,9 @@ class TestUpdateEntryMetadataBackends:
     """Test update_entry_metadata() implementation in different backends."""
     
     def test_memory_backend_update(self, cache_dir):
-        """Test InMemoryBackend.update_entry_metadata()."""
-        backend = InMemoryBackend()
+        """Test SqliteBackend (in-memory) update_entry_metadata()."""
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        backend = SqliteBackend(db_file=":memory:")
         
         # Create entry
         backend.put_entry("test_key", {
@@ -169,7 +170,10 @@ class TestUpdateEntryMetadataBackends:
         # Verify entry updated
         entry = backend.get_entry("test_key")
         assert entry["file_size"] == 200
-        assert entry["metadata"]["content_hash"] == "xyz789"
+        # SqliteBackend maps content_hash → file_hash column
+        assert entry["metadata"]["file_hash"] == "xyz789"
+        
+        backend.close()
     
     def test_json_backend_update(self, cache_dir):
         """Test JsonBackend.update_entry_metadata()."""
@@ -243,7 +247,7 @@ class TestUpdateEntryMetadataBackends:
     
     def test_update_nonexistent_key_returns_false(self, cache_dir):
         """Test updating nonexistent key returns False."""
-        backend = InMemoryBackend()
+        backend = SqliteBackend(db_file=":memory:")
         
         success = backend.update_entry_metadata(
             cache_key="nonexistent",
@@ -251,6 +255,8 @@ class TestUpdateEntryMetadataBackends:
         )
         
         assert success is False
+        
+        backend.close()
 
 
 class TestCacheKeyImmutability:

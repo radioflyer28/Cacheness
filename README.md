@@ -5,7 +5,6 @@ Fast Python disk cache with key-value store hashing and a "cachetools-like" deco
 **Key Features:**
 - **Function decorators** for automatic caching with `@cached`
 - **Multi-format storage** with automatic type detection and optimal format selection
-- **SQL pull-through cache** for intelligent API and database caching with automatic gap detection
 - **Key-based caching** using xxhash (XXH3_64) for fast, deterministic cache keys
 - **Advanced compression** using Blosc2 and LZ4 for fast compression
 - **Multiple backends** with SQLite and JSON metadata support
@@ -65,41 +64,6 @@ result1 = expensive_computation(5)  # Computed and cached
 result2 = expensive_computation(5)  # Retrieved from cache
 ```
 
-### SQL Pull-Through Cache
-
-For intelligent API caching with automatic gap detection and database backend selection:
-
-```python
-from cacheness.sql_cache import SqlCache
-from sqlalchemy import Float, Integer
-
-# Simple function-based approach (no inheritance required!)
-def fetch_stock_data(symbol, start_date, end_date):
-    # Your API logic here - return DataFrame
-    return api_client.get_historical_data(symbol, start_date, end_date)
-
-# Create cache with builder pattern - chooses optimal database backend
-cache = SqlCache.for_timeseries(
-    "stocks.db",  # Uses DuckDB for analytical workloads
-    data_fetcher=fetch_stock_data,
-    price=Float,
-    volume=Integer
-)
-
-# Automatic gap detection and caching
-data = cache.get_data(symbol="AAPL", start_date="2024-01-01", end_date="2024-01-31")
-```
-
-# SQLite for transactional/row-wise operations (ACID compliance, moderate concurrency)
-cache = SqlCache.with_sqlite("stocks.db", stock_table, StockAdapter())
-
-# PostgreSQL for production environments (high concurrency, advanced features)
-cache = SqlCache.with_postgresql("postgresql://...", stock_table, StockAdapter())
-
-# Get data - automatically fetches missing data gaps
-data = cache.get_data(symbol="AAPL", start_date="2024-01-01")
-```
-
 ## Intelligent Storage & Access Patterns
 
 Cacheness automatically optimizes storage and backend selection based on your data and access patterns.
@@ -122,53 +86,6 @@ def process_data(df):
 def fetch_user_data(user_id):
     return requests.get(f"/api/users/{user_id}").json()
 ```
-
-### SqlCache - Access-Pattern-Optimized Caching
-```python
-from cacheness.sql_cache import SqlCache
-from sqlalchemy import Float, Integer
-
-# Individual record lookups → SQLite (row-wise optimization)
-user_cache = SqlCache.for_lookup_table(
-    "users.db", 
-    data_fetcher=fetch_user_profile,
-    user_id=Integer,
-    name=String(100)
-)
-
-# Bulk analytics → DuckDB (columnar optimization)  
-analytics_cache = SqlCache.for_analytics_table(
-    "analytics.db",
-    data_fetcher=fetch_sales_data,
-    department=String(50),
-    revenue=Float
-)
-
-# Real-time data → SQLite (fast updates)
-realtime_cache = SqlCache.for_realtime_timeseries(
-    "prices.db",
-    data_fetcher=fetch_live_prices,
-    price=Float,
-    volume=Integer
-)
-
-# Historical analysis → DuckDB (analytical queries)
-historical_cache = SqlCache.for_timeseries(
-    "history.db", 
-    data_fetcher=fetch_historical_data,
-    price=Float,
-    volume=Integer
-)
-```
-
-### Backend Selection Guide
-
-| **Access Pattern** | **Method** | **Database** | **Optimized For** |
-|-------------------|------------|--------------|-------------------|
-| Individual lookups | `for_lookup_table()` | SQLite | Row-wise access, transactions |
-| Bulk analytics | `for_analytics_table()` | DuckDB | Columnar queries, aggregations |
-| Real-time data | `for_realtime_timeseries()` | SQLite | Fast updates, recent data |
-| Historical analysis | `for_timeseries()` | DuckDB | Time-series analytics |
 
 ## Core Concepts
 
@@ -515,7 +432,6 @@ data = cache.get(model="xgboost", dataset="training")
 Comprehensive examples are available in the [`examples/`](examples/) directory:
 
 - **[API Request Caching](examples/api_request_caching.py)** - Intelligent API caching with TTL strategies
-- **[Stock Cache Example](examples/stock_cache_example.py)** - SQL pull-through cache with Yahoo Finance integration
 - **[ML Pipeline Caching](examples/ml_pipeline_caching.py)** - Multi-stage ML training pipeline caching
 - **[S3 Caching](examples/s3_caching.py)** - Caching of S3 file downloads with ETag (remote file hash) validation
 - **[Custom Metadata Demo](examples/custom_metadata_demo.py)** - Advanced metadata tracking workflows
@@ -773,7 +689,6 @@ Missing optional dependencies are handled gracefully with automatic fallbacks.
 - **[Security Guide](docs/SECURITY.md)** - Cache entry signing, integrity protection, and security best practices
 - **[Configuration Guide](docs/CONFIGURATION.md)** - Detailed configuration options and use cases
 - **[Backend Selection Guide](docs/BACKEND_SELECTION.md)** - Choosing between JSON, SQLite, and PostgreSQL backends
-- **[SQL Cache Guide](docs/SQL_CACHE.md)** - Pull-through cache for APIs and time-series data
 - **[Custom Metadata Guide](docs/CUSTOM_METADATA.md)** - Advanced metadata workflows with SQLAlchemy
 - **[Performance Guide](docs/PERFORMANCE.md)** - Optimization strategies and benchmarks
 - **[Cross-Platform Guide](docs/CROSS_PLATFORM_GUIDE.md)** - Development guide for all platforms

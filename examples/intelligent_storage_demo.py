@@ -4,19 +4,17 @@ Intelligent Storage Demo
 =======================
 
 Demonstrates how UnifiedCache automatically chooses optimal storage
-formats based on data types, and SqlCache access patterns.
+formats based on data types.
 
 Usage:
     python intelligent_storage_demo.py
 """
 
 from cacheness import cached
-from cacheness.sql_cache import SqlCache
-from sqlalchemy import Integer, String, Float
 import pandas as pd
 import numpy as np
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 
 # ===== UnifiedCache: Intelligent Storage Examples =====
 
@@ -65,27 +63,8 @@ def fetch_api_data(endpoint):
         "timestamp": str(datetime.now())
     }
 
-# ===== SqlCache: Database Access Pattern Examples =====
-
-def fetch_user_lookup(user_id):
-    """Individual user lookup."""
-    print(f"🔍 SQL: Looking up user {user_id}")
-    return pd.DataFrame([{
-        'user_id': user_id,
-        'name': f'User {user_id}',
-        'department': 'Engineering'
-    }])
-
-def fetch_analytics_bulk(department):
-    """Bulk analytics data."""
-    print(f"📈 SQL: Fetching bulk data for {department}")
-    return pd.DataFrame([
-        {'dept': department, 'emp_id': i, 'score': 85 + i}
-        for i in range(100)
-    ])
-
 def main():
-    """Demonstrate intelligent storage and access patterns."""
+    """Demonstrate intelligent storage format optimization."""
     
     print("=== Intelligent Storage Demo ===\n")
     
@@ -108,44 +87,12 @@ def main():
     api_data = fetch_api_data("users")
     print(f"✅ API response (lz4): {len(api_data['data'])} items\n")
     
-    # SqlCache access pattern optimization
-    print("�️  SQLCACHE: Access Pattern Optimization")
-    
-    # Individual lookups → SQLite
-    lookup_cache = SqlCache.for_lookup_table(
-        "lookup.db",
-        primary_keys=["user_id"],
-        data_fetcher=fetch_user_lookup,
-        user_id=Integer,
-        name=String(100),
-        department=String(50)
-    )
-    
-    user_data = lookup_cache.get_data(user_id=123)
-    print(f"✅ SQLite lookup: {user_data.iloc[0]['name']}")
-    
-    # Bulk analytics → DuckDB
-    analytics_cache = SqlCache.for_analytics_table(
-        "analytics.db",
-        primary_keys=["dept", "emp_id"], 
-        data_fetcher=fetch_analytics_bulk,
-        dept=String(50),
-        emp_id=Integer,
-        score=Integer
-    )
-    
-    bulk_data = analytics_cache.get_data(department="Engineering")
-    print(f"✅ DuckDB analytics: {len(bulk_data)} records")
-    
-    print("\n🎯 Key Benefits:")
-    print("   • UnifiedCache: Automatic format optimization")
+    print("🎯 Key Benefits:")
+    print("   • Automatic format optimization")
     print("     - DataFrames → Parquet (columnar)")
     print("     - NumPy → Blosc (numerical compression)")
     print("     - Objects → Pickle (serialization)")
     print("     - JSON → LZ4 (fast text compression)")
-    print("   • SqlCache: Database backend optimization")
-    print("     - Individual lookups → SQLite")
-    print("     - Bulk analytics → DuckDB")
 
 if __name__ == "__main__":
     main()

@@ -300,8 +300,8 @@ cache = cacheness(config=config)
 |------|-------------|----------|
 | `json` | JSON file storage | Development, small caches |
 | `sqlite` | SQLite database | Production, concurrent access |
+| `sqlite_memory` | In-memory SQLite | Testing, temporary caches |
 | `postgresql` | PostgreSQL database | Distributed, production |
-| `memory` | In-memory storage | Testing, temporary caches |
 
 ---
 
@@ -445,7 +445,7 @@ cache = cacheness(config=config)
 | `sqlite` | `filesystem` | Local development (default) |
 | `postgresql` | `filesystem` | Shared metadata, local blobs |
 | `postgresql` | `s3` | Fully distributed production |
-| `memory` | `memory` | Testing and CI |
+| `sqlite_memory` | `filesystem` | Testing and CI |
 | `redis` | `s3` | High-performance distributed |
 
 ---

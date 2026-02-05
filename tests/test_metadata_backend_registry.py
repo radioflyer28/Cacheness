@@ -29,12 +29,6 @@ try:
 except ImportError:
     _HAS_SQLITE = False
 
-try:
-    from cacheness.storage.backends import InMemoryBackend
-    _HAS_MEMORY = True
-except ImportError:
-    _HAS_MEMORY = False
-
 # Import module-level API
 import cacheness
 
@@ -203,17 +197,11 @@ class TestBuiltinBackends:
         names = [b["name"] for b in backends]
         assert "sqlite" in names
     
-    def test_memory_backend_registered(self, clean_registry):
-        """Test that memory backend is registered by default."""
-        backends = list_metadata_backends()
-        names = [b["name"] for b in backends]
-        assert "memory" in names
-    
     def test_builtin_backends_marked_correctly(self, clean_registry):
         """Test that builtin backends have is_builtin=True."""
         backends = list_metadata_backends()
         for backend in backends:
-            if backend["name"] in ("json", "sqlite", "memory"):
+            if backend["name"] in ("json", "sqlite"):
                 assert backend["is_builtin"] is True
 
 
@@ -354,14 +342,6 @@ class TestGetMetadataBackend:
         assert isinstance(backend, SqliteBackend)
         backend.close()
     
-    @pytest.mark.skipif(not _HAS_MEMORY, reason="Memory backend not available")
-    def test_get_memory_backend(self, clean_registry):
-        """Test getting a memory backend instance."""
-        backend = get_metadata_backend("memory")
-        
-        assert backend is not None
-        assert isinstance(backend, InMemoryBackend)
-    
     def test_get_custom_backend(self, clean_registry, temp_dir):
         """Test getting a custom backend instance."""
         register_metadata_backend("mock", MockMetadataBackend)
@@ -410,7 +390,6 @@ class TestListMetadataBackends:
         
         assert "json" in names
         assert "sqlite" in names
-        assert "memory" in names
     
     def test_list_entry_format(self, clean_registry):
         """Test that list entries have correct format."""
@@ -471,10 +450,11 @@ class TestModuleLevelAPI:
         """Test that module-level functions work correctly."""
         # These should work without raising errors
         backends = cacheness.list_metadata_backends()
-        assert len(backends) >= 3  # At least builtin backends
+        assert len(backends) >= 2  # At least builtin backends (json, sqlite)
         
-        backend = cacheness.get_metadata_backend("memory")
+        backend = cacheness.get_metadata_backend("sqlite", db_file=":memory:")
         assert backend is not None
+        backend.close()
 
 
 class TestBackendFunctionality:

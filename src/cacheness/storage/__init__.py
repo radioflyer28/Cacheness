@@ -3,7 +3,7 @@ Storage Layer
 =============
 
 Low-level blob storage infrastructure providing:
-- Pluggable metadata backends (JSON, SQLite, In-Memory)
+- Pluggable metadata backends (JSON, SQLite)
 - Type-aware serialization handlers (DataFrames, arrays, objects)
 - Compression support (blosc2, lz4, zstd, gzip)
 - Security features (HMAC signing, integrity verification)

@@ -515,5 +515,4 @@ jobs:
 ## Next Steps
 
 - See [DEVELOPMENT_PLANNING.md](../DEVELOPMENT_PLANNING.md) for Phase 2.10 status
-- See [SQL_CACHE.md](../SQL_CACHE.md) for PostgreSQL metadata backend details
 - See [BACKEND_SELECTION.md](../BACKEND_SELECTION.md) for backend selection guide

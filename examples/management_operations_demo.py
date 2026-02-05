@@ -37,7 +37,7 @@ def main():
     print("=" * 60)
 
     try:
-        config = CacheConfig(cache_dir=tmp, metadata_backend="memory")
+        config = CacheConfig(cache_dir=tmp, metadata_backend="sqlite_memory")
         cache = cacheness(config)
 
         demo_get_metadata(cache)

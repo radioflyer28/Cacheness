@@ -302,7 +302,7 @@ Automatically selects the best available backend:
 
 ## Memory Cache Layer
 
-The memory cache layer provides an in-memory cache on top of disk-persistent metadata backends to avoid repeated disk I/O operations. This is separate from the pure in-memory backend.
+The memory cache layer provides an in-memory cache on top of disk-persistent metadata backends to avoid repeated disk I/O operations.
 
 ### Architecture
 

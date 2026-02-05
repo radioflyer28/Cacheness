@@ -135,11 +135,6 @@ class UnifiedCache:
             )
             self.actual_backend = "json"
             
-        elif requested == "memory":
-            self.metadata_backend = create_metadata_backend("memory", config=self.config.metadata)
-            self.actual_backend = "memory"
-            logger.info("⚡ Using ultra-fast in-memory backend (no persistence)")
-            
         elif requested == "sqlite":
             self.metadata_backend = create_metadata_backend(
                 "sqlite",

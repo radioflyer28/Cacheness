@@ -12,7 +12,7 @@ This guide helps you choose between JSON and SQLite metadata backends based on y
 | Multiple processes | SQLite | JSON **unsafe** for concurrency |
 | Production deployment | SQLite | Robust, ACID compliance, data integrity |
 | Need complex queries | SQLite | Full SQL support vs basic key lookup |
-| Temporary high-performance cache | InMemory | Best performance without persistence |
+| Temporary high-performance cache | SQLite (in-memory) | Best performance without persistence |
 
 ## Performance Characteristics
 
@@ -23,28 +23,20 @@ All backends now use unified entry structures with consistent API return formats
 - **Reduced Overhead**: Eliminated unnecessary data conversions and JSON parsing
 - **Predictable Performance**: Consistent entry handling across backend types
 
-### InMemory Backend
+### In-Memory SQLite Backend
 
 **Strengths:**
-- ✅ **Ultra-fast performance** - 6,000+ PUT ops/sec, 15,000+ GET ops/sec
-- ✅ Zero I/O operations - all data in memory
+- ✅ **Fast performance** - no disk persistence overhead for metadata
+- ✅ Full SQL query support and ACID compliance
 - ✅ Perfect for temporary high-performance caching
-- ✅ Consistent performance regardless of cache size
-- ✅ Simple setup with no external dependencies
+- ✅ Same API as file-based SQLite
 
 **Limitations:**
 - ❌ **No persistence** - data lost on restart
-- ❌ Memory consumption grows with cache size
 - ❌ Single-process only (no sharing between processes)
-- ❌ Limited by available system memory
 
-**Performance Profile:**
-```
-Cache Size:    50     200     500    1000
-PUT ops/sec:   6011   6547    6693   6228
-GET ops/sec:   19594  21732   14698  14794
-LIST time:     0.1ms  0.3ms   0.6ms  1.2ms
-```
+**Tip:** For maximum temporary cache speed, use `metadata_backend="sqlite_memory"` and
+point `cache_dir` at your system's temp directory or a RAM disk.
 
 ### JSON Backend
 
@@ -167,10 +159,6 @@ Based on benchmark data, here's when SQLite becomes advantageous:
 ### Memory Usage Patterns
 
 ```python
-# InMemory Backend - all data in memory (fastest)
-memory_usage = cache_entries * (avg_data_size + avg_metadata_size)
-# Fastest access but highest memory usage
-
 # JSON Backend - loads entire metadata into memory
 json_memory_usage = cache_entries * avg_metadata_size + file_cache
 # Linear growth - can become problematic
@@ -216,12 +204,13 @@ prod_config = CacheConfig(
 ```python
 # Maximum performance for temporary data
 from cacheness import CacheConfig
+import tempfile
 
 perf_config = CacheConfig(
-    cache_dir="./temp_cache",
-    metadata_backend="memory",        # Ultra-fast in-memory storage
-    max_cache_size_mb=5000,          # Large memory cache
-    default_ttl_seconds=21600        # Medium TTL (6 hours)
+    cache_dir=tempfile.mkdtemp(),
+    metadata_backend="sqlite_memory",    # In-memory SQLite (no persistence)
+    max_cache_size_mb=5000,              # Large cache
+    default_ttl_seconds=21600            # Medium TTL (6 hours)
 )
 ```
 
@@ -350,8 +339,8 @@ config = CacheConfig(
 
 **Issue**: Lower than expected throughput
 ```python
-# 1. For maximum speed, use InMemory backend for temporary data
-config = CacheConfig(metadata_backend="memory")
+# 1. For maximum speed, use in-memory SQLite for temporary data
+config = CacheConfig(metadata_backend="sqlite_memory")
 
 # 2. Check disk I/O - use SSD storage for persistent backends
 config = CacheConfig(
@@ -368,12 +357,10 @@ if cache_size_entries > 500:
 ```python
 # 1. JSON: Caused by large metadata file parsing - switch to SQLite
 # 2. SQLite: Usually due to WAL checkpoint operations (normal)
-# 3. InMemory: Should have minimal latency - check system memory pressure
 ```
 
 **Issue**: Memory consumption concerns
 ```python
-# InMemory: All data in memory (highest speed, highest memory usage)
 # JSON: Loads all metadata into memory (grows with cache size)
 # SQLite: Constant memory usage with configurable cache size
 # Choose based on your memory vs speed tradeoffs
