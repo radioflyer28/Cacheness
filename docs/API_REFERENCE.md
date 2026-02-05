@@ -573,6 +573,189 @@ Remove all entries from the cache.
 **Returns:**
 - `int`: Number of entries removed
 
+#### Management Operations
+
+These methods provide fine-grained control over cache entries — inspecting metadata, updating stored data in-place, refreshing TTLs, and performing bulk/batch operations.
+
+##### `get_metadata(cache_key=None, check_expiration=True, **kwargs) -> Optional[Dict]`
+Get entry metadata without loading blob data.
+
+Useful for inspecting cache entries (TTL, file size, data type) before deciding whether to load the actual data.
+
+**Parameters:**
+- `cache_key` (Optional[str]): Direct cache key (if provided, `**kwargs` are ignored)
+- `check_expiration` (bool): If True, returns None for expired entries (default: True)
+- `**kwargs`: Parameters identifying the cached data (used if `cache_key` is None)
+
+**Returns:**
+- Metadata dictionary (including `cache_key`, `data_type`, `file_size`, `created_at`, etc.) or `None` if not found/expired
+
+**Example:**
+```python
+# Check metadata before loading large file
+meta = cache.get_metadata(experiment="exp_001")
+if meta and meta.get("file_size", 0) > 1e9:
+    print("Large file — loading may take time")
+    data = cache.get(experiment="exp_001")
+```
+
+##### `update_data(data, cache_key=None, **kwargs) -> bool`
+Replace blob data at an existing cache entry without changing the cache key.
+
+Updates derived metadata (file_size, content_hash, timestamp) and re-signs the entry if signing is enabled. The cache key remains unchanged to maintain referential integrity.
+
+**Parameters:**
+- `data` (Any): New data to store (must be serializable by handler)
+- `cache_key` (Optional[str]): Direct cache key (if provided, `**kwargs` are ignored)
+- `**kwargs`: Parameters identifying the cached data (used if `cache_key` is None)
+
+**Returns:**
+- `bool`: True if entry was updated, False if entry doesn't exist
+
+**Example:**
+```python
+# Update cached DataFrame with new data
+success = cache.update_data(
+    new_df,
+    experiment="exp_001",
+    run_id=42
+)
+
+if not success:
+    print("Entry not found — use put() to create new entry")
+```
+
+> **Note:** Cache keys are immutable and derived from input params, not content. Use `update_data()` to refresh data at the same logical location. Use `put()` to create new entries.
+
+##### `touch(cache_key=None, ttl_seconds=None, **kwargs) -> bool`
+Update entry timestamp to extend TTL without reloading data.
+
+Resets the expiration timer, useful for keeping frequently accessed data alive or preventing expiration of long-running computations.
+
+**Parameters:**
+- `cache_key` (Optional[str]): Direct cache key (if provided, `**kwargs` are ignored)
+- `ttl_seconds` (Optional[float]): New TTL in seconds (uses default if None)
+- `**kwargs`: Parameters identifying the cached data (used if `cache_key` is None)
+
+**Returns:**
+- `bool`: True if entry exists and was touched, False if entry doesn't exist
+
+**Example:**
+```python
+# Reset TTL to default
+cache.touch(experiment="exp_001")
+
+# Keep long-running computation alive
+for i in range(100):
+    process_chunk(i)
+    if i % 10 == 0:
+        cache.touch(job_id="long_job")  # Prevent expiration
+```
+
+##### `delete_where(filter_fn) -> int`
+Delete all cache entries matching a filter function.
+
+Iterates over every entry and deletes those for which `filter_fn` returns `True`. Works with all backends.
+
+**Parameters:**
+- `filter_fn` (Callable[[Dict], bool]): Receives an entry dict and returns True if the entry should be deleted. Each dict contains at least `cache_key`, `data_type`, `description`, `metadata`, `created`, `last_accessed`, and `size_mb`.
+
+**Returns:**
+- `int`: Number of entries deleted
+
+**Example:**
+```python
+from datetime import datetime, timezone, timedelta
+
+# Delete all entries older than 7 days
+cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+deleted = cache.delete_where(
+    lambda e: (e.get("created") or "") < cutoff
+)
+
+# Delete all DataFrames
+deleted = cache.delete_where(
+    lambda e: e.get("data_type") == "pandas_dataframe"
+)
+```
+
+##### `delete_matching(**kwargs) -> int`
+Delete all entries whose metadata contains the given key/value pairs.
+
+Convenience wrapper around `delete_where()`. For SQLite with `store_full_metadata=True`, uses indexed `query_meta()` for fast lookups.
+
+**Parameters:**
+- `**kwargs`: Key-value pairs to match. An entry is deleted when **all** pairs match.
+
+**Returns:**
+- `int`: Number of entries deleted
+
+**Example:**
+```python
+# Delete all entries for a specific project
+deleted = cache.delete_matching(project="ml_models")
+
+# Delete entries matching multiple criteria
+deleted = cache.delete_matching(
+    experiment="exp_001",
+    model_type="xgboost"
+)
+```
+
+##### `get_batch(kwargs_list) -> Dict[str, Any]`
+Get multiple cache entries in one call.
+
+**Parameters:**
+- `kwargs_list` (List[Dict]): List of kwarg dicts, each identifying one entry (same parameters you would pass to `get()`).
+
+**Returns:**
+- `dict`: Mapping of cache_key → data (or `None` if not found/expired)
+
+**Example:**
+```python
+results = cache.get_batch([
+    {"experiment": "exp_001"},
+    {"experiment": "exp_002"},
+    {"experiment": "exp_003"},
+])
+for key, data in results.items():
+    if data is not None:
+        print(f"{key}: loaded")
+```
+
+##### `delete_batch(kwargs_list) -> int`
+Delete multiple cache entries in one call.
+
+**Parameters:**
+- `kwargs_list` (List[Dict]): List of kwarg dicts, each identifying one entry (same parameters you would pass to `invalidate()`).
+
+**Returns:**
+- `int`: Number of entries that were actually deleted (existed)
+
+**Example:**
+```python
+deleted = cache.delete_batch([
+    {"experiment": "exp_001"},
+    {"experiment": "exp_002"},
+])
+print(f"Removed {deleted} entries")
+```
+
+##### `touch_batch(**filter_kwargs) -> int`
+Touch (refresh TTL of) all cache entries whose metadata matches the given key/value pairs.
+
+**Parameters:**
+- `**filter_kwargs`: Key-value pairs to match against entry metadata.
+
+**Returns:**
+- `int`: Number of entries touched
+
+**Example:**
+```python
+# Extend TTL for all entries in a project
+touched = cache.touch_batch(project="ml_models")
+```
+
 ---
 
 ## Custom Metadata

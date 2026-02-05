@@ -7,6 +7,7 @@ This document tracks the architectural evolution and future development roadmap 
 **Quick Links:**
 - [Phase 1: Storage Layer Separation](#phase-1-storage-layer-separation-low-risk) (✅ Complete)
 - [Phase 2: Extensibility & Plugins](#phase-2-plugin-architecture--extensibility-medium-risk) (🚧 In Planning)
+- [Phase 3: Management Operations](#phase-3-management-operations-api-medium-risk) (📋 Ready to Implement)
 - [Phase 2 Implementation Roadmap](#recommendations-for-phase-2-implementation-order) (Start here for what's next!)
 - [Bug Tracking](#-bug-tracking) (Historical - most fixed)
 - [Feasibility Review](#phase-2-feasibility-review) (Technical analysis)
@@ -15,10 +16,11 @@ This document tracks the architectural evolution and future development roadmap 
 
 - **Completed Work**: Phase 1 storage layer refactoring (✅ Complete Jan 2026)
 - **Active Planning**: Phase 2 extensibility features (handlers, metadata backends, blob backends) - 9-12 month effort
+- **Ready to Implement**: Phase 3 management operations (update, touch, bulk delete, batch ops) - 3-6 month effort
 - **Bug Tracking**: Issues identified during code review (most ✅ Fixed)
 - **Design Decisions**: Manual registration over auto-discovery plugins
 
-**For New Contributors**: Jump to [Phase 2 Implementation Roadmap](#recommendations-for-phase-2-implementation-order) to see what's planned next.
+**For New Contributors**: Jump to [Phase 3 Management Operations](#phase-3-management-operations-api-medium-risk) for the next implementation phase, or review [Phase 2 Implementation Roadmap](#recommendations-for-phase-2-implementation-order) for extensibility features.
 
 ---
 
@@ -945,6 +947,513 @@ Phase 2 (Extensibility & Plugin Architecture) status:
 
 ---
 
+<a id="phase-3-management-operations-api-medium-risk"></a>
+#### Phase 3: Management Operations API (Medium Risk)
+
+**Goal:** Complete missing CRUD and management operations in storage backends and cache layer.
+
+**Status:** 📋 Ready to Implement (February 2026)
+
+**Effort Estimate:** 3-6 months
+
+**Reference:** [MISSING_MANAGEMENT_API.md](MISSING_MANAGEMENT_API.md) - Complete architectural analysis
+
+---
+
+### Architectural Principles (From MISSING_MANAGEMENT_API.md)
+
+**Storage Backend Responsibilities:**
+- Basic CRUD (create, read, update, delete)
+- Bulk operations (delete many, batch operations)
+- Metadata management (get/update metadata without loading data)
+- Pattern-based operations (delete by prefix, list with filters)
+- **NO TTL awareness** - storage is "dumb" about expiration
+- **Enforce cache_key immutability** - keys cannot be modified after creation
+
+**Cache Layer Responsibilities:**
+- TTL policy and enforcement
+- Cache hit/miss logic with expiration checking
+- Touch/refresh operations (extending expiration)
+- Cleanup of expired entries (delegates timestamp deletion to backend)
+- Wraps storage backend with caching semantics
+
+**Key Insight:** Storage backends store timestamps but don't interpret them. Cache layer interprets timestamps according to TTL policy.
+
+---
+
+### 3.1 Update Blob Data (High Priority)
+
+**Current State:** Must delete then re-insert to update data at an existing cache_key.
+
+**Goal:** Add `update_blob_data()` operation to replace data at a fixed cache_key.
+
+**Important:** The cache_key is computed from input parameters and is **immutable**. This operation replaces the blob data stored at that key, not the key itself. Updates derived metadata (file_size, content_hash, created_at) but cache_key remains unchanged.
+
+**Implementation Tasks:**
+
+**Storage Backend Layer:**
+- [ ] Add `update_blob_data(cache_key: str, new_data: Any)` to `MetadataBackend` abstract class
+- [ ] Implement in `SQLiteBackend`:
+  - [ ] Serialize new data using handlers
+  - [ ] Write new blob file (or update in place)
+  - [ ] Update metadata: file_size, content_hash, file_hash, created_at
+  - [ ] Keep cache_key unchanged
+- [ ] Implement in `PostgreSQLBackend` (same logic)
+- [ ] Implement in `JSONBackend` (same logic)
+- [ ] Implement in `MemoryBackend` (update in-memory dict)
+- [ ] Add `update_data(key: str, new_data: Any)` to `BlobStore` class
+- [ ] Handle errors: key not found, serialization failure, disk full
+
+**Cache Layer:**
+- [ ] Add `update_data(data: Any, cache_key: Optional[str] = None, **kwargs)` to `UnifiedCache`
+- [ ] Resolve cache_key from kwargs if not provided
+- [ ] Check if entry exists (return False if not)
+- [ ] Delegate to `backend.update_blob_data(cache_key, data)`
+- [ ] Update cache stats (if applicable)
+- [ ] Handle TTL: reset created_at timestamp (acts like touch + update)
+
+**Testing:**
+- [ ] Test update_blob_data across all backends (SQLite, PostgreSQL, JSON, Memory)
+- [ ] Test cache_key immutability (verify key doesn't change)
+- [ ] Test derived metadata updates (file_size, content_hash, created_at)
+- [ ] Test error cases: key not found, serialization failure
+- [ ] Test UnifiedCache.update_data() with kwargs resolution
+- [ ] Test TTL behavior after update
+
+**Documentation:**
+- [ ] Add to API_REFERENCE.md (backend and cache layer)
+- [ ] Add example to examples/management_operations_demo.py
+- [ ] Document difference from put() (update requires existing key)
+
+**Priority:** ✅✅✅ Highest - Core CRUD operation, frequently requested
+
+---
+
+### 3.2 Bulk Delete by Pattern (High Priority)
+
+**Current State:** Must loop over list results and delete individually.
+
+**Goal:** Delete multiple entries matching criteria efficiently.
+
+**Implementation Tasks:**
+
+**Storage Backend Layer:**
+- [ ] Add `delete_where(filter_fn: Callable[[Dict], bool])` to `MetadataBackend`
+- [ ] Implement in `SQLiteBackend`:
+  - [ ] Query all entries
+  - [ ] Filter with filter_fn
+  - [ ] Delete matching entries in transaction
+  - [ ] Return count of deleted entries
+- [ ] Implement in `PostgreSQLBackend` (same logic, can optimize with SQL WHERE)
+- [ ] Implement in `JSONBackend` (filter dict, delete, save atomically)
+- [ ] Implement in `MemoryBackend` (filter dict, delete)
+- [ ] Add `delete_by_cache_key_prefix(prefix: str)` convenience method
+  - [ ] Implemented as: `delete_where(lambda e: e['cache_key'].startswith(prefix))`
+- [ ] Optimize PostgreSQL/SQLite: Use SQL `DELETE WHERE cache_key LIKE 'prefix%'`
+
+**Cache Layer:**
+- [ ] Add `delete_by_prefix(**prefix_kwargs)` to `UnifiedCache`
+- [ ] Query matching entries with kwargs
+- [ ] Extract cache_keys
+- [ ] Delegate to `backend.delete_entries_batch(cache_keys)` or loop
+- [ ] Return count of deleted entries
+- [ ] Add `delete_where(filter_fn)` for advanced filtering
+
+**Testing:**
+- [ ] Test delete_where with various filter functions
+- [ ] Test delete_by_cache_key_prefix across all backends
+- [ ] Test cache.delete_by_prefix with kwargs matching
+- [ ] Test transaction rollback on error (SQLite, PostgreSQL)
+- [ ] Test empty result (no matches)
+- [ ] Test delete_where with TTL-based filters (cache layer concern)
+
+**Documentation:**
+- [ ] Add to API_REFERENCE.md
+- [ ] Add examples showing common patterns (delete old entries, delete by project)
+- [ ] Document performance characteristics (SQL backends faster)
+
+**Priority:** ✅✅✅ High - Essential for cleanup operations
+
+---
+
+### 3.3 Get Metadata Without Loading Data (Trivial)
+
+**Current State:**
+- `BlobStore.get_metadata()` ✅ Already exists
+- `MetadataBackend.get_entry()` ✅ Already exists
+- `UnifiedCache.get_metadata()` ❌ Not exposed
+
+**Goal:** Expose existing backend method in cache layer.
+
+**Implementation Tasks:**
+
+**Cache Layer:**
+- [ ] Add `get_metadata(cache_key: Optional[str] = None, **kwargs)` to `UnifiedCache`
+  ```python
+  def get_metadata(self, cache_key: Optional[str] = None, **kwargs) -> Optional[Dict[str, Any]]:
+      """Get entry metadata without loading blob data."""
+      if cache_key is None:
+          cache_key = self._create_cache_key(kwargs)
+      return self.metadata_backend.get_entry(cache_key)
+  ```
+- [ ] Handle expired entries (return None if expired, per cache policy)
+- [ ] Add to BlobStore as well (already has it, ensure exposed)
+
+**Testing:**
+- [ ] Test get_metadata with cache_key
+- [ ] Test get_metadata with kwargs
+- [ ] Test returns None for non-existent entry
+- [ ] Test returns None for expired entry (cache layer)
+- [ ] Test metadata fields are correct (cache_key, file_size, created_at, etc.)
+
+**Documentation:**
+- [ ] Add to API_REFERENCE.md
+- [ ] Add example showing metadata inspection before loading
+
+**Priority:** ✅✅ Medium - Trivial implementation, useful utility
+
+---
+
+### 3.4 Touch/Refresh TTL (High Priority)
+
+**Current State:** No way to extend expiration without reloading data.
+
+**Goal:** Update entry timestamp to reset TTL (cache layer operation).
+
+**Implementation Tasks:**
+
+**Storage Backend Support:**
+- [ ] Add `update_entry_timestamp(cache_key: str, new_timestamp: datetime)` to `MetadataBackend`
+- [ ] Implement in `SQLiteBackend`: UPDATE created_at
+- [ ] Implement in `PostgreSQLBackend`: UPDATE created_at
+- [ ] Implement in `JSONBackend`: Update dict, save atomically
+- [ ] Implement in `MemoryBackend`: Update dict
+
+**Cache Layer:**
+- [ ] Add `touch(cache_key: Optional[str] = None, ttl_seconds: Optional[float] = None, **kwargs)` to `UnifiedCache`
+  ```python
+  def touch(self, cache_key: Optional[str] = None, ttl_seconds: Optional[float] = None, **kwargs) -> bool:
+      """Update entry timestamp to extend TTL without reloading data."""
+      if cache_key is None:
+          cache_key = self._create_cache_key(kwargs)
+      
+      entry = self.metadata_backend.get_entry(cache_key)
+      if not entry:
+          return False
+      
+      # Update timestamp
+      new_timestamp = datetime.now(timezone.utc)
+      self.metadata_backend.update_entry_timestamp(cache_key, new_timestamp)
+      return True
+  ```
+- [ ] Handle custom TTL (if provided, store in metadata? Or just update timestamp?)
+- [ ] Decision needed: Store TTL per entry or use config default?
+
+**Testing:**
+- [ ] Test touch updates timestamp
+- [ ] Test touch with kwargs resolution
+- [ ] Test touch returns False for non-existent entry
+- [ ] Test TTL extension works (entry not expired after touch)
+- [ ] Test touch with custom ttl_seconds parameter
+
+**Documentation:**
+- [ ] Add to API_REFERENCE.md
+- [ ] Add examples: keep session alive, prevent long computation expiration
+- [ ] Document that touch is a cache-layer operation (not storage backend)
+
+**Priority:** ✅✅✅ High - Core cache operation for TTL management
+
+---
+
+### 3.5 Batch Operations (Medium Priority)
+
+**Current State:** Must make N individual calls for N operations.
+
+**Goal:** Optimize multiple operations in single transaction/batch.
+
+**Implementation Tasks:**
+
+**Storage Backend Layer:**
+- [ ] Add `get_entries_batch(cache_keys: List[str])` to `MetadataBackend`
+  - [ ] Return `Dict[str, Optional[Dict]]` - {cache_key: metadata or None}
+  - [ ] Optimize SQLite/PostgreSQL: Single query with `WHERE cache_key IN (...)`
+- [ ] Add `delete_entries_batch(cache_keys: List[str])` to `MetadataBackend`
+  - [ ] Return count of deleted entries
+  - [ ] Use transaction for atomicity
+  - [ ] Optimize SQL: `DELETE WHERE cache_key IN (...)`
+- [ ] Add `update_entries_batch(updates: Dict[str, Any])` to `MetadataBackend`
+  - [ ] Input: {cache_key: new_data}
+  - [ ] Call update_blob_data for each in transaction
+  - [ ] Return count of updated entries
+
+**Cache Layer:**
+- [ ] Add `get_batch(kwargs_list: List[Dict])` to `UnifiedCache`
+  - [ ] Resolve each kwargs dict to cache_key
+  - [ ] Call `backend.get_entries_batch(cache_keys)`
+  - [ ] Load blob data for each hit
+  - [ ] Return `Dict[str, Any]` - {cache_key: data or None}
+- [ ] Add `delete_batch(kwargs_list: List[Dict])` to `UnifiedCache`
+  - [ ] Resolve cache_keys from kwargs
+  - [ ] Call `backend.delete_entries_batch(cache_keys)`
+  - [ ] Return count
+- [ ] Add `update_batch(updates: List[Tuple[Dict, Any]])` to `UnifiedCache`
+  - [ ] Input: [(kwargs, new_data), ...]
+  - [ ] Resolve cache_keys
+  - [ ] Build {cache_key: new_data} dict
+  - [ ] Call `backend.update_entries_batch(updates)`
+
+**Testing:**
+- [ ] Test get_entries_batch across all backends
+- [ ] Test delete_entries_batch with transaction rollback on error
+- [ ] Test update_entries_batch
+- [ ] Test cache.get_batch with kwargs resolution
+- [ ] Test batch operations with mixed hits/misses
+- [ ] Test empty batch (no-op)
+- [ ] Benchmark: batch vs individual operations
+
+**Documentation:**
+- [ ] Add to API_REFERENCE.md
+- [ ] Add examples showing batch loading, batch delete, batch update
+- [ ] Document performance benefits (transaction overhead, network round trips)
+
+**Priority:** ✅✅ Medium - Performance optimization for common patterns
+
+---
+
+### 3.6 Copy/Move Entries (Low Priority - Convenience)
+
+**Current State:** Users must manually get then put to duplicate entries.
+
+**Goal:** Convenience methods that compose CRUD primitives.
+
+**Why Provide:** While users can compose CRUD, copy/move provide:
+- **Atomicity** - Backend can guarantee atomic move
+- **Efficiency** - Server-side copy avoids transferring large blobs
+- **Convenience** - Common operations packaged
+
+**Implementation Tasks:**
+
+**Storage Backend Layer:**
+- [ ] Add `copy_entry(source_key: str, dest_key: str)` to `MetadataBackend`
+  ```python
+  def copy_entry(self, source_key: str, dest_key: str) -> bool:
+      """Convenience: Get source + Put to dest."""
+      entry = self.get_entry(source_key)  # CRUD: Read
+      if entry:
+          # Copy blob file as well
+          blob_data = self.read_blob(entry['blob_path'])
+          new_entry = entry.copy()
+          new_entry['cache_key'] = dest_key
+          new_entry['created_at'] = datetime.now(timezone.utc).isoformat()
+          self.put_entry(dest_key, new_entry)  # CRUD: Create
+          self.write_blob(blob_data, new_entry['blob_path'])
+      return entry is not None
+  ```
+- [ ] Add `move_entry(source_key: str, dest_key: str)` to `MetadataBackend`
+  ```python
+  def move_entry(self, source_key: str, dest_key: str) -> bool:
+      """Convenience: Atomic copy + delete."""
+      # Use transaction for atomicity (SQLite/PostgreSQL)
+      if self.copy_entry(source_key, dest_key):
+          self.remove_entry(source_key)  # CRUD: Delete
+          return True
+      return False
+  ```
+- [ ] Implement in all backends (SQLite, PostgreSQL, JSON, Memory)
+- [ ] Optimize: File-based backends can use OS rename for move
+
+**Cache Layer:**
+- [ ] Add `copy(source: Dict, dest: Dict)` to `UnifiedCache`
+  - [ ] Resolve source and dest cache_keys
+  - [ ] Delegate to `backend.copy_entry(source_key, dest_key)`
+- [ ] Add `move(source: Dict, dest: Dict)` to `UnifiedCache`
+  - [ ] Resolve source and dest cache_keys
+  - [ ] Delegate to `backend.move_entry(source_key, dest_key)`
+
+**Testing:**
+- [ ] Test copy_entry creates new entry with new cache_key
+- [ ] Test move_entry deletes source
+- [ ] Test move is atomic (transaction rollback on error)
+- [ ] Test copy/move with BlobStore (file operations)
+- [ ] Test cache.copy/move with kwargs resolution
+- [ ] Test error cases: source not found, dest already exists
+
+**Documentation:**
+- [ ] Add to API_REFERENCE.md
+- [ ] Add examples: backup before modification, fork experiments
+- [ ] Document that these are convenience methods (users can use CRUD directly)
+- [ ] Document atomicity guarantees for move
+
+**Priority:** ⚠️ Low - Convenience only, users can compose CRUD
+
+---
+
+### 3.7 Export/Import Cache (Low Priority)
+
+**Goal:** Backup/restore cache or migrate between environments.
+
+**Implementation Tasks:**
+
+**Cache Layer:**
+- [ ] Add `export_to_file(path: str, compress: bool = True, filter_fn: Optional[Callable] = None)`
+  - [ ] Query all entries (or filtered subset)
+  - [ ] Create tarball with: metadata.json + all blobs
+  - [ ] Optionally compress with gzip
+- [ ] Add `export_to_dict()` for programmatic export
+- [ ] Add `import_from_file(path: str)`
+  - [ ] Extract tarball
+  - [ ] Restore metadata entries
+  - [ ] Restore blob files
+  - [ ] Validate integrity (signatures, hashes)
+- [ ] Add `import_from_dict(data: Dict)`
+
+**Testing:**
+- [ ] Test export creates valid tarball
+- [ ] Test import restores all entries
+- [ ] Test round-trip (export → import → verify)
+- [ ] Test filtered export
+- [ ] Test cross-backend migration (SQLite → PostgreSQL)
+
+**Documentation:**
+- [ ] Add to API_REFERENCE.md
+- [ ] Add examples: backup, team sharing, dev→prod migration
+
+**Priority:** ⚠️ Low - Nice-to-have for migrations
+
+---
+
+### 3.8 Verify and Repair Cache (Low Priority)
+
+**Goal:** Detect corrupted entries or missing files.
+
+**Implementation Tasks:**
+
+**Storage Backend:**
+- [ ] Add `verify_integrity()` method
+  - [ ] Check all metadata entries have corresponding blobs
+  - [ ] Verify blob signatures (if enabled)
+  - [ ] Verify content hashes match
+  - [ ] Return list of issues
+
+**Cache Layer:**
+- [ ] Add `verify_integrity()` wrapper
+- [ ] Add `verify_cache_coherence()` for TTL consistency
+- [ ] Add `repair(dry_run: bool = True)`
+  - [ ] Remove orphaned metadata entries
+  - [ ] Remove orphaned blob files
+  - [ ] Recompute invalid hashes
+- [ ] Add `find_orphaned_files()` utility
+- [ ] Add `cleanup_orphaned_files()`
+
+**Testing:**
+- [ ] Test detect missing blobs
+- [ ] Test detect orphaned files
+- [ ] Test detect signature mismatches
+- [ ] Test repair fixes issues
+- [ ] Test dry_run doesn't modify cache
+
+**Documentation:**
+- [ ] Add to API_REFERENCE.md
+- [ ] Add examples: post-crash recovery, debugging
+
+**Priority:** ⚠️ Low - Debugging/maintenance utility
+
+---
+
+### Phase 3 Implementation Roadmap
+
+**Recommended Order:**
+
+**Sprint 1 (2-3 weeks): Trivial/High-Value Operations**
+1. ✅ **Get Metadata Exposure** (3.3) - Trivial, expose existing method
+   - 1-2 days implementation
+   - 1 day testing
+   - 1 day documentation
+2. ✅ **Update Blob Data** (3.1) - High priority, core CRUD
+   - 1 week implementation (all backends)
+   - 3 days testing
+   - 2 days documentation
+
+**Sprint 2 (3-4 weeks): Cache Operations**
+3. ✅ **Touch/Refresh TTL** (3.4) - High priority cache operation
+   - 1 week implementation (backend support + cache wrapper)
+   - 3 days testing
+   - 2 days documentation
+4. ✅ **Bulk Delete** (3.2) - High priority cleanup operation
+   - 1 week implementation (backends + cache wrappers)
+   - 3 days testing
+   - 2 days documentation
+
+**Sprint 3 (3-4 weeks): Batch Operations**
+5. ✅ **Batch Operations** (3.5) - Medium priority performance optimization
+   - 1.5 weeks implementation (get_batch, delete_batch, update_batch)
+   - 4 days testing (including benchmarks)
+   - 3 days documentation
+
+**Sprint 4 (2-3 weeks): Convenience Operations**
+6. ⚠️ **Copy/Move Entries** (3.6) - Low priority convenience
+   - 1 week implementation
+   - 2 days testing
+   - 2 days documentation
+
+**Sprint 5 (Optional - 2-3 weeks): Utilities**
+7. ⚠️ **Export/Import** (3.7) - Low priority
+8. ⚠️ **Verify/Repair** (3.8) - Low priority
+
+**Total Estimate:**
+- **Core Operations (Sprints 1-3):** 8-11 weeks
+- **With Convenience (Sprint 4):** 10-14 weeks
+- **With Utilities (Sprint 5):** 12-17 weeks
+
+**Recommendation:** Implement Sprints 1-3 first (core operations), then evaluate user demand for Sprints 4-5.
+
+---
+
+### Phase 3 Testing Strategy
+
+**Unit Tests:**
+- [ ] Test each operation in isolation
+- [ ] Test across all backends (SQLite, PostgreSQL, JSON, Memory)
+- [ ] Test error cases and edge cases
+- [ ] Test transaction rollback (where applicable)
+
+**Integration Tests:**
+- [ ] Test cache layer + backend layer integration
+- [ ] Test with BlobStore wrapper
+- [ ] Test with UnifiedCache wrapper
+- [ ] Test with different configurations
+
+**Performance Tests:**
+- [ ] Benchmark batch operations vs individual
+- [ ] Benchmark bulk delete vs loop
+- [ ] Compare backend performance (SQL vs JSON vs Memory)
+
+**Regression Tests:**
+- [ ] Ensure existing operations still work
+- [ ] Ensure cache_key immutability enforced
+- [ ] Ensure TTL behavior unchanged
+
+---
+
+### Phase 3 Documentation
+
+**API Reference Updates:**
+- [ ] Document all new backend methods
+- [ ] Document all new cache layer methods
+- [ ] Include code examples for each operation
+- [ ] Document return types and error conditions
+
+**New Examples:**
+- [ ] `examples/management_operations_demo.py` - Comprehensive demo
+- [ ] Update existing examples to use new operations where appropriate
+
+**Guides:**
+- [ ] Update MISSING_MANAGEMENT_API.md with implementation status
+- [ ] Add "Cache Management" section to main README
+- [ ] Add troubleshooting guide for common patterns
+
+---
+
 ##### 2.10 S3 Blob Backend
 
 **Status:** 🚧 In Progress (Core Implementation Complete)
@@ -1634,7 +2143,101 @@ def test_custom_metadata_foreign_key_cascade(cache_with_backend):
 
 ---
 
-#### Phase 3: Evaluate Full Separation (Future Decision)
+#### Phase 3: Management API Enhancements
+
+**Status:** 🆕 Proposed
+
+**Purpose:** Add comprehensive management operations for cache maintenance and data lifecycle.
+
+**Analysis Document:** [docs/MISSING_MANAGEMENT_API.md](MISSING_MANAGEMENT_API.md)
+
+**Priority Features:**
+
+##### 3.1 Touch/Refresh TTL (High Priority)
+
+Extend expiration time without reloading data:
+
+```python
+# Reset TTL to default
+cache.touch(experiment="exp_001")
+
+# Set custom TTL
+cache.touch(experiment="exp_001", ttl_seconds=hours(48))
+```
+
+**Use Cases:**
+- Keep frequently accessed data alive
+- Reset TTL for active sessions
+- Prevent expiration during long operations
+
+##### 3.2 Replace/Update Data (Medium Priority)
+
+Update cached data in-place:
+
+```python
+# Replace existing entry
+cache.replace(new_data, experiment="exp_001")
+
+# Update only if exists
+cache.update(new_data, experiment="exp_001", if_exists=True)
+```
+
+**Use Cases:**
+- Update stale data without invalidate+put
+- Modify cached results
+- Atomic updates
+
+##### 3.3 Bulk Delete Operations (Medium Priority)
+
+Delete multiple entries by pattern:
+
+```python
+# Delete all matching entries
+count = cache.delete_by_prefix(project="ml_models")
+
+# Delete with custom filter
+count = cache.delete_matching(lambda meta: meta.get("version").startswith("v1"))
+```
+
+**Use Cases:**
+- Cleanup old experiments
+- Remove specific data types
+- Clear version ranges
+
+##### 3.4 Get Metadata Only (Medium Priority)
+
+Retrieve metadata without loading data:
+
+```python
+# Check metadata before loading
+meta = cache.get_metadata(experiment="exp_001")
+# Returns: {"cache_key": "...", "file_size": 1024, "created_at": "...", ...}
+```
+
+**Use Cases:**
+- Inspect TTL before loading
+- Check file size before download
+- Query metadata for decisions
+
+**Additional Features (Lower Priority):**
+- Export/Import cache for backup/migration
+- Verify and repair corrupted entries
+- Batch operations (get_batch, touch_batch)
+- Copy/clone entries
+
+**Implementation Tasks:**
+
+- [ ] Add `touch()` method to UnifiedCache
+- [ ] Add `replace()` method to UnifiedCache
+- [ ] Add `delete_by_prefix()` method
+- [ ] Expose `get_metadata()` in UnifiedCache
+- [ ] Add tests for all new operations
+- [ ] Document in API_REFERENCE.md
+- [ ] Create usage examples
+
+---
+
+#### Phase 4: Evaluate Full Separation (Future Decision)
 1. Assess community adoption and feedback
 2. Determine if separate packages provide value
 3. If splitting, use namespace packages for smooth migration:
@@ -3152,9 +3755,10 @@ Currently, SQL backends (SQLite/PostgreSQL) only preserve known technical metada
 
 ## 📝 Summary for New Readers
 
-**Current Status (January 2026):**
+**Current Status (February 2026):**
 - ✅ **Phase 1 Complete**: Storage layer separated into `cacheness/storage/` subpackage
-- 🚧 **Phase 2 Planning**: Extensibility features designed, ready for implementation
+- 🚧 **Phase 2 In Progress**: Extensibility features (S3 backend in progress, rest complete)
+- 📋 **Phase 3 Ready**: Management operations designed, ready for implementation
 - ✅ **Bug Fixes**: All critical and medium severity issues resolved
 
 **Key Architectural Decisions:**
@@ -3163,17 +3767,19 @@ Currently, SQL backends (SQLite/PostgreSQL) only preserve known technical metada
 3. **Separate concerns**: Metadata backends ≠ blob storage backends
 4. **File-based interface**: Blob backends use files, not streaming
 5. **Preserve existing features**: Three metadata types coexist harmoniously
+6. **Storage backend = TTL-agnostic**: Backends store timestamps, cache layer interprets
+7. **Cache_key immutability**: Keys are immutable, derived from input parameters
 
-**Phase 2 Roadmap** (9-12 months):
-- **Phase 2.1** (2-3 months): Registration APIs, config validation
-- **Phase 2.2** (3-4 months): PostgreSQL metadata, S3 blobs, retry logic
-- **Phase 2.3** (2-3 months): Local caching, failover, observability
-- **Phase 2.4** (2-3 months): Azure/GCS, migration tools, cost tracking
+**Implementation Roadmap:**
+- **Phase 2** (mostly complete, 1-2 months remaining): PostgreSQL backend ✅, S3 backend 🚧, observability, Azure/GCS
+- **Phase 3** (3-6 months): Management operations - update, touch, bulk delete, batch ops, copy/move
+  - **Sprint 1-3** (8-11 weeks): Core operations (get_metadata, update_data, touch, bulk delete, batch ops)
+  - **Sprint 4-5** (optional, 4-6 weeks): Convenience operations (copy/move, export/import, verify/repair)
 
 **Next Steps for Contributors:**
-1. Review [Phase 2 Implementation Roadmap](#recommendations-for-phase-2-implementation-order)
-2. Check out Section 2.1-2.9 for detailed feature specifications
-3. See [Feasibility Review](#phase-2-feasibility-review) for technical considerations
+1. **For extensibility work:** Review [Phase 2 S3 Backend](#210-s3-blob-backend) (in progress)
+2. **For management operations:** Review [Phase 3 Management Operations](#phase-3-management-operations-api-medium-risk) (ready to start)
+3. See [MISSING_MANAGEMENT_API.md](MISSING_MANAGEMENT_API.md) for complete architectural analysis
 4. Read design decision on [Manual Registration vs Plugins](#phase-2-plugin-architecture--extensibility-medium-risk)
 
 ---
@@ -3197,4 +3803,5 @@ Currently, SQL backends (SQLite/PostgreSQL) only preserve known technical metada
 | 2026-02-04 | Section 2.11 Complete: Backend parity verification (11 tests passing) | Implementation |
 | 2026-02-04 | Section 2.13 Planned: Optional arbitrary metadata storage (opt-in JSON column) | Planning |
 | 2026-02-04 | Design Decision: Backends preserve technical fields only by default for performance | Architecture |
+| 2026-02-05 | Phase 3 Planned: Management Operations API - update, touch, bulk delete, batch ops | Planning |
 

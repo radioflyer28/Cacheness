@@ -78,6 +78,26 @@ class MetadataBackend(ABC):
         pass
 
     @abstractmethod
+    def update_blob_data(self, cache_key: str, new_data: Any, handler, config) -> bool:
+        """
+        Update blob data at existing cache_key without changing the key.
+        
+        This replaces the data stored at a cache_key while keeping the key immutable.
+        Updates derived metadata (file_size, content_hash, created_at) but cache_key
+        remains unchanged.
+        
+        Args:
+            cache_key: The unique identifier for the cache entry to update
+            new_data: New data to store
+            handler: Handler instance for serialization
+            config: CacheConfig instance
+            
+        Returns:
+            bool: True if entry was updated, False if entry doesn't exist
+        """
+        pass
+
+    @abstractmethod
     def list_entries(self) -> List[Dict[str, Any]]:
         """
         List all cache entries with metadata.

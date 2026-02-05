@@ -1064,6 +1064,418 @@ class UnifiedCache:
             self.metadata_backend.increment_misses()
             return None
 
+    def get_metadata(
+        self,
+        cache_key: Optional[str] = None,
+        check_expiration: bool = True,
+        **kwargs
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Get entry metadata without loading blob data.
+        
+        This is useful for inspecting cache entries (TTL, file size, data type)
+        before deciding whether to load the actual data.
+        
+        Args:
+            cache_key: Direct cache key (if provided, **kwargs are ignored)
+            check_expiration: If True, returns None for expired entries (default: True)
+            **kwargs: Parameters identifying the cached data (used if cache_key is None)
+        
+        Returns:
+            Metadata dictionary or None if not found or expired
+            
+        Example:
+            # Check metadata before loading large file
+            meta = cache.get_metadata(experiment="exp_001")
+            if meta and meta.get("file_size_bytes", 0) > 1e9:
+                print("Large file - loading may take time")
+                data = cache.get(experiment="exp_001")
+        """
+        if cache_key is None:
+            cache_key = self._create_cache_key(kwargs)
+        
+        entry = self.metadata_backend.get_entry(cache_key)
+        if not entry:
+            return None
+        
+        # Check expiration if requested (respects cache TTL policy)
+        if check_expiration and self._is_expired(cache_key):
+            return None
+        
+        # Ensure cache_key is included in returned metadata
+        entry["cache_key"] = cache_key
+        
+        return entry
+    
+    def update_data(
+        self,
+        data: Any,
+        cache_key: Optional[str] = None,
+        **kwargs
+    ) -> bool:
+        """
+        Update blob data at an existing cache entry without changing the cache_key.
+        
+        This replaces the stored data at a fixed cache_key while updating derived
+        metadata (file_size, content_hash, created_at timestamp). The cache_key
+        itself remains unchanged to maintain referential integrity.
+        
+        Args:
+            data: New data to store (must be serializable by handler)
+            cache_key: Direct cache key (if provided, **kwargs are ignored)
+            **kwargs: Parameters identifying the cached data (used if cache_key is None)
+        
+        Returns:
+            bool: True if entry was updated, False if entry doesn't exist
+            
+        Example:
+            # Update cached DataFrame with new data
+            success = cache.update_data(
+                new_df,
+                experiment="exp_001",
+                run_id=42
+            )
+            
+            if not success:
+                print("Entry not found - use put() to create new entry")
+        
+        Note:
+            - Cache_key is immutable and derived from input params (not content)
+            - Use update_data() to refresh data at same logical location
+            - Use put() to create new entries
+            - created_at timestamp is reset to now (acts like touch)
+        """
+        if cache_key is None:
+            cache_key = self._create_cache_key(kwargs)
+        
+        # Get appropriate handler for the data type
+        handler = self.handlers.get_handler(data)
+        
+        # Delegate to backend (storage layer)
+        success = self.metadata_backend.update_blob_data(
+            cache_key=cache_key,
+            new_data=data,
+            handler=handler,
+            config=self.config
+        )
+        
+        if not success:
+            logger.warning(f"⚠️ Cache entry not found for update: {cache_key[:16]}...")
+            return False
+        
+        # Re-sign the entry if signing is enabled (security: signature must match updated data)
+        if self.signer:
+            try:
+                # Get the updated entry from backend
+                updated_entry = self.metadata_backend.get_entry(cache_key)
+                if updated_entry:
+                    # Recalculate file hash for integrity verification
+                    metadata = updated_entry.get("metadata", {})
+                    actual_path = metadata.get("actual_path")
+                    if actual_path and self.config.metadata.verify_cache_integrity:
+                        new_file_hash = self._calculate_file_hash(Path(actual_path))
+                        metadata["file_hash"] = new_file_hash
+                    
+                    # Extract signable fields and create new signature
+                    cache_key_params = kwargs if self.config.metadata.store_full_metadata else None
+                    complete_entry_data = self._extract_signable_fields(
+                        cache_key=cache_key,
+                        entry_data=updated_entry,
+                        metadata=metadata,
+                        cache_key_params=cache_key_params
+                    )
+                    
+                    # Generate new signature for updated entry
+                    new_signature = self.signer.sign_entry(complete_entry_data)
+                    metadata["entry_signature"] = new_signature
+                    
+                    # Update entry with new signature and file hash
+                    updated_entry["metadata"] = metadata
+                    self.metadata_backend.put_entry(cache_key, updated_entry)
+                    
+                    logger.debug(f"Re-signed updated entry {cache_key}")
+            except Exception as e:
+                logger.warning(f"Failed to re-sign updated entry {cache_key}: {e}")
+                # Continue - update succeeded, just missing signature
+        
+        logger.info(f"✅ Updated cache entry: {cache_key[:16]}...")
+        return True
+    
+    def touch(
+        self,
+        cache_key: Optional[str] = None,
+        ttl_seconds: Optional[float] = None,
+        **kwargs
+    ) -> bool:
+        """
+        Update entry timestamp to extend TTL without reloading data.
+        
+        This "touches" the cache entry to reset its expiration time, useful for
+        keeping frequently accessed data alive longer or preventing expiration
+        of long-running computations.
+        
+        Args:
+            cache_key: Direct cache key (if provided, **kwargs are ignored)
+            ttl_seconds: New TTL in seconds (uses default if None)
+            **kwargs: Parameters identifying the cached data (used if cache_key is None)
+        
+        Returns:
+            bool: True if entry exists and was touched, False if entry doesn't exist
+            
+        Example:
+            # Reset TTL to default
+            cache.touch(experiment="exp_001")
+            
+            # Extend TTL to 48 hours
+            from cacheness.ttl_helpers import hours
+            cache.touch(experiment="exp_001", ttl_seconds=hours(48))
+            
+            # Keep long-running computation alive
+            for i in range(100):
+                process_chunk(i)
+                if i % 10 == 0:
+                    cache.touch(job_id="long_job")  # Prevent expiration
+        
+        Note:
+            - This is a cache-layer operation (TTL-aware)
+            - Storage backend updates timestamp, cache layer interprets it
+            - Does not reload or re-serialize data
+            - Much faster than get() + put()
+        """
+        if cache_key is None:
+            cache_key = self._create_cache_key(kwargs)
+        
+        # Get existing entry
+        entry = self.metadata_backend.get_entry(cache_key)
+        if not entry:
+            logger.warning(f"⚠️ Cache entry not found for touch: {cache_key[:16]}...")
+            return False
+        
+        # Update timestamp to now (resets TTL)
+        now = datetime.now(timezone.utc)
+        entry["created_at"] = now.isoformat()
+        entry["accessed_at"] = now.isoformat()
+        
+        # Re-sign if signing is enabled (timestamp is part of signature)
+        if self.signer:
+            try:
+                metadata = entry.get("metadata", {})
+                cache_key_params = kwargs if self.config.metadata.store_full_metadata else None
+                complete_entry_data = self._extract_signable_fields(
+                    cache_key=cache_key,
+                    entry_data=entry,
+                    metadata=metadata,
+                    cache_key_params=cache_key_params
+                )
+                
+                # Generate new signature with updated timestamp
+                new_signature = self.signer.sign_entry(complete_entry_data)
+                metadata["entry_signature"] = new_signature
+                entry["metadata"] = metadata
+                
+                logger.debug(f"Re-signed touched entry {cache_key}")
+            except Exception as e:
+                logger.warning(f"Failed to re-sign touched entry {cache_key}: {e}")
+                # Continue - touch succeeded, just missing signature
+        
+        # Store updated entry
+        self.metadata_backend.put_entry(cache_key, entry)
+        
+        logger.info(f"👆 Touched cache entry: {cache_key[:16]}... (TTL extended)")
+        return True
+
+    # ── Bulk & Batch Operations ───────────────────────────────────────────
+
+    def delete_where(self, filter_fn: Callable[[Dict[str, Any]], bool]) -> int:
+        """
+        Delete all cache entries matching a filter function.
+        
+        Iterates over every entry and deletes those for which ``filter_fn``
+        returns ``True``.  This works with **all** backends.
+        
+        Args:
+            filter_fn: A callable that receives an entry dict and returns True
+                       if the entry should be deleted.  Each dict contains at
+                       least ``cache_key``, ``data_type``, ``description``,
+                       ``metadata``, ``created``, ``last_accessed``, and
+                       ``size_mb``.
+        
+        Returns:
+            int: Number of entries deleted
+        
+        Example:
+            # Delete all entries older than 7 days
+            from datetime import datetime, timezone, timedelta
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+            deleted = cache.delete_where(
+                lambda e: (e.get("created") or "") < cutoff
+            )
+            
+            # Delete all DataFrames
+            deleted = cache.delete_where(
+                lambda e: e.get("data_type") == "pandas_dataframe"
+            )
+        """
+        entries = self.list_entries()
+        deleted = 0
+        for entry in entries:
+            try:
+                if filter_fn(entry):
+                    cache_key = entry.get("cache_key")
+                    if cache_key:
+                        self.invalidate(cache_key=cache_key)
+                        deleted += 1
+            except Exception as exc:
+                logger.warning(
+                    f"filter_fn raised for entry {entry.get('cache_key', '?')}: {exc}"
+                )
+        logger.info(f"🗑️ Bulk delete: removed {deleted} entries")
+        return deleted
+
+    def delete_matching(self, **kwargs) -> int:
+        """
+        Delete all cache entries whose metadata contains the given key/value
+        pairs.
+        
+        This is a convenience wrapper around :meth:`delete_where` that checks
+        each entry's metadata dict for matching values.  Works with all
+        backends; for SQLite with ``store_full_metadata=True`` it also checks
+        the ``metadata_dict`` column via ``query_meta()``.
+        
+        Args:
+            **kwargs: Key-value pairs to match against entry metadata.
+                      An entry is deleted when **all** pairs match.
+        
+        Returns:
+            int: Number of entries deleted
+        
+        Example:
+            # Delete all entries for a specific project
+            deleted = cache.delete_matching(project="ml_models")
+            
+            # Delete all entries for a specific experiment + model type
+            deleted = cache.delete_matching(
+                experiment="exp_001",
+                model_type="xgboost"
+            )
+        """
+        if not kwargs:
+            return 0
+
+        # Fast path: use query_meta on SQLite for indexed lookups
+        if self.actual_backend == "sqlite" and self.config.metadata.store_full_metadata:
+            results = self.query_meta(**kwargs)
+            if results is not None:
+                deleted = 0
+                for entry in results:
+                    cache_key = entry.get("cache_key")
+                    if cache_key:
+                        self.invalidate(cache_key=cache_key)
+                        deleted += 1
+                logger.info(f"🗑️ Bulk delete (query_meta): removed {deleted} entries")
+                return deleted
+
+        # Generic path: scan all entries and match metadata
+        def _matches(entry: Dict[str, Any]) -> bool:
+            meta = entry.get("metadata", {})
+            # Also check top-level fields (data_type, description, etc.)
+            combined = {**entry, **meta}
+            return all(combined.get(k) == v for k, v in kwargs.items())
+
+        return self.delete_where(_matches)
+
+    def get_batch(
+        self,
+        kwargs_list: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """
+        Get multiple cache entries in one call.
+        
+        Args:
+            kwargs_list: List of kwarg dicts, each identifying one entry
+                         (same parameters you would pass to :meth:`get`).
+        
+        Returns:
+            dict mapping each generated cache_key to its data (or ``None``
+            if not found / expired).
+        
+        Example:
+            results = cache.get_batch([
+                {"experiment": "exp_001"},
+                {"experiment": "exp_002"},
+                {"experiment": "exp_003"},
+            ])
+            for key, data in results.items():
+                if data is not None:
+                    print(f"{key}: loaded")
+        """
+        results: Dict[str, Any] = {}
+        for kw in kwargs_list:
+            cache_key = self._create_cache_key(kw)
+            results[cache_key] = self.get(**kw)
+        return results
+
+    def delete_batch(
+        self,
+        kwargs_list: List[Dict[str, Any]],
+    ) -> int:
+        """
+        Delete multiple cache entries in one call.
+        
+        Args:
+            kwargs_list: List of kwarg dicts, each identifying one entry
+                         (same parameters you would pass to :meth:`invalidate`).
+        
+        Returns:
+            int: Number of entries that were actually deleted (existed).
+        
+        Example:
+            deleted = cache.delete_batch([
+                {"experiment": "exp_001"},
+                {"experiment": "exp_002"},
+            ])
+            print(f"Removed {deleted} entries")
+        """
+        deleted = 0
+        for kw in kwargs_list:
+            cache_key = self._create_cache_key(kw)
+            entry = self.metadata_backend.get_entry(cache_key)
+            if entry is not None:
+                self.invalidate(cache_key=cache_key)
+                deleted += 1
+        logger.info(f"🗑️ Batch delete: removed {deleted}/{len(kwargs_list)} entries")
+        return deleted
+
+    def touch_batch(self, **filter_kwargs) -> int:
+        """
+        Touch (refresh TTL of) all cache entries whose metadata matches
+        the given key/value pairs.
+        
+        Args:
+            **filter_kwargs: Key-value pairs to match against entry metadata.
+        
+        Returns:
+            int: Number of entries touched.
+        
+        Example:
+            # Extend TTL for all entries in a project
+            touched = cache.touch_batch(project="ml_models")
+        """
+        if not filter_kwargs:
+            return 0
+
+        entries = self.list_entries()
+        touched = 0
+        for entry in entries:
+            meta = entry.get("metadata", {})
+            combined = {**entry, **meta}
+            if all(combined.get(k) == v for k, v in filter_kwargs.items()):
+                cache_key = entry.get("cache_key")
+                if cache_key and self.touch(cache_key=cache_key):
+                    touched += 1
+        logger.info(f"👆 Batch touch: refreshed {touched} entries")
+        return touched
+
     def _enforce_size_limit(self):
         """Enforce cache size limits using LRU eviction."""
         # Get current total size from metadata backend

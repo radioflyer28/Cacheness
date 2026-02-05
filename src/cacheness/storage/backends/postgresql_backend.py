@@ -533,6 +533,70 @@ class PostgresBackend(MetadataBackend):
                     logger.error(f"Failed to remove entry {cache_key}: {e}")
                     raise
     
+    def update_blob_data(self, cache_key: str, new_data: Any, handler, config) -> bool:
+        """
+        Update blob data at existing cache_key without changing the key.
+        
+        Args:
+            cache_key: The unique identifier for the cache entry to update
+            new_data: New data to store
+            handler: Handler instance for serialization
+            config: CacheConfig instance
+            
+        Returns:
+            bool: True if entry was updated, False if entry doesn't exist
+        """
+        with self._lock:
+            with self.SessionLocal() as session:
+                try:
+                    # Check if entry exists
+                    entry = session.execute(
+                        select(PgCacheEntry).where(PgCacheEntry.cache_key == cache_key)
+                    ).scalar_one_or_none()
+                    
+                    if not entry:
+                        return False
+                    
+                    # Get cache file path from metadata
+                    from pathlib import Path
+                    cache_dir = Path(config.storage.cache_dir)
+                    prefix = entry.prefix or ""
+                    if prefix:
+                        base_file_path = cache_dir / f"{prefix}_{cache_key}"
+                    else:
+                        base_file_path = cache_dir / cache_key
+                    
+                    # Use handler to store the new data
+                    result = handler.put(new_data, base_file_path, config)
+                    
+                    # Update derived metadata fields
+                    now = datetime.now(timezone.utc)
+                    entry.created_at = now  # Reset timestamp
+                    entry.file_size = result.get("file_size", 0)
+                    entry.file_hash = result.get("file_hash") or result.get("content_hash")
+                    entry.actual_path = str(result.get("actual_path", base_file_path))
+                    
+                    # Update data_type and storage_format (might change with data type)
+                    if hasattr(handler, "data_type"):
+                        entry.data_type = handler.data_type
+                    if result.get("storage_format"):
+                        entry.storage_format = result["storage_format"]
+                    if hasattr(handler, "serializer"):
+                        entry.serializer = handler.serializer
+                    if result.get("compression_codec"):
+                        entry.compression_codec = result["compression_codec"]
+                    if result.get("object_type"):
+                        entry.object_type = result["object_type"]
+                    if result.get("s3_etag"):
+                        entry.s3_etag = result["s3_etag"]
+                    
+                    session.commit()
+                    return True
+                except Exception as e:
+                    session.rollback()
+                    logger.error(f"Failed to update entry {cache_key}: {e}")
+                    raise
+    
     def list_entries(self) -> List[Dict[str, Any]]:
         """List all cache entries."""
         with self.SessionLocal() as session:
