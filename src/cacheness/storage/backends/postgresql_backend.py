@@ -590,6 +590,38 @@ class PostgresBackend(MetadataBackend):
                     logger.error(f"Failed to update entry {cache_key}: {e}")
                     raise
     
+    def iter_entry_summaries(self) -> List[Dict[str, Any]]:
+        """Return lightweight flat entry dicts — raw SQL, no ORM hydration."""
+        with self.SessionLocal() as session:
+            rows = session.execute(text(
+                "SELECT cache_key, data_type, description, prefix, "
+                "       file_size, created_at, accessed_at, "
+                "       object_type, storage_format, serializer, "
+                "       compression_codec, actual_path, "
+                "       file_hash, entry_signature "
+                "FROM cache_entries"
+            )).fetchall()
+            result = []
+            for row in rows:
+                flat = {
+                    "cache_key": row[0],
+                    "data_type": row[1],
+                    "description": row[2] or "",
+                    "prefix": row[3] or "",
+                    "file_size": row[4] or 0,
+                    "created_at": row[5],
+                    "accessed_at": row[6],
+                }
+                if row[7] is not None: flat["object_type"] = row[7]
+                if row[8] is not None: flat["storage_format"] = row[8]
+                if row[9] is not None: flat["serializer"] = row[9]
+                if row[10] is not None: flat["compression_codec"] = row[10]
+                if row[11] is not None: flat["actual_path"] = row[11]
+                if row[12] is not None: flat["file_hash"] = row[12]
+                if row[13] is not None: flat["entry_signature"] = row[13]
+                result.append(flat)
+            return result
+
     def list_entries(self) -> List[Dict[str, Any]]:
         """List all cache entries."""
         with self.SessionLocal() as session:

@@ -284,6 +284,37 @@ class MetadataBackend(ABC):
         """Remove all cache entries and return count removed."""
         pass
 
+    def iter_entry_summaries(self) -> List[Dict[str, Any]]:
+        """Return lightweight entry summaries for internal filtering.
+
+        Each dict contains flat, unprocessed column values:
+            cache_key, data_type, description, created_at (raw),
+            accessed_at (raw), file_size (bytes int), plus any
+            backend-specific technical fields (object_type,
+            storage_format, serializer, compression_codec,
+            actual_path, file_hash, entry_signature, prefix).
+
+        Unlike list_entries(), this method:
+        - Skips ORM hydration on SQL backends (uses raw SELECT)
+        - Skips nested metadata dict construction
+        - Skips isoformat() conversion on timestamps
+        - Skips cache_key_params JSON parsing
+        - Skips size_mb calculation
+
+        The returned dicts are flat (no nested 'metadata' key) so callers
+        can match against any field with simple ``entry.get(k) == v``.
+
+        Default implementation falls back to list_entries() for custom
+        backends that haven't overridden this method.
+        """
+        # Fallback: flatten list_entries() output for custom backends
+        result = []
+        for entry in self.list_entries():
+            flat = {k: v for k, v in entry.items() if k != "metadata"}
+            flat.update(entry.get("metadata", {}))
+            result.append(flat)
+        return result
+
     def close(self):
         """Close and clean up any resources (default implementation does nothing)."""
         pass
@@ -486,7 +517,10 @@ class CachedMetadataBackend(MetadataBackend):
     
     def list_entries(self) -> List[Dict[str, Any]]:
         return self.backend.list_entries()
-    
+
+    def iter_entry_summaries(self) -> List[Dict[str, Any]]:
+        return self.backend.iter_entry_summaries()
+
     def get_stats(self) -> Dict[str, Any]:
         """Get cache statistics with optional entry cache stats."""
         stats = self.backend.get_stats()
@@ -696,6 +730,27 @@ class JsonBackend(MetadataBackend):
             # Save to disk immediately for atomicity
             self._save_to_disk()
             return True
+
+    def iter_entry_summaries(self) -> List[Dict[str, Any]]:
+        """Return lightweight flat entry dicts for internal filtering."""
+        with self._lock:
+            result = []
+            for cache_key, entry in self._metadata.get("entries", {}).items():
+                flat = {
+                    "cache_key": cache_key,
+                    "data_type": entry.get("data_type", "unknown"),
+                    "description": entry.get("description", ""),
+                    "prefix": entry.get("prefix", ""),
+                    "created_at": entry.get("created_at"),
+                    "accessed_at": entry.get("accessed_at"),
+                    "file_size": entry.get("file_size", 0),
+                }
+                # Merge technical metadata fields flat
+                for k, v in entry.get("metadata", {}).items():
+                    if k not in flat:
+                        flat[k] = v
+                result.append(flat)
+            return result
 
     def list_entries(self) -> List[Dict[str, Any]]:
         """List all cache entries with metadata (simple entries iteration)."""
@@ -1202,6 +1257,40 @@ class SqliteBackend(MetadataBackend):
             
             session.commit()
             return True
+
+    def iter_entry_summaries(self) -> List[Dict[str, Any]]:
+        """Return lightweight flat entry dicts — raw SQL, no ORM hydration."""
+        from sqlalchemy import text
+        with self.SessionLocal() as session:
+            rows = session.execute(text(
+                "SELECT cache_key, data_type, description, prefix, "
+                "       file_size, created_at, accessed_at, "
+                "       object_type, storage_format, serializer, "
+                "       compression_codec, actual_path, "
+                "       file_hash, entry_signature "
+                "FROM cache_entries"
+            )).fetchall()
+            result = []
+            for row in rows:
+                flat = {
+                    "cache_key": row[0],
+                    "data_type": row[1],
+                    "description": row[2] or "",
+                    "prefix": row[3] or "",
+                    "file_size": row[4] or 0,
+                    "created_at": row[5],
+                    "accessed_at": row[6],
+                }
+                # Only include non-None technical metadata
+                if row[7] is not None: flat["object_type"] = row[7]
+                if row[8] is not None: flat["storage_format"] = row[8]
+                if row[9] is not None: flat["serializer"] = row[9]
+                if row[10] is not None: flat["compression_codec"] = row[10]
+                if row[11] is not None: flat["actual_path"] = row[11]
+                if row[12] is not None: flat["file_hash"] = row[12]
+                if row[13] is not None: flat["entry_signature"] = row[13]
+                result.append(flat)
+            return result
 
     def list_entries(self) -> List[Dict[str, Any]]:
         """List all cache entries using columns directly - zero JSON parsing overhead for backend data."""
