@@ -16,7 +16,7 @@ def analyze_list_performance():
     print("=" * 60)
     print("NOTE: Memory cache layer DISABLED for JSON/SQLite to test raw backend performance")
     
-    backends = ["memory", "json", "sqlite"]
+    backends = ["json", "sqlite", "sqlite_memory"]
     cache_sizes = [50, 200, 500, 1000]
     
     for size in cache_sizes:
@@ -63,6 +63,7 @@ def analyze_list_performance():
                 
                 # Verify all calls return same number of entries
                 assert len(entries1) == len(entries2) == len(entries3) == size
+                cache.close()
 
 
 def analyze_list_operations_detail():
@@ -74,7 +75,7 @@ def analyze_list_operations_detail():
     # Test with moderate size to see patterns clearly
     size = 500
     
-    for backend in ["memory", "json", "sqlite"]:
+    for backend in ["json", "sqlite", "sqlite_memory"]:
         print(f"\n🔍 {backend.upper()} Backend Analysis:")
         
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -116,6 +117,7 @@ def analyze_list_operations_detail():
             entries_b = cache.list_entries()
             is_cached = entries_a is entries_b
             print(f"   Result caching: {'Yes' if is_cached else 'No'}")
+            cache.close()
 
 
 def compare_scaling_patterns():
@@ -126,7 +128,7 @@ def compare_scaling_patterns():
     
     sizes = [10, 50, 100, 200, 500, 1000, 2000]
     
-    print("Size     | Memory (ms) | JSON (ms)   | SQLite (ms) | Memory/JSON | SQLite/JSON")
+    print("Size     | SQLite-Mem (ms) | JSON (ms)   | SQLite (ms) | SQLiteMem/JSON | SQLite/JSON")
     print("-" * 80)
     
     results = {}
@@ -134,7 +136,7 @@ def compare_scaling_patterns():
     for size in sizes:
         size_results = {}
         
-        for backend in ["memory", "json", "sqlite"]:
+        for backend in ["json", "sqlite", "sqlite_memory"]:
             with tempfile.TemporaryDirectory() as temp_dir:
                 cache_dir = os.path.join(temp_dir, f"scale_test_{backend}")
                 
@@ -159,18 +161,19 @@ def compare_scaling_patterns():
                 list_time = (time.time() - start) * 1000
                 
                 size_results[backend] = list_time
+                cache.close()
         
         results[size] = size_results
         
         # Calculate ratios
-        memory_time = size_results["memory"]
+        sqlite_mem_time = size_results["sqlite_memory"]
         json_time = size_results["json"] 
         sqlite_time = size_results["sqlite"]
         
-        memory_json_ratio = memory_time / json_time if json_time > 0 else 0
+        sqlite_mem_json_ratio = sqlite_mem_time / json_time if json_time > 0 else 0
         sqlite_json_ratio = sqlite_time / json_time if json_time > 0 else 0
         
-        print(f"{size:4d}     | {memory_time:8.1f}    | {json_time:8.1f}    | {sqlite_time:8.1f}     | {memory_json_ratio:8.2f}    | {sqlite_json_ratio:8.2f}")
+        print(f"{size:4d}     | {sqlite_mem_time:8.1f}       | {json_time:8.1f}    | {sqlite_time:8.1f}     | {sqlite_mem_json_ratio:8.2f}       | {sqlite_json_ratio:8.2f}")
     
     return results
 
@@ -182,13 +185,12 @@ if __name__ == "__main__":
     
     print("\n\n🎯 Key Insights:")
     print("=" * 60)
-    print("• InMemoryBackend: Pure in-memory, no internal result caching")
+    print("• SQLite In-Memory: Pure in-memory via :memory:, no file I/O")
     print("• JSONBackend: File-based storage, no internal caching")  
-    print("• SQLiteBackend: Database storage + JSON parsing overhead per entry")
+    print("• SQLiteBackend: Database storage with dedicated columns")
     print("• Memory cache layer: Can be enabled/disabled for JSON/SQLite backends")
-    print("• InMemoryBackend shouldn't have internal caching (fixed in this version)")
     print("\n💡 Recommendations:")
-    print("• SQLite: Significant performance overhead due to DB + JSON parsing")
-    print("• JSON vs Memory: Should have similar performance for list operations") 
+    print("• SQLite: Some overhead due to DB queries vs JSON file reads")
+    print("• JSON vs SQLite In-Memory: Similar performance for list operations") 
     print("• Enable memory cache layer for JSON/SQLite if doing frequent list_entries() calls")
-    print("• InMemoryBackend: Best raw performance, no persistence")
+    print("• SQLite In-Memory: Best raw performance, no persistence")

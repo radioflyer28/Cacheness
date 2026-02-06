@@ -30,7 +30,7 @@ def test_schema_optimization_performance():
     backends = [
         ("JSON Backend (unified schema)", "json"),
         ("SQLite Backend (optimized)", "sqlite"),
-        ("InMemory Backend (unified)", "memory"),
+        ("SQLite In-Memory (ephemeral)", "sqlite_memory"),
     ]
     
     print("Backend                    | PUT ops/sec | GET ops/sec | LIST time (ms)")
@@ -80,6 +80,7 @@ def test_schema_optimization_performance():
                 first_entry = entries[0]
                 print(f"   Entry fields: {list(first_entry.keys())}")
                 print(f"   Metadata keys: {list(first_entry.get('metadata', {}).keys())[:5]}...")  # Show first 5
+            cache.close()
 
 
 def test_memory_cache_layer_benefit():
@@ -138,6 +139,7 @@ def test_memory_cache_layer_benefit():
                 hit_rate = f"{hit_rate:.3f}"
             
             print(f"{config_name:26} | {get_ops_per_sec:8.0f}    | {list_time:8.1f}      | {hit_rate}")
+            cache.close()
 
 
 def compare_backends_optimized():
@@ -151,7 +153,7 @@ def compare_backends_optimized():
     test_data = {"data": "test", "array": list(range(30))}
     
     backends = [
-        ("Memory", "memory"),
+        ("SQLite In-Memory", "sqlite_memory"),
         ("JSON", "json"),
         ("SQLite", "sqlite"),
     ]
@@ -193,6 +195,7 @@ def compare_backends_optimized():
             list_time = (time.time() - start) * 1000
             
             print(f"{backend_name:26} | {put_ops_per_sec:8.0f}    | {get_ops_per_sec:8.0f}    | {list_time:8.1f}")
+            cache.close()
 
 
 def main():
@@ -217,11 +220,11 @@ def main():
         print("📈 Performance Improvements:")
         print("• SQLite backend: Eliminated JSON parsing overhead for backend metadata")
         print("• JSON backend: Simple row-based storage for better performance")
-        print("• InMemory backend: Optimized unified entry structure")
+        print("• SQLite In-Memory: Fast ephemeral caching via :memory: mode")
         print("• All backends: Consistent API with optimized storage patterns")
         print()
         print("🚀 Best Practices:")
-        print("• Use Memory backend for temporary high-performance caching")
+        print("• Use SQLite In-Memory for temporary high-performance caching")
         print("• Use JSON backend for small caches and development")
         print("• Use SQLite backend for production and large caches")
         print("• All backends now provide identical entry structures")

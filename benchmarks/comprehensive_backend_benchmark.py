@@ -4,7 +4,7 @@ Comprehensive Backend Performance Benchmark
 ===========================================
 
 This consolidates multiple backend benchmarks into a single comprehensive test:
-1. Raw backend performance comparison (Memory, JSON, SQLite)
+1. Raw backend performance comparison (JSON, SQLite, SQLite In-Memory)
 2. Memory cache layer impact (enabled vs disabled for JSON/SQLite)
 3. Realistic workload patterns with different access patterns
 4. Scaling characteristics across different cache sizes
@@ -50,8 +50,8 @@ def benchmark_raw_backend_performance():
     print("Testing pure backend performance with memory cache layer DISABLED")
     print()
     
-    backends = ["memory", "json", "sqlite"]
-    cache_sizes = [50, 200, 500, 1000]
+    backends = ["json", "sqlite", "sqlite_memory"]
+    cache_sizes = [50, 100, 200, 500]
     
     print("Backend   | Cache Size | PUT ops/sec | GET ops/sec | LIST time (ms)")
     print("-" * 70)
@@ -97,6 +97,7 @@ def benchmark_raw_backend_performance():
                 list_time = (time.time() - start) * 1000
                 
                 print(f"{backend:9} | {size:10d} | {put_ops_per_sec:8.0f}    | {get_ops_per_sec:8.0f}    | {list_time:8.1f}")
+                cache.close()
 
 
 def benchmark_memory_cache_layer_impact():
@@ -106,9 +107,9 @@ def benchmark_memory_cache_layer_impact():
     print("Comparing JSON and SQLite backends with memory cache layer ON vs OFF")
     print()
     
-    backends = ["json", "sqlite"]  # Memory backend doesn't use cache layer
-    cache_size = 500
-    num_operations = 1000
+    backends = ["json", "sqlite"]
+    cache_size = 100
+    num_operations = 200
     
     print("Backend | Cache Layer | PUT ops/sec | GET ops/sec | Hit Rate | Cache Stats")
     print("-" * 85)
@@ -131,7 +132,7 @@ def benchmark_memory_cache_layer_impact():
                 cache = cacheness(config)
                 
                 # Populate cache first
-                test_data = create_test_data("medium")
+                test_data = create_test_data("small")
                 cache_keys = []
                 for i in range(cache_size):
                     key = cache.put(test_data, test_id=i)
@@ -160,6 +161,7 @@ def benchmark_memory_cache_layer_impact():
                 
                 cache_status = "ENABLED " if cache_enabled else "DISABLED"
                 print(f"{backend:7} | {cache_status:11} | {'N/A':8}     | {get_ops_per_sec:8.0f}    | {cache_hit_rate:8}  | {cache_size_info}")
+                cache.close()
 
 
 def benchmark_realistic_workload_patterns():
@@ -178,8 +180,8 @@ def benchmark_realistic_workload_patterns():
         ])
     ]
     
-    cache_size = 1000
-    num_operations = 2000
+    cache_size = 200
+    num_operations = 500
     
     print("Pattern     | Backend | Cache Layer | ops/sec | Cache Hit Rate")
     print("-" * 60)
@@ -227,6 +229,7 @@ def benchmark_realistic_workload_patterns():
                     
                     cache_status = "ON " if cache_enabled else "OFF"
                     print(f"{pattern_name:11} | {backend:7} | {cache_status:11} | {ops_per_sec:7.0f} | {hit_rate}")
+                    cache.close()
 
 
 def benchmark_scaling_characteristics():
@@ -236,10 +239,10 @@ def benchmark_scaling_characteristics():
     print("Testing how list_entries() performance scales with cache size")
     print()
     
-    sizes = [10, 50, 100, 500, 1000, 2000]
-    backends = ["memory", "json", "sqlite"]
+    sizes = [10, 50, 100, 200, 500]
+    backends = ["json", "sqlite", "sqlite_memory"]
     
-    print("Cache Size | Memory (ms) | JSON (ms)   | SQLite (ms) | SQLite/JSON Ratio")
+    print("Cache Size | SQLite-Mem (ms) | JSON (ms)   | SQLite (ms) | SQLite/JSON Ratio")
     print("-" * 75)
     
     for size in sizes:
@@ -268,11 +271,12 @@ def benchmark_scaling_characteristics():
                 list_time = (time.time() - start) * 1000
                 
                 results[backend] = list_time
+                cache.close()
         
         # Calculate ratio
         ratio = results["sqlite"] / results["json"] if results["json"] > 0 else 0
         
-        print(f"{size:10d} | {results['memory']:8.1f}    | {results['json']:8.1f}    | {results['sqlite']:8.1f}     | {ratio:8.1f}x")
+        print(f"{size:10d} | {results['sqlite_memory']:8.1f}       | {results['json']:8.1f}    | {results['sqlite']:8.1f}     | {ratio:8.1f}x")
 
 
 def benchmark_memory_cache_effectiveness():
@@ -283,7 +287,7 @@ def benchmark_memory_cache_effectiveness():
     print()
     
     backend = "sqlite"  # Use SQLite as it benefits most from caching
-    cache_size = 500
+    cache_size = 100
     
     for cache_enabled in [False, True]:
         cache_status = "ENABLED" if cache_enabled else "DISABLED"
@@ -305,14 +309,14 @@ def benchmark_memory_cache_effectiveness():
             cache = cacheness(config)
             
             # Populate cache
-            test_data = create_test_data("medium")
+            test_data = create_test_data("small")
             cache_keys = []
             for i in range(cache_size):
                 key = cache.put(test_data, test_id=i)
                 cache_keys.append(key)
             
             # Test repeated get_entry calls on same keys
-            test_keys = cache_keys[:50]  # Test with subset of keys
+            test_keys = cache_keys[:20]  # Test with subset of keys
             
             times = []
             for round_num in range(5):
@@ -337,6 +341,7 @@ def benchmark_memory_cache_effectiveness():
                 cache_size_used = stats.get('memory_cache_size', 0)
                 print(f"   Cache hit rate: {hit_rate:.3f}")
                 print(f"   Cache utilization: {cache_size_used}/100")
+            cache.close()
 
 
 def main():
@@ -357,14 +362,14 @@ def main():
         print("\n\n🎯 Summary and Recommendations")
         print("=" * 80)
         print("📋 Backend Selection Guide:")
-        print("• Memory Backend: Ultra-fast, no persistence, single-process only")
+        print("• SQLite In-Memory: Fast ephemeral caching, no persistence")
         print("• JSON Backend: Good for small caches (<500 entries), single-process apps")
         print("• SQLite Backend: Best for large caches (>500 entries), production apps")
         print()
         print("🚀 Memory Cache Layer:")
         print("• Significant benefit for SQLite backend (database overhead reduction)")
         print("• Moderate benefit for JSON backend (file I/O reduction)")
-        print("• Not applicable to Memory backend (already in-memory)")
+        print("• Not applicable to SQLite In-Memory (already in-memory)")
         print()
         print("⚡ Performance Patterns:")
         print("• Hot-spot access patterns benefit most from memory cache layer")
