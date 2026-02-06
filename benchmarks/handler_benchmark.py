@@ -158,12 +158,13 @@ def benchmark_put_get_roundtrip():
                     result = cache.get(cache_key=key)
                     get_times.append((time.perf_counter() - start) * 1000)
 
-                # File size of one entry
+                # File size of one entry (read from disk for accuracy)
                 entries = cache.list_entries()
                 file_size_kb = 0
                 if entries:
-                    fs = entries[0].get("file_size", 0)
-                    file_size_kb = fs / 1024 if fs else 0
+                    actual_path = entries[0].get("metadata", {}).get("actual_path", "")
+                    if actual_path and os.path.exists(actual_path):
+                        file_size_kb = os.path.getsize(actual_path) / 1024
 
                 avg_put = statistics.mean(put_times)
                 avg_get = statistics.mean(get_times)
@@ -202,7 +203,11 @@ def benchmark_handler_scaling():
             get_ms = (time.perf_counter() - start) * 1000
 
             entries = cache.list_entries()
-            kb = entries[0].get("file_size", 0) / 1024 if entries else 0
+            kb = 0
+            if entries:
+                ap = entries[0].get("metadata", {}).get("actual_path", "")
+                if ap and os.path.exists(ap):
+                    kb = os.path.getsize(ap) / 1024
 
             print(f"    {n:>10,} {put_ms:8.2f} {get_ms:8.2f} {kb:8.1f}")
             cache.close()
@@ -230,7 +235,11 @@ def benchmark_handler_scaling():
                 get_ms = (time.perf_counter() - start) * 1000
 
                 entries = cache.list_entries()
-                kb = entries[0].get("file_size", 0) / 1024 if entries else 0
+                kb = 0
+                if entries:
+                    ap = entries[0].get("metadata", {}).get("actual_path", "")
+                    if ap and os.path.exists(ap):
+                        kb = os.path.getsize(ap) / 1024
 
                 print(f"    {n:>10,} {put_ms:8.2f} {get_ms:8.2f} {kb:8.1f}")
                 cache.close()
@@ -258,7 +267,11 @@ def benchmark_handler_scaling():
                 get_ms = (time.perf_counter() - start) * 1000
 
                 entries = cache.list_entries()
-                kb = entries[0].get("file_size", 0) / 1024 if entries else 0
+                kb = 0
+                if entries:
+                    ap = entries[0].get("metadata", {}).get("actual_path", "")
+                    if ap and os.path.exists(ap):
+                        kb = os.path.getsize(ap) / 1024
 
                 print(f"    {n:>10,} {put_ms:8.2f} {get_ms:8.2f} {kb:8.1f}")
                 cache.close()

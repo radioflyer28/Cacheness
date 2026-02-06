@@ -792,29 +792,45 @@ def read_file(filepath, *, nparray=True):
 
     def decomp_byte_arr(f):
         """Decompress byte array chunks from file."""
-        buffsize = blosc.MAX_BUFFERSIZE
-        while buffsize > 0:
-            try:
-                carr = f.read(buffsize)
-            except (OverflowError, MemoryError):
-                buffsize = buffsize // 2
-                continue
-
-            if len(carr) == 0:
-                break
-
-            decompressed = blosc.decompress(carr)
-            # blosc.decompress returns bytes, but ensure type safety
+        # Read entire file content at once - avoids the catastrophic
+        # performance penalty of f.read(blosc.MAX_BUFFERSIZE) which
+        # tries to allocate a ~2GB buffer even for tiny files.
+        raw = f.read()
+        if not raw:
+            return
+        try:
+            decompressed = blosc.decompress(raw)
             if isinstance(decompressed, bytes):
                 yield decompressed
             elif isinstance(decompressed, (bytearray, memoryview)):
                 yield bytes(decompressed)
             else:
-                # This shouldn't happen with blosc2, but handle gracefully
                 yield b""
+        except Exception:
+            # If single decompress fails, fall back to chunked reading
+            # for files with multiple concatenated blosc frames
+            f.seek(0)
+            buffsize = min(blosc.MAX_BUFFERSIZE, 256 * 1024 * 1024)  # Cap at 256MB
+            while buffsize > 0:
+                try:
+                    carr = f.read(buffsize)
+                except (OverflowError, MemoryError):
+                    buffsize = buffsize // 2
+                    continue
 
-        if buffsize == 0:
-            raise RuntimeError("Could not determine a buffer size.")
+                if len(carr) == 0:
+                    break
+
+                chunk_decompressed = blosc.decompress(carr)
+                if isinstance(chunk_decompressed, bytes):
+                    yield chunk_decompressed
+                elif isinstance(chunk_decompressed, (bytearray, memoryview)):
+                    yield bytes(chunk_decompressed)
+                else:
+                    yield b""
+
+            if buffsize == 0:
+                raise RuntimeError("Could not determine a buffer size.")
 
     try:
         with filepath.open("rb") as f:

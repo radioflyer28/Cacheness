@@ -147,12 +147,13 @@ def benchmark_end_to_end_codecs():
                     cache.get(cache_key=key)
                     get_times.append((time.perf_counter() - start) * 1000)
 
-                # File size
+                # File size (read from disk for accuracy)
                 entries = cache.list_entries()
                 file_kb = 0
                 if entries:
-                    fs = entries[0].get("file_size", 0)
-                    file_kb = fs / 1024 if fs else 0
+                    actual_path = entries[0].get("metadata", {}).get("actual_path", "")
+                    if actual_path and os.path.exists(actual_path):
+                        file_kb = os.path.getsize(actual_path) / 1024
 
                 p = statistics.median(put_times)
                 g = statistics.median(get_times)
@@ -204,8 +205,9 @@ def benchmark_codec_comparison_table():
             entries = cache.list_entries()
             file_kb = 0
             if entries:
-                fs = entries[0].get("file_size", 0)
-                file_kb = fs / 1024 if fs else 0
+                actual_path = entries[0].get("metadata", {}).get("actual_path", "")
+                if actual_path and os.path.exists(actual_path):
+                    file_kb = os.path.getsize(actual_path) / 1024
 
             results[codec] = {
                 "put": statistics.median(put_times),
