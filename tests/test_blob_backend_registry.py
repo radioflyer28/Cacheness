@@ -13,7 +13,6 @@ from io import BytesIO
 from cacheness.storage.backends.blob_backends import (
     BlobBackend,
     FilesystemBlobBackend,
-    InMemoryBlobBackend,
     register_blob_backend,
     unregister_blob_backend,
     get_blob_backend,
@@ -121,17 +120,11 @@ class TestBuiltinBlobBackends:
         names = [b["name"] for b in backends]
         assert "filesystem" in names
     
-    def test_memory_backend_registered(self, clean_registry):
-        """Test that memory backend is registered by default."""
-        backends = list_blob_backends()
-        names = [b["name"] for b in backends]
-        assert "memory" in names
-    
     def test_builtin_backends_marked_correctly(self, clean_registry):
         """Test that builtin backends have is_builtin=True."""
         backends = list_blob_backends()
         for backend in backends:
-            if backend["name"] in ("filesystem", "memory"):
+            if backend["name"] in ("filesystem",):
                 assert backend["is_builtin"] is True
 
 
@@ -261,13 +254,6 @@ class TestGetBlobBackend:
         assert backend is not None
         assert isinstance(backend, FilesystemBlobBackend)
     
-    def test_get_memory_backend(self, clean_registry):
-        """Test getting a memory backend instance."""
-        backend = get_blob_backend("memory")
-        
-        assert backend is not None
-        assert isinstance(backend, InMemoryBlobBackend)
-    
     def test_get_custom_backend(self, clean_registry, temp_dir):
         """Test getting a custom backend instance."""
         register_blob_backend("mock", MockBlobBackend)
@@ -376,17 +362,13 @@ class TestModuleLevelAPI:
         """Test that FilesystemBlobBackend is exported."""
         assert hasattr(cacheness, "FilesystemBlobBackend")
     
-    def test_inmemory_blob_backend_exported(self):
-        """Test that InMemoryBlobBackend is exported."""
-        assert hasattr(cacheness, "InMemoryBlobBackend")
-    
     def test_module_level_functions_work(self, clean_registry, temp_dir):
         """Test that module-level functions work correctly."""
         # These should work without raising errors
         backends = cacheness.list_blob_backends()
-        assert len(backends) >= 2  # At least builtin backends
+        assert len(backends) >= 1  # At least builtin backends
         
-        backend = cacheness.get_blob_backend("memory")
+        backend = cacheness.get_blob_backend("filesystem", base_dir=str(temp_dir))
         assert backend is not None
 
 
@@ -479,70 +461,6 @@ class TestFilesystemBlobBackend:
         
         assert backend.exists(blob_path)
         assert backend.read_blob(blob_path) == data
-
-
-class TestInMemoryBlobBackend:
-    """Test the InMemoryBlobBackend implementation."""
-    
-    def test_write_and_read_blob(self):
-        """Test writing and reading a blob."""
-        backend = InMemoryBlobBackend()
-        
-        data = b"Hello, World!"
-        blob_path = backend.write_blob("test_key", data)
-        
-        result = backend.read_blob(blob_path)
-        assert result == data
-    
-    def test_exists(self):
-        """Test exists method."""
-        backend = InMemoryBlobBackend()
-        
-        blob_path = backend.write_blob("test_key", b"data")
-        
-        assert backend.exists(blob_path)
-        assert not backend.exists("nonexistent")
-    
-    def test_delete_blob(self):
-        """Test deleting a blob."""
-        backend = InMemoryBlobBackend()
-        
-        blob_path = backend.write_blob("test_key", b"data")
-        assert backend.exists(blob_path)
-        
-        result = backend.delete_blob(blob_path)
-        assert result is True
-        assert not backend.exists(blob_path)
-    
-    def test_get_size(self):
-        """Test get_size method."""
-        backend = InMemoryBlobBackend()
-        
-        data = b"Hello, World!"
-        blob_path = backend.write_blob("test_key", data)
-        
-        assert backend.get_size(blob_path) == len(data)
-    
-    def test_clear(self):
-        """Test clearing all blobs."""
-        backend = InMemoryBlobBackend()
-        
-        backend.write_blob("key1", b"data1")
-        backend.write_blob("key2", b"data2")
-        
-        count = backend.clear()
-        assert count == 2
-        
-        # Verify storage is empty
-        assert not backend.exists("memory://key1")
-        assert not backend.exists("memory://key2")
-    
-    def test_blob_path_format(self):
-        """Test that blob paths use memory:// scheme."""
-        backend = InMemoryBlobBackend()
-        
-        blob_path = backend.write_blob("test_key", b"data")
-        assert blob_path.startswith("memory://")
 
 
 class TestBackendValidation:

@@ -10,7 +10,6 @@ from pathlib import Path
 
 from cacheness.storage.backends.blob_backends import (
     FilesystemBlobBackend,
-    InMemoryBlobBackend,
 )
 from cacheness.config import CacheBlobConfig
 
@@ -313,23 +312,3 @@ class TestShardingEdgeCases:
         blob_path = backend.write_blob(blob_id, data)
         
         assert backend.get_size(blob_path) == 1000
-
-
-# =============================================================================
-# InMemoryBlobBackend (sharding not applicable but test config)
-# =============================================================================
-
-class TestInMemorySharding:
-    """Test that InMemoryBlobBackend doesn't break with sharding config."""
-    
-    def test_inmemory_ignores_sharding(self):
-        """InMemoryBlobBackend doesn't use filesystem paths, so no sharding."""
-        backend = InMemoryBlobBackend()
-        
-        blob_id = "memory_blob_123"
-        data = b"in memory data"
-        blob_path = backend.write_blob(blob_id, data)
-        
-        # Memory backend uses memory:// prefix
-        assert blob_path.startswith("memory://")
-        assert backend.read_blob(blob_path) == data

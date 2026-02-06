@@ -6,11 +6,29 @@ These fixtures automatically connect to Docker containers started via docker-com
 
 import os
 from pathlib import Path
-import boto3
-import psycopg
+
 import pytest
-from sqlalchemy import create_engine, text
-from moto import mock_aws
+
+try:
+    import boto3
+except ImportError:
+    boto3 = None
+
+try:
+    import psycopg
+except ImportError:
+    psycopg = None
+
+try:
+    from sqlalchemy import create_engine, text
+except ImportError:
+    create_engine = None
+    text = None
+
+try:
+    from moto import mock_aws
+except ImportError:
+    mock_aws = None
 
 
 # ==================== Environment Configuration ====================
@@ -158,6 +176,8 @@ def s3_bucket(s3_client):
 @pytest.fixture
 def mock_s3_client():
     """Provide a mocked S3 client (no container needed)."""
+    if mock_aws is None or boto3 is None:
+        pytest.skip("moto/boto3 not installed")
     with mock_aws():
         client = boto3.client("s3", region_name="us-east-1")
         client.create_bucket(Bucket="test-bucket")

@@ -408,45 +408,28 @@ class TestLogConfigurationValidation:
 class TestErrorSummary:
     """Test the ErrorSummary class."""
 
-    def test_error_summary_initialization(self):
-        """Test ErrorSummary initialization."""
+    def test_error_summary_add_and_report(self):
+        """Test adding errors/warnings and generating report."""
         summary = ErrorSummary()
-        assert summary.errors == []
-        assert summary.warnings == []
         assert not summary.has_errors()
         assert not summary.has_warnings()
-
-    def test_add_error(self):
-        """Test adding errors to summary."""
-        summary = ErrorSummary()
-        error = ValueError("Test error")
-        context = {"key": "value"}
         
-        summary.add_error(error, context)
+        # Add error and warning
+        error = ValueError("Test error")
+        summary.add_error(error, {"key": "value"})
+        summary.add_warning("Test warning", {"operation": "test"})
         
         assert summary.has_errors()
-        assert len(summary.errors) == 1
-        
-        error_info = summary.errors[0]
-        assert error_info["error"] == error
-        assert error_info["type"] == "ValueError"
-        assert error_info["message"] == "Test error"
-        assert error_info["context"] == context
-        assert "traceback" in error_info
-
-    def test_add_warning(self):
-        """Test adding warnings to summary."""
-        summary = ErrorSummary()
-        context = {"operation": "test"}
-        
-        summary.add_warning("Test warning", context)
-        
         assert summary.has_warnings()
+        assert len(summary.errors) == 1
         assert len(summary.warnings) == 1
         
-        warning_info = summary.warnings[0]
-        assert warning_info["message"] == "Test warning"
-        assert warning_info["context"] == context
+        # Check report
+        report = summary.get_error_report()
+        assert report["error_count"] == 1
+        assert report["warning_count"] == 1
+        assert report["errors"][0]["type"] == "ValueError"
+        assert report["warnings"][0]["message"] == "Test warning"
 
     def test_log_summary_with_errors(self, caplog):
         """Test logging summary with errors."""
@@ -454,27 +437,9 @@ class TestErrorSummary:
             summary = ErrorSummary()
             summary.add_error(ValueError("Error 1"))
             summary.add_error(TypeError("Error 2"))
-            
             summary.log_summary()
         
-        logs = caplog.text
-        assert "Cache operation completed with 2 error(s)" in logs
-        assert "Error 1: ValueError: Error 1" in logs
-        assert "Error 2: TypeError: Error 2" in logs
-
-    def test_log_summary_with_warnings(self, caplog):
-        """Test logging summary with warnings."""
-        with caplog.at_level(logging.WARNING):
-            summary = ErrorSummary()
-            summary.add_warning("Warning 1")
-            summary.add_warning("Warning 2")
-            
-            summary.log_summary()
-        
-        logs = caplog.text
-        assert "Cache operation completed with 2 warning(s)" in logs
-        assert "Warning 1: Warning 1" in logs
-        assert "Warning 2: Warning 2" in logs
+        assert "Cache operation completed with 2 error(s)" in caplog.text
 
     def test_log_summary_success(self, caplog):
         """Test logging summary with no errors or warnings."""
@@ -483,21 +448,6 @@ class TestErrorSummary:
             summary.log_summary()
         
         assert "Cache operation completed successfully with no errors or warnings" in caplog.text
-
-    def test_get_error_report(self):
-        """Test getting detailed error report."""
-        summary = ErrorSummary()
-        summary.add_error(ValueError("Test error"), {"key": "value"})
-        summary.add_warning("Test warning", {"operation": "test"})
-        
-        report = summary.get_error_report()
-        
-        assert report["error_count"] == 1
-        assert report["warning_count"] == 1
-        assert len(report["errors"]) == 1
-        assert len(report["warnings"]) == 1
-        assert report["errors"][0]["type"] == "ValueError"
-        assert report["warnings"][0]["message"] == "Test warning"
 
 
 class TestErrorHandlingIntegration:

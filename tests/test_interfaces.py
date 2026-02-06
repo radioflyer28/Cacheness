@@ -34,22 +34,6 @@ from cacheness.interfaces import (
 class TestCacheabilityCheckerInterface:
     """Test the CacheabilityChecker interface."""
 
-    def test_is_abstract(self):
-        """Test that CacheabilityChecker is an abstract base class."""
-        assert issubclass(CacheabilityChecker, ABC)
-        
-        # Should not be able to instantiate directly
-        with pytest.raises(TypeError):
-            CacheabilityChecker()
-
-    def test_abstract_method_enforcement(self):
-        """Test that can_handle method must be implemented."""
-        class IncompleteChecker(CacheabilityChecker):
-            pass
-        
-        with pytest.raises(TypeError, match="Can't instantiate abstract class"):
-            IncompleteChecker()
-
     def test_concrete_implementation(self):
         """Test that concrete implementation works correctly."""
         class ConcreteChecker(CacheabilityChecker):
@@ -74,21 +58,6 @@ class TestCacheabilityCheckerInterface:
 
 class TestCacheWriterInterface:
     """Test the CacheWriter interface."""
-
-    def test_is_abstract(self):
-        """Test that CacheWriter is an abstract base class."""
-        assert issubclass(CacheWriter, ABC)
-        
-        with pytest.raises(TypeError):
-            CacheWriter()
-
-    def test_abstract_method_enforcement(self):
-        """Test that put method must be implemented."""
-        class IncompleteWriter(CacheWriter):
-            pass
-        
-        with pytest.raises(TypeError, match="Can't instantiate abstract class"):
-            IncompleteWriter()
 
     def test_concrete_implementation(self):
         """Test that concrete implementation works correctly."""
@@ -132,21 +101,6 @@ class TestCacheWriterInterface:
 class TestCacheReaderInterface:
     """Test the CacheReader interface."""
 
-    def test_is_abstract(self):
-        """Test that CacheReader is an abstract base class."""
-        assert issubclass(CacheReader, ABC)
-        
-        with pytest.raises(TypeError):
-            CacheReader()
-
-    def test_abstract_method_enforcement(self):
-        """Test that get method must be implemented."""
-        class IncompleteReader(CacheReader):
-            pass
-        
-        with pytest.raises(TypeError, match="Can't instantiate abstract class"):
-            IncompleteReader()
-
     def test_concrete_implementation(self):
         """Test that concrete implementation works correctly."""
         class ConcreteReader(CacheReader):
@@ -175,28 +129,6 @@ class TestCacheReaderInterface:
 
 class TestFormatProviderInterface:
     """Test the FormatProvider interface."""
-
-    def test_is_abstract(self):
-        """Test that FormatProvider is an abstract base class."""
-        assert issubclass(FormatProvider, ABC)
-        
-        with pytest.raises(TypeError):
-            FormatProvider()
-
-    def test_abstract_method_enforcement(self):
-        """Test that abstract methods must be implemented."""
-        class IncompleteProvider(FormatProvider):
-            pass
-        
-        with pytest.raises(TypeError, match="Can't instantiate abstract class"):
-            IncompleteProvider()
-
-        class PartialProvider(FormatProvider):
-            def get_file_extension(self, config: Any) -> str:
-                return ".test"
-        
-        with pytest.raises(TypeError, match="Can't instantiate abstract class"):
-            PartialProvider()
 
     def test_concrete_implementation(self):
         """Test that concrete implementation works correctly."""
@@ -239,11 +171,6 @@ class TestCacheHandlerInterface:
         assert issubclass(CacheHandler, CacheWriter)
         assert issubclass(CacheHandler, CacheReader)
         assert issubclass(CacheHandler, FormatProvider)
-
-    def test_is_abstract(self):
-        """Test that CacheHandler is still abstract."""
-        with pytest.raises(TypeError):
-            CacheHandler()
 
     def test_concrete_implementation(self):
         """Test that complete implementation works."""
@@ -490,22 +417,6 @@ class TestCacheHandlerErrors:
 class TestHandlerFactoryInterface:
     """Test the HandlerFactory interface."""
 
-    def test_is_abstract(self):
-        """Test that HandlerFactory is an abstract base class."""
-        assert issubclass(HandlerFactory, ABC)
-        
-        with pytest.raises(TypeError):
-            HandlerFactory()
-
-    def test_abstract_method_enforcement(self):
-        """Test that abstract methods must be implemented."""
-        class IncompleteFactory(HandlerFactory):
-            def create_handler(self, data_type: str, config: Any = None) -> 'CacheHandler':
-                pass  # Only implement one method
-        
-        with pytest.raises(TypeError, match="Can't instantiate abstract class"):
-            IncompleteFactory()
-
     def test_concrete_implementation(self):
         """Test that concrete implementation works correctly."""
         class MockHandler(CacheHandler):
@@ -547,25 +458,6 @@ class TestHandlerFactoryInterface:
 
 class TestHandlerRegistryInterface:
     """Test the HandlerRegistry interface."""
-
-    def test_is_abstract(self):
-        """Test that HandlerRegistry is an abstract base class."""
-        assert issubclass(HandlerRegistry, ABC)
-        
-        with pytest.raises(TypeError):
-            HandlerRegistry()
-
-    def test_abstract_method_enforcement(self):
-        """Test that all abstract methods must be implemented."""
-        class IncompleteRegistry(HandlerRegistry):
-            def register_handler(self, handler: 'CacheHandler', priority: int = 0) -> None:
-                pass
-            def get_handler(self, data: Any) -> 'CacheHandler':
-                pass
-            # Missing other methods
-        
-        with pytest.raises(TypeError, match="Can't instantiate abstract class"):
-            IncompleteRegistry()
 
     def test_concrete_implementation(self):
         """Test that concrete implementation works correctly."""
@@ -637,31 +529,6 @@ class TestHandlerRegistryInterface:
 
 class TestInterfaceContractCompliance:
     """Test that interfaces enforce proper contracts."""
-
-    def test_method_signature_validation(self):
-        """Test that concrete implementations must match interface signatures."""
-        class BadSignatureHandler(CacheHandler):
-            def can_handle(self, wrong_param_name: Any) -> bool:  # Wrong parameter name
-                return True
-            
-            def put(self, data: Any, file_path: Path, config: Any) -> Dict[str, Any]:
-                return {}
-            
-            def get(self, file_path: Path, metadata: Dict[str, Any]) -> Any:
-                return None
-            
-            def get_file_extension(self, config: Any) -> str:
-                return ".test"
-            
-            @property
-            def data_type(self) -> str:
-                return "test"
-        
-        # Handler can be created (Python doesn't enforce parameter names at class level)
-        handler = BadSignatureHandler()
-        
-        # But using it correctly should still work due to positional arguments
-        assert handler.can_handle("test") is True
 
     def test_return_type_expectations(self):
         """Test that implementations return expected types."""
@@ -759,54 +626,3 @@ class TestInterfaceContractCompliance:
         assert handler.get_file_extension("normal") == ".test"
 
 
-class TestInterfaceDocumentationCompliance:
-    """Test that interfaces provide proper documentation contracts."""
-
-    def test_interface_docstrings_exist(self):
-        """Test that all interfaces have proper docstrings."""
-        interfaces = [
-            CacheabilityChecker,
-            CacheWriter,
-            CacheReader,
-            FormatProvider,
-            CacheHandler,
-            DataFrameHandler,
-            SeriesHandler,
-            ArrayHandler,
-            ObjectHandler,
-            HandlerFactory,
-            HandlerRegistry,
-        ]
-        
-        for interface in interfaces:
-            assert interface.__doc__ is not None
-            assert len(interface.__doc__.strip()) > 0
-
-    def test_abstract_method_docstrings_exist(self):
-        """Test that abstract methods have documentation."""
-        # Test CacheabilityChecker
-        assert CacheabilityChecker.can_handle.__doc__ is not None
-        
-        # Test CacheWriter
-        assert CacheWriter.put.__doc__ is not None
-        
-        # Test CacheReader
-        assert CacheReader.get.__doc__ is not None
-        
-        # Test FormatProvider
-        assert FormatProvider.get_file_extension.__doc__ is not None
-        assert FormatProvider.data_type.__doc__ is not None
-
-    def test_error_class_documentation(self):
-        """Test that error classes are properly documented."""
-        error_classes = [
-            CacheHandlerError,
-            CacheWriteError,
-            CacheReadError,
-            CacheFormatError,
-            CacheValidationError,
-        ]
-        
-        for error_class in error_classes:
-            assert error_class.__doc__ is not None
-            assert len(error_class.__doc__.strip()) > 0

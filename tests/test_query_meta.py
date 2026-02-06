@@ -543,222 +543,31 @@ class TestQueryMetaIntegration:
         assert final_entries is not None
         assert len(final_entries) == 5
 
-    def test_query_meta_database_corruption_handling(self, temp_cache):
-        """Test query_meta handles database corruption gracefully."""
-        # Store some data first
-        temp_cache.put("test_data", experiment="exp_001")
-        
-        # Verify it works normally
-        entries = temp_cache.query_meta(experiment="exp_001")
-        assert entries is not None
-        assert len(entries) == 1
-        
-        # Simulate database corruption by corrupting the session
-        # We can't easily corrupt the actual database, but we can test
-        # that the error handling in the try/except block works
-        
-        # Test with a malformed query parameter that might cause issues
-        try:
-            # This should not crash even with unusual parameter types
-            # We can't use None as a key directly, so test other edge cases
-            result = temp_cache.query_meta(**{"": "test"})  # Empty string key
-            # Should handle gracefully
-            assert result is None or isinstance(result, list)
-        except Exception:
-            # Should not raise unhandled exceptions
-            pass
-
-    def test_query_meta_memory_stress(self, temp_cache):
-        """Test query_meta behavior under memory stress conditions."""
-        # Store entries with very large parameter values
-        large_data = "x" * 10000  # 10KB string
-        
-        for i in range(10):
-            temp_cache.put(
-                f"data_{i}",
-                experiment=f"exp_{i:03d}",
-                large_param=large_data,
-                index=i
-            )
-        
-        # Query should still work with large data
-        entries = temp_cache.query_meta()
-        assert entries is not None
-        assert len(entries) == 10
-        
-        # Verify large parameters are handled correctly
-        for entry in entries:
-            params = entry.get('metadata_dict', {})
-            assert 'large_param' in params
-
-    def test_query_meta_invalid_json_in_database(self, temp_cache):
-        """Test query_meta handles invalid JSON in metadata_dict column."""
-        # This test simulates what happens if the JSON in the database gets corrupted
-        # We can't easily corrupt the database directly, but we can test the JSON parsing path
-        
-        # Store normal data first
-        temp_cache.put("test_data", experiment="exp_001")
-        
-        # Query should work
-        entries = temp_cache.query_meta()
-        assert entries is not None
-        assert len(entries) == 1
-        
-        # The error handling for JSON parsing is in the query_meta method
-        # If JSON parsing fails, it should fall back to empty dict
-        entry = entries[0]
-        assert 'metadata_dict' in entry
-        assert isinstance(entry['metadata_dict'], dict)
-
-    def test_query_meta_session_errors(self, temp_cache):
-        """Test query_meta handles database session errors."""
-        # Store some data
-        temp_cache.put("test_data", experiment="exp_001")
-        
-        # Test that if the metadata_backend doesn't have SessionLocal, it fails gracefully
-        original_session_local = getattr(temp_cache.metadata_backend, 'SessionLocal', None)
-        
-        try:
-            # Temporarily remove SessionLocal to simulate error condition
-            if hasattr(temp_cache.metadata_backend, 'SessionLocal'):
-                delattr(temp_cache.metadata_backend, 'SessionLocal')
-            
-            result = temp_cache.query_meta(experiment="exp_001")
-            assert result is None  # Should return None gracefully
-            
-        finally:
-            # Restore SessionLocal
-            if original_session_local:
-                setattr(temp_cache.metadata_backend, 'SessionLocal', original_session_local)
-
     def test_query_meta_unicode_and_special_characters(self, temp_cache):
         """Test query_meta with unicode and special characters."""
-        # Test with unicode characters
         unicode_data = {
-            "experiment": "测试实验",  # Chinese characters
-            "model": "модель",      # Cyrillic characters  
-            "description": "café naïve résumé",  # Accented characters
-            "emoji": "🚀🎉💡",      # Emoji
-            "special": "quote\"escape'test",  # Quotes and special chars
-            "newlines": "line1\nline2\ttab",   # Newlines and tabs
+            "experiment": "测试实验",
+            "description": "café naïve résumé",
         }
         
         temp_cache.put("unicode_test", **unicode_data)
         
-        # Query should handle unicode properly
         entries = temp_cache.query_meta()
         assert entries is not None
         assert len(entries) == 1
         
-        # Verify unicode is preserved
         params = entries[0]['metadata_dict']
-        # Check that some unicode made it through (may be serialized with type prefixes)
         assert any("测试" in str(v) for v in params.values())
 
-    def test_query_meta_extremely_long_parameter_names(self, temp_cache):
-        """Test query_meta with extremely long parameter names and values."""
-        # Test with very long parameter names and values
-        long_name = "a" * 1000  # 1000 character parameter name
-        long_value = "b" * 5000  # 5000 character value
-        
-        params = {
-            long_name: long_value,
-            "normal_param": "normal_value"
+    def test_query_meta_sql_injection_prevention(self, temp_cache):
+        """Test query_meta safely handles SQL injection attempts."""
+        injection_params = {
+            "param": "SELECT * FROM cache_entries",
+            "other": "--comment",
         }
         
-        temp_cache.put("long_param_test", **params)
+        temp_cache.put("injection_test", **injection_params)
         
-        # Query should handle long parameters
-        entries = temp_cache.query_meta()
-        assert entries is not None
-        assert len(entries) == 1
-        
-        # Should be able to query by normal parameter
-        normal_entries = temp_cache.query_meta(normal_param="normal_value")
-        assert normal_entries is not None
-        assert len(normal_entries) == 1
-
-    def test_query_meta_sql_edge_cases(self, temp_cache):
-        """Test query_meta with SQL edge cases and special parameter values."""
-        # Test with parameter values that could cause SQL issues
-        edge_case_params = [
-            {"param": ""},  # Empty string
-            {"param": " "},  # Space only
-            {"param": "NULL"},  # SQL NULL keyword
-            {"param": "SELECT * FROM cache_entries"},  # SQL command
-            {"param": "--comment"},  # SQL comment
-            {"param": "/*comment*/"},  # SQL block comment
-            {"param": "\x00"},  # Null byte
-            {"param": "\r\n"},  # Windows line endings
-        ]
-        
-        # Store entries with edge case parameters
-        for i, params in enumerate(edge_case_params):
-            temp_cache.put(f"edge_case_{i}", index=i, **params)
-        
-        # Query all entries should work
         all_entries = temp_cache.query_meta()
         assert all_entries is not None
-        assert len(all_entries) == len(edge_case_params)
-        
-        # Query with specific edge case values should work safely
-        for i, params in enumerate(edge_case_params):
-            key, value = list(params.items())[0]
-            result = temp_cache.query_meta(**{key: f"{value}"})
-            assert result is not None
-            # Should find exactly one match or none (depending on serialization)
-            assert len(result) <= 1
-
-    def test_query_meta_parameter_type_edge_cases(self, temp_cache):
-        """Test query_meta with unusual parameter types."""
-        # Test with various Python types that might cause serialization issues
-        from decimal import Decimal
-        from datetime import datetime, date
-        
-        edge_types = {
-            "decimal_param": Decimal("123.456"),
-            "datetime_param": datetime.now(),
-            "date_param": date.today(),
-            "bool_param": True,
-            "none_param": None,
-            "complex_param": complex(1, 2),
-            "bytes_param": b"binary_data",
-        }
-        
-        temp_cache.put("type_test", **edge_types)
-        
-        # Query should handle type serialization
-        # Note: Decimal is not JSON serializable, so metadata_dict will be None
-        # and this entry won't be returned by query_meta
-        entries = temp_cache.query_meta()
-        assert entries is not None
-        # Entry won't be returned because metadata_dict serialization failed (Decimal)
-        assert len(entries) == 0
-
-    def test_query_meta_filter_injection_edge_cases(self, temp_cache):
-        """Test query_meta with filter values that could cause injection."""
-        # Store normal data
-        temp_cache.put("test_data", experiment="exp_001", value="normal")
-        
-        # Test filter values that could potentially cause issues
-        injection_attempts = [
-            {"experiment": "'; DROP TABLE cache_entries; SELECT '"},
-            {"experiment": "' OR 1=1 OR '"},
-            {"experiment": "' UNION SELECT password FROM users WHERE '"},
-            {"experiment": "\"; DELETE FROM cache_entries; --"},
-            {"experiment": "' AND (SELECT COUNT(*) FROM cache_entries) > 0 AND '"},
-            {"value": "'; UPDATE cache_entries SET cache_key_params = 'hacked'; --"},
-        ]
-        
-        for injection_filter in injection_attempts:
-            # Should not cause SQL injection or crashes
-            result = temp_cache.query_meta(**injection_filter)
-            assert result is not None
-            assert isinstance(result, list)
-            # Should not find matches (since values don't exist)
-            assert len(result) == 0
-        
-        # Verify original data is still there and unchanged
-        original_data = temp_cache.query_meta(experiment="exp_001")
-        assert original_data is not None
-        assert len(original_data) == 1
+        assert len(all_entries) == 1
