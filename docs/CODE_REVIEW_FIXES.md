@@ -83,11 +83,8 @@ Systematic fixes for issues identified during the code quality, separation of co
 - **Fix:** Add a reconciliation section mapping proposed → actual names. Mark the doc as a historical design doc (not current API reference). Remove or consolidate duplicate sections.
 - **Status:** [ ]
 
-### Fix 12: Update `DEVELOPMENT_PLANNING.md` Phase 3 status
-- **File:** `docs/DEVELOPMENT_PLANNING.md` (lines 11, 21)
-- **Issue:** Phase 3 header still says "📋 Ready to Implement" but sprint items inside have ✅ checkmarks.
-- **Fix:** Update to "🚧 In Progress" or "✅ Sprints 1-3 Complete" depending on remaining work.
-- **Status:** [ ]
+### Fix 12: ~~Update `DEVELOPMENT_PLANNING.md` Phase 3 status~~
+- **Status:** N/A — `DEVELOPMENT_PLANNING.md` has been deleted (work tracked in beads-mcp now)
 
 ### Fix 13: Fix `API_REFERENCE.md` `delete_where` example data_type
 - **File:** `docs/API_REFERENCE.md` (Management Operations section)

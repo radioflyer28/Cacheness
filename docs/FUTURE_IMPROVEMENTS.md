@@ -991,5 +991,4 @@ data = cache.get(experiment: "exp_001")
 
 - [Missing Management API Analysis](MISSING_MANAGEMENT_API.md)
 - [Comparison to Existing Solutions](COMPARISON_TO_EXISTING_SOLUTIONS.md)
-- [Development Planning](DEVELOPMENT_PLANNING.md)
 - [API Reference](API_REFERENCE.md)

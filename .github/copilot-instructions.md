@@ -186,7 +186,7 @@ def my_operation(self, **filter_kwargs) -> int:
 1. **~~Race condition in `put()`:~~** FIXED — All public methods now protected by `threading.RLock()`
 2. **~~Auto-deletion on read errors:~~** FIXED — `get()` preserves metadata on transient `IOError`/`OSError`
 3. **Orphaned blobs on crash:** `put()` cleans up on exception, but a hard crash between blob write and metadata write can still leak. Use `verify_integrity(repair=True)` to detect/fix.
-4. **`invalidate()` doesn't delete blob files:** Only removes metadata — use `clear_all()` or `verify_integrity(repair=True)` to clean orphans
+4. **~~`invalidate()` doesn't delete blob files:~~** FIXED — `invalidate()` now deletes the blob file before removing metadata. All delete operations (`delete_where`, `delete_matching`, `delete_batch`) delegate to `invalidate()` and benefit from this fix.
 5. **SQLite "database is locked":** 30-second timeout can be exceeded under heavy concurrent writes
 6. **JSON backend scales O(n²):** Each write re-serializes entire JSON file
 
@@ -209,7 +209,6 @@ Expected baseline (200 entries):
 - **API Reference:** `docs/API_REFERENCE.md`
 - **Performance:** `docs/PERFORMANCE.md`
 - **Backend Selection:** `docs/BACKEND_SELECTION.md`
-- **Development Planning:** `docs/DEVELOPMENT_PLANNING.md`
 
 ## When Modifying Core Logic
 

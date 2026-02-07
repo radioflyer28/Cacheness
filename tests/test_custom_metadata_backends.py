@@ -10,8 +10,6 @@ identically on both SQLite and PostgreSQL backends. Tests cover:
 - Different column types
 - Edge cases and error handling
 - Integration with core cache operations
-
-Section 2.13 of DEVELOPMENT_PLANNING.md
 """
 
 import pytest

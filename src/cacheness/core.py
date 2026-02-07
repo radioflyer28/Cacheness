@@ -1563,9 +1563,35 @@ class UnifiedCache:
             if cache_key is None:
                 cache_key = self._create_cache_key(kwargs)
 
-            # Remove from metadata backend (handles file cleanup)
+            # Look up the entry to find the blob path before removing metadata
+            entry = self.metadata_backend.get_entry(cache_key)
+            blob_deleted = False
+            if entry:
+                actual_path = None
+                # actual_path may be in the top-level entry or nested in metadata
+                metadata = entry.get("metadata", {})
+                if isinstance(metadata, dict):
+                    actual_path = metadata.get("actual_path")
+                if not actual_path:
+                    actual_path = entry.get("actual_path")
+                if actual_path:
+                    blob_file = Path(actual_path)
+                    if blob_file.exists():
+                        try:
+                            blob_file.unlink()
+                            blob_deleted = True
+                        except OSError as exc:
+                            logger.warning(
+                                f"Failed to delete blob file {actual_path} for "
+                                f"cache entry {cache_key}: {exc}"
+                            )
+
+            # Remove from metadata backend
             if self.metadata_backend.remove_entry(cache_key):
-                logger.info(f"Invalidated cache entry {cache_key}")
+                logger.info(
+                    f"Invalidated cache entry {cache_key}"
+                    + (" (blob deleted)" if blob_deleted else "")
+                )
             else:
                 logger.debug(f"Cache entry {cache_key} not found for invalidation")
 

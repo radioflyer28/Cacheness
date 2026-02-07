@@ -597,3 +597,133 @@ class TestTouchBatch:
 
         touched = cache.touch_batch(data_type="array")
         assert touched == 2
+
+
+# ── Blob Cleanup Tests ───────────────────────────────────────────────
+
+class TestBlobCleanupOnDelete:
+    """Verify that invalidate/delete operations remove blob files from disk."""
+
+    # Extensions that are actual cache blob files
+    _BLOB_EXTENSIONS = {".pkl", ".npz", ".b2nd", ".b2tr", ".parquet",
+                        ".lz4", ".zstd", ".gzip", ".zst", ".gz", ".bz2", ".xz"}
+
+    def _get_blob_files(self, cache_dir: Path) -> set:
+        """Return the set of cache blob files currently on disk."""
+        if not cache_dir.exists():
+            return set()
+        blobs = set()
+        for f in cache_dir.iterdir():
+            if not f.is_file():
+                continue
+            # Check primary extension and compound extensions (e.g. .pkl.lz4)
+            suffixes = f.suffixes  # e.g. ['.pkl', '.lz4']
+            if any(s in self._BLOB_EXTENSIONS for s in suffixes):
+                blobs.add(f)
+        return blobs
+
+    def test_invalidate_deletes_blob(self, memory_cache, cache_dir):
+        """invalidate() should delete the blob file, not just metadata."""
+        memory_cache.put(np.array([1, 2, 3]), item="blob_test")
+        blobs_before = self._get_blob_files(cache_dir)
+        assert len(blobs_before) > 0, "Expected blob file after put()"
+
+        memory_cache.invalidate(item="blob_test")
+        blobs_after = self._get_blob_files(cache_dir)
+        assert len(blobs_after) == 0, f"Blob files should be deleted: {blobs_after}"
+
+    def test_invalidate_by_cache_key_deletes_blob(self, memory_cache, cache_dir):
+        """invalidate(cache_key=...) should also delete the blob."""
+        memory_cache.put({"data": "test"}, item="key_test")
+        blobs_before = self._get_blob_files(cache_dir)
+        assert len(blobs_before) > 0
+
+        # Get the cache key and invalidate directly
+        entries = memory_cache.list_entries()
+        cache_key = entries[0]["cache_key"]
+        memory_cache.invalidate(cache_key=cache_key)
+
+        blobs_after = self._get_blob_files(cache_dir)
+        assert len(blobs_after) == 0
+
+    def test_delete_where_deletes_blobs(self, memory_cache, cache_dir):
+        """delete_where() should delete blob files for all matched entries."""
+        memory_cache.put(np.array([1, 2]), kind="dw1")
+        memory_cache.put(np.array([3, 4]), kind="dw2")
+        memory_cache.put({"keep": True}, kind="dw3")
+
+        blobs_before = self._get_blob_files(cache_dir)
+        assert len(blobs_before) == 3
+
+        deleted = memory_cache.delete_where(
+            lambda e: e.get("data_type") == "array"
+        )
+        assert deleted == 2
+
+        blobs_after = self._get_blob_files(cache_dir)
+        assert len(blobs_after) == 1, f"Expected 1 remaining blob, got {blobs_after}"
+
+    def test_delete_matching_deletes_blobs(self, memory_cache, cache_dir):
+        """delete_matching() should delete blob files for matched entries."""
+        memory_cache.put(np.array([10]), dm="a")
+        memory_cache.put({"v": 2}, dm="b")
+
+        deleted = memory_cache.delete_matching(data_type="array")
+        assert deleted == 1
+
+        blobs_after = self._get_blob_files(cache_dir)
+        assert len(blobs_after) == 1
+
+    def test_delete_batch_deletes_blobs(self, memory_cache, cache_dir):
+        """delete_batch() should delete blob files for each entry."""
+        memory_cache.put(np.array([1]), batch_del="b1")
+        memory_cache.put(np.array([2]), batch_del="b2")
+
+        blobs_before = self._get_blob_files(cache_dir)
+        assert len(blobs_before) == 2
+
+        deleted = memory_cache.delete_batch([
+            {"batch_del": "b1"},
+            {"batch_del": "b2"},
+        ])
+        assert deleted == 2
+        assert len(self._get_blob_files(cache_dir)) == 0
+
+    def test_verify_integrity_clean_after_invalidate(self, memory_cache, cache_dir):
+        """verify_integrity() should report 0 issues after invalidate()."""
+        memory_cache.put(np.array([1, 2, 3]), item="vi1")
+        memory_cache.put(np.array([4, 5, 6]), item="vi2")
+
+        memory_cache.invalidate(item="vi1")
+        memory_cache.invalidate(item="vi2")
+
+        report = memory_cache.verify_integrity()
+        assert len(report["orphaned_blobs"]) == 0, f"Orphaned blobs found: {report}"
+        assert len(report["dangling_entries"]) == 0
+
+    @pytest.mark.parametrize("cache_fixture", ["memory_cache", "json_cache", "sqlite_cache"])
+    def test_invalidate_blob_cleanup_all_backends(self, cache_fixture, cache_dir, request):
+        """Blob cleanup on invalidate works across all backends."""
+        cache = request.getfixturevalue(cache_fixture)
+        cache.put(np.array([1, 2, 3]), blob_backend_test="val")
+
+        blobs_before = self._get_blob_files(cache_dir)
+        assert len(blobs_before) > 0
+
+        cache.invalidate(blob_backend_test="val")
+
+        blobs_after = self._get_blob_files(cache_dir)
+        assert len(blobs_after) == 0
+
+    def test_invalidate_missing_blob_no_error(self, memory_cache, cache_dir):
+        """invalidate() handles missing blob file gracefully."""
+        memory_cache.put(np.array([1, 2, 3]), item="ghost")
+
+        # Manually delete the blob to simulate corruption
+        blobs = self._get_blob_files(cache_dir)
+        for b in blobs:
+            b.unlink()
+
+        # Should not raise, just remove metadata
+        memory_cache.invalidate(item="ghost")
+        assert memory_cache.get(item="ghost") is None

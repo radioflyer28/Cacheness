@@ -243,18 +243,12 @@ class TestCacheKeyConsistency:
             # All should return same result
             assert result1 == result2 == result3 == result4 == 13
             
-            # All should hit cache after first call (currently FAILS due to inconsistent keys)
-            # Note: This is the cache key consistency issue we need to fix
-            expected_calls = 1  # Should only call function once if keys are consistent
-            actual_calls = call_count
-            
-            if actual_calls != expected_calls:
-                print(f"Cache key consistency issue: function called {actual_calls} times instead of {expected_calls}")
-                print("This indicates that logically equivalent function calls are producing different cache keys")
-            
-            # For now, we'll document this as a known issue rather than asserting
-            # TODO: Fix cache key generation to handle positional vs keyword parameter consistency
-            # assert call_count == 1  # This should pass once the issue is fixed
+            # All should hit cache after first call — _normalize_function_args
+            # uses inspect.signature().bind() to normalize positional/keyword args
+            assert call_count == 1, (
+                f"Cache key inconsistency: function called {call_count} times "
+                f"instead of 1 for logically equivalent calls"
+            )
             
             cache.close()
 

@@ -514,5 +514,4 @@ jobs:
 
 ## Next Steps
 
-- See [DEVELOPMENT_PLANNING.md](../DEVELOPMENT_PLANNING.md) for Phase 2.10 status
 - See [BACKEND_SELECTION.md](../BACKEND_SELECTION.md) for backend selection guide
