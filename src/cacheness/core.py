@@ -7,6 +7,7 @@ The main UnifiedCache class is now focused on coordination and delegates format-
 operations to specialized handlers.
 """
 
+import os
 import xxhash
 import inspect
 import threading
@@ -83,8 +84,9 @@ class UnifiedCache:
         self.cache_dir = Path(self.config.storage.cache_dir)
         self.cache_dir.mkdir(exist_ok=True, parents=True)
 
-        # Thread safety
-        self._lock = threading.Lock()
+        # Thread safety — RLock allows re-entrant calls
+        # (e.g. delete_where → invalidate, touch_batch → touch)
+        self._lock = threading.RLock()
 
         # Initialize handler registry with config
         self.handlers = HandlerRegistry(self.config)
@@ -809,129 +811,130 @@ class UnifiedCache:
                            - Dictionary (legacy): {"experiments": experiment_metadata}
             **kwargs: Parameters identifying this data
         """
-        # Get appropriate handler
-        handler = self.handlers.get_handler(data)
-        cache_key = self._create_cache_key(kwargs)
-        base_file_path = self._get_cache_file_path(cache_key, prefix)
+        with self._lock:
+            # Get appropriate handler
+            handler = self.handlers.get_handler(data)
+            cache_key = self._create_cache_key(kwargs)
+            base_file_path = self._get_cache_file_path(cache_key, prefix)
 
-        try:
-            # Use handler to store the data
-            result = handler.put(data, base_file_path, self.config)
+            try:
+                # Use handler to store the data
+                result = handler.put(data, base_file_path, self.config)
 
-            # Track the blob path so we can clean up on failure
-            blob_path = Path(result.get("actual_path", str(base_file_path)))
+                # Track the blob path so we can clean up on failure
+                blob_path = Path(result.get("actual_path", str(base_file_path)))
 
-            # Calculate file hash for integrity verification (if enabled)
-            file_hash = None
-            if self.config.metadata.verify_cache_integrity:
-                actual_path = result.get("actual_path", str(base_file_path))
-                file_hash = self._calculate_file_hash(Path(actual_path))
+                # Calculate file hash for integrity verification (if enabled)
+                file_hash = None
+                if self.config.metadata.verify_cache_integrity:
+                    actual_path = result.get("actual_path", str(base_file_path))
+                    file_hash = self._calculate_file_hash(Path(actual_path))
 
-            # Update metadata
-            metadata_dict = {
-                **result["metadata"],
-                "prefix": prefix,
-                "actual_path": result.get("actual_path", str(base_file_path)),
-                "file_hash": file_hash,  # Store file hash for verification
-            }
+                # Update metadata
+                metadata_dict = {
+                    **result["metadata"],
+                    "prefix": prefix,
+                    "actual_path": result.get("actual_path", str(base_file_path)),
+                    "file_hash": file_hash,  # Store file hash for verification
+                }
 
-            # Store complete cache key parameters as JSON for debugging/querying (if enabled)
-            # This captures the original kwargs used to derive the cache key
-            # Pre-serialize to JSON strings so backend can be standalone storage
-            if self.config.metadata.store_full_metadata:
-                from .serialization import serialize_for_cache_key
-                from .json_utils import dumps as json_dumps
-                try:
-                    # Serialize kwargs to a consistent, queryable format
-                    serializable_kwargs = {
-                        key: serialize_for_cache_key(value, self.config)
-                        for key, value in kwargs.items()
-                    }
-                    # Pre-serialize to JSON string - backend just stores strings
-                    metadata_dict["cache_key_params"] = json_dumps(serializable_kwargs)
-                    
-                    # Also store kwargs as metadata_dict (raw values for easy querying)
-                    # Pre-serialize to JSON string - backend just stores strings
-                    metadata_dict["metadata_dict"] = json_dumps(kwargs.copy())
-                except Exception as e:
-                    # If serialization fails, skip cache_key_params
-                    logger.warning(f"Failed to serialize cache_key_params: {e}")
+                # Store complete cache key parameters as JSON for debugging/querying (if enabled)
+                # This captures the original kwargs used to derive the cache key
+                # Pre-serialize to JSON strings so backend can be standalone storage
+                if self.config.metadata.store_full_metadata:
+                    from .serialization import serialize_for_cache_key
+                    from .json_utils import dumps as json_dumps
+                    try:
+                        # Serialize kwargs to a consistent, queryable format
+                        serializable_kwargs = {
+                            key: serialize_for_cache_key(value, self.config)
+                            for key, value in kwargs.items()
+                        }
+                        # Pre-serialize to JSON string - backend just stores strings
+                        metadata_dict["cache_key_params"] = json_dumps(serializable_kwargs)
+                        
+                        # Also store kwargs as metadata_dict (raw values for easy querying)
+                        # Pre-serialize to JSON string - backend just stores strings
+                        metadata_dict["metadata_dict"] = json_dumps(kwargs.copy())
+                    except Exception as e:
+                        # If serialization fails, skip cache_key_params
+                        logger.warning(f"Failed to serialize cache_key_params: {e}")
 
-            entry_data = {
-                "data_type": handler.data_type,
-                "prefix": prefix,
-                "description": description,
-                "file_size": result["file_size"],
-                "metadata": metadata_dict,
-            }
+                entry_data = {
+                    "data_type": handler.data_type,
+                    "prefix": prefix,
+                    "description": description,
+                    "file_size": result["file_size"],
+                    "metadata": metadata_dict,
+                }
 
-            # Sign the entry if signing is enabled
-            if self.signer:
-                try:
-                    # Use consistent timestamp for both storage and signing (always UTC)
-                    creation_timestamp = datetime.now(timezone.utc)
-                    # Store as UTC ISO format with timezone info
-                    creation_timestamp_str = creation_timestamp.isoformat()
-                    
-                    # Store the creation timestamp in entry_data for the database
-                    entry_data["created_at"] = creation_timestamp_str
-                    
-                    # Use helper method for consistent field extraction
-                    cache_key_params = kwargs if self.config.metadata.store_full_metadata else None
-                    complete_entry_data = self._extract_signable_fields(
-                        cache_key=cache_key,
-                        entry_data=entry_data,
-                        metadata=metadata_dict,
-                        cache_key_params=cache_key_params
-                    )
-                    
-                    signature = self.signer.sign_entry(complete_entry_data)
-                    metadata_dict["entry_signature"] = signature
-                    
-                    logger.debug(f"Created signature for entry {cache_key}")
-                    
-                except Exception as e:
-                    logger.warning(f"Failed to sign entry {cache_key}: {e}")
-                    # Continue without signature for backward compatibility
-            
-            self.metadata_backend.put_entry(cache_key, entry_data)
+                # Sign the entry if signing is enabled
+                if self.signer:
+                    try:
+                        # Use consistent timestamp for both storage and signing (always UTC)
+                        creation_timestamp = datetime.now(timezone.utc)
+                        # Store as UTC ISO format with timezone info
+                        creation_timestamp_str = creation_timestamp.isoformat()
+                        
+                        # Store the creation timestamp in entry_data for the database
+                        entry_data["created_at"] = creation_timestamp_str
+                        
+                        # Use helper method for consistent field extraction
+                        cache_key_params = kwargs if self.config.metadata.store_full_metadata else None
+                        complete_entry_data = self._extract_signable_fields(
+                            cache_key=cache_key,
+                            entry_data=entry_data,
+                            metadata=metadata_dict,
+                            cache_key_params=cache_key_params
+                        )
+                        
+                        signature = self.signer.sign_entry(complete_entry_data)
+                        metadata_dict["entry_signature"] = signature
+                        
+                        logger.debug(f"Created signature for entry {cache_key}")
+                        
+                    except Exception as e:
+                        logger.warning(f"Failed to sign entry {cache_key}: {e}")
+                        # Continue without signature for backward compatibility
+                
+                self.metadata_backend.put_entry(cache_key, entry_data)
 
-            # Handle custom metadata if provided
-            if custom_metadata and self._supports_custom_metadata():
-                self._store_custom_metadata(cache_key, custom_metadata)
+                # Handle custom metadata if provided
+                if custom_metadata and self._supports_custom_metadata():
+                    self._store_custom_metadata(cache_key, custom_metadata)
 
-            self._enforce_size_limit()
+                self._enforce_size_limit()
 
-            file_size_mb = result["file_size"] / (1024 * 1024)
-            format_info = f"({result['storage_format']} format)"
-            logger.info(
-                f"Cached {handler.data_type} {cache_key} ({file_size_mb:.3f}MB) {format_info}: {description}"
-            )
-            
-            return cache_key
+                file_size_mb = result["file_size"] / (1024 * 1024)
+                format_info = f"({result['storage_format']} format)"
+                logger.info(
+                    f"Cached {handler.data_type} {cache_key} ({file_size_mb:.3f}MB) {format_info}: {description}"
+                )
+                
+                return cache_key
 
-        except (OSError, IOError) as e:
-            # I/O errors (disk full, permissions, etc.)
-            # Clean up orphaned blob file if it was written
-            if 'blob_path' in locals() and blob_path.exists():
-                try:
-                    blob_path.unlink()
-                    logger.debug(f"Cleaned up orphaned blob: {blob_path}")
-                except OSError:
-                    pass
-            logger.error(f"Failed to cache {handler.data_type} (I/O error): {e}")
-            raise
-        except Exception as e:
-            # Clean up orphaned blob file if it was written
-            if 'blob_path' in locals() and blob_path.exists():
-                try:
-                    blob_path.unlink()
-                    logger.debug(f"Cleaned up orphaned blob: {blob_path}")
-                except OSError:
-                    pass
-            # Include exception type for easier debugging
-            logger.error(f"Failed to cache {handler.data_type}: {type(e).__name__}: {e}")
-            raise
+            except (OSError, IOError) as e:
+                # I/O errors (disk full, permissions, etc.)
+                # Clean up orphaned blob file if it was written
+                if 'blob_path' in locals() and blob_path.exists():
+                    try:
+                        blob_path.unlink()
+                        logger.debug(f"Cleaned up orphaned blob: {blob_path}")
+                    except OSError:
+                        pass
+                logger.error(f"Failed to cache {handler.data_type} (I/O error): {e}")
+                raise
+            except Exception as e:
+                # Clean up orphaned blob file if it was written
+                if 'blob_path' in locals() and blob_path.exists():
+                    try:
+                        blob_path.unlink()
+                        logger.debug(f"Cleaned up orphaned blob: {blob_path}")
+                    except OSError:
+                        pass
+                # Include exception type for easier debugging
+                logger.error(f"Failed to cache {handler.data_type}: {type(e).__name__}: {e}")
+                raise
 
     def get(
         self,
@@ -952,118 +955,119 @@ class UnifiedCache:
         Returns:
             Cached data or None if not found/expired
         """
-        if cache_key is None:
-            cache_key = self._create_cache_key(kwargs)
+        with self._lock:
+            if cache_key is None:
+                cache_key = self._create_cache_key(kwargs)
 
-        # Check if entry exists and is not expired
-        entry = self.metadata_backend.get_entry(cache_key)
-        if not entry or self._is_expired(cache_key, ttl_seconds):
-            self.metadata_backend.increment_misses()
-            return None
+            # Check if entry exists and is not expired
+            entry = self.metadata_backend.get_entry(cache_key)
+            if not entry or self._is_expired(cache_key, ttl_seconds):
+                self.metadata_backend.increment_misses()
+                return None
 
-        # Get appropriate handler
-        data_type = entry.get("data_type")
-        if not data_type:
-            self.metadata_backend.increment_misses()
-            return None
+            # Get appropriate handler
+            data_type = entry.get("data_type")
+            if not data_type:
+                self.metadata_backend.increment_misses()
+                return None
 
-        try:
-            handler = self.handlers.get_handler_by_type(data_type)
-            base_file_path = self._get_cache_file_path(cache_key, prefix)
+            try:
+                handler = self.handlers.get_handler_by_type(data_type)
+                base_file_path = self._get_cache_file_path(cache_key, prefix)
 
-            # Use actual path from metadata if available, otherwise use base path
-            metadata = entry.get("metadata", {})
-            actual_path = metadata.get("actual_path")
-            if actual_path:
-                file_path = Path(actual_path)
-            else:
-                file_path = base_file_path
+                # Use actual path from metadata if available, otherwise use base path
+                metadata = entry.get("metadata", {})
+                actual_path = metadata.get("actual_path")
+                if actual_path:
+                    file_path = Path(actual_path)
+                else:
+                    file_path = base_file_path
 
-            # Verify cache file integrity if enabled and hash is available
-            if self.config.metadata.verify_cache_integrity:
-                stored_hash = metadata.get("file_hash")
-                if stored_hash is not None:
-                    current_hash = self._calculate_file_hash(file_path)
-                    if current_hash != stored_hash:
+                # Verify cache file integrity if enabled and hash is available
+                if self.config.metadata.verify_cache_integrity:
+                    stored_hash = metadata.get("file_hash")
+                    if stored_hash is not None:
+                        current_hash = self._calculate_file_hash(file_path)
+                        if current_hash != stored_hash:
+                            logger.warning(
+                                f"Cache integrity verification failed for {cache_key}: "
+                                f"stored hash {stored_hash} != current hash {current_hash}. "
+                                f"Removing corrupted cache entry."
+                            )
+                            self.metadata_backend.remove_entry(cache_key)
+                            self.metadata_backend.increment_misses()
+                            return None
+
+                # Verify entry signature if signing is enabled
+                if self.signer and self.config.security.enable_entry_signing:
+                    stored_signature = metadata.get("entry_signature")
+                    
+                    if stored_signature is not None:
+                        # Use helper method for consistent field extraction
+                        cache_key_params = metadata.get("cache_key_params")
+                        verify_entry_data = self._extract_signable_fields(
+                            cache_key=cache_key,
+                            entry_data=entry,
+                            metadata=metadata,
+                            cache_key_params=cache_key_params
+                        )
+                        
+                        if not self.signer.verify_entry(verify_entry_data, stored_signature):
+                            if self.config.security.delete_invalid_signatures:
+                                logger.warning(
+                                    f"Entry signature verification failed for {cache_key}. "
+                                    f"Removing potentially tampered cache entry."
+                                )
+                                self.metadata_backend.remove_entry(cache_key)
+                                self.metadata_backend.increment_misses()
+                                return None
+                            else:
+                                logger.warning(
+                                    f"Entry signature verification failed for {cache_key}. "
+                                    f"Entry retained due to delete_invalid_signatures=False."
+                                )
+                                # Continue with loading despite invalid signature
+                            
+                    elif not self.config.security.allow_unsigned_entries:
                         logger.warning(
-                            f"Cache integrity verification failed for {cache_key}: "
-                            f"stored hash {stored_hash} != current hash {current_hash}. "
-                            f"Removing corrupted cache entry."
+                            f"Entry {cache_key} has no signature but unsigned entries are not allowed. "
+                            f"Removing entry."
                         )
                         self.metadata_backend.remove_entry(cache_key)
                         self.metadata_backend.increment_misses()
                         return None
 
-            # Verify entry signature if signing is enabled
-            if self.signer and self.config.security.enable_entry_signing:
-                stored_signature = metadata.get("entry_signature")
-                
-                if stored_signature is not None:
-                    # Use helper method for consistent field extraction
-                    cache_key_params = metadata.get("cache_key_params")
-                    verify_entry_data = self._extract_signable_fields(
-                        cache_key=cache_key,
-                        entry_data=entry,
-                        metadata=metadata,
-                        cache_key_params=cache_key_params
-                    )
-                    
-                    if not self.signer.verify_entry(verify_entry_data, stored_signature):
-                        if self.config.security.delete_invalid_signatures:
-                            logger.warning(
-                                f"Entry signature verification failed for {cache_key}. "
-                                f"Removing potentially tampered cache entry."
-                            )
-                            self.metadata_backend.remove_entry(cache_key)
-                            self.metadata_backend.increment_misses()
-                            return None
-                        else:
-                            logger.warning(
-                                f"Entry signature verification failed for {cache_key}. "
-                                f"Entry retained due to delete_invalid_signatures=False."
-                            )
-                            # Continue with loading despite invalid signature
-                        
-                elif not self.config.security.allow_unsigned_entries:
-                    logger.warning(
-                        f"Entry {cache_key} has no signature but unsigned entries are not allowed. "
-                        f"Removing entry."
-                    )
-                    self.metadata_backend.remove_entry(cache_key)
-                    self.metadata_backend.increment_misses()
-                    return None
+                # Use handler to load the data
+                data = handler.get(file_path, metadata)
 
-            # Use handler to load the data
-            data = handler.get(file_path, metadata)
+                # Update access time
+                self.metadata_backend.update_access_time(cache_key)
+                self.metadata_backend.increment_hits()
 
-            # Update access time
-            self.metadata_backend.update_access_time(cache_key)
-            self.metadata_backend.increment_hits()
+                logger.debug(f"Cache hit ({data_type}): {cache_key}")
+                return data
 
-            logger.debug(f"Cache hit ({data_type}): {cache_key}")
-            return data
-
-        except FileNotFoundError as e:
-            # Cache file was deleted externally — permanent, clean up metadata
-            logger.warning(f"Cache file missing for {cache_key}: {e}")
-            self.metadata_backend.remove_entry(cache_key)
-            self.metadata_backend.increment_misses()
-            return None
-        except (OSError, IOError) as e:
-            # I/O errors may be transient (disk temporarily unavailable, etc.)
-            # Do NOT delete metadata — the entry may be readable on retry
-            logger.warning(f"I/O error loading cached {data_type} {cache_key}: {e}")
-            self.metadata_backend.increment_misses()
-            return None
-        except Exception as e:
-            # Unexpected errors (deserialization failures, corruption, etc.)
-            # These are likely permanent — clean up the metadata entry
-            logger.warning(
-                f"Failed to load cached {data_type} {cache_key}: {type(e).__name__}: {e}"
-            )
-            self.metadata_backend.remove_entry(cache_key)
-            self.metadata_backend.increment_misses()
-            return None
+            except FileNotFoundError as e:
+                # Cache file was deleted externally — permanent, clean up metadata
+                logger.warning(f"Cache file missing for {cache_key}: {e}")
+                self.metadata_backend.remove_entry(cache_key)
+                self.metadata_backend.increment_misses()
+                return None
+            except (OSError, IOError) as e:
+                # I/O errors may be transient (disk temporarily unavailable, etc.)
+                # Do NOT delete metadata — the entry may be readable on retry
+                logger.warning(f"I/O error loading cached {data_type} {cache_key}: {e}")
+                self.metadata_backend.increment_misses()
+                return None
+            except Exception as e:
+                # Unexpected errors (deserialization failures, corruption, etc.)
+                # These are likely permanent — clean up the metadata entry
+                logger.warning(
+                    f"Failed to load cached {data_type} {cache_key}: {type(e).__name__}: {e}"
+                )
+                self.metadata_backend.remove_entry(cache_key)
+                self.metadata_backend.increment_misses()
+                return None
 
     def get_metadata(
         self,
@@ -1092,21 +1096,22 @@ class UnifiedCache:
                 print("Large file - loading may take time")
                 data = cache.get(experiment="exp_001")
         """
-        if cache_key is None:
-            cache_key = self._create_cache_key(kwargs)
-        
-        entry = self.metadata_backend.get_entry(cache_key)
-        if not entry:
-            return None
-        
-        # Check expiration if requested (respects cache TTL policy)
-        if check_expiration and self._is_expired(cache_key):
-            return None
-        
-        # Ensure cache_key is included in returned metadata
-        entry["cache_key"] = cache_key
-        
-        return entry
+        with self._lock:
+            if cache_key is None:
+                cache_key = self._create_cache_key(kwargs)
+            
+            entry = self.metadata_backend.get_entry(cache_key)
+            if not entry:
+                return None
+            
+            # Check expiration if requested (respects cache TTL policy)
+            if check_expiration and self._is_expired(cache_key):
+                return None
+            
+            # Ensure cache_key is included in returned metadata
+            entry["cache_key"] = cache_key
+            
+            return entry
     
     def update_data(
         self,
@@ -1146,87 +1151,88 @@ class UnifiedCache:
             - Use put() to create new entries
             - created_at timestamp is reset to now (acts like touch)
         """
-        if cache_key is None:
-            cache_key = self._create_cache_key(kwargs)
-        
-        # Check if entry exists before doing any I/O
-        existing_entry = self.metadata_backend.get_entry(cache_key)
-        if not existing_entry:
-            logger.warning(f"⚠️ Cache entry not found for update: {cache_key[:16]}...")
-            return False
-        
-        # Get appropriate handler for the data type
-        handler = self.handlers.get_handler(data)
-        
-        # Reconstruct file path from existing metadata (blob I/O belongs here, not in metadata layer)
-        prefix = existing_entry.get("prefix", "")
-        base_file_path = self._get_cache_file_path(cache_key, prefix)
-        
-        # Perform blob I/O: write new data to disk
-        result = handler.put(data, base_file_path, self.config)
-        
-        # Build metadata updates dict from handler result
-        updates = {
-            "file_size": result.get("file_size", 0),
-            "content_hash": result.get("content_hash"),
-            "file_hash": result.get("file_hash"),
-            "actual_path": str(result.get("actual_path", base_file_path)),
-            "storage_format": result.get("storage_format"),
-        }
-        if hasattr(handler, "data_type"):
-            updates["data_type"] = handler.data_type
-        if hasattr(handler, "serializer"):
-            updates["serializer"] = handler.serializer
-        if result.get("compression_codec"):
-            updates["compression_codec"] = result["compression_codec"]
-        if result.get("object_type"):
-            updates["object_type"] = result["object_type"]
-        if result.get("s3_etag"):
-            updates["s3_etag"] = result["s3_etag"]
-        
-        # Delegate metadata-only update to backend (no I/O in metadata layer)
-        success = self.metadata_backend.update_entry_metadata(
-            cache_key=cache_key,
-            updates=updates
-        )
-        
-        # Re-sign the entry if signing is enabled (security: signature must match updated data)
-        if self.signer:
-            try:
-                # Get the updated entry from backend
-                updated_entry = self.metadata_backend.get_entry(cache_key)
-                if updated_entry:
-                    # Recalculate file hash for integrity verification
-                    metadata = updated_entry.get("metadata", {})
-                    actual_path = metadata.get("actual_path")
-                    if actual_path and self.config.metadata.verify_cache_integrity:
-                        new_file_hash = self._calculate_file_hash(Path(actual_path))
-                        metadata["file_hash"] = new_file_hash
-                    
-                    # Extract signable fields and create new signature
-                    cache_key_params = kwargs if self.config.metadata.store_full_metadata else None
-                    complete_entry_data = self._extract_signable_fields(
-                        cache_key=cache_key,
-                        entry_data=updated_entry,
-                        metadata=metadata,
-                        cache_key_params=cache_key_params
-                    )
-                    
-                    # Generate new signature for updated entry
-                    new_signature = self.signer.sign_entry(complete_entry_data)
-                    metadata["entry_signature"] = new_signature
-                    
-                    # Update entry with new signature and file hash
-                    updated_entry["metadata"] = metadata
-                    self.metadata_backend.put_entry(cache_key, updated_entry)
-                    
-                    logger.debug(f"Re-signed updated entry {cache_key}")
-            except Exception as e:
-                logger.warning(f"Failed to re-sign updated entry {cache_key}: {e}")
-                # Continue - update succeeded, just missing signature
-        
-        logger.info(f"✅ Updated cache entry: {cache_key[:16]}...")
-        return True
+        with self._lock:
+            if cache_key is None:
+                cache_key = self._create_cache_key(kwargs)
+            
+            # Check if entry exists before doing any I/O
+            existing_entry = self.metadata_backend.get_entry(cache_key)
+            if not existing_entry:
+                logger.warning(f"⚠️ Cache entry not found for update: {cache_key[:16]}...")
+                return False
+            
+            # Get appropriate handler for the data type
+            handler = self.handlers.get_handler(data)
+            
+            # Reconstruct file path from existing metadata (blob I/O belongs here, not in metadata layer)
+            prefix = existing_entry.get("prefix", "")
+            base_file_path = self._get_cache_file_path(cache_key, prefix)
+            
+            # Perform blob I/O: write new data to disk
+            result = handler.put(data, base_file_path, self.config)
+            
+            # Build metadata updates dict from handler result
+            updates = {
+                "file_size": result.get("file_size", 0),
+                "content_hash": result.get("content_hash"),
+                "file_hash": result.get("file_hash"),
+                "actual_path": str(result.get("actual_path", base_file_path)),
+                "storage_format": result.get("storage_format"),
+            }
+            if hasattr(handler, "data_type"):
+                updates["data_type"] = handler.data_type
+            if hasattr(handler, "serializer"):
+                updates["serializer"] = handler.serializer
+            if result.get("compression_codec"):
+                updates["compression_codec"] = result["compression_codec"]
+            if result.get("object_type"):
+                updates["object_type"] = result["object_type"]
+            if result.get("s3_etag"):
+                updates["s3_etag"] = result["s3_etag"]
+            
+            # Delegate metadata-only update to backend (no I/O in metadata layer)
+            success = self.metadata_backend.update_entry_metadata(
+                cache_key=cache_key,
+                updates=updates
+            )
+            
+            # Re-sign the entry if signing is enabled (security: signature must match updated data)
+            if self.signer:
+                try:
+                    # Get the updated entry from backend
+                    updated_entry = self.metadata_backend.get_entry(cache_key)
+                    if updated_entry:
+                        # Recalculate file hash for integrity verification
+                        metadata = updated_entry.get("metadata", {})
+                        actual_path = metadata.get("actual_path")
+                        if actual_path and self.config.metadata.verify_cache_integrity:
+                            new_file_hash = self._calculate_file_hash(Path(actual_path))
+                            metadata["file_hash"] = new_file_hash
+                        
+                        # Extract signable fields and create new signature
+                        cache_key_params = kwargs if self.config.metadata.store_full_metadata else None
+                        complete_entry_data = self._extract_signable_fields(
+                            cache_key=cache_key,
+                            entry_data=updated_entry,
+                            metadata=metadata,
+                            cache_key_params=cache_key_params
+                        )
+                        
+                        # Generate new signature for updated entry
+                        new_signature = self.signer.sign_entry(complete_entry_data)
+                        metadata["entry_signature"] = new_signature
+                        
+                        # Update entry with new signature and file hash
+                        updated_entry["metadata"] = metadata
+                        self.metadata_backend.put_entry(cache_key, updated_entry)
+                        
+                        logger.debug(f"Re-signed updated entry {cache_key}")
+                except Exception as e:
+                    logger.warning(f"Failed to re-sign updated entry {cache_key}: {e}")
+                    # Continue - update succeeded, just missing signature
+            
+            logger.info(f"✅ Updated cache entry: {cache_key[:16]}...")
+            return True
     
     def touch(
         self,
@@ -1265,47 +1271,48 @@ class UnifiedCache:
             - TTL duration is always determined by the global config
               (``CacheMetadataConfig.default_ttl_seconds``)
         """
-        if cache_key is None:
-            cache_key = self._create_cache_key(kwargs)
-        
-        # Get existing entry
-        entry = self.metadata_backend.get_entry(cache_key)
-        if not entry:
-            logger.warning(f"⚠️ Cache entry not found for touch: {cache_key[:16]}...")
-            return False
-        
-        # Update timestamp to now (resets TTL)
-        now = datetime.now(timezone.utc)
-        entry["created_at"] = now.isoformat()
-        entry["accessed_at"] = now.isoformat()
-        
-        # Re-sign if signing is enabled (timestamp is part of signature)
-        if self.signer:
-            try:
-                metadata = entry.get("metadata", {})
-                cache_key_params = kwargs if self.config.metadata.store_full_metadata else None
-                complete_entry_data = self._extract_signable_fields(
-                    cache_key=cache_key,
-                    entry_data=entry,
-                    metadata=metadata,
-                    cache_key_params=cache_key_params
-                )
-                
-                # Generate new signature with updated timestamp
-                new_signature = self.signer.sign_entry(complete_entry_data)
-                metadata["entry_signature"] = new_signature
-                entry["metadata"] = metadata
-                
-                logger.debug(f"Re-signed touched entry {cache_key}")
-            except Exception as e:
-                logger.warning(f"Failed to re-sign touched entry {cache_key}: {e}")
-                # Continue - touch succeeded, just missing signature
-        
-        # Store updated entry
-        self.metadata_backend.put_entry(cache_key, entry)
-        
-        logger.info(f"👆 Touched cache entry: {cache_key[:16]}... (TTL extended)")
-        return True
+        with self._lock:
+            if cache_key is None:
+                cache_key = self._create_cache_key(kwargs)
+            
+            # Get existing entry
+            entry = self.metadata_backend.get_entry(cache_key)
+            if not entry:
+                logger.warning(f"⚠️ Cache entry not found for touch: {cache_key[:16]}...")
+                return False
+            
+            # Update timestamp to now (resets TTL)
+            now = datetime.now(timezone.utc)
+            entry["created_at"] = now.isoformat()
+            entry["accessed_at"] = now.isoformat()
+            
+            # Re-sign if signing is enabled (timestamp is part of signature)
+            if self.signer:
+                try:
+                    metadata = entry.get("metadata", {})
+                    cache_key_params = kwargs if self.config.metadata.store_full_metadata else None
+                    complete_entry_data = self._extract_signable_fields(
+                        cache_key=cache_key,
+                        entry_data=entry,
+                        metadata=metadata,
+                        cache_key_params=cache_key_params
+                    )
+                    
+                    # Generate new signature with updated timestamp
+                    new_signature = self.signer.sign_entry(complete_entry_data)
+                    metadata["entry_signature"] = new_signature
+                    entry["metadata"] = metadata
+                    
+                    logger.debug(f"Re-signed touched entry {cache_key}")
+                except Exception as e:
+                    logger.warning(f"Failed to re-sign touched entry {cache_key}: {e}")
+                    # Continue - touch succeeded, just missing signature
+            
+            # Store updated entry
+            self.metadata_backend.put_entry(cache_key, entry)
+            
+            logger.info(f"👆 Touched cache entry: {cache_key[:16]}... (TTL extended)")
+            return True
 
     # ── Bulk & Batch Operations ───────────────────────────────────────────
 
@@ -1339,31 +1346,32 @@ class UnifiedCache:
                 lambda e: e.get("data_type") == "dataframe"
             )
         """
-        summaries = self.metadata_backend.iter_entry_summaries()
-        deleted = 0
-        for entry in summaries:
-            # Add user-facing aliases so filter functions written for
-            # list_entries() dicts continue to work
-            if "created" not in entry and "created_at" in entry:
-                raw = entry["created_at"]
-                entry["created"] = raw.isoformat() if hasattr(raw, "isoformat") else raw
-            if "last_accessed" not in entry and "accessed_at" in entry:
-                raw = entry["accessed_at"]
-                entry["last_accessed"] = raw.isoformat() if hasattr(raw, "isoformat") else raw
-            if "size_mb" not in entry and "file_size" in entry:
-                entry["size_mb"] = round(entry["file_size"] / (1024 * 1024), 3)
-            try:
-                if filter_fn(entry):
-                    cache_key = entry.get("cache_key")
-                    if cache_key:
-                        self.invalidate(cache_key=cache_key)
-                        deleted += 1
-            except Exception as exc:
-                logger.warning(
-                    f"filter_fn raised for entry {entry.get('cache_key', '?')}: {exc}"
-                )
-        logger.info(f"🗑️ Bulk delete: removed {deleted} entries")
-        return deleted
+        with self._lock:
+            summaries = self.metadata_backend.iter_entry_summaries()
+            deleted = 0
+            for entry in summaries:
+                # Add user-facing aliases so filter functions written for
+                # list_entries() dicts continue to work
+                if "created" not in entry and "created_at" in entry:
+                    raw = entry["created_at"]
+                    entry["created"] = raw.isoformat() if hasattr(raw, "isoformat") else raw
+                if "last_accessed" not in entry and "accessed_at" in entry:
+                    raw = entry["accessed_at"]
+                    entry["last_accessed"] = raw.isoformat() if hasattr(raw, "isoformat") else raw
+                if "size_mb" not in entry and "file_size" in entry:
+                    entry["size_mb"] = round(entry["file_size"] / (1024 * 1024), 3)
+                try:
+                    if filter_fn(entry):
+                        cache_key = entry.get("cache_key")
+                        if cache_key:
+                            self.invalidate(cache_key=cache_key)
+                            deleted += 1
+                except Exception as exc:
+                    logger.warning(
+                        f"filter_fn raised for entry {entry.get('cache_key', '?')}: {exc}"
+                    )
+            logger.info(f"🗑️ Bulk delete: removed {deleted} entries")
+            return deleted
 
     def delete_matching(self, **kwargs) -> int:
         """
@@ -1392,33 +1400,34 @@ class UnifiedCache:
                 model_type="xgboost"
             )
         """
-        if not kwargs:
-            return 0
+        with self._lock:
+            if not kwargs:
+                return 0
 
-        # Fast path: use query_meta on SQLite for indexed lookups
-        if self.actual_backend == "sqlite" and self.config.metadata.store_full_metadata:
-            results = self.query_meta(**kwargs)
-            if results is not None:
-                deleted = 0
-                for entry in results:
+            # Fast path: use query_meta on SQLite for indexed lookups
+            if self.actual_backend == "sqlite" and self.config.metadata.store_full_metadata:
+                results = self.query_meta(**kwargs)
+                if results is not None:
+                    deleted = 0
+                    for entry in results:
+                        cache_key = entry.get("cache_key")
+                        if cache_key:
+                            self.invalidate(cache_key=cache_key)
+                            deleted += 1
+                    logger.info(f"🗑️ Bulk delete (query_meta): removed {deleted} entries")
+                    return deleted
+
+            # Generic path: scan summaries and match flat fields directly
+            summaries = self.metadata_backend.iter_entry_summaries()
+            deleted = 0
+            for entry in summaries:
+                if all(entry.get(k) == v for k, v in kwargs.items()):
                     cache_key = entry.get("cache_key")
                     if cache_key:
                         self.invalidate(cache_key=cache_key)
                         deleted += 1
-                logger.info(f"🗑️ Bulk delete (query_meta): removed {deleted} entries")
-                return deleted
-
-        # Generic path: scan summaries and match flat fields directly
-        summaries = self.metadata_backend.iter_entry_summaries()
-        deleted = 0
-        for entry in summaries:
-            if all(entry.get(k) == v for k, v in kwargs.items()):
-                cache_key = entry.get("cache_key")
-                if cache_key:
-                    self.invalidate(cache_key=cache_key)
-                    deleted += 1
-        logger.info(f"🗑️ Bulk delete (matching): removed {deleted} entries")
-        return deleted
+            logger.info(f"🗑️ Bulk delete (matching): removed {deleted} entries")
+            return deleted
 
     def get_batch(
         self,
@@ -1445,15 +1454,16 @@ class UnifiedCache:
                 if data is not None:
                     print(f"{key}: loaded")
         """
-        results: Dict[str, Any] = {}
-        for kw in kwargs_list:
-            # Strip named params that get() consumes so the cache key
-            # matches the one computed during put()
-            hash_kwargs = {k: v for k, v in kw.items()
-                           if k not in ("cache_key", "prefix", "ttl_seconds")}
-            cache_key = kw.get("cache_key") or self._create_cache_key(hash_kwargs)
-            results[cache_key] = self.get(**kw)
-        return results
+        with self._lock:
+            results: Dict[str, Any] = {}
+            for kw in kwargs_list:
+                # Strip named params that get() consumes so the cache key
+                # matches the one computed during put()
+                hash_kwargs = {k: v for k, v in kw.items()
+                               if k not in ("cache_key", "prefix", "ttl_seconds")}
+                cache_key = kw.get("cache_key") or self._create_cache_key(hash_kwargs)
+                results[cache_key] = self.get(**kw)
+            return results
 
     def delete_batch(
         self,
@@ -1476,20 +1486,21 @@ class UnifiedCache:
             ])
             print(f"Removed {deleted} entries")
         """
-        deleted = 0
-        for kw in kwargs_list:
-            # Strip named params that invalidate()/put() consume so the
-            # cache key matches the one computed during put()
-            hash_kwargs = {k: v for k, v in kw.items()
-                           if k not in ("cache_key", "prefix", "description",
-                                        "custom_metadata")}
-            cache_key = kw.get("cache_key") or self._create_cache_key(hash_kwargs)
-            entry = self.metadata_backend.get_entry(cache_key)
-            if entry is not None:
-                self.invalidate(cache_key=cache_key)
-                deleted += 1
-        logger.info(f"🗑️ Batch delete: removed {deleted}/{len(kwargs_list)} entries")
-        return deleted
+        with self._lock:
+            deleted = 0
+            for kw in kwargs_list:
+                # Strip named params that invalidate()/put() consume so the
+                # cache key matches the one computed during put()
+                hash_kwargs = {k: v for k, v in kw.items()
+                               if k not in ("cache_key", "prefix", "description",
+                                            "custom_metadata")}
+                cache_key = kw.get("cache_key") or self._create_cache_key(hash_kwargs)
+                entry = self.metadata_backend.get_entry(cache_key)
+                if entry is not None:
+                    self.invalidate(cache_key=cache_key)
+                    deleted += 1
+            logger.info(f"🗑️ Batch delete: removed {deleted}/{len(kwargs_list)} entries")
+            return deleted
 
     def touch_batch(self, **filter_kwargs) -> int:
         """
@@ -1506,19 +1517,20 @@ class UnifiedCache:
             # Extend TTL for all entries in a project
             touched = cache.touch_batch(project="ml_models")
         """
-        if not filter_kwargs:
-            return 0
+        with self._lock:
+            if not filter_kwargs:
+                return 0
 
-        summaries = self.metadata_backend.iter_entry_summaries()
-        touched = 0
-        for entry in summaries:
-            # Summaries are already flat — no need to merge with metadata
-            if all(entry.get(k) == v for k, v in filter_kwargs.items()):
-                cache_key = entry.get("cache_key")
-                if cache_key and self.touch(cache_key=cache_key):
-                    touched += 1
-        logger.info(f"👆 Batch touch: refreshed {touched} entries")
-        return touched
+            summaries = self.metadata_backend.iter_entry_summaries()
+            touched = 0
+            for entry in summaries:
+                # Summaries are already flat — no need to merge with metadata
+                if all(entry.get(k) == v for k, v in filter_kwargs.items()):
+                    cache_key = entry.get("cache_key")
+                    if cache_key and self.touch(cache_key=cache_key):
+                        touched += 1
+            logger.info(f"👆 Batch touch: refreshed {touched} entries")
+            return touched
 
     def _enforce_size_limit(self):
         """Enforce cache size limits using LRU eviction."""
@@ -1547,57 +1559,186 @@ class UnifiedCache:
             prefix: Descriptive prefix of the cache filename
             **kwargs: Parameters identifying the cached data (used if cache_key is None)
         """
-        if cache_key is None:
-            cache_key = self._create_cache_key(kwargs)
+        with self._lock:
+            if cache_key is None:
+                cache_key = self._create_cache_key(kwargs)
 
-        # Remove from metadata backend (handles file cleanup)
-        if self.metadata_backend.remove_entry(cache_key):
-            logger.info(f"Invalidated cache entry {cache_key}")
-        else:
-            logger.debug(f"Cache entry {cache_key} not found for invalidation")
+            # Remove from metadata backend (handles file cleanup)
+            if self.metadata_backend.remove_entry(cache_key):
+                logger.info(f"Invalidated cache entry {cache_key}")
+            else:
+                logger.debug(f"Cache entry {cache_key} not found for invalidation")
+
+    def verify_integrity(self, repair: bool = False, verify_hashes: bool = False) -> Dict[str, Any]:
+        """
+        Verify cache integrity by cross-checking blob files and metadata entries.
+
+        Detects:
+        - Orphaned blobs: files in cache_dir with no metadata entry
+        - Dangling metadata: entries pointing to missing blob files
+        - Size mismatches: metadata file_size != actual file size on disk
+        - Hash mismatches: metadata file_hash != actual file hash (if verify_hashes=True)
+
+        Args:
+            repair: If True, delete orphaned blobs and remove dangling metadata entries.
+            verify_hashes: If True, also verify file hashes (slower but catches corruption).
+
+        Returns:
+            Dict with keys: orphaned_blobs, dangling_entries, size_mismatches,
+            hash_mismatches (if verify_hashes), repaired (if repair).
+        """
+        import glob
+
+        with self._lock:
+            # 1. Inventory all blob files in cache_dir
+            blob_extensions = ["pkl", "npz", "b2nd", "b2tr", "parquet"]
+            pickle_codecs = ["lz4", "zstd", "gzip", "zst", "gz", "bz2", "xz"]
+
+            blob_files: set[str] = set()
+            patterns = [str(self.cache_dir / f"*.{ext}") for ext in blob_extensions]
+            for codec in pickle_codecs:
+                patterns.append(str(self.cache_dir / f"*.pkl.{codec}"))
+            patterns.append(str(self.cache_dir / "*.pkl.*"))
+
+            for pattern in patterns:
+                for file_path in glob.glob(pattern):
+                    blob_files.add(os.path.normpath(file_path))
+
+            # 2. Inventory all metadata entries and their actual_paths
+            entry_paths: dict[str, dict] = {}  # actual_path -> {cache_key, file_size, file_hash}
+            for entry in self.metadata_backend.iter_entry_summaries():
+                actual_path = entry.get("actual_path")
+                if actual_path:
+                    norm_path = os.path.normpath(actual_path)
+                    entry_paths[norm_path] = {
+                        "cache_key": entry["cache_key"],
+                        "file_size": entry.get("file_size"),
+                        "file_hash": entry.get("file_hash"),
+                    }
+
+            # 3. Find orphaned blobs (files with no metadata entry)
+            known_paths = set(entry_paths.keys())
+            orphaned_blobs = sorted(blob_files - known_paths)
+
+            # 4. Find dangling metadata (entries pointing to missing files)
+            dangling_entries = []
+            for path, info in entry_paths.items():
+                if not os.path.exists(path):
+                    dangling_entries.append({
+                        "cache_key": info["cache_key"],
+                        "expected_path": path,
+                    })
+
+            # 5. Check size mismatches
+            size_mismatches = []
+            for path, info in entry_paths.items():
+                if os.path.exists(path) and info["file_size"] is not None:
+                    actual_size = os.path.getsize(path)
+                    if actual_size != info["file_size"]:
+                        size_mismatches.append({
+                            "cache_key": info["cache_key"],
+                            "path": path,
+                            "expected_size": info["file_size"],
+                            "actual_size": actual_size,
+                        })
+
+            # 6. Check hash mismatches (optional, expensive)
+            hash_mismatches = []
+            if verify_hashes:
+                for path, info in entry_paths.items():
+                    if os.path.exists(path) and info.get("file_hash"):
+                        current_hash = self._calculate_file_hash(Path(path))
+                        if current_hash != info["file_hash"]:
+                            hash_mismatches.append({
+                                "cache_key": info["cache_key"],
+                                "path": path,
+                                "expected_hash": info["file_hash"],
+                                "actual_hash": current_hash,
+                            })
+
+            # 7. Repair if requested
+            repaired = {"orphans_deleted": 0, "dangling_removed": 0}
+            if repair:
+                for blob_path in orphaned_blobs:
+                    try:
+                        os.remove(blob_path)
+                        repaired["orphans_deleted"] += 1
+                    except OSError as e:
+                        logger.warning(f"Failed to remove orphaned blob {blob_path}: {e}")
+
+                for entry in dangling_entries:
+                    try:
+                        self.metadata_backend.remove_entry(entry["cache_key"])
+                        repaired["dangling_removed"] += 1
+                    except Exception as e:
+                        logger.warning(f"Failed to remove dangling entry {entry['cache_key']}: {e}")
+
+            report = {
+                "orphaned_blobs": orphaned_blobs,
+                "dangling_entries": dangling_entries,
+                "size_mismatches": size_mismatches,
+            }
+            if verify_hashes:
+                report["hash_mismatches"] = hash_mismatches
+            if repair:
+                report["repaired"] = repaired
+
+            total_issues = len(orphaned_blobs) + len(dangling_entries) + len(size_mismatches) + len(hash_mismatches)
+            if total_issues == 0:
+                logger.info("Cache integrity check passed — no issues found")
+            else:
+                logger.warning(
+                    f"Cache integrity check found {total_issues} issue(s): "
+                    f"{len(orphaned_blobs)} orphaned blobs, "
+                    f"{len(dangling_entries)} dangling entries, "
+                    f"{len(size_mismatches)} size mismatches"
+                    + (f", {len(hash_mismatches)} hash mismatches" if verify_hashes else "")
+                )
+
+            return report
 
     def clear_all(self):
         """Clear all cache entries and remove cache files."""
-        import os
         import glob
         
-        # Clear metadata first and get count
-        removed_count = self.metadata_backend.clear_all()
-        
-        # Remove all cache files - comprehensive pattern matching
-        # Primary extensions
-        cache_patterns = [
-            str(self.cache_dir / "*.pkl"),      # Uncompressed pickle
-            str(self.cache_dir / "*.npz"),      # NumPy arrays
-            str(self.cache_dir / "*.b2nd"),     # Blosc2 arrays  
-            str(self.cache_dir / "*.b2tr"),     # TensorFlow tensors with blosc2
-            str(self.cache_dir / "*.parquet"),  # DataFrame files
-        ]
-        
-        # Compressed pickle files with valid compression codecs
-        pickle_codecs = ["lz4", "zstd", "gzip", "zst", "gz", "bz2", "xz"]
-        for codec in pickle_codecs:
-            cache_patterns.append(str(self.cache_dir / f"*.pkl.{codec}"))
-        
-        # Additional patterns for any other compression extensions user might use
-        # This catches any .pkl.* pattern that might not be in our known list
-        cache_patterns.append(str(self.cache_dir / "*.pkl.*"))
-        
-        files_removed = 0
-        processed_files = set()  # Avoid double-counting due to overlapping patterns
-        
-        for pattern in cache_patterns:
-            for file_path in glob.glob(pattern):
-                if file_path not in processed_files:
-                    try:
-                        os.remove(file_path)
-                        files_removed += 1
-                        processed_files.add(file_path)
-                    except OSError as e:
-                        logger.warning(f"Failed to remove cache file {file_path}: {e}")
-        
-        logger.info(f"Cleared {removed_count} cache entries and removed {files_removed} cache files")
-        return removed_count
+        with self._lock:
+            # Clear metadata first and get count
+            removed_count = self.metadata_backend.clear_all()
+            
+            # Remove all cache files - comprehensive pattern matching
+            # Primary extensions
+            cache_patterns = [
+                str(self.cache_dir / "*.pkl"),      # Uncompressed pickle
+                str(self.cache_dir / "*.npz"),      # NumPy arrays
+                str(self.cache_dir / "*.b2nd"),     # Blosc2 arrays  
+                str(self.cache_dir / "*.b2tr"),     # TensorFlow tensors with blosc2
+                str(self.cache_dir / "*.parquet"),  # DataFrame files
+            ]
+            
+            # Compressed pickle files with valid compression codecs
+            pickle_codecs = ["lz4", "zstd", "gzip", "zst", "gz", "bz2", "xz"]
+            for codec in pickle_codecs:
+                cache_patterns.append(str(self.cache_dir / f"*.pkl.{codec}"))
+            
+            # Additional patterns for any other compression extensions user might use
+            # This catches any .pkl.* pattern that might not be in our known list
+            cache_patterns.append(str(self.cache_dir / "*.pkl.*"))
+            
+            files_removed = 0
+            processed_files = set()  # Avoid double-counting due to overlapping patterns
+            
+            for pattern in cache_patterns:
+                for file_path in glob.glob(pattern):
+                    if file_path not in processed_files:
+                        try:
+                            os.remove(file_path)
+                            files_removed += 1
+                            processed_files.add(file_path)
+                        except OSError as e:
+                            logger.warning(f"Failed to remove cache file {file_path}: {e}")
+            
+            logger.info(f"Cleared {removed_count} cache entries and removed {files_removed} cache files")
+            return removed_count
 
     def get_stats(self) -> Dict[str, Any]:
         """Get comprehensive cache statistics."""

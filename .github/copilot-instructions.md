@@ -39,7 +39,7 @@ This project uses **beads-mcp** for issue tracking. **Always use the beads MCP t
 ## Test Suite
 
 - **Location:** `tests/` directory
-- **Current baseline:** 740 passed, 70 skipped, 0 failures
+- **Current baseline:** 777 passed, 70 skipped, 0 failures
 - **Run command:** `uv run pytest tests/ -x -q`
 - **Conventions:**
   - Use `-x` flag to stop on first failure
@@ -148,7 +148,7 @@ cache_key = self._create_cache_key(**kwargs_for_key)
 - **JSON:** Protected by `threading.Lock()`
 - **SQLite:** `check_same_thread=False` + WAL mode + per-operation locks
 - **PostgreSQL:** `ThreadPoolExecutor` around all operations
-- **UnifiedCache itself:** NOT thread-safe (lock never acquired)
+- **UnifiedCache:** Protected by `threading.RLock()` around all public methods
 
 ## Common Patterns
 
@@ -183,11 +183,12 @@ def my_operation(self, **filter_kwargs) -> int:
 
 ## Known Issues & Gotchas
 
-1. **Race condition in `put()`:** Two threads calling `put()` with the same key can corrupt state (lock never used)
-2. **Auto-deletion on read errors:** Transient I/O errors cause permanent metadata loss
-3. **Orphaned blobs:** If process crashes between blob write and metadata write, disk space consumed but invisible
-4. **SQLite "database is locked":** 30-second timeout can be exceeded under heavy concurrent writes
-5. **JSON backend scales O(n²):** Each write re-serializes entire JSON file
+1. **~~Race condition in `put()`:~~** FIXED — All public methods now protected by `threading.RLock()`
+2. **~~Auto-deletion on read errors:~~** FIXED — `get()` preserves metadata on transient `IOError`/`OSError`
+3. **Orphaned blobs on crash:** `put()` cleans up on exception, but a hard crash between blob write and metadata write can still leak. Use `verify_integrity(repair=True)` to detect/fix.
+4. **`invalidate()` doesn't delete blob files:** Only removes metadata — use `clear_all()` or `verify_integrity(repair=True)` to clean orphans
+5. **SQLite "database is locked":** 30-second timeout can be exceeded under heavy concurrent writes
+6. **JSON backend scales O(n²):** Each write re-serializes entire JSON file
 
 ## Benchmarks
 
@@ -213,7 +214,7 @@ Expected baseline (200 entries):
 ## When Modifying Core Logic
 
 1. **Always run tests after changes:** `uv run pytest tests/ -x -q`
-2. **Check for regressions:** Baseline is 740 passed, 70 skipped
+2. **Check for regressions:** Baseline is 777 passed, 70 skipped
 3. **Run relevant benchmark:** Ensure no performance degradation
 4. **Update documentation:** If changing public API
 
@@ -226,6 +227,10 @@ All dependencies managed in `pyproject.toml`:
 
 Install with: `uv sync`
 
+## Git Operations
+
+**Always use the GitKraken MCP tools** (`mcp_gitkraken_git_status`, `mcp_gitkraken_git_add_or_commit`, `mcp_gitkraken_git_push`, etc.) for git operations. Do NOT run git CLI commands via the terminal.
+
 ## Sessions / Workflows
 
 **MANDATORY WORKFLOW:**
@@ -233,15 +238,9 @@ Install with: `uv sync`
 1. **File issues for remaining work** — Create issues for anything that needs follow-up
 2. **Run quality gates** (if code changed) — Tests, linters, builds
 3. **Update issue status** — Close finished work, update in-progress items
-4. **PUSH TO REMOTE** — This is MANDATORY:
-   ```bash
-   git pull --rebase
-   git push
-   git status  # MUST show "up to date with origin"
-   ```
-5. **Clean up** — Clear stashes, prune remote branches
-6. **Verify** — All changes committed AND pushed
-7. **Hand off** — Provide context for next session
+4. **PUSH TO REMOTE** — This is MANDATORY. Use `mcp_gitkraken_git_push`.
+5. **Verify** — Use `mcp_gitkraken_git_status` to confirm "up to date with origin"
+6. **Hand off** — Provide context for next session
 
 **CRITICAL RULES:**
 - Work is NOT complete until `git push` succeeds
@@ -256,4 +255,4 @@ Install with: `uv sync`
 ---
 
 **Last Updated:** February 2026
-**Test Baseline:** 740 passed, 70 skipped, 0 failures
+**Test Baseline:** 777 passed, 70 skipped, 0 failures
