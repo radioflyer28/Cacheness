@@ -9,6 +9,9 @@ wheels/
 # Virtual environments
 .venv
 
+# Test suite
+.hypothesis/
+
 # Cache system
 *.bin
 *.db

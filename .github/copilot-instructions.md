@@ -39,7 +39,7 @@ This project uses **beads-mcp** for issue tracking. Use the "beads" MCP server f
 ## Test Suite
 
 - **Location:** `tests/` directory
-- **Current baseline:** 696 passed, 70 skipped, 0 failures
+- **Current baseline:** 723 passed, 70 skipped, 0 failures
 - **Run command:** `uv run pytest tests/ -x -q`
 - **Conventions:**
   - Use `-x` flag to stop on first failure
@@ -213,7 +213,7 @@ Expected baseline (200 entries):
 ## When Modifying Core Logic
 
 1. **Always run tests after changes:** `uv run pytest tests/ -x -q`
-2. **Check for regressions:** Baseline is 696 passed, 70 skipped
+2. **Check for regressions:** Baseline is 723 passed, 70 skipped
 3. **Run relevant benchmark:** Ensure no performance degradation
 4. **Update documentation:** If changing public API
 
@@ -229,4 +229,4 @@ Install with: `uv sync`
 ---
 
 **Last Updated:** February 2026  
-**Test Baseline:** 696 passed, 70 skipped, 0 failures
+**Test Baseline:** 723 passed, 70 skipped, 0 failures

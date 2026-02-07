@@ -70,6 +70,7 @@ dev = [
     "pytest-cov>=6.2.1",
     "ruff>=0.12.8",
     "moto[s3]>=5.0.0",
+    "hypothesis>=6.151.5",
 ]
 tensorflow = [
     "tensorflow>=2.0.0",
@@ -110,9 +111,10 @@ markers = [
     "optional_deps: tests that require optional dependencies like polars/pandas",
 ]
 
-# Logging configuration
+# Logging configuration — use WARNING to keep test output concise;
+# override with: uv run pytest --log-cli-level=INFO
 log_cli = true
-log_cli_level = "INFO"
+log_cli_level = "WARNING"
 log_cli_format = "%(asctime)s [%(levelname)8s] %(name)s: %(message)s"
 log_cli_date_format = "%Y-%m-%d %H:%M:%S"
 
