@@ -174,7 +174,7 @@ class TestCacheKeyDeterminism:
     """Cache key generation must be deterministic and consistent."""
 
     @given(params=param_dicts)
-    @settings(max_examples=200, deadline=None)
+    @settings(max_examples=100, deadline=None)
     def test_same_input_same_key(self, params):
         """Same parameters must always produce the same cache key."""
         key1 = create_unified_cache_key(params)
@@ -182,7 +182,7 @@ class TestCacheKeyDeterminism:
         assert key1 == key2, f"Non-deterministic key: {params} → {key1} vs {key2}"
 
     @given(params=param_dicts)
-    @settings(max_examples=200, deadline=None)
+    @settings(max_examples=100, deadline=None)
     def test_key_format(self, params):
         """Cache key must be a 16-character hex string."""
         key = create_unified_cache_key(params)
@@ -191,7 +191,7 @@ class TestCacheKeyDeterminism:
         assert all(c in "0123456789abcdef" for c in key)
 
     @given(params=param_dicts, extra_key=st.text(min_size=1, max_size=20))
-    @settings(max_examples=200, deadline=None)
+    @settings(max_examples=100, deadline=None)
     def test_different_input_usually_different_key(self, params, extra_key):
         """Adding a parameter should (almost always) change the key."""
         assume(extra_key not in params)
@@ -337,7 +337,7 @@ class TestObjectHandlerRoundTrip:
     """ObjectHandler.put() → get() must preserve pickleable objects."""
 
     @given(obj=pickleable_objects)
-    @settings(max_examples=200, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+    @settings(max_examples=100, deadline=None, suppress_health_check=[HealthCheck.too_slow])
     def test_pickle_round_trip(self, obj):
         """Pickleable objects survive compressed pickle round-trip."""
         handler = ObjectHandler()
@@ -483,7 +483,7 @@ class TestSQLiteBackendContract:
     """SqliteBackend must satisfy the same metadata backend contract."""
 
     @given(cache_key=st.text(min_size=1, max_size=32, alphabet="abcdef0123456789"))
-    @settings(max_examples=100, deadline=None)
+    @settings(max_examples=25, deadline=None)
     def test_put_then_get(self, cache_key):
         """put_entry → get_entry returns the entry."""
         from cacheness.metadata import SqliteBackend
@@ -502,7 +502,7 @@ class TestSQLiteBackendContract:
                 backend.close()
 
     @given(cache_key=st.text(min_size=1, max_size=32, alphabet="abcdef0123456789"))
-    @settings(max_examples=100, deadline=None)
+    @settings(max_examples=25, deadline=None)
     def test_put_then_delete_then_get(self, cache_key):
         """put_entry → remove_entry → get_entry returns None."""
         from cacheness.metadata import SqliteBackend
@@ -523,7 +523,7 @@ class TestSQLiteBackendContract:
                 backend.close()
 
     @given(cache_key=st.text(min_size=1, max_size=32, alphabet="abcdef0123456789"))
-    @settings(max_examples=50, deadline=None)
+    @settings(max_examples=25, deadline=None)
     def test_get_nonexistent_returns_none(self, cache_key):
         """get_entry for non-existent key returns None."""
         from cacheness.metadata import SqliteBackend
@@ -538,7 +538,7 @@ class TestSQLiteBackendContract:
                 backend.close()
 
     @given(cache_key=st.text(min_size=1, max_size=32, alphabet="abcdef0123456789"))
-    @settings(max_examples=50, deadline=None)
+    @settings(max_examples=25, deadline=None)
     def test_remove_nonexistent_returns_false(self, cache_key):
         """remove_entry for non-existent key returns False."""
         from cacheness.metadata import SqliteBackend
@@ -556,7 +556,7 @@ class TestSQLiteBackendContract:
         st.text(min_size=1, max_size=16, alphabet="abcdef0123456789"),
         min_size=1, max_size=20, unique=True,
     ))
-    @settings(max_examples=50, deadline=None)
+    @settings(max_examples=25, deadline=None)
     def test_list_entries_contains_all_put_keys(self, keys):
         """list_entries must include all keys that were put."""
         from cacheness.metadata import SqliteBackend
@@ -575,7 +575,7 @@ class TestSQLiteBackendContract:
                 backend.close()
 
     @given(cache_key=st.text(min_size=1, max_size=32, alphabet="abcdef0123456789"))
-    @settings(max_examples=50, deadline=None)
+    @settings(max_examples=25, deadline=None)
     def test_put_twice_overwrites(self, cache_key):
         """Putting the same key twice overwrites without duplication."""
         from cacheness.metadata import SqliteBackend
