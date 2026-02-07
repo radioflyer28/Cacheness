@@ -818,6 +818,9 @@ class UnifiedCache:
             # Use handler to store the data
             result = handler.put(data, base_file_path, self.config)
 
+            # Track the blob path so we can clean up on failure
+            blob_path = Path(result.get("actual_path", str(base_file_path)))
+
             # Calculate file hash for integrity verification (if enabled)
             file_hash = None
             if self.config.metadata.verify_cache_integrity:
@@ -909,9 +912,23 @@ class UnifiedCache:
 
         except (OSError, IOError) as e:
             # I/O errors (disk full, permissions, etc.)
+            # Clean up orphaned blob file if it was written
+            if 'blob_path' in locals() and blob_path.exists():
+                try:
+                    blob_path.unlink()
+                    logger.debug(f"Cleaned up orphaned blob: {blob_path}")
+                except OSError:
+                    pass
             logger.error(f"Failed to cache {handler.data_type} (I/O error): {e}")
             raise
         except Exception as e:
+            # Clean up orphaned blob file if it was written
+            if 'blob_path' in locals() and blob_path.exists():
+                try:
+                    blob_path.unlink()
+                    logger.debug(f"Cleaned up orphaned blob: {blob_path}")
+                except OSError:
+                    pass
             # Include exception type for easier debugging
             logger.error(f"Failed to cache {handler.data_type}: {type(e).__name__}: {e}")
             raise
@@ -1027,19 +1044,20 @@ class UnifiedCache:
             return data
 
         except FileNotFoundError as e:
-            # Cache file was deleted externally
+            # Cache file was deleted externally — permanent, clean up metadata
             logger.warning(f"Cache file missing for {cache_key}: {e}")
             self.metadata_backend.remove_entry(cache_key)
             self.metadata_backend.increment_misses()
             return None
         except (OSError, IOError) as e:
-            # I/O errors (disk full, permissions, etc.)
+            # I/O errors may be transient (disk temporarily unavailable, etc.)
+            # Do NOT delete metadata — the entry may be readable on retry
             logger.warning(f"I/O error loading cached {data_type} {cache_key}: {e}")
-            self.metadata_backend.remove_entry(cache_key)
             self.metadata_backend.increment_misses()
             return None
         except Exception as e:
-            # Unexpected errors - log with more detail for debugging
+            # Unexpected errors (deserialization failures, corruption, etc.)
+            # These are likely permanent — clean up the metadata entry
             logger.warning(
                 f"Failed to load cached {data_type} {cache_key}: {type(e).__name__}: {e}"
             )

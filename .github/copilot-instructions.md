@@ -33,13 +33,13 @@ uv run python script.py
 
 ## Issue Tracking
 
-This project uses **beads-mcp** for issue tracking. Use the "beads" MCP server for all issue-related operations.
+This project uses **beads-mcp** for issue tracking. **Always use the beads MCP tools** (e.g. `mcp_beads_ready`, `mcp_beads_show`, `mcp_beads_update`, `mcp_beads_close`, `mcp_beads_create`) for all issue operations. Do NOT run `bd` or `beads` CLI commands via the terminal.
 
 
 ## Test Suite
 
 - **Location:** `tests/` directory
-- **Current baseline:** 723 passed, 70 skipped, 0 failures
+- **Current baseline:** 740 passed, 70 skipped, 0 failures
 - **Run command:** `uv run pytest tests/ -x -q`
 - **Conventions:**
   - Use `-x` flag to stop on first failure
@@ -213,7 +213,7 @@ Expected baseline (200 entries):
 ## When Modifying Core Logic
 
 1. **Always run tests after changes:** `uv run pytest tests/ -x -q`
-2. **Check for regressions:** Baseline is 723 passed, 70 skipped
+2. **Check for regressions:** Baseline is 740 passed, 70 skipped
 3. **Run relevant benchmark:** Ensure no performance degradation
 4. **Update documentation:** If changing public API
 
@@ -226,7 +226,34 @@ All dependencies managed in `pyproject.toml`:
 
 Install with: `uv sync`
 
+## Sessions / Workflows
+
+**MANDATORY WORKFLOW:**
+
+1. **File issues for remaining work** — Create issues for anything that needs follow-up
+2. **Run quality gates** (if code changed) — Tests, linters, builds
+3. **Update issue status** — Close finished work, update in-progress items
+4. **PUSH TO REMOTE** — This is MANDATORY:
+   ```bash
+   git pull --rebase
+   git push
+   git status  # MUST show "up to date with origin"
+   ```
+5. **Clean up** — Clear stashes, prune remote branches
+6. **Verify** — All changes committed AND pushed
+7. **Hand off** — Provide context for next session
+
+**CRITICAL RULES:**
+- Work is NOT complete until `git push` succeeds
+- NEVER stop before pushing — that leaves work stranded locally
+- NEVER say "ready to push when you are" — YOU must push
+- If push fails, resolve and retry until it succeeds
+
+### Session Completion
+
+**When ending a work session**, you MUST complete ALL steps in the session. Work is NOT complete until `git push` succeeds.
+
 ---
 
-**Last Updated:** February 2026  
-**Test Baseline:** 723 passed, 70 skipped, 0 failures
+**Last Updated:** February 2026
+**Test Baseline:** 740 passed, 70 skipped, 0 failures

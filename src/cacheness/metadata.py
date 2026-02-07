@@ -591,7 +591,12 @@ class JsonBackend(MetadataBackend):
         if self.metadata_file.exists():
             try:
                 with open(self.metadata_file, "r") as f:
-                    return json_loads(f.read())
+                    data = json_loads(f.read())
+                # Validate schema: must be a dict with an "entries" key
+                if not isinstance(data, dict) or "entries" not in data:
+                    logger.warning("JSON metadata has invalid schema, starting fresh")
+                else:
+                    return data
             except Exception:
                 logger.warning("JSON metadata corrupted, starting fresh")
 
