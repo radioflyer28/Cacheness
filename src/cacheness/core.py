@@ -23,18 +23,20 @@ from .serialization import create_unified_cache_key
 logger = logging.getLogger(__name__)
 
 
-def _normalize_function_args(func: Callable, args: Tuple, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+def _normalize_function_args(
+    func: Callable, args: Tuple, kwargs: Dict[str, Any]
+) -> Dict[str, Any]:
     """
     Normalize function call arguments to consistent parameter mapping.
-    
+
     This ensures that func(1, 2, 10), func(a=1, b=2, c=10), and func(1, b=2, c=10)
     all produce the same cache key when they represent the same logical call.
-    
+
     Args:
         func: The function being called
         args: Positional arguments
         kwargs: Keyword arguments
-        
+
     Returns:
         Normalized parameter dictionary
     """
@@ -47,14 +49,14 @@ def _normalize_function_args(func: Callable, args: Tuple, kwargs: Dict[str, Any]
     except Exception:
         # Fallback: convert to consistent dict format if signature inspection fails
         param_dict = {}
-        
+
         # Add positional args with generic names
         for i, arg in enumerate(args):
             param_dict[f"__arg_{i}"] = arg
-        
+
         # Add keyword args
         param_dict.update(kwargs)
-        
+
         return param_dict
 
 
@@ -111,24 +113,24 @@ class UnifiedCache:
     def _init_metadata_backend(self, metadata_backend):
         """Initialize the metadata backend based on config or provided instance."""
         from .metadata import create_metadata_backend, SQLALCHEMY_AVAILABLE
-        
+
         # User-provided backend takes priority
         if metadata_backend is not None:
             self.metadata_backend = metadata_backend
             self.actual_backend = "custom"
             return
-        
+
         requested = self.config.metadata.metadata_backend
-        
+
         # Backends that require SQLAlchemy
         _SQLALCHEMY_BACKENDS = {"sqlite", "sqlite_memory", "postgresql"}
-        
+
         if requested in _SQLALCHEMY_BACKENDS and not SQLALCHEMY_AVAILABLE:
             raise ImportError(
                 f"SQLAlchemy is required for {requested} backend but is not available. "
                 f"Install with: uv add sqlalchemy"
             )
-        
+
         if requested == "json":
             self.metadata_backend = create_metadata_backend(
                 "json",
@@ -136,7 +138,7 @@ class UnifiedCache:
                 config=self.config.metadata,
             )
             self.actual_backend = "json"
-            
+
         elif requested == "sqlite":
             self.metadata_backend = create_metadata_backend(
                 "sqlite",
@@ -144,12 +146,14 @@ class UnifiedCache:
                 config=self.config.metadata,
             )
             self.actual_backend = "sqlite"
-            
+
         elif requested == "sqlite_memory":
-            self.metadata_backend = create_metadata_backend("sqlite_memory", config=self.config.metadata)
+            self.metadata_backend = create_metadata_backend(
+                "sqlite_memory", config=self.config.metadata
+            )
             self.actual_backend = "sqlite_memory"
             logger.info("⚡ Using in-memory SQLite backend (no persistence)")
-            
+
         elif requested == "postgresql":
             opts = self.config.metadata.metadata_backend_options or {}
             connection_url = opts.get("connection_url")
@@ -169,11 +173,11 @@ class UnifiedCache:
                 config=self.config.metadata,
             )
             self.actual_backend = "postgresql"
-            
+
         else:
             # Auto mode: prefer SQLite if available, fallback to JSON
             self._init_auto_backend(create_metadata_backend, SQLALCHEMY_AVAILABLE)
-    
+
     def _init_auto_backend(self, create_metadata_backend, sqlalchemy_available: bool):
         """Auto-select the best available metadata backend."""
         if sqlalchemy_available:
@@ -184,13 +188,15 @@ class UnifiedCache:
                     config=self.config.metadata,
                 )
                 self.actual_backend = "sqlite"
-                logger.info("🗄️  Using SQLite backend (auto-selected for better performance)")
+                logger.info(
+                    "🗄️  Using SQLite backend (auto-selected for better performance)"
+                )
                 return
             except Exception as e:
                 logger.warning(f"SQLite backend failed, falling back to JSON: {e}")
         else:
             logger.info("📝 SQLModel not available, using JSON backend")
-        
+
         self.metadata_backend = create_metadata_backend(
             "json",
             metadata_file=self.cache_dir / "cache_metadata.json",
@@ -209,7 +215,7 @@ class UnifiedCache:
     def _normalize_custom_metadata(self, custom_metadata):
         """
         Normalize custom_metadata input to a list of metadata objects.
-        
+
         Supports:
         - Single metadata object: custom_metadata=experiment_metadata
         - List of objects: custom_metadata=[experiment_metadata, performance_metadata]
@@ -218,19 +224,21 @@ class UnifiedCache:
         """
         if custom_metadata is None:
             return []
-        
+
         # Check if it's a single metadata object (has _schema_name attribute)
-        if hasattr(custom_metadata, '_schema_name') or hasattr(type(custom_metadata), '_schema_name'):
+        if hasattr(custom_metadata, "_schema_name") or hasattr(
+            type(custom_metadata), "_schema_name"
+        ):
             return [custom_metadata]
-        
+
         # Check if it's a list or tuple of metadata objects
         if isinstance(custom_metadata, (list, tuple)):
             return list(custom_metadata)
-        
+
         # Check if it's a dictionary (legacy format)
         if isinstance(custom_metadata, dict):
             return list(custom_metadata.values())
-        
+
         # Invalid format
         raise ValueError(
             f"Invalid custom_metadata format. Expected metadata object, list/tuple of objects, "
@@ -242,7 +250,10 @@ class UnifiedCache:
         try:
             from .custom_metadata import is_custom_metadata_available
 
-            if is_custom_metadata_available() and self.actual_backend in ("sqlite", "postgresql"):
+            if is_custom_metadata_available() and self.actual_backend in (
+                "sqlite",
+                "postgresql",
+            ):
                 self._custom_metadata_enabled = True
                 logger.info("🏷️  Custom metadata support enabled")
             else:
@@ -255,15 +266,17 @@ class UnifiedCache:
         try:
             if self.config.security.enable_entry_signing:
                 from .security import create_cache_signer
-                
+
                 self.signer = create_cache_signer(
                     cache_dir=self.cache_dir,
                     key_file=self.config.security.signing_key_file,
                     custom_fields=self.config.security.custom_signed_fields,
-                    use_in_memory_key=self.config.security.use_in_memory_key
+                    use_in_memory_key=self.config.security.use_in_memory_key,
                 )
-                
-                logger.info(f"🔒 Entry signing enabled with fields: {self.signer.signed_fields}")
+
+                logger.info(
+                    f"🔒 Entry signing enabled with fields: {self.signer.signed_fields}"
+                )
             else:
                 self.signer = None
                 logger.debug("Entry signing disabled")
@@ -274,11 +287,16 @@ class UnifiedCache:
     def _store_custom_metadata(self, cache_key: str, custom_metadata):
         """Store custom metadata using link table architecture."""
         if not self._supports_custom_metadata():
-            logger.warning("Custom metadata not supported - requires SQLite or PostgreSQL backend")
+            logger.warning(
+                "Custom metadata not supported - requires SQLite or PostgreSQL backend"
+            )
             return
 
         try:
-            from .custom_metadata import get_custom_metadata_model, get_schema_name_for_model, get_all_custom_metadata_models
+            from .custom_metadata import (
+                get_custom_metadata_model,
+                get_all_custom_metadata_models,
+            )
             from .metadata import Base
 
             # Normalize custom_metadata to iterable of metadata objects
@@ -294,13 +312,20 @@ class UnifiedCache:
                     # which are managed by the metadata backend
                     tables_to_create = []
                     for model_class in get_all_custom_metadata_models().values():
-                        if hasattr(model_class, "__table__") and model_class.__table__ is not None:
+                        if (
+                            hasattr(model_class, "__table__")
+                            and model_class.__table__ is not None
+                        ):
                             tables_to_create.append(model_class.__table__)
-                    Base.metadata.create_all(self.metadata_backend.engine, tables=tables_to_create)
+                    Base.metadata.create_all(
+                        self.metadata_backend.engine, tables=tables_to_create
+                    )
 
                     for metadata_instance in metadata_objects:
                         # Get schema name from the metadata object's class
-                        schema_name = getattr(type(metadata_instance), '_schema_name', None)
+                        schema_name = getattr(
+                            type(metadata_instance), "_schema_name", None
+                        )
                         if not schema_name:
                             logger.warning(
                                 f"Metadata object {type(metadata_instance).__name__} is not properly registered"
@@ -338,7 +363,6 @@ class UnifiedCache:
             return {}
 
         try:
-            from .custom_metadata import get_custom_metadata_model
 
             if hasattr(self.metadata_backend, "SessionLocal"):
                 with self.metadata_backend.SessionLocal() as session:
@@ -346,7 +370,10 @@ class UnifiedCache:
 
                     result = {}
                     # Query each registered schema for metadata with this cache_key
-                    for schema_name, model_class in self._get_registered_schemas().items():
+                    for (
+                        schema_name,
+                        model_class,
+                    ) in self._get_registered_schemas().items():
                         metadata_instance = session.execute(
                             select(model_class).where(
                                 model_class.cache_key == cache_key
@@ -370,7 +397,9 @@ class UnifiedCache:
         except ImportError:
             return {}
 
-    def query_custom(self, schema_name: str, filters: Optional[Dict[str, Any]] = None) -> List[Any]:
+    def query_custom(
+        self, schema_name: str, filters: Optional[Dict[str, Any]] = None
+    ) -> List[Any]:
         """
         Query custom metadata for a specific schema with automatic session cleanup.
 
@@ -388,10 +417,10 @@ class UnifiedCache:
         Example:
             # Get all entries
             results = cache.query_custom("ml_experiments")
-            
+
             # Filter by field values
             results = cache.query_custom("ml_experiments", {"model_type": "xgboost"})
-            
+
             # For advanced filtering, use the context manager:
             with cache.query_custom_session("ml_experiments") as query:
                 high_accuracy = query.filter(MLExperimentMetadata.accuracy >= 0.9).all()
@@ -414,15 +443,19 @@ class UnifiedCache:
                 # Use context manager to ensure proper session cleanup
                 with self.metadata_backend.SessionLocal() as session:
                     query = session.query(model_class)
-                    
+
                     # Apply optional filters
                     if filters:
                         for field_name, value in filters.items():
                             if hasattr(model_class, field_name):
-                                query = query.filter(getattr(model_class, field_name) == value)
+                                query = query.filter(
+                                    getattr(model_class, field_name) == value
+                                )
                             else:
-                                logger.warning(f"Unknown filter field '{field_name}' for schema '{schema_name}'")
-                    
+                                logger.warning(
+                                    f"Unknown filter field '{field_name}' for schema '{schema_name}'"
+                                )
+
                     return query.all()
             else:
                 logger.warning("SQLAlchemy session not available")
@@ -434,7 +467,7 @@ class UnifiedCache:
     def query_custom_session(self, schema_name: str):
         """
         Context manager for custom metadata queries with proper session cleanup.
-        
+
         Use this for advanced queries that need direct access to the SQLAlchemy
         query object for complex filtering, ordering, or joining.
 
@@ -456,11 +489,13 @@ class UnifiedCache:
                 ).order_by(MLExperimentMetadata.accuracy.desc()).limit(10).all()
         """
         from contextlib import contextmanager
-        
+
         @contextmanager
         def _session_context():
             if not self._supports_custom_metadata():
-                raise ValueError("Custom metadata querying not supported - requires SQLite or PostgreSQL backend")
+                raise ValueError(
+                    "Custom metadata querying not supported - requires SQLite or PostgreSQL backend"
+                )
 
             from .custom_metadata import get_custom_metadata_model
 
@@ -476,13 +511,15 @@ class UnifiedCache:
                 yield session.query(model_class)
             finally:
                 session.close()
-        
+
         return _session_context()
 
-    def query_custom_metadata(self, schema_name: str, filters: Optional[Dict[str, Any]] = None) -> List[Any]:
+    def query_custom_metadata(
+        self, schema_name: str, filters: Optional[Dict[str, Any]] = None
+    ) -> List[Any]:
         """
         Query custom metadata for a specific schema.
-        
+
         **Deprecated:** Use query_custom() instead for shorter syntax.
 
         Args:
@@ -492,13 +529,15 @@ class UnifiedCache:
         Returns:
             List of results (empty list if not supported or on error)
         """
-        logger.warning("query_custom_metadata() is deprecated, use query_custom() instead")
+        logger.warning(
+            "query_custom_metadata() is deprecated, use query_custom() instead"
+        )
         return self.query_custom(schema_name, filters)
 
     def query_meta(self, **filters):
         """
         Query built-in cache metadata using SQLite JSON1 extension.
-        
+
         This method allows querying cache entries based on their stored cache_key_params
         when store_full_metadata=True is configured.
 
@@ -513,12 +552,12 @@ class UnifiedCache:
             # Configure cache to store parameters
             config = CacheConfig(store_full_metadata=True)
             cache = Cacheness(config=config)
-            
+
             # Store some data
             cache.put(model, experiment="exp_001", model_type="xgboost", accuracy=0.95)
             cache.put(data, experiment="exp_002", model_type="cnn", accuracy=0.88)
-            
-            # Query by parameters  
+
+            # Query by parameters
             xgb_experiments = cache.query_meta(model_type="xgboost")
             high_accuracy = cache.query_meta(accuracy=0.9)  # >= comparison
             specific_exp = cache.query_meta(experiment="exp_001")
@@ -539,16 +578,16 @@ class UnifiedCache:
 
         try:
             from sqlalchemy import text
-            
+
             with self.metadata_backend.SessionLocal() as session:
                 # Build WHERE conditions using SQLite JSON1 extension
                 where_conditions = []
                 params = {}
-                
+
                 for key, value in filters.items():
                     # Use JSON_EXTRACT for querying JSON fields
                     param_name = f"param_{len(params)}"
-                    
+
                     if isinstance(value, (int, float)):
                         # For numeric values, cast to REAL for proper comparison
                         where_conditions.append(
@@ -559,7 +598,7 @@ class UnifiedCache:
                         where_conditions.append(
                             f"JSON_EXTRACT(metadata_dict, '$.{key}') = :{param_name}"
                         )
-                    
+
                     params[param_name] = value
 
                 # Build the query
@@ -583,31 +622,36 @@ class UnifiedCache:
                     """
 
                 result = session.execute(text(query), params)
-                
+
                 # Convert results to dictionaries
                 entries = []
                 for row in result:
                     entry = {
-                        'cache_key': row.cache_key,
-                        'description': row.description,
-                        'data_type': row.data_type,
-                        'created_at': row.created_at.isoformat() if hasattr(row.created_at, 'isoformat') else str(row.created_at),
-                        'accessed_at': row.accessed_at.isoformat() if hasattr(row.accessed_at, 'isoformat') else str(row.accessed_at),
-                        'file_size': row.file_size,
+                        "cache_key": row.cache_key,
+                        "description": row.description,
+                        "data_type": row.data_type,
+                        "created_at": row.created_at.isoformat()
+                        if hasattr(row.created_at, "isoformat")
+                        else str(row.created_at),
+                        "accessed_at": row.accessed_at.isoformat()
+                        if hasattr(row.accessed_at, "isoformat")
+                        else str(row.accessed_at),
+                        "file_size": row.file_size,
                     }
-                    
+
                     # Parse metadata_dict JSON
                     if row.metadata_dict:
                         try:
                             from .json_utils import loads as json_loads
-                            entry['metadata_dict'] = json_loads(row.metadata_dict)
+
+                            entry["metadata_dict"] = json_loads(row.metadata_dict)
                         except Exception:
-                            entry['metadata_dict'] = {}
-                    
+                            entry["metadata_dict"] = {}
+
                     entries.append(entry)
-                
+
                 return entries
-                
+
         except Exception as e:
             logger.error(f"Failed to query metadata: {e}")
             return None
@@ -661,7 +705,7 @@ class UnifiedCache:
 
     def _is_expired(self, cache_key: str, ttl_seconds=_DEFAULT_TTL) -> bool:
         """Check if cache entry is expired.
-        
+
         Args:
             cache_key: The cache key to check
             ttl_seconds: TTL in seconds. None means never expire.
@@ -678,7 +722,9 @@ class UnifiedCache:
             ttl_seconds = self.config.metadata.default_ttl_seconds
 
         # Type guard to ensure ttl is numeric
-        assert isinstance(ttl_seconds, (int, float)), f"TTL must be numeric, got {type(ttl_seconds)}"
+        assert isinstance(ttl_seconds, (int, float)), (
+            f"TTL must be numeric, got {type(ttl_seconds)}"
+        )
 
         creation_time_str = entry["created_at"]
 
@@ -698,24 +744,24 @@ class UnifiedCache:
         return current_time > expiry_time
 
     def _extract_signable_fields(
-        self, 
+        self,
         cache_key: str,
-        entry_data: Dict[str, Any], 
+        entry_data: Dict[str, Any],
         metadata: Dict[str, Any],
-        cache_key_params: Optional[Dict[str, Any]] = None
+        cache_key_params: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Extract fields for signing/verification in a consistent manner.
-        
+
         This ensures that the same fields are used during both put() and get()
         to prevent signature mismatches.
-        
+
         Args:
             cache_key: The cache key
             entry_data: The entry data dictionary (data_type, prefix, description, etc.)
             metadata: The metadata dictionary from handler result
             cache_key_params: Optional cache key parameters
-            
+
         Returns:
             Dictionary containing all fields that should be signed
         """
@@ -733,7 +779,7 @@ class UnifiedCache:
             except (ValueError, TypeError):
                 # If parsing fails, use as-is
                 pass
-        
+
         # Build complete entry data with all signable fields
         signable_data = {
             "cache_key": cache_key,
@@ -750,11 +796,11 @@ class UnifiedCache:
             "serializer": metadata.get("serializer"),
             "compression_codec": metadata.get("compression_codec"),
         }
-        
+
         # Include cache_key_params if provided
         if cache_key_params is not None:
             signable_data["cache_key_params"] = cache_key_params
-            
+
         return signable_data
 
     def _calculate_file_hash(self, file_path: Path) -> Optional[str]:
@@ -844,6 +890,7 @@ class UnifiedCache:
                 if self.config.metadata.store_full_metadata:
                     from .serialization import serialize_for_cache_key
                     from .json_utils import dumps as json_dumps
+
                     try:
                         # Serialize kwargs to a consistent, queryable format
                         serializable_kwargs = {
@@ -851,8 +898,10 @@ class UnifiedCache:
                             for key, value in kwargs.items()
                         }
                         # Pre-serialize to JSON string - backend just stores strings
-                        metadata_dict["cache_key_params"] = json_dumps(serializable_kwargs)
-                        
+                        metadata_dict["cache_key_params"] = json_dumps(
+                            serializable_kwargs
+                        )
+
                         # Also store kwargs as metadata_dict (raw values for easy querying)
                         # Pre-serialize to JSON string - backend just stores strings
                         metadata_dict["metadata_dict"] = json_dumps(kwargs.copy())
@@ -875,28 +924,30 @@ class UnifiedCache:
                         creation_timestamp = datetime.now(timezone.utc)
                         # Store as UTC ISO format with timezone info
                         creation_timestamp_str = creation_timestamp.isoformat()
-                        
+
                         # Store the creation timestamp in entry_data for the database
                         entry_data["created_at"] = creation_timestamp_str
-                        
+
                         # Use helper method for consistent field extraction
-                        cache_key_params = kwargs if self.config.metadata.store_full_metadata else None
+                        cache_key_params = (
+                            kwargs if self.config.metadata.store_full_metadata else None
+                        )
                         complete_entry_data = self._extract_signable_fields(
                             cache_key=cache_key,
                             entry_data=entry_data,
                             metadata=metadata_dict,
-                            cache_key_params=cache_key_params
+                            cache_key_params=cache_key_params,
                         )
-                        
+
                         signature = self.signer.sign_entry(complete_entry_data)
                         metadata_dict["entry_signature"] = signature
-                        
+
                         logger.debug(f"Created signature for entry {cache_key}")
-                        
+
                     except Exception as e:
                         logger.warning(f"Failed to sign entry {cache_key}: {e}")
                         # Continue without signature for backward compatibility
-                
+
                 self.metadata_backend.put_entry(cache_key, entry_data)
 
                 # Handle custom metadata if provided
@@ -910,13 +961,13 @@ class UnifiedCache:
                 logger.info(
                     f"Cached {handler.data_type} {cache_key} ({file_size_mb:.3f}MB) {format_info}: {description}"
                 )
-                
+
                 return cache_key
 
             except (OSError, IOError) as e:
                 # I/O errors (disk full, permissions, etc.)
                 # Clean up orphaned blob file if it was written
-                if 'blob_path' in locals() and blob_path.exists():
+                if "blob_path" in locals() and blob_path.exists():
                     try:
                         blob_path.unlink()
                         logger.debug(f"Cleaned up orphaned blob: {blob_path}")
@@ -926,14 +977,16 @@ class UnifiedCache:
                 raise
             except Exception as e:
                 # Clean up orphaned blob file if it was written
-                if 'blob_path' in locals() and blob_path.exists():
+                if "blob_path" in locals() and blob_path.exists():
                     try:
                         blob_path.unlink()
                         logger.debug(f"Cleaned up orphaned blob: {blob_path}")
                     except OSError:
                         pass
                 # Include exception type for easier debugging
-                logger.error(f"Failed to cache {handler.data_type}: {type(e).__name__}: {e}")
+                logger.error(
+                    f"Failed to cache {handler.data_type}: {type(e).__name__}: {e}"
+                )
                 raise
 
     def get(
@@ -1001,7 +1054,7 @@ class UnifiedCache:
                 # Verify entry signature if signing is enabled
                 if self.signer and self.config.security.enable_entry_signing:
                     stored_signature = metadata.get("entry_signature")
-                    
+
                     if stored_signature is not None:
                         # Use helper method for consistent field extraction
                         cache_key_params = metadata.get("cache_key_params")
@@ -1009,10 +1062,12 @@ class UnifiedCache:
                             cache_key=cache_key,
                             entry_data=entry,
                             metadata=metadata,
-                            cache_key_params=cache_key_params
+                            cache_key_params=cache_key_params,
                         )
-                        
-                        if not self.signer.verify_entry(verify_entry_data, stored_signature):
+
+                        if not self.signer.verify_entry(
+                            verify_entry_data, stored_signature
+                        ):
                             if self.config.security.delete_invalid_signatures:
                                 logger.warning(
                                     f"Entry signature verification failed for {cache_key}. "
@@ -1027,7 +1082,7 @@ class UnifiedCache:
                                     f"Entry retained due to delete_invalid_signatures=False."
                                 )
                                 # Continue with loading despite invalid signature
-                            
+
                     elif not self.config.security.allow_unsigned_entries:
                         logger.warning(
                             f"Entry {cache_key} has no signature but unsigned entries are not allowed. "
@@ -1070,25 +1125,22 @@ class UnifiedCache:
                 return None
 
     def get_metadata(
-        self,
-        cache_key: Optional[str] = None,
-        check_expiration: bool = True,
-        **kwargs
+        self, cache_key: Optional[str] = None, check_expiration: bool = True, **kwargs
     ) -> Optional[Dict[str, Any]]:
         """
         Get entry metadata without loading blob data.
-        
+
         This is useful for inspecting cache entries (TTL, file size, data type)
         before deciding whether to load the actual data.
-        
+
         Args:
             cache_key: Direct cache key (if provided, **kwargs are ignored)
             check_expiration: If True, returns None for expired entries (default: True)
             **kwargs: Parameters identifying the cached data (used if cache_key is None)
-        
+
         Returns:
             Metadata dictionary or None if not found or expired
-            
+
         Example:
             # Check metadata before loading large file
             meta = cache.get_metadata(experiment="exp_001")
@@ -1099,41 +1151,36 @@ class UnifiedCache:
         with self._lock:
             if cache_key is None:
                 cache_key = self._create_cache_key(kwargs)
-            
+
             entry = self.metadata_backend.get_entry(cache_key)
             if not entry:
                 return None
-            
+
             # Check expiration if requested (respects cache TTL policy)
             if check_expiration and self._is_expired(cache_key):
                 return None
-            
+
             # Ensure cache_key is included in returned metadata
             entry["cache_key"] = cache_key
-            
+
             return entry
-    
-    def update_data(
-        self,
-        data: Any,
-        cache_key: Optional[str] = None,
-        **kwargs
-    ) -> bool:
+
+    def update_data(self, data: Any, cache_key: Optional[str] = None, **kwargs) -> bool:
         """
         Update blob data at an existing cache entry without changing the cache_key.
-        
+
         This replaces the stored data at a fixed cache_key while updating derived
         metadata (file_size, content_hash, created_at timestamp). The cache_key
         itself remains unchanged to maintain referential integrity.
-        
+
         Args:
             data: New data to store (must be serializable by handler)
             cache_key: Direct cache key (if provided, **kwargs are ignored)
             **kwargs: Parameters identifying the cached data (used if cache_key is None)
-        
+
         Returns:
             bool: True if entry was updated, False if entry doesn't exist
-            
+
         Example:
             # Update cached DataFrame with new data
             success = cache.update_data(
@@ -1141,10 +1188,10 @@ class UnifiedCache:
                 experiment="exp_001",
                 run_id=42
             )
-            
+
             if not success:
                 print("Entry not found - use put() to create new entry")
-        
+
         Note:
             - Cache_key is immutable and derived from input params (not content)
             - Use update_data() to refresh data at same logical location
@@ -1154,23 +1201,25 @@ class UnifiedCache:
         with self._lock:
             if cache_key is None:
                 cache_key = self._create_cache_key(kwargs)
-            
+
             # Check if entry exists before doing any I/O
             existing_entry = self.metadata_backend.get_entry(cache_key)
             if not existing_entry:
-                logger.warning(f"⚠️ Cache entry not found for update: {cache_key[:16]}...")
+                logger.warning(
+                    f"⚠️ Cache entry not found for update: {cache_key[:16]}..."
+                )
                 return False
-            
+
             # Get appropriate handler for the data type
             handler = self.handlers.get_handler(data)
-            
+
             # Reconstruct file path from existing metadata (blob I/O belongs here, not in metadata layer)
             prefix = existing_entry.get("prefix", "")
             base_file_path = self._get_cache_file_path(cache_key, prefix)
-            
+
             # Perform blob I/O: write new data to disk
             result = handler.put(data, base_file_path, self.config)
-            
+
             # Build metadata updates dict from handler result
             updates = {
                 "file_size": result.get("file_size", 0),
@@ -1189,13 +1238,12 @@ class UnifiedCache:
                 updates["object_type"] = result["object_type"]
             if result.get("s3_etag"):
                 updates["s3_etag"] = result["s3_etag"]
-            
+
             # Delegate metadata-only update to backend (no I/O in metadata layer)
             success = self.metadata_backend.update_entry_metadata(
-                cache_key=cache_key,
-                updates=updates
+                cache_key=cache_key, updates=updates
             )
-            
+
             # Re-sign the entry if signing is enabled (security: signature must match updated data)
             if self.signer:
                 try:
@@ -1208,62 +1256,60 @@ class UnifiedCache:
                         if actual_path and self.config.metadata.verify_cache_integrity:
                             new_file_hash = self._calculate_file_hash(Path(actual_path))
                             metadata["file_hash"] = new_file_hash
-                        
+
                         # Extract signable fields and create new signature
-                        cache_key_params = kwargs if self.config.metadata.store_full_metadata else None
+                        cache_key_params = (
+                            kwargs if self.config.metadata.store_full_metadata else None
+                        )
                         complete_entry_data = self._extract_signable_fields(
                             cache_key=cache_key,
                             entry_data=updated_entry,
                             metadata=metadata,
-                            cache_key_params=cache_key_params
+                            cache_key_params=cache_key_params,
                         )
-                        
+
                         # Generate new signature for updated entry
                         new_signature = self.signer.sign_entry(complete_entry_data)
                         metadata["entry_signature"] = new_signature
-                        
+
                         # Update entry with new signature and file hash
                         updated_entry["metadata"] = metadata
                         self.metadata_backend.put_entry(cache_key, updated_entry)
-                        
+
                         logger.debug(f"Re-signed updated entry {cache_key}")
                 except Exception as e:
                     logger.warning(f"Failed to re-sign updated entry {cache_key}: {e}")
                     # Continue - update succeeded, just missing signature
-            
+
             logger.info(f"✅ Updated cache entry: {cache_key[:16]}...")
             return True
-    
-    def touch(
-        self,
-        cache_key: Optional[str] = None,
-        **kwargs
-    ) -> bool:
+
+    def touch(self, cache_key: Optional[str] = None, **kwargs) -> bool:
         """
         Update entry timestamp to extend TTL without reloading data.
-        
+
         This "touches" the cache entry to reset its creation timestamp to now,
         effectively extending the entry's lifetime by the full configured TTL.
         Useful for keeping frequently accessed data alive or preventing
         expiration of long-running computations.
-        
+
         Args:
             cache_key: Direct cache key (if provided, **kwargs are ignored)
             **kwargs: Parameters identifying the cached data (used if cache_key is None)
-        
+
         Returns:
             bool: True if entry exists and was touched, False if entry doesn't exist
-            
+
         Example:
             # Reset TTL to full default duration from now
             cache.touch(experiment="exp_001")
-            
+
             # Keep long-running computation alive
             for i in range(100):
                 process_chunk(i)
                 if i % 10 == 0:
                     cache.touch(job_id="long_job")  # Prevent expiration
-        
+
         Note:
             - This is a cache-layer operation (TTL-aware)
             - Resets ``created_at`` to now, giving a full config-TTL extension
@@ -1274,43 +1320,47 @@ class UnifiedCache:
         with self._lock:
             if cache_key is None:
                 cache_key = self._create_cache_key(kwargs)
-            
+
             # Get existing entry
             entry = self.metadata_backend.get_entry(cache_key)
             if not entry:
-                logger.warning(f"⚠️ Cache entry not found for touch: {cache_key[:16]}...")
+                logger.warning(
+                    f"⚠️ Cache entry not found for touch: {cache_key[:16]}..."
+                )
                 return False
-            
+
             # Update timestamp to now (resets TTL)
             now = datetime.now(timezone.utc)
             entry["created_at"] = now.isoformat()
             entry["accessed_at"] = now.isoformat()
-            
+
             # Re-sign if signing is enabled (timestamp is part of signature)
             if self.signer:
                 try:
                     metadata = entry.get("metadata", {})
-                    cache_key_params = kwargs if self.config.metadata.store_full_metadata else None
+                    cache_key_params = (
+                        kwargs if self.config.metadata.store_full_metadata else None
+                    )
                     complete_entry_data = self._extract_signable_fields(
                         cache_key=cache_key,
                         entry_data=entry,
                         metadata=metadata,
-                        cache_key_params=cache_key_params
+                        cache_key_params=cache_key_params,
                     )
-                    
+
                     # Generate new signature with updated timestamp
                     new_signature = self.signer.sign_entry(complete_entry_data)
                     metadata["entry_signature"] = new_signature
                     entry["metadata"] = metadata
-                    
+
                     logger.debug(f"Re-signed touched entry {cache_key}")
                 except Exception as e:
                     logger.warning(f"Failed to re-sign touched entry {cache_key}: {e}")
                     # Continue - touch succeeded, just missing signature
-            
+
             # Store updated entry
             self.metadata_backend.put_entry(cache_key, entry)
-            
+
             logger.info(f"👆 Touched cache entry: {cache_key[:16]}... (TTL extended)")
             return True
 
@@ -1319,20 +1369,20 @@ class UnifiedCache:
     def delete_where(self, filter_fn: Callable[[Dict[str, Any]], bool]) -> int:
         """
         Delete all cache entries matching a filter function.
-        
+
         Iterates over every entry and deletes those for which ``filter_fn``
         returns ``True``.  This works with **all** backends.
-        
+
         Args:
             filter_fn: A callable that receives an entry dict and returns True
                        if the entry should be deleted.  Each dict contains at
                        least ``cache_key``, ``data_type``, ``description``,
                        ``metadata``, ``created``, ``last_accessed``, and
                        ``size_mb``.
-        
+
         Returns:
             int: Number of entries deleted
-        
+
         Example:
             # Delete all entries older than 7 days
             from datetime import datetime, timezone, timedelta
@@ -1340,7 +1390,7 @@ class UnifiedCache:
             deleted = cache.delete_where(
                 lambda e: (e.get("created") or "") < cutoff
             )
-            
+
             # Delete all DataFrames
             deleted = cache.delete_where(
                 lambda e: e.get("data_type") == "dataframe"
@@ -1354,10 +1404,14 @@ class UnifiedCache:
                 # list_entries() dicts continue to work
                 if "created" not in entry and "created_at" in entry:
                     raw = entry["created_at"]
-                    entry["created"] = raw.isoformat() if hasattr(raw, "isoformat") else raw
+                    entry["created"] = (
+                        raw.isoformat() if hasattr(raw, "isoformat") else raw
+                    )
                 if "last_accessed" not in entry and "accessed_at" in entry:
                     raw = entry["accessed_at"]
-                    entry["last_accessed"] = raw.isoformat() if hasattr(raw, "isoformat") else raw
+                    entry["last_accessed"] = (
+                        raw.isoformat() if hasattr(raw, "isoformat") else raw
+                    )
                 if "size_mb" not in entry and "file_size" in entry:
                     entry["size_mb"] = round(entry["file_size"] / (1024 * 1024), 3)
                 try:
@@ -1377,23 +1431,23 @@ class UnifiedCache:
         """
         Delete all cache entries whose metadata contains the given key/value
         pairs.
-        
+
         This is a convenience wrapper around :meth:`delete_where` that checks
         each entry's metadata dict for matching values.  Works with all
         backends; for SQLite with ``store_full_metadata=True`` it also checks
         the ``metadata_dict`` column via ``query_meta()``.
-        
+
         Args:
             **kwargs: Key-value pairs to match against entry metadata.
                       An entry is deleted when **all** pairs match.
-        
+
         Returns:
             int: Number of entries deleted
-        
+
         Example:
             # Delete all entries for a specific project
             deleted = cache.delete_matching(project="ml_models")
-            
+
             # Delete all entries for a specific experiment + model type
             deleted = cache.delete_matching(
                 experiment="exp_001",
@@ -1405,7 +1459,10 @@ class UnifiedCache:
                 return 0
 
             # Fast path: use query_meta on SQLite for indexed lookups
-            if self.actual_backend == "sqlite" and self.config.metadata.store_full_metadata:
+            if (
+                self.actual_backend == "sqlite"
+                and self.config.metadata.store_full_metadata
+            ):
                 results = self.query_meta(**kwargs)
                 if results is not None:
                     deleted = 0
@@ -1414,7 +1471,9 @@ class UnifiedCache:
                         if cache_key:
                             self.invalidate(cache_key=cache_key)
                             deleted += 1
-                    logger.info(f"🗑️ Bulk delete (query_meta): removed {deleted} entries")
+                    logger.info(
+                        f"🗑️ Bulk delete (query_meta): removed {deleted} entries"
+                    )
                     return deleted
 
             # Generic path: scan summaries and match flat fields directly
@@ -1435,15 +1494,15 @@ class UnifiedCache:
     ) -> Dict[str, Any]:
         """
         Get multiple cache entries in one call.
-        
+
         Args:
             kwargs_list: List of kwarg dicts, each identifying one entry
                          (same parameters you would pass to :meth:`get`).
-        
+
         Returns:
             dict mapping each generated cache_key to its data (or ``None``
             if not found / expired).
-        
+
         Example:
             results = cache.get_batch([
                 {"experiment": "exp_001"},
@@ -1459,8 +1518,11 @@ class UnifiedCache:
             for kw in kwargs_list:
                 # Strip named params that get() consumes so the cache key
                 # matches the one computed during put()
-                hash_kwargs = {k: v for k, v in kw.items()
-                               if k not in ("cache_key", "prefix", "ttl_seconds")}
+                hash_kwargs = {
+                    k: v
+                    for k, v in kw.items()
+                    if k not in ("cache_key", "prefix", "ttl_seconds")
+                }
                 cache_key = kw.get("cache_key") or self._create_cache_key(hash_kwargs)
                 results[cache_key] = self.get(**kw)
             return results
@@ -1471,14 +1533,14 @@ class UnifiedCache:
     ) -> int:
         """
         Delete multiple cache entries in one call.
-        
+
         Args:
             kwargs_list: List of kwarg dicts, each identifying one entry
                          (same parameters you would pass to :meth:`invalidate`).
-        
+
         Returns:
             int: Number of entries that were actually deleted (existed).
-        
+
         Example:
             deleted = cache.delete_batch([
                 {"experiment": "exp_001"},
@@ -1491,9 +1553,12 @@ class UnifiedCache:
             for kw in kwargs_list:
                 # Strip named params that invalidate()/put() consume so the
                 # cache key matches the one computed during put()
-                hash_kwargs = {k: v for k, v in kw.items()
-                               if k not in ("cache_key", "prefix", "description",
-                                            "custom_metadata")}
+                hash_kwargs = {
+                    k: v
+                    for k, v in kw.items()
+                    if k
+                    not in ("cache_key", "prefix", "description", "custom_metadata")
+                }
                 cache_key = kw.get("cache_key") or self._create_cache_key(hash_kwargs)
                 entry = self.metadata_backend.get_entry(cache_key)
                 if entry is not None:
@@ -1506,13 +1571,13 @@ class UnifiedCache:
         """
         Touch (refresh TTL of) all cache entries whose metadata matches
         the given key/value pairs.
-        
+
         Args:
             **filter_kwargs: Key-value pairs to match against entry metadata.
-        
+
         Returns:
             int: Number of entries touched.
-        
+
         Example:
             # Extend TTL for all entries in a project
             touched = cache.touch_batch(project="ml_models")
@@ -1595,7 +1660,9 @@ class UnifiedCache:
             else:
                 logger.debug(f"Cache entry {cache_key} not found for invalidation")
 
-    def verify_integrity(self, repair: bool = False, verify_hashes: bool = False) -> Dict[str, Any]:
+    def verify_integrity(
+        self, repair: bool = False, verify_hashes: bool = False
+    ) -> Dict[str, Any]:
         """
         Verify cache integrity by cross-checking blob files and metadata entries.
 
@@ -1631,7 +1698,9 @@ class UnifiedCache:
                     blob_files.add(os.path.normpath(file_path))
 
             # 2. Inventory all metadata entries and their actual_paths
-            entry_paths: dict[str, dict] = {}  # actual_path -> {cache_key, file_size, file_hash}
+            entry_paths: dict[
+                str, dict
+            ] = {}  # actual_path -> {cache_key, file_size, file_hash}
             for entry in self.metadata_backend.iter_entry_summaries():
                 actual_path = entry.get("actual_path")
                 if actual_path:
@@ -1650,10 +1719,12 @@ class UnifiedCache:
             dangling_entries = []
             for path, info in entry_paths.items():
                 if not os.path.exists(path):
-                    dangling_entries.append({
-                        "cache_key": info["cache_key"],
-                        "expected_path": path,
-                    })
+                    dangling_entries.append(
+                        {
+                            "cache_key": info["cache_key"],
+                            "expected_path": path,
+                        }
+                    )
 
             # 5. Check size mismatches
             size_mismatches = []
@@ -1661,12 +1732,14 @@ class UnifiedCache:
                 if os.path.exists(path) and info["file_size"] is not None:
                     actual_size = os.path.getsize(path)
                     if actual_size != info["file_size"]:
-                        size_mismatches.append({
-                            "cache_key": info["cache_key"],
-                            "path": path,
-                            "expected_size": info["file_size"],
-                            "actual_size": actual_size,
-                        })
+                        size_mismatches.append(
+                            {
+                                "cache_key": info["cache_key"],
+                                "path": path,
+                                "expected_size": info["file_size"],
+                                "actual_size": actual_size,
+                            }
+                        )
 
             # 6. Check hash mismatches (optional, expensive)
             hash_mismatches = []
@@ -1675,12 +1748,14 @@ class UnifiedCache:
                     if os.path.exists(path) and info.get("file_hash"):
                         current_hash = self._calculate_file_hash(Path(path))
                         if current_hash != info["file_hash"]:
-                            hash_mismatches.append({
-                                "cache_key": info["cache_key"],
-                                "path": path,
-                                "expected_hash": info["file_hash"],
-                                "actual_hash": current_hash,
-                            })
+                            hash_mismatches.append(
+                                {
+                                    "cache_key": info["cache_key"],
+                                    "path": path,
+                                    "expected_hash": info["file_hash"],
+                                    "actual_hash": current_hash,
+                                }
+                            )
 
             # 7. Repair if requested
             repaired = {"orphans_deleted": 0, "dangling_removed": 0}
@@ -1690,14 +1765,18 @@ class UnifiedCache:
                         os.remove(blob_path)
                         repaired["orphans_deleted"] += 1
                     except OSError as e:
-                        logger.warning(f"Failed to remove orphaned blob {blob_path}: {e}")
+                        logger.warning(
+                            f"Failed to remove orphaned blob {blob_path}: {e}"
+                        )
 
                 for entry in dangling_entries:
                     try:
                         self.metadata_backend.remove_entry(entry["cache_key"])
                         repaired["dangling_removed"] += 1
                     except Exception as e:
-                        logger.warning(f"Failed to remove dangling entry {entry['cache_key']}: {e}")
+                        logger.warning(
+                            f"Failed to remove dangling entry {entry['cache_key']}: {e}"
+                        )
 
             report = {
                 "orphaned_blobs": orphaned_blobs,
@@ -1709,7 +1788,12 @@ class UnifiedCache:
             if repair:
                 report["repaired"] = repaired
 
-            total_issues = len(orphaned_blobs) + len(dangling_entries) + len(size_mismatches) + len(hash_mismatches)
+            total_issues = (
+                len(orphaned_blobs)
+                + len(dangling_entries)
+                + len(size_mismatches)
+                + len(hash_mismatches)
+            )
             if total_issues == 0:
                 logger.info("Cache integrity check passed — no issues found")
             else:
@@ -1718,7 +1802,11 @@ class UnifiedCache:
                     f"{len(orphaned_blobs)} orphaned blobs, "
                     f"{len(dangling_entries)} dangling entries, "
                     f"{len(size_mismatches)} size mismatches"
-                    + (f", {len(hash_mismatches)} hash mismatches" if verify_hashes else "")
+                    + (
+                        f", {len(hash_mismatches)} hash mismatches"
+                        if verify_hashes
+                        else ""
+                    )
                 )
 
             return report
@@ -1726,33 +1814,33 @@ class UnifiedCache:
     def clear_all(self):
         """Clear all cache entries and remove cache files."""
         import glob
-        
+
         with self._lock:
             # Clear metadata first and get count
             removed_count = self.metadata_backend.clear_all()
-            
+
             # Remove all cache files - comprehensive pattern matching
             # Primary extensions
             cache_patterns = [
-                str(self.cache_dir / "*.pkl"),      # Uncompressed pickle
-                str(self.cache_dir / "*.npz"),      # NumPy arrays
-                str(self.cache_dir / "*.b2nd"),     # Blosc2 arrays  
-                str(self.cache_dir / "*.b2tr"),     # TensorFlow tensors with blosc2
+                str(self.cache_dir / "*.pkl"),  # Uncompressed pickle
+                str(self.cache_dir / "*.npz"),  # NumPy arrays
+                str(self.cache_dir / "*.b2nd"),  # Blosc2 arrays
+                str(self.cache_dir / "*.b2tr"),  # TensorFlow tensors with blosc2
                 str(self.cache_dir / "*.parquet"),  # DataFrame files
             ]
-            
+
             # Compressed pickle files with valid compression codecs
             pickle_codecs = ["lz4", "zstd", "gzip", "zst", "gz", "bz2", "xz"]
             for codec in pickle_codecs:
                 cache_patterns.append(str(self.cache_dir / f"*.pkl.{codec}"))
-            
+
             # Additional patterns for any other compression extensions user might use
             # This catches any .pkl.* pattern that might not be in our known list
             cache_patterns.append(str(self.cache_dir / "*.pkl.*"))
-            
+
             files_removed = 0
             processed_files = set()  # Avoid double-counting due to overlapping patterns
-            
+
             for pattern in cache_patterns:
                 for file_path in glob.glob(pattern):
                     if file_path not in processed_files:
@@ -1761,9 +1849,13 @@ class UnifiedCache:
                             files_removed += 1
                             processed_files.add(file_path)
                         except OSError as e:
-                            logger.warning(f"Failed to remove cache file {file_path}: {e}")
-            
-            logger.info(f"Cleared {removed_count} cache entries and removed {files_removed} cache files")
+                            logger.warning(
+                                f"Failed to remove cache file {file_path}: {e}"
+                            )
+
+            logger.info(
+                f"Cleared {removed_count} cache entries and removed {files_removed} cache files"
+            )
             return removed_count
 
     def get_stats(self) -> Dict[str, Any]:
@@ -1794,8 +1886,8 @@ class UnifiedCache:
 
     def close(self):
         """Close all resources (database connections, etc.)."""
-        if hasattr(self, 'metadata_backend') and self.metadata_backend:
-            if hasattr(self.metadata_backend, 'close'):
+        if hasattr(self, "metadata_backend") and self.metadata_backend:
+            if hasattr(self.metadata_backend, "close"):
                 self.metadata_backend.close()
 
     def __del__(self):
@@ -1821,16 +1913,16 @@ class UnifiedCache:
         cache_dir: Optional[str] = None,
         ttl_seconds: float = 21600,  # 6 hours
         ignore_errors: bool = True,
-        **kwargs
+        **kwargs,
     ) -> "UnifiedCache":
         """
         Create a cache optimized for API requests.
-        
+
         Defaults:
         - TTL: 6 hours (21600 seconds, good for most API data)
         - ignore_errors: True (don't fail if cache has issues)
         - Compression: LZ4 (fast for JSON/text data)
-        
+
         Args:
             cache_dir: Cache directory (default: ./cache)
             ttl_seconds: Time-to-live in seconds (default: 21600 = 6 hours)
@@ -1842,7 +1934,7 @@ class UnifiedCache:
             default_ttl_seconds=ttl_seconds,
             pickle_compression_codec="zstd",  # Fast for JSON/text
             pickle_compression_level=3,
-            **kwargs
+            **kwargs,
         )
         return cls(config)
 

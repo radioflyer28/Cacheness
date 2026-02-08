@@ -18,23 +18,23 @@ Usage:
         get_blob_backend,
         list_blob_backends,
     )
-    
+
     # Use built-in filesystem backend
     backend = get_blob_backend("filesystem", base_dir="./cache")
     blob_path = backend.write_blob("my_key", data_bytes)
     data = backend.read_blob(blob_path)
-    
+
     # Register custom backend (e.g., S3)
     class S3BlobBackend(BlobBackend):
         def __init__(self, bucket: str, region: str = "us-east-1"):
             self.bucket = bucket
             self.region = region
             # ... initialize S3 client
-        
+
         def write_blob(self, blob_id: str, data: bytes) -> str:
             # Upload to S3, return s3://bucket/key URL
             ...
-    
+
     register_blob_backend("s3", S3BlobBackend)
     backend = get_blob_backend("s3", bucket="my-cache", region="us-west-2")
 """
@@ -44,7 +44,7 @@ import os
 from abc import ABC, abstractmethod
 from io import BytesIO
 from pathlib import Path
-from typing import BinaryIO, Dict, List, Optional, Type, Union
+from typing import BinaryIO, Dict, List, Type, Union
 
 logger = logging.getLogger(__name__)
 
@@ -53,17 +53,18 @@ logger = logging.getLogger(__name__)
 # Abstract Base Class
 # =============================================================================
 
+
 class BlobBackend(ABC):
     """
     Abstract base class for blob storage backends.
-    
+
     Blob backends are responsible for storing and retrieving raw binary data.
     They work in conjunction with metadata backends, which store the index
     and metadata about the blobs.
-    
+
     Implementations must provide both synchronous byte-based methods
     (write_blob/read_blob) and optionally streaming methods for large objects.
-    
+
     All blob paths/URLs returned by write operations should be strings that
     can be passed back to read/delete operations.
     """
@@ -72,11 +73,11 @@ class BlobBackend(ABC):
     def write_blob(self, blob_id: str, data: bytes) -> str:
         """
         Write blob data to storage.
-        
+
         Args:
             blob_id: Unique identifier for the blob (used to generate path)
             data: Raw bytes to store
-            
+
         Returns:
             Storage path/URL where the blob was written.
             This path can be passed to read_blob() or delete_blob().
@@ -87,13 +88,13 @@ class BlobBackend(ABC):
     def read_blob(self, blob_path: str) -> bytes:
         """
         Read blob data from storage.
-        
+
         Args:
             blob_path: Storage path/URL returned by write_blob()
-            
+
         Returns:
             Raw bytes of the blob
-            
+
         Raises:
             FileNotFoundError: If blob doesn't exist
         """
@@ -103,10 +104,10 @@ class BlobBackend(ABC):
     def delete_blob(self, blob_path: str) -> bool:
         """
         Delete blob from storage.
-        
+
         Args:
             blob_path: Storage path/URL returned by write_blob()
-            
+
         Returns:
             True if blob was deleted, False if it didn't exist
         """
@@ -116,10 +117,10 @@ class BlobBackend(ABC):
     def exists(self, blob_path: str) -> bool:
         """
         Check if blob exists in storage.
-        
+
         Args:
             blob_path: Storage path/URL to check
-            
+
         Returns:
             True if blob exists, False otherwise
         """
@@ -128,14 +129,14 @@ class BlobBackend(ABC):
     def write_blob_stream(self, blob_id: str, stream: BinaryIO) -> str:
         """
         Write blob from a stream (for large objects).
-        
+
         Default implementation reads entire stream into memory.
         Override for backends that support true streaming uploads.
-        
+
         Args:
             blob_id: Unique identifier for the blob
             stream: File-like object with read() method
-            
+
         Returns:
             Storage path/URL where the blob was written
         """
@@ -145,13 +146,13 @@ class BlobBackend(ABC):
     def read_blob_stream(self, blob_path: str) -> BinaryIO:
         """
         Read blob as a stream (for large objects).
-        
+
         Default implementation reads entire blob into memory.
         Override for backends that support true streaming downloads.
-        
+
         Args:
             blob_path: Storage path/URL returned by write_blob()
-            
+
         Returns:
             File-like object with read() method
         """
@@ -161,13 +162,13 @@ class BlobBackend(ABC):
     def get_size(self, blob_path: str) -> int:
         """
         Get size of blob in bytes.
-        
+
         Default implementation reads the blob to get size.
         Override for backends that can query size without reading.
-        
+
         Args:
             blob_path: Storage path/URL
-            
+
         Returns:
             Size in bytes, or -1 if unknown
         """
@@ -180,7 +181,7 @@ class BlobBackend(ABC):
     def close(self) -> None:
         """
         Close and clean up any resources.
-        
+
         Default implementation does nothing. Override in backends that
         hold connections or other resources.
         """
@@ -200,17 +201,18 @@ class BlobBackend(ABC):
 # Filesystem Backend Implementation
 # =============================================================================
 
+
 class FilesystemBlobBackend(BlobBackend):
     """
     Filesystem-based blob storage backend.
-    
+
     This is the default backend that stores blobs as files in a directory.
     Blob paths are absolute filesystem paths.
-    
+
     Supports Git-style directory sharding to avoid overloading directories
     with too many files. With shard_chars=2 (default), blob IDs are stored as:
         "abc123..." -> "ab/abc123..."
-    
+
     Attributes:
         base_dir: Root directory for blob storage
         shard_chars: Number of leading characters for directory sharding (0 to disable)
@@ -219,7 +221,7 @@ class FilesystemBlobBackend(BlobBackend):
     def __init__(self, base_dir: Union[str, Path], shard_chars: int = 2):
         """
         Initialize filesystem blob backend.
-        
+
         Args:
             base_dir: Directory where blobs will be stored
             shard_chars: Number of leading chars for Git-style sharding (default: 2)
@@ -227,13 +229,15 @@ class FilesystemBlobBackend(BlobBackend):
         self.base_dir = Path(base_dir)
         self.shard_chars = shard_chars
         self.base_dir.mkdir(parents=True, exist_ok=True)
-        logger.debug(f"FilesystemBlobBackend initialized at {self.base_dir} (shard_chars={shard_chars})")
+        logger.debug(
+            f"FilesystemBlobBackend initialized at {self.base_dir} (shard_chars={shard_chars})"
+        )
 
     def write_blob(self, blob_id: str, data: bytes) -> str:
         """Write blob to filesystem."""
         blob_path = self._get_blob_path(blob_id)
         blob_path.parent.mkdir(parents=True, exist_ok=True)
-        
+
         # Write atomically using temp file
         temp_path = blob_path.with_suffix(blob_path.suffix + ".tmp")
         try:
@@ -243,7 +247,7 @@ class FilesystemBlobBackend(BlobBackend):
             if temp_path.exists():
                 temp_path.unlink()
             raise
-        
+
         logger.debug(f"Wrote blob {blob_id} ({len(data)} bytes) to {blob_path}")
         return str(blob_path)
 
@@ -271,7 +275,7 @@ class FilesystemBlobBackend(BlobBackend):
         """Write blob from stream to filesystem."""
         blob_path = self._get_blob_path(blob_id)
         blob_path.parent.mkdir(parents=True, exist_ok=True)
-        
+
         temp_path = blob_path.with_suffix(blob_path.suffix + ".tmp")
         try:
             with open(temp_path, "wb") as f:
@@ -286,7 +290,7 @@ class FilesystemBlobBackend(BlobBackend):
             if temp_path.exists():
                 temp_path.unlink()
             raise
-        
+
         return str(blob_path)
 
     def read_blob_stream(self, blob_path: str) -> BinaryIO:
@@ -306,21 +310,21 @@ class FilesystemBlobBackend(BlobBackend):
     def _get_blob_path(self, blob_id: str) -> Path:
         """
         Convert blob ID to filesystem path with Git-style directory sharding.
-        
+
         With shard_chars=2 (default):
             "abc123def456" -> base_dir/ab/abc123def456
-        
+
         With shard_chars=0 (disabled):
             "abc123def456" -> base_dir/abc123def456
         """
         # Sanitize blob_id to prevent path traversal
         safe_id = blob_id.replace("..", "__").replace("/", os.sep).replace("\\", os.sep)
-        
+
         # Apply Git-style sharding if enabled
         if self.shard_chars > 0 and len(safe_id) >= self.shard_chars:
-            shard_dir = safe_id[:self.shard_chars]
+            shard_dir = safe_id[: self.shard_chars]
             return self.base_dir / shard_dir / safe_id
-        
+
         return self.base_dir / safe_id
 
 
@@ -328,10 +332,11 @@ class FilesystemBlobBackend(BlobBackend):
 # In-Memory Backend Implementation (for testing)
 # =============================================================================
 
+
 class InMemoryBlobBackend(BlobBackend):
     """
     In-memory blob storage backend.
-    
+
     Stores blobs in a dictionary. Useful for testing or ephemeral caches.
     Data is lost when the backend is closed or garbage collected.
     """
@@ -401,52 +406,50 @@ _initialize_builtin_blob_backends()
 
 
 def register_blob_backend(
-    name: str,
-    backend_class: Type[BlobBackend],
-    force: bool = False
+    name: str, backend_class: Type[BlobBackend], force: bool = False
 ) -> None:
     """
     Register a custom blob storage backend.
-    
+
     Args:
         name: Unique name for the backend (e.g., "s3", "azure", "gcs")
         backend_class: Class that implements BlobBackend interface
         force: If True, overwrite existing registration
-        
+
     Raises:
         ValueError: If name already registered and force=False
         ValueError: If backend_class doesn't inherit from BlobBackend
-        
+
     Example:
         >>> class S3BlobBackend(BlobBackend):
         ...     def __init__(self, bucket: str, region: str = "us-east-1"):
         ...         self.bucket = bucket
         ...         self.region = region
-        ...     
+        ...
         ...     def write_blob(self, blob_id: str, data: bytes) -> str:
         ...         # Upload to S3
         ...         return f"s3://{self.bucket}/{blob_id}"
-        ...     
+        ...
         ...     # ... implement other methods
-        >>> 
+        >>>
         >>> register_blob_backend("s3", S3BlobBackend)
     """
     # Validate backend class
     if not isinstance(backend_class, type):
         raise ValueError(f"backend_class must be a class, got {type(backend_class)}")
-    
+
     if not issubclass(backend_class, BlobBackend):
         raise ValueError(
             f"Backend class {backend_class.__name__} must inherit from BlobBackend"
         )
-    
+
     # Check for duplicate registration
     if name in _blob_backend_registry and not force:
         raise ValueError(
             f"Blob backend '{name}' already registered. "
             f"Use force=True to overwrite or unregister_blob_backend() first."
         )
-    
+
     _blob_backend_registry[name] = backend_class
     logger.info(f"Registered blob backend '{name}' ({backend_class.__name__})")
 
@@ -454,13 +457,13 @@ def register_blob_backend(
 def unregister_blob_backend(name: str) -> bool:
     """
     Unregister a blob storage backend.
-    
+
     Args:
         name: Name of the backend to unregister
-        
+
     Returns:
         True if backend was unregistered, False if not found
-        
+
     Note:
         Built-in backends (filesystem, memory) can be unregistered but
         will be re-registered on module reload.
@@ -469,7 +472,7 @@ def unregister_blob_backend(name: str) -> bool:
         del _blob_backend_registry[name]
         logger.info(f"Unregistered blob backend '{name}'")
         return True
-    
+
     logger.warning(f"Blob backend '{name}' not found for unregistration")
     return False
 
@@ -477,33 +480,32 @@ def unregister_blob_backend(name: str) -> bool:
 def get_blob_backend(name: str, **options) -> BlobBackend:
     """
     Get a blob backend instance by name.
-    
+
     Args:
         name: Name of the registered backend
         **options: Backend-specific configuration options
-        
+
     Returns:
         Configured BlobBackend instance
-        
+
     Raises:
         ValueError: If backend name not registered
-        
+
     Example:
         >>> # Get filesystem backend
         >>> backend = get_blob_backend("filesystem", base_dir="./cache")
-        >>> 
+        >>>
         >>> # Get custom S3 backend
         >>> backend = get_blob_backend("s3", bucket="my-cache", region="us-west-2")
     """
     if name not in _blob_backend_registry:
         available = list(_blob_backend_registry.keys())
         raise ValueError(
-            f"Unknown blob backend: '{name}'. "
-            f"Available backends: {available}"
+            f"Unknown blob backend: '{name}'. Available backends: {available}"
         )
-    
+
     backend_class = _blob_backend_registry[name]
-    
+
     try:
         return backend_class(**options)
     except TypeError as e:
@@ -515,13 +517,13 @@ def get_blob_backend(name: str, **options) -> BlobBackend:
 def list_blob_backends() -> List[Dict[str, any]]:
     """
     List all registered blob backends.
-    
+
     Returns:
         List of dictionaries with backend info:
         - name: Backend name
         - class: Backend class name
         - is_builtin: Whether it's a built-in backend
-        
+
     Example:
         >>> backends = list_blob_backends()
         >>> for b in backends:
@@ -530,27 +532,31 @@ def list_blob_backends() -> List[Dict[str, any]]:
         memory: InMemoryBlobBackend (builtin=True)
     """
     result = []
-    
+
     # Add builtin backends first
     for name in sorted(_builtin_blob_backends):
         if name in _blob_backend_registry:
             backend_class = _blob_backend_registry[name]
-            result.append({
-                "name": name,
-                "class": backend_class.__name__,
-                "is_builtin": True,
-            })
-    
+            result.append(
+                {
+                    "name": name,
+                    "class": backend_class.__name__,
+                    "is_builtin": True,
+                }
+            )
+
     # Add custom backends
     for name in sorted(_blob_backend_registry.keys()):
         if name not in _builtin_blob_backends:
             backend_class = _blob_backend_registry[name]
-            result.append({
-                "name": name,
-                "class": backend_class.__name__,
-                "is_builtin": False,
-            })
-    
+            result.append(
+                {
+                    "name": name,
+                    "class": backend_class.__name__,
+                    "is_builtin": False,
+                }
+            )
+
     return result
 
 

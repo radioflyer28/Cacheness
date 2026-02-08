@@ -21,10 +21,8 @@ Covers:
 import pytest
 import tempfile
 import threading
-import time
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from pathlib import Path
 
 from cacheness.core import UnifiedCache
 from cacheness.config import CacheConfig
@@ -72,7 +70,9 @@ class TestConcurrentPutSameKey:
             except Exception as e:
                 errors.append(f"Thread {thread_id}: {e}")
 
-        threads = [threading.Thread(target=writer, args=(i,)) for i in range(num_threads)]
+        threads = [
+            threading.Thread(target=writer, args=(i,)) for i in range(num_threads)
+        ]
         for t in threads:
             t.start()
         for t in threads:
@@ -96,7 +96,9 @@ class TestConcurrentPutSameKey:
             data = np.random.rand(10) * thread_id
             cache.put(data, key="overwrite_target")
 
-        threads = [threading.Thread(target=writer, args=(i,)) for i in range(num_threads)]
+        threads = [
+            threading.Thread(target=writer, args=(i,)) for i in range(num_threads)
+        ]
         for t in threads:
             t.start()
         for t in threads:
@@ -148,7 +150,9 @@ class TestConcurrentPutDistinctKeys:
             except Exception as e:
                 errors.append(str(e))
 
-        threads = [threading.Thread(target=writer, args=(i,)) for i in range(num_threads)]
+        threads = [
+            threading.Thread(target=writer, args=(i,)) for i in range(num_threads)
+        ]
         for t in threads:
             t.start()
         for t in threads:
@@ -189,7 +193,9 @@ class TestConcurrentGetDuringPut:
                     if not isinstance(result, dict):
                         partial_reads.append(f"Reader {reader_id}: got {type(result)}")
                     elif "state" not in result or "payload" not in result:
-                        partial_reads.append(f"Reader {reader_id}: missing keys in {result.keys()}")
+                        partial_reads.append(
+                            f"Reader {reader_id}: missing keys in {result.keys()}"
+                        )
                     elif len(result["payload"]) != 100:
                         partial_reads.append(
                             f"Reader {reader_id}: payload len={len(result['payload'])}"
@@ -349,7 +355,9 @@ class TestConcurrentUpdateData:
                 errors.append(f"update {thread_id}: {e}")
 
         num_threads = 8
-        threads = [threading.Thread(target=updater, args=(i,)) for i in range(num_threads)]
+        threads = [
+            threading.Thread(target=updater, args=(i,)) for i in range(num_threads)
+        ]
         for t in threads:
             t.start()
         for t in threads:
@@ -436,6 +444,7 @@ class TestHighConcurrencyStress:
 
         def mixed_worker(worker_id):
             import random
+
             for _ in range(ops_per_thread):
                 key_idx = random.randint(0, num_keys - 1)
                 op = random.choice(["put", "get", "touch", "invalidate"])

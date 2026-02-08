@@ -20,7 +20,7 @@ Architecture:
 Prerequisites:
     PostgreSQL server running with database created:
     $ createdb cacheness_demo
-    
+
     Or Docker:
     $ docker run --name postgres-cacheness -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=cacheness_demo -p 5432:5432 -d postgres:15
 
@@ -181,7 +181,10 @@ def main():
             cache.put(
                 {"weights": np.random.randn(15, 10), "bias": np.random.randn(10)},
                 experiment="exp_002",
-                custom_metadata=[experiment2, performance2],  # Multiple metadata objects
+                custom_metadata=[
+                    experiment2,
+                    performance2,
+                ],  # Multiple metadata objects
             )
             print(f"✅ Stored experiment: {experiment2.experiment_id}")
             print(f"   Model type: {experiment2.model_type}")
@@ -230,7 +233,9 @@ def main():
             with cache.query_custom_session("experiments") as query:
                 high_accuracy = query.filter(ExperimentMetadata.accuracy >= 0.95).all()
 
-                print(f"Found {len(high_accuracy)} experiments with accuracy >= 0.95:\n")
+                print(
+                    f"Found {len(high_accuracy)} experiments with accuracy >= 0.95:\n"
+                )
                 for exp in high_accuracy:
                     print(f"  • {exp.experiment_id}")
                     print(f"    Model: {exp.model_type}")
@@ -247,11 +252,13 @@ def main():
             print("=" * 60)
 
             with cache.query_custom_session("experiments") as query:
-                alice_experiments = query.filter(
-                    ExperimentMetadata.created_by == "alice"
-                ).order_by(ExperimentMetadata.accuracy.desc()).all()
+                alice_experiments = (
+                    query.filter(ExperimentMetadata.created_by == "alice")
+                    .order_by(ExperimentMetadata.accuracy.desc())
+                    .all()
+                )
 
-                print(f"Alice's experiments (sorted by accuracy):\n")
+                print("Alice's experiments (sorted by accuracy):\n")
                 for exp in alice_experiments:
                     print(
                         f"  • {exp.experiment_id}: {exp.model_type} - {exp.accuracy:.3f}"
@@ -270,7 +277,7 @@ def main():
                     ExperimentMetadata.model_type == "xgboost"
                 ).all()
 
-                print(f"XGBoost experiments:\n")
+                print("XGBoost experiments:\n")
                 for exp in xgboost_experiments:
                     print(f"  • {exp.experiment_id}")
                     print(f"    Accuracy: {exp.accuracy:.3f}")
@@ -295,7 +302,7 @@ def main():
                     PerformanceMetadata.cache_key.in_(high_acc_keys)
                 ).all()
 
-                print(f"Performance metrics for high-accuracy experiments:\n")
+                print("Performance metrics for high-accuracy experiments:\n")
                 for perf in perf_metrics:
                     print(f"  • {perf.run_id}")
                     print(f"    Training time: {perf.training_time_seconds}s")
@@ -314,7 +321,7 @@ def main():
 
             if "experiments" in custom_meta:
                 exp = custom_meta["experiments"]
-                print(f"Experiment metadata for exp_002:")
+                print("Experiment metadata for exp_002:")
                 print(f"  Model type: {exp.model_type}")
                 print(f"  Accuracy: {exp.accuracy}")
                 print(f"  Created by: {exp.created_by}")
@@ -322,7 +329,7 @@ def main():
 
             if "performance" in custom_meta:
                 perf = custom_meta["performance"]
-                print(f"Performance metadata for exp_002:")
+                print("Performance metadata for exp_002:")
                 print(f"  Training time: {perf.training_time_seconds}s")
                 print(f"  Memory usage: {perf.memory_usage_mb} MB")
                 print()
@@ -340,7 +347,7 @@ def main():
                 print(f"  Total experiments: {count_before}")
 
             # Delete a cache entry
-            print(f"\nDeleting cache entry for exp_003...")
+            print("\nDeleting cache entry for exp_003...")
             cache.invalidate(experiment="exp_003")
 
             print("\nAfter deletion:")

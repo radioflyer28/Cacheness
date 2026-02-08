@@ -20,7 +20,7 @@ def temp_cache():
         cache.close()
 
 
-@pytest.fixture  
+@pytest.fixture
 def temp_cache_no_integrity():
     """Fixture to create a temporary cache with integrity verification disabled."""
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -46,7 +46,7 @@ class TestCacheIntegrity:
     def test_file_hash_calculation(self, temp_cache):
         """Test that file hash is calculated correctly."""
         cache = temp_cache
-        
+
         # Create a test file in the cache directory
         test_file = Path(cache.cache_dir) / "test_file.txt"
         test_content = b"Hello, World!"
@@ -56,9 +56,7 @@ class TestCacheIntegrity:
         calculated_hash = cache._calculate_file_hash(test_file)
         assert calculated_hash is not None
         assert isinstance(calculated_hash, str)
-        assert (
-            len(calculated_hash) == 16
-        )  # XXH3_64 produces 16-character hex strings
+        assert len(calculated_hash) == 16  # XXH3_64 produces 16-character hex strings
 
     def test_file_hash_stored_in_metadata(self, temp_cache):
         """Test that file hash is stored in metadata when caching."""
@@ -138,10 +136,13 @@ class TestCacheIntegrity:
         with tempfile.TemporaryDirectory() as temp_dir:
             # Disable entry signing for this legacy compatibility test
             from cacheness.config import SecurityConfig
+
             config = CacheConfig(
-                cache_dir=temp_dir, 
+                cache_dir=temp_dir,
                 verify_cache_integrity=True,
-                security=SecurityConfig(enable_entry_signing=False)  # Test legacy behavior without signing
+                security=SecurityConfig(
+                    enable_entry_signing=False
+                ),  # Test legacy behavior without signing
             )
             cache = cacheness(config)
 
@@ -170,7 +171,7 @@ class TestCacheIntegrity:
             retrieved_data = cache.get(test_key="value")
             assert retrieved_data is not None
             assert retrieved_data == test_data
-            
+
             cache.close()
 
     def test_integrity_verification_disabled_skips_check(self):
@@ -211,7 +212,7 @@ class TestCacheIntegrity:
                 # Expected - the handler will likely fail to parse corrupted data
                 # But the important thing is we didn't fail due to hash verification
                 pass
-            
+
             cache_enabled.close()
             cache_disabled.close()
 

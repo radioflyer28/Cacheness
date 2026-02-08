@@ -59,6 +59,7 @@ from pathlib import Path
 # Optional dependency - dill for enhanced object serialization
 try:
     import dill
+
     DILL_AVAILABLE = True
 except ImportError:
     dill = None  # type: ignore
@@ -238,7 +239,7 @@ def is_dill_serializable(obj) -> bool:
     """
     if not DILL_AVAILABLE or dill is None:
         return False
-        
+
     try:
         dill.dumps(obj)
         return True
@@ -277,7 +278,7 @@ def verify_dill_serializable(obj, raise_on_error: bool = True):
             raise CompressionError(error_msg)
         else:
             return False, error_msg
-    
+
     try:
         # Test dill serialization
         serialized_data = dill.dumps(obj)
@@ -291,7 +292,9 @@ def verify_dill_serializable(obj, raise_on_error: bool = True):
             return True, ""
 
     except Exception as e:
-        error_msg = f"Object cannot be serialized with dill: {type(e).__name__}: {str(e)}"
+        error_msg = (
+            f"Object cannot be serialized with dill: {type(e).__name__}: {str(e)}"
+        )
 
         if raise_on_error:
             raise CompressionError(error_msg) from e
@@ -464,13 +467,22 @@ def list_available_codecs():
     """
     if not BLOSC_AVAILABLE:
         return ["lz4", "lz4hc", "zstd", "zlib", "blosclz"]  # Default fallback list
-    
+
     # Get available codecs from blosc2
     try:
         # For blosc2, iterate through Codec enum
         return [
-            "lz4", "lz4hc", "zstd", "zlib", "blosclz", "ndlz",
-            "zfp_acc", "zfp_prec", "zfp_rate", "openhtj2k", "grok"
+            "lz4",
+            "lz4hc",
+            "zstd",
+            "zlib",
+            "blosclz",
+            "ndlz",
+            "zfp_acc",
+            "zfp_prec",
+            "zfp_rate",
+            "openhtj2k",
+            "grok",
         ]
     except Exception:
         return ["lz4", "lz4hc", "zstd", "zlib", "blosclz"]
@@ -651,15 +663,26 @@ def write_file(obj, filepath, *, nparray=True, **kwargs):
         raise ValueError("filepath cannot be empty")
 
     if not BLOSC_AVAILABLE:
-        raise CompressionError("blosc2 is required for cacheness compression but is not available")
+        raise CompressionError(
+            "blosc2 is required for cacheness compression but is not available"
+        )
 
     # Validate codec early for better error messages
     if "codec" in kwargs:
         codec = kwargs["codec"]
         if isinstance(codec, str):
             valid_codecs = [
-                "lz4", "lz4hc", "zstd", "zlib", "blosclz", "ndlz",
-                "zfp_acc", "zfp_prec", "zfp_rate", "openhtj2k", "grok"
+                "lz4",
+                "lz4hc",
+                "zstd",
+                "zlib",
+                "blosclz",
+                "ndlz",
+                "zfp_acc",
+                "zfp_prec",
+                "zfp_rate",
+                "openhtj2k",
+                "grok",
             ]
             if codec.lower() not in valid_codecs:
                 raise ValueError(
@@ -672,7 +695,7 @@ def write_file(obj, filepath, *, nparray=True, **kwargs):
         kwargs["typesize"] = kwargs.get("typesize", itemsize)
         kwargs["clevel"] = kwargs.get("clevel", 9)
         kwargs["filter"] = kwargs.get("filter", shuffle_obj)
-        
+
         # Convert string codec to enum if needed
         codec = kwargs.get("codec", blosc.Codec.LZ4)
         if isinstance(codec, str):
@@ -695,8 +718,11 @@ def write_file(obj, filepath, *, nparray=True, **kwargs):
 
         if isinstance(obj, np.ndarray) and nparray:
             # Remove unsupported keys for pack_array
-            pack_kwargs = {k: v for k, v in kwargs.items() 
-                          if k not in ("typesize", "_ignore_multiple_size")}
+            pack_kwargs = {
+                k: v
+                for k, v in kwargs.items()
+                if k not in ("typesize", "_ignore_multiple_size")
+            }
             with Path(filepath).open("wb") as f:
                 packed_data = blosc.pack_array(obj, **pack_kwargs)
                 # Ensure packed_data is bytes for writing
@@ -707,9 +733,11 @@ def write_file(obj, filepath, *, nparray=True, **kwargs):
                 else:
                     # Handle string case (shouldn't happen with blosc2 but be safe)
                     if isinstance(packed_data, str):
-                        f.write(packed_data.encode('utf-8'))
+                        f.write(packed_data.encode("utf-8"))
                     else:
-                        raise CompressionError(f"Unexpected data type from pack_array: {type(packed_data)}")
+                        raise CompressionError(
+                            f"Unexpected data type from pack_array: {type(packed_data)}"
+                        )
         else:
             arr = pickle.dumps(obj, -1)
             with Path(filepath).open("wb") as f:
@@ -719,7 +747,7 @@ def write_file(obj, filepath, *, nparray=True, **kwargs):
                     "clevel": kwargs.get("clevel", 9),
                     "filter": kwargs.get("filter", shuffle_obj),
                 }
-                
+
                 # Adjust typesize to ensure compatibility with data length
                 default_typesize = kwargs.get("typesize", 8)
                 data_len = len(arr)
@@ -753,9 +781,11 @@ def write_file(obj, filepath, *, nparray=True, **kwargs):
                     if isinstance(carr, bytes):
                         f.write(carr)
                     elif isinstance(carr, str):
-                        f.write(carr.encode('utf-8'))
+                        f.write(carr.encode("utf-8"))
                     else:
-                        raise CompressionError(f"Unexpected compression result type: {type(carr)}")
+                        raise CompressionError(
+                            f"Unexpected compression result type: {type(carr)}"
+                        )
                     start = end
     except Exception as e:
         raise CompressionError(f"Failed to compress data: {e}") from e
@@ -784,7 +814,9 @@ def read_file(filepath, *, nparray=True):
         If filepath doesn't exist
     """
     if not BLOSC_AVAILABLE:
-        raise CompressionError("blosc2 is required for cacheness compression but is not available")
+        raise CompressionError(
+            "blosc2 is required for cacheness compression but is not available"
+        )
 
     filepath = Path(filepath)
     if not filepath.exists():

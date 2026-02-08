@@ -14,11 +14,11 @@ Available handlers:
 
 Usage:
     from cacheness.storage.handlers import HandlerRegistry, ArrayHandler
-    
+
     # Get a handler for data
     registry = HandlerRegistry()
     handler = registry.get_handler(data)
-    
+
     # Or use specific handler directly
     handler = ArrayHandler()
     if handler.can_handle(my_array):
@@ -51,18 +51,21 @@ from cacheness.interfaces import (
 # Optional handlers
 try:
     from cacheness.handlers import PandasDataFrameHandler, PandasSeriesHandler
+
     _HAS_PANDAS = True
 except ImportError:
     _HAS_PANDAS = False
 
 try:
     from cacheness.handlers import PolarsDataFrameHandler
+
     _HAS_POLARS = True
 except ImportError:
     _HAS_POLARS = False
 
 try:
     from cacheness.handlers import TensorFlowTensorHandler
+
     _HAS_TENSORFLOW = True
 except ImportError:
     _HAS_TENSORFLOW = False

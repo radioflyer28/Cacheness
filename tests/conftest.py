@@ -33,6 +33,7 @@ except ImportError:
 
 # ==================== Environment Configuration ====================
 
+
 def get_postgres_url() -> str:
     """Get PostgreSQL connection URL from environment."""
     user = os.getenv("POSTGRES_USER", "cacheness")
@@ -55,6 +56,7 @@ def get_s3_config() -> dict:
 
 
 # ==================== PostgreSQL Fixtures ====================
+
 
 @pytest.fixture(scope="session")
 def postgres_available() -> bool:
@@ -97,9 +99,9 @@ def postgres_clean_db(postgres_connection):
     # Create test schema
     postgres_connection.execute(text("CREATE SCHEMA IF NOT EXISTS cache"))
     postgres_connection.commit()
-    
+
     yield postgres_connection
-    
+
     # Cleanup
     postgres_connection.execute(text("DROP SCHEMA IF EXISTS cache CASCADE"))
     postgres_connection.commit()
@@ -107,11 +109,13 @@ def postgres_clean_db(postgres_connection):
 
 # ==================== S3/MinIO Fixtures ====================
 
+
 @pytest.fixture(scope="session")
 def s3_available() -> bool:
     """Check if MinIO/S3 is available (with a short timeout)."""
     try:
         from botocore.config import Config as BotoConfig
+
         config = get_s3_config()
         client = boto3.client(
             "s3",
@@ -136,7 +140,7 @@ def s3_client(s3_available):
     """Provide an S3 client for MinIO testing."""
     if not s3_available:
         pytest.skip("MinIO/S3 not available")
-    
+
     config = get_s3_config()
     client = boto3.client(
         "s3",
@@ -153,16 +157,16 @@ def s3_bucket(s3_client):
     """Provide a clean S3 bucket for a test."""
     config = get_s3_config()
     bucket = config["bucket"]
-    
+
     # Clear bucket before test
     paginator = s3_client.get_paginator("list_objects_v2")
     for page in paginator.paginate(Bucket=bucket):
         if "Contents" in page:
             for obj in page["Contents"]:
                 s3_client.delete_object(Bucket=bucket, Key=obj["Key"])
-    
+
     yield bucket
-    
+
     # Cleanup after test
     paginator = s3_client.get_paginator("list_objects_v2")
     for page in paginator.paginate(Bucket=bucket):
@@ -172,6 +176,7 @@ def s3_bucket(s3_client):
 
 
 # ==================== Mocked S3 Fixtures ====================
+
 
 @pytest.fixture
 def mock_s3_client():
@@ -192,12 +197,13 @@ def mock_s3_bucket(mock_s3_client):
 
 # ==================== Integration Fixtures ====================
 
+
 @pytest.fixture
 def cacheness_postgres_config(postgres_available) -> dict:
     """Provide Cacheness configuration for PostgreSQL backend."""
     if not postgres_available:
         pytest.skip("PostgreSQL not available")
-    
+
     return {
         "metadata_backend": "postgresql",
         "metadata_config": {
@@ -211,7 +217,7 @@ def cacheness_s3_config(s3_available) -> dict:
     """Provide Cacheness configuration for S3 backend."""
     if not s3_available:
         pytest.skip("S3 not available")
-    
+
     config = get_s3_config()
     return {
         "blob_backend": "s3",
@@ -232,7 +238,7 @@ def cacheness_postgres_s3_config(postgres_available, s3_available) -> dict:
         pytest.skip("PostgreSQL not available")
     if not s3_available:
         pytest.skip("S3 not available")
-    
+
     config = get_s3_config()
     return {
         "metadata_backend": "postgresql",
@@ -252,6 +258,7 @@ def cacheness_postgres_s3_config(postgres_available, s3_available) -> dict:
 
 # ==================== Config File Fixtures ====================
 
+
 @pytest.fixture
 def config_dir() -> Path:
     """Get the config directory path."""
@@ -266,11 +273,11 @@ def cacheness_config_from_yaml(config_dir):
         from cacheness.config import load_config_from_yaml
     except ImportError:
         pytest.skip("cacheness not installed")
-    
+
     config_file = config_dir / "test_config.yaml"
     if not config_file.exists():
         pytest.skip(f"Config file not found: {config_file}")
-    
+
     return load_config_from_yaml(str(config_file))
 
 
@@ -281,27 +288,29 @@ def cacheness_config_from_json(config_dir):
         from cacheness.config import load_config_from_json
     except ImportError:
         pytest.skip("cacheness not installed")
-    
+
     config_file = config_dir / "test_config.json"
     if not config_file.exists():
         pytest.skip(f"Config file not found: {config_file}")
-    
+
     return load_config_from_json(str(config_file))
 
 
 @pytest.fixture
-def cacheness_cache_from_yaml(cacheness_config_from_yaml, postgres_available, s3_available):
+def cacheness_cache_from_yaml(
+    cacheness_config_from_yaml, postgres_available, s3_available
+):
     """Provide a Cache instance configured from test_config.yaml."""
     if not postgres_available:
         pytest.skip("PostgreSQL not available")
     if not s3_available:
         pytest.skip("S3 not available")
-    
+
     try:
         from cacheness import cacheness as create_cache
     except ImportError:
         pytest.skip("cacheness not installed")
-    
+
     cache = create_cache(config=cacheness_config_from_yaml)
     cache.clear_all()  # Clear any cached data from previous test runs
     yield cache
@@ -309,18 +318,20 @@ def cacheness_cache_from_yaml(cacheness_config_from_yaml, postgres_available, s3
 
 
 @pytest.fixture
-def cacheness_cache_from_json(cacheness_config_from_json, postgres_available, s3_available):
+def cacheness_cache_from_json(
+    cacheness_config_from_json, postgres_available, s3_available
+):
     """Provide a Cache instance configured from test_config.json."""
     if not postgres_available:
         pytest.skip("PostgreSQL not available")
     if not s3_available:
         pytest.skip("S3 not available")
-    
+
     try:
         from cacheness import cacheness as create_cache
     except ImportError:
         pytest.skip("cacheness not installed")
-    
+
     cache = create_cache(config=cacheness_config_from_json)
     cache.clear_all()  # Clear any cached data from previous test runs
     yield cache
@@ -335,13 +346,12 @@ def cacheness_local_sqlite_fs(config_dir):
         from cacheness.config import load_config_from_yaml
     except ImportError:
         pytest.skip("cacheness not installed")
-    
+
     config_file = config_dir / "local_sqlite_fs.yaml"
     if not config_file.exists():
         pytest.skip(f"Config file not found: {config_file}")
-    
+
     config = load_config_from_yaml(str(config_file))
     cache = create_cache(config=config)
     yield cache
     # Cleanup could go here
-

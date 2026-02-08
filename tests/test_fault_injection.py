@@ -17,12 +17,8 @@ Issue: CACHE-yw9
 """
 
 import os
-import json
 import errno
-import tempfile
-import logging
-from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -40,6 +36,7 @@ from cacheness.metadata import JsonBackend
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_cache(tmp_dir, backend="json"):
     """Create a cacheness instance for testing."""
@@ -66,7 +63,8 @@ class TestOrphanedBlobOnPutCrash:
         data = {"key": "value", "numbers": [1, 2, 3]}
 
         with patch.object(
-            cache.metadata_backend, "put_entry",
+            cache.metadata_backend,
+            "put_entry",
             side_effect=RuntimeError("Simulated metadata write failure"),
         ):
             with pytest.raises(RuntimeError, match="Simulated metadata write failure"):
@@ -84,7 +82,8 @@ class TestOrphanedBlobOnPutCrash:
         data = "test string"
 
         with patch.object(
-            cache.metadata_backend, "put_entry",
+            cache.metadata_backend,
+            "put_entry",
             side_effect=OSError("Simulated I/O failure"),
         ):
             with pytest.raises(OSError):
@@ -100,7 +99,8 @@ class TestOrphanedBlobOnPutCrash:
         data = np.array([1, 2, 3])
 
         with patch.object(
-            cache.metadata_backend, "put_entry",
+            cache.metadata_backend,
+            "put_entry",
             side_effect=Exception("Database connection lost"),
         ):
             with pytest.raises(Exception, match="Database connection lost"):
@@ -215,7 +215,8 @@ class TestGetDeserializationFailure:
 
         handler = cache.handlers.get_handler_by_type("object")
         with patch.object(
-            handler, "get",
+            handler,
+            "get",
             side_effect=ModuleNotFoundError("No module named 'deleted_package'"),
         ):
             result = cache.get(test_key="module_test")
@@ -245,7 +246,9 @@ class TestJsonBackendCorruption:
     def test_partial_json_starts_fresh(self, tmp_path):
         """Truncated JSON (simulating crash during write) starts fresh."""
         metadata_file = tmp_path / "cache_metadata.json"
-        metadata_file.write_text('{"entries": {"key1": {"data_type": "test"')  # truncated
+        metadata_file.write_text(
+            '{"entries": {"key1": {"data_type": "test"'
+        )  # truncated
 
         backend = JsonBackend(metadata_file)
         entries = backend.list_entries()
@@ -276,13 +279,16 @@ class TestJsonBackendCorruption:
 
         # First write valid data
         backend = JsonBackend(metadata_file)
-        backend.put_entry("key1", {
-            "data_type": "test",
-            "prefix": "",
-            "description": "test entry",
-            "file_size": 100,
-            "metadata": {},
-        })
+        backend.put_entry(
+            "key1",
+            {
+                "data_type": "test",
+                "prefix": "",
+                "description": "test entry",
+                "file_size": 100,
+                "metadata": {},
+            },
+        )
         assert len(backend.list_entries()) == 1
 
         # Now corrupt the file externally

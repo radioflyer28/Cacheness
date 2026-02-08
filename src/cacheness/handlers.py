@@ -6,6 +6,7 @@ This module contains specialized handlers for different data types in the cache 
 Each handler implements focused interfaces following the Interface Segregation Principle.
 """
 
+import ast
 import numpy as np
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -14,10 +15,8 @@ import logging
 # Import focused interfaces
 from .interfaces import (
     CacheHandler,
-    CacheHandlerError,
     CacheWriteError,
     CacheReadError,
-    CacheFormatError,
 )
 from .error_handling import cache_operation_context
 
@@ -44,7 +43,6 @@ from .compress_pickle import (
     read_file as read_compressed_pickle,
     is_pickleable,
     is_dill_serializable,
-    verify_dill_serializable,
     BLOSC_AVAILABLE,
     DILL_AVAILABLE,
     optimize_compression_params,
@@ -73,17 +71,19 @@ TENSORFLOW_AVAILABLE = False
 tf = None
 _tensorflow_import_attempted = False
 
+
 def _lazy_import_tensorflow():
     """Lazy import TensorFlow to avoid slow startup times and system issues."""
     global tf, TENSORFLOW_AVAILABLE, _tensorflow_import_attempted
-    
+
     if _tensorflow_import_attempted:
         return tf, TENSORFLOW_AVAILABLE
-        
+
     _tensorflow_import_attempted = True
-    
+
     try:
         import tensorflow as tf_module
+
         tf = tf_module
         TENSORFLOW_AVAILABLE = True
         logger.debug("TensorFlow successfully imported")
@@ -95,8 +95,9 @@ def _lazy_import_tensorflow():
         tf = None
         TENSORFLOW_AVAILABLE = False
         logger.warning(f"TensorFlow import failed with unexpected error: {e}")
-    
+
     return tf, TENSORFLOW_AVAILABLE
+
 
 logger = logging.getLogger(__name__)
 
@@ -529,9 +530,9 @@ class ArrayHandler(CacheHandler):
         compressed_data = blosc2.compress2(
             data,
             cparams={
-                'typesize': data.dtype.itemsize,
-                'clevel': config.compression.blosc2_array_clevel,
-                'codec': getattr(
+                "typesize": data.dtype.itemsize,
+                "clevel": config.compression.blosc2_array_clevel,
+                "codec": getattr(
                     blosc2.Codec,
                     config.compression.blosc2_array_codec.upper(),
                     blosc2.Codec.LZ4,
@@ -572,7 +573,7 @@ class ArrayHandler(CacheHandler):
             # Decompress and reconstruct array
             # Decompress the data using blosc2.decompress2 (no 2GB limit)
             decompressed = blosc2.decompress2(compressed_data)
-            shape = eval(shape_str)  # Convert string tuple back to tuple
+            shape = ast.literal_eval(shape_str)  # Convert string tuple back to tuple
             dtype = np.dtype(dtype_str)
             return np.frombuffer(decompressed, dtype=dtype).reshape(shape)
 
@@ -622,19 +623,19 @@ class TensorFlowTensorHandler(CacheHandler):
         # Quick check for obviously non-tensor types before importing TensorFlow
         if isinstance(data, (str, int, float, bool, list, tuple, dict)):
             return False
-        
+
         # Also exclude numpy arrays (they have their own handler)
-        if hasattr(data, '__array__') and hasattr(data, 'dtype'):
+        if hasattr(data, "__array__") and hasattr(data, "dtype"):
             # This is likely a numpy array or similar
             return False
-        
+
         # Only import TensorFlow if we have a potential tensor-like object
         tf_module, tf_available = _lazy_import_tensorflow()
         if not tf_available or tf_module is None:
             return False
         if not BLOSC2_AVAILABLE or blosc2 is None:
             return False
-        
+
         # Check if it's a TensorFlow tensor (EagerTensor, Variable, etc.)
         try:
             return isinstance(data, (tf_module.Tensor, tf_module.Variable))
@@ -650,11 +651,13 @@ class TensorFlowTensorHandler(CacheHandler):
                 handler_type="tensorflow_tensor",
                 data_type=type(data).__name__,
             )
-            
+
         with cache_operation_context(
-            "store_tensorflow_tensor", 
-            shape=data.shape.as_list() if hasattr(data.shape, 'as_list') else str(data.shape),
-            dtype=str(data.dtype)
+            "store_tensorflow_tensor",
+            shape=data.shape.as_list()
+            if hasattr(data.shape, "as_list")
+            else str(data.shape),
+            dtype=str(data.dtype),
         ):
             try:
                 # Convert to tensor if it's a Variable
@@ -664,23 +667,23 @@ class TensorFlowTensorHandler(CacheHandler):
                     tensor_data = data
 
                 b2tr_path = file_path.with_suffix("").with_suffix(".b2tr")
-                
+
                 logger.debug(
                     f"Writing TensorFlow tensor to {b2tr_path} with blosc2 compression"
                 )
-                
+
                 # Use blosc2.save_tensor for optimized tensor storage
                 blosc2.save_tensor(
                     tensor_data.numpy(),  # Convert to numpy for blosc2
                     str(b2tr_path),
                     cparams={
-                        'clevel': config.compression.blosc2_array_clevel,
-                        'codec': getattr(
+                        "clevel": config.compression.blosc2_array_clevel,
+                        "codec": getattr(
                             blosc2.Codec,
                             config.compression.blosc2_array_codec.upper(),
                             blosc2.Codec.LZ4,
                         ),
-                    }
+                    },
                 )
 
                 file_size = b2tr_path.stat().st_size
@@ -693,7 +696,9 @@ class TensorFlowTensorHandler(CacheHandler):
                     "file_size": file_size,
                     "actual_path": str(b2tr_path),
                     "metadata": {
-                        "shape": tensor_data.shape.as_list() if hasattr(tensor_data.shape, 'as_list') else list(tensor_data.shape),
+                        "shape": tensor_data.shape.as_list()
+                        if hasattr(tensor_data.shape, "as_list")
+                        else list(tensor_data.shape),
                         "dtype": str(tensor_data.dtype),
                         "storage_format": "blosc2_tensor",
                         "compression": config.compression.blosc2_array_codec,
@@ -711,15 +716,17 @@ class TensorFlowTensorHandler(CacheHandler):
     def get(self, file_path: Path, metadata: Dict[str, Any]) -> Any:
         """Load TensorFlow tensor from blosc2 tensor file with proper error handling."""
         tf_module, tf_available = _lazy_import_tensorflow()
-        
-        with cache_operation_context("load_tensorflow_tensor", file_path=str(file_path)):
+
+        with cache_operation_context(
+            "load_tensorflow_tensor", file_path=str(file_path)
+        ):
             try:
                 if not tf_available or tf_module is None:
                     raise CacheReadError(
                         "TensorFlow not available for loading tensor",
                         handler_type="tensorflow_tensor",
                     )
-                
+
                 if not BLOSC2_AVAILABLE or blosc2 is None:
                     raise CacheReadError(
                         "blosc2 not available for loading tensor",
@@ -727,17 +734,17 @@ class TensorFlowTensorHandler(CacheHandler):
                     )
 
                 logger.debug(f"Reading TensorFlow tensor from {file_path}")
-                
+
                 # Load tensor using blosc2.load_tensor
                 numpy_array = blosc2.load_tensor(str(file_path))
-                
+
                 # Convert numpy array back to TensorFlow tensor
                 tensor = tf_module.constant(numpy_array)
-                
+
                 # If it was originally a Variable, convert back to Variable
                 if metadata.get("metadata", {}).get("was_variable", False):
                     tensor = tf_module.Variable(tensor)
-                
+
                 logger.debug(f"Loaded TensorFlow tensor with shape {tensor.shape}")
                 return tensor
 
@@ -775,7 +782,11 @@ class ObjectHandler(CacheHandler):
                 if is_pickleable(data):
                     return True
                 # Then try dill as fallback if enabled
-                if config and hasattr(config, 'handlers') and config.handlers.enable_dill_fallback:
+                if (
+                    config
+                    and hasattr(config, "handlers")
+                    and config.handlers.enable_dill_fallback
+                ):
                     return is_dill_serializable(data)
                 return False
 
@@ -791,7 +802,11 @@ class ObjectHandler(CacheHandler):
                 if is_pickleable(data):
                     return True
                 # Then try dill as fallback if enabled
-                if config and hasattr(config, 'handlers') and config.handlers.enable_dill_fallback:
+                if (
+                    config
+                    and hasattr(config, "handlers")
+                    and config.handlers.enable_dill_fallback
+                ):
                     return is_dill_serializable(data)
                 return False
 
@@ -809,7 +824,11 @@ class ObjectHandler(CacheHandler):
                 if is_pickleable(data):
                     return True
                 # Then try dill as fallback if enabled
-                if config and hasattr(config, 'handlers') and config.handlers.enable_dill_fallback:
+                if (
+                    config
+                    and hasattr(config, "handlers")
+                    and config.handlers.enable_dill_fallback
+                ):
                     return is_dill_serializable(data)
                 return False
 
@@ -828,7 +847,11 @@ class ObjectHandler(CacheHandler):
                 if is_pickleable(data):
                     return True
                 # Then try dill as fallback if enabled
-                if config and hasattr(config, 'handlers') and config.handlers.enable_dill_fallback:
+                if (
+                    config
+                    and hasattr(config, "handlers")
+                    and config.handlers.enable_dill_fallback
+                ):
                     return is_dill_serializable(data)
                 return False
 
@@ -844,7 +867,11 @@ class ObjectHandler(CacheHandler):
         if is_pickleable(data):
             return True
         # Then try dill as fallback if enabled
-        if config and hasattr(config, 'handlers') and config.handlers.enable_dill_fallback:
+        if (
+            config
+            and hasattr(config, "handlers")
+            and config.handlers.enable_dill_fallback
+        ):
             return is_dill_serializable(data)
         return False
 
@@ -854,37 +881,55 @@ class ObjectHandler(CacheHandler):
         use_pickle = is_pickleable(data)
         use_dill = False
         serializer_name = "pickle"
-        
+
         if not use_pickle:
             # Only try dill if enabled in config
-            if config and hasattr(config, 'handlers') and config.handlers.enable_dill_fallback:
+            if (
+                config
+                and hasattr(config, "handlers")
+                and config.handlers.enable_dill_fallback
+            ):
                 use_dill = is_dill_serializable(data)
                 if use_dill:
                     serializer_name = "dill"
-            
+
             if not use_dill:
-                dill_status = " (dill disabled)" if not (config and hasattr(config, 'handlers') and config.handlers.enable_dill_fallback) else ""
+                dill_status = (
+                    " (dill disabled)"
+                    if not (
+                        config
+                        and hasattr(config, "handlers")
+                        and config.handlers.enable_dill_fallback
+                    )
+                    else ""
+                )
                 raise ValueError(
                     f"Object of type {type(data)} cannot be serialized with pickle{dill_status}"
                 )
 
         # Check if we should use compression based on codec, size threshold, and availability
-        should_compress = BLOSC_AVAILABLE and config.compression.pickle_compression_codec != "none"
+        should_compress = (
+            BLOSC_AVAILABLE and config.compression.pickle_compression_codec != "none"
+        )
         if should_compress:
             # Get a rough estimate of object size by pickling it first
             import pickle
+
             try:
                 if use_dill and DILL_AVAILABLE and dill is not None:
                     test_data = dill.dumps(data, protocol=dill.HIGHEST_PROTOCOL)
                 else:
                     test_data = pickle.dumps(data, protocol=pickle.HIGHEST_PROTOCOL)
-                
+
                 # Only compress if object is larger than threshold
                 if len(test_data) < config.compression.compression_threshold_bytes:
                     should_compress = False
             except Exception:
                 # If we can't estimate size, use compression anyway (but respect "none" codec)
-                should_compress = BLOSC_AVAILABLE and config.compression.pickle_compression_codec != "none"
+                should_compress = (
+                    BLOSC_AVAILABLE
+                    and config.compression.pickle_compression_codec != "none"
+                )
 
         # Ensure clean path without existing extension
         if should_compress:
@@ -908,9 +953,7 @@ class ObjectHandler(CacheHandler):
             # Use the appropriate serializer with compression
             if use_dill:
                 # Use dill for serialization but still apply blosc compression
-                self._write_compressed_dill(
-                    data, pickle_path, compression_params
-                )
+                self._write_compressed_dill(data, pickle_path, compression_params)
             else:
                 # Use compressed pickle with optimized parameters
                 write_compressed_pickle(
@@ -923,12 +966,13 @@ class ObjectHandler(CacheHandler):
         else:
             # Fall back to standard serialization when blosc is not available
             pickle_path = file_path.with_suffix("").with_suffix(".pkl")
-            
+
             if use_dill and DILL_AVAILABLE and dill is not None:
                 with open(pickle_path, "wb") as f:
                     dill.dump(data, f, protocol=dill.HIGHEST_PROTOCOL)
             else:
                 import pickle
+
                 with open(pickle_path, "wb") as f:
                     pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
             storage_format = serializer_name
@@ -949,32 +993,34 @@ class ObjectHandler(CacheHandler):
             "metadata": metadata,
         }
 
-    def _write_compressed_dill(self, data: Any, file_path: Path, compression_params: Dict[str, Any]) -> None:
+    def _write_compressed_dill(
+        self, data: Any, file_path: Path, compression_params: Dict[str, Any]
+    ) -> None:
         """Write object using dill serialization with blosc compression."""
         if not DILL_AVAILABLE or dill is None:
             raise ValueError("dill is not available for serialization")
-        
+
         if not BLOSC_AVAILABLE:
             raise ValueError("blosc is not available for compression")
-        
+
         # Use similar approach to write_compressed_pickle but with dill
         # Serialize with dill first
         pickled_data = dill.dumps(data, protocol=dill.HIGHEST_PROTOCOL)
-        
+
         # Use the same compression approach as compress_pickle
         from .compress_pickle import blosc
-        
+
         # Filter compression params to only include valid blosc2 parameters
         # For pickled data, set typesize to 1 (byte) since it's arbitrary binary data
         valid_blosc_params = {
-            'typesize': 1,  # Always use 1 for pickled binary data
+            "typesize": 1,  # Always use 1 for pickled binary data
         }
         for key, value in compression_params.items():
-            if key in ['clevel', 'codec', 'filter']:
+            if key in ["clevel", "codec", "filter"]:
                 valid_blosc_params[key] = value
-        
+
         compressed_data = blosc.compress(pickled_data, **valid_blosc_params)
-        
+
         # Write to file
         with open(file_path, "wb") as f:
             f.write(compressed_data)
@@ -983,18 +1029,19 @@ class ObjectHandler(CacheHandler):
         """Read object using dill deserialization with blosc decompression."""
         if not DILL_AVAILABLE or dill is None:
             raise ValueError("dill is not available for deserialization")
-        
+
         if not BLOSC_AVAILABLE:
             raise ValueError("blosc is not available for decompression")
-        
+
         # Read compressed data
         with open(file_path, "rb") as f:
             compressed_data = f.read()
-        
+
         # Use the same decompression approach as compress_pickle
         from .compress_pickle import blosc
+
         decompressed_data = blosc.decompress(compressed_data)
-        
+
         # Deserialize with dill
         return dill.loads(decompressed_data)
 
@@ -1022,6 +1069,7 @@ class ObjectHandler(CacheHandler):
                         return dill.load(f)
                 else:
                     import pickle
+
                     with open(pickle_path, "rb") as f:
                         return pickle.load(f)
             else:
@@ -1057,24 +1105,24 @@ class ObjectHandler(CacheHandler):
 class HandlerRegistry:
     """
     Registry for cache handlers with configurable selection order.
-    
+
     Supports:
     - Built-in handlers (DataFrame, Array, Object)
     - Custom handler registration via `register_handler()`
     - Handler unregistration via `unregister_handler()`
     - Handler listing via `list_handlers()`
     - Priority-based handler selection
-    
+
     Example:
         >>> registry = HandlerRegistry()
-        >>> 
+        >>>
         >>> # Register custom handler
         >>> class MyHandler(CacheHandler):
         ...     def can_handle(self, data): return isinstance(data, MyType)
         ...     # ... other methods
-        >>> 
+        >>>
         >>> registry.register_handler(MyHandler(), priority=0)  # Highest priority
-        >>> 
+        >>>
         >>> # List all handlers
         >>> for info in registry.list_handlers():
         ...     print(f"{info['name']}: priority={info['priority']}")
@@ -1212,36 +1260,36 @@ class HandlerRegistry:
         raise ValueError(f"No handler found for data type: {data_type}")
 
     def register_handler(
-        self, 
-        handler: CacheHandler, 
+        self,
+        handler: CacheHandler,
         priority: Optional[int] = None,
-        name: Optional[str] = None
+        name: Optional[str] = None,
     ) -> None:
         """
         Register a custom handler with optional priority.
-        
+
         Args:
             handler: Handler instance implementing CacheHandler interface
             priority: Position in handler list (0 = highest priority, None = append to end)
             name: Optional name for the handler (defaults to handler.data_type)
-            
+
         Raises:
             ValueError: If handler doesn't implement required interface
             ValueError: If handler with same name already exists
-            
+
         Example:
             >>> class ParquetHandler(CacheHandler):
             ...     @property
             ...     def data_type(self): return "parquet"
             ...     # ... other methods
-            >>> 
+            >>>
             >>> registry.register_handler(ParquetHandler(), priority=0)
         """
         # Validate handler implements required interface
         self._validate_handler(handler)
-        
+
         handler_name = name or handler.data_type
-        
+
         # Check for duplicate registration
         existing_names = [h.data_type for h in self.handlers]
         if handler_name in existing_names:
@@ -1249,7 +1297,7 @@ class HandlerRegistry:
                 f"Handler '{handler_name}' already registered. "
                 f"Use unregister_handler() first or provide a unique name."
             )
-        
+
         # Insert at priority position or append
         if priority is not None:
             if priority < 0:
@@ -1262,17 +1310,17 @@ class HandlerRegistry:
         else:
             self.handlers.append(handler)
             logger.info(f"Registered handler '{handler_name}' at end of priority list")
-    
+
     def unregister_handler(self, handler_name: str) -> bool:
         """
         Remove a handler by name (data_type).
-        
+
         Args:
             handler_name: The data_type of the handler to remove
-            
+
         Returns:
             True if handler was removed, False if not found
-            
+
         Example:
             >>> registry.unregister_handler("parquet")
             True
@@ -1282,21 +1330,21 @@ class HandlerRegistry:
                 self.handlers.pop(i)
                 logger.info(f"Unregistered handler '{handler_name}'")
                 return True
-        
+
         logger.warning(f"Handler '{handler_name}' not found for unregistration")
         return False
-    
+
     def list_handlers(self) -> list:
         """
         List all registered handlers with their priority and capabilities.
-        
+
         Returns:
             List of dictionaries with handler information:
             - name: Handler data_type
             - priority: Position in handler list (lower = higher priority)
             - class: Handler class name
             - is_builtin: Whether it's a built-in handler
-            
+
         Example:
             >>> for info in registry.list_handlers():
             ...     print(f"{info['priority']}: {info['name']} ({info['class']})")
@@ -1306,44 +1354,50 @@ class HandlerRegistry:
             3: object (ObjectHandler)
         """
         builtin_types = {
-            "polars_dataframe", "pandas_dataframe", "polars_series", "pandas_series",
-            "numpy_array", "object", "tensorflow_tensor"
+            "polars_dataframe",
+            "pandas_dataframe",
+            "polars_series",
+            "pandas_series",
+            "numpy_array",
+            "object",
+            "tensorflow_tensor",
         }
-        
+
         result = []
         for i, handler in enumerate(self.handlers):
-            result.append({
-                "name": handler.data_type,
-                "priority": i,
-                "class": handler.__class__.__name__,
-                "is_builtin": handler.data_type in builtin_types
-            })
-        
+            result.append(
+                {
+                    "name": handler.data_type,
+                    "priority": i,
+                    "class": handler.__class__.__name__,
+                    "is_builtin": handler.data_type in builtin_types,
+                }
+            )
+
         return result
-    
+
     def _validate_handler(self, handler: Any) -> None:
         """
         Validate that handler implements required CacheHandler interface.
-        
+
         Raises:
             ValueError: If handler is missing required methods/properties
         """
         required_methods = ["can_handle", "put", "get", "get_file_extension"]
         required_properties = ["data_type"]
-        
+
         missing = []
-        
+
         for method in required_methods:
             if not callable(getattr(handler, method, None)):
                 missing.append(f"method '{method}'")
-        
+
         for prop in required_properties:
             if not hasattr(handler, prop):
                 missing.append(f"property '{prop}'")
-        
+
         if missing:
             raise ValueError(
                 f"Handler {handler.__class__.__name__} missing required: {', '.join(missing)}. "
                 f"Handlers must implement the CacheHandler interface."
             )
-

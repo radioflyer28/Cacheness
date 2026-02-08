@@ -45,9 +45,10 @@ class TestCacheConfig:
             SerializationConfig,
             HandlerConfig,
         )
-        
+
         # Use a platform-agnostic path for testing
         import tempfile
+
         test_cache_dir = Path(tempfile.gettempdir()) / "test_cache"
         storage_config = CacheStorageConfig(
             cache_dir=str(test_cache_dir), max_cache_size_mb=1000, cleanup_on_init=False
@@ -458,68 +459,68 @@ class TestCacheness:
         """Test that TTL expiration handles UTC timestamps correctly"""
         from datetime import datetime, timezone
         from unittest.mock import patch
-        
+
         test_data = {"timezone": "test"}
         cache_key_params = {"test": "timezone_ttl"}
-        
+
         # Store data to create a real cache entry
         cache.put(test_data, **cache_key_params)
-        
+
         # Find the actual cache key that was created
         entries = cache.list_entries()
         assert len(entries) > 0, "Should have at least one cache entry"
-        
+
         # Get the first entry's cache key
         cache_key = entries[0]["cache_key"]
-        
+
         # Test that _is_expired uses UTC time correctly
-        with patch('cacheness.core.datetime') as mock_datetime:
+        with patch("cacheness.core.datetime") as mock_datetime:
             # Mock current UTC time
             current_utc = datetime(2024, 1, 15, 12, 0, 0, tzinfo=timezone.utc)
             mock_datetime.now.return_value = current_utc
             mock_datetime.fromisoformat = datetime.fromisoformat
-            
+
             # Should not be expired with fresh timestamp (large TTL)
             assert cache._is_expired(cache_key, ttl_seconds=86400) is False
-            
+
             # Verify datetime.now was called with timezone.utc
             mock_datetime.now.assert_called_with(timezone.utc)
-    
+
     def test_timezone_aware_expiration_calculation(self, cache):
         """Test expiration calculation with timezone-aware datetime strings"""
         from datetime import datetime, timezone, timedelta
         from unittest.mock import patch
-        
+
         # Create a mock metadata entry with a timezone-aware timestamp
         utc_time = datetime.now(timezone.utc) - timedelta(hours=2)  # 2 hours ago
         timestamp_iso = utc_time.isoformat()
-        
+
         # Mock the metadata backend to return our test entry
         mock_entry = {"created_at": timestamp_iso, "description": "timezone test"}
-        
-        with patch.object(cache.metadata_backend, 'get_entry', return_value=mock_entry):
+
+        with patch.object(cache.metadata_backend, "get_entry", return_value=mock_entry):
             # Should be expired (created 2 hours ago, checking with 1 hour TTL = 3600 seconds)
             assert cache._is_expired("test_key", ttl_seconds=3600) is True
-            
+
             # Should not be expired with longer TTL: 3 hours = 10800 seconds
             assert cache._is_expired("test_key", ttl_seconds=10800) is False
-    
+
     def test_timezone_consistency_across_cache_operations(self, cache):
         """Test that all cache operations use consistent UTC timezone handling"""
         from datetime import datetime, timezone
-        
+
         test_data = {"consistent": "timezone"}
         cache_key_params = {"consistency": "test"}
-        
+
         # Store data - this should create a UTC timestamp
         cache.put(test_data, **cache_key_params)
-        
+
         # The timestamp in metadata should be UTC
         # We can't easily access the internal cache key generation,
         # but we can verify the data is retrievable (indicating consistent timezone handling)
         retrieved = cache.get(**cache_key_params)
         assert retrieved == test_data
-        
+
         # Test with current time for comparison
         current_utc = datetime.now(timezone.utc)
         assert current_utc.tzinfo == timezone.utc  # Verify we're using UTC
@@ -532,28 +533,30 @@ class TestFactoryMethods:
         """Test cacheness.for_api() factory method."""
         with tempfile.TemporaryDirectory() as temp_dir:
             cache = cacheness.for_api(cache_dir=temp_dir, ttl_seconds=28800)
-            
+
             # Should be a UnifiedCache instance
             assert isinstance(cache, cacheness)
-            
+
             # Should have the specified configuration
             assert cache.config.storage.cache_dir == temp_dir
-            assert cache.config.metadata.default_ttl_seconds == 28800  # 8 hours in seconds
+            assert (
+                cache.config.metadata.default_ttl_seconds == 28800
+            )  # 8 hours in seconds
             assert cache.config.compression.pickle_compression_codec == "zstd"
-            
+
             # Test basic functionality
             test_data = {"api": "response", "data": [1, 2, 3]}
             cache.put(test_data, endpoint="test")
-            
+
             retrieved = cache.get(endpoint="test")
             assert retrieved == test_data
-            
+
             cache.close()
 
     def test_for_api_default_values(self):
         """Test default values for for_api factory."""
         cache = cacheness.for_api()
-        
+
         # Check default values
         assert cache.config.storage.cache_dir == "./cache"
         assert cache.config.metadata.default_ttl_seconds == 21600  # 6 hours in seconds
@@ -576,9 +579,9 @@ class TestMemoryCacheConfig:
             memory_cache_type="lru",
             memory_cache_maxsize=500,
             memory_cache_ttl_seconds=300,
-            memory_cache_stats=True
+            memory_cache_stats=True,
         )
-        
+
         # Verify parameters are set correctly
         assert config.metadata.enable_memory_cache is True
         assert config.metadata.memory_cache_type == "lru"
@@ -589,7 +592,7 @@ class TestMemoryCacheConfig:
     def test_memory_cache_config_defaults(self):
         """Test memory cache defaults when not specified."""
         config = CacheConfig(cache_dir="/tmp/test_defaults")
-        
+
         # Verify defaults
         assert config.metadata.enable_memory_cache is False
         assert config.metadata.memory_cache_type == "lru"
@@ -600,8 +603,7 @@ class TestMemoryCacheConfig:
     def test_memory_cache_functional_test(self):
         """Test that memory cache layer actually works."""
         import tempfile
-        import time
-        
+
         with tempfile.TemporaryDirectory() as temp_dir:
             # Create cache with memory cache layer enabled
             config = CacheConfig(
@@ -611,61 +613,59 @@ class TestMemoryCacheConfig:
                 memory_cache_type="lru",
                 memory_cache_maxsize=10,
                 memory_cache_ttl_seconds=2,  # Short TTL for testing
-                memory_cache_stats=True
+                memory_cache_stats=True,
             )
-            
+
             cache = cacheness(config)
-            
+
             # Store some test data
             test_data = {"test": "memory_cache_data", "value": 42}
             cache.put(test_data, test_key="memory_cache_test")
-            
+
             # Verify data is cached
             result = cache.get(test_key="memory_cache_test")
             assert result == test_data
-            
+
             # Check if memory cache statistics are available (should be CachedMetadataBackend)
             from cacheness.metadata import CachedMetadataBackend
+
             if isinstance(cache.metadata_backend, CachedMetadataBackend):
                 stats = cache.metadata_backend.get_cache_stats()
-                assert 'memory_cache_enabled' in stats
-                assert stats['memory_cache_enabled'] is True
-                assert stats['memory_cache_type'] == 'lru'
-                assert stats['memory_cache_maxsize'] == 10
-            
+                assert "memory_cache_enabled" in stats
+                assert stats["memory_cache_enabled"] is True
+                assert stats["memory_cache_type"] == "lru"
+                assert stats["memory_cache_maxsize"] == 10
+
             cache.close()
 
     def test_memory_cache_cache_types(self):
         """Test different memory cache types."""
         cache_types = ["lru", "lfu", "fifo", "rr"]
-        
+
         for cache_type in cache_types:
             config = CacheConfig(
                 cache_dir="/tmp/test_cache_types",
                 enable_memory_cache=True,
                 memory_cache_type=cache_type,
-                memory_cache_maxsize=50
+                memory_cache_maxsize=50,
             )
-            
+
             assert config.metadata.memory_cache_type == cache_type
 
     def test_memory_cache_validation(self):
         """Test validation of memory cache parameters."""
         # Test invalid cache type
-        config = CacheConfig(
-            enable_memory_cache=True,
-            memory_cache_type="invalid_type"
-        )
-        
+        config = CacheConfig(enable_memory_cache=True, memory_cache_type="invalid_type")
+
         # Should accept any string (validation happens at cache creation)
         assert config.metadata.memory_cache_type == "invalid_type"
-        
+
         # Test edge case values
         config = CacheConfig(
             enable_memory_cache=True,
             memory_cache_maxsize=1,  # Minimum
-            memory_cache_ttl_seconds=0.1  # Very short
+            memory_cache_ttl_seconds=0.1,  # Very short
         )
-        
+
         assert config.metadata.memory_cache_maxsize == 1
         assert config.metadata.memory_cache_ttl_seconds == 0.1

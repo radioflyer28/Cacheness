@@ -46,10 +46,11 @@ def reset_registry():
 def temp_cache_dir(request):
     """Create a temporary cache directory."""
     temp_dir = tempfile.mkdtemp()
-    
+
     def cleanup():
         import time
         import gc
+
         gc.collect()  # Force garbage collection
         time.sleep(0.2)  # Give SQLite time to release locks
         if Path(temp_dir).exists():
@@ -59,7 +60,7 @@ def temp_cache_dir(request):
                 # If still locked, wait a bit more and try again
                 time.sleep(0.5)
                 shutil.rmtree(temp_dir)
-    
+
     request.addfinalizer(cleanup)
     return temp_dir
 
@@ -196,27 +197,27 @@ class TestCustomMetadataModels:
     def test_datetime_timezone_awareness(self):
         """Test that DateTime columns properly handle timezone-aware timestamps"""
         from datetime import datetime, timezone, timedelta
-        
+
         @custom_metadata_model("timezone_test")
         class TimezoneTestMetadata(Base, CustomMetadataBase):
             __tablename__ = "custom_timezone_test_unique"
-            
+
             # Test timezone-aware DateTime column
             test_timestamp = Column(DateTime(timezone=True), nullable=False)
             experiment_name = Column(String(100), nullable=False)
-        
+
         # Verify the model is properly registered
         assert "timezone_test" in list_registered_schemas()
-        
+
         # Test UTC timestamp
         utc_time = datetime.now(timezone.utc)
         assert utc_time.tzinfo == timezone.utc
-        
+
         # Test different timezone
         eastern_tz = timezone(timedelta(hours=-5))  # EST timezone
         eastern_time = datetime.now(eastern_tz)
         assert eastern_time.tzinfo == eastern_tz
-        
+
         # Both should be valid timezone-aware datetimes
         assert utc_time.tzinfo is not None
         assert eastern_time.tzinfo is not None
@@ -224,23 +225,22 @@ class TestCustomMetadataModels:
     def test_custom_metadata_timestamp_consistency(self):
         """Test that custom metadata timestamps are stored with proper timezone info"""
         from datetime import datetime, timezone
-        
+
         @custom_metadata_model("timestamp_consistency_test")
         class TimestampTestMetadata(Base, CustomMetadataBase):
             __tablename__ = "custom_timestamp_consistency_unique"
-            
+
             created_timestamp = Column(DateTime(timezone=True), nullable=False)
             process_name = Column(String(100), nullable=False)
-        
+
         # Create a UTC timestamp
         utc_now = datetime.now(timezone.utc)
-        
+
         # Verify we can create instances with timezone-aware timestamps
         metadata_instance = TimestampTestMetadata(
-            created_timestamp=utc_now,
-            process_name="timezone_test"
+            created_timestamp=utc_now, process_name="timezone_test"
         )
-        
+
         # Verify the timestamp is preserved
         assert metadata_instance.created_timestamp == utc_now
         assert metadata_instance.created_timestamp.tzinfo == timezone.utc
@@ -377,7 +377,9 @@ class MLExperimentIntegrationMetadata_{unique_suffix}(Base, CustomMetadataBase):
             assert len(xgboost_experiments) == 2  # Experiments 0 and 2
 
             # Test accuracy filter
-            high_accuracy = query.filter(self.MLExperimentMetadata.accuracy >= 0.85).all()
+            high_accuracy = query.filter(
+                self.MLExperimentMetadata.accuracy >= 0.85
+            ).all()
             assert len(high_accuracy) >= 1
 
     def test_multiple_metadata_types(self, cache_instance):

@@ -24,7 +24,7 @@ def memory_cache(cache_dir):
     config = CacheConfig(
         cache_dir=str(cache_dir),
         metadata_backend="sqlite_memory",
-        cleanup_on_init=False
+        cleanup_on_init=False,
     )
     # Disable signing for testing to avoid signature issues
     config.security.enable_signing = False
@@ -37,9 +37,7 @@ def memory_cache(cache_dir):
 def json_cache(cache_dir):
     """UnifiedCache with JsonBackend."""
     config = CacheConfig(
-        cache_dir=str(cache_dir),
-        metadata_backend="json",
-        cleanup_on_init=False
+        cache_dir=str(cache_dir), metadata_backend="json", cleanup_on_init=False
     )
     # Disable signing for testing
     config.security.enable_signing = False
@@ -52,9 +50,7 @@ def json_cache(cache_dir):
 def sqlite_cache(cache_dir):
     """UnifiedCache with SqliteBackend."""
     config = CacheConfig(
-        cache_dir=str(cache_dir),
-        metadata_backend="sqlite",
-        cleanup_on_init=False
+        cache_dir=str(cache_dir), metadata_backend="sqlite", cleanup_on_init=False
     )
     # Disable signing for testing
     config.security.enable_signing = False
@@ -65,71 +61,72 @@ def sqlite_cache(cache_dir):
 
 class TestUpdateData:
     """Test update_data() method in UnifiedCache."""
-    
+
     def test_update_existing_entry(self, memory_cache):
         """Test updating data at existing cache key."""
         # Create initial entry
         original_data = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
         memory_cache.put(original_data, experiment="exp_001", run_id=1)
-        
+
         # Update with new data
         new_data = pd.DataFrame({"a": [10, 20], "b": [30, 40]})
         success = memory_cache.update_data(new_data, experiment="exp_001", run_id=1)
-        
+
         assert success is True
-        
+
         # Verify updated data
         result = memory_cache.get(experiment="exp_001", run_id=1)
         pd.testing.assert_frame_equal(result, new_data)
-    
+
     def test_update_nonexistent_entry(self, memory_cache):
         """Test updating entry that doesn't exist."""
         new_data = pd.DataFrame({"a": [1, 2]})
         success = memory_cache.update_data(new_data, experiment="nonexistent")
-        
+
         assert success is False
-    
+
     # Test removed - requires internal cache_key generation details
     # Direct cache_key updates are tested in backend tests
-    
+
     def test_update_different_data_types(self, memory_cache):
         """Test updating with different data types."""
         # Original: DataFrame
         df = pd.DataFrame({"x": [1, 2, 3]})
         memory_cache.put(df, test="type_change")
-        
+
         # Update to: dict (different type)
         new_data = {"message": "now a dict"}
         success = memory_cache.update_data(new_data, test="type_change")
-        
+
         assert success is True
         result = memory_cache.get(test="type_change")
         assert result == new_data
-    
+
     def test_update_updates_metadata(self, memory_cache):
         """Test that update_data() updates derived metadata."""
         # Create small entry
         small_data = pd.DataFrame({"a": [1]})
         memory_cache.put(small_data, test="metadata_update")
-        
+
         # Get initial metadata
         meta_before = memory_cache.get_metadata(test="metadata_update")
         size_before = meta_before.get("file_size", 0)
         created_before = meta_before.get("created_at")
-        
+
         # Update with larger data
         import time
+
         time.sleep(0.1)  # Ensure timestamp changes
         large_data = pd.DataFrame({"a": range(1000), "b": range(1000)})
         success = memory_cache.update_data(large_data, test="metadata_update")
-        
+
         assert success is True
-        
+
         # Get updated metadata
         meta_after = memory_cache.get_metadata(test="metadata_update")
         size_after = meta_after.get("file_size", 0)
         created_after = meta_after.get("created_at")
-        
+
         # Verify metadata changed
         assert size_after > size_before
         assert created_after != created_before  # Timestamp should update
@@ -137,21 +134,24 @@ class TestUpdateData:
 
 class TestUpdateEntryMetadataBackends:
     """Test update_entry_metadata() implementation in different backends."""
-    
+
     def test_memory_backend_update(self, cache_dir):
         """Test SqliteBackend (in-memory) update_entry_metadata()."""
         cache_dir.mkdir(parents=True, exist_ok=True)
         backend = SqliteBackend(db_file=":memory:")
-        
+
         # Create entry
-        backend.put_entry("test_key", {
-            "description": "test",
-            "data_type": "dict",
-            "prefix": "",
-            "file_size": 100,
-            "metadata": {"content_hash": "abc123"}
-        })
-        
+        backend.put_entry(
+            "test_key",
+            {
+                "description": "test",
+                "data_type": "dict",
+                "prefix": "",
+                "file_size": 100,
+                "metadata": {"content_hash": "abc123"},
+            },
+        )
+
         # Update metadata (no handler/config — blob I/O is core.py's job)
         success = backend.update_entry_metadata(
             cache_key="test_key",
@@ -162,35 +162,38 @@ class TestUpdateEntryMetadataBackends:
                 "storage_format": "pickle",
                 "data_type": "dict",
                 "serializer": "pickle",
-            }
+            },
         )
-        
+
         assert success is True
-        
+
         # Verify entry updated
         entry = backend.get_entry("test_key")
         assert entry["file_size"] == 200
         # SqliteBackend maps content_hash → file_hash column
         assert entry["metadata"]["file_hash"] == "xyz789"
-        
+
         backend.close()
-    
+
     def test_json_backend_update(self, cache_dir):
         """Test JsonBackend.update_entry_metadata()."""
         metadata_file = cache_dir / "metadata.json"
         cache_dir.mkdir(parents=True)
-        
+
         backend = JsonBackend(metadata_file)
-        
+
         # Create entry
-        backend.put_entry("test_key", {
-            "description": "test",
-            "data_type": "dict",
-            "prefix": "",
-            "file_size": 100,
-            "metadata": {}
-        })
-        
+        backend.put_entry(
+            "test_key",
+            {
+                "description": "test",
+                "data_type": "dict",
+                "prefix": "",
+                "file_size": 100,
+                "metadata": {},
+            },
+        )
+
         # Update metadata only
         success = backend.update_entry_metadata(
             cache_key="test_key",
@@ -200,31 +203,34 @@ class TestUpdateEntryMetadataBackends:
                 "storage_format": "pickle",
                 "data_type": "dict",
                 "serializer": "pickle",
-            }
+            },
         )
-        
+
         assert success is True
-        
+
         # Verify persisted to disk
         entry = backend.get_entry("test_key")
         assert entry["file_size"] == 300
-    
+
     def test_sqlite_backend_update(self, cache_dir):
         """Test SqliteBackend.update_entry_metadata()."""
         db_file = cache_dir / "cache.db"
         cache_dir.mkdir(parents=True)
-        
+
         backend = SqliteBackend(db_file=str(db_file))
-        
+
         # Create entry
-        backend.put_entry("test_key", {
-            "description": "test",
-            "data_type": "dict",
-            "prefix": "",
-            "file_size": 100,
-            "metadata": {}
-        })
-        
+        backend.put_entry(
+            "test_key",
+            {
+                "description": "test",
+                "data_type": "dict",
+                "prefix": "",
+                "file_size": 100,
+                "metadata": {},
+            },
+        )
+
         # Update metadata only
         success = backend.update_entry_metadata(
             cache_key="test_key",
@@ -234,53 +240,52 @@ class TestUpdateEntryMetadataBackends:
                 "storage_format": "pickle",
                 "data_type": "dict",
                 "serializer": "pickle",
-            }
+            },
         )
-        
+
         assert success is True
-        
+
         # Verify updated in database
         entry = backend.get_entry("test_key")
         assert entry["file_size"] == 400
-        
+
         backend.close()
-    
+
     def test_update_nonexistent_key_returns_false(self, cache_dir):
         """Test updating nonexistent key returns False."""
         backend = SqliteBackend(db_file=":memory:")
-        
+
         success = backend.update_entry_metadata(
-            cache_key="nonexistent",
-            updates={"file_size": 100}
+            cache_key="nonexistent", updates={"file_size": 100}
         )
-        
+
         assert success is False
-        
+
         backend.close()
 
 
 class TestCacheKeyImmutability:
     """Test that cache_key remains immutable during updates."""
-    
+
     def test_cache_key_unchanged_after_update(self, memory_cache):
         """Verify cache_key doesn't change when updating data."""
         # Create entry
         original = {"value": 1}
         memory_cache.put(original, test="immutable")
-        
+
         # Get metadata before updates
         meta_before = memory_cache.get_metadata(test="immutable")
         cache_key_before = meta_before["cache_key"]
-        
+
         # Update data multiple times
         memory_cache.update_data({"value": 2}, test="immutable")
         memory_cache.update_data({"value": 3}, test="immutable")
-        
+
         # Verify cache_key unchanged
         meta_after = memory_cache.get_metadata(test="immutable")
         cache_key_after = meta_after["cache_key"]
         assert cache_key_after == cache_key_before
-        
+
         # Verify we can still retrieve with same params
         result = memory_cache.get(test="immutable")
         assert result["value"] == 3
@@ -288,29 +293,31 @@ class TestCacheKeyImmutability:
 
 class TestIntegrationAllBackends:
     """Integration tests across all backends."""
-    
-    @pytest.mark.parametrize("cache_fixture", ["memory_cache", "json_cache", "sqlite_cache"])
+
+    @pytest.mark.parametrize(
+        "cache_fixture", ["memory_cache", "json_cache", "sqlite_cache"]
+    )
     def test_update_workflow(self, cache_fixture, request):
         """Test complete update workflow on all backends."""
         cache = request.getfixturevalue(cache_fixture)
-        
+
         # Initial put
         data_v1 = np.array([1, 2, 3])
         cache.put(data_v1, version="v1")
-        
+
         # Verify initial
         result = cache.get(version="v1")
         np.testing.assert_array_equal(result, data_v1)
-        
+
         # Update
         data_v2 = np.array([10, 20, 30, 40])
         success = cache.update_data(data_v2, version="v1")
         assert success is True
-        
+
         # Verify updated
         result = cache.get(version="v1")
         np.testing.assert_array_equal(result, data_v2)
-        
+
         # Verify metadata updated
         meta = cache.get_metadata(version="v1")
         assert meta is not None
@@ -319,82 +326,86 @@ class TestIntegrationAllBackends:
 
 class TestTouchOperation:
     """Test touch() operation for TTL extension."""
-    
+
     def test_touch_existing_entry(self, memory_cache):
         """Test touching existing entry extends TTL."""
         # Create entry
         data = {"value": 100}
         memory_cache.put(data, test="touch_test")
-        
+
         # Get initial timestamp
         meta_before = memory_cache.get_metadata(test="touch_test")
         created_before = meta_before.get("created_at")
-        
+
         # Wait a moment
         import time
+
         time.sleep(0.1)
-        
+
         # Touch the entry
         success = memory_cache.touch(test="touch_test")
         assert success is True
-        
+
         # Verify timestamp updated
         meta_after = memory_cache.get_metadata(test="touch_test")
         created_after = meta_after.get("created_at")
-        
+
         assert created_after != created_before
         assert created_after > created_before
-    
+
     def test_touch_nonexistent_entry(self, memory_cache):
         """Test touching nonexistent entry returns False."""
         success = memory_cache.touch(test="nonexistent")
         assert success is False
-    
+
     def test_touch_with_cache_key(self, memory_cache):
         """Test touch using direct cache_key."""
         # Create entry
         data = {"value": 200}
         cache_key = memory_cache.put(data, key="direct_touch")
-        
+
         # Touch using cache_key
         success = memory_cache.touch(cache_key=cache_key)
         assert success is True
-        
+
         # Verify data still accessible
         result = memory_cache.get(key="direct_touch")
         assert result["value"] == 200
-    
+
     def test_touch_preserves_data(self, memory_cache):
         """Test that touch doesn't modify data."""
         # Create entry with specific data
         original_data = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
         memory_cache.put(original_data, test="preserve")
-        
+
         # Touch the entry
         memory_cache.touch(test="preserve")
-        
+
         # Verify data unchanged
         result = memory_cache.get(test="preserve")
         pd.testing.assert_frame_equal(result, original_data)
-    
-    @pytest.mark.parametrize("cache_fixture", ["memory_cache", "json_cache", "sqlite_cache"])
+
+    @pytest.mark.parametrize(
+        "cache_fixture", ["memory_cache", "json_cache", "sqlite_cache"]
+    )
     def test_touch_all_backends(self, cache_fixture, request):
         """Test touch works on all backends."""
         cache = request.getfixturevalue(cache_fixture)
-        
+
         # Create entry
         cache.put(np.array([1, 2, 3]), version="touch_test")
-        
+
         # Touch it
         success = cache.touch(version="touch_test")
         assert success is True
-        
+
         # Verify still accessible
         result = cache.get(version="touch_test")
         np.testing.assert_array_equal(result, np.array([1, 2, 3]))
 
 
 # ── Bulk & Batch Operation Tests ──────────────────────────────────────
+
 
 class TestDeleteWhere:
     """Test delete_where() with filter functions."""
@@ -442,7 +453,9 @@ class TestDeleteWhere:
         # Entry still alive
         assert memory_cache.get(item="safe") == {"val": 1}
 
-    @pytest.mark.parametrize("cache_fixture", ["memory_cache", "json_cache", "sqlite_cache"])
+    @pytest.mark.parametrize(
+        "cache_fixture", ["memory_cache", "json_cache", "sqlite_cache"]
+    )
     def test_delete_where_all_backends(self, cache_fixture, request):
         """delete_where works on every backend."""
         cache = request.getfixturevalue(cache_fixture)
@@ -450,9 +463,7 @@ class TestDeleteWhere:
         cache.put(np.array([3, 4]), exp="b")
         cache.put(np.array([5, 6]), exp="c")
 
-        deleted = cache.delete_where(
-            lambda e: e.get("data_type") == "array"
-        )
+        deleted = cache.delete_where(lambda e: e.get("data_type") == "array")
         assert deleted == 3
 
 
@@ -473,7 +484,9 @@ class TestDeleteMatching:
         memory_cache.put({"a": 1}, z="1")
         assert memory_cache.delete_matching() == 0
 
-    @pytest.mark.parametrize("cache_fixture", ["memory_cache", "json_cache", "sqlite_cache"])
+    @pytest.mark.parametrize(
+        "cache_fixture", ["memory_cache", "json_cache", "sqlite_cache"]
+    )
     def test_delete_matching_all_backends(self, cache_fixture, request):
         """delete_matching works on every backend."""
         cache = request.getfixturevalue(cache_fixture)
@@ -494,11 +507,13 @@ class TestGetBatch:
         memory_cache.put({"val": 1}, key="k1")
         memory_cache.put({"val": 2}, key="k2")
 
-        results = memory_cache.get_batch([
-            {"key": "k1"},
-            {"key": "k2"},
-            {"key": "missing"},
-        ])
+        results = memory_cache.get_batch(
+            [
+                {"key": "k1"},
+                {"key": "k2"},
+                {"key": "missing"},
+            ]
+        )
 
         assert len(results) == 3
         vals = list(results.values())
@@ -510,7 +525,9 @@ class TestGetBatch:
         """Empty input gives empty result."""
         assert memory_cache.get_batch([]) == {}
 
-    @pytest.mark.parametrize("cache_fixture", ["memory_cache", "json_cache", "sqlite_cache"])
+    @pytest.mark.parametrize(
+        "cache_fixture", ["memory_cache", "json_cache", "sqlite_cache"]
+    )
     def test_get_batch_all_backends(self, cache_fixture, request):
         """get_batch works on every backend."""
         cache = request.getfixturevalue(cache_fixture)
@@ -531,11 +548,13 @@ class TestDeleteBatch:
         memory_cache.put({"a": 1}, d="d1")
         memory_cache.put({"b": 2}, d="d2")
 
-        deleted = memory_cache.delete_batch([
-            {"d": "d1"},
-            {"d": "d2"},
-            {"d": "d_missing"},
-        ])
+        deleted = memory_cache.delete_batch(
+            [
+                {"d": "d1"},
+                {"d": "d2"},
+                {"d": "d_missing"},
+            ]
+        )
         assert deleted == 2
         assert memory_cache.get(d="d1") is None
         assert memory_cache.get(d="d2") is None
@@ -544,7 +563,9 @@ class TestDeleteBatch:
         """Empty input deletes nothing."""
         assert memory_cache.delete_batch([]) == 0
 
-    @pytest.mark.parametrize("cache_fixture", ["memory_cache", "json_cache", "sqlite_cache"])
+    @pytest.mark.parametrize(
+        "cache_fixture", ["memory_cache", "json_cache", "sqlite_cache"]
+    )
     def test_delete_batch_all_backends(self, cache_fixture, request):
         """delete_batch works on every backend."""
         cache = request.getfixturevalue(cache_fixture)
@@ -581,14 +602,12 @@ class TestTouchBatch:
 
         memory_cache.touch_batch(data_type="array")
 
-        np.testing.assert_array_equal(
-            memory_cache.get(p="p1"), np.array([10, 20])
-        )
-        np.testing.assert_array_equal(
-            memory_cache.get(p="p2"), np.array([30, 40])
-        )
+        np.testing.assert_array_equal(memory_cache.get(p="p1"), np.array([10, 20]))
+        np.testing.assert_array_equal(memory_cache.get(p="p2"), np.array([30, 40]))
 
-    @pytest.mark.parametrize("cache_fixture", ["memory_cache", "json_cache", "sqlite_cache"])
+    @pytest.mark.parametrize(
+        "cache_fixture", ["memory_cache", "json_cache", "sqlite_cache"]
+    )
     def test_touch_batch_all_backends(self, cache_fixture, request):
         """touch_batch works on every backend."""
         cache = request.getfixturevalue(cache_fixture)
@@ -601,12 +620,25 @@ class TestTouchBatch:
 
 # ── Blob Cleanup Tests ───────────────────────────────────────────────
 
+
 class TestBlobCleanupOnDelete:
     """Verify that invalidate/delete operations remove blob files from disk."""
 
     # Extensions that are actual cache blob files
-    _BLOB_EXTENSIONS = {".pkl", ".npz", ".b2nd", ".b2tr", ".parquet",
-                        ".lz4", ".zstd", ".gzip", ".zst", ".gz", ".bz2", ".xz"}
+    _BLOB_EXTENSIONS = {
+        ".pkl",
+        ".npz",
+        ".b2nd",
+        ".b2tr",
+        ".parquet",
+        ".lz4",
+        ".zstd",
+        ".gzip",
+        ".zst",
+        ".gz",
+        ".bz2",
+        ".xz",
+    }
 
     def _get_blob_files(self, cache_dir: Path) -> set:
         """Return the set of cache blob files currently on disk."""
@@ -655,9 +687,7 @@ class TestBlobCleanupOnDelete:
         blobs_before = self._get_blob_files(cache_dir)
         assert len(blobs_before) == 3
 
-        deleted = memory_cache.delete_where(
-            lambda e: e.get("data_type") == "array"
-        )
+        deleted = memory_cache.delete_where(lambda e: e.get("data_type") == "array")
         assert deleted == 2
 
         blobs_after = self._get_blob_files(cache_dir)
@@ -682,10 +712,12 @@ class TestBlobCleanupOnDelete:
         blobs_before = self._get_blob_files(cache_dir)
         assert len(blobs_before) == 2
 
-        deleted = memory_cache.delete_batch([
-            {"batch_del": "b1"},
-            {"batch_del": "b2"},
-        ])
+        deleted = memory_cache.delete_batch(
+            [
+                {"batch_del": "b1"},
+                {"batch_del": "b2"},
+            ]
+        )
         assert deleted == 2
         assert len(self._get_blob_files(cache_dir)) == 0
 
@@ -701,8 +733,12 @@ class TestBlobCleanupOnDelete:
         assert len(report["orphaned_blobs"]) == 0, f"Orphaned blobs found: {report}"
         assert len(report["dangling_entries"]) == 0
 
-    @pytest.mark.parametrize("cache_fixture", ["memory_cache", "json_cache", "sqlite_cache"])
-    def test_invalidate_blob_cleanup_all_backends(self, cache_fixture, cache_dir, request):
+    @pytest.mark.parametrize(
+        "cache_fixture", ["memory_cache", "json_cache", "sqlite_cache"]
+    )
+    def test_invalidate_blob_cleanup_all_backends(
+        self, cache_fixture, cache_dir, request
+    ):
         """Blob cleanup on invalidate works across all backends."""
         cache = request.getfixturevalue(cache_fixture)
         cache.put(np.array([1, 2, 3]), blob_backend_test="val")

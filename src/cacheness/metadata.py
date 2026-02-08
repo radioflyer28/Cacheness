@@ -33,7 +33,7 @@ import threading
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Dict, Any, Optional, List, Union
+from typing import Dict, Any, Optional, List
 
 import logging
 
@@ -46,6 +46,7 @@ try:
     from cachetools import LRUCache, LFUCache, FIFOCache, RRCache, TTLCache
     from functools import wraps
     import time
+
     CACHETOOLS_AVAILABLE = True
 except ImportError:
     CACHETOOLS_AVAILABLE = False
@@ -104,10 +105,12 @@ try:
 
         # Cache integrity verification
         file_hash = Column(String(16), nullable=True)  # XXH3_64 hash (16 hex chars)
-        
+
         # Entry signature for metadata integrity protection
-        entry_signature = Column(String(64), nullable=True)  # HMAC-SHA256 hex (64 chars)
-        
+        entry_signature = Column(
+            String(64), nullable=True
+        )  # HMAC-SHA256 hex (64 chars)
+
         # S3 ETag for S3-backed blob storage (separate from file_hash)
         s3_etag = Column(String(100), nullable=True)  # S3 ETag (MD5 or multipart hash)
 
@@ -120,23 +123,24 @@ try:
 
         # Original cache key parameters - only store, don't index (rarely queried)
         # Only populated when store_full_metadata=True config option is enabled
-        cache_key_params = Column(Text, nullable=True)  # JSON-serialized kwargs used for cache key
-        
+        cache_key_params = Column(
+            Text, nullable=True
+        )  # JSON-serialized kwargs used for cache key
+
         # User metadata dict - simple key-value metadata for filtering/querying
         # Raw values stored for easy JSON_EXTRACT queries (not hashed like cache_key_params)
-        metadata_dict = Column(Text, nullable=True)  # JSON dict for query_meta() filtering
+        metadata_dict = Column(
+            Text, nullable=True
+        )  # JSON dict for query_meta() filtering
 
         # Optimized composite indexes for actual query patterns only
         __table_args__ = (
             # PRIMARY: List entries by creation time (most common - list_entries)
             Index("idx_list_entries", desc("created_at")),
-            
-            # CLEANUP: TTL-based cleanup operations  
+            # CLEANUP: TTL-based cleanup operations
             Index("idx_cleanup", "created_at"),
-            
             # SIZE MANAGEMENT: Combined file size + time for cache management
             Index("idx_size_mgmt", "file_size", "created_at"),
-            
             # STATS: Data type for statistics (if needed)
             Index("idx_data_type", "data_type"),
         )
@@ -189,11 +193,11 @@ class MetadataBackend(ABC):
     @abstractmethod
     def get_entry(self, cache_key: str) -> Optional[Dict[str, Any]]:
         """Get specific cache entry metadata (internal storage format).
-        
+
         Returns a dict with internal field names:
-            description, data_type, prefix, created_at, accessed_at, 
+            description, data_type, prefix, created_at, accessed_at,
             file_size (bytes), metadata (nested dict)
-        
+
         See also: list_entries() returns user-facing format with different keys.
         """
         pass
@@ -206,7 +210,7 @@ class MetadataBackend(ABC):
     @abstractmethod
     def remove_entry(self, cache_key: str) -> bool:
         """Remove cache entry metadata.
-        
+
         Returns:
             bool: True if the entry existed and was removed, False if not found.
         """
@@ -215,14 +219,14 @@ class MetadataBackend(ABC):
     @abstractmethod
     def update_entry_metadata(self, cache_key: str, updates: Dict[str, Any]) -> bool:
         """Update metadata fields for an existing cache entry.
-        
+
         Updates derived metadata fields (file_size, content_hash, timestamps,
         data_type, etc.) after blob data has been written by the cache layer.
         The cache_key remains immutable.
-        
+
         This method only updates metadata — blob I/O is handled by
         UnifiedCache.update_data() before calling this method.
-        
+
         Args:
             cache_key: The unique identifier for the cache entry to update
             updates: Dict of metadata fields to update. Expected keys include:
@@ -235,7 +239,7 @@ class MetadataBackend(ABC):
                 - serializer (str): Serializer used
                 - compression_codec (str): Compression codec used
                 - object_type (str): Object type identifier
-            
+
         Returns:
             bool: True if entry was updated, False if entry doesn't exist
         """
@@ -244,11 +248,11 @@ class MetadataBackend(ABC):
     @abstractmethod
     def list_entries(self) -> List[Dict[str, Any]]:
         """List all cache entries with metadata (user-facing format).
-        
+
         Returns a list of dicts with user-facing field names:
             cache_key, data_type, description, metadata (nested dict),
             created (ISO string), last_accessed (ISO string), size_mb (float)
-        
+
         Note: Field names differ from get_entry() — this format is used by
         delete_where(), delete_matching(), and UnifiedCache.list_entries().
         """
@@ -322,26 +326,26 @@ class MetadataBackend(ABC):
 
 def create_entry_cache(cache_type: str, maxsize: int, ttl_seconds: float):
     """Create a TTLCache for the memory cache layer.
-    
+
     Uses cachetools.TTLCache which provides LRU eviction combined with
     time-based expiration. The ``cache_type`` parameter is accepted for
     forward-compatibility but currently only ``"lru"`` (the default) is
     meaningfully distinct — all types create a TTLCache with LRU eviction.
-    
+
     Args:
         cache_type: Cache eviction strategy name (currently all map to TTLCache).
         maxsize: Maximum number of entries in the memory cache.
         ttl_seconds: Time-to-live for cached entries in seconds.
-    
+
     Returns:
         TTLCache instance, or None if cachetools is not installed.
     """
     if not CACHETOOLS_AVAILABLE:
         return None
-    
+
     if cache_type not in ("lru", "lfu", "fifo", "rr"):
         logger.warning(f"Unknown cache type '{cache_type}', using TTLCache (LRU)")
-    
+
     # All types currently use TTLCache (LRU + TTL). cachetools does not
     # provide LFU/FIFO/RR variants with built-in TTL support.
     return TTLCache(maxsize=maxsize, ttl=ttl_seconds)
@@ -349,15 +353,15 @@ def create_entry_cache(cache_type: str, maxsize: int, ttl_seconds: float):
 
 class CachedMetadataBackend(MetadataBackend):
     """Wrapper that adds memory caching layer to disk-persistent metadata backends.
-    
-    This wrapper adds an in-memory cache layer between the application and disk-persistent 
+
+    This wrapper adds an in-memory cache layer between the application and disk-persistent
     backends (JSON and SQLite) to avoid repeated disk I/O operations. The memory cache
-    is completely separate from the in-memory backend - it's a caching layer on top 
+    is completely separate from the in-memory backend - it's a caching layer on top
     of disk storage.
-    
+
     Architecture:
         Application → Memory Cache Layer → Disk Backend (JSON/SQLite)
-    
+
     Features:
     - Configurable cache type (LRU, LFU, FIFO, RR)
     - TTL-based expiration for cached metadata entries
@@ -365,10 +369,10 @@ class CachedMetadataBackend(MetadataBackend):
     - Optional cache statistics tracking
     - Only applies to disk backends, never to pure in-memory backend
     """
-    
+
     def __init__(self, wrapped_backend: MetadataBackend, config):
         """Initialize memory cache layer for disk-persistent backend.
-        
+
         Args:
             wrapped_backend: The underlying disk-persistent metadata backend to wrap
             config: CacheMetadataConfig with memory cache settings
@@ -376,15 +380,15 @@ class CachedMetadataBackend(MetadataBackend):
         self.backend = wrapped_backend
         self.config = config
         self._lock = threading.RLock()
-        
+
         # Initialize memory cache layer if cachetools is available and enabled
         if CACHETOOLS_AVAILABLE and config.enable_memory_cache:
             self._memory_cache = create_entry_cache(
                 config.memory_cache_type,
-                config.memory_cache_maxsize, 
-                config.memory_cache_ttl_seconds
+                config.memory_cache_maxsize,
+                config.memory_cache_ttl_seconds,
             )
-            
+
             # Optional cache statistics
             if config.memory_cache_stats:
                 self._cache_hits = 0
@@ -392,29 +396,33 @@ class CachedMetadataBackend(MetadataBackend):
             else:
                 self._cache_hits = None
                 self._cache_misses = None
-                
-            logger.info(f"🚀 Memory cache layer enabled: {config.memory_cache_type} "
-                       f"(maxsize={config.memory_cache_maxsize}, ttl={config.memory_cache_ttl_seconds}s)")
+
+            logger.info(
+                f"🚀 Memory cache layer enabled: {config.memory_cache_type} "
+                f"(maxsize={config.memory_cache_maxsize}, ttl={config.memory_cache_ttl_seconds}s)"
+            )
         else:
             self._memory_cache = None
             self._cache_hits = None
             self._cache_misses = None
-            
+
             if not CACHETOOLS_AVAILABLE:
-                logger.warning("cachetools not available, memory cache layer disabled. Install with: pip install cachetools")
-    
+                logger.warning(
+                    "cachetools not available, memory cache layer disabled. Install with: pip install cachetools"
+                )
+
     def _cache_key_for_entry(self, cache_key: str) -> str:
         """Create cache key for memory cache layer."""
         return f"entry:{cache_key}"
-    
+
     def get_entry(self, cache_key: str) -> Optional[Dict[str, Any]]:
         """Get specific cache entry metadata with memory cache layer."""
         if self._memory_cache is None:
             return self.backend.get_entry(cache_key)
-        
+
         with self._lock:
             entry_cache_key = self._cache_key_for_entry(cache_key)
-            
+
             # Try memory cache first
             cached_entry = self._memory_cache.get(entry_cache_key)
             if cached_entry is not None:
@@ -422,24 +430,24 @@ class CachedMetadataBackend(MetadataBackend):
                     self._cache_hits += 1
                 logger.debug(f"Memory cache hit: {cache_key}")
                 return cached_entry
-            
+
             # Cache miss - load from disk backend
             if self._cache_misses is not None:
                 self._cache_misses += 1
-            
+
             entry = self.backend.get_entry(cache_key)
             if entry is not None:
                 # Cache the result in memory
                 self._memory_cache[entry_cache_key] = entry
                 logger.debug(f"Entry cached in memory: {cache_key}")
-            
+
             return entry
-    
+
     def put_entry(self, cache_key: str, entry_data: Dict[str, Any]):
         """Store cache entry metadata and update memory cache."""
         # Always call disk backend first
         self.backend.put_entry(cache_key, entry_data)
-        
+
         # Update memory cache if enabled
         if self._memory_cache is not None:
             with self._lock:
@@ -449,55 +457,61 @@ class CachedMetadataBackend(MetadataBackend):
                 if formatted_entry is not None:
                     self._memory_cache[entry_cache_key] = formatted_entry
                     logger.debug(f"Memory cache updated: {cache_key}")
-    
+
     def remove_entry(self, cache_key: str) -> bool:
         """Remove cache entry metadata and invalidate memory cache."""
         # Remove from disk backend first
         removed = self.backend.remove_entry(cache_key)
-        
+
         # Remove from memory cache if enabled
         if self._memory_cache is not None:
             with self._lock:
                 entry_cache_key = self._cache_key_for_entry(cache_key)
                 self._memory_cache.pop(entry_cache_key, None)
                 logger.debug(f"Memory cache invalidated: {cache_key}")
-        
+
         return removed
-    
+
     def update_entry_metadata(self, cache_key: str, updates: Dict[str, Any]) -> bool:
         """Update entry metadata and invalidate memory cache entry."""
         result = self.backend.update_entry_metadata(cache_key, updates)
-        
+
         # Invalidate memory cache entry so next get_entry() fetches fresh metadata
         if result and self._memory_cache is not None:
             with self._lock:
                 entry_cache_key = self._cache_key_for_entry(cache_key)
                 self._memory_cache.pop(entry_cache_key, None)
-                logger.debug(f"Memory cache invalidated after metadata update: {cache_key}")
-        
+                logger.debug(
+                    f"Memory cache invalidated after metadata update: {cache_key}"
+                )
+
         return result
 
     def clear_all(self) -> int:
         """Remove all cache entries and clear memory cache."""
         count = self.backend.clear_all()
-        
+
         # Clear memory cache if enabled
         if self._memory_cache is not None:
             with self._lock:
                 self._memory_cache.clear()
                 logger.debug("Memory cache cleared")
-        
+
         return count
-    
+
     def get_cache_stats(self) -> Dict[str, Any]:
         """Get memory cache layer statistics."""
-        if self._memory_cache is None or self._cache_hits is None or self._cache_misses is None:
+        if (
+            self._memory_cache is None
+            or self._cache_hits is None
+            or self._cache_misses is None
+        ):
             return {}
-        
+
         with self._lock:
             total_requests = self._cache_hits + self._cache_misses
             hit_rate = self._cache_hits / total_requests if total_requests > 0 else 0.0
-            
+
             return {
                 "memory_cache_enabled": True,
                 "memory_cache_type": self.config.memory_cache_type,
@@ -507,14 +521,14 @@ class CachedMetadataBackend(MetadataBackend):
                 "memory_cache_misses": self._cache_misses,
                 "memory_cache_hit_rate": round(hit_rate, 3),
             }
-    
+
     # Delegate all other methods to the wrapped backend
     def load_metadata(self) -> Dict[str, Any]:
         return self.backend.load_metadata()
-    
+
     def save_metadata(self, metadata: Dict[str, Any]):
         return self.backend.save_metadata(metadata)
-    
+
     def list_entries(self) -> List[Dict[str, Any]]:
         return self.backend.list_entries()
 
@@ -524,39 +538,39 @@ class CachedMetadataBackend(MetadataBackend):
     def get_stats(self) -> Dict[str, Any]:
         """Get cache statistics with optional entry cache stats."""
         stats = self.backend.get_stats()
-        
+
         # Add entry cache stats if available
         cache_stats = self.get_cache_stats()
         if cache_stats:
             stats.update(cache_stats)
-        
+
         return stats
-    
+
     def update_access_time(self, cache_key: str):
         # Update backend access time
         self.backend.update_access_time(cache_key)
-        
+
         # Invalidate memory cache entry to force refresh with new access time
         if self._memory_cache is not None:
             with self._lock:
                 entry_cache_key = self._cache_key_for_entry(cache_key)
                 self._memory_cache.pop(entry_cache_key, None)
-    
+
     def increment_hits(self):
         return self.backend.increment_hits()
-    
+
     def increment_misses(self):
         return self.backend.increment_misses()
-    
+
     def cleanup_expired(self, ttl_seconds: float) -> int:
         count = self.backend.cleanup_expired(ttl_seconds)
-        
+
         # Clear entire memory cache after cleanup (entries might be stale)
         if self._memory_cache is not None and count > 0:
             with self._lock:
                 self._memory_cache.clear()
                 logger.debug("Memory cache cleared after expired cleanup")
-        
+
         return count
 
     def close(self):
@@ -566,9 +580,9 @@ class CachedMetadataBackend(MetadataBackend):
             with self._lock:
                 self._memory_cache.clear()
                 logger.debug("Memory cache cleared during close")
-        
+
         # Close the wrapped backend
-        if hasattr(self.backend, 'close'):
+        if hasattr(self.backend, "close"):
             self.backend.close()
 
 
@@ -609,23 +623,27 @@ class JsonBackend(MetadataBackend):
     def _save_to_disk(self):
         """Save metadata to JSON file using atomic write pattern to prevent corruption."""
         import tempfile
+
         try:
             # Check if parent directory exists (may have been deleted during cleanup)
             if not self.metadata_file.parent.exists():
-                logger.debug(f"Metadata directory no longer exists: {self.metadata_file.parent}")
+                logger.debug(
+                    f"Metadata directory no longer exists: {self.metadata_file.parent}"
+                )
                 return
-                
+
             # Write to temp file first, then rename for atomicity
             fd, temp_path = tempfile.mkstemp(
-                suffix='.json.tmp', 
+                suffix=".json.tmp",
                 dir=self.metadata_file.parent,
-                prefix='cache_metadata_'
+                prefix="cache_metadata_",
             )
             try:
-                with os.fdopen(fd, 'w') as f:
+                with os.fdopen(fd, "w") as f:
                     f.write(json_dumps(self._metadata, default=str))
                 # Atomic rename (works on same filesystem)
                 import shutil
+
                 shutil.move(temp_path, self.metadata_file)
             except Exception:
                 # Clean up temp file on failure
@@ -655,7 +673,7 @@ class JsonBackend(MetadataBackend):
             entry = self._metadata.get("entries", {}).get(cache_key)
             if entry is None:
                 return None
-            
+
             # Entry already contains the structured fields matching SQLite schema
             return entry
 
@@ -666,7 +684,7 @@ class JsonBackend(MetadataBackend):
 
             # Extract and restructure metadata to match SQLite schema
             metadata = entry_data.get("metadata", {}).copy()
-            
+
             # Build complete entry with structured fields (matching SQLite columns)
             entry = {
                 "description": entry_data.get("description", ""),
@@ -677,7 +695,7 @@ class JsonBackend(MetadataBackend):
                 "file_size": entry_data.get("file_size", 0),
                 "metadata": metadata,  # Include all metadata as nested structure
             }
-            
+
             # Store complete entry - simple and efficient
             self._metadata["entries"][cache_key] = entry
             self._save_to_disk()
@@ -691,18 +709,18 @@ class JsonBackend(MetadataBackend):
                 self._save_to_disk()
                 return True
             return False
-    
+
     def update_entry_metadata(self, cache_key: str, updates: Dict[str, Any]) -> bool:
         """
         Update metadata fields for an existing cache entry.
-        
+
         Only updates metadata — blob I/O is handled by UnifiedCache.update_data().
-        
+
         Args:
             cache_key: The unique identifier for the cache entry to update
-            updates: Dict of metadata fields to update (file_size, file_hash, 
+            updates: Dict of metadata fields to update (file_size, file_hash,
                     actual_path, data_type, storage_format, serializer, etc.)
-            
+
         Returns:
             bool: True if entry was updated, False if entry doesn't exist
         """
@@ -711,27 +729,36 @@ class JsonBackend(MetadataBackend):
             entry = entries.get(cache_key)
             if not entry:
                 return False
-            
+
             # Update derived metadata (file_size, content_hash, created_at)
             now = datetime.now(timezone.utc)
             entry["created_at"] = now.isoformat()  # Reset timestamp
-            
+
             if "file_size" in updates:
                 entry["file_size"] = updates["file_size"]
             if "data_type" in updates:
                 entry["data_type"] = updates["data_type"]
             if "storage_format" in updates:
-                entry["storage_format"] = updates.get("storage_format", entry.get("storage_format"))
+                entry["storage_format"] = updates.get(
+                    "storage_format", entry.get("storage_format")
+                )
             if "serializer" in updates:
                 entry["serializer"] = updates["serializer"]
-            
+
             # Update metadata dict with new values
             metadata = entry.get("metadata", {})
-            for key in ("file_size", "content_hash", "file_hash", "actual_path", "storage_format", "serializer"):
+            for key in (
+                "file_size",
+                "content_hash",
+                "file_hash",
+                "actual_path",
+                "storage_format",
+                "serializer",
+            ):
                 if key in updates:
                     metadata[key] = updates[key]
             entry["metadata"] = metadata
-            
+
             # Save to disk immediately for atomicity
             self._save_to_disk()
             return True
@@ -767,7 +794,7 @@ class JsonBackend(MetadataBackend):
                 # Ensure timestamps are timezone-aware when returned
                 creation_time = entry.get("created_at")
                 access_time = entry.get("accessed_at")
-                
+
                 if creation_time and isinstance(creation_time, str):
                     try:
                         # Parse ISO format string back to timezone-aware datetime
@@ -811,23 +838,21 @@ class JsonBackend(MetadataBackend):
         """Get cache statistics (simple entries-based counting)."""
         with self._lock:
             entries = self._metadata.get("entries", {})
-            
+
             # Count total entries
             total_entries = len(entries)
-            
+
             # Calculate total size
-            total_size_mb = sum(entry.get("file_size", 0) for entry in entries.values()) / (1024 * 1024)
+            total_size_mb = sum(
+                entry.get("file_size", 0) for entry in entries.values()
+            ) / (1024 * 1024)
 
             # Count by data type
             dataframe_count = sum(
-                1
-                for entry in entries.values()
-                if entry.get("data_type") == "dataframe"
+                1 for entry in entries.values() if entry.get("data_type") == "dataframe"
             )
             array_count = sum(
-                1
-                for entry in entries.values()
-                if entry.get("data_type") == "array"
+                1 for entry in entries.values() if entry.get("data_type") == "array"
             )
 
             # Cache hit rate
@@ -850,7 +875,9 @@ class JsonBackend(MetadataBackend):
         with self._lock:
             entries = self._metadata.get("entries", {})
             if cache_key in entries:
-                entries[cache_key]["accessed_at"] = datetime.now(timezone.utc).isoformat()
+                entries[cache_key]["accessed_at"] = datetime.now(
+                    timezone.utc
+                ).isoformat()
                 self._save_to_disk()
 
     def increment_hits(self):
@@ -867,7 +894,6 @@ class JsonBackend(MetadataBackend):
 
     def cleanup_expired(self, ttl_seconds: float) -> int:
         """Remove expired entries and return count removed (simple entries structure)."""
-        from datetime import timedelta
 
         with self._lock:
             expired_keys = []
@@ -899,14 +925,14 @@ class JsonBackend(MetadataBackend):
         with self._lock:
             # Count entries from the entries dict
             entry_count = len(self._metadata.get("entries", {}))
-            
+
             # Reset to simple structure
             self._metadata = {
                 "entries": {},
                 "cache_hits": 0,
                 "cache_misses": 0,
             }
-            
+
             self._save_to_disk()
             return entry_count
 
@@ -945,51 +971,57 @@ class SqliteBackend(MetadataBackend):
             )
 
         self.db_file = db_file
-        
+
         # Configure SQLite engine with appropriate optimizations
         # Note: SQLite uses SingletonThreadPool which doesn't support pool_size/max_overflow
         self.engine = create_engine(
-            f"sqlite:///{db_file}", 
+            f"sqlite:///{db_file}",
             echo=echo,
             pool_pre_ping=True,
             pool_recycle=3600,  # Recycle connections every hour
             connect_args={
                 "check_same_thread": False,  # Allow multi-threading
                 "timeout": 30,  # Longer timeout for database locks
-            }
+            },
         )
-        
+
         # Enable SQLite optimizations via events
         from sqlalchemy import event
-        
+
         @event.listens_for(self.engine, "connect")
         def set_sqlite_pragma(dbapi_connection, connection_record):
             """Set SQLite pragmas for maximum performance."""
             cursor = dbapi_connection.cursor()
-            
+
             # WAL mode for better concurrency (most important)
             cursor.execute("PRAGMA journal_mode=WAL")
-            
+
             # Aggressive performance optimizations
-            cursor.execute("PRAGMA synchronous=NORMAL")    # Good balance of safety/speed
-            cursor.execute("PRAGMA cache_size=20000")      # 20MB cache (increased from 10MB)
-            cursor.execute("PRAGMA temp_store=MEMORY")     # Temp tables in memory
-            cursor.execute("PRAGMA mmap_size=536870912")   # 512MB memory mapped I/O (doubled)
-            cursor.execute("PRAGMA page_size=32768")       # Larger page size for better I/O
-            
+            cursor.execute("PRAGMA synchronous=NORMAL")  # Good balance of safety/speed
+            cursor.execute(
+                "PRAGMA cache_size=20000"
+            )  # 20MB cache (increased from 10MB)
+            cursor.execute("PRAGMA temp_store=MEMORY")  # Temp tables in memory
+            cursor.execute(
+                "PRAGMA mmap_size=536870912"
+            )  # 512MB memory mapped I/O (doubled)
+            cursor.execute("PRAGMA page_size=32768")  # Larger page size for better I/O
+
             # Query optimization pragmas
-            cursor.execute("PRAGMA optimize")              # Enable query planner optimizations
+            cursor.execute("PRAGMA optimize")  # Enable query planner optimizations
             cursor.execute("PRAGMA analysis_limit=1000")  # Better statistics
-            
+
             # Concurrent access optimizations
-            cursor.execute("PRAGMA busy_timeout=30000")    # 30s busy timeout
-            cursor.execute("PRAGMA wal_autocheckpoint=1000") # WAL checkpoint every 1000 pages
-            
+            cursor.execute("PRAGMA busy_timeout=30000")  # 30s busy timeout
+            cursor.execute(
+                "PRAGMA wal_autocheckpoint=1000"
+            )  # WAL checkpoint every 1000 pages
+
             # Enable foreign key constraints
             cursor.execute("PRAGMA foreign_keys=ON")
-            
+
             cursor.close()
-        
+
         self.SessionLocal = sessionmaker(
             autocommit=False, autoflush=False, bind=self.engine
         )
@@ -997,7 +1029,7 @@ class SqliteBackend(MetadataBackend):
 
         # Create tables
         Base.metadata.create_all(self.engine)
-        
+
         # Run migrations for schema evolution
         self._run_migrations()
 
@@ -1013,31 +1045,35 @@ class SqliteBackend(MetadataBackend):
             inspector = inspect(self.engine)
             if "cache_entries" not in inspector.get_table_names():
                 return  # Table doesn't exist yet, will be created by create_all
-            
-            existing_columns = {col["name"] for col in inspector.get_columns("cache_entries")}
-            
+
+            existing_columns = {
+                col["name"] for col in inspector.get_columns("cache_entries")
+            }
+
             # Migration 1: Add s3_etag column if missing
             if "s3_etag" not in existing_columns:
                 logger.info("Migrating: Adding s3_etag column to cache_entries")
-                session.execute(text(
-                    "ALTER TABLE cache_entries ADD COLUMN s3_etag VARCHAR(100)"
-                ))
+                session.execute(
+                    text("ALTER TABLE cache_entries ADD COLUMN s3_etag VARCHAR(100)")
+                )
                 session.commit()
-            
+
             # Migration 2: Add cache_key_params column if missing
             if "cache_key_params" not in existing_columns:
-                logger.info("Migrating: Adding cache_key_params column to cache_entries")
-                session.execute(text(
-                    "ALTER TABLE cache_entries ADD COLUMN cache_key_params TEXT"
-                ))
+                logger.info(
+                    "Migrating: Adding cache_key_params column to cache_entries"
+                )
+                session.execute(
+                    text("ALTER TABLE cache_entries ADD COLUMN cache_key_params TEXT")
+                )
                 session.commit()
-            
+
             # Migration 3: Add metadata_dict column if missing
             if "metadata_dict" not in existing_columns:
                 logger.info("Migrating: Adding metadata_dict column to cache_entries")
-                session.execute(text(
-                    "ALTER TABLE cache_entries ADD COLUMN metadata_dict TEXT"
-                ))
+                session.execute(
+                    text("ALTER TABLE cache_entries ADD COLUMN metadata_dict TEXT")
+                )
                 session.commit()
 
     def _init_stats(self):
@@ -1077,7 +1113,7 @@ class SqliteBackend(MetadataBackend):
 
             # Build metadata from columns directly - zero JSON parsing for backend data
             metadata = {}
-            
+
             # Add backend technical metadata from dedicated columns (not JSON)
             if entry.object_type is not None:
                 metadata["object_type"] = entry.object_type
@@ -1089,7 +1125,7 @@ class SqliteBackend(MetadataBackend):
                 metadata["compression_codec"] = entry.compression_codec
             if entry.actual_path is not None:
                 metadata["actual_path"] = entry.actual_path
-            
+
             # Add optional security fields from columns (not JSON)
             if entry.file_hash is not None:
                 metadata["file_hash"] = entry.file_hash
@@ -1097,7 +1133,7 @@ class SqliteBackend(MetadataBackend):
                 metadata["entry_signature"] = entry.entry_signature
             if entry.s3_etag is not None:
                 metadata["s3_etag"] = entry.s3_etag
-            
+
             # Only parse cache_key_params JSON if it exists (should be disabled by default)
             if entry.cache_key_params is not None:
                 try:
@@ -1106,9 +1142,17 @@ class SqliteBackend(MetadataBackend):
                     pass  # Skip malformed cache_key_params
 
             # Ensure timestamps are always in UTC for consistency
-            created_at_utc = entry.created_at.astimezone(timezone.utc) if entry.created_at.tzinfo else entry.created_at.replace(tzinfo=timezone.utc)
-            accessed_at_utc = entry.accessed_at.astimezone(timezone.utc) if entry.accessed_at.tzinfo else entry.accessed_at.replace(tzinfo=timezone.utc)
-            
+            created_at_utc = (
+                entry.created_at.astimezone(timezone.utc)
+                if entry.created_at.tzinfo
+                else entry.created_at.replace(tzinfo=timezone.utc)
+            )
+            accessed_at_utc = (
+                entry.accessed_at.astimezone(timezone.utc)
+                if entry.accessed_at.tzinfo
+                else entry.accessed_at.replace(tzinfo=timezone.utc)
+            )
+
             return {
                 "description": entry.description,
                 "data_type": entry.data_type,
@@ -1124,53 +1168,58 @@ class SqliteBackend(MetadataBackend):
         with self._lock, self.SessionLocal() as session:
             # Extract and process metadata fields efficiently
             metadata = entry_data.get("metadata", {}).copy()
-            
+
             # Extract full metadata copy FIRST (before any pop() operations) if present
             full_metadata_dict = metadata.pop("_full_metadata", None)
             full_metadata_json = None
             if full_metadata_dict is not None:
                 try:
                     full_metadata_json = json_dumps(full_metadata_dict)
-                    logger.debug(f"Serialized full_metadata: {len(full_metadata_json)} chars")
+                    logger.debug(
+                        f"Serialized full_metadata: {len(full_metadata_json)} chars"
+                    )
                 except Exception as e:
                     # If serialization fails, skip full_metadata
                     logger.warning(f"Failed to serialize full_metadata JSON: {e}")
                     full_metadata_json = None
-            
+
             # Extract backend technical metadata to dedicated columns (not JSON)
             object_type = metadata.pop("object_type", None)
             storage_format = metadata.pop("storage_format", None)
             serializer = metadata.pop("serializer", None)
             compression_codec = metadata.pop("compression_codec", None)
             actual_path = metadata.pop("actual_path", None)
-            
+
             # Extract security fields from metadata (remove from JSON to avoid duplication)
             file_hash = metadata.pop("file_hash", None)
             entry_signature = metadata.pop("entry_signature", None)
             s3_etag = metadata.pop("s3_etag", None)  # S3 ETag if using S3 backend
             # These fields are pre-serialized JSON strings from the caching layer
             cache_key_params = metadata.pop("cache_key_params", None)
-            metadata_dict_value = metadata.pop("metadata_dict", None)  # User metadata for querying
-            
+            metadata_dict_value = metadata.pop(
+                "metadata_dict", None
+            )  # User metadata for querying
+
             # Remove redundant fields that are already stored as columns
             metadata.pop("prefix", None)  # Already stored in prefix column
             metadata.pop("data_type", None)  # Already stored in data_type column
-            
+
             # Handle timestamps with proper defaults
             created_at = entry_data.get("created_at")
             if isinstance(created_at, str):
                 created_at = datetime.fromisoformat(created_at)
             elif created_at is None:
                 created_at = datetime.now(timezone.utc)
-            
+
             accessed_at = entry_data.get("accessed_at")
             if isinstance(accessed_at, str):
                 accessed_at = datetime.fromisoformat(accessed_at)
             elif accessed_at is None:
                 accessed_at = datetime.now(timezone.utc)
-            
+
             # Use efficient INSERT OR REPLACE with dedicated columns - zero JSON overhead
             from sqlalchemy import text
+
             session.execute(
                 text("""
                     INSERT OR REPLACE INTO cache_entries 
@@ -1200,8 +1249,8 @@ class SqliteBackend(MetadataBackend):
                     "compression_codec": compression_codec,
                     "actual_path": actual_path,
                     "created_at": created_at,
-                    "accessed_at": accessed_at
-                }
+                    "accessed_at": accessed_at,
+                },
             )
             session.commit()
 
@@ -1210,21 +1259,23 @@ class SqliteBackend(MetadataBackend):
         with self._lock, self.SessionLocal() as session:
             # Delete cache entry - custom metadata records will cascade delete automatically
             # due to ondelete="CASCADE" on the cache_key foreign key
-            result = session.execute(delete(CacheEntry).where(CacheEntry.cache_key == cache_key))
+            result = session.execute(
+                delete(CacheEntry).where(CacheEntry.cache_key == cache_key)
+            )
             session.commit()
             return result.rowcount > 0
-    
+
     def update_entry_metadata(self, cache_key: str, updates: Dict[str, Any]) -> bool:
         """
         Update metadata fields for an existing cache entry.
-        
+
         Only updates metadata — blob I/O is handled by UnifiedCache.update_data().
-        
+
         Args:
             cache_key: The unique identifier for the cache entry to update
-            updates: Dict of metadata fields to update (file_size, file_hash, 
+            updates: Dict of metadata fields to update (file_size, file_hash,
                     actual_path, data_type, storage_format, serializer, etc.)
-            
+
         Returns:
             bool: True if entry was updated, False if entry doesn't exist
         """
@@ -1233,14 +1284,14 @@ class SqliteBackend(MetadataBackend):
             entry = session.execute(
                 select(CacheEntry).where(CacheEntry.cache_key == cache_key)
             ).scalar_one_or_none()
-            
+
             if not entry:
                 return False
-            
+
             # Update derived metadata fields
             now = datetime.now(timezone.utc)
             entry.created_at = now  # Reset timestamp
-            
+
             if "file_size" in updates:
                 entry.file_size = updates["file_size"]
             if "file_hash" in updates:
@@ -1259,22 +1310,25 @@ class SqliteBackend(MetadataBackend):
                 entry.compression_codec = updates["compression_codec"]
             if "object_type" in updates:
                 entry.object_type = updates["object_type"]
-            
+
             session.commit()
             return True
 
     def iter_entry_summaries(self) -> List[Dict[str, Any]]:
         """Return lightweight flat entry dicts — raw SQL, no ORM hydration."""
         from sqlalchemy import text
+
         with self.SessionLocal() as session:
-            rows = session.execute(text(
-                "SELECT cache_key, data_type, description, prefix, "
-                "       file_size, created_at, accessed_at, "
-                "       object_type, storage_format, serializer, "
-                "       compression_codec, actual_path, "
-                "       file_hash, entry_signature "
-                "FROM cache_entries"
-            )).fetchall()
+            rows = session.execute(
+                text(
+                    "SELECT cache_key, data_type, description, prefix, "
+                    "       file_size, created_at, accessed_at, "
+                    "       object_type, storage_format, serializer, "
+                    "       compression_codec, actual_path, "
+                    "       file_hash, entry_signature "
+                    "FROM cache_entries"
+                )
+            ).fetchall()
             result = []
             for row in rows:
                 flat = {
@@ -1287,13 +1341,20 @@ class SqliteBackend(MetadataBackend):
                     "accessed_at": row[6],
                 }
                 # Only include non-None technical metadata
-                if row[7] is not None: flat["object_type"] = row[7]
-                if row[8] is not None: flat["storage_format"] = row[8]
-                if row[9] is not None: flat["serializer"] = row[9]
-                if row[10] is not None: flat["compression_codec"] = row[10]
-                if row[11] is not None: flat["actual_path"] = row[11]
-                if row[12] is not None: flat["file_hash"] = row[12]
-                if row[13] is not None: flat["entry_signature"] = row[13]
+                if row[7] is not None:
+                    flat["object_type"] = row[7]
+                if row[8] is not None:
+                    flat["storage_format"] = row[8]
+                if row[9] is not None:
+                    flat["serializer"] = row[9]
+                if row[10] is not None:
+                    flat["compression_codec"] = row[10]
+                if row[11] is not None:
+                    flat["actual_path"] = row[11]
+                if row[12] is not None:
+                    flat["file_hash"] = row[12]
+                if row[13] is not None:
+                    flat["entry_signature"] = row[13]
                 result.append(flat)
             return result
 
@@ -1313,7 +1374,7 @@ class SqliteBackend(MetadataBackend):
             for entry in entries:
                 # Build metadata from columns directly - zero JSON parsing for backend data
                 entry_metadata = {}
-                
+
                 # Add backend technical metadata from dedicated columns (not JSON)
                 if entry.object_type is not None:
                     entry_metadata["object_type"] = entry.object_type
@@ -1325,7 +1386,7 @@ class SqliteBackend(MetadataBackend):
                     entry_metadata["compression_codec"] = entry.compression_codec
                 if entry.actual_path is not None:
                     entry_metadata["actual_path"] = entry.actual_path
-                
+
                 # Add optional security fields from columns (not JSON)
                 if entry.file_hash is not None:
                     entry_metadata["file_hash"] = entry.file_hash
@@ -1333,14 +1394,16 @@ class SqliteBackend(MetadataBackend):
                     entry_metadata["entry_signature"] = entry.entry_signature
                 if entry.s3_etag is not None:
                     entry_metadata["s3_etag"] = entry.s3_etag
-                
+
                 # Only parse cache_key_params JSON if it exists (should be disabled by default)
                 if entry.cache_key_params is not None:
                     try:
-                        entry_metadata["cache_key_params"] = json_loads(entry.cache_key_params)
+                        entry_metadata["cache_key_params"] = json_loads(
+                            entry.cache_key_params
+                        )
                     except (ValueError, TypeError):
                         pass  # Skip malformed cache_key_params
-                        
+
                 result.append(
                     {
                         "cache_key": entry.cache_key,
@@ -1362,13 +1425,19 @@ class SqliteBackend(MetadataBackend):
             row = session.execute(
                 select(
                     func.count(CacheEntry.cache_key).label("total"),
-                    func.coalesce(func.sum(CacheEntry.file_size), 0).label("total_size"),
-                    func.count(case(
-                        (CacheEntry.data_type == "dataframe", 1),
-                    )).label("dataframe_count"),
-                    func.count(case(
-                        (CacheEntry.data_type == "array", 1),
-                    )).label("array_count"),
+                    func.coalesce(func.sum(CacheEntry.file_size), 0).label(
+                        "total_size"
+                    ),
+                    func.count(
+                        case(
+                            (CacheEntry.data_type == "dataframe", 1),
+                        )
+                    ).label("dataframe_count"),
+                    func.count(
+                        case(
+                            (CacheEntry.data_type == "array", 1),
+                        )
+                    ).label("array_count"),
                 )
             ).one()
 
@@ -1430,7 +1499,6 @@ class SqliteBackend(MetadataBackend):
 
     def cleanup_expired(self, ttl_seconds: float) -> int:
         """Remove expired entries and return count removed."""
-        from datetime import timedelta
 
         cutoff_time = datetime.now(timezone.utc) - timedelta(seconds=ttl_seconds)
 
@@ -1449,19 +1517,19 @@ class SqliteBackend(MetadataBackend):
             # Count existing entries
             result = session.execute(select(func.count(CacheEntry.cache_key)))
             entry_count = result.scalar() or 0
-            
+
             # Delete all entries
             session.execute(delete(CacheEntry))
-            
+
             # Reset stats
             stats = session.execute(
                 select(CacheStats).where(CacheStats.id == 1)
             ).scalar_one_or_none()
-            
+
             if stats:
                 stats.cache_hits = 0
                 stats.cache_misses = 0
-            
+
             session.commit()
             return entry_count
 
@@ -1477,11 +1545,12 @@ class SqliteBackend(MetadataBackend):
 
     def close(self):
         """Close all database connections and clean up resources."""
-        if hasattr(self, 'engine') and self.engine:
+        if hasattr(self, "engine") and self.engine:
             # Close all connections in the pool
             self.engine.dispose()
             # On Windows, we need to be more aggressive
             import gc
+
             gc.collect()  # Force garbage collection to release file handles
             logger.debug("SQLite engine disposed and connections closed")
 
@@ -1516,8 +1585,8 @@ def create_metadata_backend(backend_type: str = "auto", **kwargs) -> MetadataBac
         MetadataBackend instance (potentially wrapped with caching)
     """
     # Extract cache config if provided
-    cache_config = kwargs.pop('config', None)
-    
+    cache_config = kwargs.pop("config", None)
+
     # Create the base backend
     if backend_type == "json":
         metadata_file = kwargs.get("metadata_file", Path("cache_metadata.json"))
@@ -1545,11 +1614,11 @@ def create_metadata_backend(backend_type: str = "auto", **kwargs) -> MetadataBac
             raise ImportError(
                 f"PostgreSQL backend is not available. Install with: pip install psycopg2-binary sqlalchemy. Error: {e}"
             )
-        
+
         connection_url = kwargs.get("connection_url")
         if not connection_url:
             raise ValueError("PostgreSQL backend requires 'connection_url' parameter")
-        
+
         backend = PostgresBackend(
             connection_url=connection_url,
             pool_size=kwargs.get("pool_size", 10),
@@ -1576,21 +1645,26 @@ def create_metadata_backend(backend_type: str = "auto", **kwargs) -> MetadataBac
                 except Exception:
                     # Final fallback to JSON
                     logger.warning("SQLite backends failed, falling back to JSON")
-                    metadata_file = kwargs.get("metadata_file", Path("cache_metadata.json"))
+                    metadata_file = kwargs.get(
+                        "metadata_file", Path("cache_metadata.json")
+                    )
                     backend = JsonBackend(metadata_file)
         else:
             # SQLAlchemy not available, use JSON
             metadata_file = kwargs.get("metadata_file", Path("cache_metadata.json"))
             backend = JsonBackend(metadata_file)
     else:
-        raise ValueError(f"Unknown backend type: {backend_type}. Supported: 'auto', 'json', 'sqlite', 'sqlite_memory', 'postgresql'")
-    
+        raise ValueError(
+            f"Unknown backend type: {backend_type}. Supported: 'auto', 'json', 'sqlite', 'sqlite_memory', 'postgresql'"
+        )
+
     # Apply memory cache layer wrapper for disk-persistent backends
-    if (cache_config is not None and 
-        hasattr(cache_config, 'enable_memory_cache') and 
-        cache_config.enable_memory_cache):
-        
+    if (
+        cache_config is not None
+        and hasattr(cache_config, "enable_memory_cache")
+        and cache_config.enable_memory_cache
+    ):
         logger.debug(f"Wrapping {backend_type} backend with memory cache layer")
         backend = CachedMetadataBackend(backend, cache_config)
-    
+
     return backend

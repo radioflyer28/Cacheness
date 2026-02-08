@@ -17,9 +17,7 @@ import pytest
 import tempfile
 import time
 from pathlib import Path
-from unittest.mock import Mock, patch, MagicMock
-from contextlib import redirect_stderr
-import io
+from unittest.mock import patch
 
 from cacheness.error_handling import (
     CacheError,
@@ -61,7 +59,7 @@ class TestCacheErrorHierarchy:
         with caplog.at_level(logging.ERROR):
             context = {"operation": "test", "file": "test.txt"}
             CacheError("Test error", context)
-            
+
         assert "Cache error: Test error" in caplog.text
         assert "operation=test" in caplog.text
         assert "file=test.txt" in caplog.text
@@ -90,24 +88,26 @@ class TestWithErrorHandlingDecorator:
 
     def test_decorator_reraises_cache_errors(self):
         """Test that decorator re-raises CacheError types as-is."""
+
         @with_error_handling()
         def failing_function():
             raise CacheStorageError("Original cache error")
 
         with pytest.raises(CacheStorageError) as exc_info:
             failing_function()
-        
+
         assert str(exc_info.value) == "Original cache error"
 
     def test_decorator_converts_other_exceptions(self):
         """Test that decorator converts non-cache exceptions."""
+
         @with_error_handling(error_type=CacheHandlerError)
         def failing_function():
             raise ValueError("Original error")
 
         with pytest.raises(CacheHandlerError) as exc_info:
             failing_function()
-        
+
         assert "Error in failing_function: Original error" in str(exc_info.value)
         assert exc_info.value.context["function"] == "failing_function"
         assert exc_info.value.context["original_error"] == "Original error"
@@ -116,14 +116,14 @@ class TestWithErrorHandlingDecorator:
     def test_decorator_with_context(self):
         """Test decorator with additional context."""
         context = {"operation": "test_op", "file": "test.txt"}
-        
+
         @with_error_handling(context=context)
         def failing_function():
             raise RuntimeError("Test error")
 
         with pytest.raises(CacheError) as exc_info:
             failing_function()
-        
+
         assert exc_info.value.context["operation"] == "test_op"
         assert exc_info.value.context["file"] == "test.txt"
         assert exc_info.value.context["function"] == "failing_function"
@@ -131,17 +131,19 @@ class TestWithErrorHandlingDecorator:
     def test_decorator_no_reraise_mode(self, caplog):
         """Test decorator in no-reraise mode."""
         with caplog.at_level(logging.WARNING):
+
             @with_error_handling(reraise=False, default_return="default")
             def failing_function():
                 raise ValueError("Test error")
 
             result = failing_function()
-        
+
         assert result == "default"
         assert "Suppressed error in failing_function: Test error" in caplog.text
 
     def test_decorator_preserves_successful_returns(self):
         """Test that decorator doesn't interfere with successful operations."""
+
         @with_error_handling()
         def successful_function(value):
             return value * 2
@@ -151,13 +153,14 @@ class TestWithErrorHandlingDecorator:
 
     def test_decorator_with_args_and_kwargs(self):
         """Test decorator properly handles function arguments."""
+
         @with_error_handling()
         def function_with_args(arg1, arg2, kwarg1=None, kwarg2=None):
             raise ValueError("Test error")
 
         with pytest.raises(CacheError) as exc_info:
             function_with_args("a", "b", kwarg1="c", kwarg2="d")
-        
+
         assert exc_info.value.context["args_count"] == 2
         assert set(exc_info.value.context["kwargs_keys"]) == {"kwarg1", "kwarg2"}
 
@@ -170,7 +173,7 @@ class TestCacheOperationContext:
         with caplog.at_level(logging.DEBUG):
             with cache_operation_context("test_operation", key="value"):
                 time.sleep(0.01)  # Small delay to test duration logging
-        
+
         logs = caplog.text
         assert "Starting cache operation: test_operation" in logs
         assert "Cache operation completed: test_operation" in logs
@@ -182,7 +185,7 @@ class TestCacheOperationContext:
             with pytest.raises(CacheStorageError):
                 with cache_operation_context("test_operation"):
                     raise CacheStorageError("Test cache error")
-        
+
         assert "Cache operation failed: test_operation" in caplog.text
 
     def test_non_cache_error_conversion(self, caplog):
@@ -191,7 +194,7 @@ class TestCacheOperationContext:
             with pytest.raises(ValueError):  # Should not be converted anymore
                 with cache_operation_context("test_operation", file="test.txt"):
                     raise ValueError("Test error")
-        
+
         assert "Unexpected error in cache operation: test_operation" in caplog.text
 
 
@@ -201,13 +204,14 @@ class TestLogCachePerformance:
     def test_successful_operation_logging(self, caplog):
         """Test performance logging for successful operations."""
         with caplog.at_level(logging.DEBUG):
+
             @log_cache_performance
             def test_function():
                 time.sleep(0.01)
                 return "success"
 
             result = test_function()
-        
+
         assert result == "success"
         assert "Cache operation test_function completed in" in caplog.text
         assert "s" in caplog.text
@@ -215,6 +219,7 @@ class TestLogCachePerformance:
     def test_failed_operation_logging(self, caplog):
         """Test performance logging for failed operations."""
         with caplog.at_level(logging.WARNING):
+
             @log_cache_performance
             def failing_function():
                 time.sleep(0.01)
@@ -222,7 +227,7 @@ class TestLogCachePerformance:
 
             with pytest.raises(ValueError):
                 failing_function()
-        
+
         assert "Cache operation failing_function failed after" in caplog.text
         assert "Test error" in caplog.text
 
@@ -235,7 +240,7 @@ class TestValidateFilePath:
         with tempfile.TemporaryDirectory() as temp_dir:
             file_path = Path(temp_dir) / "test_file.txt"
             result = validate_file_path(file_path)
-            
+
             assert isinstance(result, Path)
             assert result == file_path
             assert result.parent.exists()  # Parent directory should be created
@@ -246,15 +251,15 @@ class TestValidateFilePath:
             # Test with existing file
             existing_file = Path(temp_dir) / "existing.txt"
             existing_file.write_text("test")
-            
+
             result = validate_file_path(existing_file, must_exist=True)
             assert result == existing_file
-            
+
             # Test with non-existing file
             non_existing = Path(temp_dir) / "non_existing.txt"
             with pytest.raises(CacheStorageError) as exc_info:
                 validate_file_path(non_existing, must_exist=True)
-            
+
             assert "Required file does not exist" in str(exc_info.value)
             assert str(non_existing) in exc_info.value.context["file_path"]
 
@@ -262,7 +267,7 @@ class TestValidateFilePath:
         """Test error on empty filename."""
         with pytest.raises(CacheStorageError) as exc_info:
             validate_file_path("")
-        
+
         assert "Invalid file path: empty filename" in str(exc_info.value)
 
     def test_string_path_conversion(self):
@@ -270,18 +275,18 @@ class TestValidateFilePath:
         with tempfile.TemporaryDirectory() as temp_dir:
             file_path_str = str(Path(temp_dir) / "test.txt")
             result = validate_file_path(file_path_str)
-            
+
             assert isinstance(result, Path)
             assert str(result) == file_path_str
 
-    @patch('pathlib.Path.mkdir')
+    @patch("pathlib.Path.mkdir")
     def test_os_error_handling(self, mock_mkdir):
         """Test OSError handling during path validation."""
         mock_mkdir.side_effect = OSError("Permission denied")
-        
+
         with pytest.raises(CacheStorageError) as exc_info:
             validate_file_path("/invalid/path/file.txt")
-        
+
         assert "File system error" in str(exc_info.value)
         assert "Permission denied" in str(exc_info.value)
 
@@ -292,40 +297,43 @@ class TestSafeFileOperation:
     def test_successful_file_operation(self, caplog):
         """Test successful file operation."""
         with caplog.at_level(logging.DEBUG):
+
             def mock_operation(content):
                 return f"processed: {content}"
-            
+
             with tempfile.TemporaryDirectory() as temp_dir:
                 file_path = Path(temp_dir) / "test.txt"
                 result = safe_file_operation(
                     "test write", file_path, mock_operation, "test content"
                 )
-        
+
         assert result == "processed: test content"
         assert "Starting cache operation: test write" in caplog.text
 
     def test_permission_error_handling(self):
         """Test handling of permission errors."""
+
         def failing_operation():
             raise PermissionError("Access denied")
-        
+
         file_path = Path("/test/file.txt")
         with pytest.raises(CacheStorageError) as exc_info:
             safe_file_operation("test operation", file_path, failing_operation)
-        
+
         assert "Permission denied for test operation" in str(exc_info.value)
         assert exc_info.value.context["operation"] == "test operation"
         assert exc_info.value.context["file_path"] == str(file_path)
 
     def test_os_error_handling(self):
         """Test handling of general OS errors."""
+
         def failing_operation():
             raise OSError("Disk full")
-        
+
         file_path = Path("/test/file.txt")
         with pytest.raises(CacheStorageError) as exc_info:
             safe_file_operation("test operation", file_path, failing_operation)
-        
+
         assert "File system error during test operation" in str(exc_info.value)
         assert "Disk full" in str(exc_info.value)
 
@@ -335,23 +343,25 @@ class TestHandleImportErrors:
 
     def test_successful_import_operation(self):
         """Test decorator doesn't interfere with successful operations."""
+
         @handle_import_errors("test_module")
         def successful_function():
             return "success"
-        
+
         result = successful_function()
         assert result == "success"
 
     def test_import_error_handling(self, caplog):
         """Test import error conversion."""
         with caplog.at_level(logging.ERROR):
+
             @handle_import_errors("missing_module", "test functionality")
             def failing_function():
                 raise ImportError("No module named 'missing_module'")
-            
+
             with pytest.raises(CacheConfigurationError) as exc_info:
                 failing_function()
-        
+
         assert "Missing dependency 'missing_module'" in str(exc_info.value)
         assert "required for test functionality" in str(exc_info.value)
         assert exc_info.value.context["module_name"] == "missing_module"
@@ -360,13 +370,14 @@ class TestHandleImportErrors:
 
     def test_import_error_without_required_for(self):
         """Test import error handling without required_for parameter."""
+
         @handle_import_errors("missing_module")
         def failing_function():
             raise ImportError("No module named 'missing_module'")
-        
+
         with pytest.raises(CacheConfigurationError) as exc_info:
             failing_function()
-        
+
         assert "Missing dependency 'missing_module'" in str(exc_info.value)
         assert "required for" not in str(exc_info.value)
         assert exc_info.value.context["required_for"] is None
@@ -378,29 +389,31 @@ class TestLogConfigurationValidation:
     def test_successful_validation_logging(self, caplog):
         """Test logging for successful configuration validation."""
         with caplog.at_level(logging.DEBUG):
+
             class TestConfig:
                 @log_configuration_validation("TestConfig")
                 def validate(self):
                     return True
-            
+
             config = TestConfig()
             result = config.validate()
-        
+
         assert result is True
         assert "TestConfig configuration validated successfully" in caplog.text
 
     def test_failed_validation_logging(self, caplog):
         """Test logging for failed configuration validation."""
         with caplog.at_level(logging.ERROR):
+
             class TestConfig:
                 @log_configuration_validation("TestConfig")
                 def validate(self):
                     raise ValueError("Invalid configuration")
-            
+
             config = TestConfig()
             with pytest.raises(ValueError):
                 config.validate()
-        
+
         assert "TestConfig configuration validation failed" in caplog.text
         assert "Invalid configuration" in caplog.text
 
@@ -413,17 +426,17 @@ class TestErrorSummary:
         summary = ErrorSummary()
         assert not summary.has_errors()
         assert not summary.has_warnings()
-        
+
         # Add error and warning
         error = ValueError("Test error")
         summary.add_error(error, {"key": "value"})
         summary.add_warning("Test warning", {"operation": "test"})
-        
+
         assert summary.has_errors()
         assert summary.has_warnings()
         assert len(summary.errors) == 1
         assert len(summary.warnings) == 1
-        
+
         # Check report
         report = summary.get_error_report()
         assert report["error_count"] == 1
@@ -438,7 +451,7 @@ class TestErrorSummary:
             summary.add_error(ValueError("Error 1"))
             summary.add_error(TypeError("Error 2"))
             summary.log_summary()
-        
+
         assert "Cache operation completed with 2 error(s)" in caplog.text
 
     def test_log_summary_success(self, caplog):
@@ -446,8 +459,11 @@ class TestErrorSummary:
         with caplog.at_level(logging.DEBUG):
             summary = ErrorSummary()
             summary.log_summary()
-        
-        assert "Cache operation completed successfully with no errors or warnings" in caplog.text
+
+        assert (
+            "Cache operation completed successfully with no errors or warnings"
+            in caplog.text
+        )
 
 
 class TestErrorHandlingIntegration:
@@ -456,15 +472,16 @@ class TestErrorHandlingIntegration:
     def test_decorator_with_context_manager(self, caplog):
         """Test decorator and context manager working together."""
         with caplog.at_level(logging.DEBUG):
+
             @with_error_handling(error_type=CacheStorageError)
             def operation_with_context():
                 with cache_operation_context("test_operation"):
                     raise ValueError("Test error")
-            
+
             # Now the decorator should properly convert to CacheStorageError
             with pytest.raises(CacheStorageError):
                 operation_with_context()
-        
+
         logs = caplog.text
         assert "Starting cache operation: test_operation" in logs
         assert "Unexpected error in cache operation" in logs
@@ -473,33 +490,34 @@ class TestErrorHandlingIntegration:
         """Test file validation and safe operations together."""
         with tempfile.TemporaryDirectory() as temp_dir:
             file_path = Path(temp_dir) / "test.txt"
-            
+
             # Validate path
             validated_path = validate_file_path(file_path)
-            
+
             # Use safe operation
             def write_content(content):
                 validated_path.write_text(content)
                 return "written"
-            
+
             result = safe_file_operation(
                 "write test", validated_path, write_content, "test content"
             )
-            
+
             assert result == "written"
             assert validated_path.read_text() == "test content"
 
     def test_performance_logging_with_error_handling(self, caplog):
         """Test performance logging combined with error handling."""
         with caplog.at_level(logging.WARNING):
+
             @log_cache_performance
             @with_error_handling(reraise=False, default_return="fallback")
             def slow_failing_operation():
                 time.sleep(0.01)
                 raise ValueError("Simulated error")
-            
+
             result = slow_failing_operation()
-        
+
         assert result == "fallback"
         logs = caplog.text
         # The performance decorator should not log "failed after" when the error is suppressed
@@ -507,18 +525,19 @@ class TestErrorHandlingIntegration:
 
     def test_comprehensive_error_context_propagation(self):
         """Test that error context is properly propagated through layers."""
+
         @with_error_handling(
             error_type=CacheHandlerError,
-            context={"layer": "handler", "operation": "process"}
+            context={"layer": "handler", "operation": "process"},
         )
         def handler_operation():
             with cache_operation_context("handler_process", item_id="123"):
                 raise RuntimeError("Core failure")
-        
+
         # Now the decorator should properly convert to CacheHandlerError
         with pytest.raises(CacheHandlerError) as exc_info:
             handler_operation()
-        
+
         # Check that context from decorator is preserved
         context = exc_info.value.context
         assert context["layer"] == "handler"

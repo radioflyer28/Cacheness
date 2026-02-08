@@ -12,14 +12,14 @@ from typing import Dict, Any, Optional, List
 class MetadataBackend(ABC):
     """
     Abstract base class for cache metadata backends.
-    
+
     This interface defines the contract for storing and retrieving cache entry
     metadata. Implementations can use various storage mechanisms:
     - JSON files (simple, portable)
     - SQLite databases (queryable, concurrent access)
     - In-memory dictionaries (fast, ephemeral)
     - Redis/external databases (distributed)
-    
+
     All implementations must be thread-safe.
     """
 
@@ -27,7 +27,7 @@ class MetadataBackend(ABC):
     def load_metadata(self) -> Dict[str, Any]:
         """
         Load complete metadata structure.
-        
+
         Returns:
             Dictionary containing all cache metadata including entries and stats.
         """
@@ -37,7 +37,7 @@ class MetadataBackend(ABC):
     def save_metadata(self, metadata: Dict[str, Any]):
         """
         Save complete metadata structure.
-        
+
         Args:
             metadata: Complete metadata dictionary to persist.
         """
@@ -47,10 +47,10 @@ class MetadataBackend(ABC):
     def get_entry(self, cache_key: str) -> Optional[Dict[str, Any]]:
         """
         Get specific cache entry metadata.
-        
+
         Args:
             cache_key: The unique identifier for the cache entry.
-            
+
         Returns:
             Entry metadata dictionary, or None if not found.
         """
@@ -60,7 +60,7 @@ class MetadataBackend(ABC):
     def put_entry(self, cache_key: str, entry_data: Dict[str, Any]):
         """
         Store cache entry metadata.
-        
+
         Args:
             cache_key: The unique identifier for the cache entry.
             entry_data: Metadata dictionary to store.
@@ -71,7 +71,7 @@ class MetadataBackend(ABC):
     def remove_entry(self, cache_key: str):
         """
         Remove cache entry metadata.
-        
+
         Args:
             cache_key: The unique identifier for the cache entry to remove.
         """
@@ -81,19 +81,19 @@ class MetadataBackend(ABC):
     def update_entry_metadata(self, cache_key: str, updates: Dict[str, Any]) -> bool:
         """
         Update metadata fields for an existing cache entry.
-        
+
         Updates derived metadata fields (file_size, content_hash, timestamps,
         data_type, etc.) after blob data has been written by the cache layer.
         The cache_key remains immutable.
-        
+
         This method only updates metadata — blob I/O is handled by
         UnifiedCache.update_data() before calling this method.
-        
+
         Args:
             cache_key: The unique identifier for the cache entry to update
             updates: Dict of metadata fields to update (file_size, file_hash,
                     actual_path, data_type, storage_format, serializer, etc.)
-            
+
         Returns:
             bool: True if entry was updated, False if entry doesn't exist
         """
@@ -103,7 +103,7 @@ class MetadataBackend(ABC):
     def list_entries(self) -> List[Dict[str, Any]]:
         """
         List all cache entries with metadata.
-        
+
         Returns:
             List of all entry metadata dictionaries.
         """
@@ -113,7 +113,7 @@ class MetadataBackend(ABC):
     def get_stats(self) -> Dict[str, Any]:
         """
         Get cache statistics.
-        
+
         Returns:
             Dictionary containing cache statistics (hits, misses, entry count, etc.)
         """
@@ -123,7 +123,7 @@ class MetadataBackend(ABC):
     def update_access_time(self, cache_key: str):
         """
         Update last access time for cache entry.
-        
+
         Args:
             cache_key: The unique identifier for the cache entry.
         """
@@ -143,10 +143,10 @@ class MetadataBackend(ABC):
     def cleanup_expired(self, ttl_seconds: float) -> int:
         """
         Remove expired entries and return count removed.
-        
+
         Args:
             ttl_seconds: Time-to-live in seconds. Entries older than this are removed.
-            
+
         Returns:
             Number of entries removed.
         """
@@ -156,7 +156,7 @@ class MetadataBackend(ABC):
     def clear_all(self) -> int:
         """
         Remove all cache entries and return count removed.
-        
+
         Returns:
             Number of entries removed.
         """
@@ -165,16 +165,16 @@ class MetadataBackend(ABC):
     def close(self):
         """
         Close and clean up any resources.
-        
+
         Default implementation does nothing. Override in backends that hold
         resources like database connections or file handles.
         """
         pass
-    
+
     def __enter__(self):
         """Support context manager protocol."""
         return self
-    
+
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Ensure resources are cleaned up."""
         self.close()

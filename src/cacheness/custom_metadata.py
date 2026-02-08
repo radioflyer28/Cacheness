@@ -50,7 +50,7 @@ Usage:
 
 import logging
 from datetime import datetime, timezone
-from typing import Dict, Type, Any, Optional, List
+from typing import Dict, Type, Optional, List
 
 try:
     from sqlalchemy import (
@@ -135,7 +135,7 @@ if SQLALCHEMY_AVAILABLE:
             )
 
         def __repr__(self):
-            cache_key_display = getattr(self, 'cache_key', 'N/A')
+            cache_key_display = getattr(self, "cache_key", "N/A")
             return f"<{self.__class__.__name__}(id={self.id}, cache_key={cache_key_display})>"
 
         @classmethod
@@ -397,12 +397,12 @@ def migrate_custom_metadata_tables(engine=None):
         # This avoids conflicts with cache_entries/cache_stats tables
         # which may be managed by different backends (SQLite vs PostgreSQL)
         tables_to_create = []
-        
+
         # Add all registered custom metadata model tables
         for schema_name, model_class in _custom_metadata_registry.items():
             if hasattr(model_class, "__table__") and model_class.__table__ is not None:
                 tables_to_create.append(model_class.__table__)
-        
+
         # Create only the specified tables (safe to call multiple times)
         Base.metadata.create_all(engine, tables=tables_to_create)
 
@@ -425,7 +425,7 @@ def migrate_custom_metadata_tables(engine=None):
 def cleanup_orphaned_metadata(engine=None, model_class=None) -> int:
     """
     Clean up orphaned custom metadata records that no longer have corresponding cache entries.
-    
+
     With direct FK architecture, orphaned metadata should not exist (cascade delete handles it),
     but this utility is provided for manual cleanup if needed (e.g., after FK constraint issues).
 
@@ -441,8 +441,6 @@ def cleanup_orphaned_metadata(engine=None, model_class=None) -> int:
         return 0
 
     try:
-        from sqlalchemy import create_engine
-        from .metadata import CacheEntry
 
         if engine is None:
             try:
@@ -465,12 +463,16 @@ def cleanup_orphaned_metadata(engine=None, model_class=None) -> int:
 
         with SessionLocal() as session:
             total_cleaned = 0
-            
+
             # Clean specific model or all registered models
-            models_to_clean = [model_class] if model_class else list(_custom_metadata_registry.values())
-            
+            models_to_clean = (
+                [model_class]
+                if model_class
+                else list(_custom_metadata_registry.values())
+            )
+
             for model in models_to_clean:
-                if hasattr(model, 'cleanup_orphaned_metadata'):
+                if hasattr(model, "cleanup_orphaned_metadata"):
                     count = model.cleanup_orphaned_metadata(session)
                     total_cleaned += count
 

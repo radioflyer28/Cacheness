@@ -9,10 +9,8 @@ Issue: CACHE-8fu
 """
 
 import os
-from pathlib import Path
 
 import numpy as np
-import pytest
 
 from cacheness import cacheness
 from cacheness.config import (
@@ -26,6 +24,7 @@ from cacheness.config import (
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_cache(tmp_dir, backend="json"):
     """Create a cacheness instance for testing."""

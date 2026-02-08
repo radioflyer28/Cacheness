@@ -30,7 +30,7 @@ def _hash_single_file(file_info: Tuple[Path, Path]) -> Tuple[str, str]:
     file_path, base_path = file_info
     # Get relative path and normalize to forward slashes for cross-platform compatibility
     rel_path = file_path.relative_to(base_path).as_posix()
-    
+
     try:
         # Hash the file content
         hasher = xxhash.xxh3_64()
@@ -63,11 +63,11 @@ def hash_directory_parallel(
     """
     # Validate input first
     if directory_path is None:
-        return f"missing_directory:None"
-    
+        return "missing_directory:None"
+
     if not isinstance(directory_path, Path):
         directory_path = Path(directory_path)
-    
+
     if not directory_path.exists() or not directory_path.is_dir():
         return f"missing_directory:{str(directory_path)}"
 
@@ -214,11 +214,11 @@ def hash_file_content(file_path: Optional[Path]) -> str:
     """
     # Validate input first
     if file_path is None:
-        return f"missing_file:None"
-    
+        return "missing_file:None"
+
     if not isinstance(file_path, Path):
         file_path = Path(file_path)
-    
+
     if not file_path.exists():
         return f"missing_file:{str(file_path)}"
 

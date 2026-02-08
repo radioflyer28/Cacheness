@@ -9,7 +9,6 @@ using the UnifiedCache system with automatic key generation.
 import atexit
 import functools
 import weakref
-import xxhash
 from typing import Any, Callable, Optional, Union, Dict, Tuple, cast
 
 from .core import UnifiedCache, CacheConfig, _normalize_function_args
@@ -65,14 +64,14 @@ def _generate_cache_key(
 
     # Normalize arguments to consistent parameter mapping
     normalized_params = _normalize_function_args(func, args, kwargs)
-    
+
     # Add function identification to parameters for uniqueness
     enhanced_params = {**normalized_params, "__function__": func_id}
-    
+
     # Add key prefix if provided
     if key_prefix:
         enhanced_params["__key_prefix__"] = key_prefix
-    
+
     # Use the same unified cache key generation as UnifiedCache
     return create_unified_cache_key(enhanced_params, config)
 
@@ -130,7 +129,7 @@ class cached:
             ignore_errors: If True, cache errors don't prevent function execution
         """
         self.ttl_seconds = ttl_seconds
-        
+
         self.key_prefix = key_prefix
         self.cache_instance = cache_instance
         self.key_func = key_func
@@ -245,7 +244,7 @@ class cached:
     def close(self):
         """
         Close the cache instance if this decorator owns it.
-        
+
         Call this method to explicitly release resources when the decorated
         function is no longer needed, especially in long-running applications.
         """
@@ -259,18 +258,19 @@ class cached:
     def for_api(cls, ttl_seconds: float = 21600, ignore_errors: bool = True, **kwargs):
         """
         Decorator optimized for API requests.
-        
+
         Defaults:
         - TTL: 6 hours (21600 seconds)
         - ignore_errors: True (don't fail if cache has issues)
         - Fast compression for JSON/text data
-        
+
         Example:
             @cached.for_api(ttl_seconds=14400)  # 4 hours
             def fetch_weather(city):
                 return requests.get(f"api.weather.com/{city}").json()
         """
         from .core import UnifiedCache
+
         cache_instance = UnifiedCache.for_api(ttl_seconds=ttl_seconds, **kwargs)
         # Track for cleanup using weak reference
         _decorator_cache_instances.append(weakref.ref(cache_instance))
