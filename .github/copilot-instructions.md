@@ -368,9 +368,76 @@ git worktree add -b issue-a1b2c3d-handler-perf ../Cacheness-issue-a1b2c3d dev
 # 3. Open in new VS Code window
 code ../Cacheness-issue-<hash>
 
-# 4. Update beads to mark issue as in-progress
+# 4. Create WORKTREE.md with issue details
+# (Do this from within the new worktree's VS Code window using mcp_beads_show)
+
+# 5. Update beads to mark issue as in-progress
 # (Do this from within the new worktree's VS Code window)
 ```
+
+### WORKTREE.md Documentation
+
+Each feature worktree should have a `WORKTREE.md` file at the root documenting the issue:
+
+**Purpose:**
+- Provides context about what's being worked on
+- Tracks progress and decisions made during work
+- Useful for parallel agent work (each agent sees their task)
+- Helps resume work after context switches
+
+**Template:**
+```markdown
+# Worktree: Issue <hash>
+
+**Branch:** `issue-<hash>-<description>`
+**Status:** In Progress
+**Assigned:** <agent-name or your-name>
+**Created:** <date>
+
+## Issue Details
+
+<Copy from beads: title, description, acceptance criteria>
+
+## Work Log
+
+- [ ] Task 1
+- [ ] Task 2
+- [ ] Task 3
+
+## Notes
+
+- Any important decisions or findings
+- Links to relevant documentation
+- Dependencies or blockers
+
+## Testing
+
+- [ ] Unit tests pass
+- [ ] Integration tests pass
+- [ ] Manual testing completed
+
+## Definition of Done
+
+- [ ] Code complete and committed
+- [ ] Tests pass: `uv run pytest tests/ -x -q`
+- [ ] Quality gates pass: `uv run ruff format . && uv run ruff check --fix . && uv run ty`
+- [ ] Feature branch pushed
+- [ ] Ready for integration to dev
+```
+
+**Creating WORKTREE.md:**
+```bash
+# In your new worktree
+cd ../Cacheness-issue-<hash>
+
+# Use beads to get issue details
+mcp_beads_show --id <hash>
+
+# Create WORKTREE.md with the issue information
+# (Agent will do this automatically based on beads output)
+```
+
+**Important:** `WORKTREE.md` is git-ignored (worktree-specific metadata, not committed)
 
 ### Working in Feature Worktree
 
@@ -381,8 +448,12 @@ Once in your feature worktree:
 pwd                                    # Should show: .../Cacheness-issue-<hash>
 git branch --show-current              # Should show: issue-<hash>-description
 
+# Check WORKTREE.md for issue context and tasks
+cat WORKTREE.md
+
 # Normal development workflow
 # ... make changes ...
+# Update WORKTREE.md work log as you progress
 git add .
 git commit -m "fix: description of changes"
 
@@ -506,7 +577,8 @@ git worktree list
 **MANDATORY WORKFLOW:**
 
 1. **File issues (in beads) for remaining work** — Create issues for anything that needs follow-up
-2. **Create feature worktree** (if working on specific issue):
+2. **Create `WORKTREE.md` with issue details from beads
+   - Create feature worktree** (if working on specific issue):
    - Get issue hash from beads: `mcp_beads_show` or `mcp_beads_ready`
    - Create worktree: `git worktree add -b issue-<hash>-<desc> ../Cacheness-issue-<hash> dev`
    - Open in new VS Code window: `code ../Cacheness-issue-<hash>`

@@ -37,3 +37,6 @@ config/my_*.yaml
 config/my_*.json
 docker-compose.override.yml
 .env
+
+# Worktree-specific metadata (not committed)
+WORKTREE.md
