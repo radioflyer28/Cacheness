@@ -441,7 +441,6 @@ def cleanup_orphaned_metadata(engine=None, model_class=None) -> int:
         return 0
 
     try:
-
         if engine is None:
             try:
                 from .core import get_cache

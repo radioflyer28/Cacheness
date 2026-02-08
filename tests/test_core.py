@@ -287,6 +287,141 @@ class TestCacheness:
         result = cache.get(nonexistent="key")
         assert result is None
 
+    def test_exists_returns_true_for_cached_entry(self, cache):
+        """Test that exists() returns True for entries that exist."""
+        # Create a cache entry
+        test_data = {"value": 42}
+        cache.put(test_data, test_key="exists_test")
+
+        # Check existence using kwargs
+        assert cache.exists(test_key="exists_test") is True
+
+        # Check existence using direct cache_key
+        cache_key = cache._create_cache_key({"test_key": "exists_test"})
+        assert cache.exists(cache_key=cache_key) is True
+
+    def test_exists_returns_false_for_missing_entry(self, cache):
+        """Test that exists() returns False for entries that don't exist."""
+        # Check for non-existent entry using kwargs
+        assert cache.exists(nonexistent_key="missing") is False
+
+        # Check for non-existent entry using direct cache_key
+        assert cache.exists(cache_key="fake_cache_key_123") is False
+
+    def test_exists_returns_false_for_expired_entry(self, temp_cache_dir):
+        """Test that exists() returns False for expired entries."""
+        from cacheness.config import (
+            CacheStorageConfig,
+            CacheMetadataConfig,
+            CompressionConfig,
+            SerializationConfig,
+            HandlerConfig,
+        )
+        import time
+
+        # Create cache with very short TTL (0.1 seconds)
+        storage_config = CacheStorageConfig(
+            cache_dir=str(temp_cache_dir), cleanup_on_init=False
+        )
+        metadata_config = CacheMetadataConfig(
+            metadata_backend="json", default_ttl_seconds=0.1
+        )
+        compression_config = CompressionConfig()
+        serialization_config = SerializationConfig()
+        handler_config = HandlerConfig()
+
+        config = CacheConfig(
+            storage=storage_config,
+            metadata=metadata_config,
+            compression=compression_config,
+            serialization=serialization_config,
+            handlers=handler_config,
+        )
+
+        cache = cacheness(config)
+
+        # Create entry
+        test_data = {"value": 99}
+        cache.put(test_data, expired_test="entry")
+
+        # Verify it exists initially
+        assert cache.exists(expired_test="entry") is True
+
+        # Wait for expiration (0.15 seconds > 0.1 second TTL)
+        time.sleep(0.15)
+
+        # Verify it no longer exists
+        assert cache.exists(expired_test="entry") is False
+
+    def test_exists_check_expiration_parameter(self, temp_cache_dir):
+        """Test that exists() respects the check_expiration parameter."""
+        from cacheness.config import (
+            CacheStorageConfig,
+            CacheMetadataConfig,
+            CompressionConfig,
+            SerializationConfig,
+            HandlerConfig,
+        )
+        import time
+
+        # Create cache with very short TTL
+        storage_config = CacheStorageConfig(
+            cache_dir=str(temp_cache_dir), cleanup_on_init=False
+        )
+        metadata_config = CacheMetadataConfig(
+            metadata_backend="json", default_ttl_seconds=0.1
+        )
+        compression_config = CompressionConfig()
+        serialization_config = SerializationConfig()
+        handler_config = HandlerConfig()
+
+        config = CacheConfig(
+            storage=storage_config,
+            metadata=metadata_config,
+            compression=compression_config,
+            serialization=serialization_config,
+            handlers=handler_config,
+        )
+
+        cache = cacheness(config)
+
+        # Create entry
+        test_data = {"value": 123}
+        cache.put(test_data, expiration_param_test="entry")
+
+        # Wait for expiration
+        time.sleep(0.15)
+
+        # With check_expiration=True (default), should return False
+        assert cache.exists(expiration_param_test="entry") is False
+
+        # With check_expiration=False, should return True (entry still in metadata)
+        assert (
+            cache.exists(expiration_param_test="entry", check_expiration=False) is True
+        )
+
+    def test_exists_is_metadata_only(self, cache, tmp_path):
+        """Test that exists() does not load the blob file."""
+        # Create a large entry
+        large_data = np.random.rand(1000, 1000)  # ~8MB array
+        cache.put(large_data, large_test="data")
+
+        # Get the cache entry to find the blob file path
+        cache_key = cache._create_cache_key({"large_test": "data"})
+        entry = cache.metadata_backend.get_entry(cache_key)
+        blob_path = Path(entry.get("metadata", {}).get("actual_path"))
+
+        # Delete the blob file (but keep metadata)
+        if blob_path.exists():
+            blob_path.unlink()
+
+        # exists() should still return True (metadata exists)
+        # This proves it doesn't access the blob file
+        assert cache.exists(large_test="data") is True
+
+        # But get() should return None (blob missing)
+        assert cache.get(large_test="data") is None
+
     def test_cache_key_generation(self, cache):
         """Test cache key generation from parameters."""
         params1 = {"a": 1, "b": 2, "c": 3}
@@ -579,7 +714,9 @@ class TestCacheness:
         # Check stats to verify size is under target
         stats = cache.metadata_backend.get_stats()
         total_size_mb = stats.get("total_size_mb", 0)
-        assert total_size_mb <= 0.005, f"Cache size {total_size_mb}MB should be <= 0.005MB after enforcement"
+        assert total_size_mb <= 0.005, (
+            f"Cache size {total_size_mb}MB should be <= 0.005MB after enforcement"
+        )
 
 
 class TestFactoryMethods:

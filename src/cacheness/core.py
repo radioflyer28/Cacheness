@@ -363,7 +363,6 @@ class UnifiedCache:
             return {}
 
         try:
-
             if hasattr(self.metadata_backend, "SessionLocal"):
                 with self.metadata_backend.SessionLocal() as session:
                     from sqlalchemy import select
@@ -1165,6 +1164,50 @@ class UnifiedCache:
 
             return entry
 
+    def exists(
+        self,
+        cache_key: Optional[str] = None,
+        prefix: str = "",
+        check_expiration: bool = True,
+        **kwargs,
+    ) -> bool:
+        """
+        Check if a cache entry exists without loading the blob file.
+
+        This is a lightweight metadata-only check that avoids loading large cached
+        objects into memory. Useful for existence checks before calling get().
+
+        Args:
+            cache_key: Direct cache key (if provided, **kwargs are ignored)
+            prefix: Descriptive prefix prepended to the cache filename (not used for check)
+            check_expiration: If True, returns False for expired entries (default: True)
+            **kwargs: Parameters identifying the cached data (used if cache_key is None)
+
+        Returns:
+            bool: True if entry exists and is not expired, False otherwise
+
+        Example:
+            # Check before loading large DataFrame
+            if cache.exists(experiment="exp_001", run_id=42):
+                df = cache.get(experiment="exp_001", run_id=42)
+            else:
+                df = expensive_computation()
+                cache.put(df, experiment="exp_001", run_id=42)
+        """
+        with self._lock:
+            if cache_key is None:
+                cache_key = self._create_cache_key(kwargs)
+
+            entry = self.metadata_backend.get_entry(cache_key)
+            if not entry:
+                return False
+
+            # Check expiration if requested
+            if check_expiration and self._is_expired(cache_key):
+                return False
+
+            return True
+
     def update_data(self, data: Any, cache_key: Optional[str] = None, **kwargs) -> bool:
         """
         Update blob data at an existing cache entry without changing the cache_key.
@@ -1610,7 +1653,7 @@ class UnifiedCache:
         target_size = (
             self.config.storage.max_cache_size_mb * 0.8
         )  # Clean to 80% of limit
-        
+
         result = self.metadata_backend.cleanup_by_size(target_size)
         removed_count = result.get("count", 0)
         removed_entries = result.get("removed_entries", [])

@@ -261,7 +261,6 @@ class TestFullMetadataStoragePostgreSQL:
         """Verify full_metadata works with PostgreSQL backend."""
         cache_dir = tmp_path / "cache"
 
-
         config = CacheConfig(
             cache_dir=str(cache_dir),
             metadata_backend="postgresql",

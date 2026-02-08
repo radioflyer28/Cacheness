@@ -286,10 +286,10 @@ class MetadataBackend(ABC):
     @abstractmethod
     def cleanup_by_size(self, target_size_mb: float) -> Dict[str, Any]:
         """Remove least-recently-accessed entries until cache size drops to or below target.
-        
+
         Args:
             target_size_mb: Target cache size in megabytes
-            
+
         Returns:
             Dict with 'count' (int) and 'removed_entries' (list of dicts with 'cache_key' and 'actual_path')
         """
@@ -951,54 +951,66 @@ class JsonBackend(MetadataBackend):
             # Get current total size
             stats = self.get_stats()
             total_size_mb = stats.get("total_size_mb", 0)
-            
-            logger.debug(f"cleanup_by_size: current size {total_size_mb:.6f}MB, target {target_size_mb:.6f}MB")
-            
+
+            logger.debug(
+                f"cleanup_by_size: current size {total_size_mb:.6f}MB, target {target_size_mb:.6f}MB"
+            )
+
             if total_size_mb <= target_size_mb:
                 return {"count": 0, "removed_entries": []}  # Already at or below target
-            
+
             entries = self._metadata.get("entries", {})
             logger.debug(f"cleanup_by_size: {len(entries)} total entries")
-            
+
             # Sort entries by last_accessed (oldest first) for LRU eviction
             sorted_entries = sorted(
                 entries.items(),
-                key=lambda item: item[1].get("accessed_at", item[1].get("created_at", "")),
+                key=lambda item: item[1].get(
+                    "accessed_at", item[1].get("created_at", "")
+                ),
             )
-            
+
             # Calculate how many bytes we need to remove
             target_size_bytes = target_size_mb * 1024 * 1024
             current_size_bytes = total_size_mb * 1024 * 1024
             bytes_to_remove = current_size_bytes - target_size_bytes
-            
+
             logger.debug(f"cleanup_by_size: need to remove {bytes_to_remove:.0f} bytes")
-            
+
             removed_entries = []
             accumulated_bytes = 0
-            
+
             # Remove entries until we've freed up enough space
             for cache_key, entry in sorted_entries:
                 if accumulated_bytes >= bytes_to_remove:
                     break
-                    
-                # file_size is stored at top level of entry dict  
+
+                # file_size is stored at top level of entry dict
                 entry_size_bytes = entry.get("file_size", 0)
-                
+
                 # actual_path is stored in nested metadata dict
-                actual_path = entry.get("metadata", {}).get("actual_path") or entry.get("actual_path")
-                
+                actual_path = entry.get("metadata", {}).get("actual_path") or entry.get(
+                    "actual_path"
+                )
+
                 # Remove entry
                 entries.pop(cache_key, None)
-                removed_entries.append({"cache_key": cache_key, "actual_path": actual_path})
+                removed_entries.append(
+                    {"cache_key": cache_key, "actual_path": actual_path}
+                )
                 accumulated_bytes += entry_size_bytes
-                
-                logger.debug(f"cleanup_by_size: removed {cache_key}, freed {entry_size_bytes} bytes (total freed: {accumulated_bytes})")
-            
-            logger.debug(f"cleanup_by_size: done, removed {len(removed_entries)} entries")
-            
+
+                logger.debug(
+                    f"cleanup_by_size: removed {cache_key}, freed {entry_size_bytes} bytes (total freed: {accumulated_bytes})"
+                )
+
+            logger.debug(
+                f"cleanup_by_size: done, removed {len(removed_entries)} entries"
+            )
+
             if removed_entries:
                 self._save_to_disk()
-            
+
             return {"count": len(removed_entries), "removed_entries": removed_entries}
 
     def clear_all(self) -> int:
@@ -1601,29 +1613,32 @@ class SqliteBackend(MetadataBackend):
             )
             total_size_bytes = result.scalar() or 0
             total_size_mb = total_size_bytes / (1024 * 1024)
-            
+
             if total_size_mb <= target_size_mb:
                 return {"count": 0, "removed_entries": []}  # Already at or below target
-            
+
             target_size_bytes = target_size_mb * 1024 * 1024
             bytes_to_remove = total_size_bytes - target_size_bytes
-            
+
             # Get entries sorted by accessed_at (oldest first) with actual_path
             entries_to_delete = session.execute(
-                select(CacheEntry.cache_key, CacheEntry.file_size, CacheEntry.actual_path)
-                .order_by(CacheEntry.accessed_at.asc())
+                select(
+                    CacheEntry.cache_key, CacheEntry.file_size, CacheEntry.actual_path
+                ).order_by(CacheEntry.accessed_at.asc())
             ).all()
-            
+
             # Calculate which entries to delete to reach target
             removed_entries = []
             accumulated_size = 0
-            
+
             for cache_key, file_size, actual_path in entries_to_delete:
                 if accumulated_size >= bytes_to_remove:
                     break
-                removed_entries.append({"cache_key": cache_key, "actual_path": actual_path})
+                removed_entries.append(
+                    {"cache_key": cache_key, "actual_path": actual_path}
+                )
                 accumulated_size += file_size
-            
+
             if removed_entries:
                 # Delete the selected entries
                 removed_keys = [e["cache_key"] for e in removed_entries]
@@ -1631,7 +1646,7 @@ class SqliteBackend(MetadataBackend):
                     delete(CacheEntry).where(CacheEntry.cache_key.in_(removed_keys))
                 )
                 session.commit()
-            
+
             return {"count": len(removed_entries), "removed_entries": removed_entries}
 
     def clear_all(self) -> int:
