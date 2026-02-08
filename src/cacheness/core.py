@@ -1922,6 +1922,16 @@ class UnifiedCache:
             )
             return removed_count
 
+    def clear(self):
+        """Alias for clear_all() - clear all cache entries and remove cache files.
+
+        This method provides a shorter, more intuitive name for clearing the cache.
+
+        Returns:
+            int: The number of cache entries removed.
+        """
+        return self.clear_all()
+
     def get_stats(self) -> Dict[str, Any]:
         """Get comprehensive cache statistics."""
         stats = self.metadata_backend.get_stats()

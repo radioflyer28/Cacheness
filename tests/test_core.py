@@ -422,6 +422,41 @@ class TestCacheness:
         # But get() should return None (blob missing)
         assert cache.get(large_test="data") is None
 
+    def test_clear_alias_clears_cache(self, cache):
+        """Test that clear() alias works like clear_all()."""
+        # Add some entries
+        cache.put(np.array([1, 2, 3]), key="a")
+        cache.put(np.array([4, 5, 6]), key="b")
+        cache.put(np.array([7, 8, 9]), key="c")
+
+        # Verify entries exist
+        assert cache.exists(key="a")
+        assert cache.exists(key="b")
+        assert cache.exists(key="c")
+
+        # Clear cache using clear() alias
+        removed_count = cache.clear()
+
+        # Verify all entries are gone
+        assert not cache.exists(key="a")
+        assert not cache.exists(key="b")
+        assert not cache.exists(key="c")
+        assert removed_count == 3
+
+    def test_clear_alias_returns_count(self, cache):
+        """Test that clear() returns the correct count of removed entries."""
+        # Empty cache should return 0
+        count = cache.clear()
+        assert count == 0
+
+        # Add 5 entries
+        for i in range(5):
+            cache.put({"value": i}, key=f"entry_{i}")
+
+        # Clear should return 5
+        count = cache.clear()
+        assert count == 5
+
     def test_cache_key_generation(self, cache):
         """Test cache key generation from parameters."""
         params1 = {"a": 1, "b": 2, "c": 3}
