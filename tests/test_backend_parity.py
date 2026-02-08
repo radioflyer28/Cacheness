@@ -212,6 +212,86 @@ class TestBackendParity:
         assert sqlite_backend.get_entry("recent_key") is not None
         assert removed_count >= 1
 
+    def test_cleanup_by_size_parity(self, sqlite_backend):
+        """Test that cleanup_by_size works identically."""
+        import time
+
+        # Create entries with different sizes and access times
+        base_time = datetime.now(timezone.utc)
+
+        # Entry 1: 1 MB, accessed recently
+        recent_entry = {
+            "cache_key": "recent_large",
+            "description": "Recent large entry",
+            "data_type": "array",
+            "prefix": "size_test",
+            "file_size": 1024 * 1024,  # 1 MB
+            "actual_path": "/tmp/recent_large.pkl",
+            "created_at": base_time.isoformat(),
+            "accessed_at": base_time.isoformat(),
+            "metadata": {},
+        }
+
+        # Entry 2: 2 MB, accessed 1 second ago
+        mid_entry = {
+            "cache_key": "mid_large",
+            "description": "Mid-age large entry",
+            "data_type": "array",
+            "prefix": "size_test",
+            "file_size": 2 * 1024 * 1024,  # 2 MB
+            "actual_path": "/tmp/mid_large.pkl",
+            "created_at": base_time.isoformat(),
+            "accessed_at": base_time.isoformat(),
+            "metadata": {},
+        }
+
+        # Entry 3: 3 MB, accessed 2 seconds ago (oldest)
+        old_entry = {
+            "cache_key": "old_large",
+            "description": "Old large entry",
+            "data_type": "array",
+            "prefix": "size_test",
+            "file_size": 3 * 1024 * 1024,  # 3 MB
+            "actual_path": "/tmp/old_large.pkl",
+            "created_at": base_time.isoformat(),
+            "accessed_at": base_time.isoformat(),
+            "metadata": {},
+        }
+
+        # Insert in order: old, mid, recent (to test LRU, not insertion order)
+        sqlite_backend.put_entry("old_large", old_entry)
+        time.sleep(0.01)  # Small delay to ensure different accessed_at
+        sqlite_backend.put_entry("mid_large", mid_entry)
+        time.sleep(0.01)
+        sqlite_backend.put_entry("recent_large", recent_entry)
+
+        # Touch entries to establish clear LRU order: old < mid < recent
+        sqlite_backend.get_entry("old_large")  # Accessed first (oldest)
+        time.sleep(0.01)
+        sqlite_backend.get_entry("mid_large")  # Accessed second
+        time.sleep(0.01)
+        sqlite_backend.get_entry("recent_large")  # Accessed third (most recent)
+
+        # Total size: 6 MB, target: 2 MB
+        # Should remove oldest entries (old_large: 3MB, then mid_large: 2MB)
+        # Leaving only recent_large (1MB)
+        result = sqlite_backend.cleanup_by_size(target_size_mb=2.0)
+
+        # Verify result structure
+        assert "count" in result
+        assert "removed_entries" in result
+        assert result["count"] >= 1
+
+        # Verify LRU eviction: oldest entries removed, recent kept
+        assert sqlite_backend.get_entry("old_large") is None  # Removed (oldest)
+        assert sqlite_backend.get_entry("recent_large") is not None  # Kept (newest)
+
+        # Verify removed_entries contains actual_path
+        removed_entries = result["removed_entries"]
+        assert len(removed_entries) >= 1
+        assert all("cache_key" in entry for entry in removed_entries)
+        assert all("actual_path" in entry for entry in removed_entries)
+
     def test_clear_all_parity(self, sqlite_backend):
         """Test that clear_all works identically."""
         # Store multiple entries

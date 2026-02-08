@@ -778,6 +778,64 @@ class PostgresBackend(MetadataBackend):
                     logger.error(f"Cleanup failed: {e}")
                     return 0
 
+    def cleanup_by_size(self, target_size_mb: float) -> Dict[str, Any]:
+        """Remove least-recently-accessed entries until cache size drops to or below target."""
+        with self._lock:
+            with self.SessionLocal() as session:
+                try:
+                    # Get current total size
+                    result = session.execute(
+                        select(func.sum(PgCacheEntry.file_size)).select_from(PgCacheEntry)
+                    )
+                    total_size_bytes = result.scalar() or 0
+                    total_size_mb = total_size_bytes / (1024 * 1024)
+                    
+                    if total_size_mb <= target_size_mb:
+                        return {"count": 0, "removed_entries": []}  # Already at or below target
+                    
+                    target_size_bytes = target_size_mb * 1024 * 1024
+                    bytes_to_remove = total_size_bytes - target_size_bytes
+                    
+                    # Get entries sorted by accessed_at (oldest first) with actual_path
+                    entries_to_delete = session.execute(
+                        select(PgCacheEntry.cache_key, PgCacheEntry.file_size, PgCacheEntry.actual_path)
+                        .order_by(PgCacheEntry.accessed_at.asc())
+                    ).all()
+                    
+                    # Calculate which entries to delete to reach target
+                    removed_entries = []
+                    accumulated_size = 0
+                    
+                    for cache_key, file_size, actual_path in entries_to_delete:
+                        if accumulated_size >= bytes_to_remove:
+                            break
+                        removed_entries.append({"cache_key": cache_key, "actual_path": actual_path})
+                        accumulated_size += file_size
+                    
+                    if removed_entries:
+                        # Delete the selected entries
+                        removed_keys = [e["cache_key"] for e in removed_entries]
+                        session.execute(
+                            delete(PgCacheEntry).where(PgCacheEntry.cache_key.in_(removed_keys))
+                        )
+                        
+                        # Update last cleanup timestamp
+                        session.execute(
+                            update(PgCacheStats)
+                            .where(PgCacheStats.id == 1)
+                            .values(last_cleanup_at=datetime.now(timezone.utc))
+                        )
+                        
+                        session.commit()
+                        logger.info(f"LRU cleanup: removed {len(removed_entries)} entries to reach {target_size_mb:.2f}MB")
+                    
+                    return {"count": len(removed_entries), "removed_entries": removed_entries}
+
+                except Exception as e:
+                    session.rollback()
+                    logger.error(f"LRU cleanup failed: {e}")
+                    return {"count": 0, "removed_entries": []}
+
     def clear_all(self) -> int:
         """Remove all cache entries and return count removed."""
         with self._lock:

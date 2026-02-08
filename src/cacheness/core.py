@@ -1610,10 +1610,31 @@ class UnifiedCache:
         target_size = (
             self.config.storage.max_cache_size_mb * 0.8
         )  # Clean to 80% of limit
-        removed_count = self.metadata_backend.cleanup_by_size(target_size)
+        
+        result = self.metadata_backend.cleanup_by_size(target_size)
+        removed_count = result.get("count", 0)
+        removed_entries = result.get("removed_entries", [])
+
+        # Delete blob files for removed entries
+        blobs_deleted = 0
+        for entry in removed_entries:
+            actual_path = entry.get("actual_path")
+            if actual_path:
+                blob_file = Path(actual_path)
+                if blob_file.exists():
+                    try:
+                        blob_file.unlink()
+                        blobs_deleted += 1
+                    except OSError as exc:
+                        logger.warning(
+                            f"Failed to delete blob file {actual_path} during size enforcement: {exc}"
+                        )
 
         if removed_count > 0:
-            logger.info(f"Cache size enforcement: removed {removed_count} entries")
+            logger.info(
+                f"Cache size enforcement: removed {removed_count} entries "
+                f"(deleted {blobs_deleted} blob files)"
+            )
 
     def invalidate(self, cache_key: Optional[str] = None, prefix: str = "", **kwargs):
         """

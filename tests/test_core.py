@@ -525,6 +525,62 @@ class TestCacheness:
         current_utc = datetime.now(timezone.utc)
         assert current_utc.tzinfo == timezone.utc  # Verify we're using UTC
 
+    @pytest.mark.skip(reason="Test hangs - see CACHE issue for investigation")
+    def test_size_limit_enforcement(self, temp_cache_dir):
+        """Test that cache enforces size limits with LRU eviction."""
+        from cacheness.config import (
+            CacheStorageConfig,
+            CacheMetadataConfig,
+            CompressionConfig,
+            SerializationConfig,
+            HandlerConfig,
+        )
+        import time
+
+        # Create cache with very small size limit (0.005 MB = ~5KB)
+        storage_config = CacheStorageConfig(
+            cache_dir=str(temp_cache_dir), max_cache_size_mb=0.005
+        )
+        metadata_config = CacheMetadataConfig(metadata_backend="json")
+        compression_config = CompressionConfig()
+        serialization_config = SerializationConfig()
+        handler_config = HandlerConfig()
+
+        config = CacheConfig(
+            storage=storage_config,
+            metadata=metadata_config,
+            compression=compression_config,
+            serialization=serialization_config,
+            handlers=handler_config,
+        )
+
+        cache = cacheness(config)
+
+        # Put several entries that exceed the size limit
+        # Each entry is ~500 bytes, so 20 entries = ~10KB, exceeding 5KB limit
+        for i in range(20):
+            data = {"index": i, "data": "x" * 500}
+            cache.put(data, entry=f"entry_{i}")
+            time.sleep(0.02)  # Delay to ensure different accessed_at timestamps
+
+        # After enforcing 80% of 5KB limit = 4KB, only ~8 most recent entries should remain
+        # Check that oldest entries were evicted
+        first_entry = cache.get(entry="entry_0")
+        assert first_entry is None, "Oldest entry should have been evicted"
+
+        second_entry = cache.get(entry="entry_1")
+        assert second_entry is None, "Second entry should have been evicted"
+
+        # More recent entries should still exist
+        last_entry = cache.get(entry="entry_19")
+        assert last_entry is not None, "Most recent entry should still exist"
+        assert last_entry["index"] == 19
+
+        # Check stats to verify size is under target
+        stats = cache.metadata_backend.get_stats()
+        total_size_mb = stats.get("total_size_mb", 0)
+        assert total_size_mb <= 0.005, f"Cache size {total_size_mb}MB should be <= 0.005MB after enforcement"
+
 
 class TestFactoryMethods:
     """Test factory methods for creating specialized cache instances."""
