@@ -1,0 +1,39 @@
+{
+  "servers": {
+    // The "servers" section defines the MCP servers you want to use.
+    "fetch": {
+      "command": "uv",
+      "args": ["mcp-server-fetch"]
+    },
+    // uv is for managing Python virtual environments, managing dependencies, running Python commands, building packages, running tools, etc. It's a more modern alternative to venv/virtualenv/pipenv/poetry.
+    "beads": {
+      "command": "uv",
+      "args": ["run", "beads-mcp"]
+    },
+    // Issue tracker for development sessions (features, bug, tasks, etc.), persists across sessions
+    "memory": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-memory"]
+    },
+    // mcp-language-server - Semantic code navigation (definition, references, rename, diagnostics)
+    // Requires: go install github.com/isaacphi/mcp-language-server@latest
+    // Requires: npm install -g pyright (for Python LSP)
+    "language-server": {
+      "command": "mcp-language-server",
+      "args": [
+        "--workspace", "${workspaceFolder}",
+        "--lsp", "pyright-langserver", "--stdio"
+      ]
+    },
+    // Memalot - Python memory leak detection
+    "memalot": {
+      "command": "uvx",
+      "args": ["--python", ">=3.10", "--from", "memalot[mcp]", "memalot-mcp"]
+    },
+    // mcp-code-checker - pytest, pylint, mypy code quality checks
+    "code-checker": {
+      "command": "uv",
+      "args": ["run", "mcp-code-checker", "--project-dir", "${workspaceFolder}"]
+    }
+  }
+}

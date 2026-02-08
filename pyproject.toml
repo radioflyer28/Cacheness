@@ -69,8 +69,10 @@ dev = [
     "pytest>=8.4.1",
     "pytest-cov>=6.2.1",
     "ruff>=0.12.8",
+    "ty>=0.0.15",
     "moto[s3]>=5.0.0",
     "hypothesis>=6.151.5",
+    "beads-mcp>=0.1.0",
 ]
 tensorflow = [
     "tensorflow>=2.0.0",

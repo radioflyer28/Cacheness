@@ -1,0 +1,37 @@
+{
+  "_WARNING": "FOR LOCAL DEVELOPMENT/TESTING ONLY - DO NOT USE IN PRODUCTION",
+  "_comment": "This config has hardcoded credentials for local Docker containers only. For production, use environment variables and proper secret management.",
+  "storage": {
+    "cache_dir": "./cache"
+  },
+  "metadata": {
+    "metadata_backend": "postgresql",
+    "metadata_backend_options": {
+      "connection_url": "postgresql+psycopg://cacheness:cacheness_dev_password@localhost:5432/cacheness_test"
+    }
+  },
+  "blob": {
+    "blob_backend": "s3",
+    "blob_backend_options": {
+      "bucket": "cache-bucket",
+      "endpoint_url": "http://localhost:9000",
+      "aws_access_key_id": "minioadmin",
+      "aws_secret_access_key": "minioadmin",
+      "region_name": "us-east-1"
+    },
+    "shard_chars": 2
+  },
+  "security": {
+    "signing_key_file": "dev_test_key.bin",
+    "allow_unsigned_entries": true
+  },
+  "handlers": {
+    "enable_dill_fallback": true,
+    "enable_tensorflow_tensors": true
+  },
+  "compression": {
+    "use_blosc2_arrays": true,
+    "blosc2_array_clevel": 5,
+    "pickle_compression_level": 5
+  }
+}
