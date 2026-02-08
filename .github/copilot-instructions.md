@@ -35,40 +35,71 @@ uv run python script.py
 
 **Primary Tools:** Use `ruff` for linting/formatting and `ty` for type checking.
 
+### Quality Gates
+
+This project uses a two-phase quality gate system.
+
+**Phase 1: Auto-Fix (Always Runs, Never Fails)**
 ```bash
-# Linting (check for issues)
-uv run ruff check .
+uv run ruff format . && uv run ruff check --fix .
+```
+- Formats all code to project standards
+- Fixes safe lint violations automatically
+- Modifies files in place
+- Never exits with error
 
-# Linting with auto-fix
-uv run ruff check --fix .
+**Phase 2: Validation (Check Only, May Fail)**
+```bash
+uv run ruff check . && uv run ty check
+```
+- Reports unfixable lint issues
+- Reports type errors
+- Does not modify files
+- Exits non-zero if issues remain
 
-# Formatting (check only)
-uv run ruff format --check .
+### Quick Commands
 
-# Formatting (apply)
-uv run ruff format .
+```bash
+# Run full quality check (both phases)
+.\scripts\quality-check.ps1   # Windows
+./scripts/quality-check.sh    # Unix/Linux/Mac
 
-# Type checking
-uv run ty
-
-# Type checking specific files
-uv run ty src/cacheness/core.py
-
-# Combined: format, lint with fixes, then type check
-uv run ruff format . && uv run ruff check --fix . && uv run ty
+# Or manually:
+uv run ruff format . && uv run ruff check --fix .  # Phase 1: Auto-fix
+uv run ruff check . && uv run ty check                # Phase 2: Validate
 ```
 
-**Configuration:**
+### Pre-commit Hook
+
+A pre-commit hook is installed at `.git/hooks/pre-commit` that:
+1. ✅ Runs Phase 1 auto-fixes on every commit
+2. 📝 Logs Phase 2 errors to `.quality-errors.log` (if any)
+3. ✅ Allows commit to proceed (warnings only)
+
+**Check for logged errors:**
+```bash
+cat .quality-errors.log  # View errors from last commit
+```
+
+### Configuration
+
 - Ruff settings in `pyproject.toml` under `[tool.ruff]`
 - Target Python: 3.12+
 - Line length: 88
 - Respects `.gitignore` by default
 
-**When to use:**
-- Before committing changes
+### When to Use
+
+**Auto-fix (Phase 1):**
+- Automatically runs on every commit (via pre-commit hook)
+- Run manually before pushing: `uv run ruff format . && uv run ruff check --fix .`
+
+**Validation (Phase 2):**
+- Before creating PR
 - After implementing new features
 - When fixing bugs or refactoring
 - As part of CI/CD validation
+- Run: `.\scripts\quality-check.ps1` or check `.quality-errors.log`
 
 
 ## Issue Tracking
@@ -311,7 +342,7 @@ Expected baseline (200 entries):
 
 1. **Always run tests after changes:** `uv run pytest tests/ -x -q`
 2. **Check for regressions:** Baseline is 787 passed, 70 skipped
-3. **Run code quality checks:** `uv run ruff format . && uv run ruff check --fix . && uv run ty`
+3. **Run quality gates:** `.\scripts\quality-check.ps1` (or `./scripts/quality-check.sh`)
 4. **Run relevant benchmark:** Ensure no performance degradation
 5. **Update documentation:** If changing public API
 
@@ -420,7 +451,7 @@ Each feature worktree should have a `WORKTREE.md` file at the root documenting t
 
 - [ ] Code complete and committed
 - [ ] Tests pass: `uv run pytest tests/ -x -q`
-- [ ] Quality gates pass: `uv run ruff format . && uv run ruff check --fix . && uv run ty`
+- [ ] Quality gates pass: `.\scripts\quality-check.ps1` (or `./scripts/quality-check.sh`)
 - [ ] Feature branch pushed
 - [ ] Ready for integration to dev
 ```
@@ -459,7 +490,7 @@ git commit -m "fix: description of changes"
 
 # Run quality gates
 uv run pytest tests/ -x -q
-uv run ruff format . && uv run ruff check --fix . && uv run ty
+.\scripts\quality-check.ps1
 
 # Push your feature branch
 git push -u origin issue-<hash>-description
@@ -481,7 +512,7 @@ git merge issue-<hash>-description
 
 # Run full test suite in integration environment
 uv run pytest tests/ -x -q
-uv run ruff format . && uv run ruff check --fix . && uv run ty
+.\scripts\quality-check.ps1
 
 # If tests pass, push to dev
 git push origin dev
@@ -585,9 +616,8 @@ git worktree list
    - Update beads: Mark issue as in-progress
 3. **Run quality gates** (if code changed):
    - Tests: `uv run pytest tests/ -x -q`
-   - Format: `uv run ruff format .`
-   - Lint: `uv run ruff check --fix .`
-   - Type check: `uv run ty`
+   - Quality check: `.\scripts\quality-check.ps1` (or `./scripts/quality-check.sh`)
+   - Check errors: `cat .quality-errors.log` (if file exists)
 4. **Push feature branch** — `git push -u origin issue-<hash>-description`
 5. **Integrate to dev worktree**:
    - Switch to dev worktree: `cd ../Cacheness-dev`

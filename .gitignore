@@ -40,3 +40,6 @@ docker-compose.override.yml
 
 # Worktree-specific metadata (not committed)
 WORKTREE.md
+
+# Quality check error logs
+.quality-errors.log
