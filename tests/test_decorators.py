@@ -830,11 +830,16 @@ class TestCacheIfDecorator:
 
         def capture_condition(result):
             received_results.append(result)
-            return result.get("status") == "success" if isinstance(result, dict) else False
+            return (
+                result.get("status") == "success" if isinstance(result, dict) else False
+            )
 
         @cache_if(condition=capture_condition, cache_instance=cache_instance)
         def api_call(status_code):
-            return {"status": "success" if status_code == 200 else "error", "code": status_code}
+            return {
+                "status": "success" if status_code == 200 else "error",
+                "code": status_code,
+            }
 
         # Call with success
         result1 = api_call(200)
