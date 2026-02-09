@@ -326,6 +326,117 @@ class TestMemoizeDecorator:
         assert info["ttl_seconds"] is None
 
 
+class TestCacheClearFunctionality:
+    """Test cache_clear() method on decorated functions."""
+
+    def test_cache_clear_removes_entries(self, tmp_path):
+        """Test that cache_clear() actually deletes cached entries."""
+        call_count = 0
+
+        cache_config = CacheConfig(cache_dir=tmp_path)
+        @cached(cache_instance=cacheness(cache_config))
+        def func_to_clear(x):
+            nonlocal call_count
+            call_count += 1
+            return x * 2
+
+        # Create cache entries
+        result1 = func_to_clear(1)
+        result2 = func_to_clear(2)
+        result3 = func_to_clear(3)
+        assert result1 == 2
+        assert result2 == 4
+        assert result3 == 6
+        assert call_count == 3
+
+        # Verify entries are cached (calls don't increment count)
+        func_to_clear(1)
+        func_to_clear(2)
+        func_to_clear(3)
+        assert call_count == 3  # No new calls
+
+        # Clear cache
+        cleared = func_to_clear.cache_clear()
+        assert cleared == 3  # Should have deleted 3 entries
+
+        # Verify entries are gone (calls increment count)
+        func_to_clear(1)
+        func_to_clear(2)
+        func_to_clear(3)
+        assert call_count == 6  # 3 new calls
+
+    def test_cache_clear_independent_functions(self, tmp_path):
+        """Test that cache_clear() on one function doesn't affect another."""
+        cache_config = CacheConfig(cache_dir=tmp_path)
+        cache_instance = cacheness(cache_config)
+        
+        count_a = 0
+        count_b = 0
+
+        @cached(cache_instance=cache_instance, key_prefix="func_a")
+        def func_a(x):
+            nonlocal count_a
+            count_a += 1
+            return x * 2
+
+        @cached(cache_instance=cache_instance, key_prefix="func_b")
+        def func_b(x):
+            nonlocal count_b
+            count_b += 1
+            return x * 3
+
+        # Create entries for both functions
+        func_a(1)
+        func_a(2)
+        func_b(1)
+        func_b(2)
+        assert count_a == 2
+        assert count_b == 2
+
+        # Clear only func_a
+        cleared_a = func_a.cache_clear()
+        assert cleared_a == 2
+
+        # Verify func_a entries are gone but func_b entries remain
+        func_a(1)
+        func_a(2)
+        func_b(1)
+        func_b(2)
+        assert count_a == 4  # func_a was called again
+        assert count_b == 2  # func_b used cache
+
+    def test_cache_clear_empty_cache(self, tmp_path):
+        """Test that cache_clear() returns 0 when cache is empty."""
+        cache_config = CacheConfig(cache_dir=tmp_path)
+        
+        @cached(cache_instance=cacheness(cache_config))
+        def empty_func(x):
+            return x + 1
+
+        # Clear without creating any entries
+        cleared = empty_func.cache_clear()
+        assert cleared == 0
+
+    def test_cache_clear_multiple_calls(self, tmp_path):
+        """Test that calling cache_clear() multiple times is safe."""
+        cache_config = CacheConfig(cache_dir=tmp_path)
+        
+        @cached(cache_instance=cacheness(cache_config))
+        def multi_clear_func(x):
+            return x * 2
+
+        # Create entry
+        multi_clear_func(5)
+
+        # First clear
+        cleared1 = multi_clear_func.cache_clear()
+        assert cleared1 == 1
+
+        # Second clear should return 0
+        cleared2 = multi_clear_func.cache_clear()
+        assert cleared2 == 0
+
+
 class TestCacheContext:
     """Test the CacheContext context manager."""
 

@@ -8,8 +8,9 @@ using the UnifiedCache system with automatic key generation.
 
 import atexit
 import functools
+import threading
 import weakref
-from typing import Any, Callable, Optional, Union, Dict, Tuple, cast
+from typing import Any, Callable, Optional, Union, Dict, Tuple, Set, cast
 
 from .core import UnifiedCache, CacheConfig, _normalize_function_args
 from .serialization import create_unified_cache_key
@@ -136,6 +137,10 @@ class cached:
         self.ignore_errors = ignore_errors
         self._owns_cache = False  # Track if we created the cache instance
 
+        # Track cache keys created by this decorator for cache_clear()
+        self._cache_keys: Set[str] = set()
+        self._lock = threading.Lock()
+
         # Create default cache instance if none provided
         if self.cache_instance is None:
             self.cache_instance = UnifiedCache()
@@ -189,6 +194,9 @@ class cached:
                     description=f"Cached result for {cache_key}",
                     __decorator_cache_key=cache_key,  # Use same synthetic parameter
                 )
+                # Track the cache key for later cleanup
+                with self._lock:
+                    self._cache_keys.add(cache_key)
             except Exception as e:
                 if not self.ignore_errors:
                     raise RuntimeError(f"Cache storage failed: {e}") from e
@@ -222,11 +230,27 @@ class cached:
 
     def _clear_cache(self, func: Callable) -> int:
         """Clear all cache entries for this function."""
-        # This is a simplified implementation - in practice, you might want
-        # to track function-specific keys or use a pattern-based deletion
-        # For now, we'll return 0 as we don't have pattern-based deletion
-        # This could be enhanced by keeping track of keys per function
-        return 0
+        cache_instance = cast(UnifiedCache, self.cache_instance)
+        deleted = 0
+
+        with self._lock:
+            # Make a copy of the keys to avoid modification during iteration
+            keys_to_delete = self._cache_keys.copy()
+
+        # Delete each tracked cache key
+        for cache_key in keys_to_delete:
+            try:
+                # Invalidate using the cache key stored in __decorator_cache_key
+                cache_instance.invalidate(__decorator_cache_key=cache_key)
+                with self._lock:
+                    self._cache_keys.discard(cache_key)
+                deleted += 1
+            except Exception:
+                # Key might have been deleted externally or expired
+                with self._lock:
+                    self._cache_keys.discard(cache_key)
+
+        return deleted
 
     def _cache_info(self, func: Callable) -> Dict[str, Any]:
         """Get cache information for this function."""
