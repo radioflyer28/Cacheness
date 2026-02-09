@@ -26,6 +26,12 @@ cat .quality-errors.log
 git worktree add -b issue-<hash>-<desc> ../Cacheness-issue-<hash> dev
 ```
 
+**Windows: Start beads daemon once per session**
+```powershell
+uv run bd daemon start
+```
+(Required after reboot/logout - beads-mcp auto-start doesn't work on Windows)
+
 ## Package Manager: uv
 
 **ALWAYS use `uv` for Python operations** — never use `python`, `pip`, or `python -m pytest` directly.

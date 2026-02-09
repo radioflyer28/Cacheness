@@ -1,19 +1,20 @@
 {
   "servers": {
     // The "servers" section defines the MCP servers you want to use.
-    "fetch": {
-      "command": "uv",
-      "args": ["mcp-server-fetch"]
-    },
+    // Configuration for the Fetch MCP (Model Context Protocol) server
+    // This entry defines how to run the uv-managed MCP server that provides
+    // HTTP fetch/request capabilities to the AI assistant.
+    // The "fetch" server allows making HTTP requests to retrieve web content
+    // and data from URLs, enabling the assistant to access external resources.
+    // Command: Uses 'uv' package manager to launch the mcp-server-fetch package
+    // "fetch": {
+    //   "command": "uv",
+    //   "args": ["mcp-server-fetch"]
+    // },
     // uv is for managing Python virtual environments, managing dependencies, running Python commands, building packages, running tools, etc. It's a more modern alternative to venv/virtualenv/pipenv/poetry.
     "beads": {
       "command": "uv",
       "args": ["run", "beads-mcp"]
-    },
-    // Issue tracker for development sessions (features, bug, tasks, etc.), persists across sessions
-    "memory": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-memory"]
     },
     // mcp-language-server - Semantic code navigation (definition, references, rename, diagnostics)
     // Requires: go install github.com/isaacphi/mcp-language-server@latest
@@ -26,15 +27,10 @@
         "--", "--stdio"
       ]
     },
-    // Memalot - Python memory leak detection
-    "memalot": {
-      "command": "uvx",
-      "args": ["--python", ">=3.10", "--from", "memalot[mcp]", "memalot-mcp"]
-    },
-    // mcp-code-checker - pytest, pylint, mypy code quality checks
-    "code-checker": {
-      "command": "uv",
-      "args": ["run", "mcp-code-checker", "--project-dir", "${workspaceFolder}"]
-    }
+    // for external memory storage of the AI assistant
+    // "memory": {
+    //   "command": "npx",
+    //   "args": ["-y", "@modelcontextprotocol/server-memory"]
+    // }
   }
 }

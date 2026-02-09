@@ -622,7 +622,7 @@ class JsonBackend(MetadataBackend):
             metadata_file: Path to JSON metadata file
         """
         self.metadata_file = metadata_file
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()  # Use RLock to allow reentrant calls (cleanup_by_size -> get_stats)
         self._metadata = self._load_from_disk()
 
     def _load_from_disk(self) -> Dict[str, Any]:
@@ -889,7 +889,7 @@ class JsonBackend(MetadataBackend):
                 "total_entries": total_entries,
                 "dataframe_entries": dataframe_count,
                 "array_entries": array_count,
-                "total_size_mb": round(total_size_mb, 2),
+                "total_size_mb": total_size_mb,  # Don't round - precise size needed for cleanup calculations
                 "cache_hits": hits,
                 "cache_misses": misses,
                 "hit_rate": round(hit_rate, 3),

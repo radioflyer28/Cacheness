@@ -1011,7 +1011,6 @@ class TestCacheness:
         current_utc = datetime.now(timezone.utc)
         assert current_utc.tzinfo == timezone.utc  # Verify we're using UTC
 
-    @pytest.mark.skip(reason="Test hangs - see CACHE issue for investigation")
     def test_size_limit_enforcement(self, temp_cache_dir):
         """Test that cache enforces size limits with LRU eviction."""
         from cacheness.config import (

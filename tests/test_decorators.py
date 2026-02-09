@@ -444,7 +444,7 @@ class TestCacheInfoStatistics:
     def test_cache_info_tracks_hits_and_misses(self, tmp_path):
         """Test that cache_info() returns accurate hit/miss counts."""
         cache_config = CacheConfig(cache_dir=tmp_path)
-        
+
         @cached(cache_instance=cacheness(cache_config))
         def stat_func(x):
             return x * 2
@@ -458,7 +458,7 @@ class TestCacheInfoStatistics:
         # First call is a miss
         result1 = stat_func(5)
         assert result1 == 10
-        
+
         info = stat_func.cache_info()
         assert info["hits"] == 0
         assert info["misses"] == 1
@@ -467,7 +467,7 @@ class TestCacheInfoStatistics:
         # Second call with same arg is a hit
         result2 = stat_func(5)
         assert result2 == 10
-        
+
         info = stat_func.cache_info()
         assert info["hits"] == 1
         assert info["misses"] == 1
@@ -476,7 +476,7 @@ class TestCacheInfoStatistics:
         # Third call with different arg is a miss
         result3 = stat_func(10)
         assert result3 == 20
-        
+
         info = stat_func.cache_info()
         assert info["hits"] == 1
         assert info["misses"] == 2
@@ -485,7 +485,7 @@ class TestCacheInfoStatistics:
         # Fourth call with first arg is another hit
         result4 = stat_func(5)
         assert result4 == 10
-        
+
         info = stat_func.cache_info()
         assert info["hits"] == 2
         assert info["misses"] == 2
@@ -495,7 +495,7 @@ class TestCacheInfoStatistics:
         """Test that cache_info() stats are isolated per decorated function."""
         cache_config = CacheConfig(cache_dir=tmp_path)
         cache_instance = cacheness(cache_config)
-        
+
         @cached(cache_instance=cache_instance, key_prefix="func_x")
         def func_x(n):
             return n + 1
@@ -526,12 +526,12 @@ class TestCacheInfoStatistics:
     def test_cache_info_includes_config_fields(self, tmp_path):
         """Test that cache_info() still returns original config fields."""
         cache_config = CacheConfig(cache_dir=tmp_path)
-        
+
         @cached(
             cache_instance=cacheness(cache_config),
             ttl_seconds=7200,
             key_prefix="test_prefix",
-            ignore_errors=False
+            ignore_errors=False,
         )
         def config_func(x):
             return x * 3
@@ -540,12 +540,12 @@ class TestCacheInfoStatistics:
         config_func(1)
 
         info = config_func.cache_info()
-        
+
         # Check runtime stats
         assert "hits" in info
         assert "misses" in info
         assert "size" in info
-        
+
         # Check config fields are still present
         assert info["ttl_seconds"] == 7200
         assert info["key_prefix"] == "test_prefix"
@@ -556,7 +556,7 @@ class TestCacheInfoStatistics:
     def test_cache_info_after_cache_clear(self, tmp_path):
         """Test that size updates correctly after cache_clear()."""
         cache_config = CacheConfig(cache_dir=tmp_path)
-        
+
         @cached(cache_instance=cacheness(cache_config))
         def clear_stat_func(x):
             return x * 4

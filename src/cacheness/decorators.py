@@ -140,7 +140,7 @@ class cached:
         # Track cache keys created by this decorator for cache_clear()
         self._cache_keys: Set[str] = set()
         self._lock = threading.Lock()
-        
+
         # Track hit/miss statistics
         self._hits: int = 0
         self._misses: int = 0
@@ -193,7 +193,7 @@ class cached:
             # Cache miss - increment misses counter
             with self._lock:
                 self._misses += 1
-            
+
             # Call the original function
             result = func(*args, **kwargs)
 
@@ -268,13 +268,13 @@ class cached:
         func_name = getattr(func, "__qualname__", getattr(func, "__name__", "unknown"))
         func_module = getattr(func, "__module__", "unknown")
         cache_instance = cast(UnifiedCache, self.cache_instance)
-        
+
         # Get current stats with thread-safe access
         with self._lock:
             hits = self._hits
             misses = self._misses
             size = len(self._cache_keys)
-        
+
         return {
             "function": f"{func_module}.{func_name}",
             "hits": hits,
