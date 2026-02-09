@@ -437,6 +437,149 @@ class TestCacheClearFunctionality:
         assert cleared2 == 0
 
 
+class TestCacheInfoStatistics:
+    """Test cache_info() hit/miss statistics."""
+
+    def test_cache_info_tracks_hits_and_misses(self, tmp_path):
+        """Test that cache_info() returns accurate hit/miss counts."""
+        cache_config = CacheConfig(cache_dir=tmp_path)
+        
+        @cached(cache_instance=cacheness(cache_config))
+        def stat_func(x):
+            return x * 2
+
+        # Get initial info (should be all zeros)
+        info = stat_func.cache_info()
+        assert info["hits"] == 0
+        assert info["misses"] == 0
+        assert info["size"] == 0
+
+        # First call is a miss
+        result1 = stat_func(5)
+        assert result1 == 10
+        
+        info = stat_func.cache_info()
+        assert info["hits"] == 0
+        assert info["misses"] == 1
+        assert info["size"] == 1
+
+        # Second call with same arg is a hit
+        result2 = stat_func(5)
+        assert result2 == 10
+        
+        info = stat_func.cache_info()
+        assert info["hits"] == 1
+        assert info["misses"] == 1
+        assert info["size"] == 1
+
+        # Third call with different arg is a miss
+        result3 = stat_func(10)
+        assert result3 == 20
+        
+        info = stat_func.cache_info()
+        assert info["hits"] == 1
+        assert info["misses"] == 2
+        assert info["size"] == 2
+
+        # Fourth call with first arg is another hit
+        result4 = stat_func(5)
+        assert result4 == 10
+        
+        info = stat_func.cache_info()
+        assert info["hits"] == 2
+        assert info["misses"] == 2
+        assert info["size"] == 2
+
+    def test_cache_info_per_function_isolation(self, tmp_path):
+        """Test that cache_info() stats are isolated per decorated function."""
+        cache_config = CacheConfig(cache_dir=tmp_path)
+        cache_instance = cacheness(cache_config)
+        
+        @cached(cache_instance=cache_instance, key_prefix="func_x")
+        def func_x(n):
+            return n + 1
+
+        @cached(cache_instance=cache_instance, key_prefix="func_y")
+        def func_y(n):
+            return n + 2
+
+        # Call func_x multiple times
+        func_x(1)  # miss
+        func_x(1)  # hit
+        func_x(1)  # hit
+
+        # Call func_y once
+        func_y(5)  # miss
+
+        # Check that stats are independent
+        info_x = func_x.cache_info()
+        assert info_x["hits"] == 2
+        assert info_x["misses"] == 1
+        assert info_x["size"] == 1
+
+        info_y = func_y.cache_info()
+        assert info_y["hits"] == 0
+        assert info_y["misses"] == 1
+        assert info_y["size"] == 1
+
+    def test_cache_info_includes_config_fields(self, tmp_path):
+        """Test that cache_info() still returns original config fields."""
+        cache_config = CacheConfig(cache_dir=tmp_path)
+        
+        @cached(
+            cache_instance=cacheness(cache_config),
+            ttl_seconds=7200,
+            key_prefix="test_prefix",
+            ignore_errors=False
+        )
+        def config_func(x):
+            return x * 3
+
+        # Call once to populate stats
+        config_func(1)
+
+        info = config_func.cache_info()
+        
+        # Check runtime stats
+        assert "hits" in info
+        assert "misses" in info
+        assert "size" in info
+        
+        # Check config fields are still present
+        assert info["ttl_seconds"] == 7200
+        assert info["key_prefix"] == "test_prefix"
+        assert info["ignore_errors"] is False
+        assert "cache_dir" in info
+        assert "function" in info
+
+    def test_cache_info_after_cache_clear(self, tmp_path):
+        """Test that size updates correctly after cache_clear()."""
+        cache_config = CacheConfig(cache_dir=tmp_path)
+        
+        @cached(cache_instance=cacheness(cache_config))
+        def clear_stat_func(x):
+            return x * 4
+
+        # Create entries
+        clear_stat_func(1)
+        clear_stat_func(2)
+        clear_stat_func(3)
+
+        info_before = clear_stat_func.cache_info()
+        assert info_before["size"] == 3
+        assert info_before["misses"] == 3
+
+        # Clear cache
+        cleared = clear_stat_func.cache_clear()
+        assert cleared == 3
+
+        info_after = clear_stat_func.cache_info()
+        assert info_after["size"] == 0
+        # Hits and misses should be unchanged (they persist)
+        assert info_after["hits"] == 0
+        assert info_after["misses"] == 3
+
+
 class TestCacheContext:
     """Test the CacheContext context manager."""
 

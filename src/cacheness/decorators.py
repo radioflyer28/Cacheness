@@ -140,6 +140,10 @@ class cached:
         # Track cache keys created by this decorator for cache_clear()
         self._cache_keys: Set[str] = set()
         self._lock = threading.Lock()
+        
+        # Track hit/miss statistics
+        self._hits: int = 0
+        self._misses: int = 0
 
         # Create default cache instance if none provided
         if self.cache_instance is None:
@@ -177,12 +181,19 @@ class cached:
                     __decorator_cache_key=cache_key,  # Use synthetic parameter with the cache key
                 )
                 if cached_result is not None:
+                    # Cache hit - increment hits counter
+                    with self._lock:
+                        self._hits += 1
                     return cached_result
             except Exception as e:
                 if not self.ignore_errors:
                     raise RuntimeError(f"Cache retrieval failed: {e}") from e
                 # If cache retrieval fails but we're ignoring errors, continue to function call
 
+            # Cache miss - increment misses counter
+            with self._lock:
+                self._misses += 1
+            
             # Call the original function
             result = func(*args, **kwargs)
 
@@ -257,8 +268,18 @@ class cached:
         func_name = getattr(func, "__qualname__", getattr(func, "__name__", "unknown"))
         func_module = getattr(func, "__module__", "unknown")
         cache_instance = cast(UnifiedCache, self.cache_instance)
+        
+        # Get current stats with thread-safe access
+        with self._lock:
+            hits = self._hits
+            misses = self._misses
+            size = len(self._cache_keys)
+        
         return {
             "function": f"{func_module}.{func_name}",
+            "hits": hits,
+            "misses": misses,
+            "size": size,
             "ttl_seconds": self.ttl_seconds,
             "key_prefix": self.key_prefix,
             "cache_dir": str(cache_instance.config.cache_dir),
