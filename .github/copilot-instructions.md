@@ -642,7 +642,132 @@ git worktree list
 
 **When ending a work session**, you MUST complete ALL steps in the session. Work is NOT complete until `git push` succeeds.
 
+
 ---
 
-**Last Updated:** February 2026
-**Test Baseline:** 787 passed, 70 skipped, 0 failures
+## Maintaining This Document
+
+This document is a **living document** — it should evolve as the project, tools, and workflows change.
+
+### When to Update
+
+**Update this document when:**
+- ✏️ Adding or removing MCP tools
+- ✏️ Changing development workflows
+- ✏️ Discovering better practices
+- ✏️ Tools become broken or unreliable
+- ✏️ Test baselines change significantly
+- ✏️ New patterns emerge from actual usage
+- ✏️ Instructions cause confusion or errors
+
+### How to Update
+
+**Process:**
+1. Identify what needs to change (broken tool, outdated workflow, etc.)
+2. Edit `.github/copilot-instructions.md` directly
+3. Update "Last Updated" date at bottom
+4. Commit with descriptive message: `docs: update copilot instructions - <reason>`
+5. Push to dev branch
+
+**Example updates:**
+```bash
+# Remove broken tool
+# 1. Remove from MCP Tools Reference section
+# 2. Remove from .vscode/mcp.json
+# 3. Update workflow steps that reference it
+
+# Add new practice
+# 1. Add to relevant section (Coding Conventions, Common Patterns, etc.)
+# 2. Include example code if applicable
+# 3. Explain why this practice is recommended
+
+# Update workflow
+# 1. Modify Sessions/Workflows section
+# 2. Test the new workflow
+# 3. Update any affected sections (e.g., Git Worktree Workflow)
+```
+
+### Deprecating Tools
+
+**When a tool becomes problematic:**
+
+1. **Document the issue** in comments:
+   ```markdown
+   ### tool-name (Currently Disabled - See Note)
+   **Note:** This tool has issues with <problem>. Consider using <alternative> instead.
+   ```
+
+2. **Disable in MCP config**:
+   - Comment out in `.vscode/mcp.json`
+   - Don't delete immediately (keeps history)
+
+3. **Update workflow instructions**:
+   - Change from "Use tool X" to "Use alternative Y"
+   - Add note explaining why
+
+4. **Remove after grace period**:
+   - After confirming alternative works
+   - Remove from both this document and MCP config
+
+**Example - Replacing GitKraken MCP:**
+```markdown
+### XYZ Operations
+~~Use XYZ MCP for git operations~~
+
+**Update 2026-02-09:** XYZ MCP has reliability issues. Use XYZ CLI instead:
+- `xyz status` instead of `mcp_gitkraken_git_status`
+- `xyz add` and `xyz commit` instead of `mcp_xyz_add_or_commit`
+- `xyz push` instead of `mcp_xyz_push`
+```
+
+### Feedback Loop
+
+**Encourage continuous improvement:**
+
+- 🔄 **When instructions fail:** Update them immediately after finding a solution
+- 🔄 **When tools break:** Document workarounds, then update for long-term fix
+- 🔄 **When patterns emerge:** Codify them as conventions
+- 🔄 **When confused:** Clarify the confusing section right away
+
+**Agents should:**
+- Suggest updates when encountering unclear instructions
+- Report tools that consistently fail or cause issues
+- Propose better workflows when discovering them
+- Update test baselines after major test suite changes
+
+### Change Tracking
+
+**Use git history as changelog:**
+```bash
+# View instruction changes
+git log --oneline -- .github/copilot-instructions.md
+
+# See specific change
+git show <commit-hash>:.github/copilot-instructions.md
+```
+
+**Commit message format:**
+```
+docs: update copilot instructions - <what changed>
+
+- Specific change 1
+- Specific change 2
+- Reason for change
+```
+
+### Known Issues with Tools
+
+**Current tool status:**
+- ✅ **beads-mcp:** Working well, core dependency
+- ✅ **memory:** Stable, useful for cross-session context
+- ✅ **language-server:** Helpful for navigation
+- ⚠️ **GitKraken MCP:** Use with caution, prefer git CLI for reliability
+- ⚠️ **code-checker:** Useful but prefer direct `ruff`/`ty` commands
+- ✅ **memalot:** Specialized tool, works when needed
+
+**Note:** This status list should be updated as tools evolve.
+
+---
+
+**Document Version:** See git history for changes
+**Contributing:** All agents and developers are encouraged to improve this document
