@@ -622,7 +622,9 @@ class JsonBackend(MetadataBackend):
             metadata_file: Path to JSON metadata file
         """
         self.metadata_file = metadata_file
-        self._lock = threading.RLock()  # Use RLock to allow reentrant calls (cleanup_by_size -> get_stats)
+        self._lock = (
+            threading.RLock()
+        )  # Use RLock to allow reentrant calls (cleanup_by_size -> get_stats)
         self._metadata = self._load_from_disk()
 
     def _load_from_disk(self) -> Dict[str, Any]:
