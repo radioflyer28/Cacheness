@@ -1932,6 +1932,87 @@ class UnifiedCache:
         """
         return self.clear_all()
 
+    def cleanup_expired(self, ttl_seconds: Optional[float] = None) -> int:
+        """Remove all expired cache entries and their blob files.
+
+        This method allows on-demand TTL cleanup for long-running applications
+        without restarting the cache. Removes both metadata entries and associated
+        blob files for entries that have exceeded their TTL.
+
+        Args:
+            ttl_seconds: Time-to-live in seconds. If None, uses the configured
+                        default_ttl_seconds from config.metadata.default_ttl_seconds.
+                        If config also has no default, no cleanup is performed.
+
+        Returns:
+            int: The number of expired entries removed.
+
+        Example:
+            # Clean up entries older than 1 hour
+            removed = cache.cleanup_expired(ttl_seconds=3600)
+            print(f"Removed {removed} expired entries")
+
+            # Use configured default TTL
+            removed = cache.cleanup_expired()
+        """
+        import time
+        from datetime import datetime, timezone
+
+        with self._lock:
+            # Determine TTL to use
+            if ttl_seconds is None:
+                ttl_seconds = self.config.metadata.default_ttl_seconds
+            
+            if not ttl_seconds:
+                logger.debug("cleanup_expired: no TTL configured, nothing to do")
+                return 0
+
+            # Find expired entries by scanning metadata
+            cutoff_time = time.time() - ttl_seconds
+            expired_entries = []
+
+            for entry in self.metadata_backend.iter_entry_summaries():
+                created_at = entry.get("created_at")
+                if created_at:
+                    # Handle both raw timestamp and ISO format
+                    if isinstance(created_at, str):
+                        try:
+                            created_dt = datetime.fromisoformat(created_at)
+                            created_timestamp = created_dt.timestamp()
+                        except (ValueError, TypeError):
+                            continue
+                    else:
+                        created_timestamp = created_at
+                    
+                    if created_timestamp < cutoff_time:
+                        expired_entries.append(entry)
+
+            # Delete blob files for expired entries
+            blobs_deleted = 0
+            for entry in expired_entries:
+                actual_path = entry.get("actual_path")
+                if actual_path:
+                    blob_file = Path(actual_path)
+                    if blob_file.exists():
+                        try:
+                            blob_file.unlink()
+                            blobs_deleted += 1
+                        except OSError as exc:
+                            logger.warning(
+                                f"Failed to delete expired blob file {actual_path}: {exc}"
+                            )
+
+            # Remove metadata entries
+            removed_count = self.metadata_backend.cleanup_expired(ttl_seconds)
+
+            if removed_count > 0:
+                logger.info(
+                    f"Cleaned up {removed_count} expired entries "
+                    f"(deleted {blobs_deleted} blob files)"
+                )
+
+            return removed_count
+
     def get_stats(self) -> Dict[str, Any]:
         """Get comprehensive cache statistics."""
         stats = self.metadata_backend.get_stats()

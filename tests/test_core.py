@@ -457,6 +457,201 @@ class TestCacheness:
         count = cache.clear()
         assert count == 5
 
+    def test_cleanup_expired_removes_entries(self):
+        """Test that cleanup_expired() removes expired entries."""
+        import time
+        from cacheness import cacheness
+        from cacheness.config import (
+            CacheConfig,
+            CacheStorageConfig,
+            CacheMetadataConfig,
+            CompressionConfig,
+            SerializationConfig,
+            HandlerConfig,
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Create cache with short TTL
+            storage_config = CacheStorageConfig(cache_dir=temp_dir)
+            metadata_config = CacheMetadataConfig(
+                metadata_backend="json", default_ttl_seconds=0.1
+            )
+            compression_config = CompressionConfig()
+            serialization_config = SerializationConfig()
+            handler_config = HandlerConfig()
+
+            config = CacheConfig(
+                storage=storage_config,
+                metadata=metadata_config,
+                compression=compression_config,
+                serialization=serialization_config,
+                handlers=handler_config,
+            )
+
+            cache = cacheness(config)
+
+            # Create 3 entries
+            cache.put({"value": 1}, key="entry_1")
+            cache.put({"value": 2}, key="entry_2")
+            cache.put({"value": 3}, key="entry_3")
+
+            # Verify all exist
+            assert cache.exists(key="entry_1")
+            assert cache.exists(key="entry_2")
+            assert cache.exists(key="entry_3")
+
+            # Wait for expiration
+            time.sleep(0.15)
+
+            # Cleanup expired entries
+            removed = cache.cleanup_expired()
+
+            # All should be removed
+            assert removed == 3
+            assert not cache.exists(key="entry_1")
+            assert not cache.exists(key="entry_2")
+            assert not cache.exists(key="entry_3")
+
+    def test_cleanup_expired_with_custom_ttl(self):
+        import time
+        """Test cleanup_expired() with custom TTL parameter."""
+        from cacheness import cacheness
+        from cacheness.config import (
+            CacheConfig,
+            CacheStorageConfig,
+            CacheMetadataConfig,
+            CompressionConfig,
+            SerializationConfig,
+            HandlerConfig,
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Create cache with long default TTL (won't expire on its own)
+            storage_config = CacheStorageConfig(cache_dir=temp_dir)
+            metadata_config = CacheMetadataConfig(
+                metadata_backend="json", default_ttl_seconds=3600  # 1 hour
+            )
+            compression_config = CompressionConfig()
+            serialization_config = SerializationConfig()
+            handler_config = HandlerConfig()
+
+            config = CacheConfig(
+                storage=storage_config,
+                metadata=metadata_config,
+                compression=compression_config,
+                serialization=serialization_config,
+                handlers=handler_config,
+            )
+
+            cache = cacheness(config)
+
+            # Create entries
+            cache.put({"value": 1}, key="test_1")
+            cache.put({"value": 2}, key="test_2")
+
+            # Wait a bit
+            time.sleep(0.15)
+
+            # Cleanup with very short custom TTL of 0.1 seconds
+            # (shorter than default, so entries should be expired)
+            removed = cache.cleanup_expired(ttl_seconds=0.1)
+
+            # Should remove both entries
+            assert removed == 2
+            assert not cache.exists(key="test_1")
+            assert not cache.exists(key="test_2")
+
+    def test_cleanup_expired_deletes_blob_files(self):
+        import time
+        """Test that cleanup_expired() deletes blob files, not just metadata."""
+        from pathlib import Path
+        from cacheness import cacheness
+        from cacheness.config import (
+            CacheConfig,
+            CacheStorageConfig,
+            CacheMetadataConfig,
+            CompressionConfig,
+            SerializationConfig,
+            HandlerConfig,
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage_config = CacheStorageConfig(cache_dir=temp_dir)
+            metadata_config = CacheMetadataConfig(
+                metadata_backend="json", default_ttl_seconds=0.1
+            )
+            compression_config = CompressionConfig()
+            serialization_config = SerializationConfig()
+            handler_config = HandlerConfig()
+
+            config = CacheConfig(
+                storage=storage_config,
+                metadata=metadata_config,
+                compression=compression_config,
+                serialization=serialization_config,
+                handlers=handler_config,
+            )
+
+            cache = cacheness(config)
+
+            # Create entry and get blob path
+            cache.put(np.array([1, 2, 3]), key="array_test")
+            cache_key = cache._create_cache_key({"key": "array_test"})
+            entry = cache.metadata_backend.get_entry(cache_key)
+            
+            # Get actual_path from metadata (may be nested)
+            metadata = entry.get("metadata", {})
+            actual_path = metadata.get("actual_path") or entry.get("actual_path")
+            blob_path = Path(actual_path)
+
+            # Verify blob file exists
+            assert blob_path.exists()
+
+            # Wait for expiration
+            time.sleep(0.15)
+
+            # Cleanup
+            removed = cache.cleanup_expired()
+            assert removed == 1
+
+            # Blob file should be gone
+            assert not blob_path.exists()
+
+    def test_cleanup_expired_empty_cache(self):
+        """Test cleanup_expired() on empty cache returns 0."""
+        from cacheness import cacheness
+        from cacheness.config import (
+            CacheConfig,
+            CacheStorageConfig,
+            CacheMetadataConfig,
+            CompressionConfig,
+            SerializationConfig,
+            HandlerConfig,
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage_config = CacheStorageConfig(cache_dir=temp_dir)
+            metadata_config = CacheMetadataConfig(
+                metadata_backend="json", default_ttl_seconds=3600
+            )
+            compression_config = CompressionConfig()
+            serialization_config = SerializationConfig()
+            handler_config = HandlerConfig()
+
+            config = CacheConfig(
+                storage=storage_config,
+                metadata=metadata_config,
+                compression=compression_config,
+                serialization=serialization_config,
+                handlers=handler_config,
+            )
+
+            cache = cacheness(config)
+
+            # Empty cache cleanup should return 0
+            removed = cache.cleanup_expired()
+            assert removed == 0
+
     def test_cache_key_generation(self, cache):
         """Test cache key generation from parameters."""
         params1 = {"a": 1, "b": 2, "c": 3}
