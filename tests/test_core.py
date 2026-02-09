@@ -295,14 +295,14 @@ class TestCacheness:
 
         # Retrieve with metadata
         result = cache.get_with_metadata(experiment="test_123")
-        
+
         assert result is not None
         data, metadata = result
-        
+
         # Verify data
         assert isinstance(data, np.ndarray)
         np.testing.assert_array_equal(data, test_data)
-        
+
         # Verify metadata dict contains expected fields
         assert isinstance(metadata, dict)
         assert "cache_key" in metadata
@@ -320,14 +320,14 @@ class TestCacheness:
         # Create entry
         test_data = {"value": 42, "name": "test"}
         cache.put(test_data, single_lookup_test="data")
-        
+
         # Get with metadata
         result = cache.get_with_metadata(single_lookup_test="data")
         assert result is not None
-        
+
         data, metadata = result
         assert data == test_data
-        
+
         # Verify metadata includes cache_key (proves single lookup)
         assert "cache_key" in metadata
         cache_key = cache._create_cache_key({"single_lookup_test": "data"})
@@ -390,16 +390,16 @@ class TestCacheness:
         # Retrieve with metadata
         result = cache.get_with_metadata(custom_test="data_with_metadata")
         assert result is not None
-        
+
         data, metadata = result
         np.testing.assert_array_equal(data, test_data)
-        
+
         # Verify metadata contains expected fields
         assert "cache_key" in metadata
         assert "data_type" in metadata
         assert "created_at" in metadata
         assert "metadata" in metadata  # Nested metadata dict
-        
+
         # Verify nested metadata structure exists and is a dict
         meta_dict = metadata["metadata"]
         assert isinstance(meta_dict, dict)
@@ -632,6 +632,7 @@ class TestCacheness:
 
     def test_cleanup_expired_with_custom_ttl(self):
         import time
+
         """Test cleanup_expired() with custom TTL parameter."""
         from cacheness import cacheness
         from cacheness.config import (
@@ -647,7 +648,8 @@ class TestCacheness:
             # Create cache with long default TTL (won't expire on its own)
             storage_config = CacheStorageConfig(cache_dir=temp_dir)
             metadata_config = CacheMetadataConfig(
-                metadata_backend="json", default_ttl_seconds=3600  # 1 hour
+                metadata_backend="json",
+                default_ttl_seconds=3600,  # 1 hour
             )
             compression_config = CompressionConfig()
             serialization_config = SerializationConfig()
@@ -681,6 +683,7 @@ class TestCacheness:
 
     def test_cleanup_expired_deletes_blob_files(self):
         import time
+
         """Test that cleanup_expired() deletes blob files, not just metadata."""
         from pathlib import Path
         from cacheness import cacheness
@@ -716,7 +719,7 @@ class TestCacheness:
             cache.put(np.array([1, 2, 3]), key="array_test")
             cache_key = cache._create_cache_key({"key": "array_test"})
             entry = cache.metadata_backend.get_entry(cache_key)
-            
+
             # Get actual_path from metadata (may be nested)
             metadata = entry.get("metadata", {})
             actual_path = metadata.get("actual_path") or entry.get("actual_path")

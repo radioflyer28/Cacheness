@@ -2133,13 +2133,13 @@ class UnifiedCache:
             removed = cache.cleanup_expired()
         """
         import time
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         with self._lock:
             # Determine TTL to use
             if ttl_seconds is None:
                 ttl_seconds = self.config.metadata.default_ttl_seconds
-            
+
             if not ttl_seconds:
                 logger.debug("cleanup_expired: no TTL configured, nothing to do")
                 return 0
@@ -2160,7 +2160,7 @@ class UnifiedCache:
                             continue
                     else:
                         created_timestamp = created_at
-                    
+
                     if created_timestamp < cutoff_time:
                         expired_entries.append(entry)
 

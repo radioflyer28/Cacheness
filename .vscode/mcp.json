@@ -21,8 +21,9 @@
     "language-server": {
       "command": "mcp-language-server",
       "args": [
-        "--workspace", "${workspaceFolder}",
-        "--lsp", "pyright-langserver", "--stdio"
+        "-workspace", "${workspaceFolder}",
+        "-lsp", "pyright-langserver",
+        "--", "--stdio"
       ]
     },
     // Memalot - Python memory leak detection

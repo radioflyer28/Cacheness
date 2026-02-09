@@ -334,6 +334,7 @@ class TestCacheClearFunctionality:
         call_count = 0
 
         cache_config = CacheConfig(cache_dir=tmp_path)
+
         @cached(cache_instance=cacheness(cache_config))
         def func_to_clear(x):
             nonlocal call_count
@@ -369,7 +370,7 @@ class TestCacheClearFunctionality:
         """Test that cache_clear() on one function doesn't affect another."""
         cache_config = CacheConfig(cache_dir=tmp_path)
         cache_instance = cacheness(cache_config)
-        
+
         count_a = 0
         count_b = 0
 
@@ -408,7 +409,7 @@ class TestCacheClearFunctionality:
     def test_cache_clear_empty_cache(self, tmp_path):
         """Test that cache_clear() returns 0 when cache is empty."""
         cache_config = CacheConfig(cache_dir=tmp_path)
-        
+
         @cached(cache_instance=cacheness(cache_config))
         def empty_func(x):
             return x + 1
@@ -420,7 +421,7 @@ class TestCacheClearFunctionality:
     def test_cache_clear_multiple_calls(self, tmp_path):
         """Test that calling cache_clear() multiple times is safe."""
         cache_config = CacheConfig(cache_dir=tmp_path)
-        
+
         @cached(cache_instance=cacheness(cache_config))
         def multi_clear_func(x):
             return x * 2
