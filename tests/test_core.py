@@ -287,6 +287,124 @@ class TestCacheness:
         result = cache.get(nonexistent="key")
         assert result is None
 
+    def test_get_with_metadata_returns_both(self, cache):
+        """Test that get_with_metadata() returns both data and metadata."""
+        # Create a cache entry
+        test_data = np.array([1, 2, 3, 4, 5])
+        cache.put(test_data, experiment="test_123")
+
+        # Retrieve with metadata
+        result = cache.get_with_metadata(experiment="test_123")
+        
+        assert result is not None
+        data, metadata = result
+        
+        # Verify data
+        assert isinstance(data, np.ndarray)
+        np.testing.assert_array_equal(data, test_data)
+        
+        # Verify metadata dict contains expected fields
+        assert isinstance(metadata, dict)
+        assert "cache_key" in metadata
+        assert "data_type" in metadata
+        assert "created_at" in metadata
+        assert metadata["data_type"] == "array"
+
+    def test_get_with_metadata_returns_none_for_missing(self, cache):
+        """Test that get_with_metadata() returns None for missing entries."""
+        result = cache.get_with_metadata(nonexistent="entry")
+        assert result is None
+
+    def test_get_with_metadata_single_lookup(self, cache):
+        """Test that get_with_metadata() performs single metadata lookup."""
+        # Create entry
+        test_data = {"value": 42, "name": "test"}
+        cache.put(test_data, single_lookup_test="data")
+        
+        # Get with metadata
+        result = cache.get_with_metadata(single_lookup_test="data")
+        assert result is not None
+        
+        data, metadata = result
+        assert data == test_data
+        
+        # Verify metadata includes cache_key (proves single lookup)
+        assert "cache_key" in metadata
+        cache_key = cache._create_cache_key({"single_lookup_test": "data"})
+        assert metadata["cache_key"] == cache_key
+
+    def test_get_with_metadata_respects_ttl(self):
+        """Test that get_with_metadata() respects TTL expiration."""
+        import time
+        from cacheness import cacheness
+        from cacheness.config import (
+            CacheConfig,
+            CacheStorageConfig,
+            CacheMetadataConfig,
+            CompressionConfig,
+            SerializationConfig,
+            HandlerConfig,
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Create cache with short TTL
+            storage_config = CacheStorageConfig(cache_dir=temp_dir)
+            metadata_config = CacheMetadataConfig(
+                metadata_backend="json", default_ttl_seconds=0.1
+            )
+            compression_config = CompressionConfig()
+            serialization_config = SerializationConfig()
+            handler_config = HandlerConfig()
+
+            config = CacheConfig(
+                storage=storage_config,
+                metadata=metadata_config,
+                compression=compression_config,
+                serialization=serialization_config,
+                handlers=handler_config,
+            )
+
+            cache = cacheness(config)
+
+            # Create entry
+            test_data = {"expired": "data"}
+            cache.put(test_data, ttl_test="entry")
+
+            # Verify exists initially
+            result = cache.get_with_metadata(ttl_test="entry")
+            assert result is not None
+
+            # Wait for expiration
+            time.sleep(0.15)
+
+            # Should return None after expiration
+            result = cache.get_with_metadata(ttl_test="entry")
+            assert result is None
+
+    def test_get_with_metadata_with_custom_metadata(self, cache):
+        """Test that get_with_metadata() returns all metadata fields including nested metadata."""
+        # Create entry
+        test_data = np.array([10, 20, 30])
+        cache.put(test_data, custom_test="data_with_metadata")
+
+        # Retrieve with metadata
+        result = cache.get_with_metadata(custom_test="data_with_metadata")
+        assert result is not None
+        
+        data, metadata = result
+        np.testing.assert_array_equal(data, test_data)
+        
+        # Verify metadata contains expected fields
+        assert "cache_key" in metadata
+        assert "data_type" in metadata
+        assert "created_at" in metadata
+        assert "metadata" in metadata  # Nested metadata dict
+        
+        # Verify nested metadata structure exists and is a dict
+        meta_dict = metadata["metadata"]
+        assert isinstance(meta_dict, dict)
+        assert len(meta_dict) > 0  # Contains handler-specific fields
+
     def test_exists_returns_true_for_cached_entry(self, cache):
         """Test that exists() returns True for entries that exist."""
         # Create a cache entry

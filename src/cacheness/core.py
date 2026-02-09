@@ -1123,6 +1123,183 @@ class UnifiedCache:
                 self.metadata_backend.increment_misses()
                 return None
 
+    def get_with_metadata(
+        self,
+        cache_key: Optional[str] = None,
+        ttl_seconds=_DEFAULT_TTL,
+        prefix: str = "",
+        **kwargs,
+    ) -> Optional[tuple[Any, Dict[str, Any]]]:
+        """
+        Retrieve cached data along with its metadata in a single atomic operation.
+
+        This method combines get() and get_metadata() into one call, avoiding
+        separate metadata lookups. Useful when you need both the data and its
+        metadata (e.g., created_at, file_size, custom metadata).
+
+        Args:
+            cache_key: Direct cache key (if provided, **kwargs are ignored)
+            ttl_seconds: Custom TTL in seconds (overrides default). None = never expire.
+                         Use _DEFAULT_TTL sentinel (default) to use config's default_ttl_seconds.
+            prefix: Descriptive prefix prepended to the cache filename
+            **kwargs: Parameters identifying the cached data (used if cache_key is None)
+
+        Returns:
+            Tuple of (data, metadata_dict) if found and not expired, None otherwise
+
+        Example:
+            result = cache.get_with_metadata(experiment="exp_001")
+            if result:
+                data, metadata = result
+                print(f"Created: {metadata['created_at']}")
+                print(f"Size: {metadata.get('file_size_bytes', 0)} bytes")
+                process(data)
+        """
+        with self._lock:
+            if cache_key is None:
+                cache_key = self._create_cache_key(kwargs)
+
+            # Single metadata lookup
+            entry = self.metadata_backend.get_entry(cache_key)
+            if not entry:
+                self.metadata_backend.increment_misses()
+                return None
+
+            # Check TTL expiration directly using the already-retrieved entry
+            # to avoid a second metadata lookup
+            if ttl_seconds is _DEFAULT_TTL:  # Use config default
+                actual_ttl = self.config.metadata.default_ttl_seconds
+            else:  # Use provided TTL (could be None for infinite or a specific value)
+                actual_ttl = ttl_seconds
+
+            # If TTL is not None (infinite), check expiration
+            if actual_ttl is not None:
+                creation_time_str = entry.get("created_at")
+                if creation_time_str:
+                    if isinstance(creation_time_str, str):
+                        creation_time = datetime.fromisoformat(creation_time_str)
+                    else:
+                        creation_time = creation_time_str
+
+                    if creation_time.tzinfo is None:
+                        creation_time = creation_time.replace(tzinfo=timezone.utc)
+
+                    expiry_time = creation_time + timedelta(seconds=actual_ttl)
+                    current_time = datetime.now(timezone.utc)
+
+                    if current_time > expiry_time:
+                        self.metadata_backend.increment_misses()
+                        return None
+
+            # Get appropriate handler
+            data_type = entry.get("data_type")
+            if not data_type:
+                self.metadata_backend.increment_misses()
+                return None
+
+            try:
+                handler = self.handlers.get_handler_by_type(data_type)
+                base_file_path = self._get_cache_file_path(cache_key, prefix)
+
+                # Use actual path from metadata if available, otherwise use base path
+                metadata = entry.get("metadata", {})
+                actual_path = metadata.get("actual_path")
+                if actual_path:
+                    file_path = Path(actual_path)
+                else:
+                    file_path = base_file_path
+
+                # Verify cache file integrity if enabled and hash is available
+                if self.config.metadata.verify_cache_integrity:
+                    stored_hash = metadata.get("file_hash")
+                    if stored_hash is not None:
+                        current_hash = self._calculate_file_hash(file_path)
+                        if current_hash != stored_hash:
+                            logger.warning(
+                                f"Cache integrity verification failed for {cache_key}: "
+                                f"stored hash {stored_hash} != current hash {current_hash}. "
+                                f"Removing corrupted cache entry."
+                            )
+                            self.metadata_backend.remove_entry(cache_key)
+                            self.metadata_backend.increment_misses()
+                            return None
+
+                # Verify entry signature if signing is enabled
+                if self.signer and self.config.security.enable_entry_signing:
+                    stored_signature = metadata.get("entry_signature")
+
+                    if stored_signature is not None:
+                        # Use helper method for consistent field extraction
+                        cache_key_params = metadata.get("cache_key_params")
+                        verify_entry_data = self._extract_signable_fields(
+                            cache_key=cache_key,
+                            entry_data=entry,
+                            metadata=metadata,
+                            cache_key_params=cache_key_params,
+                        )
+
+                        if not self.signer.verify_entry(
+                            verify_entry_data, stored_signature
+                        ):
+                            if self.config.security.delete_invalid_signatures:
+                                logger.warning(
+                                    f"Entry signature verification failed for {cache_key}. "
+                                    f"Removing potentially tampered cache entry."
+                                )
+                                self.metadata_backend.remove_entry(cache_key)
+                                self.metadata_backend.increment_misses()
+                                return None
+                            else:
+                                logger.warning(
+                                    f"Entry signature verification failed for {cache_key}. "
+                                    f"Entry retained due to delete_invalid_signatures=False."
+                                )
+                                # Continue with loading despite invalid signature
+
+                    elif not self.config.security.allow_unsigned_entries:
+                        logger.warning(
+                            f"Entry {cache_key} has no signature but unsigned entries are not allowed. "
+                            f"Removing entry."
+                        )
+                        self.metadata_backend.remove_entry(cache_key)
+                        self.metadata_backend.increment_misses()
+                        return None
+
+                # Use handler to load the data
+                data = handler.get(file_path, metadata)
+
+                # Update access time
+                self.metadata_backend.update_access_time(cache_key)
+                self.metadata_backend.increment_hits()
+
+                # Include cache_key in returned metadata
+                entry["cache_key"] = cache_key
+
+                logger.debug(f"Cache hit with metadata ({data_type}): {cache_key}")
+                return (data, entry)
+
+            except FileNotFoundError as e:
+                # Cache file was deleted externally — permanent, clean up metadata
+                logger.warning(f"Cache file missing for {cache_key}: {e}")
+                self.metadata_backend.remove_entry(cache_key)
+                self.metadata_backend.increment_misses()
+                return None
+            except (OSError, IOError) as e:
+                # I/O errors may be transient (disk temporarily unavailable, etc.)
+                # Do NOT delete metadata — the entry may be readable on retry
+                logger.warning(f"I/O error loading cached {data_type} {cache_key}: {e}")
+                self.metadata_backend.increment_misses()
+                return None
+            except Exception as e:
+                # Unexpected errors (deserialization failures, corruption, etc.)
+                # These are likely permanent — clean up the metadata entry
+                logger.warning(
+                    f"Failed to load cached {data_type} {cache_key}: {type(e).__name__}: {e}"
+                )
+                self.metadata_backend.remove_entry(cache_key)
+                self.metadata_backend.increment_misses()
+                return None
+
     def get_metadata(
         self, cache_key: Optional[str] = None, check_expiration: bool = True, **kwargs
     ) -> Optional[Dict[str, Any]]:
