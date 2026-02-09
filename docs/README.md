@@ -8,6 +8,7 @@ Welcome to the Cacheness documentation! This high-performance caching library pr
 - **[Configuration Guide](CONFIGURATION.md)** - Comprehensive configuration options
 - **[Backend Selection Guide](BACKEND_SELECTION.md)** - Choose JSON vs SQLite backend
 - **[Security Guide](SECURITY.md)** - Cache entry signing and security features
+- **[Troubleshooting Guide](TROUBLESHOOTING.md)** - Common issues and solutions
 
 ## Platform Compatibility
 
