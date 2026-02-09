@@ -324,6 +324,238 @@ class cached:
         return decorator
 
 
+class cache_if:
+    """
+    Conditional caching decorator that only caches when a predicate returns True.
+
+    This decorator checks the function's return value against a user-provided
+    condition before deciding whether to cache it. The cache lookup still happens
+    normally - only the storage is conditional.
+
+    Examples:
+        # Only cache non-None results
+        @cache_if(condition=lambda result: result is not None)
+        def fetch_api_data(url):
+            response = requests.get(url)
+            return response.json() if response.ok else None
+
+        # Only cache successful API responses
+        @cache_if(
+            condition=lambda result: result.get("status") == "success",
+            ttl_seconds=3600
+        )
+        def api_call(endpoint):
+            return requests.get(endpoint).json()
+
+        # Only cache non-empty DataFrames
+        @cache_if(condition=lambda df: not df.empty)
+        def load_data(query):
+            return pd.read_sql(query, connection)
+    """
+
+    def __init__(
+        self,
+        condition: Callable[[Any], bool],
+        ttl_seconds: Optional[float] = None,
+        key_prefix: Optional[str] = None,
+        cache_instance: Optional[UnifiedCache] = None,
+        key_func: Optional[Callable[[Callable, Tuple, Dict], str]] = None,
+        ignore_errors: bool = True,
+    ):
+        """
+        Initialize the conditional caching decorator.
+
+        Args:
+            condition: Function that receives the result and returns True if it
+                should be cached. Signature: condition(result) -> bool
+            ttl_seconds: Time-to-live in seconds (uses cache default if None).
+                Pass None explicitly to never expire.
+            key_prefix: Prefix for cache keys (useful for versioning)
+            cache_instance: Specific cache instance to use (creates default if None)
+            key_func: Custom function for generating cache keys
+            ignore_errors: If True, cache errors don't prevent function execution
+        """
+        self.condition = condition
+        self.ttl_seconds = ttl_seconds
+        self.key_prefix = key_prefix
+        self.cache_instance = cache_instance
+        self.key_func = key_func
+        self.ignore_errors = ignore_errors
+        self._owns_cache = False  # Track if we created the cache instance
+
+        # Track cache keys created by this decorator for cache_clear()
+        self._cache_keys: Set[str] = set()
+        self._lock = threading.Lock()
+
+        # Track hit/miss statistics
+        self._hits: int = 0
+        self._misses: int = 0
+
+        # Create default cache instance if none provided
+        if self.cache_instance is None:
+            self.cache_instance = UnifiedCache()
+            self._owns_cache = True
+            # Track for cleanup using weak reference
+            _decorator_cache_instances.append(weakref.ref(self.cache_instance))
+
+    def __call__(self, func: Callable) -> Callable:
+        """Apply the conditional caching decorator to a function."""
+
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            # Generate cache key
+            try:
+                if self.key_func:
+                    cache_key = self.key_func(func, args, kwargs)
+                else:
+                    cache_instance = cast(UnifiedCache, self.cache_instance)
+                    cache_key = _generate_cache_key(
+                        func, args, kwargs, self.key_prefix, cache_instance.config
+                    )
+            except Exception as e:
+                if self.ignore_errors:
+                    # If key generation fails, just call the function
+                    return func(*args, **kwargs)
+                else:
+                    raise RuntimeError(f"Cache key generation failed: {e}") from e
+
+            # Try to get from cache using a synthetic parameter containing the cache key
+            try:
+                cache_instance = cast(UnifiedCache, self.cache_instance)
+                cached_result = cache_instance.get(
+                    ttl_seconds=self.ttl_seconds,
+                    __decorator_cache_key=cache_key,  # Use synthetic parameter with the cache key
+                )
+                if cached_result is not None:
+                    # Cache hit - increment hits counter
+                    with self._lock:
+                        self._hits += 1
+                    return cached_result
+            except Exception as e:
+                if not self.ignore_errors:
+                    raise RuntimeError(f"Cache retrieval failed: {e}") from e
+                # If cache retrieval fails but we're ignoring errors, continue to function call
+
+            # Cache miss - increment misses counter
+            with self._lock:
+                self._misses += 1
+
+            # Call the original function
+            result = func(*args, **kwargs)
+
+            # Check condition before caching
+            try:
+                should_cache = self.condition(result)
+            except Exception as e:
+                if not self.ignore_errors:
+                    raise RuntimeError(f"Condition evaluation failed: {e}") from e
+                # If condition evaluation fails, don't cache but return result
+                should_cache = False
+
+            # Only store result in cache if condition is True
+            if should_cache:
+                try:
+                    cache_instance = cast(UnifiedCache, self.cache_instance)
+                    cache_instance.put(
+                        result,
+                        description=f"Cached result for {cache_key}",
+                        __decorator_cache_key=cache_key,  # Use same synthetic parameter
+                    )
+                    # Track the cache key for later cleanup
+                    with self._lock:
+                        self._cache_keys.add(cache_key)
+                except Exception as e:
+                    if not self.ignore_errors:
+                        raise RuntimeError(f"Cache storage failed: {e}") from e
+                    # If cache storage fails but we're ignoring errors, still return the result
+
+            return result
+
+        # Add cache management methods to the wrapped function
+        def cache_clear():
+            return self._clear_cache(func)
+
+        def cache_info():
+            return self._cache_info(func)
+
+        def cache_key(*args, **kwargs):
+            if self.key_func:
+                return self.key_func(func, args, kwargs)
+            else:
+                cache_instance = cast(UnifiedCache, self.cache_instance)
+                return _generate_cache_key(
+                    func, args, kwargs, self.key_prefix, cache_instance.config
+                )
+
+        # Attach methods (these will be available as wrapper.cache_clear(), etc.)
+        setattr(wrapper, "cache_clear", cache_clear)
+        setattr(wrapper, "cache_info", cache_info)
+        setattr(wrapper, "cache_key", cache_key)
+        setattr(wrapper, "_cache_instance", self.cache_instance)  # For cleanup in tests
+
+        return wrapper
+
+    def _clear_cache(self, func: Callable) -> int:
+        """Clear all cache entries for this function."""
+        cache_instance = cast(UnifiedCache, self.cache_instance)
+        deleted = 0
+
+        with self._lock:
+            # Make a copy of the keys to avoid modification during iteration
+            keys_to_delete = self._cache_keys.copy()
+
+        # Delete each tracked cache key
+        for cache_key in keys_to_delete:
+            try:
+                # Invalidate using the cache key stored in __decorator_cache_key
+                cache_instance.invalidate(__decorator_cache_key=cache_key)
+                with self._lock:
+                    self._cache_keys.discard(cache_key)
+                deleted += 1
+            except Exception:
+                # Key might have been deleted externally or expired
+                with self._lock:
+                    self._cache_keys.discard(cache_key)
+
+        return deleted
+
+    def _cache_info(self, func: Callable) -> Dict[str, Any]:
+        """Get cache information for this function."""
+        func_name = getattr(func, "__qualname__", getattr(func, "__name__", "unknown"))
+        func_module = getattr(func, "__module__", "unknown")
+        cache_instance = cast(UnifiedCache, self.cache_instance)
+
+        # Get current stats with thread-safe access
+        with self._lock:
+            hits = self._hits
+            misses = self._misses
+            size = len(self._cache_keys)
+
+        return {
+            "function": f"{func_module}.{func_name}",
+            "hits": hits,
+            "misses": misses,
+            "size": size,
+            "ttl_seconds": self.ttl_seconds,
+            "key_prefix": self.key_prefix,
+            "cache_dir": str(cache_instance.config.cache_dir),
+            "ignore_errors": self.ignore_errors,
+        }
+
+    def close(self):
+        """
+        Close the cache instance if this decorator owns it.
+
+        Call this method to explicitly release resources when the decorated
+        function is no longer needed, especially in long-running applications.
+        """
+        if self._owns_cache and self.cache_instance is not None:
+            try:
+                self.cache_instance.close()
+            except Exception:
+                pass  # Ignore errors during cleanup
+
+
 def cache_function(
     func: Optional[Callable] = None, **kwargs
 ) -> Union[Callable, cached]:

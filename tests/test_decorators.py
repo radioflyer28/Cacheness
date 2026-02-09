@@ -774,3 +774,333 @@ class TestFactoryMethods:
 
             # Close the cache instance created by the decorator
             might_fail._cache_instance.close()
+
+
+class TestCacheIfDecorator:
+    """Test the @cache_if conditional caching decorator."""
+
+    def test_cache_if_only_caches_when_condition_true(self, tmp_path):
+        """Test that @cache_if only caches results when condition returns True."""
+        config = CacheConfig(cache_dir=tmp_path)
+        cache_instance = cacheness(config)
+
+        call_count = 0
+
+        from cacheness.decorators import cache_if
+
+        @cache_if(
+            condition=lambda result: result is not None,
+            cache_instance=cache_instance,
+        )
+        def fetch_data(should_succeed):
+            nonlocal call_count
+            call_count += 1
+            return "data" if should_succeed else None
+
+        # First call with successful result (should cache)
+        result1 = fetch_data(True)
+        assert result1 == "data"
+        assert call_count == 1
+
+        # Second call with same args (should hit cache)
+        result2 = fetch_data(True)
+        assert result2 == "data"
+        assert call_count == 1  # Still 1 - cache was hit
+
+        # Call with unsuccessful result (should NOT cache)
+        result3 = fetch_data(False)
+        assert result3 is None
+        assert call_count == 2
+
+        # Calling again with unsuccessful result (should execute again, not cached)
+        result4 = fetch_data(False)
+        assert result4 is None
+        assert call_count == 3  # Incremented - not cached
+
+        cache_instance.close()
+
+    def test_cache_if_predicate_receives_result(self, tmp_path):
+        """Test that the condition predicate receives the actual return value."""
+        config = CacheConfig(cache_dir=tmp_path)
+        cache_instance = cacheness(config)
+
+        received_results = []
+
+        from cacheness.decorators import cache_if
+
+        def capture_condition(result):
+            received_results.append(result)
+            return result.get("status") == "success" if isinstance(result, dict) else False
+
+        @cache_if(condition=capture_condition, cache_instance=cache_instance)
+        def api_call(status_code):
+            return {"status": "success" if status_code == 200 else "error", "code": status_code}
+
+        # Call with success
+        result1 = api_call(200)
+        assert result1 == {"status": "success", "code": 200}
+        assert len(received_results) == 1
+        assert received_results[0] == {"status": "success", "code": 200}
+
+        # Call with error
+        result2 = api_call(500)
+        assert result2 == {"status": "error", "code": 500}
+        assert len(received_results) == 2
+        assert received_results[1] == {"status": "error", "code": 500}
+
+        cache_instance.close()
+
+    def test_cache_if_supports_ttl_parameter(self, tmp_path):
+        """Test that @cache_if supports ttl_seconds parameter like @cached."""
+        config = CacheConfig(cache_dir=tmp_path)
+        cache_instance = cacheness(config)
+
+        call_count = 0
+
+        from cacheness.decorators import cache_if
+
+        @cache_if(
+            condition=lambda result: result is not None,
+            ttl_seconds=1,  # 1 second TTL
+            cache_instance=cache_instance,
+        )
+        def fetch_data():
+            nonlocal call_count
+            call_count += 1
+            return "data"
+
+        # First call
+        result1 = fetch_data()
+        assert result1 == "data"
+        assert call_count == 1
+
+        # Immediate second call (should hit cache)
+        result2 = fetch_data()
+        assert result2 == "data"
+        assert call_count == 1
+
+        # Wait for TTL to expire
+        time.sleep(1.1)
+
+        # Third call after TTL expires (should execute again)
+        result3 = fetch_data()
+        assert result3 == "data"
+        assert call_count == 2
+
+        cache_instance.close()
+
+    def test_cache_if_supports_key_prefix(self, tmp_path):
+        """Test that @cache_if supports key_prefix parameter."""
+        config = CacheConfig(cache_dir=tmp_path)
+        cache_instance = cacheness(config)
+
+        from cacheness.decorators import cache_if
+
+        @cache_if(
+            condition=lambda result: True,
+            key_prefix="v1",
+            cache_instance=cache_instance,
+        )
+        def api_v1():
+            return "v1_data"
+
+        @cache_if(
+            condition=lambda result: True,
+            key_prefix="v2",
+            cache_instance=cache_instance,
+        )
+        def api_v1():  # Same function name, different prefix
+            return "v2_data"
+
+        # Both should work independently
+        result1 = api_v1()
+        assert "data" in result1
+
+        cache_instance.close()
+
+    def test_cache_if_cache_clear(self, tmp_path):
+        """Test that cache_clear() works on @cache_if decorated functions."""
+        config = CacheConfig(cache_dir=tmp_path)
+        cache_instance = cacheness(config)
+
+        call_count = 0
+
+        from cacheness.decorators import cache_if
+
+        @cache_if(
+            condition=lambda result: result is not None,
+            cache_instance=cache_instance,
+        )
+        def fetch_data(value):
+            nonlocal call_count
+            call_count += 1
+            return value
+
+        # Cache some results
+        fetch_data(1)
+        fetch_data(2)
+        fetch_data(3)
+        assert call_count == 3
+
+        # Hit cache
+        fetch_data(1)
+        assert call_count == 3
+
+        # Clear cache
+        cleared = fetch_data.cache_clear()
+        assert cleared == 3  # Should have cleared 3 entries
+
+        # Should execute again after clear
+        fetch_data(1)
+        assert call_count == 4
+
+        cache_instance.close()
+
+    def test_cache_if_cache_info(self, tmp_path):
+        """Test that cache_info() works on @cache_if decorated functions."""
+        config = CacheConfig(cache_dir=tmp_path)
+        cache_instance = cacheness(config)
+
+        from cacheness.decorators import cache_if
+
+        @cache_if(
+            condition=lambda result: result is not None,
+            ttl_seconds=3600,
+            cache_instance=cache_instance,
+        )
+        def fetch_data(value):
+            return value
+
+        # Cache some results
+        fetch_data(1)  # miss
+        fetch_data(1)  # hit
+        fetch_data(2)  # miss
+
+        info = fetch_data.cache_info()
+        assert info["hits"] == 1
+        assert info["misses"] == 2
+        assert info["size"] == 2
+        assert info["ttl_seconds"] == 3600
+        assert "cache_dir" in info
+
+        cache_instance.close()
+
+    def test_cache_if_condition_failure_doesnt_cache(self, tmp_path):
+        """Test that if condition raises exception, result is not cached."""
+        config = CacheConfig(cache_dir=tmp_path)
+        cache_instance = cacheness(config)
+
+        call_count = 0
+
+        from cacheness.decorators import cache_if
+
+        def failing_condition(result):
+            if result > 10:
+                raise ValueError("Too large!")
+            return True
+
+        @cache_if(
+            condition=failing_condition,
+            cache_instance=cache_instance,
+            ignore_errors=True,  # Don't propagate condition errors
+        )
+        def compute(value):
+            nonlocal call_count
+            call_count += 1
+            return value
+
+        # Call with small value (condition passes)
+        result1 = compute(5)
+        assert result1 == 5
+        assert call_count == 1
+
+        # Second call (should hit cache)
+        result2 = compute(5)
+        assert result2 == 5
+        assert call_count == 1
+
+        # Call with large value (condition fails with exception)
+        result3 = compute(15)
+        assert result3 == 15
+        assert call_count == 2
+
+        # Call again with large value (should not be cached due to condition failure)
+        result4 = compute(15)
+        assert result4 == 15
+        assert call_count == 3  # Executed again
+
+        cache_instance.close()
+
+    def test_cache_if_with_different_arg_combinations(self, tmp_path):
+        """Test that @cache_if generates different keys for different arguments."""
+        config = CacheConfig(cache_dir=tmp_path)
+        cache_instance = cacheness(config)
+
+        call_count = 0
+
+        from cacheness.decorators import cache_if
+
+        @cache_if(
+            condition=lambda result: result is not None,
+            cache_instance=cache_instance,
+        )
+        def fetch_user(user_id, include_details=False):
+            nonlocal call_count
+            call_count += 1
+            return {"id": user_id, "details": include_details}
+
+        # Different positional args
+        fetch_user(1)
+        fetch_user(2)
+        assert call_count == 2
+
+        # Different keyword args
+        fetch_user(1, include_details=True)
+        assert call_count == 3  # New variation
+
+        # Cache hit for existing combination
+        fetch_user(1)
+        assert call_count == 3  # Still 3
+
+        cache_instance.close()
+
+    @pytest.mark.skipif(not PANDAS_AVAILABLE, reason="pandas not installed")
+    def test_cache_if_with_dataframe_condition(self, tmp_path):
+        """Test @cache_if with DataFrame-specific conditions."""
+        config = CacheConfig(cache_dir=tmp_path)
+        cache_instance = cacheness(config)
+
+        call_count = 0
+
+        from cacheness.decorators import cache_if
+
+        @cache_if(
+            condition=lambda df: not df.empty,  # Only cache non-empty DataFrames
+            cache_instance=cache_instance,
+        )
+        def load_data(rows):
+            nonlocal call_count
+            call_count += 1
+            return pd.DataFrame({"col": list(range(rows))})
+
+        # Cache non-empty DataFrame
+        df1 = load_data(5)
+        assert len(df1) == 5
+        assert call_count == 1
+
+        # Hit cache
+        df2 = load_data(5)
+        assert len(df2) == 5
+        assert call_count == 1
+
+        # Don't cache empty DataFrame
+        df3 = load_data(0)
+        assert len(df3) == 0
+        assert call_count == 2
+
+        # Call again with empty (not cached, executes again)
+        df4 = load_data(0)
+        assert len(df4) == 0
+        assert call_count == 3
+
+        cache_instance.close()
