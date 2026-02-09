@@ -44,6 +44,7 @@ from typing import Any, Dict, List, Optional, Union
 from datetime import datetime, timezone
 
 from .backends import MetadataBackend, JsonBackend
+from .backends.blob_backends import BlobBackend, FilesystemBlobBackend
 from .handlers import HandlerRegistry
 from .compression import read_file
 
@@ -81,6 +82,7 @@ class BlobStore:
         compression: str = "lz4",
         compression_level: int = 3,
         content_addressable: bool = False,
+        blob_backend: Optional[BlobBackend] = None,
     ):
         """
         Initialize a BlobStore.
@@ -91,6 +93,8 @@ class BlobStore:
             compression: Compression codec (lz4, zstd, gzip, blosclz, etc.)
             compression_level: Compression level (1-9)
             content_addressable: If True, use content hash as blob key
+            blob_backend: Blob storage backend for file operations (delete, exists).
+                Defaults to FilesystemBlobBackend if not provided.
         """
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -123,6 +127,12 @@ class BlobStore:
 
         # Initialize handler registry
         self.handlers = HandlerRegistry()
+
+        # Initialize blob backend for file operations (delete, exists)
+        if blob_backend is not None:
+            self.blob_backend = blob_backend
+        else:
+            self.blob_backend = FilesystemBlobBackend(self.cache_dir, shard_chars=0)
 
         logger.debug(f"BlobStore initialized at {self.cache_dir}")
 
@@ -217,7 +227,7 @@ class BlobStore:
             else:
                 actual_path = self.cache_dir / key
 
-        if not actual_path.exists():
+        if not self.blob_backend.exists(str(actual_path)):
             logger.warning(f"Blob file missing: {actual_path}")
             return None
 
@@ -299,10 +309,9 @@ class BlobStore:
         if entry is None:
             return False
 
-        # Delete the file
+        # Delete the file via blob backend
         actual_path = Path(entry.get("actual_path", self.cache_dir / key))
-        if actual_path.exists():
-            actual_path.unlink()
+        self.blob_backend.delete_blob(str(actual_path))
 
         # Remove metadata
         self.backend.remove_entry(key)
@@ -324,9 +333,9 @@ class BlobStore:
         if entry is None:
             return False
 
-        # Also verify the file exists
+        # Also verify the file exists via blob backend
         actual_path = Path(entry.get("actual_path", self.cache_dir / key))
-        return actual_path.exists()
+        return self.blob_backend.exists(str(actual_path))
 
     def list(
         self,
@@ -379,6 +388,7 @@ class BlobStore:
     def close(self):
         """Close the blob store and release resources."""
         self.backend.close()
+        self.blob_backend.close()
 
     def __enter__(self):
         return self

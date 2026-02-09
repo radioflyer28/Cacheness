@@ -1,43 +1,31 @@
 #!/usr/bin/env python3
 
-"""Functions to compress and decompress Python pickle files.
-Uses blosc library for compression.
-Benchmarks and tests commented out at bottom of code.
+"""Compression and serialization module for Cacheness.
 
-Benchmark result on FalconPC with NVME drive:
-    Pickling 10,000,000 integers in list (about 20MB)
+This module provides two categories of functionality:
 
-    19,554KB
-    Un-compressed write time: 0.34
-    Un-compressed read time: 0.52
+1. **Serialization Utilities** (pure functions, no I/O):
+   - ``is_pickleable()``, ``verify_pickleable()`` - Pickle compatibility checks
+   - ``is_dill_serializable()``, ``verify_dill_serializable()`` - Dill compatibility checks
+   - ``optimize_compression_params()`` - Data-aware blosc2 parameter tuning
+   - ``get_recommended_settings()`` - Preset compression configurations
+   - ``list_available_codecs()`` - Available blosc2 codec enumeration
 
-    8,520KB
-    LZMA (.xz) write time: 14.89
-    LZMA (.xz) read time: 1.36
+2. **File I/O Operations** (read/write compressed data to disk):
+   - ``write_file()`` - Serialize, compress, and write to file via blosc2
+   - ``read_file()`` - Read, decompress, and deserialize from file via blosc2
+   - ``write_file_with_metadata()`` / ``read_file_with_metadata()`` - With metadata wrappers
+   - ``get_compression_info()`` - File compression statistics
+   - ``benchmark_codecs()`` - Codec performance comparison
 
-    11,867KB
-    blosclz write time: 0.32 sec
-    blosclz read time: 1.51 sec
+The file I/O operations are primarily consumed by ``ObjectHandler`` in ``handlers.py``.
+Other handlers (DataFrame, Array, TensorFlow) use their own format-specific I/O
+(parquet, npz, blosc2 tensor) as defined by their handler interfaces.
 
-    9,879KB
-    lz4 write time: 0.25 sec
-    lz4 read time: 1.44 sec
-
-    9,865KB
-    lz4hc write time: 0.36 sec
-    lz4hc read time: 1.51 sec
-
-    10,271KB
-    snappy write time: 0.31 sec
-    snappy read time: 1.54 sec
-
-    8,308KB
-    zlib write time: 0.38 sec
-    zlib read time: 1.57 sec
-
-    8,260KB
-    zstd write time: 0.70 sec
-    zstd read time: 1.54 sec
+See Also:
+    - ``cacheness.handlers`` - Handler implementations using this module
+    - ``cacheness.storage.compression`` - Re-exports for the storage layer
+    - ``cacheness.interfaces`` - CacheHandler ABC defining the handler contract
 """
 
 # %%
@@ -128,27 +116,36 @@ except ImportError:
     BLOSC_AVAILABLE = False
     blosc_version = "not available"
 
-# Make blosc available through the module for tests
 __all__ = [
+    # Blosc2 internals (exposed for handler/test use)
     "blosc",
     "blosc_version",
-    "get_compression_info",
-    "list_available_codecs",
-    "read_file",
-    "write_file",
-    "get_recommended_settings",
-    "benchmark_codecs",
+    "BLOSC_AVAILABLE",
+    "DILL_AVAILABLE",
+    # Exceptions
     "CompressionError",
     "DecompressionError",
+    # Serialization utilities (pure functions, no I/O)
+    "is_pickleable",
+    "verify_pickleable",
+    "is_dill_serializable",
+    "verify_dill_serializable",
+    "get_recommended_settings",
+    "optimize_compression_params",
+    "list_available_codecs",
+    # File I/O operations
+    "write_file",
+    "read_file",
     "write_file_with_metadata",
     "read_file_with_metadata",
-    "is_pickleable",
-    "is_dill_serializable",
-    "verify_pickleable",
-    "verify_dill_serializable",
-    "DILL_AVAILABLE",
+    "get_compression_info",
+    "benchmark_codecs",
 ]
-# print(f'blosc version: {blosc_version}')
+
+
+# =============================================================================
+# Serialization Utilities (pure functions, no I/O)
+# =============================================================================
 
 
 def is_pickleable(obj) -> bool:
@@ -432,6 +429,11 @@ def optimize_compression_params(
     return params
 
 
+# =============================================================================
+# Compression Analysis & Benchmarking
+# =============================================================================
+
+
 def get_compression_info(filepath):
     """Get compression information about a file.
 
@@ -566,6 +568,11 @@ def benchmark_codecs(data, codecs=None, temp_dir=None):
             results[codec] = {"error": str(e)}
 
     return results
+
+
+# =============================================================================
+# File I/O Operations (serialize + compress + write to disk)
+# =============================================================================
 
 
 def write_file_with_metadata(obj, filepath, metadata=None, **kwargs):
@@ -886,134 +893,3 @@ def read_file(filepath, *, nparray=True):
         if isinstance(e, (CompressionError, FileNotFoundError)):
             raise
         raise CompressionError(f"Failed to decompress file {filepath}: {e}") from e
-
-
-# %% TEST AND BENCHMARK
-# if __name__ == "__main__":
-# import time
-# import random
-# import pickle
-# import lzma
-# import numpy as np
-
-# #saves and reads from this file
-# #adds extra extension for various compression types, example: test_pickle.pickle.xz
-# filepath = 'blosc_benchmark.pickle'
-
-# # %%
-# #generate list of 10 million random numbers, about 10MB un-compressed
-# # results = random.choices(range(0,101), k=int(1e7))
-# # blosc_pack_numpy = True
-
-# #generate two lists of a million random numbers
-# list_len = 1e7
-# rand_list = random.choices(range(0,101), k=int(round(list_len/2)))
-# results = rand_list + rand_list
-# blosc_pack_numpy = True
-
-# #generate numpy array of 10 million random numbers, about 80MB un-compressed
-# # results = np.random.randint(0, 100, int(1e7))
-# # blosc_pack_numpy = True
-
-# print(f'{len(results)} integers in list')
-
-# bench_results = {}
-
-# #test no compression
-# start_write = time.perf_counter()
-# with open(filepath, 'wb') as outfile:
-#     pickle.dump(results, outfile)
-# end_write = time.perf_counter()
-# write_time = end_write - start_write
-# print(f'Un-compressed write time: {write_time:.4f}')
-
-# #get size of un-compressed file in MiB
-# uncomp_file_size = Path(filepath).stat().st_size / 1024**2
-# print(f'Un-compressed file size: {uncomp_file_size}MiB')
-
-# start_read = time.perf_counter()
-# with open(filepath, 'rb') as infile:
-#     read_results = pickle.load(infile)
-# end_read = time.perf_counter()
-# read_time = end_read - start_read
-# print(f'Un-compressed read time: {read_time:.4f}')
-
-# bench_results['uncompressed'] = {'write_time': write_time, 'read_time': read_time, 'compression_ratio': 1}
-
-# #test LZMA compression (smallest size)
-# # start_write = time.perf_counter()
-# # with lzma.open(filepath+'.xz', 'wb') as pkl_file:
-# #     pickle.dump(results, pkl_file)
-# # end_write = time.perf_counter()
-# # print(f'LZMA (.xz) write time: {(end_write-start_write):.4f}')
-
-# # start_read = time.perf_counter()
-# # with lzma.open(filepath+'.xz', 'rb') as pkl_file:
-# #     read_results = pickle.load(pkl_file)
-# # end_read = time.perf_counter()
-# # print(f'LZMA (.xz) read time: {(end_read-start_read):.4f}')
-
-# #test all blosc2 compression types
-# comp_types = [
-#     blosc.Codec.BLOSCLZ,
-#     blosc.Codec.LZ4,
-#     blosc.Codec.LZ4HC,
-#     blosc.Codec.ZLIB,
-#     blosc.Codec.ZSTD,
-#     blosc.Codec.NDLZ,
-#     blosc.Codec.ZFP_ACC,
-#     blosc.Codec.ZFP_PREC,
-#     blosc.Codec.ZFP_RATE,
-# ]
-# for comp_type in comp_types:
-#     try:
-#         blosc_opts = dict(codec=comp_type)
-#         comp_str = comp_type.name.lower()
-
-#         start_write = time.perf_counter()
-#         write_file(results, filepath+'.'+comp_str, nparray=blosc_pack_numpy, **blosc_opts)
-#         end_write = time.perf_counter()
-#         write_time = end_write - start_write
-#         print(f'{comp_str} write time: {write_time:.4f} sec')
-#     except Exception as e:
-#         print(f'Write of {comp_str} failed: {e}')
-#         continue
-
-#     try:
-#         #compute compression ratio compared to un-compressed file
-#         comp_file_size = Path(filepath+'.'+comp_str).stat().st_size / 1024**2
-#         compression_ratio = 1 / (comp_file_size / uncomp_file_size)
-#         print(f'compression ratio: {compression_ratio:.2f}')
-#     except Exception as e:
-#         print(f'Error computing compression ratio: {e}')
-#         continue
-
-#     try:
-#         start_read = time.perf_counter()
-#         read_results = read_file(filepath+'.'+comp_str)
-#         end_read = time.perf_counter()
-#         read_time = end_read - start_read
-#         print(f'{comp_str} read time: {read_time:.4f} sec')
-#     except Exception as e:
-#         print(f'Read of {comp_str} failed: {e}')
-#         continue
-
-#     #check if the read results match the original results
-#     try:
-#         if isinstance(results, np.ndarray):
-#             if not np.array_equal(results, read_results):
-#                 print(f'{comp_str} results do not match original results')
-#                 continue
-#         elif results != read_results:
-#             print(f'{comp_str} results do not match original results')
-#             continue
-#     except Exception as e:
-#         print(f'Error comparing {comp_str} results: {e}')
-#         continue
-
-#     bench_results[comp_str] = {'write_time': write_time, 'read_time': read_time, 'compression_ratio': compression_ratio}
-
-# import json
-# print(json.dumps(bench_results, indent=4))  #pretty print results
-
-# %%
