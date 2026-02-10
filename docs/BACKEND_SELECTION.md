@@ -1,6 +1,8 @@
 # Backend Selection Guide
 
-This guide helps you choose between JSON and SQLite metadata backends based on your specific use case.
+This guide helps you choose between JSON and SQLite **metadata** backends based on your specific use case.
+
+> **Note:** Cacheness has two types of backends: _metadata backends_ (covered here) manage the key index and timestamps, while _blob backends_ manage file lifecycle operations. These are separate concerns — see the [Architecture Guide](ARCHITECTURE.md) for how they fit together.
 
 ## Quick Decision Matrix
 

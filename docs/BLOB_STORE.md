@@ -61,6 +61,7 @@ BlobStore(
     compression: str = "lz4",
     compression_level: int = 3,
     content_addressable: bool = False,
+    blob_backend: BlobBackend | None = None,
 )
 ```
 
@@ -71,6 +72,9 @@ BlobStore(
 | `compression` | `str` | `"lz4"` | Compression codec (lz4, zstd, gzip, blosclz) |
 | `compression_level` | `int` | `3` | Compression level (1-9) |
 | `content_addressable` | `bool` | `False` | Use content hash as key (enables deduplication) |
+| `blob_backend` | `BlobBackend \| None` | `None` | Blob storage backend for file lifecycle operations. Defaults to `FilesystemBlobBackend`. |
+
+> **Architecture note:** The `backend` parameter controls _metadata_ storage (key index, timestamps). The `blob_backend` parameter controls _file lifecycle_ operations (delete, exists). Serialization is handled by handlers. See the [Architecture Guide](ARCHITECTURE.md) for details.
 
 ### Methods
 
