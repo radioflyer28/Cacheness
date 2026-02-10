@@ -44,7 +44,7 @@ from typing import Any, Dict, List, Optional, Union
 from datetime import datetime, timezone
 
 from .backends import MetadataBackend, JsonBackend
-from .backends.blob_backends import BlobBackend, FilesystemBlobBackend
+from .backends.blob_backends import BlobBackend, FilesystemBlobBackend, get_blob_backend
 from .handlers import HandlerRegistry
 from .compression import read_file
 
@@ -82,7 +82,7 @@ class BlobStore:
         compression: str = "lz4",
         compression_level: int = 3,
         content_addressable: bool = False,
-        blob_backend: Optional[BlobBackend] = None,
+        blob_backend: Optional[Union[str, BlobBackend]] = None,
     ):
         """
         Initialize a BlobStore.
@@ -94,7 +94,8 @@ class BlobStore:
             compression_level: Compression level (1-9)
             content_addressable: If True, use content hash as blob key
             blob_backend: Blob storage backend for file operations (delete, exists).
-                Defaults to FilesystemBlobBackend if not provided.
+                Can be a string ('filesystem', 'memory') or a BlobBackend instance.
+                Defaults to 'filesystem' if not provided.
         """
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -129,10 +130,21 @@ class BlobStore:
         self.handlers = HandlerRegistry()
 
         # Initialize blob backend for file operations (delete, exists)
-        if blob_backend is not None:
+        if blob_backend is None or blob_backend == "filesystem":
+            self.blob_backend = FilesystemBlobBackend(self.cache_dir, shard_chars=0)
+        elif isinstance(blob_backend, str):
+            # Use registry to get backend by name
+            if blob_backend == "memory":
+                self.blob_backend = get_blob_backend(blob_backend)
+            else:
+                # Pass cache_dir for filesystem-like backends
+                self.blob_backend = get_blob_backend(
+                    blob_backend, base_dir=self.cache_dir, shard_chars=0
+                )
+        elif isinstance(blob_backend, BlobBackend):
             self.blob_backend = blob_backend
         else:
-            self.blob_backend = FilesystemBlobBackend(self.cache_dir, shard_chars=0)
+            raise ValueError(f"Unknown blob_backend type: {blob_backend}")
 
         logger.debug(f"BlobStore initialized at {self.cache_dir}")
 

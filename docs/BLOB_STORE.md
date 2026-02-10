@@ -50,6 +50,45 @@ model_keys = store.list(prefix="model_")
 store.delete("model_v1")
 ```
 
+## Blob Backend Configuration
+
+BlobStore supports pluggable blob backends for file lifecycle operations (delete, exists checks). By default, it uses the filesystem backend.
+
+### Using Built-in Backends
+
+`python
+from cacheness.storage import BlobStore
+
+# Default: filesystem backend
+store = BlobStore(cache_dir="./data")
+
+# Explicit filesystem backend
+store = BlobStore(cache_dir="./data", blob_backend="filesystem")
+
+# In-memory backend (for testing)
+store = BlobStore(cache_dir="./temp", blob_backend="memory")
+`
+
+### Custom Blob Backend Instance
+
+`python
+from cacheness.storage import BlobStore
+from cacheness.storage.backends import FilesystemBlobBackend
+
+# Custom configuration
+custom_backend = FilesystemBlobBackend(
+    base_dir="./cache",
+    shard_chars=3  # Use 3-char sharding (abc/abc123...)
+)
+
+store = BlobStore(
+    cache_dir="./cache",
+    blob_backend=custom_backend
+)
+`
+
+> **Note:** Handlers still manage format-specific serialization to local paths. Blob backends manage file lifecycle (delete, exists). See [Architecture Guide](ARCHITECTURE.md) for details on the separation of concerns.
+
 ## API Reference
 
 ### Constructor
@@ -61,7 +100,7 @@ BlobStore(
     compression: str = "lz4",
     compression_level: int = 3,
     content_addressable: bool = False,
-    blob_backend: BlobBackend | None = None,
+    blob_backend: str | BlobBackend | None = None,
 )
 ```
 
