@@ -23,7 +23,7 @@ uv run pytest tests/ -x -q
 cat .quality-errors.log
 
 # Work on issue (see Git Worktree Workflow)
-git worktree add -b issue-<hash>-<desc> ../Cacheness-issue-<hash> dev
+git worktree add worktrees/beads-<hash> -b beads-<hash>-<desc> dev
 ```
 
 **Windows: Start beads daemon once per session**
@@ -77,8 +77,9 @@ uv run ruff check . && uv run ty check             # Phase 2
 
 ## Test Suite
 
-**Baseline:** 787 passed, 70 skipped, 0 failures
-**Command:** `uv run pytest tests/ -x -q` (use `-x` to stop on first failure)
+**Baseline:** 848 passed, 65 skipped, 0 failures
+**Command:** `uv run pytest tests/ -x -q --ignore=tests/test_tensorflow_handler.py` (use `-x` to stop on first failure)
+**Windows:** Always add `--ignore=tests/test_tensorflow_handler.py` — TensorFlow tests hang on Windows.
 **Key files:** `test_core.py`, `test_update_operations.py`, `test_handlers.py`, `test_metadata.py`, `test_security.py`
 
 ## Coding Gotchas
@@ -93,35 +94,57 @@ See [`docs/BACKEND_SELECTION.md`](../docs/BACKEND_SELECTION.md) for details.
 
 ## Git Worktree Workflow
 
-**Parallel development** using git worktrees for multiple issues simultaneously.
+**Parallel development** using git worktrees nested inside the main repo to share dependencies.
 
-**Structure:** `Cacheness/` (main), `Cacheness-dev/` (dev), `Cacheness-issue-<hash>/` (features)
+**Structure:** 
+```
+Cacheness/              # Main folder (on dev branch)
+├── .venv/              # Main venv (NOT shared with worktrees)
+├── worktrees/          # Feature worktrees container
+│   ├── beads-abc123/   # Branch: beads-abc123-description (has own .venv)
+│   └── beads-def456/   # Branch: beads-def456-description (has own .venv)
+```
 
-**Naming:** Use beads hash (✅ `Cacheness-issue-a1b2c3d`) not sequential numbers (❌ `Cacheness-issue-42`)
+**Naming:** Use `beads-<hash>` format (✅ `beads-a1b2c3d`) to clearly identify beads issues
+
+**Setup (one-time):**
+```bash
+# Add worktrees/ to .gitignore
+echo "/worktrees/" >> .gitignore
+```
 
 **Create feature worktree:**
 ```bash
 # Get issue hash from beads, then:
-git worktree add -b issue-<hash>-<desc> ../Cacheness-issue-<hash> dev
-code ../Cacheness-issue-<hash>
+git worktree add worktrees/beads-<hash> -b beads-<hash>-<desc> dev
+cd worktrees/beads-<hash>
+uv sync --all-groups   # Each worktree gets its own .venv
 # Create WORKTREE.md with issue details, mark issue in-progress
 ```
 
-**WORKTREE.md template:** Document issue details, work log, testing checklist (git-ignored, worktree-specific)
+**Note:** Nested worktrees do **not** share the parent's `.venv`. Each needs `uv sync --all-groups` on first use.
 
 **Integration workflow:**
 ```bash
-cd ../Cacheness-dev
-git pull origin dev && git merge issue-<hash>-<desc>
+# Test and push from worktree
+cd worktrees/beads-<hash>
+uv run pytest tests/ -x -q && git push -u origin beads-<hash>-<desc>
+
+# Integrate to dev (from main repo root)
+cd ../..  # Back to Cacheness/
+git checkout dev
+git pull origin dev && git merge beads-<hash>-<desc>
 uv run pytest tests/ -x -q && git push origin dev
 
-cd ../Cacheness
-git worktree remove ../Cacheness-issue-<hash>
-git branch -d issue-<hash>-desc && git push origin --delete issue-<hash>-desc
+# Cleanup
+git worktree remove worktrees/beads-<hash>
+git branch -d beads-<hash>-<desc> && git push origin --delete beads-<hash>-<desc>
 # Close issue in beads
 ```
 
-**Rules:** Main worktree stays on `main`, dev worktree stays on `dev`, feature worktrees are temporary. One issue per worktree. Always push before integrating. Each VS Code window has independent MCP instances.
+**Rules:** Each worktree has its own `.venv` (run `uv sync --all-groups` on first use). Clean up promptly after merge. Each VS Code window has independent MCP instances.
+
+**beads gotcha:** Closing a child issue of an epic requires `--force` (parent-child dep blocks close). Use CLI: `uv run bd close CACHE-xxx --force`
 
 ## Sessions / Workflows
 
@@ -130,23 +153,32 @@ git branch -d issue-<hash>-desc && git push origin --delete issue-<hash>-desc
 1. **File issues (in beads) for remaining work** — Create issues for anything that needs follow-up
 2. **Create feature worktree** (if working on specific issue):
    - Get issue hash from beads: `mcp_beads_show` or `mcp_beads_ready`
-   - Create worktree: `git worktree add -b issue-<hash>-<desc> ../Cacheness-issue-<hash> dev`
-   - Open in new VS Code window, create `WORKTREE.md` with issue details
+   - Create worktree: `git worktree add worktrees/beads-<hash> -b beads-<hash>-<desc> dev`
+   - Open in new VS Code window: `code worktrees/beads-<hash>`
+   - Create `WORKTREE.md` with issue details
    - Update beads: Mark issue as in-progress
 3. **Run quality gates** (if code changed):
-   - Tests: `uv run pytest tests/ -x -q`
-   - Quality check: `.\scripts\quality-check.ps1` (or `./scripts/quality-check.sh`)
-   - Check errors: `cat .quality-errors.log` (if file exists)
+   - Quality check (changed files only, BEFORE testing):
+     ```bash
+     # Phase 1: auto-fix changed files
+     uv run ruff format $(git diff --name-only --diff-filter=ACMR HEAD -- '*.py')
+     uv run ruff check --fix $(git diff --name-only --diff-filter=ACMR HEAD -- '*.py')
+     # Phase 2: validate changed files
+     uv run ruff check $(git diff --name-only --diff-filter=ACMR HEAD -- '*.py')
+     ```
+   - Tests: `uv run pytest tests/ -x -q --ignore=tests/test_tensorflow_handler.py`
    - **Update docs:** If changing public API, update relevant files in `docs/` before committing
-4. **Push feature branch** — `git push -u origin issue-<hash>-description`
-5. **Integrate to dev worktree**:
-   - Switch to dev: `cd ../Cacheness-dev`
-   - Merge: `git pull origin dev && git merge issue-<hash>-description`
-   - Test: `uv run pytest tests/ -x -q`
+4. **Push feature branch** — `git push -u origin beads-<hash>-description`
+5. **Integrate to dev**:
+   - Return to main folder: `cd ../..` (from worktree back to Cacheness/)
+   - Ensure on dev: `git checkout dev`
+   - Merge: `git pull origin dev && git merge beads-<hash>-description`
+   - Test: `uv run pytest tests/ -x -q --ignore=tests/test_tensorflow_handler.py`
+     - **Skip if fast-forward merge:** If merge was fast-forward (no conflicts, no diverged dev changes), tests already passed in worktree — skip re-running
    - Push: `git push origin dev`
 6. **Cleanup worktree**:
-   - Remove: `git worktree remove ../Cacheness-issue-<hash>`
-   - Delete branch: `git branch -d issue-<hash>-description && git push origin --delete issue-<hash>-description`
+   - Remove: `git worktree remove worktrees/beads-<hash>`
+   - Delete branch: `git branch -d beads-<hash>-description && git push origin --delete beads-<hash>-description`
    - Update beads: Close issue
 7. **Verify** — Check git status confirms "up to date with origin"
 8. **Hand off** — Provide context for next session

@@ -41,5 +41,8 @@ docker-compose.override.yml
 # Worktree-specific metadata (not committed)
 WORKTREE.md
 
+# Git worktrees (parallel development)
+/worktrees/
+
 # Quality check error logs
 .quality-errors.log
