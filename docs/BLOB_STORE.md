@@ -448,15 +448,24 @@ model.load_state_dict(state)
 
 ## Comparison: BlobStore vs cacheness()
 
-| Feature | `BlobStore` | `cacheness()` |
-|---------|-------------|---------------|
-| **Use case** | Pure storage | Function caching |
-| **TTL support** | ❌ No | ✅ Yes |
-| **Eviction policies** | ❌ No | ✅ Yes (LRU, size-based) |
-| **Function memoization** | ❌ No | ✅ Yes |
-| **Custom metadata** | ✅ Yes | ✅ Yes |
-| **Content-addressable** | ✅ Yes | ❌ No |
-| **Key-value API** | ✅ Direct | Abstracted |
+| Feature | `BlobStore` | `cacheness()` | `cacheness(storage_mode=True)` |
+|---------|-------------|---------------|-------------------------------|
+| **Use case** | Pure storage | Function caching | Durable key-value storage |
+| **TTL support** | ❌ No | ✅ Yes | ❌ Disabled |
+| **Eviction policies** | ❌ No | ✅ Yes (LRU, size-based) | ❌ Disabled |
+| **Function memoization** | ❌ No | ✅ Yes | ❌ Not targeted |
+| **Custom metadata** | ✅ Yes | ✅ Yes | ✅ Yes |
+| **Content-addressable** | ✅ Yes | ❌ No | ✅ `content_key()` |
+| **Key-value API** | ✅ Direct | Abstracted | ✅ `hash_key` alias |
+| **Integrity verification** | ❌ No | ✅ Yes | ✅ Yes (no auto-delete) |
+| **Entry signing** | ❌ No | ✅ Yes | ✅ Yes (no auto-delete) |
+| **Hit/miss stats** | ❌ No | ✅ Yes | ❌ Disabled |
+| **Auto-delete on error** | N/A | ✅ Yes | ❌ Preserves entries |
+
+> **Recommendation:** Use `storage_mode=True` on `UnifiedCache` instead of
+> `BlobStore` for new projects. It provides the same pure-storage semantics
+> with additional integrity verification, signing, and handler-based
+> serialisation. `BlobStore` remains available for backward compatibility.
 
 ## Related Documentation
 

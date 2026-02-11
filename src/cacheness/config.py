@@ -89,9 +89,9 @@ class CacheMetadataConfig:
         builtin_backends = ["auto", "json", "sqlite", "sqlite_memory"]
         # Note: Custom backends are validated when get_metadata_backend() is called
 
-        # Validate TTL
-        if self.default_ttl_seconds <= 0:
-            raise ValueError("default_ttl_seconds must be positive")
+        # Validate TTL (None means infinite / no expiration)
+        if self.default_ttl_seconds is not None and self.default_ttl_seconds <= 0:
+            raise ValueError("default_ttl_seconds must be positive or None")
 
         # Validate metadata_backend_options is a dict if provided
         if self.metadata_backend_options is not None:
@@ -393,6 +393,7 @@ class CacheConfig:
     serialization: SerializationConfig = field(default_factory=SerializationConfig)
     handlers: HandlerConfig = field(default_factory=HandlerConfig)
     security: SecurityConfig = field(default_factory=SecurityConfig)
+    storage_mode: bool = False  # When True, disables TTL, eviction, stats, auto-delete
 
     def __init__(
         self,
@@ -446,6 +447,8 @@ class CacheConfig:
         memory_cache_maxsize: Optional[int] = None,
         memory_cache_ttl_seconds: Optional[float] = None,
         memory_cache_stats: Optional[bool] = None,
+        # Storage mode
+        storage_mode: bool = False,
         **kwargs,
     ):
         """Initialize configuration with backwards compatibility support."""
@@ -602,6 +605,15 @@ class CacheConfig:
                 logger.warning(
                     f"Unknown configuration parameter ignored: {key}={value}"
                 )
+
+        # Storage mode: disable cache-specific behaviors for pure storage use
+        self.storage_mode = storage_mode
+        if self.storage_mode:
+            self.metadata.default_ttl_seconds = None
+            self.storage.max_cache_size_mb = None
+            self.storage.cleanup_on_init = False
+            self.metadata.enable_cache_stats = False
+            self.metadata.auto_cleanup_expired = False
 
         self.__post_init__()
 

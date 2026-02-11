@@ -659,6 +659,7 @@ class UnifiedCache:
         self,
         cache_key: Optional[str] = None,
         on: Optional[Dict] = None,
+        hash_key: Optional[str] = None,
         **kwargs,
     ) -> Dict[str, Any]:
         """
@@ -673,6 +674,7 @@ class UnifiedCache:
         Returns:
             Dictionary mapping schema names to metadata instances
         """
+        cache_key = self._resolve_hash_key_alias(cache_key, hash_key)
         cache_key = self._resolve_cache_key(cache_key, on, kwargs)
 
         return self._get_custom_metadata(cache_key)
@@ -696,6 +698,51 @@ class UnifiedCache:
         # Use unified cache key generation with config
         # Path objects will be handled by the serialization system
         return create_unified_cache_key(params, self.config)
+
+    @staticmethod
+    def _resolve_hash_key_alias(
+        cache_key: Optional[str], hash_key: Optional[str]
+    ) -> Optional[str]:
+        """Normalize hash_key alias to cache_key.
+
+        ``hash_key`` is a storage-oriented alias for ``cache_key``.
+        Both refer to the same underlying key. If only ``hash_key`` is
+        provided it is returned as ``cache_key``; if both are supplied
+        a ``ValueError`` is raised.
+        """
+        if hash_key is not None and cache_key is not None:
+            raise ValueError(
+                "Cannot specify both 'cache_key' and 'hash_key'. "
+                "They are aliases — use one or the other."
+            )
+        return cache_key if hash_key is None else hash_key
+
+    @staticmethod
+    def content_key(data: Any) -> str:
+        """Compute a content-addressable key from data using SHA-256.
+
+        This produces a deterministic 16-character hex key based on the
+        serialised content of *data*.  Storing the same data twice will
+        always yield the same key, enabling deduplication.
+
+        Args:
+            data: Any pickleable object.
+
+        Returns:
+            16-character hex string suitable for ``cache_key`` / ``hash_key``.
+
+        Example:
+            key = UnifiedCache.content_key(my_dataframe)
+            cache.put(my_dataframe, hash_key=key)
+        """
+        import hashlib
+        import pickle
+
+        try:
+            serialized = pickle.dumps(data)
+        except Exception:
+            serialized = repr(data).encode()
+        return hashlib.sha256(serialized).hexdigest()[:16]
 
     def _resolve_cache_key(
         self,
@@ -759,6 +806,8 @@ class UnifiedCache:
             return False  # Never expires
         elif ttl_seconds is _DEFAULT_TTL:
             ttl_seconds = self.config.metadata.default_ttl_seconds
+            if ttl_seconds is None:
+                return False  # Config says never expire
 
         # Type guard to ensure ttl is numeric
         assert isinstance(ttl_seconds, (int, float)), (
@@ -866,9 +915,21 @@ class UnifiedCache:
             logger.warning(f"Failed to calculate hash for {file_path}: {e}")
             return None
 
+    def _record_hit(self):
+        """Record a cache hit if stats tracking is enabled."""
+        if self.config.metadata.enable_cache_stats:
+            self.metadata_backend.increment_hits()
+
+    def _record_miss(self):
+        """Record a cache miss if stats tracking is enabled."""
+        if self.config.metadata.enable_cache_stats:
+            self.metadata_backend.increment_misses()
+
     def _cleanup_expired(self):
         """Remove expired cache entries."""
         ttl_seconds = self.config.metadata.default_ttl_seconds
+        if ttl_seconds is None:
+            return  # No TTL configured — nothing to expire
         removed_count = self.metadata_backend.cleanup_expired(ttl_seconds)
 
         if removed_count > 0:
@@ -882,6 +943,7 @@ class UnifiedCache:
         prefix: str = "",
         description: str = "",
         custom_metadata=None,
+        hash_key: Optional[str] = None,
         **kwargs,
     ):
         """
@@ -890,6 +952,8 @@ class UnifiedCache:
         Args:
             data: Data to cache (DataFrame, array, or general object)
             cache_key: Explicit cache key (if provided, on and **kwargs are ignored)
+            hash_key: Alias for cache_key (storage-oriented name). Cannot be
+                used together with cache_key.
             on: Dictionary of key parameters for cache key derivation.
                 Use this to avoid namespace collisions with cache control
                 parameters like prefix, description, etc.
@@ -915,6 +979,7 @@ class UnifiedCache:
         with self._lock:
             # Get appropriate handler
             handler = self.handlers.get_handler(data)
+            cache_key = self._resolve_hash_key_alias(cache_key, hash_key)
             cache_key = self._resolve_cache_key(cache_key, on, kwargs)
             base_file_path = self._get_cache_file_path(cache_key, prefix)
 
@@ -1050,6 +1115,7 @@ class UnifiedCache:
         on: Optional[Dict] = None,
         ttl_seconds: Optional[float] = None,
         prefix: str = "",
+        hash_key: Optional[str] = None,
         **kwargs,
     ) -> Optional[Any]:
         """
@@ -1057,6 +1123,7 @@ class UnifiedCache:
 
         Args:
             cache_key: Direct cache key (if provided, on and **kwargs are ignored)
+            hash_key: Alias for cache_key (storage-oriented name).
             on: Dictionary of key parameters for cache key derivation.
                 Use this to avoid namespace collisions with cache control
                 parameters like prefix, ttl_seconds, etc.
@@ -1068,18 +1135,19 @@ class UnifiedCache:
             Cached data or None if not found/expired
         """
         with self._lock:
+            cache_key = self._resolve_hash_key_alias(cache_key, hash_key)
             cache_key = self._resolve_cache_key(cache_key, on, kwargs)
 
             # Check if entry exists and is not expired
             entry = self.metadata_backend.get_entry(cache_key)
             if not entry or self._is_expired(cache_key, ttl_seconds):
-                self.metadata_backend.increment_misses()
+                self._record_miss()
                 return None
 
             # Get appropriate handler
             data_type = entry.get("data_type")
             if not data_type:
-                self.metadata_backend.increment_misses()
+                self._record_miss()
                 return None
 
             try:
@@ -1105,8 +1173,9 @@ class UnifiedCache:
                                 f"stored hash {stored_hash} != current hash {current_hash}. "
                                 f"Removing corrupted cache entry."
                             )
-                            self.metadata_backend.remove_entry(cache_key)
-                            self.metadata_backend.increment_misses()
+                            if not self.config.storage_mode:
+                                self.metadata_backend.remove_entry(cache_key)
+                            self._record_miss()
                             return None
 
                 # Verify entry signature if signing is enabled
@@ -1131,8 +1200,9 @@ class UnifiedCache:
                                     f"Entry signature verification failed for {cache_key}. "
                                     f"Removing potentially tampered cache entry."
                                 )
-                                self.metadata_backend.remove_entry(cache_key)
-                                self.metadata_backend.increment_misses()
+                                if not self.config.storage_mode:
+                                    self.metadata_backend.remove_entry(cache_key)
+                                self._record_miss()
                                 return None
                             else:
                                 logger.warning(
@@ -1146,8 +1216,9 @@ class UnifiedCache:
                             f"Entry {cache_key} has no signature but unsigned entries are not allowed. "
                             f"Removing entry."
                         )
-                        self.metadata_backend.remove_entry(cache_key)
-                        self.metadata_backend.increment_misses()
+                        if not self.config.storage_mode:
+                            self.metadata_backend.remove_entry(cache_key)
+                        self._record_miss()
                         return None
 
                 # Use handler to load the data
@@ -1155,7 +1226,7 @@ class UnifiedCache:
 
                 # Update access time
                 self.metadata_backend.update_access_time(cache_key)
-                self.metadata_backend.increment_hits()
+                self._record_hit()
 
                 logger.debug(f"Cache hit ({data_type}): {cache_key}")
                 return data
@@ -1164,13 +1235,13 @@ class UnifiedCache:
                 # Cache file was deleted externally — permanent, clean up metadata
                 logger.warning(f"Cache file missing for {cache_key}: {e}")
                 self.metadata_backend.remove_entry(cache_key)
-                self.metadata_backend.increment_misses()
+                self._record_miss()
                 return None
             except (OSError, IOError) as e:
                 # I/O errors may be transient (disk temporarily unavailable, etc.)
                 # Do NOT delete metadata — the entry may be readable on retry
                 logger.warning(f"I/O error loading cached {data_type} {cache_key}: {e}")
-                self.metadata_backend.increment_misses()
+                self._record_miss()
                 return None
             except Exception as e:
                 # Unexpected errors (deserialization failures, corruption, etc.)
@@ -1178,8 +1249,9 @@ class UnifiedCache:
                 logger.warning(
                     f"Failed to load cached {data_type} {cache_key}: {type(e).__name__}: {e}"
                 )
-                self.metadata_backend.remove_entry(cache_key)
-                self.metadata_backend.increment_misses()
+                if not self.config.storage_mode:
+                    self.metadata_backend.remove_entry(cache_key)
+                self._record_miss()
                 return None
 
     def get_with_metadata(
@@ -1188,6 +1260,7 @@ class UnifiedCache:
         on: Optional[Dict] = None,
         ttl_seconds=_DEFAULT_TTL,
         prefix: str = "",
+        hash_key: Optional[str] = None,
         **kwargs,
     ) -> Optional[tuple[Any, Dict[str, Any]]]:
         """
@@ -1199,6 +1272,7 @@ class UnifiedCache:
 
         Args:
             cache_key: Direct cache key (if provided, on and **kwargs are ignored)
+            hash_key: Alias for cache_key (storage-oriented name).
             on: Dictionary of key parameters for cache key derivation.
                 Use this to avoid namespace collisions with cache control parameters.
             ttl_seconds: Custom TTL in seconds (overrides default). None = never expire.
@@ -1218,12 +1292,13 @@ class UnifiedCache:
                 process(data)
         """
         with self._lock:
+            cache_key = self._resolve_hash_key_alias(cache_key, hash_key)
             cache_key = self._resolve_cache_key(cache_key, on, kwargs)
 
             # Single metadata lookup
             entry = self.metadata_backend.get_entry(cache_key)
             if not entry:
-                self.metadata_backend.increment_misses()
+                self._record_miss()
                 return None
 
             # Check TTL expiration directly using the already-retrieved entry
@@ -1249,13 +1324,13 @@ class UnifiedCache:
                     current_time = datetime.now(timezone.utc)
 
                     if current_time > expiry_time:
-                        self.metadata_backend.increment_misses()
+                        self._record_miss()
                         return None
 
             # Get appropriate handler
             data_type = entry.get("data_type")
             if not data_type:
-                self.metadata_backend.increment_misses()
+                self._record_miss()
                 return None
 
             try:
@@ -1281,8 +1356,9 @@ class UnifiedCache:
                                 f"stored hash {stored_hash} != current hash {current_hash}. "
                                 f"Removing corrupted cache entry."
                             )
-                            self.metadata_backend.remove_entry(cache_key)
-                            self.metadata_backend.increment_misses()
+                            if not self.config.storage_mode:
+                                self.metadata_backend.remove_entry(cache_key)
+                            self._record_miss()
                             return None
 
                 # Verify entry signature if signing is enabled
@@ -1307,8 +1383,9 @@ class UnifiedCache:
                                     f"Entry signature verification failed for {cache_key}. "
                                     f"Removing potentially tampered cache entry."
                                 )
-                                self.metadata_backend.remove_entry(cache_key)
-                                self.metadata_backend.increment_misses()
+                                if not self.config.storage_mode:
+                                    self.metadata_backend.remove_entry(cache_key)
+                                self._record_miss()
                                 return None
                             else:
                                 logger.warning(
@@ -1322,8 +1399,9 @@ class UnifiedCache:
                             f"Entry {cache_key} has no signature but unsigned entries are not allowed. "
                             f"Removing entry."
                         )
-                        self.metadata_backend.remove_entry(cache_key)
-                        self.metadata_backend.increment_misses()
+                        if not self.config.storage_mode:
+                            self.metadata_backend.remove_entry(cache_key)
+                        self._record_miss()
                         return None
 
                 # Use handler to load the data
@@ -1331,7 +1409,7 @@ class UnifiedCache:
 
                 # Update access time
                 self.metadata_backend.update_access_time(cache_key)
-                self.metadata_backend.increment_hits()
+                self._record_hit()
 
                 # Include cache_key in returned metadata
                 entry["cache_key"] = cache_key
@@ -1343,13 +1421,13 @@ class UnifiedCache:
                 # Cache file was deleted externally — permanent, clean up metadata
                 logger.warning(f"Cache file missing for {cache_key}: {e}")
                 self.metadata_backend.remove_entry(cache_key)
-                self.metadata_backend.increment_misses()
+                self._record_miss()
                 return None
             except (OSError, IOError) as e:
                 # I/O errors may be transient (disk temporarily unavailable, etc.)
                 # Do NOT delete metadata — the entry may be readable on retry
                 logger.warning(f"I/O error loading cached {data_type} {cache_key}: {e}")
-                self.metadata_backend.increment_misses()
+                self._record_miss()
                 return None
             except Exception as e:
                 # Unexpected errors (deserialization failures, corruption, etc.)
@@ -1357,8 +1435,9 @@ class UnifiedCache:
                 logger.warning(
                     f"Failed to load cached {data_type} {cache_key}: {type(e).__name__}: {e}"
                 )
-                self.metadata_backend.remove_entry(cache_key)
-                self.metadata_backend.increment_misses()
+                if not self.config.storage_mode:
+                    self.metadata_backend.remove_entry(cache_key)
+                self._record_miss()
                 return None
 
     def get_metadata(
@@ -1366,6 +1445,7 @@ class UnifiedCache:
         cache_key: Optional[str] = None,
         on: Optional[Dict] = None,
         check_expiration: bool = True,
+        hash_key: Optional[str] = None,
         **kwargs,
     ) -> Optional[Dict[str, Any]]:
         """
@@ -1392,6 +1472,7 @@ class UnifiedCache:
                 data = cache.get(on={'experiment': 'exp_001'})
         """
         with self._lock:
+            cache_key = self._resolve_hash_key_alias(cache_key, hash_key)
             cache_key = self._resolve_cache_key(cache_key, on, kwargs)
 
             entry = self.metadata_backend.get_entry(cache_key)
@@ -1413,6 +1494,7 @@ class UnifiedCache:
         on: Optional[Dict] = None,
         prefix: str = "",
         check_expiration: bool = True,
+        hash_key: Optional[str] = None,
         **kwargs,
     ) -> bool:
         """
@@ -1442,6 +1524,7 @@ class UnifiedCache:
                 cache.put(df, on=params)
         """
         with self._lock:
+            cache_key = self._resolve_hash_key_alias(cache_key, hash_key)
             cache_key = self._resolve_cache_key(cache_key, on, kwargs)
 
             entry = self.metadata_backend.get_entry(cache_key)
@@ -1459,6 +1542,7 @@ class UnifiedCache:
         data: Any,
         cache_key: Optional[str] = None,
         on: Optional[Dict] = None,
+        hash_key: Optional[str] = None,
         **kwargs,
     ) -> bool:
         """
@@ -1495,6 +1579,7 @@ class UnifiedCache:
             - created_at timestamp is reset to now (acts like touch)
         """
         with self._lock:
+            cache_key = self._resolve_hash_key_alias(cache_key, hash_key)
             cache_key = self._resolve_cache_key(cache_key, on, kwargs)
 
             # Check if entry exists before doing any I/O
@@ -1583,6 +1668,7 @@ class UnifiedCache:
         self,
         cache_key: Optional[str] = None,
         on: Optional[Dict] = None,
+        hash_key: Optional[str] = None,
         **kwargs,
     ) -> bool:
         """
@@ -1620,6 +1706,7 @@ class UnifiedCache:
               (``CacheMetadataConfig.default_ttl_seconds``)
         """
         with self._lock:
+            cache_key = self._resolve_hash_key_alias(cache_key, hash_key)
             cache_key = self._resolve_cache_key(cache_key, on, kwargs)
 
             # Get existing entry
@@ -1900,6 +1987,9 @@ class UnifiedCache:
 
     def _enforce_size_limit(self):
         """Enforce cache size limits using LRU eviction."""
+        if self.config.storage.max_cache_size_mb is None:
+            return  # No size limit configured
+
         # Get current total size from metadata backend
         stats = self.metadata_backend.get_stats()
         total_size_mb = stats.get("total_size_mb", 0)
@@ -1942,6 +2032,7 @@ class UnifiedCache:
         cache_key: Optional[str] = None,
         on: Optional[Dict] = None,
         prefix: str = "",
+        hash_key: Optional[str] = None,
         **kwargs,
     ):
         """
@@ -1949,12 +2040,14 @@ class UnifiedCache:
 
         Args:
             cache_key: Direct cache key (if provided, on and **kwargs are ignored)
+            hash_key: Alias for cache_key (storage-oriented name).
             on: Dictionary of key parameters for cache key derivation.
                 Use this to avoid namespace collisions with cache control parameters.
             prefix: Descriptive prefix of the cache filename
             **kwargs: Parameters identifying the cached data (legacy, use 'on' instead)
         """
         with self._lock:
+            cache_key = self._resolve_hash_key_alias(cache_key, hash_key)
             cache_key = self._resolve_cache_key(cache_key, on, kwargs)
 
             # Look up the entry to find the blob path before removing metadata

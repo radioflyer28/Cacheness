@@ -256,6 +256,76 @@ data_config = CacheConfig(
 )
 ```
 
+## Storage Mode
+
+Use `storage_mode=True` when you need a **durable key-value store** rather than
+a temporary cache. Storage mode disables all cache-specific behaviours that
+assume data is disposable:
+
+| Behaviour | Cache (default) | Storage mode |
+|---|---|---|
+| TTL expiration | Entries expire after `default_ttl_seconds` | Entries **never expire** |
+| Size-based eviction | LRU eviction at `max_cache_size_mb` | **No eviction** |
+| Startup cleanup | Expired entries removed on init | **No cleanup on init** |
+| Hit/miss stats | Tracked by `increment_hits/misses` | **Disabled** |
+| Auto-delete on errors | Corrupted/invalid entries deleted | **Preserved** (logged) |
+
+### Quick start
+
+```python
+from cacheness import CacheConfig, UnifiedCache
+
+store = UnifiedCache(config=CacheConfig(
+    cache_dir="./artifacts",
+    storage_mode=True,
+))
+
+# Store with explicit key
+store.put(my_dataframe, hash_key="exp-001-results")
+
+# Retrieve
+df = store.get(hash_key="exp-001-results")
+```
+
+### `hash_key` alias
+
+All public methods (`put`, `get`, `get_with_metadata`, `get_metadata`,
+`exists`, `invalidate`, `touch`, `update_data`) accept `hash_key` as an
+alias for `cache_key`. They are interchangeable — use whichever reads better
+in your context. You cannot pass both at once.
+
+```python
+# These are equivalent
+store.put(data, cache_key="k1")
+store.put(data, hash_key="k1")
+```
+
+### Content-addressable keys
+
+`UnifiedCache.content_key(data)` computes a deterministic SHA-256-based
+16-character hex key from the serialised content. This enables deduplication:
+
+```python
+key = UnifiedCache.content_key(my_array)
+store.put(my_array, hash_key=key)
+
+# Storing the same data again produces the same key — no duplicates
+key2 = UnifiedCache.content_key(my_array)
+assert key == key2
+```
+
+### What still works in storage mode
+
+- **Integrity verification** — file hashes are checked on read
+- **Entry signing** — HMAC signatures are verified if enabled
+- **Custom metadata** — attached metadata is fully supported
+- **All serialisation handlers** — Pandas, NumPy, Polars, pickle, dill, etc.
+- **Explicit invalidation** — `invalidate()` still deletes entries on request
+
+The key difference is that storage mode **never silently destroys data**.
+If verification fails, the entry is preserved and `None` is returned so you
+can investigate.
+
 ## Backend Selection
 
 ### SQLite Backend (Recommended)
