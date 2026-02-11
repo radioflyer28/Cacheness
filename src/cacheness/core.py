@@ -656,20 +656,24 @@ class UnifiedCache:
             return None
 
     def get_custom_metadata_for_entry(
-        self, cache_key: Optional[str] = None, **kwargs
+        self,
+        cache_key: Optional[str] = None,
+        on: Optional[Dict] = None,
+        **kwargs,
     ) -> Dict[str, Any]:
         """
         Get custom metadata for a specific cache entry.
 
         Args:
-            cache_key: Direct cache key (if provided, **kwargs are ignored)
-            **kwargs: Parameters identifying the cached data (used if cache_key is None)
+            cache_key: Direct cache key (if provided, on and **kwargs are ignored)
+            on: Dictionary of key parameters for cache key derivation.
+                Use this to avoid namespace collisions with cache control parameters.
+            **kwargs: Parameters identifying the cached data (legacy, use 'on' instead)
 
         Returns:
             Dictionary mapping schema names to metadata instances
         """
-        if cache_key is None:
-            cache_key = self._create_cache_key(kwargs)
+        cache_key = self._resolve_cache_key(cache_key, on, kwargs)
 
         return self._get_custom_metadata(cache_key)
 
@@ -692,6 +696,42 @@ class UnifiedCache:
         # Use unified cache key generation with config
         # Path objects will be handled by the serialization system
         return create_unified_cache_key(params, self.config)
+
+    def _resolve_cache_key(
+        self,
+        cache_key: Optional[str],
+        on: Optional[Dict],
+        kwargs: Dict,
+    ) -> str:
+        """
+        Resolve cache key from three sources with priority: cache_key > on > kwargs.
+
+        This centralizes the key resolution logic used by all public methods.
+        The ``on`` parameter prevents namespace collisions between user key
+        parameters and cache control parameters (prefix, description, etc.).
+
+        Args:
+            cache_key: Explicit pre-computed cache key (highest priority)
+            on: Dictionary of key parameters (medium priority, no namespace collision)
+            kwargs: Legacy keyword arguments for key derivation (lowest priority)
+
+        Returns:
+            16-character hex string cache key
+
+        Raises:
+            ValueError: If ``on`` and ``**kwargs`` are both provided (ambiguous)
+        """
+        if cache_key is not None:
+            return cache_key
+        if on is not None:
+            if kwargs:
+                raise ValueError(
+                    "Cannot use both 'on' and **kwargs for key derivation. "
+                    "Use 'on' for explicit key params or **kwargs for legacy "
+                    "compatibility, not both."
+                )
+            return self._create_cache_key(on)
+        return self._create_cache_key(kwargs)
 
     def _get_cache_file_path(self, cache_key: str, prefix: str = "") -> Path:
         """Get base cache file path (without extension)."""
@@ -837,6 +877,8 @@ class UnifiedCache:
     def put(
         self,
         data: Any,
+        cache_key: Optional[str] = None,
+        on: Optional[Dict] = None,
         prefix: str = "",
         description: str = "",
         custom_metadata=None,
@@ -847,6 +889,10 @@ class UnifiedCache:
 
         Args:
             data: Data to cache (DataFrame, array, or general object)
+            cache_key: Explicit cache key (if provided, on and **kwargs are ignored)
+            on: Dictionary of key parameters for cache key derivation.
+                Use this to avoid namespace collisions with cache control
+                parameters like prefix, description, etc.
             prefix: Descriptive prefix prepended to the cache filename
             description: Human-readable description
             custom_metadata: Custom metadata for the cache entry. Supports:
@@ -854,12 +900,22 @@ class UnifiedCache:
                            - List of objects: [experiment_metadata, performance_metadata]
                            - Tuple of objects: (experiment_metadata, performance_metadata)
                            - Dictionary (legacy): {"experiments": experiment_metadata}
-            **kwargs: Parameters identifying this data
+            **kwargs: Parameters identifying this data (legacy, use 'on' instead)
+
+        Examples:
+            # Explicit cache key
+            cache.put(data, cache_key="my-key-123")
+
+            # Dict-based key params (recommended, no namespace collisions)
+            cache.put(data, on={'date': '2026-02-08', 'description': 'user val'})
+
+            # Legacy kwargs (still works)
+            cache.put(data, date='2026-02-08', region='CA')
         """
         with self._lock:
             # Get appropriate handler
             handler = self.handlers.get_handler(data)
-            cache_key = self._create_cache_key(kwargs)
+            cache_key = self._resolve_cache_key(cache_key, on, kwargs)
             base_file_path = self._get_cache_file_path(cache_key, prefix)
 
             try:
@@ -991,6 +1047,7 @@ class UnifiedCache:
     def get(
         self,
         cache_key: Optional[str] = None,
+        on: Optional[Dict] = None,
         ttl_seconds: Optional[float] = None,
         prefix: str = "",
         **kwargs,
@@ -999,17 +1056,19 @@ class UnifiedCache:
         Retrieve any supported data type from cache.
 
         Args:
-            cache_key: Direct cache key (if provided, **kwargs are ignored)
+            cache_key: Direct cache key (if provided, on and **kwargs are ignored)
+            on: Dictionary of key parameters for cache key derivation.
+                Use this to avoid namespace collisions with cache control
+                parameters like prefix, ttl_seconds, etc.
             ttl_seconds: Custom TTL in seconds (overrides default). None = never expire.
             prefix: Descriptive prefix prepended to the cache filename
-            **kwargs: Parameters identifying the cached data (used if cache_key is None)
+            **kwargs: Parameters identifying the cached data (legacy, use 'on' instead)
 
         Returns:
             Cached data or None if not found/expired
         """
         with self._lock:
-            if cache_key is None:
-                cache_key = self._create_cache_key(kwargs)
+            cache_key = self._resolve_cache_key(cache_key, on, kwargs)
 
             # Check if entry exists and is not expired
             entry = self.metadata_backend.get_entry(cache_key)
@@ -1126,6 +1185,7 @@ class UnifiedCache:
     def get_with_metadata(
         self,
         cache_key: Optional[str] = None,
+        on: Optional[Dict] = None,
         ttl_seconds=_DEFAULT_TTL,
         prefix: str = "",
         **kwargs,
@@ -1138,17 +1198,19 @@ class UnifiedCache:
         metadata (e.g., created_at, file_size, custom metadata).
 
         Args:
-            cache_key: Direct cache key (if provided, **kwargs are ignored)
+            cache_key: Direct cache key (if provided, on and **kwargs are ignored)
+            on: Dictionary of key parameters for cache key derivation.
+                Use this to avoid namespace collisions with cache control parameters.
             ttl_seconds: Custom TTL in seconds (overrides default). None = never expire.
                          Use _DEFAULT_TTL sentinel (default) to use config's default_ttl_seconds.
             prefix: Descriptive prefix prepended to the cache filename
-            **kwargs: Parameters identifying the cached data (used if cache_key is None)
+            **kwargs: Parameters identifying the cached data (legacy, use 'on' instead)
 
         Returns:
             Tuple of (data, metadata_dict) if found and not expired, None otherwise
 
         Example:
-            result = cache.get_with_metadata(experiment="exp_001")
+            result = cache.get_with_metadata(on={'experiment': 'exp_001'})
             if result:
                 data, metadata = result
                 print(f"Created: {metadata['created_at']}")
@@ -1156,8 +1218,7 @@ class UnifiedCache:
                 process(data)
         """
         with self._lock:
-            if cache_key is None:
-                cache_key = self._create_cache_key(kwargs)
+            cache_key = self._resolve_cache_key(cache_key, on, kwargs)
 
             # Single metadata lookup
             entry = self.metadata_backend.get_entry(cache_key)
@@ -1301,7 +1362,11 @@ class UnifiedCache:
                 return None
 
     def get_metadata(
-        self, cache_key: Optional[str] = None, check_expiration: bool = True, **kwargs
+        self,
+        cache_key: Optional[str] = None,
+        on: Optional[Dict] = None,
+        check_expiration: bool = True,
+        **kwargs,
     ) -> Optional[Dict[str, Any]]:
         """
         Get entry metadata without loading blob data.
@@ -1310,23 +1375,24 @@ class UnifiedCache:
         before deciding whether to load the actual data.
 
         Args:
-            cache_key: Direct cache key (if provided, **kwargs are ignored)
+            cache_key: Direct cache key (if provided, on and **kwargs are ignored)
+            on: Dictionary of key parameters for cache key derivation.
+                Use this to avoid namespace collisions with cache control parameters.
             check_expiration: If True, returns None for expired entries (default: True)
-            **kwargs: Parameters identifying the cached data (used if cache_key is None)
+            **kwargs: Parameters identifying the cached data (legacy, use 'on' instead)
 
         Returns:
             Metadata dictionary or None if not found or expired
 
         Example:
             # Check metadata before loading large file
-            meta = cache.get_metadata(experiment="exp_001")
+            meta = cache.get_metadata(on={'experiment': 'exp_001'})
             if meta and meta.get("file_size_bytes", 0) > 1e9:
                 print("Large file - loading may take time")
-                data = cache.get(experiment="exp_001")
+                data = cache.get(on={'experiment': 'exp_001'})
         """
         with self._lock:
-            if cache_key is None:
-                cache_key = self._create_cache_key(kwargs)
+            cache_key = self._resolve_cache_key(cache_key, on, kwargs)
 
             entry = self.metadata_backend.get_entry(cache_key)
             if not entry:
@@ -1344,6 +1410,7 @@ class UnifiedCache:
     def exists(
         self,
         cache_key: Optional[str] = None,
+        on: Optional[Dict] = None,
         prefix: str = "",
         check_expiration: bool = True,
         **kwargs,
@@ -1355,25 +1422,27 @@ class UnifiedCache:
         objects into memory. Useful for existence checks before calling get().
 
         Args:
-            cache_key: Direct cache key (if provided, **kwargs are ignored)
+            cache_key: Direct cache key (if provided, on and **kwargs are ignored)
+            on: Dictionary of key parameters for cache key derivation.
+                Use this to avoid namespace collisions with cache control parameters.
             prefix: Descriptive prefix prepended to the cache filename (not used for check)
             check_expiration: If True, returns False for expired entries (default: True)
-            **kwargs: Parameters identifying the cached data (used if cache_key is None)
+            **kwargs: Parameters identifying the cached data (legacy, use 'on' instead)
 
         Returns:
             bool: True if entry exists and is not expired, False otherwise
 
         Example:
             # Check before loading large DataFrame
-            if cache.exists(experiment="exp_001", run_id=42):
-                df = cache.get(experiment="exp_001", run_id=42)
+            params = {'experiment': 'exp_001', 'run_id': 42}
+            if cache.exists(on=params):
+                df = cache.get(on=params)
             else:
                 df = expensive_computation()
-                cache.put(df, experiment="exp_001", run_id=42)
+                cache.put(df, on=params)
         """
         with self._lock:
-            if cache_key is None:
-                cache_key = self._create_cache_key(kwargs)
+            cache_key = self._resolve_cache_key(cache_key, on, kwargs)
 
             entry = self.metadata_backend.get_entry(cache_key)
             if not entry:
@@ -1385,7 +1454,13 @@ class UnifiedCache:
 
             return True
 
-    def update_data(self, data: Any, cache_key: Optional[str] = None, **kwargs) -> bool:
+    def update_data(
+        self,
+        data: Any,
+        cache_key: Optional[str] = None,
+        on: Optional[Dict] = None,
+        **kwargs,
+    ) -> bool:
         """
         Update blob data at an existing cache entry without changing the cache_key.
 
@@ -1395,8 +1470,10 @@ class UnifiedCache:
 
         Args:
             data: New data to store (must be serializable by handler)
-            cache_key: Direct cache key (if provided, **kwargs are ignored)
-            **kwargs: Parameters identifying the cached data (used if cache_key is None)
+            cache_key: Direct cache key (if provided, on and **kwargs are ignored)
+            on: Dictionary of key parameters for cache key derivation.
+                Use this to avoid namespace collisions with cache control parameters.
+            **kwargs: Parameters identifying the cached data (legacy, use 'on' instead)
 
         Returns:
             bool: True if entry was updated, False if entry doesn't exist
@@ -1405,8 +1482,7 @@ class UnifiedCache:
             # Update cached DataFrame with new data
             success = cache.update_data(
                 new_df,
-                experiment="exp_001",
-                run_id=42
+                on={'experiment': 'exp_001', 'run_id': 42}
             )
 
             if not success:
@@ -1419,8 +1495,7 @@ class UnifiedCache:
             - created_at timestamp is reset to now (acts like touch)
         """
         with self._lock:
-            if cache_key is None:
-                cache_key = self._create_cache_key(kwargs)
+            cache_key = self._resolve_cache_key(cache_key, on, kwargs)
 
             # Check if entry exists before doing any I/O
             existing_entry = self.metadata_backend.get_entry(cache_key)
@@ -1504,7 +1579,12 @@ class UnifiedCache:
             logger.info(f"✅ Updated cache entry: {cache_key[:16]}...")
             return True
 
-    def touch(self, cache_key: Optional[str] = None, **kwargs) -> bool:
+    def touch(
+        self,
+        cache_key: Optional[str] = None,
+        on: Optional[Dict] = None,
+        **kwargs,
+    ) -> bool:
         """
         Update entry timestamp to extend TTL without reloading data.
 
@@ -1514,21 +1594,23 @@ class UnifiedCache:
         expiration of long-running computations.
 
         Args:
-            cache_key: Direct cache key (if provided, **kwargs are ignored)
-            **kwargs: Parameters identifying the cached data (used if cache_key is None)
+            cache_key: Direct cache key (if provided, on and **kwargs are ignored)
+            on: Dictionary of key parameters for cache key derivation.
+                Use this to avoid namespace collisions with cache control parameters.
+            **kwargs: Parameters identifying the cached data (legacy, use 'on' instead)
 
         Returns:
             bool: True if entry exists and was touched, False if entry doesn't exist
 
         Example:
             # Reset TTL to full default duration from now
-            cache.touch(experiment="exp_001")
+            cache.touch(on={'experiment': 'exp_001'})
 
             # Keep long-running computation alive
             for i in range(100):
                 process_chunk(i)
                 if i % 10 == 0:
-                    cache.touch(job_id="long_job")  # Prevent expiration
+                    cache.touch(on={'job_id': 'long_job'})  # Prevent expiration
 
         Note:
             - This is a cache-layer operation (TTL-aware)
@@ -1538,8 +1620,7 @@ class UnifiedCache:
               (``CacheMetadataConfig.default_ttl_seconds``)
         """
         with self._lock:
-            if cache_key is None:
-                cache_key = self._create_cache_key(kwargs)
+            cache_key = self._resolve_cache_key(cache_key, on, kwargs)
 
             # Get existing entry
             entry = self.metadata_backend.get_entry(cache_key)
@@ -1856,18 +1937,25 @@ class UnifiedCache:
                 f"(deleted {blobs_deleted} blob files)"
             )
 
-    def invalidate(self, cache_key: Optional[str] = None, prefix: str = "", **kwargs):
+    def invalidate(
+        self,
+        cache_key: Optional[str] = None,
+        on: Optional[Dict] = None,
+        prefix: str = "",
+        **kwargs,
+    ):
         """
         Invalidate (remove) specific cache entries.
 
         Args:
-            cache_key: Direct cache key (if provided, **kwargs are ignored)
+            cache_key: Direct cache key (if provided, on and **kwargs are ignored)
+            on: Dictionary of key parameters for cache key derivation.
+                Use this to avoid namespace collisions with cache control parameters.
             prefix: Descriptive prefix of the cache filename
-            **kwargs: Parameters identifying the cached data (used if cache_key is None)
+            **kwargs: Parameters identifying the cached data (legacy, use 'on' instead)
         """
         with self._lock:
-            if cache_key is None:
-                cache_key = self._create_cache_key(kwargs)
+            cache_key = self._resolve_cache_key(cache_key, on, kwargs)
 
             # Look up the entry to find the blob path before removing metadata
             entry = self.metadata_backend.get_entry(cache_key)

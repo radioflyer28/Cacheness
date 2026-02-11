@@ -173,12 +173,12 @@ class cached:
                 else:
                     raise RuntimeError(f"Cache key generation failed: {e}") from e
 
-            # Try to get from cache using a synthetic parameter containing the cache key
+            # Try to get from cache using the explicit cache_key parameter
             try:
                 cache_instance = cast(UnifiedCache, self.cache_instance)
                 cached_result = cache_instance.get(
+                    cache_key=cache_key,
                     ttl_seconds=self.ttl_seconds,
-                    __decorator_cache_key=cache_key,  # Use synthetic parameter with the cache key
                 )
                 if cached_result is not None:
                     # Cache hit - increment hits counter
@@ -197,13 +197,13 @@ class cached:
             # Call the original function
             result = func(*args, **kwargs)
 
-            # Store result in cache using the same synthetic parameter
+            # Store result in cache using the explicit cache_key parameter
             try:
                 cache_instance = cast(UnifiedCache, self.cache_instance)
                 cache_instance.put(
                     result,
+                    cache_key=cache_key,
                     description=f"Cached result for {cache_key}",
-                    __decorator_cache_key=cache_key,  # Use same synthetic parameter
                 )
                 # Track the cache key for later cleanup
                 with self._lock:
@@ -251,8 +251,8 @@ class cached:
         # Delete each tracked cache key
         for cache_key in keys_to_delete:
             try:
-                # Invalidate using the cache key stored in __decorator_cache_key
-                cache_instance.invalidate(__decorator_cache_key=cache_key)
+                # Invalidate using the explicit cache_key parameter
+                cache_instance.invalidate(cache_key=cache_key)
                 with self._lock:
                     self._cache_keys.discard(cache_key)
                 deleted += 1
@@ -419,12 +419,12 @@ class cache_if:
                 else:
                     raise RuntimeError(f"Cache key generation failed: {e}") from e
 
-            # Try to get from cache using a synthetic parameter containing the cache key
+            # Try to get from cache using the explicit cache_key parameter
             try:
                 cache_instance = cast(UnifiedCache, self.cache_instance)
                 cached_result = cache_instance.get(
+                    cache_key=cache_key,
                     ttl_seconds=self.ttl_seconds,
-                    __decorator_cache_key=cache_key,  # Use synthetic parameter with the cache key
                 )
                 if cached_result is not None:
                     # Cache hit - increment hits counter
@@ -458,8 +458,8 @@ class cache_if:
                     cache_instance = cast(UnifiedCache, self.cache_instance)
                     cache_instance.put(
                         result,
+                        cache_key=cache_key,
                         description=f"Cached result for {cache_key}",
-                        __decorator_cache_key=cache_key,  # Use same synthetic parameter
                     )
                     # Track the cache key for later cleanup
                     with self._lock:
@@ -507,8 +507,8 @@ class cache_if:
         # Delete each tracked cache key
         for cache_key in keys_to_delete:
             try:
-                # Invalidate using the cache key stored in __decorator_cache_key
-                cache_instance.invalidate(__decorator_cache_key=cache_key)
+                # Invalidate using the explicit cache_key parameter
+                cache_instance.invalidate(cache_key=cache_key)
                 with self._lock:
                     self._cache_keys.discard(cache_key)
                 deleted += 1

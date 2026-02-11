@@ -93,8 +93,9 @@ class TestCrossSystemCompatibility:
             enhanced_params = {**normalized_params, "__function__": func_id}
 
             # Use the same synthetic parameter approach as decorator
+            # Use the cache_key parameter directly
             cached_data = cache_instance.get(
-                __decorator_cache_key=cache_instance._create_cache_key(enhanced_params)
+                cache_key=cache_instance._create_cache_key(enhanced_params)
             )
 
             assert cached_data == 30, (
@@ -131,7 +132,7 @@ class TestCrossSystemCompatibility:
             cache_key = cache_instance._create_cache_key(enhanced_params)
 
             # Store using UnifiedCache with decorator's synthetic parameter approach
-            cache_instance.put(expected_result, __decorator_cache_key=cache_key)
+            cache_instance.put(expected_result, cache_key=cache_key)
 
             # Create decorated version of function
             @cached(cache_instance=cache_instance)
@@ -194,7 +195,7 @@ class TestCrossSystemCompatibility:
             enhanced_params = {**normalized_params, "__function__": func_id}
             cache_key = cache_instance._create_cache_key(enhanced_params)
 
-            unified_result = cache_instance.get(__decorator_cache_key=cache_key)
+            unified_result = cache_instance.get(cache_key=cache_key)
 
             np.testing.assert_array_equal(
                 unified_result,
@@ -243,7 +244,7 @@ class TestCrossSystemCompatibility:
             cache_key = cache_instance._create_cache_key(enhanced_params)
 
             expected_result = 10  # sum of [1, 2, 3, 4]
-            cache_instance.put(expected_result, __decorator_cache_key=cache_key)
+            cache_instance.put(expected_result, cache_key=cache_key)
 
             # Retrieve using decorator
             @cached(cache_instance=cache_instance)
@@ -331,16 +332,14 @@ class TestCrossSystemCompatibility:
             enhanced_params = {**normalized_params, "__function__": func_id}
             cache_key = cache_instance._create_cache_key(enhanced_params)
 
-            result2 = cache_instance.get(__decorator_cache_key=cache_key)
+            result2 = cache_instance.get(cache_key=cache_key)
             assert result2 == expected_result, (
                 "UnifiedCache should retrieve decorator's cached result"
             )
 
             # Round 3: Cache additional data with UnifiedCache
-            cache_instance.put(999, __decorator_cache_key="custom_test_key")
-            retrieved_custom = cache_instance.get(
-                __decorator_cache_key="custom_test_key"
-            )
+            cache_instance.put(999, cache_key="custom_test_key")
+            retrieved_custom = cache_instance.get(cache_key="custom_test_key")
             assert retrieved_custom == 999
 
             # Round 4: Verify original cache still works
