@@ -11,6 +11,16 @@ The BlobStore is designed to be reusable for non-caching use cases:
 - Artifact storage
 - Data pipeline checkpoints
 
+Features:
+- Content-addressable storage (xxhash or SHA-256 based keys)
+- Pluggable metadata backends (JSON, SQLite)
+- Type-aware serialization via handlers
+- Configurable compression
+- File integrity verification (xxhash-based file hashes)
+- Cryptographic signing (HMAC-SHA256 entry signing)
+- Integrity auditing (orphan/dangling/mismatch detection)
+- Thread-safe operations
+
 Usage:
     from cacheness.storage import BlobStore
 
@@ -33,15 +43,22 @@ Usage:
     # List blobs
     blob_ids = store.list(prefix="model_")
 
+    # Verify integrity
+    report = store.verify_integrity(repair=True)
+
     # Delete
     store.delete(blob_id)
 """
 
-import hashlib
+import glob
 import logging
+import os
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 from datetime import datetime, timezone
+
+import xxhash
 
 from .backends import MetadataBackend, JsonBackend
 from .backends.blob_backends import BlobBackend, FilesystemBlobBackend, get_blob_backend
@@ -63,16 +80,21 @@ class BlobStore:
     does not implement caching semantics like TTL or eviction policies.
 
     Features:
-    - Content-addressable storage option (hash-based keys)
+    - Content-addressable storage option (xxhash or SHA-256 based keys)
     - Pluggable metadata backends (JSON, SQLite)
-    - Type-aware serialization via handlers
+    - Type-aware serialization via config-aware handlers
     - Configurable compression
+    - File integrity verification (xxhash-based file hashes)
+    - Cryptographic signing (HMAC-SHA256 entry signing)
+    - Integrity auditing (orphan/dangling/mismatch detection)
+    - Thread-safe operations
     - Rich, queryable metadata
 
     Attributes:
         cache_dir: Root directory for blob storage
         backend: Metadata backend instance
         handlers: Handler registry for type detection
+        signer: Optional CacheEntrySigner for metadata integrity
     """
 
     def __init__(
@@ -83,6 +105,11 @@ class BlobStore:
         compression_level: int = 3,
         content_addressable: bool = False,
         blob_backend: Optional[Union[str, BlobBackend]] = None,
+        enable_signing: bool = False,
+        signing_key_file: str = "cache_signing_key.bin",
+        custom_signed_fields: Optional[List[str]] = None,
+        use_in_memory_key: bool = False,
+        config: Optional[CacheConfig] = None,
     ):
         """
         Initialize a BlobStore.
@@ -96,6 +123,12 @@ class BlobStore:
             blob_backend: Blob storage backend for file operations (delete, exists).
                 Can be a string ('filesystem', 'memory') or a BlobBackend instance.
                 Defaults to 'filesystem' if not provided.
+            enable_signing: If True, enable HMAC-SHA256 entry signing
+            signing_key_file: Name of the signing key file
+            custom_signed_fields: Custom list of fields to sign
+            use_in_memory_key: If True, use ephemeral in-memory signing key
+            config: Optional CacheConfig for handler configuration. If not provided,
+                a default config is created from compression parameters.
         """
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -104,15 +137,21 @@ class BlobStore:
         self.compression_level = compression_level
         self.content_addressable = content_addressable
 
-        # Create config for handlers
-        self.config = CacheConfig(
-            cache_dir=self.cache_dir,
-            compression=CompressionConfig(
-                pickle_compression_codec=compression,
-                pickle_compression_level=compression_level,
-                blosc2_array_clevel=compression_level,
-            ),
-        )
+        # Thread safety
+        self._lock = threading.RLock()
+
+        # Create or use provided config for handlers
+        if config is not None:
+            self.config = config
+        else:
+            self.config = CacheConfig(
+                cache_dir=self.cache_dir,
+                compression=CompressionConfig(
+                    pickle_compression_codec=compression,
+                    pickle_compression_level=compression_level,
+                    blosc2_array_clevel=compression_level,
+                ),
+            )
 
         # Initialize metadata backend
         if backend is None or backend == "json":
@@ -126,8 +165,8 @@ class BlobStore:
         else:
             raise ValueError(f"Unknown backend type: {backend}")
 
-        # Initialize handler registry
-        self.handlers = HandlerRegistry()
+        # Initialize handler registry with config for proper type detection
+        self.handlers = HandlerRegistry(self.config)
 
         # Initialize blob backend for file operations (delete, exists)
         if blob_backend is None or blob_backend == "filesystem":
@@ -146,7 +185,35 @@ class BlobStore:
         else:
             raise ValueError(f"Unknown blob_backend type: {blob_backend}")
 
+        # Initialize entry signer for metadata integrity protection
+        self.signer = None
+        if enable_signing:
+            self._init_signer(signing_key_file, custom_signed_fields, use_in_memory_key)
+
         logger.debug(f"BlobStore initialized at {self.cache_dir}")
+
+    def _init_signer(
+        self,
+        signing_key_file: str,
+        custom_signed_fields: Optional[List[str]],
+        use_in_memory_key: bool,
+    ) -> None:
+        """Initialize the cache entry signer."""
+        try:
+            from ..security import create_cache_signer
+
+            self.signer = create_cache_signer(
+                cache_dir=self.cache_dir,
+                key_file=signing_key_file,
+                custom_fields=custom_signed_fields,
+                use_in_memory_key=use_in_memory_key,
+            )
+            logger.info(
+                f"Entry signing enabled with fields: {self.signer.signed_fields}"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to initialize entry signer: {e}")
+            self.signer = None
 
     def put(
         self,
@@ -166,51 +233,73 @@ class BlobStore:
         Returns:
             The blob key (can be used to retrieve the blob)
         """
-        # Generate key
-        if self.content_addressable:
-            # Use content hash as key
-            blob_key = self._compute_content_hash(data)
-        elif key:
-            blob_key = self._sanitize_key(key)
-        else:
-            blob_key = self._generate_unique_key()
+        with self._lock:
+            # Generate key
+            if self.content_addressable:
+                # Use xxhash content hash as key
+                blob_key = self._compute_content_hash(data)
+            elif key:
+                blob_key = self._sanitize_key(key)
+            else:
+                blob_key = self._generate_unique_key()
 
-        # Get appropriate handler
-        handler = self.handlers.get_handler(data)
+            # Get appropriate handler
+            handler = self.handlers.get_handler(data)
 
-        # Determine file path
-        base_path = self.cache_dir / blob_key
+            # Determine file path
+            base_path = self.cache_dir / blob_key
 
-        # Store the data using the handler
-        result = handler.put(data, base_path, self.config)
+            # Store the data using the handler
+            result = handler.put(data, base_path, self.config)
 
-        # Build entry metadata
-        # Note: JsonBackend stores custom fields in nested 'metadata' dict
-        custom_metadata = metadata or {}
-        custom_metadata["actual_path"] = str(result.get("actual_path", base_path))
-        custom_metadata["storage_format"] = result.get("storage_format", "pickle")
-        custom_metadata["compression_codec"] = self.compression
+            # Calculate file hash for integrity verification
+            actual_path = Path(str(result.get("actual_path", base_path)))
+            file_hash = self._calculate_file_hash(actual_path)
 
-        entry_data = {
-            "cache_key": blob_key,
-            "data_type": handler.data_type,
-            "file_size": result.get("file_size", 0),
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "metadata": custom_metadata,
-        }
+            # Build entry metadata
+            # Note: JsonBackend stores custom fields in nested 'metadata' dict
+            # We store file_hash and entry_signature in nested metadata too so
+            # JsonBackend preserves them (it only keeps specific top-level fields).
+            custom_metadata = metadata or {}
+            custom_metadata["actual_path"] = str(actual_path)
+            custom_metadata["storage_format"] = result.get("storage_format", "pickle")
+            custom_metadata["compression_codec"] = self.compression
+            if file_hash:
+                custom_metadata["file_hash"] = file_hash
 
-        # Store metadata
-        self.backend.put_entry(blob_key, entry_data)
+            entry_data = {
+                "cache_key": blob_key,
+                "data_type": handler.data_type,
+                "file_size": result.get("file_size", 0),
+                "file_hash": file_hash,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "metadata": custom_metadata,
+            }
 
-        logger.debug(
-            f"Stored blob {blob_key}: {handler.data_type}, {entry_data['file_size']} bytes"
-        )
+            # Sign entry if signer is available
+            if self.signer is not None:
+                # Build signable data (flatten for signing)
+                signable = {**entry_data, **custom_metadata}
+                signature = self.signer.sign_entry(signable)
+                entry_data["entry_signature"] = signature
+                # Also store in nested metadata so JsonBackend preserves it
+                custom_metadata["entry_signature"] = signature
 
-        return blob_key
+            # Store metadata
+            self.backend.put_entry(blob_key, entry_data)
+
+            logger.debug(
+                f"Stored blob {blob_key}: {handler.data_type}, "
+                f"{entry_data['file_size']} bytes"
+            )
+
+            return blob_key
 
     def get(self, key: str) -> Optional[Any]:
         """
         Retrieve a blob by key.
+
+        Verifies entry signature if signing is enabled.
 
         Args:
             key: The blob key
@@ -218,53 +307,67 @@ class BlobStore:
         Returns:
             The stored data, or None if not found
         """
-        entry = self.backend.get_entry(key)
-        if entry is None:
-            logger.debug(f"Blob not found: {key}")
-            return None
+        with self._lock:
+            entry = self.backend.get_entry(key)
+            if entry is None:
+                logger.debug(f"Blob not found: {key}")
+                return None
 
-        # Get the file path - may be in top-level or nested metadata
-        nested_meta = entry.get("metadata", {})
-        actual_path_str = entry.get("actual_path") or nested_meta.get("actual_path")
+            # Verify entry signature if signer is available
+            if self.signer is not None:
+                nested_meta = entry.get("metadata", {})
+                stored_signature = entry.get("entry_signature") or nested_meta.get(
+                    "entry_signature"
+                )
+                if stored_signature:
+                    # Reconstruct signable data matching what was signed on put()
+                    signable = {**entry, **nested_meta, "cache_key": key}
+                    if not self.signer.verify_entry(signable, stored_signature):
+                        logger.warning(f"Signature verification failed for blob {key}")
+                        return None
 
-        if actual_path_str:
-            actual_path = Path(actual_path_str)
-        else:
-            # Fallback: try common extensions
-            for ext in [".pkl", ".b2nd", ".parquet", ".npz", ""]:
-                candidate = self.cache_dir / f"{key}{ext}"
-                if candidate.exists():
-                    actual_path = candidate
-                    break
+            # Get the file path - may be in top-level or nested metadata
+            nested_meta = entry.get("metadata", {})
+            actual_path_str = entry.get("actual_path") or nested_meta.get("actual_path")
+
+            if actual_path_str:
+                actual_path = Path(actual_path_str)
             else:
-                actual_path = self.cache_dir / key
+                # Fallback: try common extensions
+                for ext in [".pkl", ".b2nd", ".parquet", ".npz", ""]:
+                    candidate = self.cache_dir / f"{key}{ext}"
+                    if candidate.exists():
+                        actual_path = candidate
+                        break
+                else:
+                    actual_path = self.cache_dir / key
 
-        if not self.blob_backend.exists(str(actual_path)):
-            logger.warning(f"Blob file missing: {actual_path}")
-            return None
+            if not self.blob_backend.exists(str(actual_path)):
+                logger.warning(f"Blob file missing: {actual_path}")
+                return None
 
-        # Get the handler based on data type
-        data_type = entry.get("data_type", "object")
-        handler = self.handlers.get_handler_by_type(data_type)
+            # Get the handler based on data type
+            data_type = entry.get("data_type", "object")
+            handler = self.handlers.get_handler_by_type(data_type)
 
-        # Build handler metadata by merging entry with nested metadata
-        nested_meta = entry.get("metadata", {})
-        handler_metadata = {
-            **entry,
-            **nested_meta,  # Flatten nested metadata to top level
-        }
+            # Build handler metadata by merging entry with nested metadata
+            nested_meta = entry.get("metadata", {})
+            handler_metadata = {
+                **entry,
+                **nested_meta,  # Flatten nested metadata to top level
+            }
 
-        if handler is None:
-            # Fall back to generic read
-            return read_file(actual_path)
+            if handler is None:
+                # Fall back to generic read
+                return read_file(actual_path)
 
-        # Read using handler
-        data = handler.get(actual_path, handler_metadata)
+            # Read using handler
+            data = handler.get(actual_path, handler_metadata)
 
-        # Update access time
-        self.backend.update_access_time(key)
+            # Update access time
+            self.backend.update_access_time(key)
 
-        return data
+            return data
 
     def get_metadata(self, key: str) -> Optional[Dict[str, Any]]:
         """
@@ -276,7 +379,8 @@ class BlobStore:
         Returns:
             Metadata dictionary, or None if not found
         """
-        return self.backend.get_entry(key)
+        with self._lock:
+            return self.backend.get_entry(key)
 
     def update_metadata(self, key: str, metadata: Dict[str, Any]) -> bool:
         """
@@ -289,23 +393,24 @@ class BlobStore:
         Returns:
             True if successful, False if blob not found
         """
-        existing = self.backend.get_entry(key)
-        if existing is None:
-            return False
+        with self._lock:
+            existing = self.backend.get_entry(key)
+            if existing is None:
+                return False
 
-        # Get or create nested metadata dict
-        nested_meta = existing.get("metadata", {})
-        if not isinstance(nested_meta, dict):
-            nested_meta = {}
+            # Get or create nested metadata dict
+            nested_meta = existing.get("metadata", {})
+            if not isinstance(nested_meta, dict):
+                nested_meta = {}
 
-        # Merge user metadata into nested dict
-        nested_meta.update(metadata)
+            # Merge user metadata into nested dict
+            nested_meta.update(metadata)
 
-        # Update the entry
-        updated = {**existing, "metadata": nested_meta}
+            # Update the entry
+            updated = {**existing, "metadata": nested_meta}
 
-        self.backend.put_entry(key, updated)
-        return True
+            self.backend.put_entry(key, updated)
+            return True
 
     def delete(self, key: str) -> bool:
         """
@@ -317,19 +422,24 @@ class BlobStore:
         Returns:
             True if deleted, False if not found
         """
-        entry = self.backend.get_entry(key)
-        if entry is None:
-            return False
+        with self._lock:
+            entry = self.backend.get_entry(key)
+            if entry is None:
+                return False
 
-        # Delete the file via blob backend
-        actual_path = Path(entry.get("actual_path", self.cache_dir / key))
-        self.blob_backend.delete_blob(str(actual_path))
+            # Delete the file via blob backend
+            nested_meta = entry.get("metadata", {})
+            actual_path_str = entry.get("actual_path") or nested_meta.get("actual_path")
+            actual_path = Path(
+                actual_path_str if actual_path_str else self.cache_dir / key
+            )
+            self.blob_backend.delete_blob(str(actual_path))
 
-        # Remove metadata
-        self.backend.remove_entry(key)
+            # Remove metadata
+            self.backend.remove_entry(key)
 
-        logger.debug(f"Deleted blob: {key}")
-        return True
+            logger.debug(f"Deleted blob: {key}")
+            return True
 
     def exists(self, key: str) -> bool:
         """
@@ -341,13 +451,18 @@ class BlobStore:
         Returns:
             True if the blob exists
         """
-        entry = self.backend.get_entry(key)
-        if entry is None:
-            return False
+        with self._lock:
+            entry = self.backend.get_entry(key)
+            if entry is None:
+                return False
 
-        # Also verify the file exists via blob backend
-        actual_path = Path(entry.get("actual_path", self.cache_dir / key))
-        return self.blob_backend.exists(str(actual_path))
+            # Also verify the file exists via blob backend
+            nested_meta = entry.get("metadata", {})
+            actual_path_str = entry.get("actual_path") or nested_meta.get("actual_path")
+            actual_path = Path(
+                actual_path_str if actual_path_str else self.cache_dir / key
+            )
+            return self.blob_backend.exists(str(actual_path))
 
     def list(
         self,
@@ -364,29 +479,30 @@ class BlobStore:
         Returns:
             List of matching blob keys
         """
-        entries = self.backend.list_entries()
-        keys = []
+        with self._lock:
+            entries = self.backend.list_entries()
+            keys = []
 
-        for entry in entries:
-            key = entry.get("cache_key", "")
+            for entry in entries:
+                key = entry.get("cache_key", "")
 
-            # Apply prefix filter
-            if prefix and not key.startswith(prefix):
-                continue
-
-            # Apply metadata filter
-            if metadata_filter:
-                match = True
-                for field, value in metadata_filter.items():
-                    if entry.get(field) != value:
-                        match = False
-                        break
-                if not match:
+                # Apply prefix filter
+                if prefix and not key.startswith(prefix):
                     continue
 
-            keys.append(key)
+                # Apply metadata filter
+                if metadata_filter:
+                    match = True
+                    for field, value in metadata_filter.items():
+                        if entry.get(field) != value:
+                            match = False
+                            break
+                    if not match:
+                        continue
 
-        return keys
+                keys.append(key)
+
+            return keys
 
     def clear(self) -> int:
         """
@@ -395,12 +511,14 @@ class BlobStore:
         Returns:
             Number of blobs removed
         """
-        return self.backend.clear_all()
+        with self._lock:
+            return self.backend.clear_all()
 
     def close(self):
         """Close the blob store and release resources."""
-        self.backend.close()
-        self.blob_backend.close()
+        with self._lock:
+            self.backend.close()
+            self.blob_backend.close()
 
     def __enter__(self):
         return self
@@ -409,10 +527,182 @@ class BlobStore:
         self.close()
         return False
 
-    # Private helper methods
+    # ── Integrity verification ────────────────────────────────────────
+
+    def verify_integrity(
+        self, repair: bool = False, verify_hashes: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Verify blob store integrity by cross-checking blob files and metadata.
+
+        Detects:
+        - Orphaned blobs: files in cache_dir with no metadata entry
+        - Dangling metadata: entries pointing to missing blob files
+        - Size mismatches: metadata file_size != actual file size on disk
+        - Hash mismatches: metadata file_hash != actual file hash (if verify_hashes)
+
+        Args:
+            repair: If True, delete orphaned blobs and remove dangling entries.
+            verify_hashes: If True, also verify file hashes (slower but catches
+                corruption).
+
+        Returns:
+            Dict with keys: orphaned_blobs, dangling_entries, size_mismatches,
+            hash_mismatches (if verify_hashes), repaired (if repair).
+        """
+        with self._lock:
+            # 1. Inventory all blob files in cache_dir
+            blob_extensions = ["pkl", "npz", "b2nd", "b2tr", "parquet"]
+            pickle_codecs = ["lz4", "zstd", "gzip", "zst", "gz", "bz2", "xz"]
+
+            blob_files: set[str] = set()
+            patterns = [str(self.cache_dir / f"*.{ext}") for ext in blob_extensions]
+            for codec in pickle_codecs:
+                patterns.append(str(self.cache_dir / f"*.pkl.{codec}"))
+            patterns.append(str(self.cache_dir / "*.pkl.*"))
+
+            for pattern in patterns:
+                for file_path in glob.glob(pattern):
+                    blob_files.add(os.path.normpath(file_path))
+
+            entry_paths: dict[str, dict] = {}
+            for entry in self.backend.iter_entry_summaries():
+                actual_path = entry.get("actual_path")
+                if actual_path:
+                    norm_path = os.path.normpath(actual_path)
+                    entry_paths[norm_path] = {
+                        "cache_key": entry.get("cache_key", ""),
+                        "file_size": entry.get("file_size"),
+                        "file_hash": entry.get("file_hash"),
+                    }
+
+            # 3. Find orphaned blobs (files with no metadata entry)
+            known_paths = set(entry_paths.keys())
+            orphaned_blobs = sorted(blob_files - known_paths)
+
+            # 4. Find dangling metadata (entries pointing to missing files)
+            dangling_entries = []
+            for path, info in entry_paths.items():
+                if not os.path.exists(path):
+                    dangling_entries.append(
+                        {
+                            "cache_key": info["cache_key"],
+                            "expected_path": path,
+                        }
+                    )
+
+            # 5. Check size mismatches
+            size_mismatches = []
+            for path, info in entry_paths.items():
+                if os.path.exists(path) and info["file_size"] is not None:
+                    actual_size = os.path.getsize(path)
+                    if actual_size != info["file_size"]:
+                        size_mismatches.append(
+                            {
+                                "cache_key": info["cache_key"],
+                                "path": path,
+                                "expected_size": info["file_size"],
+                                "actual_size": actual_size,
+                            }
+                        )
+
+            # 6. Check hash mismatches (optional, expensive)
+            hash_mismatches = []
+            if verify_hashes:
+                for path, info in entry_paths.items():
+                    if os.path.exists(path) and info.get("file_hash"):
+                        current_hash = self._calculate_file_hash(Path(path))
+                        if current_hash != info["file_hash"]:
+                            hash_mismatches.append(
+                                {
+                                    "cache_key": info["cache_key"],
+                                    "path": path,
+                                    "expected_hash": info["file_hash"],
+                                    "actual_hash": current_hash,
+                                }
+                            )
+
+            # 7. Repair if requested
+            repaired = {"orphans_deleted": 0, "dangling_removed": 0}
+            if repair:
+                for blob_path in orphaned_blobs:
+                    try:
+                        os.remove(blob_path)
+                        repaired["orphans_deleted"] += 1
+                    except OSError as e:
+                        logger.warning(
+                            f"Failed to remove orphaned blob {blob_path}: {e}"
+                        )
+
+                for entry in dangling_entries:
+                    try:
+                        self.backend.remove_entry(entry["cache_key"])
+                        repaired["dangling_removed"] += 1
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to remove dangling entry {entry['cache_key']}: {e}"
+                        )
+
+            report: Dict[str, Any] = {
+                "orphaned_blobs": orphaned_blobs,
+                "dangling_entries": dangling_entries,
+                "size_mismatches": size_mismatches,
+            }
+            if verify_hashes:
+                report["hash_mismatches"] = hash_mismatches
+            if repair:
+                report["repaired"] = repaired
+
+            total_issues = (
+                len(orphaned_blobs)
+                + len(dangling_entries)
+                + len(size_mismatches)
+                + len(hash_mismatches)
+            )
+            if total_issues == 0:
+                logger.info("Blob store integrity check passed — no issues found")
+            else:
+                logger.warning(
+                    f"Blob store integrity check found {total_issues} issue(s): "
+                    f"{len(orphaned_blobs)} orphaned, "
+                    f"{len(dangling_entries)} dangling, "
+                    f"{len(size_mismatches)} size mismatches"
+                    + (
+                        f", {len(hash_mismatches)} hash mismatches"
+                        if verify_hashes
+                        else ""
+                    )
+                )
+
+            return report
+
+    # ── Private helper methods ────────────────────────────────────────
+
+    def _calculate_file_hash(self, file_path: Path) -> Optional[str]:
+        """
+        Calculate XXH3_64 hash of a blob file for integrity verification.
+
+        Args:
+            file_path: Path to the blob file
+
+        Returns:
+            Hex string of the file hash, or None if file doesn't exist or error
+        """
+        try:
+            if not file_path.exists():
+                return None
+
+            hasher = xxhash.xxh3_64()
+            with open(file_path, "rb") as f:
+                for chunk in iter(lambda: f.read(8192), b""):
+                    hasher.update(chunk)
+            return hasher.hexdigest()
+        except Exception as e:
+            logger.warning(f"Failed to calculate hash for {file_path}: {e}")
+            return None
 
     def _compute_content_hash(self, data: Any) -> str:
-        """Compute a content-based hash for the data."""
+        """Compute a content-based hash for the data using xxhash."""
         import pickle
 
         try:
@@ -420,7 +710,7 @@ class BlobStore:
         except Exception:
             # Fall back to repr for non-pickleable objects
             serialized = repr(data).encode()
-        return hashlib.sha256(serialized).hexdigest()[:16]
+        return xxhash.xxh3_64(serialized).hexdigest()[:16]
 
     def _sanitize_key(self, key: str) -> str:
         """Sanitize a user-provided key."""
