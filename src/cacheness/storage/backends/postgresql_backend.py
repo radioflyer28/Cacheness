@@ -540,15 +540,20 @@ class PostgresBackend(MetadataBackend):
 
         return result
 
-    def remove_entry(self, cache_key: str):
-        """Remove cache entry metadata."""
+    def remove_entry(self, cache_key: str) -> bool:
+        """Remove cache entry metadata.
+
+        Returns:
+            bool: True if the entry existed and was removed, False if not found.
+        """
         with self._lock:
             with self.SessionLocal() as session:
                 try:
-                    session.execute(
+                    result = session.execute(
                         delete(PgCacheEntry).where(PgCacheEntry.cache_key == cache_key)
                     )
                     session.commit()
+                    return result.rowcount > 0
                 except Exception as e:
                     session.rollback()
                     logger.error(f"Failed to remove entry {cache_key}: {e}")

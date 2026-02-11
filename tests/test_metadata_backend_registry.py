@@ -84,9 +84,11 @@ class MockMetadataBackend(MetadataBackend):
     def put_entry(self, cache_key: str, entry_data):
         self._entries[cache_key] = entry_data
 
-    def remove_entry(self, cache_key: str):
+    def remove_entry(self, cache_key: str) -> bool:
         if cache_key in self._entries:
             del self._entries[cache_key]
+            return True
+        return False
 
     def list_entries(self):
         return list(self._entries.values())
@@ -110,6 +112,9 @@ class MockMetadataBackend(MetadataBackend):
 
     def cleanup_expired(self, ttl_seconds: float) -> int:
         return 0  # Mock doesn't track TTL
+
+    def cleanup_by_size(self, target_size_mb: float):
+        return {"count": 0, "removed_entries": []}
 
     def clear_all(self) -> int:
         count = len(self._entries)
@@ -144,8 +149,8 @@ class AnotherMockBackend(MetadataBackend):
     def put_entry(self, cache_key: str, entry_data):
         pass
 
-    def remove_entry(self, cache_key: str):
-        pass
+    def remove_entry(self, cache_key: str) -> bool:
+        return False
 
     def list_entries(self):
         return []
@@ -167,6 +172,9 @@ class AnotherMockBackend(MetadataBackend):
 
     def cleanup_expired(self, ttl_seconds: float) -> int:
         return 0
+
+    def cleanup_by_size(self, target_size_mb: float):
+        return {"count": 0, "removed_entries": []}
 
     def clear_all(self) -> int:
         return 0

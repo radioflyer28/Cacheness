@@ -178,7 +178,16 @@ except ImportError:
 
 
 class MetadataBackend(ABC):
-    """Abstract base class for cache metadata backends."""
+    """Abstract base class for cache metadata backends.
+
+    This is the canonical MetadataBackend interface.  Every metadata backend
+    (JSON, SQLite, PostgreSQL, custom) must extend this ABC.
+
+    The class is re-exported by ``cacheness.storage.backends.base`` so that
+    ``from cacheness.storage.backends import MetadataBackend`` and
+    ``from cacheness.metadata import MetadataBackend`` both resolve to the
+    same type.
+    """
 
     @abstractmethod
     def load_metadata(self) -> Dict[str, Any]:

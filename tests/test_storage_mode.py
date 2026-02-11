@@ -12,7 +12,7 @@ import time
 import pytest
 import numpy as np
 
-from cacheness.config import CacheConfig, CacheMetadataConfig, CacheStorageConfig
+from cacheness.config import CacheConfig, CacheMetadataConfig
 from cacheness.core import UnifiedCache
 
 
@@ -36,7 +36,7 @@ def normal_cache(tmp_path):
     """Normal UnifiedCache for comparison."""
     config = CacheConfig(
         cache_dir=str(tmp_path / "cache"),
-        default_ttl_seconds=1,        # 1-second TTL for expiration tests
+        default_ttl_seconds=1,  # 1-second TTL for expiration tests
         max_cache_size_mb=2000,
         enable_cache_stats=True,
     )
