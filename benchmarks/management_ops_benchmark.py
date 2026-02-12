@@ -21,11 +21,12 @@ import time
 import tempfile
 import os
 import statistics
-from typing import Dict, List, Any
+from typing import List
 from cacheness import CacheConfig, cacheness
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
+
 
 def populate_cache(cache, count: int, prefix_pattern: str = "item") -> List[str]:
     """Populate a cache with test data and return the cache keys."""
@@ -47,6 +48,7 @@ def time_operation(func, iterations: int = 1) -> float:
 
 
 # ── Individual Benchmarks ────────────────────────────────────────────────────
+
 
 def benchmark_update_data(backends: List[str], cache_sizes: List[int]):
     """Benchmark update_data() — replace blob data at an existing key."""
@@ -102,9 +104,7 @@ def benchmark_touch(backends: List[str], cache_sizes: List[int]):
                 touch_count = min(20, size)
                 times = []
                 for i in range(touch_count):
-                    t = time_operation(
-                        lambda k=keys[i]: cache.touch(cache_key=k)
-                    )
+                    t = time_operation(lambda k=keys[i]: cache.touch(cache_key=k))
                     times.append(t)
 
                 avg = statistics.mean(times)
@@ -135,9 +135,7 @@ def benchmark_touch_batch(backends: List[str], cache_sizes: List[int]):
                     data = {"index": i}
                     cache.put(data, test_id=i, project="bench", group=f"g{i % 5}")
 
-                t = time_operation(
-                    lambda: cache.touch_batch(project="bench")
-                )
+                t = time_operation(lambda: cache.touch_batch(project="bench"))
                 print(f"    {backend:15} {t:8.2f}ms  (touch all {size} entries)")
                 cache.close()
 
@@ -161,9 +159,7 @@ def benchmark_delete_where(backends: List[str], cache_sizes: List[int]):
 
                 # Delete entries with even-ish index (filter on description/data)
                 start = time.perf_counter()
-                deleted = cache.delete_where(
-                    lambda e: "0" in e.get("cache_key", "")
-                )
+                deleted = cache.delete_where(lambda e: "0" in e.get("cache_key", ""))
                 elapsed = (time.perf_counter() - start) * 1000
 
                 print(f"    {backend:15} {elapsed:8.2f}ms  (deleted {deleted}/{size})")
@@ -220,9 +216,7 @@ def benchmark_invalidate(backends: List[str], cache_sizes: List[int]):
 
                 times = []
                 for i in range(invalidate_count):
-                    t = time_operation(
-                        lambda k=keys[i]: cache.invalidate(cache_key=k)
-                    )
+                    t = time_operation(lambda k=keys[i]: cache.invalidate(cache_key=k))
                     times.append(t)
 
                 avg = statistics.mean(times)
@@ -277,7 +271,9 @@ def benchmark_get_batch(backends: List[str], cache_sizes: List[int]):
                 populate_cache(cache, size)
 
                 # Build batch of kwargs to retrieve
-                kwargs_list = [{"test_id": i, "prefix": "item"} for i in range(batch_size)]
+                kwargs_list = [
+                    {"test_id": i, "prefix": "item"} for i in range(batch_size)
+                ]
 
                 times = []
                 for _ in range(3):
@@ -286,7 +282,9 @@ def benchmark_get_batch(backends: List[str], cache_sizes: List[int]):
 
                 avg = statistics.mean(times)
                 per_item = avg / batch_size
-                print(f"    {backend:15} {avg:8.2f}ms total  ({per_item:.2f}ms/item, batch={batch_size})")
+                print(
+                    f"    {backend:15} {avg:8.2f}ms total  ({per_item:.2f}ms/item, batch={batch_size})"
+                )
                 cache.close()
 
 
@@ -309,18 +307,23 @@ def benchmark_delete_batch(backends: List[str], cache_sizes: List[int]):
                 cache = cacheness(config)
                 populate_cache(cache, size)
 
-                kwargs_list = [{"test_id": i, "prefix": "item"} for i in range(batch_size)]
+                kwargs_list = [
+                    {"test_id": i, "prefix": "item"} for i in range(batch_size)
+                ]
 
                 start = time.perf_counter()
                 deleted = cache.delete_batch(kwargs_list)
                 elapsed = (time.perf_counter() - start) * 1000
 
                 per_item = elapsed / batch_size if batch_size > 0 else 0
-                print(f"    {backend:15} {elapsed:8.2f}ms total  ({per_item:.2f}ms/item, deleted {deleted}/{batch_size})")
+                print(
+                    f"    {backend:15} {elapsed:8.2f}ms total  ({per_item:.2f}ms/item, deleted {deleted}/{batch_size})"
+                )
                 cache.close()
 
 
 # ── Summary ──────────────────────────────────────────────────────────────────
+
 
 def benchmark_operation_summary(backends: List[str]):
     """Quick summary: time all ops once on a medium cache."""
@@ -407,6 +410,7 @@ def benchmark_operation_summary(backends: List[str]):
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
+
 def main():
     print("🏆 Management Operations Benchmark")
     print("=" * 60)
@@ -438,7 +442,9 @@ def main():
         print("• clear_all: wipe all entries — scales with cache size")
         print("• get_batch/delete_batch: N sequential ops (linear scaling)")
         print("• delete_where: full scan + filter (O(n) in cache size)")
-        print("• delete_matching: query_meta fast path on SQLite with store_full_metadata")
+        print(
+            "• delete_matching: query_meta fast path on SQLite with store_full_metadata"
+        )
         print("• touch_batch: scan + filter + N touches (most expensive)")
         print()
         print("⚠️  Regressions to watch for:")
@@ -453,6 +459,7 @@ def main():
     except Exception as e:
         print(f"\n❌ Benchmark failed: {e}")
         import traceback
+
         traceback.print_exc()
 
 

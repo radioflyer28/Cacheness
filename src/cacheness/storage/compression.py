@@ -15,10 +15,10 @@ Supported compression codecs:
 
 Usage:
     from cacheness.storage.compression import write_file, read_file
-    
+
     # Write compressed data
     write_file(data, Path("cache/data.pkl"), codec="lz4", clevel=3)
-    
+
     # Read compressed data
     data = read_file(Path("cache/data.pkl"))
 """

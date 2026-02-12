@@ -24,6 +24,7 @@ from cacheness.decorators import cached, _generate_cache_key
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
+
 def time_op(func, iterations: int = 100) -> float:
     """Return average ms per call."""
     # Warmup
@@ -37,6 +38,7 @@ def time_op(func, iterations: int = 100) -> float:
 
 
 # ── Benchmarks ───────────────────────────────────────────────────────────────
+
 
 def benchmark_key_generation():
     """Benchmark _generate_cache_key overhead for various arg shapes."""
@@ -56,7 +58,12 @@ def benchmark_key_generation():
         ("2 ints", simple_func, (1, 2), {}),
         ("2 strings", simple_func, ("hello", "world"), {}),
         ("8 positional args", many_args_func, (1, 2, 3, 4, 5, 6, 7, 8), {}),
-        ("1 arg + 5 kwargs", kwargs_func, (1,), {"a": 1, "b": 2, "c": 3, "d": 4, "e": 5}),
+        (
+            "1 arg + 5 kwargs",
+            kwargs_func,
+            (1,),
+            {"a": 1, "b": 2, "c": 3, "d": 4, "e": 5},
+        ),
         ("dict arg", simple_func, ({"key": "value", "nested": {"a": 1}}, 2), {}),
         ("list arg", simple_func, (list(range(50)), 2), {}),
     ]
@@ -103,7 +110,9 @@ def benchmark_hit_vs_miss():
             avg_miss = statistics.mean(miss_times)
             avg_hit = statistics.mean(hit_times)
             ratio = avg_miss / avg_hit if avg_hit > 0 else float("inf")
-            print(f"  {backend:15}  miss={avg_miss:7.2f}ms  hit={avg_hit:7.2f}ms  ratio={ratio:.1f}x")
+            print(
+                f"  {backend:15}  miss={avg_miss:7.2f}ms  hit={avg_hit:7.2f}ms  ratio={ratio:.1f}x"
+            )
 
             cache_inst.close()
 
@@ -162,7 +171,7 @@ def benchmark_with_memory_cache():
 
                 @cached(cache_instance=cache_inst)
                 def compute(x):
-                    return {"result": x ** 2, "data": list(range(100))}
+                    return {"result": x**2, "data": list(range(100))}
 
                 # Prime
                 compute(42)
@@ -213,14 +222,19 @@ def benchmark_ttl_expiration():
         expensive(1000)
         expired_call = (time.perf_counter() - start) * 1000
 
-        print(f"  First call (miss):     {first_call:8.2f} ms  (call_count={call_count})")
+        print(
+            f"  First call (miss):     {first_call:8.2f} ms  (call_count={call_count})"
+        )
         print(f"  Second call (hit):     {cached_call:8.2f} ms")
-        print(f"  After TTL (re-cache):  {expired_call:8.2f} ms  (call_count={call_count})")
+        print(
+            f"  After TTL (re-cache):  {expired_call:8.2f} ms  (call_count={call_count})"
+        )
 
         cache_inst.close()
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
+
 
 def main():
     print("🎯 Decorator Benchmark")
@@ -257,6 +271,7 @@ def main():
     except Exception as e:
         print(f"\n❌ Benchmark failed: {e}")
         import traceback
+
         traceback.print_exc()
 
 

@@ -1,6 +1,6 @@
 [project]
 name = "cacheness"
-version = "0.3.14"
+version = "0.4.0"
 description = "High-performance disk caching library using Blosc compression, geared toward numpy arrays and dataframes and pickle-ing for everything else."
 readme = "README.md"
 authors = [
@@ -69,8 +69,10 @@ dev = [
     "pytest>=8.4.1",
     "pytest-cov>=6.2.1",
     "ruff>=0.12.8",
+    "ty>=0.0.15",
     "moto[s3]>=5.0.0",
     "hypothesis>=6.151.5",
+    "beads-mcp>=0.1.0",
 ]
 tensorflow = [
     "tensorflow>=2.0.0",
@@ -89,7 +91,7 @@ cloud = [
 ]
 
 [build-system]
-requires = ["uv_build>=0.9.0,<1.0.0"]
+requires = ["uv_build>=0.10.2,<0.11.0"]
 build-backend = "uv_build"
 
 [tool.pytest.ini_options]
@@ -155,3 +157,11 @@ lint.ignore = [
     "B008", # do not perform function calls in argument defaults
     "C901", # too complex
 ]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["F401", "F841", "E721"]   # availability checks, side-effect assigns, exact type comparisons
+"benchmarks/**" = ["F841"]              # timing measurements discard return values
+"examples/**" = ["F401", "E402"]        # availability checks, late imports in scripts
+
+[tool.ty.src]
+exclude = ["tests/", "benchmarks/", "examples/"]

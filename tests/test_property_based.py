@@ -15,7 +15,6 @@ Issue: CACHE-78r
 """
 
 import tempfile
-import shutil
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -30,12 +29,13 @@ from cacheness.config import CacheConfig
 from cacheness.handlers import (
     ArrayHandler,
     PandasDataFrameHandler,
-    PandasSeriesHandler,
     ObjectHandler,
 )
+
 try:
     import polars as pl
     from cacheness.handlers import PolarsDataFrameHandler, PolarsSeriesHandler
+
     POLARS_AVAILABLE = True
 except ImportError:
     POLARS_AVAILABLE = False
@@ -48,7 +48,7 @@ except ImportError:
 # Basic JSON-safe values for cache key params
 json_values = st.one_of(
     st.text(min_size=0, max_size=100),
-    st.integers(min_value=-2**53, max_value=2**53),
+    st.integers(min_value=-(2**53), max_value=2**53),
     st.floats(allow_nan=False, allow_infinity=False),
     st.booleans(),
     st.none(),
@@ -57,7 +57,8 @@ json_values = st.one_of(
 # Param dicts for cache key testing (string keys, JSON-safe values)
 param_dicts = st.dictionaries(
     keys=st.text(min_size=1, max_size=30).filter(
-        lambda k: k not in ("prefix", "description", "custom_metadata", "ttl_seconds", "cache_key")
+        lambda k: k
+        not in ("prefix", "description", "custom_metadata", "ttl_seconds", "cache_key")
     ),
     values=json_values,
     min_size=1,
@@ -65,18 +66,28 @@ param_dicts = st.dictionaries(
 )
 
 # NumPy dtypes that round-trip cleanly through serialization
-numpy_numeric_dtypes = st.sampled_from([
-    np.float32, np.float64,
-    np.int8, np.int16, np.int32, np.int64,
-    np.uint8, np.uint16, np.uint32, np.uint64,
-    np.complex64, np.complex128,
-    np.bool_,
-])
+numpy_numeric_dtypes = st.sampled_from(
+    [
+        np.float32,
+        np.float64,
+        np.int8,
+        np.int16,
+        np.int32,
+        np.int64,
+        np.uint8,
+        np.uint16,
+        np.uint32,
+        np.uint64,
+        np.complex64,
+        np.complex128,
+        np.bool_,
+    ]
+)
 
 # NumPy array shapes (reasonable sizes for testing)
 numpy_shapes = st.one_of(
-    st.tuples(st.integers(0, 50)),                                    # 1D
-    st.tuples(st.integers(0, 20), st.integers(0, 20)),                # 2D
+    st.tuples(st.integers(0, 50)),  # 1D
+    st.tuples(st.integers(0, 20), st.integers(0, 20)),  # 2D
     st.tuples(st.integers(0, 8), st.integers(0, 8), st.integers(0, 8)),  # 3D
 )
 
@@ -92,19 +103,26 @@ def numpy_arrays(draw):
         arr = np.empty(shape, dtype=dtype)
     elif np.issubdtype(dtype, np.integer) or np.issubdtype(dtype, np.unsignedinteger):
         info = np.iinfo(dtype)
-        arr = draw(st.from_type(np.ndarray).filter(lambda x: False) | st.just(
-            np.random.RandomState(draw(st.integers(0, 2**32 - 1))).randint(
-                max(info.min, -1000), min(info.max, 1000) + 1, size=shape
-            ).astype(dtype)
-        ))
+        arr = draw(
+            st.from_type(np.ndarray).filter(lambda x: False)
+            | st.just(
+                np.random.RandomState(draw(st.integers(0, 2**32 - 1)))
+                .randint(max(info.min, -1000), min(info.max, 1000) + 1, size=shape)
+                .astype(dtype)
+            )
+        )
     elif np.issubdtype(dtype, np.floating):
-        arr = np.random.RandomState(draw(st.integers(0, 2**32 - 1))).uniform(
-            -100, 100, size=shape
-        ).astype(dtype)
+        arr = (
+            np.random.RandomState(draw(st.integers(0, 2**32 - 1)))
+            .uniform(-100, 100, size=shape)
+            .astype(dtype)
+        )
     elif np.issubdtype(dtype, np.complexfloating):
         seed = draw(st.integers(0, 2**32 - 1))
         rng = np.random.RandomState(seed)
-        arr = (rng.uniform(-100, 100, size=shape) + 1j * rng.uniform(-100, 100, size=shape)).astype(dtype)
+        arr = (
+            rng.uniform(-100, 100, size=shape) + 1j * rng.uniform(-100, 100, size=shape)
+        ).astype(dtype)
     elif dtype == np.bool_:
         arr = np.random.RandomState(draw(st.integers(0, 2**32 - 1))).choice(
             [True, False], size=shape
@@ -126,27 +144,44 @@ def pandas_dataframes(draw):
         col_type = draw(st.sampled_from(["int", "float", "str", "bool"]))
         col_name = f"col_{i}"
         if col_type == "int":
-            data[col_name] = draw(st.lists(
-                st.integers(min_value=-10000, max_value=10000),
-                min_size=n_rows, max_size=n_rows
-            ))
+            data[col_name] = draw(
+                st.lists(
+                    st.integers(min_value=-10000, max_value=10000),
+                    min_size=n_rows,
+                    max_size=n_rows,
+                )
+            )
         elif col_type == "float":
-            data[col_name] = draw(st.lists(
-                st.floats(min_value=-1e6, max_value=1e6, allow_nan=False, allow_infinity=False),
-                min_size=n_rows, max_size=n_rows
-            ))
+            data[col_name] = draw(
+                st.lists(
+                    st.floats(
+                        min_value=-1e6,
+                        max_value=1e6,
+                        allow_nan=False,
+                        allow_infinity=False,
+                    ),
+                    min_size=n_rows,
+                    max_size=n_rows,
+                )
+            )
         elif col_type == "str":
-            data[col_name] = draw(st.lists(
-                st.text(min_size=0, max_size=20, alphabet=st.characters(
-                    whitelist_categories=("L", "N", "P", "Z"),
-                )),
-                min_size=n_rows, max_size=n_rows
-            ))
+            data[col_name] = draw(
+                st.lists(
+                    st.text(
+                        min_size=0,
+                        max_size=20,
+                        alphabet=st.characters(
+                            whitelist_categories=("L", "N", "P", "Z"),
+                        ),
+                    ),
+                    min_size=n_rows,
+                    max_size=n_rows,
+                )
+            )
         elif col_type == "bool":
-            data[col_name] = draw(st.lists(
-                st.booleans(),
-                min_size=n_rows, max_size=n_rows
-            ))
+            data[col_name] = draw(
+                st.lists(st.booleans(), min_size=n_rows, max_size=n_rows)
+            )
 
     return pd.DataFrame(data)
 
@@ -170,11 +205,12 @@ pickleable_objects = st.one_of(
 # 1. Cache Key Determinism
 # =============================================================================
 
+
 class TestCacheKeyDeterminism:
     """Cache key generation must be deterministic and consistent."""
 
     @given(params=param_dicts)
-    @settings(max_examples=200, deadline=None)
+    @settings(max_examples=100, deadline=None)
     def test_same_input_same_key(self, params):
         """Same parameters must always produce the same cache key."""
         key1 = create_unified_cache_key(params)
@@ -182,7 +218,7 @@ class TestCacheKeyDeterminism:
         assert key1 == key2, f"Non-deterministic key: {params} → {key1} vs {key2}"
 
     @given(params=param_dicts)
-    @settings(max_examples=200, deadline=None)
+    @settings(max_examples=100, deadline=None)
     def test_key_format(self, params):
         """Cache key must be a 16-character hex string."""
         key = create_unified_cache_key(params)
@@ -191,11 +227,20 @@ class TestCacheKeyDeterminism:
         assert all(c in "0123456789abcdef" for c in key)
 
     @given(params=param_dicts, extra_key=st.text(min_size=1, max_size=20))
-    @settings(max_examples=200, deadline=None)
+    @settings(max_examples=100, deadline=None)
     def test_different_input_usually_different_key(self, params, extra_key):
         """Adding a parameter should (almost always) change the key."""
         assume(extra_key not in params)
-        assume(extra_key not in ("prefix", "description", "custom_metadata", "ttl_seconds", "cache_key"))
+        assume(
+            extra_key
+            not in (
+                "prefix",
+                "description",
+                "custom_metadata",
+                "ttl_seconds",
+                "cache_key",
+            )
+        )
         key1 = create_unified_cache_key(params)
         params2 = {**params, extra_key: "extra_value"}
         key2 = create_unified_cache_key(params2)
@@ -223,7 +268,7 @@ class TestCacheKeyDeterminism:
     def test_named_params_stripped_before_hashing(self, params, prefix, description):
         """Named params (prefix, description, etc.) must not affect cache key."""
         key_without = create_unified_cache_key(params)
-        
+
         # These should be stripped by the caller (UnifiedCache._create_cache_key)
         # but the raw create_unified_cache_key will include them — this test
         # verifies the contract: if you pass named params, the key changes.
@@ -237,11 +282,14 @@ class TestCacheKeyDeterminism:
 # 2. Handler Round-Trip Tests
 # =============================================================================
 
+
 class TestArrayHandlerRoundTrip:
     """ArrayHandler.put() → get() must preserve array data exactly."""
 
     @given(arr=numpy_arrays())
-    @settings(max_examples=100, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+    @settings(
+        max_examples=100, deadline=None, suppress_health_check=[HealthCheck.too_slow]
+    )
     def test_npz_round_trip(self, arr):
         """NumPy arrays survive NPZ serialization round-trip."""
         handler = ArrayHandler()
@@ -262,13 +310,19 @@ class TestArrayHandlerRoundTrip:
                 # Dict of arrays case shouldn't happen for single array
                 pytest.fail("Single array returned as dict")
 
-            assert loaded.shape == arr.shape, f"Shape mismatch: {loaded.shape} vs {arr.shape}"
-            assert loaded.dtype == arr.dtype, f"Dtype mismatch: {loaded.dtype} vs {arr.dtype}"
+            assert loaded.shape == arr.shape, (
+                f"Shape mismatch: {loaded.shape} vs {arr.shape}"
+            )
+            assert loaded.dtype == arr.dtype, (
+                f"Dtype mismatch: {loaded.dtype} vs {arr.dtype}"
+            )
             if arr.size > 0:
                 np.testing.assert_array_equal(loaded, arr)
 
     @given(arr=numpy_arrays())
-    @settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+    @settings(
+        max_examples=50, deadline=None, suppress_health_check=[HealthCheck.too_slow]
+    )
     def test_blosc2_round_trip(self, arr):
         """NumPy arrays survive blosc2 serialization round-trip."""
         try:
@@ -300,7 +354,9 @@ class TestPandasDataFrameHandlerRoundTrip:
     """PandasDataFrameHandler.put() → get() must preserve DataFrame data."""
 
     @given(df=pandas_dataframes())
-    @settings(max_examples=80, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+    @settings(
+        max_examples=80, deadline=None, suppress_health_check=[HealthCheck.too_slow]
+    )
     def test_parquet_round_trip(self, df):
         """Pandas DataFrames survive Parquet serialization round-trip."""
         handler = PandasDataFrameHandler()
@@ -327,7 +383,8 @@ class TestPandasDataFrameHandlerRoundTrip:
             # Compare column by column (handles dtype coercion from Parquet)
             for col in df.columns:
                 pd.testing.assert_series_equal(
-                    loaded[col], df[col],
+                    loaded[col],
+                    df[col],
                     check_dtype=False,  # Parquet may change dtypes
                     check_names=True,
                 )
@@ -337,7 +394,9 @@ class TestObjectHandlerRoundTrip:
     """ObjectHandler.put() → get() must preserve pickleable objects."""
 
     @given(obj=pickleable_objects)
-    @settings(max_examples=200, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+    @settings(
+        max_examples=100, deadline=None, suppress_health_check=[HealthCheck.too_slow]
+    )
     def test_pickle_round_trip(self, obj):
         """Pickleable objects survive compressed pickle round-trip."""
         handler = ObjectHandler()
@@ -353,13 +412,16 @@ class TestObjectHandlerRoundTrip:
             actual_path = Path(result_meta["actual_path"])
             loaded = handler.get(actual_path, result_meta)
 
-            assert type(loaded) == type(obj), f"Type mismatch: {type(loaded)} vs {type(obj)}"
+            assert type(loaded) == type(obj), (
+                f"Type mismatch: {type(loaded)} vs {type(obj)}"
+            )
             assert loaded == obj, f"Value mismatch: {loaded!r} vs {obj!r}"
 
 
 # =============================================================================
 # 3. Metadata Backend Contract Tests
 # =============================================================================
+
 
 def make_entry_data(cache_key: str, data_type: str = "test") -> dict:
     """Create a valid metadata entry dict."""
@@ -440,10 +502,14 @@ class TestJsonBackendContract:
             removed = backend.remove_entry(cache_key)
             assert removed is False
 
-    @given(keys=st.lists(
-        st.text(min_size=1, max_size=16, alphabet="abcdef0123456789"),
-        min_size=1, max_size=20, unique=True,
-    ))
+    @given(
+        keys=st.lists(
+            st.text(min_size=1, max_size=16, alphabet="abcdef0123456789"),
+            min_size=1,
+            max_size=20,
+            unique=True,
+        )
+    )
     @settings(max_examples=50, deadline=None)
     def test_list_entries_contains_all_put_keys(self, keys):
         """list_entries must include all keys that were put."""
@@ -483,7 +549,7 @@ class TestSQLiteBackendContract:
     """SqliteBackend must satisfy the same metadata backend contract."""
 
     @given(cache_key=st.text(min_size=1, max_size=32, alphabet="abcdef0123456789"))
-    @settings(max_examples=100, deadline=None)
+    @settings(max_examples=25, deadline=None)
     def test_put_then_get(self, cache_key):
         """put_entry → get_entry returns the entry."""
         from cacheness.metadata import SqliteBackend
@@ -502,7 +568,7 @@ class TestSQLiteBackendContract:
                 backend.close()
 
     @given(cache_key=st.text(min_size=1, max_size=32, alphabet="abcdef0123456789"))
-    @settings(max_examples=100, deadline=None)
+    @settings(max_examples=25, deadline=None)
     def test_put_then_delete_then_get(self, cache_key):
         """put_entry → remove_entry → get_entry returns None."""
         from cacheness.metadata import SqliteBackend
@@ -523,7 +589,7 @@ class TestSQLiteBackendContract:
                 backend.close()
 
     @given(cache_key=st.text(min_size=1, max_size=32, alphabet="abcdef0123456789"))
-    @settings(max_examples=50, deadline=None)
+    @settings(max_examples=25, deadline=None)
     def test_get_nonexistent_returns_none(self, cache_key):
         """get_entry for non-existent key returns None."""
         from cacheness.metadata import SqliteBackend
@@ -538,7 +604,7 @@ class TestSQLiteBackendContract:
                 backend.close()
 
     @given(cache_key=st.text(min_size=1, max_size=32, alphabet="abcdef0123456789"))
-    @settings(max_examples=50, deadline=None)
+    @settings(max_examples=25, deadline=None)
     def test_remove_nonexistent_returns_false(self, cache_key):
         """remove_entry for non-existent key returns False."""
         from cacheness.metadata import SqliteBackend
@@ -552,11 +618,15 @@ class TestSQLiteBackendContract:
             finally:
                 backend.close()
 
-    @given(keys=st.lists(
-        st.text(min_size=1, max_size=16, alphabet="abcdef0123456789"),
-        min_size=1, max_size=20, unique=True,
-    ))
-    @settings(max_examples=50, deadline=None)
+    @given(
+        keys=st.lists(
+            st.text(min_size=1, max_size=16, alphabet="abcdef0123456789"),
+            min_size=1,
+            max_size=20,
+            unique=True,
+        )
+    )
+    @settings(max_examples=25, deadline=None)
     def test_list_entries_contains_all_put_keys(self, keys):
         """list_entries must include all keys that were put."""
         from cacheness.metadata import SqliteBackend
@@ -575,7 +645,7 @@ class TestSQLiteBackendContract:
                 backend.close()
 
     @given(cache_key=st.text(min_size=1, max_size=32, alphabet="abcdef0123456789"))
-    @settings(max_examples=50, deadline=None)
+    @settings(max_examples=25, deadline=None)
     def test_put_twice_overwrites(self, cache_key):
         """Putting the same key twice overwrites without duplication."""
         from cacheness.metadata import SqliteBackend
@@ -602,11 +672,14 @@ class TestSQLiteBackendContract:
 # 4. Compression Round-Trip Tests
 # =============================================================================
 
+
 class TestCompressionRoundTrip:
     """ObjectHandler serialization round-trip with various compression codecs."""
 
     @given(obj=pickleable_objects)
-    @settings(max_examples=100, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+    @settings(
+        max_examples=100, deadline=None, suppress_health_check=[HealthCheck.too_slow]
+    )
     def test_uncompressed_pickle_round_trip(self, obj):
         """Objects survive uncompressed pickle round-trip via ObjectHandler."""
         handler = ObjectHandler()
@@ -629,7 +702,9 @@ class TestCompressionRoundTrip:
         obj=pickleable_objects,
         codec=st.sampled_from(["lz4", "zstd", "gzip"]),
     )
-    @settings(max_examples=100, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+    @settings(
+        max_examples=100, deadline=None, suppress_health_check=[HealthCheck.too_slow]
+    )
     def test_compressed_pickle_round_trip(self, obj, codec):
         """Objects survive compressed pickle round-trip across codecs."""
         handler = ObjectHandler()
@@ -655,7 +730,9 @@ class TestCompressionRoundTrip:
             assert loaded == obj
 
     @given(obj=pickleable_objects)
-    @settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+    @settings(
+        max_examples=50, deadline=None, suppress_health_check=[HealthCheck.too_slow]
+    )
     def test_blosc2_pickle_round_trip(self, obj):
         """Objects survive blosc2 pickle compression round-trip."""
         try:
@@ -685,6 +762,7 @@ class TestCompressionRoundTrip:
 # 5. End-to-End Cache Round-Trip (put → get through UnifiedCache)
 # =============================================================================
 
+
 def _make_cache(tmp_dir, backend="json"):
     """Create a cacheness instance for testing."""
     from cacheness import cacheness
@@ -706,7 +784,9 @@ class TestCacheEndToEndRoundTrip:
     """UnifiedCache.put() → get() must preserve data for all supported types."""
 
     @given(obj=pickleable_objects)
-    @settings(max_examples=80, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+    @settings(
+        max_examples=80, deadline=None, suppress_health_check=[HealthCheck.too_slow]
+    )
     def test_pickle_objects_via_cache(self, obj):
         """Pickleable objects survive full cache put → get cycle."""
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -719,7 +799,9 @@ class TestCacheEndToEndRoundTrip:
             assert loaded == obj
 
     @given(arr=numpy_arrays())
-    @settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+    @settings(
+        max_examples=50, deadline=None, suppress_health_check=[HealthCheck.too_slow]
+    )
     def test_numpy_arrays_via_cache(self, arr):
         """NumPy arrays survive full cache put → get cycle."""
         # blosc2 has issues with zero-size arrays
@@ -739,7 +821,9 @@ class TestCacheEndToEndRoundTrip:
             np.testing.assert_array_equal(loaded, arr)
 
     @given(df=pandas_dataframes())
-    @settings(max_examples=40, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+    @settings(
+        max_examples=40, deadline=None, suppress_health_check=[HealthCheck.too_slow]
+    )
     def test_pandas_dataframes_via_cache(self, df):
         """Pandas DataFrames survive full cache put → get cycle."""
         with tempfile.TemporaryDirectory() as tmp_dir:

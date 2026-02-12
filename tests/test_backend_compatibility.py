@@ -17,6 +17,7 @@ from cacheness.config import (
 # Backend Compatibility Validation Tests
 # =============================================================================
 
+
 class TestBackendCompatibility:
     """Test backend compatibility validation in CacheConfig."""
 

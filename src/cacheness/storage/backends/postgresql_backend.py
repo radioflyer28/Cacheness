@@ -14,15 +14,15 @@ Features:
 Usage:
     from cacheness.storage.backends.postgresql_backend import PostgresBackend
     from cacheness.storage.backends import register_metadata_backend
-    
+
     # Register the backend
     register_metadata_backend("postgresql", PostgresBackend)
-    
+
     # Create instance directly
     backend = PostgresBackend(
         connection_url="postgresql://user:pass@localhost:5432/cacheness"
     )
-    
+
     # Or use via registry
     backend = get_metadata_backend(
         "postgresql",
@@ -58,43 +58,44 @@ try:
         desc,
         func,
         text,
-        inspect,
     )
     from sqlalchemy.orm import sessionmaker, declarative_base
     from sqlalchemy.pool import QueuePool
-    from sqlalchemy.exc import OperationalError, IntegrityError
-    
+
     SQLALCHEMY_AVAILABLE = True
 except ImportError:
     SQLALCHEMY_AVAILABLE = False
 
 # Check psycopg2/psycopg availability
 try:
-    import psycopg2
+    import psycopg2  # noqa: F401 — availability check
+
     PSYCOPG_AVAILABLE = True
-    PSYCOPG_VERSION = "psycopg2"
 except ImportError:
     try:
-        import psycopg
+        import psycopg  # noqa: F401 — availability check
+
         PSYCOPG_AVAILABLE = True
-        PSYCOPG_VERSION = "psycopg3"
     except ImportError:
         PSYCOPG_AVAILABLE = False
-        PSYCOPG_VERSION = None
 
-from .base import MetadataBackend
+from .base import MetadataBackend  # noqa: E402
 
 # JSON serialization utilities
 try:
     import orjson
+
     def json_dumps(obj):
-        return orjson.dumps(obj).decode('utf-8')
+        return orjson.dumps(obj).decode("utf-8")
+
     def json_loads(s):
         return orjson.loads(s)
 except ImportError:
     import json
+
     def json_dumps(obj):
         return json.dumps(obj, default=str)
+
     def json_loads(s):
         return json.loads(s)
 
@@ -102,17 +103,17 @@ except ImportError:
 if SQLALCHEMY_AVAILABLE:
     # Create a separate base for PostgreSQL to avoid conflicts with SQLite models
     PostgresBase = declarative_base()
-    
+
     class PgCacheEntry(PostgresBase):
         """PostgreSQL cache entry model."""
-        
+
         __tablename__ = "cache_entries"
-        
+
         cache_key = Column(String(16), primary_key=True)
         description = Column(String(500), default="", nullable=False)
         data_type = Column(String(20), nullable=False)
         prefix = Column(String(100), default="", nullable=False)
-        
+
         created_at = Column(
             DateTime(timezone=True),
             default=lambda: datetime.now(timezone.utc),
@@ -123,24 +124,24 @@ if SQLALCHEMY_AVAILABLE:
             default=lambda: datetime.now(timezone.utc),
             nullable=False,
         )
-        
+
         file_size = Column(Integer, default=0, nullable=False)
         file_hash = Column(String(16), nullable=True)
         entry_signature = Column(String(64), nullable=True)
-        
+
         # S3 ETag for S3-backed blob storage (separate from file_hash)
         s3_etag = Column(String(100), nullable=True)  # S3 ETag (MD5 or multipart hash)
-        
+
         # Backend technical metadata
         object_type = Column(String(100), nullable=True)
         storage_format = Column(String(20), nullable=True)
         serializer = Column(String(20), nullable=True)
         compression_codec = Column(String(20), nullable=True)
         actual_path = Column(String(500), nullable=True)
-        
+
         # Cache key parameters (optional, only populated when store_full_metadata=True)
         cache_key_params = Column(Text, nullable=True)
-        
+
         __table_args__ = (
             Index("idx_pg_list_entries", desc("created_at")),
             Index("idx_pg_cleanup", "created_at"),
@@ -148,12 +149,12 @@ if SQLALCHEMY_AVAILABLE:
             Index("idx_pg_data_type", "data_type"),
             Index("idx_pg_prefix", "prefix"),
         )
-    
+
     class PgCacheStats(PostgresBase):
         """PostgreSQL cache statistics model."""
-        
+
         __tablename__ = "cache_stats"
-        
+
         id = Column(Integer, primary_key=True, default=1)
         cache_hits = Column(Integer, default=0, nullable=False)
         cache_misses = Column(Integer, default=0, nullable=False)
@@ -165,24 +166,24 @@ if SQLALCHEMY_AVAILABLE:
 class PostgresBackend(MetadataBackend):
     """
     PostgreSQL metadata backend for distributed caching.
-    
+
     This backend is designed for production environments requiring:
     - High concurrency (multiple workers, distributed systems)
     - Advanced querying capabilities
     - ACID transactions for metadata consistency
     - Centralized cache index across multiple machines
-    
+
     Args:
         connection_url: PostgreSQL connection URL
             Format: postgresql://user:password@host:port/database
-            
+
         pool_size: Connection pool size (default: 10)
         max_overflow: Max connections beyond pool_size (default: 20)
         pool_pre_ping: Test connections before use (default: True)
         pool_recycle: Recycle connections after N seconds (default: 3600)
         echo: Echo SQL statements for debugging (default: False)
         table_prefix: Optional prefix for table names (default: "")
-        
+
     Example:
         >>> backend = PostgresBackend(
         ...     connection_url="postgresql://cacheuser:secret@db.example.com:5432/cacheness",
@@ -191,7 +192,7 @@ class PostgresBackend(MetadataBackend):
         ... )
         >>> backend.put_entry("abc123", {"data_type": "pickle", "file_size": 1024})
     """
-    
+
     def __init__(
         self,
         connection_url: str,
@@ -207,16 +208,16 @@ class PostgresBackend(MetadataBackend):
                 "SQLAlchemy is required for PostgreSQL backend. "
                 "Install with: pip install sqlalchemy"
             )
-        
+
         if not PSYCOPG_AVAILABLE:
             raise ImportError(
                 "PostgreSQL driver is required. "
                 "Install with: pip install psycopg2-binary  OR  pip install psycopg[binary]"
             )
-        
+
         self.connection_url = connection_url
         self.table_prefix = table_prefix
-        
+
         # Create engine with connection pooling
         self.engine = create_engine(
             connection_url,
@@ -227,26 +228,24 @@ class PostgresBackend(MetadataBackend):
             pool_recycle=pool_recycle,
             echo=echo,
         )
-        
+
         self.SessionLocal = sessionmaker(
-            autocommit=False,
-            autoflush=False,
-            bind=self.engine
+            autocommit=False, autoflush=False, bind=self.engine
         )
-        
+
         self._lock = threading.Lock()
-        
+
         # Create tables
         PostgresBase.metadata.create_all(self.engine)
-        
+
         # Run migrations for schema evolution
         self._run_migrations()
-        
+
         # Initialize stats
         self._init_stats()
-        
+
         logger.info(f"✅ PostgreSQL metadata backend initialized: {self._safe_url()}")
-    
+
     def _safe_url(self) -> str:
         """Return connection URL with password masked."""
         # Simple masking - just show host/db
@@ -254,40 +253,53 @@ class PostgresBackend(MetadataBackend):
             parts = self.connection_url.split("@")
             return f"postgresql://***@{parts[-1]}"
         return self.connection_url
-    
+
     def _run_migrations(self):
         """Run schema migrations to add missing columns to existing databases."""
         with self.SessionLocal() as session:
             try:
                 # Check if cache_entries table exists
                 from sqlalchemy import inspect
+
                 inspector = inspect(self.engine)
                 if "cache_entries" not in inspector.get_table_names():
                     return  # Table doesn't exist yet, will be created by create_all
-                
-                existing_columns = {col["name"] for col in inspector.get_columns("cache_entries")}
-                
+
+                existing_columns = {
+                    col["name"] for col in inspector.get_columns("cache_entries")
+                }
+
                 # Migration 1: Add s3_etag column if missing
                 if "s3_etag" not in existing_columns:
                     logger.info("Migrating: Adding s3_etag column to cache_entries")
                     from sqlalchemy import text
-                    session.execute(text(
-                        "ALTER TABLE cache_entries ADD COLUMN s3_etag VARCHAR(100)"
-                    ))
+
+                    session.execute(
+                        text(
+                            "ALTER TABLE cache_entries ADD COLUMN s3_etag VARCHAR(100)"
+                        )
+                    )
                     session.commit()
-                
+
                 # Migration 2: Add cache_key_params column if missing
                 if "cache_key_params" not in existing_columns:
-                    logger.info("Migrating: Adding cache_key_params column to cache_entries")
+                    logger.info(
+                        "Migrating: Adding cache_key_params column to cache_entries"
+                    )
                     from sqlalchemy import text
-                    session.execute(text(
-                        "ALTER TABLE cache_entries ADD COLUMN cache_key_params TEXT"
-                    ))
+
+                    session.execute(
+                        text(
+                            "ALTER TABLE cache_entries ADD COLUMN cache_key_params TEXT"
+                        )
+                    )
                     session.commit()
             except Exception as e:
-                logger.warning(f"Migration failed (may be expected if columns exist): {e}")
+                logger.warning(
+                    f"Migration failed (may be expected if columns exist): {e}"
+                )
                 session.rollback()
-    
+
     def _init_stats(self):
         """Initialize cache statistics if not exists."""
         with self.SessionLocal() as session:
@@ -295,7 +307,7 @@ class PostgresBackend(MetadataBackend):
                 stats = session.execute(
                     select(PgCacheStats).where(PgCacheStats.id == 1)
                 ).scalar_one_or_none()
-                
+
                 if not stats:
                     stats = PgCacheStats(id=1)
                     session.add(stats)
@@ -303,20 +315,18 @@ class PostgresBackend(MetadataBackend):
             except Exception as e:
                 logger.warning(f"Failed to initialize stats: {e}")
                 session.rollback()
-    
+
     def load_metadata(self) -> Dict[str, Any]:
         """Load complete metadata (mainly for compatibility)."""
         with self.SessionLocal() as session:
-            entries = session.execute(
-                select(PgCacheEntry)
-            ).scalars().all()
-            
+            entries = session.execute(select(PgCacheEntry)).scalars().all()
+
             result = {"entries": {}, "stats": self.get_stats()}
             for entry in entries:
                 result["entries"][entry.cache_key] = self._entry_to_dict(entry)
-            
+
             return result
-    
+
     def save_metadata(self, metadata: Dict[str, Any]):
         """Save complete metadata (mainly for compatibility)."""
         # PostgreSQL backend stores incrementally, this is mainly for bulk import
@@ -330,19 +340,19 @@ class PostgresBackend(MetadataBackend):
                     session.rollback()
                     logger.error(f"Failed to save metadata: {e}")
                     raise
-    
+
     def get_entry(self, cache_key: str) -> Optional[Dict[str, Any]]:
         """Get cache entry metadata."""
         with self.SessionLocal() as session:
             entry = session.execute(
                 select(PgCacheEntry).where(PgCacheEntry.cache_key == cache_key)
             ).scalar_one_or_none()
-            
+
             if entry is None:
                 return None
-            
+
             return self._entry_to_dict(entry)
-    
+
     def put_entry(self, cache_key: str, entry_data: Dict[str, Any]):
         """Store cache entry metadata."""
         with self._lock:
@@ -354,15 +364,15 @@ class PostgresBackend(MetadataBackend):
                     session.rollback()
                     logger.error(f"Failed to put entry {cache_key}: {e}")
                     raise
-    
+
     def _upsert_entry(self, session, cache_key: str, entry_data: Dict[str, Any]):
         """Insert or update an entry."""
         # Extract nested metadata if present
         metadata = entry_data.get("metadata", {}).copy()
-        
+
         # Extract optional cache_key_params for storage if needed (disabled by default)
         # No separate extraction needed - it's already in metadata
-        
+
         # Extract fields from nested metadata
         object_type = metadata.pop("object_type", None)
         storage_format = metadata.pop("storage_format", None)
@@ -373,7 +383,7 @@ class PostgresBackend(MetadataBackend):
         entry_signature = metadata.pop("entry_signature", None)
         s3_etag = metadata.pop("s3_etag", None)  # S3 ETag if using S3 backend
         cache_key_params = metadata.pop("cache_key_params", None)
-        
+
         # Handle timestamps - always use UTC
         created_at = entry_data.get("created_at")
         if isinstance(created_at, str):
@@ -392,7 +402,7 @@ class PostgresBackend(MetadataBackend):
                 created_at = created_at.replace(tzinfo=timezone.utc)
             else:
                 created_at = created_at.astimezone(timezone.utc)
-        
+
         accessed_at = entry_data.get("accessed_at")
         if isinstance(accessed_at, str):
             accessed_at = datetime.fromisoformat(accessed_at)
@@ -409,7 +419,7 @@ class PostgresBackend(MetadataBackend):
                 accessed_at = accessed_at.replace(tzinfo=timezone.utc)
             else:
                 accessed_at = accessed_at.astimezone(timezone.utc)
-        
+
         # Serialize cache_key_params if present
         serialized_params = None
         if cache_key_params is not None:
@@ -417,12 +427,12 @@ class PostgresBackend(MetadataBackend):
                 serialized_params = json_dumps(cache_key_params)
             except Exception:
                 pass
-        
+
         # Check if entry exists
         existing = session.execute(
             select(PgCacheEntry).where(PgCacheEntry.cache_key == cache_key)
         ).scalar_one_or_none()
-        
+
         if existing:
             # Update existing entry
             session.execute(
@@ -467,7 +477,7 @@ class PostgresBackend(MetadataBackend):
                 cache_key_params=serialized_params,
             )
             session.add(entry)
-    
+
     def _entry_to_dict(self, entry: "PgCacheEntry") -> Dict[str, Any]:
         """Convert entry model to dictionary."""
         result = {
@@ -475,11 +485,15 @@ class PostgresBackend(MetadataBackend):
             "description": entry.description or "",
             "data_type": entry.data_type,
             "prefix": entry.prefix or "",
-            "created_at": entry.created_at.astimezone(timezone.utc).isoformat() if entry.created_at else None,
-            "accessed_at": entry.accessed_at.astimezone(timezone.utc).isoformat() if entry.accessed_at else None,
+            "created_at": entry.created_at.astimezone(timezone.utc).isoformat()
+            if entry.created_at
+            else None,
+            "accessed_at": entry.accessed_at.astimezone(timezone.utc).isoformat()
+            if entry.accessed_at
+            else None,
             "file_size": entry.file_size or 0,
         }
-        
+
         # Build nested metadata
         metadata = {}
         if entry.object_type:
@@ -504,46 +518,53 @@ class PostgresBackend(MetadataBackend):
             metadata["file_hash"] = entry.file_hash
         if entry.entry_signature:
             metadata["entry_signature"] = entry.entry_signature
-        
+
         if metadata:
             result["metadata"] = metadata
-        
+
         # Parse cache_key_params if present
         if entry.cache_key_params:
             try:
                 if "metadata" not in result:
                     result["metadata"] = {}
-                result["metadata"]["cache_key_params"] = json_loads(entry.cache_key_params)
+                result["metadata"]["cache_key_params"] = json_loads(
+                    entry.cache_key_params
+                )
             except Exception:
                 pass
-        
+
         return result
-    
-    def remove_entry(self, cache_key: str):
-        """Remove cache entry metadata."""
+
+    def remove_entry(self, cache_key: str) -> bool:
+        """Remove cache entry metadata.
+
+        Returns:
+            bool: True if the entry existed and was removed, False if not found.
+        """
         with self._lock:
             with self.SessionLocal() as session:
                 try:
-                    session.execute(
+                    result = session.execute(
                         delete(PgCacheEntry).where(PgCacheEntry.cache_key == cache_key)
                     )
                     session.commit()
+                    return result.rowcount > 0
                 except Exception as e:
                     session.rollback()
                     logger.error(f"Failed to remove entry {cache_key}: {e}")
                     raise
-    
+
     def update_entry_metadata(self, cache_key: str, updates: Dict[str, Any]) -> bool:
         """
         Update metadata fields for an existing cache entry.
-        
+
         Only updates metadata — blob I/O is handled by UnifiedCache.update_data().
-        
+
         Args:
             cache_key: The unique identifier for the cache entry to update
             updates: Dict of metadata fields to update (file_size, file_hash,
                     actual_path, data_type, storage_format, serializer, etc.)
-            
+
         Returns:
             bool: True if entry was updated, False if entry doesn't exist
         """
@@ -554,14 +575,14 @@ class PostgresBackend(MetadataBackend):
                     entry = session.execute(
                         select(PgCacheEntry).where(PgCacheEntry.cache_key == cache_key)
                     ).scalar_one_or_none()
-                    
+
                     if not entry:
                         return False
-                    
+
                     # Update derived metadata fields
                     now = datetime.now(timezone.utc)
                     entry.created_at = now  # Reset timestamp
-                    
+
                     if "file_size" in updates:
                         entry.file_size = updates["file_size"]
                     if "file_hash" in updates:
@@ -582,25 +603,27 @@ class PostgresBackend(MetadataBackend):
                         entry.object_type = updates["object_type"]
                     if "s3_etag" in updates:
                         entry.s3_etag = updates["s3_etag"]
-                    
+
                     session.commit()
                     return True
                 except Exception as e:
                     session.rollback()
                     logger.error(f"Failed to update entry {cache_key}: {e}")
                     raise
-    
+
     def iter_entry_summaries(self) -> List[Dict[str, Any]]:
         """Return lightweight flat entry dicts — raw SQL, no ORM hydration."""
         with self.SessionLocal() as session:
-            rows = session.execute(text(
-                "SELECT cache_key, data_type, description, prefix, "
-                "       file_size, created_at, accessed_at, "
-                "       object_type, storage_format, serializer, "
-                "       compression_codec, actual_path, "
-                "       file_hash, entry_signature "
-                "FROM cache_entries"
-            )).fetchall()
+            rows = session.execute(
+                text(
+                    "SELECT cache_key, data_type, description, prefix, "
+                    "       file_size, created_at, accessed_at, "
+                    "       object_type, storage_format, serializer, "
+                    "       compression_codec, actual_path, "
+                    "       file_hash, entry_signature "
+                    "FROM cache_entries"
+                )
+            ).fetchall()
             result = []
             for row in rows:
                 flat = {
@@ -612,32 +635,43 @@ class PostgresBackend(MetadataBackend):
                     "created_at": row[5],
                     "accessed_at": row[6],
                 }
-                if row[7] is not None: flat["object_type"] = row[7]
-                if row[8] is not None: flat["storage_format"] = row[8]
-                if row[9] is not None: flat["serializer"] = row[9]
-                if row[10] is not None: flat["compression_codec"] = row[10]
-                if row[11] is not None: flat["actual_path"] = row[11]
-                if row[12] is not None: flat["file_hash"] = row[12]
-                if row[13] is not None: flat["entry_signature"] = row[13]
+                if row[7] is not None:
+                    flat["object_type"] = row[7]
+                if row[8] is not None:
+                    flat["storage_format"] = row[8]
+                if row[9] is not None:
+                    flat["serializer"] = row[9]
+                if row[10] is not None:
+                    flat["compression_codec"] = row[10]
+                if row[11] is not None:
+                    flat["actual_path"] = row[11]
+                if row[12] is not None:
+                    flat["file_hash"] = row[12]
+                if row[13] is not None:
+                    flat["entry_signature"] = row[13]
                 result.append(flat)
             return result
 
     def list_entries(self) -> List[Dict[str, Any]]:
         """List all cache entries."""
         with self.SessionLocal() as session:
-            entries = session.execute(
-                select(PgCacheEntry).order_by(desc(PgCacheEntry.created_at))
-            ).scalars().all()
-            
+            entries = (
+                session.execute(
+                    select(PgCacheEntry).order_by(desc(PgCacheEntry.created_at))
+                )
+                .scalars()
+                .all()
+            )
+
             return [self._entry_to_dict(entry) for entry in entries]
-    
+
     def get_stats(self) -> Dict[str, Any]:
         """Get cache statistics."""
         with self.SessionLocal() as session:
             stats = session.execute(
                 select(PgCacheStats).where(PgCacheStats.id == 1)
             ).scalar_one_or_none()
-            
+
             if stats is None:
                 return {
                     "hits": 0,
@@ -645,18 +679,17 @@ class PostgresBackend(MetadataBackend):
                     "total_entries": 0,
                     "total_size_bytes": 0,
                 }
-            
+
             return {
                 "hits": stats.cache_hits,
                 "misses": stats.cache_misses,
                 "total_entries": stats.total_entries,
                 "total_size_bytes": stats.total_size_bytes,
                 "last_cleanup_at": (
-                    stats.last_cleanup_at.isoformat() 
-                    if stats.last_cleanup_at else None
+                    stats.last_cleanup_at.isoformat() if stats.last_cleanup_at else None
                 ),
             }
-    
+
     def update_access_time(self, cache_key: str):
         """Update last access time for cache entry."""
         with self.SessionLocal() as session:
@@ -670,7 +703,7 @@ class PostgresBackend(MetadataBackend):
             except Exception as e:
                 session.rollback()
                 logger.warning(f"Failed to update access time for {cache_key}: {e}")
-    
+
     def increment_hits(self):
         """Increment cache hits counter."""
         with self.SessionLocal() as session:
@@ -684,7 +717,7 @@ class PostgresBackend(MetadataBackend):
             except Exception as e:
                 session.rollback()
                 logger.warning(f"Failed to increment hits: {e}")
-    
+
     def increment_misses(self):
         """Increment cache misses counter."""
         with self.SessionLocal() as session:
@@ -698,57 +731,142 @@ class PostgresBackend(MetadataBackend):
             except Exception as e:
                 session.rollback()
                 logger.warning(f"Failed to increment misses: {e}")
-    
+
     def cleanup_expired(self, ttl_seconds: float) -> int:
         """Remove expired entries and return count removed."""
         if ttl_seconds <= 0:
             return 0
-        
-        cutoff = datetime.now(timezone.utc) - __import__("datetime").timedelta(seconds=ttl_seconds)
-        
+
+        cutoff = datetime.now(timezone.utc) - __import__("datetime").timedelta(
+            seconds=ttl_seconds
+        )
+
         with self._lock:
             with self.SessionLocal() as session:
                 try:
                     # Count entries to be removed
-                    count = session.execute(
-                        select(func.count()).select_from(PgCacheEntry)
-                        .where(PgCacheEntry.created_at < cutoff)
-                    ).scalar() or 0
-                    
+                    count = (
+                        session.execute(
+                            select(func.count())
+                            .select_from(PgCacheEntry)
+                            .where(PgCacheEntry.created_at < cutoff)
+                        ).scalar()
+                        or 0
+                    )
+
                     if count > 0:
                         session.execute(
-                            delete(PgCacheEntry)
-                            .where(PgCacheEntry.created_at < cutoff)
+                            delete(PgCacheEntry).where(PgCacheEntry.created_at < cutoff)
                         )
-                        
+
                         # Update last cleanup timestamp
                         session.execute(
                             update(PgCacheStats)
                             .where(PgCacheStats.id == 1)
                             .values(last_cleanup_at=datetime.now(timezone.utc))
                         )
-                        
+
                         session.commit()
-                        logger.info(f"Cleaned up {count} expired entries (TTL: {ttl_seconds}s)")
-                    
+                        logger.info(
+                            f"Cleaned up {count} expired entries (TTL: {ttl_seconds}s)"
+                        )
+
                     return count
-                    
+
                 except Exception as e:
                     session.rollback()
                     logger.error(f"Cleanup failed: {e}")
                     return 0
-    
+
+    def cleanup_by_size(self, target_size_mb: float) -> Dict[str, Any]:
+        """Remove least-recently-accessed entries until cache size drops to or below target."""
+        with self._lock:
+            with self.SessionLocal() as session:
+                try:
+                    # Get current total size
+                    result = session.execute(
+                        select(func.sum(PgCacheEntry.file_size)).select_from(
+                            PgCacheEntry
+                        )
+                    )
+                    total_size_bytes = result.scalar() or 0
+                    total_size_mb = total_size_bytes / (1024 * 1024)
+
+                    if total_size_mb <= target_size_mb:
+                        return {
+                            "count": 0,
+                            "removed_entries": [],
+                        }  # Already at or below target
+
+                    target_size_bytes = target_size_mb * 1024 * 1024
+                    bytes_to_remove = total_size_bytes - target_size_bytes
+
+                    # Get entries sorted by accessed_at (oldest first) with actual_path
+                    entries_to_delete = session.execute(
+                        select(
+                            PgCacheEntry.cache_key,
+                            PgCacheEntry.file_size,
+                            PgCacheEntry.actual_path,
+                        ).order_by(PgCacheEntry.accessed_at.asc())
+                    ).all()
+
+                    # Calculate which entries to delete to reach target
+                    removed_entries = []
+                    accumulated_size = 0
+
+                    for cache_key, file_size, actual_path in entries_to_delete:
+                        if accumulated_size >= bytes_to_remove:
+                            break
+                        removed_entries.append(
+                            {"cache_key": cache_key, "actual_path": actual_path}
+                        )
+                        accumulated_size += file_size
+
+                    if removed_entries:
+                        # Delete the selected entries
+                        removed_keys = [e["cache_key"] for e in removed_entries]
+                        session.execute(
+                            delete(PgCacheEntry).where(
+                                PgCacheEntry.cache_key.in_(removed_keys)
+                            )
+                        )
+
+                        # Update last cleanup timestamp
+                        session.execute(
+                            update(PgCacheStats)
+                            .where(PgCacheStats.id == 1)
+                            .values(last_cleanup_at=datetime.now(timezone.utc))
+                        )
+
+                        session.commit()
+                        logger.info(
+                            f"LRU cleanup: removed {len(removed_entries)} entries to reach {target_size_mb:.2f}MB"
+                        )
+
+                    return {
+                        "count": len(removed_entries),
+                        "removed_entries": removed_entries,
+                    }
+
+                except Exception as e:
+                    session.rollback()
+                    logger.error(f"LRU cleanup failed: {e}")
+                    return {"count": 0, "removed_entries": []}
+
     def clear_all(self) -> int:
         """Remove all cache entries and return count removed."""
         with self._lock:
             with self.SessionLocal() as session:
                 try:
-                    count = session.execute(
-                        select(func.count()).select_from(PgCacheEntry)
-                    ).scalar() or 0
-                    
+                    count = (
+                        session.execute(
+                            select(func.count()).select_from(PgCacheEntry)
+                        ).scalar()
+                        or 0
+                    )
+
                     session.execute(delete(PgCacheEntry))
-                    
+
                     # Reset stats
                     session.execute(
                         update(PgCacheStats)
@@ -760,16 +878,16 @@ class PostgresBackend(MetadataBackend):
                             total_size_bytes=0,
                         )
                     )
-                    
+
                     session.commit()
                     logger.info(f"Cleared all {count} cache entries")
                     return count
-                    
+
                 except Exception as e:
                     session.rollback()
                     logger.error(f"Clear all failed: {e}")
                     return 0
-    
+
     def close(self):
         """Close database connections."""
         try:
@@ -777,18 +895,18 @@ class PostgresBackend(MetadataBackend):
             logger.debug("PostgreSQL engine disposed")
         except Exception as e:
             logger.warning(f"Error closing PostgreSQL connection: {e}")
-    
+
     def __del__(self):
         """Cleanup on garbage collection."""
         try:
             self.close()
         except Exception:
             pass
-    
+
     def __enter__(self):
         """Context manager entry."""
         return self
-    
+
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Context manager exit."""
         self.close()
@@ -801,7 +919,7 @@ def _auto_register():
     if SQLALCHEMY_AVAILABLE and PSYCOPG_AVAILABLE:
         try:
             from . import register_metadata_backend, _metadata_backend_registry
-            
+
             if "postgresql" not in _metadata_backend_registry:
                 register_metadata_backend("postgresql", PostgresBackend)
                 logger.debug("Auto-registered PostgreSQL metadata backend")

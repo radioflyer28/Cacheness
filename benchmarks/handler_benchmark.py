@@ -31,6 +31,7 @@ from cacheness import CacheConfig, cacheness
 # Optional imports — graceful skip
 try:
     import pandas as pd
+
     PANDAS_AVAILABLE = True
 except ImportError:
     pd = None
@@ -38,6 +39,7 @@ except ImportError:
 
 try:
     import polars as pl
+
     POLARS_AVAILABLE = True
 except ImportError:
     pl = None
@@ -45,6 +47,7 @@ except ImportError:
 
 try:
     import tensorflow as tf
+
     TF_AVAILABLE = True
 except ImportError:
     tf = None
@@ -52,6 +55,7 @@ except ImportError:
 
 
 # ── Data Generators ──────────────────────────────────────────────────────────
+
 
 def make_test_data() -> List[Tuple[str, str, Any, Any]]:
     """
@@ -62,66 +66,79 @@ def make_test_data() -> List[Tuple[str, str, Any, Any]]:
     cases = []
 
     # ObjectHandler — plain dict
-    cases.append((
-        "dict (ObjectHandler)",
-        "ObjectHandler",
-        {"a": 1, "b": "hello", "c": [1, 2, 3]},
-        {f"key_{i}": list(range(50)) for i in range(50)},
-    ))
+    cases.append(
+        (
+            "dict (ObjectHandler)",
+            "ObjectHandler",
+            {"a": 1, "b": "hello", "c": [1, 2, 3]},
+            {f"key_{i}": list(range(50)) for i in range(50)},
+        )
+    )
 
     # ArrayHandler — NumPy array
-    cases.append((
-        "numpy array (ArrayHandler)",
-        "ArrayHandler",
-        np.random.rand(100),
-        np.random.rand(1000, 50),
-    ))
+    cases.append(
+        (
+            "numpy array (ArrayHandler)",
+            "ArrayHandler",
+            np.random.rand(100),
+            np.random.rand(1000, 50),
+        )
+    )
 
     # PandasDataFrameHandler
     if PANDAS_AVAILABLE:
         small_pdf = pd.DataFrame({"x": range(100), "y": np.random.rand(100)})
-        medium_pdf = pd.DataFrame({
-            f"col_{i}": np.random.rand(5000) for i in range(20)
-        })
-        cases.append(("pandas DataFrame", "PandasDataFrameHandler", small_pdf, medium_pdf))
+        medium_pdf = pd.DataFrame({f"col_{i}": np.random.rand(5000) for i in range(20)})
+        cases.append(
+            ("pandas DataFrame", "PandasDataFrameHandler", small_pdf, medium_pdf)
+        )
 
         # PandasSeriesHandler
-        cases.append((
-            "pandas Series",
-            "PandasSeriesHandler",
-            pd.Series(np.random.rand(100), name="values"),
-            pd.Series(np.random.rand(50_000), name="big_values"),
-        ))
+        cases.append(
+            (
+                "pandas Series",
+                "PandasSeriesHandler",
+                pd.Series(np.random.rand(100), name="values"),
+                pd.Series(np.random.rand(50_000), name="big_values"),
+            )
+        )
 
     # PolarsDataFrameHandler
     if POLARS_AVAILABLE:
         small_pldf = pl.DataFrame({"x": range(100), "y": np.random.rand(100).tolist()})
-        medium_pldf = pl.DataFrame({
-            f"col_{i}": np.random.rand(5000).tolist() for i in range(20)
-        })
-        cases.append(("polars DataFrame", "PolarsDataFrameHandler", small_pldf, medium_pldf))
+        medium_pldf = pl.DataFrame(
+            {f"col_{i}": np.random.rand(5000).tolist() for i in range(20)}
+        )
+        cases.append(
+            ("polars DataFrame", "PolarsDataFrameHandler", small_pldf, medium_pldf)
+        )
 
         # PolarsSeriesHandler
-        cases.append((
-            "polars Series",
-            "PolarSeriesHandler",
-            pl.Series("values", np.random.rand(100).tolist()),
-            pl.Series("big_values", np.random.rand(50_000).tolist()),
-        ))
+        cases.append(
+            (
+                "polars Series",
+                "PolarSeriesHandler",
+                pl.Series("values", np.random.rand(100).tolist()),
+                pl.Series("big_values", np.random.rand(50_000).tolist()),
+            )
+        )
 
     # TensorFlowTensorHandler
     if TF_AVAILABLE:
-        cases.append((
-            "TF tensor",
-            "TensorFlowTensorHandler",
-            tf.constant(np.random.rand(100).astype(np.float32)),
-            tf.constant(np.random.rand(1000, 50).astype(np.float32)),
-        ))
+        cases.append(
+            (
+                "TF tensor",
+                "TensorFlowTensorHandler",
+                tf.constant(np.random.rand(100).astype(np.float32)),
+                tf.constant(np.random.rand(1000, 50).astype(np.float32)),
+            )
+        )
 
     return cases
 
 
 # ── Benchmarks ───────────────────────────────────────────────────────────────
+
 
 def benchmark_put_get_roundtrip():
     """Benchmark put + get round-trip per handler for small & medium data."""
@@ -169,7 +186,9 @@ def benchmark_put_get_roundtrip():
                 avg_put = statistics.mean(put_times)
                 avg_get = statistics.mean(get_times)
 
-                print(f"  {label:30} {size_label:8} {avg_put:8.2f} {avg_get:8.2f} {file_size_kb:8.1f}")
+                print(
+                    f"  {label:30} {size_label:8} {avg_put:8.2f} {avg_get:8.2f} {file_size_kb:8.1f}"
+                )
 
                 cache.close()
 
@@ -249,7 +268,9 @@ def benchmark_handler_scaling():
         print("\n  Polars DataFrame (10 cols, float64):")
         print(f"    {'Rows':>10} {'Put ms':>8} {'Get ms':>8} {'KB':>8}")
         for n in sizes:
-            data = pl.DataFrame({f"c{i}": np.random.rand(n).tolist() for i in range(10)})
+            data = pl.DataFrame(
+                {f"c{i}": np.random.rand(n).tolist() for i in range(10)}
+            )
             with tempfile.TemporaryDirectory() as tmp:
                 config = CacheConfig(
                     cache_dir=os.path.join(tmp, "cache"),
@@ -316,6 +337,7 @@ def benchmark_handler_summary():
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
+
 def main():
     print("🔧 Handler Benchmark")
     print("=" * 60)
@@ -358,6 +380,7 @@ def main():
     except Exception as e:
         print(f"\n❌ Benchmark failed: {e}")
         import traceback
+
         traceback.print_exc()
 
 

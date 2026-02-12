@@ -6,7 +6,13 @@ Complete reference for all cacheness classes, methods, and configuration options
 
 ### `BlobStore`
 
-Low-level blob storage API without caching semantics (TTL, eviction). Useful for ML model versioning, artifact storage, and data pipeline checkpoints.
+Low-level blob storage API without caching semantics (TTL, eviction). Useful for
+ML model versioning, artifact storage, and data pipeline checkpoints.
+
+`BlobStore` also serves as the internal storage engine for `UnifiedCache` — all
+file I/O, handler dispatch, integrity verification, and signing are delegated to
+it via a shared composition model (same metadata backend, handlers, lock, and
+signer).
 
 ```python
 from cacheness.storage import BlobStore
@@ -78,8 +84,13 @@ model_keys = store.list(prefix="model_")
 v1_models = store.list(metadata_filter={"version": "1.0"})
 ```
 
+##### `verify_integrity(key: str) -> Dict`
+Verify blob integrity by checking file hash against stored metadata.
+
+**Returns:** Dict with `valid` (bool), `expected_hash`, `actual_hash` keys.
+
 ##### `clear() -> int`
-Remove all blobs.
+Remove all blobs and their data files.
 
 ##### `close()`
 Close the blob store and release resources.

@@ -16,15 +16,15 @@ This layer is designed to be reusable beyond caching use cases, such as:
 Usage:
     # Direct storage layer access
     from cacheness.storage import BlobStore
-    
+
     store = BlobStore(backend="sqlite", compression="lz4")
     blob_id = store.put(data, metadata={"type": "model", "version": "1.0"})
     data = store.get(blob_id)
-    
+
     # Access backends directly
     from cacheness.storage.backends import SqliteBackend, JsonBackend, MemoryBackend
-    
-    # Access handlers directly  
+
+    # Access handlers directly
     from cacheness.storage.handlers import HandlerRegistry, ArrayHandler, ObjectHandler
 """
 
@@ -60,7 +60,8 @@ from .blob_store import BlobStore
 
 # Conditionally import SqliteBackend
 try:
-    from .backends import SqliteBackend
+    from .backends import SqliteBackend  # noqa: F401
+
     _HAS_SQLITE = True
 except ImportError:
     _HAS_SQLITE = False
@@ -70,7 +71,7 @@ __all__ = [
     "BlobStore",
     # Backends
     "MetadataBackend",
-    "JsonBackend", 
+    "JsonBackend",
     "create_metadata_backend",
     # Handlers
     "CacheHandler",

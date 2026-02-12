@@ -32,6 +32,7 @@ logging.getLogger("cacheness.security").setLevel(logging.ERROR)
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
+
 def time_op(func, iterations: int = 100) -> float:
     """Return average ms per call."""
     for _ in range(min(5, iterations)):
@@ -43,6 +44,7 @@ def time_op(func, iterations: int = 100) -> float:
 
 
 # ── Benchmarks ───────────────────────────────────────────────────────────────
+
 
 def benchmark_raw_sign_verify():
     """Micro-benchmark of sign_entry and verify_entry alone."""
@@ -74,9 +76,7 @@ def benchmark_raw_sign_verify():
     sig = signer.sign_entry(entry_data)
 
     # Verify (valid)
-    verify_t = time_op(
-        lambda: signer.verify_entry(entry_data, sig), iterations=5000
-    )
+    verify_t = time_op(lambda: signer.verify_entry(entry_data, sig), iterations=5000)
 
     # Verify (invalid — should fail)
     bad_sig = "0" * 64
@@ -96,9 +96,17 @@ def benchmark_field_count_impact():
     print("-" * 60)
 
     all_fields = [
-        "cache_key", "data_type", "prefix", "file_size", "file_hash",
-        "object_type", "storage_format", "serializer", "compression_codec",
-        "actual_path", "created_at",
+        "cache_key",
+        "data_type",
+        "prefix",
+        "file_size",
+        "file_hash",
+        "object_type",
+        "storage_format",
+        "serializer",
+        "compression_codec",
+        "actual_path",
+        "created_at",
     ]
 
     entry_data = {f: f"value_{i}" for i, f in enumerate(all_fields)}
@@ -168,7 +176,9 @@ def benchmark_signing_enabled_vs_disabled():
                 avg_put = statistics.mean(put_times)
                 avg_get = statistics.mean(get_times)
                 label = f"signing={'ON' if signing else 'OFF'}"
-                print(f"    {label:20} {avg_put:8.2f} {avg_get:8.2f} {avg_put + avg_get:8.2f}")
+                print(
+                    f"    {label:20} {avg_put:8.2f} {avg_get:8.2f} {avg_put + avg_get:8.2f}"
+                )
 
                 cache.close()
 
@@ -219,6 +229,7 @@ def benchmark_signing_throughput():
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
+
 def main():
     print("🔐 Security Benchmark")
     print("=" * 60)
@@ -252,6 +263,7 @@ def main():
     except Exception as e:
         print(f"\n❌ Benchmark failed: {e}")
         import traceback
+
         traceback.print_exc()
 
 

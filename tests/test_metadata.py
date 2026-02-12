@@ -233,26 +233,26 @@ class TestMetadataIntegration:
     def test_timezone_aware_timestamps_json(self, cache_json):
         """Test that JSON metadata backend stores UTC timestamps"""
         from datetime import datetime, timezone
-        
+
         # Store data
         test_data = {"timezone": "json_test"}
         cache_json.put(test_data, description="Timezone test", timezone_test="json")
-        
+
         # Get the entry metadata
         entries = cache_json.list_entries()
         assert len(entries) > 0
-        
+
         entry = entries[0]
         assert "created" in entry  # Note: the field is "created", not "created_at"
-        
+
         # Verify the timestamp is timezone-aware and in ISO format
         created_str = entry["created"]
         assert isinstance(created_str, str)
-        
+
         # Should be able to parse as a timezone-aware datetime
         created = datetime.fromisoformat(created_str)
         assert created.tzinfo is not None  # Should have timezone info
-        
+
         # Should be close to current UTC time (within a minute)
         current_utc = datetime.now(timezone.utc)
         time_diff = abs((current_utc - created).total_seconds())
@@ -261,26 +261,26 @@ class TestMetadataIntegration:
     def test_timezone_aware_timestamps_sqlite(self, cache_sqlite):
         """Test that SQLite metadata backend stores UTC timestamps"""
         from datetime import datetime, timezone
-        
+
         # Store data
         test_data = {"timezone": "sqlite_test"}
         cache_sqlite.put(test_data, description="Timezone test", timezone_test="sqlite")
-        
+
         # Get the entry metadata
         entries = cache_sqlite.list_entries()
         assert len(entries) > 0
-        
+
         entry = entries[0]
         assert "created" in entry  # Note: the field is "created", not "created_at"
-        
+
         # Verify the timestamp is timezone-aware and in ISO format
         created_str = entry["created"]
         assert isinstance(created_str, str)
-        
+
         # Should be able to parse as a timezone-aware datetime
         created = datetime.fromisoformat(created_str)
         # Note: SQLite might not have timezone info depending on configuration
-        
+
         # Should be close to current UTC time (within a minute)
         current_utc = datetime.now(timezone.utc)
         # For timezone-naive datetimes, assume UTC
@@ -292,45 +292,45 @@ class TestMetadataIntegration:
     def test_consistent_timezone_across_backends(self, temp_dir):
         """Test that all metadata backends store consistent UTC timestamps"""
         from datetime import datetime, timezone
-        
+
         # Store data with both backends at roughly the same time
         json_config = CacheConfig(cache_dir=str(temp_dir), metadata_backend="json")
         json_cache = cacheness(json_config)
-        
+
         sqlite_config = CacheConfig(cache_dir=str(temp_dir), metadata_backend="sqlite")
         sqlite_cache = cacheness(sqlite_config)
-        
+
         # Store the same data in both
         test_data = {"consistent": "timezone"}
         start_time = datetime.now(timezone.utc)
-        
+
         json_cache.put(test_data, description="JSON timezone", backend="json")
         sqlite_cache.put(test_data, description="SQLite timezone", backend="sqlite")
-        
+
         end_time = datetime.now(timezone.utc)
-        
+
         # Get entries from both backends
         json_entries = json_cache.list_entries()
         sqlite_entries = sqlite_cache.list_entries()
-        
+
         assert len(json_entries) > 0
         assert len(sqlite_entries) > 0
-        
+
         # Parse timestamps from both backends (using "created" field)
         json_timestamp = datetime.fromisoformat(json_entries[0]["created"])
         sqlite_timestamp = datetime.fromisoformat(sqlite_entries[0]["created"])
-        
+
         # JSON should be timezone-aware
         assert json_timestamp.tzinfo is not None
-        
+
         # SQLite might be timezone-naive, handle both cases
         if sqlite_timestamp.tzinfo is None:
             sqlite_timestamp = sqlite_timestamp.replace(tzinfo=timezone.utc)
-        
+
         # Both should be within our test time window
         assert start_time <= json_timestamp <= end_time
         assert start_time <= sqlite_timestamp <= end_time
-        
+
         # Timestamps should be close to each other (within 5 seconds)
         time_diff = abs((json_timestamp - sqlite_timestamp).total_seconds())
         assert time_diff < 5  # Should be very close since stored almost simultaneously

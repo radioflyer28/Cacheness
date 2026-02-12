@@ -17,7 +17,6 @@ optimization opportunities.
 import time
 import tempfile
 import os
-import json
 from cacheness import CacheConfig, cacheness
 
 
@@ -87,9 +86,17 @@ def analyze_sqlite_schema():
         print(f"📊 Stored Entries ({len(rows)}):")
         for row in rows:
             (
-                cache_key, data_type, prefix, file_size,
-                object_type, storage_format, serializer, compression_codec,
-                actual_path, cache_key_params, metadata_dict,
+                cache_key,
+                data_type,
+                prefix,
+                file_size,
+                object_type,
+                storage_format,
+                serializer,
+                compression_codec,
+                actual_path,
+                cache_key_params,
+                metadata_dict,
             ) = row
 
             print(f"\n   Cache Key: {cache_key}")
@@ -104,13 +111,13 @@ def analyze_sqlite_schema():
                 params_len = len(cache_key_params)
                 print(f"   cache_key_params: {params_len} bytes")
             else:
-                print(f"   cache_key_params: NULL (not stored)")
+                print("   cache_key_params: NULL (not stored)")
 
             if metadata_dict:
                 meta_len = len(metadata_dict)
                 print(f"   metadata_dict: {meta_len} bytes")
             else:
-                print(f"   metadata_dict: NULL")
+                print("   metadata_dict: NULL")
 
         # Calculate total row sizes
         cursor.execute("""
@@ -126,7 +133,7 @@ def analyze_sqlite_schema():
         stats = cursor.fetchone()
         total, avg_key, avg_size, avg_params, avg_meta, avg_path = stats
 
-        print(f"\n\n📏 Storage Statistics:")
+        print("\n\n📏 Storage Statistics:")
         print(f"   Total entries: {total}")
         print(f"   Avg cache_key length: {avg_key:.0f} chars")
         print(f"   Avg file_size: {avg_size:.0f} bytes")
@@ -333,6 +340,7 @@ def main():
     except Exception as e:
         print(f"\n❌ Analysis failed: {e}")
         import traceback
+
         traceback.print_exc()
 
 

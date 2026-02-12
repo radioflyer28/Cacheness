@@ -27,6 +27,7 @@ from cacheness.compress_pickle import benchmark_codecs, list_available_codecs
 
 try:
     import pandas as pd
+
     PANDAS_AVAILABLE = True
 except ImportError:
     pd = None
@@ -34,6 +35,7 @@ except ImportError:
 
 
 # ── Data Generators ──────────────────────────────────────────────────────────
+
 
 def make_test_data() -> List[Tuple[str, Any]]:
     """Generate labeled test datasets of varying compressibility."""
@@ -46,15 +48,18 @@ def make_test_data() -> List[Tuple[str, Any]]:
     ]
 
     if PANDAS_AVAILABLE:
-        cases.append((
-            "pandas DataFrame",
-            pd.DataFrame({f"c{i}": np.random.rand(2000) for i in range(10)})
-        ))
+        cases.append(
+            (
+                "pandas DataFrame",
+                pd.DataFrame({f"c{i}": np.random.rand(2000) for i in range(10)}),
+            )
+        )
 
     return cases
 
 
 # ── Benchmarks ───────────────────────────────────────────────────────────────
+
 
 def benchmark_codec_microbench():
     """Use compress_pickle.benchmark_codecs() for raw codec comparison."""
@@ -118,7 +123,9 @@ def benchmark_end_to_end_codecs():
 
     for label, data in data_cases:
         print(f"\n  {label}:")
-        print(f"    {'Codec':8} {'Put ms':>8} {'Get ms':>8} {'File KB':>8} {'Ratio':>8}")
+        print(
+            f"    {'Codec':8} {'Put ms':>8} {'Get ms':>8} {'File KB':>8} {'Ratio':>8}"
+        )
         print("    " + "-" * 44)
 
         for codec in codecs:
@@ -160,6 +167,7 @@ def benchmark_end_to_end_codecs():
 
                 # Crude compression ratio estimate
                 import pickle
+
                 try:
                     raw_size = len(pickle.dumps(data, -1))
                     ratio = raw_size / (file_kb * 1024) if file_kb > 0 else 0
@@ -220,7 +228,9 @@ def benchmark_codec_comparison_table():
     print("  " + "-" * 40)
     for codec, r in results.items():
         total = r["put"] + r["get"]
-        print(f"  {codec:8} {r['put']:8.2f} {r['get']:8.2f} {r['kb']:8.1f} {total:8.2f}")
+        print(
+            f"  {codec:8} {r['put']:8.2f} {r['get']:8.2f} {r['kb']:8.1f} {total:8.2f}"
+        )
 
     # Identify winners
     fastest_put = min(results, key=lambda c: results[c]["put"])
@@ -233,6 +243,7 @@ def benchmark_codec_comparison_table():
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
+
 
 def main():
     print("🗜️  Compression Benchmark")
@@ -266,6 +277,7 @@ def main():
     except Exception as e:
         print(f"\n❌ Benchmark failed: {e}")
         import traceback
+
         traceback.print_exc()
 
 

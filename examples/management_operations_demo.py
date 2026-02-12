@@ -23,7 +23,6 @@ Usage:
 import numpy as np
 import tempfile
 import shutil
-from datetime import datetime, timezone, timedelta
 
 from cacheness import cacheness, CacheConfig
 
@@ -54,6 +53,7 @@ def main():
 
 # ── 1. get_metadata() ───────────────────────────────────────────────────
 
+
 def demo_get_metadata(cache):
     print("\n" + "-" * 50)
     print("1️⃣  get_metadata() — inspect without loading data")
@@ -75,6 +75,7 @@ def demo_get_metadata(cache):
 
 
 # ── 2. update_data() ────────────────────────────────────────────────────
+
 
 def demo_update_data(cache):
     print("\n" + "-" * 50)
@@ -104,6 +105,7 @@ def demo_update_data(cache):
 
 # ── 3. touch() ──────────────────────────────────────────────────────────
 
+
 def demo_touch(cache):
     print("\n" + "-" * 50)
     print("3️⃣  touch() — extend TTL without reloading data")
@@ -115,7 +117,9 @@ def demo_touch(cache):
     ts_before = meta_before["created_at"]
 
     # Simulate a short delay (timestamps are ISO-formatted)
-    import time; time.sleep(0.05)
+    import time
+
+    time.sleep(0.05)
 
     ok = cache.touch(job="long_train")
     print(f"  touch succeeded: {ok}")
@@ -128,6 +132,7 @@ def demo_touch(cache):
 
 
 # ── 4. Bulk delete ──────────────────────────────────────────────────────
+
 
 def demo_bulk_delete(cache):
     print("\n" + "-" * 50)
@@ -146,9 +151,7 @@ def demo_bulk_delete(cache):
     print(f"  entries before delete: {entries_before}")
 
     # delete_where: remove entries whose data_type match a filter
-    deleted = cache.delete_where(
-        lambda e: e.get("data_type") == "array"
-    )
+    deleted = cache.delete_where(lambda e: e.get("data_type") == "array")
     print(f"  delete_where(numpy_array): removed {deleted}")
 
     entries_after = len(cache.list_entries())
@@ -156,6 +159,7 @@ def demo_bulk_delete(cache):
 
 
 # ── 5. Batch operations ────────────────────────────────────────────────
+
 
 def demo_batch_operations(cache):
     print("\n" + "-" * 50)
@@ -167,11 +171,13 @@ def demo_batch_operations(cache):
         cache.put({"price": 100 + hash(sym) % 50}, symbol=sym, source="demo")
 
     # get_batch — fetch multiple at once
-    results = cache.get_batch([
-        {"symbol": "AAPL", "source": "demo"},
-        {"symbol": "GOOG", "source": "demo"},
-        {"symbol": "NOPE", "source": "demo"},  # doesn't exist
-    ])
+    results = cache.get_batch(
+        [
+            {"symbol": "AAPL", "source": "demo"},
+            {"symbol": "GOOG", "source": "demo"},
+            {"symbol": "NOPE", "source": "demo"},  # doesn't exist
+        ]
+    )
     found = sum(1 for v in results.values() if v is not None)
     print(f"  get_batch: {found}/{len(results)} entries found")
 
@@ -181,10 +187,12 @@ def demo_batch_operations(cache):
     print(f"  touch_batch(data_type=object): refreshed {touched} entries")
 
     # delete_batch — remove specific entries
-    deleted = cache.delete_batch([
-        {"symbol": "AAPL", "source": "demo"},
-        {"symbol": "MSFT", "source": "demo"},
-    ])
+    deleted = cache.delete_batch(
+        [
+            {"symbol": "AAPL", "source": "demo"},
+            {"symbol": "MSFT", "source": "demo"},
+        ]
+    )
     print(f"  delete_batch: removed {deleted} entries")
 
     remaining = len(cache.list_entries())

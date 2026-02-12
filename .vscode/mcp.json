@@ -1,0 +1,36 @@
+{
+  "servers": {
+    // The "servers" section defines the MCP servers you want to use.
+    // Configuration for the Fetch MCP (Model Context Protocol) server
+    // This entry defines how to run the uv-managed MCP server that provides
+    // HTTP fetch/request capabilities to the AI assistant.
+    // The "fetch" server allows making HTTP requests to retrieve web content
+    // and data from URLs, enabling the assistant to access external resources.
+    // Command: Uses 'uv' package manager to launch the mcp-server-fetch package
+    // "fetch": {
+    //   "command": "uv",
+    //   "args": ["mcp-server-fetch"]
+    // },
+    // uv is for managing Python virtual environments, managing dependencies, running Python commands, building packages, running tools, etc. It's a more modern alternative to venv/virtualenv/pipenv/poetry.
+    "beads": {
+      "command": "uv",
+      "args": ["run", "beads-mcp"]
+    },
+    // mcp-language-server - Semantic code navigation (definition, references, rename, diagnostics)
+    // Requires: go install github.com/isaacphi/mcp-language-server@latest
+    // Requires: npm install -g pyright (for Python LSP)
+    "language-server": {
+      "command": "mcp-language-server",
+      "args": [
+        "-workspace", "${workspaceFolder}",
+        "-lsp", "pyright-langserver",
+        "--", "--stdio"
+      ]
+    },
+    // for external memory storage of the AI assistant
+    // "memory": {
+    //   "command": "npx",
+    //   "args": ["-y", "@modelcontextprotocol/server-memory"]
+    // }
+  }
+}

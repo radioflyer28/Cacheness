@@ -6,7 +6,6 @@ not the underlying orjson/json library itself.
 """
 
 import json
-from pathlib import Path
 import pytest
 
 from cacheness import json_utils
@@ -24,7 +23,7 @@ class TestJSONUtils:
             "boolean": True,
             "null": None,
             "array": [1, 2, 3],
-            "nested": {"inner": "value"}
+            "nested": {"inner": "value"},
         }
 
         json_str = json_utils.dumps(original_data)
@@ -49,6 +48,7 @@ class TestJSONUtils:
 
     def test_dumps_with_custom_default(self):
         """Test serialization with custom default function."""
+
         class CustomObject:
             def __init__(self, value):
                 self.value = value
@@ -66,6 +66,7 @@ class TestJSONUtils:
 
     def test_dumps_non_serializable_raises(self):
         """Test that non-serializable objects raise without custom default."""
+
         class CustomObject:
             pass
 
@@ -105,8 +106,7 @@ class TestJSONUtils:
     def test_large_object_roundtrip(self):
         """Test serialization of large objects."""
         large_data = {
-            f"key_{i}": {"value": f"value_{i}", "number": i}
-            for i in range(1000)
+            f"key_{i}": {"value": f"value_{i}", "number": i} for i in range(1000)
         }
 
         json_str = json_utils.dumps(large_data)

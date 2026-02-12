@@ -37,7 +37,7 @@ def create_mock_model(model_type: str, complexity: int):
         "config": {
             "learning_rate": 0.001,
             "epochs": complexity * 10,
-        }
+        },
     }
 
 
@@ -45,11 +45,11 @@ def main():
     print("=" * 60)
     print("ML Model Versioning with BlobStore")
     print("=" * 60)
-    
+
     # Create a temporary directory for this example
     with tempfile.TemporaryDirectory() as tmp_dir:
         models_dir = Path(tmp_dir) / "models"
-        
+
         # Create a BlobStore for model versioning
         # NOTE: Using JSON backend because it preserves all custom metadata fields.
         # The SQLite backend stores only core fields (key, hash, size, etc.) by default.
@@ -60,11 +60,11 @@ def main():
             compression="lz4",
             content_addressable=False,  # Use explicit keys for versioning
         )
-        
+
         try:
             print("\n📦 Storing models with version metadata...")
             print("-" * 40)
-            
+
             # Store several model versions
             models_info = [
                 ("fraud_detector", "v1.0", "xgboost", 0.85, "alice"),
@@ -74,12 +74,12 @@ def main():
                 ("churn_predictor", "v1.0", "random_forest", 0.78, "carol"),
                 ("churn_predictor", "v1.1", "xgboost", 0.82, "carol"),
             ]
-            
+
             stored_keys = []
             for name, version, model_type, accuracy, author in models_info:
                 # Create mock model
                 model = create_mock_model(model_type, int(accuracy * 100))
-                
+
                 # Store with rich metadata
                 key = f"{name}_{version}"
                 blob_key = model_store.put(
@@ -94,11 +94,13 @@ def main():
                         "training_date": datetime.now().isoformat(),
                         "framework": "sklearn",
                         "python_version": f"{sys.version_info.major}.{sys.version_info.minor}",
-                    }
+                    },
                 )
                 stored_keys.append(blob_key)
-                print(f"  ✅ Stored {name} {version} ({model_type}, accuracy={accuracy}) -> {blob_key}")
-            
+                print(
+                    f"  ✅ Stored {name} {version} ({model_type}, accuracy={accuracy}) -> {blob_key}"
+                )
+
             # List all models
             print("\n📋 All stored models:")
             print("-" * 40)
@@ -110,7 +112,7 @@ def main():
                 version = nested.get("version", "?")
                 accuracy = nested.get("accuracy", 0)
                 print(f"  - {key}: {name} {version} (accuracy: {accuracy:.2f})")
-            
+
             # Filter models by prefix
             print("\n🔍 Fraud detector models only:")
             print("-" * 40)
@@ -118,9 +120,11 @@ def main():
             for key in fraud_keys:
                 meta = model_store.get_metadata(key)
                 nested = meta.get("metadata", {})
-                print(f"  - {key}: version={nested.get('version')}, "
-                      f"accuracy={nested.get('accuracy', 0):.2f}")
-            
+                print(
+                    f"  - {key}: version={nested.get('version')}, "
+                    f"accuracy={nested.get('accuracy', 0):.2f}"
+                )
+
             # Get a specific model
             print("\n📥 Retrieving best fraud detector model...")
             print("-" * 40)
@@ -130,26 +134,29 @@ def main():
                 print(f"  Model type: {model['model_type']}")
                 print(f"  Weights shape: {model['weights'].shape}")
                 print(f"  Config: {model['config']}")
-            
+
             # Update metadata (e.g., mark as deployed)
             print("\n🚀 Marking model as deployed...")
             print("-" * 40)
-            model_store.update_metadata(best_key, {
-                "deployed": True,
-                "deployment_date": datetime.now().isoformat(),
-                "deployment_env": "production"
-            })
-            
+            model_store.update_metadata(
+                best_key,
+                {
+                    "deployed": True,
+                    "deployment_date": datetime.now().isoformat(),
+                    "deployment_env": "production",
+                },
+            )
+
             updated_meta = model_store.get_metadata(best_key)
             if updated_meta:
                 nested = updated_meta.get("metadata", {})
                 print(f"  Deployed: {nested.get('deployed')}")
                 print(f"  Deployment date: {nested.get('deployment_date')}")
-            
+
             print("\n" + "=" * 60)
             print("✨ ML Model Versioning Example Complete!")
             print("=" * 60)
-        
+
         finally:
             # Cleanup - close the store to release SQLite connection
             model_store.close()

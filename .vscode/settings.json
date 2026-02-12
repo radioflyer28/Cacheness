@@ -1,0 +1,19 @@
+{
+    "python-envs.defaultEnvManager": "ms-python.python:system",
+    "python-envs.pythonProjects": [],
+    "makefile.configureOnOpen": false,
+    "chat.mcp.serverSampling": {
+        "Cacheness/.vscode/mcp.json: fetch": {
+            "allowedModels": [
+                "copilot/claude-haiku-4.5",
+                "copilot/claude-sonnet-4.5",
+                "copilot/claude-opus-4.6"
+            ]
+        }
+    },
+    "chat.tools.terminal.autoApprove": {
+        "uv run pytest": true,
+        "uv run ruff": true,
+        "uv run ty": true
+    }
+}

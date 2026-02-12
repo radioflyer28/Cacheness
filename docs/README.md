@@ -5,9 +5,11 @@ Welcome to the Cacheness documentation! This high-performance caching library pr
 ## Getting Started
 
 - **[README](../README.md)** - Quick start guide and basic usage
+- **[Architecture Guide](ARCHITECTURE.md)** - Separation of concerns, data flow, and design principles
 - **[Configuration Guide](CONFIGURATION.md)** - Comprehensive configuration options
 - **[Backend Selection Guide](BACKEND_SELECTION.md)** - Choose JSON vs SQLite backend
 - **[Security Guide](SECURITY.md)** - Cache entry signing and security features
+- **[Troubleshooting Guide](TROUBLESHOOTING.md)** - Common issues and solutions
 
 ## Platform Compatibility
 
@@ -26,8 +28,9 @@ Welcome to the Cacheness documentation! This high-performance caching library pr
 - **[TensorFlow Tensor Guide](TENSORFLOW_TENSOR_GUIDE.md)** - Native TensorFlow tensor caching
 - **[TensorFlow Handler Status](TENSORFLOW_HANDLER_STATUS.md)** - Handler implementation details
 
-## Storage Layer
+## Architecture & Storage Layer
 
+- **[Architecture Guide](ARCHITECTURE.md)** - Component responsibilities, data flow, and anti-patterns
 - **[BlobStore Guide](BLOB_STORE.md)** - Low-level storage API for non-caching use cases
 
 `BlobStore` provides direct key-value storage without caching semantics (no TTL, no eviction). Useful for ML model versioning, artifact storage, and data pipeline checkpoints.

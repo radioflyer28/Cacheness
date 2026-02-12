@@ -1,0 +1,42 @@
+#!/bin/sh
+# Pre-commit hook for Cacheness
+# Auto-fixes code (Phase 1) and logs errors (Phase 2)
+# NOTE: No `set -e` — Phase 1 must never abort the commit.
+
+echo "Running pre-commit quality checks..."
+
+# Phase 1: Auto-fix (never fails — || true guards)
+echo "Phase 1: Auto-fixing code..."
+uv run ruff format . 2>&1 || true
+uv run ruff check --fix . 2>&1 || true
+
+# Phase 2: Validation (logs errors but doesn't block)
+echo "Phase 2: Validating code..."
+LOG_FILE=".quality-errors.log"
+
+# Clear previous error log
+> "$LOG_FILE"
+
+{
+    echo "=== Quality Check Errors ($(date)) ===" 
+    echo ""
+    
+    echo "--- Ruff Linting ---"
+    uv run ruff check . 2>&1 || true
+    echo ""
+    
+    echo "--- Type Checking ---"
+    uv run ty check 2>&1 || true
+    echo ""
+} > "$LOG_FILE" 2>&1
+
+# Check if there were any errors
+if grep -q "error\|Error\|ERROR" "$LOG_FILE"; then
+    echo "⚠️  Quality issues found - logged to .quality-errors.log"
+    echo "Commit proceeding (errors are warnings only)"
+else
+    echo "✅ No quality issues found"
+    rm -f "$LOG_FILE"
+fi
+
+exit 0

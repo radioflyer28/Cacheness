@@ -2,231 +2,207 @@
 
 ## Project Overview
 
-**Cacheness** is a Python disk caching library with pluggable metadata backends and handler-based serialization. It provides persistent caching for expensive computations with support for multiple storage backends (JSON, SQLite, PostgreSQL) and type-aware serialization handlers (DataFrames, NumPy arrays, TensorFlow tensors, etc.).
+**Cacheness** is a Python disk caching library with pluggable metadata backends and handler-based serialization. Supports JSON/SQLite/PostgreSQL backends and type-aware handlers (DataFrames, NumPy, TensorFlow tensors, etc.).
 
-## Package Manager: uv
+**What makes it special:** Unlike joblib.Memory or diskcache, Cacheness provides **type-aware serialization** (optimized parquet for DataFrames, blosc2 for NumPy), **pluggable metadata backends** (JSON for simple caches, SQLite for large caches, PostgreSQL for distributed), and **cryptographic signing** for cache integrity.
 
-**ALWAYS use `uv` for Python operations** — it's already available in PATH.
+**Detailed docs:** See [`docs/README.md`](../docs/README.md) for comprehensive guides.
+**Common issues:** See [`docs/TROUBLESHOOTING.md`](../docs/TROUBLESHOOTING.md) for troubleshooting guide.
+
+## Quick Start
 
 ```bash
 # Run tests
 uv run pytest tests/ -x -q
 
-# Run specific test file
-uv run pytest tests/test_core.py -v
+# Quality check before push
+.\scripts\quality-check.ps1  # Windows
+./scripts/quality-check.sh   # Unix/Linux/Mac
 
-# Run benchmarks
-uv run python benchmarks/management_ops_benchmark.py
+# Check logged errors
+cat .quality-errors.log
 
-# Install dependencies
-uv sync
-
-# Add new dependency
-uv add package-name
-
-# Run Python scripts
-uv run python script.py
+# Work on issue (see Git Worktree Workflow)
+git worktree add worktrees/beads-<hash> -b beads-<hash>-<desc> dev
 ```
 
-**Do NOT use:** `python`, `pip`, `python -m pytest` — use `uv run` instead.
+**Windows: Start beads daemon once per session**
+```powershell
+uv run bd daemon start
+```
+(Required after reboot/logout - beads-mcp auto-start doesn't work on Windows)
+
+## Package Manager: uv
+
+**ALWAYS use `uv` for Python operations** — never use `python`, `pip`, or `python -m pytest` directly.
+
+```bash
+uv run pytest tests/ -x -q          # Run tests
+uv run python benchmarks/script.py  # Run benchmarks
+uv sync                              # Install dependencies
+uv add package-name                  # Add dependency
+```
 
 
-## Issue Tracking
+## Code Quality & Formatting
 
-This project uses **beads-mcp** for issue tracking. Use the "beads" MCP server for all issue-related operations.
+**Two-phase quality gates:** Phase 1 auto-fixes (never fails), Phase 2 validates (may fail).
+
+```bash
+# Run full check
+.\scripts\quality-check.ps1   # Windows
+./scripts/quality-check.sh    # Unix/Linux/Mac
+
+# Or manually
+uv run ruff format . && uv run ruff check --fix .  # Phase 1
+uv run ruff check . && uv run ty check             # Phase 2
+```
+
+**Pre-commit hook:** Auto-runs Phase 1 on every commit, logs Phase 2 errors to `.quality-errors.log`.
+
+**Install pre-commit hook:**
+```bash
+.\scripts\install-hooks.ps1   # Windows
+./scripts/install-hooks.sh    # Unix/Linux/Mac
+```
+
+**Config:** Ruff settings in `pyproject.toml`, Python 3.12+, line length 88.
+
+
+## MCP Tools Reference
+
+**beads** — Issue tracking: `ready`, `show`, `create`, `update`, `close` (don't use CLI)
+**GitKraken** — Git ops: `status`, `add_or_commit`, `push`, `log_or_diff` (or use git CLI at discretion)
+**memory** — Knowledge graph: `create_entities`, `create_relations`, `add_observations`, `search_nodes`, `read_graph`
+**language-server** — LSP navigation: `definition`, `references`, `hover`, `diagnostics`, `rename_symbol`, `edit_file`
+**memalot** — Memory leak detection: `list_reports`, `get_report` (requires instrumenting code)
+**code-checker** — Quality tools: `run_pytest_check`, `run_pylint_check`, `run_mypy_check` (prefer `ruff`/`ty` directly)
+
+**Git Operations:** Use git CLI or GitKraken MCP at discretion, whichever is more convenient/robust/safe for the task.
 
 
 ## Test Suite
 
-- **Location:** `tests/` directory
-- **Current baseline:** 723 passed, 70 skipped, 0 failures
-- **Run command:** `uv run pytest tests/ -x -q`
-- **Conventions:**
-  - Use `-x` flag to stop on first failure
-  - Use `-q` for quiet output, `-v` for verbose
-  - Fixtures defined in `tests/conftest.py`
+**Baseline:** 890 passed, 70 skipped, 0 failures
+**Command:** `uv run pytest tests/ -x -q --ignore=tests/test_tensorflow_handler.py` (use `-x` to stop on first failure)
+**Windows:** Always add `--ignore=tests/test_tensorflow_handler.py` — TensorFlow tests hang on Windows.
+**Key files:** `test_core.py`, `test_update_operations.py`, `test_handlers.py`, `test_metadata.py`, `test_security.py`
 
-### Key Test Files
-- `test_core.py` — Main cache operations
-- `test_update_operations.py` — Management operations (update, touch, delete_where, batch ops)
-- `test_handlers.py` — Serialization handlers
-- `test_metadata.py` — Metadata backend tests
-- `test_security.py` — HMAC signing and verification
+## Coding Gotchas
 
-## Architecture
+1. **`get()` is destructive on errors:** Auto-deletes entries that fail to load (except transient IO errors)
+2. **Named params in `_create_cache_key()`:** Strip `prefix`, `description`, `custom_metadata`, `ttl_seconds` before hashing (critical bug pattern)
+3. **Use `iter_entry_summaries()` for batch ops:** Lightweight flat dicts, not full ORM objects (major performance difference)
+4. **Backend fast paths:** Check `hasattr(self.metadata_backend, 'query_meta')` for SQLite-specific optimizations
 
-### Storage Layer Separation (Phase 1 — Complete)
+**Backend selection:** JSON (<200 entries, dev only, NOT safe for concurrency), SQLite (200+, production, multi-process), PostgreSQL (distributed)
+See [`docs/BACKEND_SELECTION.md`](../docs/BACKEND_SELECTION.md) for details.
 
+## Git Worktree Workflow
+
+**Parallel development** using git worktrees nested inside the main repo to share dependencies.
+
+**Structure:** 
 ```
-UnifiedCache (core.py)
-    ↓
-├── Handlers (handlers.py) — Type-specific serialization
-│   ├── DataFrameHandler
-│   ├── NumpyHandler
-│   ├── TensorFlowHandler
-│   └── PickleHandler (fallback)
-│
-├── Metadata Backends (metadata.py)
-│   ├── JsonBackend
-│   ├── SQLiteBackend
-│   ├── PostgresBackend
-│   └── MemoryCacheWrapper
-│
-└── Blob Storage (compress_pickle.py)
-    └── Atomic file writes with .tmp + rename
+Cacheness/              # Main folder (on dev branch)
+├── .venv/              # Main venv (NOT shared with worktrees)
+├── worktrees/          # Feature worktrees container
+│   ├── beads-abc123/   # Branch: beads-abc123-description (has own .venv)
+│   └── beads-def456/   # Branch: beads-def456-description (has own .venv)
 ```
 
-### Key Components
+**Naming:** Use `beads-<hash>` format (✅ `beads-a1b2c3d`) to clearly identify beads issues
 
-1. **`src/cacheness/core.py`** — Main `UnifiedCache` class (1,689 lines)
-   - Single coordination layer
-   - Delegates to handlers and backends
-   - **IMPORTANT:** Has a `_lock` field that is created but **never acquired** — not thread-safe
-
-2. **`src/cacheness/handlers.py`** — Type-aware serialization registry
-   - Handlers registered via `@register_handler` decorator
-   - Priority system for handler selection
-   - `can_handle(obj)` → `put(obj, path)` → `get(path)` pattern
-
-3. **`src/cacheness/metadata.py`** — Metadata backend implementations
-   - `MetadataBackend` abstract base class
-   - Each backend implements: `put_entry()`, `get_entry()`, `list_entries()`, `delete_entry()`
-   - **NEW:** `iter_entry_summaries()` for lightweight iteration (added for batch operations optimization)
-
-4. **`src/cacheness/compress_pickle.py`** — Blob compression/decompression
-   - **CRITICAL:** Always reads entire file with `f.read()` (fixed from 2GB buffer issue)
-   - Supports blosc2, lz4, zstd, gzip
-
-## Coding Conventions
-
-### 1. Always Check Backend Capabilities
-```python
-# Backend-specific optimizations exist
-if hasattr(self.metadata_backend, 'query_meta'):
-    # SQLite fast path with JSON column search
-    matching_keys = self.metadata_backend.query_meta(**kwargs)
-else:
-    # Generic path — iterate all entries
-    for entry in self.metadata_backend.list_entries():
-        # ... filter manually
-```
-
-### 2. Use `iter_entry_summaries()` for Batch Operations
-```python
-# ❌ BAD — Loads full ORM objects
-for entry in self.metadata_backend.list_entries():
-    if some_filter(entry):
-        keys.append(entry['cache_key'])
-
-# ✅ GOOD — Lightweight flat dicts, no ORM hydration
-for entry in self.metadata_backend.iter_entry_summaries():
-    if some_filter(entry):
-        keys.append(entry['cache_key'])
-```
-
-### 3. Error Handling in `get()`
-`get()` is **destructive** on errors — it auto-deletes entries that fail to load:
-```python
-try:
-    obj = handler.get(actual_path)
-except Exception:
-    # WARNING: This deletes the metadata entry permanently
-    self.metadata_backend.delete_entry(cache_key)
-    return None
-```
-
-### 4. Named Parameters in `_create_cache_key()`
-**Critical bug pattern:** Named parameters (`prefix`, `description`, `custom_metadata`, `ttl_seconds`) must be stripped before hashing:
-```python
-# ✅ CORRECT
-kwargs_for_key = {k: v for k, v in kwargs.items() 
-                  if k not in ('prefix', 'description', 'custom_metadata')}
-cache_key = self._create_cache_key(**kwargs_for_key)
-```
-
-### 5. Backend Thread Safety
-- **JSON:** Protected by `threading.Lock()`
-- **SQLite:** `check_same_thread=False` + WAL mode + per-operation locks
-- **PostgreSQL:** `ThreadPoolExecutor` around all operations
-- **UnifiedCache itself:** NOT thread-safe (lock never acquired)
-
-## Common Patterns
-
-### Adding a New Handler
-```python
-@register_handler(priority=100)
-class MyTypeHandler(Handler):
-    def can_handle(self, obj: Any) -> bool:
-        return isinstance(obj, MyType)
-    
-    def put(self, obj: MyType, file_path: str) -> Dict[str, Any]:
-        # Serialize and return metadata
-        return {"storage_format": "myformat"}
-    
-    def get(self, file_path: str) -> MyType:
-        # Deserialize and return object
-        return MyType(...)
-```
-
-### Adding a Management Operation
-```python
-def my_operation(self, **filter_kwargs) -> int:
-    """New management operation."""
-    count = 0
-    # Use iter_entry_summaries for performance
-    for entry in self.metadata_backend.iter_entry_summaries():
-        if self._matches_filters(entry, filter_kwargs):
-            # Perform operation
-            count += 1
-    return count
-```
-
-## Known Issues & Gotchas
-
-1. **Race condition in `put()`:** Two threads calling `put()` with the same key can corrupt state (lock never used)
-2. **Auto-deletion on read errors:** Transient I/O errors cause permanent metadata loss
-3. **Orphaned blobs:** If process crashes between blob write and metadata write, disk space consumed but invisible
-4. **SQLite "database is locked":** 30-second timeout can be exceeded under heavy concurrent writes
-5. **JSON backend scales O(n²):** Each write re-serializes entire JSON file
-
-## Benchmarks
-
-Run benchmarks to validate performance:
+**Setup (one-time):**
 ```bash
-uv run python benchmarks/management_ops_benchmark.py
-uv run python benchmarks/handler_benchmark.py
-uv run python benchmarks/serialization_benchmark.py
+# Add worktrees/ to .gitignore
+echo "/worktrees/" >> .gitignore
 ```
 
-Expected baseline (200 entries):
-- `touch_batch`: ~0.79ms (SQLite)
-- `delete_where`: ~44ms (SQLite)
-- `list_entries`: ~20ms (SQLite), ~0.40ms (JSON)
+**Create feature worktree:**
+```bash
+# Get issue hash from beads, then:
+git worktree add worktrees/beads-<hash> -b beads-<hash>-<desc> dev
+cd worktrees/beads-<hash>
+uv sync --all-groups   # Each worktree gets its own .venv
+# Create WORKTREE.md with issue details, mark issue in-progress
+```
 
-## Documentation
+**Note:** Nested worktrees do **not** share the parent's `.venv`. Each needs `uv sync --all-groups` on first use.
 
-- **API Reference:** `docs/API_REFERENCE.md`
-- **Performance:** `docs/PERFORMANCE.md`
-- **Backend Selection:** `docs/BACKEND_SELECTION.md`
-- **Development Planning:** `docs/DEVELOPMENT_PLANNING.md`
+**Integration workflow:**
+```bash
+# Test and push from worktree
+cd worktrees/beads-<hash>
+uv run pytest tests/ -x -q && git push -u origin beads-<hash>-<desc>
 
-## When Modifying Core Logic
+# Integrate to dev (from main repo root)
+cd ../..  # Back to Cacheness/
+git checkout dev
+git pull origin dev && git merge beads-<hash>-<desc>
+uv run pytest tests/ -x -q && git push origin dev
 
-1. **Always run tests after changes:** `uv run pytest tests/ -x -q`
-2. **Check for regressions:** Baseline is 723 passed, 70 skipped
-3. **Run relevant benchmark:** Ensure no performance degradation
-4. **Update documentation:** If changing public API
+# Cleanup
+git worktree remove worktrees/beads-<hash>
+git branch -d beads-<hash>-<desc> && git push origin --delete beads-<hash>-<desc>
+# Close issue in beads
+```
 
-## Dependencies
+**Rules:** Each worktree has its own `.venv` (run `uv sync --all-groups` on first use). Clean up promptly after merge. Each VS Code window has independent MCP instances.
 
-All dependencies managed in `pyproject.toml`:
-- **Core:** `sqlalchemy`, `blosc2`, `pandas`, `numpy`
-- **Optional:** `tensorflow`, `torch`, `psycopg2-binary`
-- **Dev:** `pytest`, `pytest-cov`, `hypothesis`
+**beads gotcha:** Closing a child issue of an epic requires `--force` (parent-child dep blocks close). Use CLI: `uv run bd close CACHE-xxx --force`
 
-Install with: `uv sync`
+## Sessions / Workflows
 
----
+**MANDATORY WORKFLOW:**
 
-**Last Updated:** February 2026  
-**Test Baseline:** 723 passed, 70 skipped, 0 failures
+1. **File issues (in beads) for remaining work** — Create issues for anything that needs follow-up
+2. **Create feature worktree** (if working on specific issue):
+   - Get issue hash from beads: `mcp_beads_show` or `mcp_beads_ready`
+   - Create worktree: `git worktree add worktrees/beads-<hash> -b beads-<hash>-<desc> dev`
+   - Open in new VS Code window: `code worktrees/beads-<hash>`
+   - Create `WORKTREE.md` with issue details
+   - Update beads: Mark issue as in-progress
+3. **Run quality gates** (if code changed):
+   - Quality check (changed files only, BEFORE testing):
+     ```bash
+     # Phase 1: auto-fix changed files
+     uv run ruff format $(git diff --name-only --diff-filter=ACMR HEAD -- '*.py')
+     uv run ruff check --fix $(git diff --name-only --diff-filter=ACMR HEAD -- '*.py')
+     # Phase 2: validate changed files
+     uv run ruff check $(git diff --name-only --diff-filter=ACMR HEAD -- '*.py')
+     uv run ty check $(git diff --name-only --diff-filter=ACMR HEAD -- '*.py')
+     ```
+   - Tests: `uv run pytest tests/ -x -q --ignore=tests/test_tensorflow_handler.py`
+   - **Update docs:** If changing public API, update relevant files in `docs/` before committing
+4. **Push feature branch** — `git push -u origin beads-<hash>-description`
+5. **Integrate to dev**:
+   - Return to main folder: `cd ../..` (from worktree back to Cacheness/)
+   - Ensure on dev: `git checkout dev`
+   - Merge: `git pull origin dev && git merge beads-<hash>-description`
+   - Test: `uv run pytest tests/ -x -q --ignore=tests/test_tensorflow_handler.py`
+     - **Skip if fast-forward merge:** If merge was fast-forward (no conflicts, no diverged dev changes), tests already passed in worktree — skip re-running
+   - Push: `git push origin dev`
+6. **Cleanup worktree**:
+   - Remove: `git worktree remove worktrees/beads-<hash>`
+   - Delete branch: `git branch -d beads-<hash>-description && git push origin --delete beads-<hash>-description`
+   - Update beads: Close issue
+7. **Verify** — Check git status confirms "up to date with origin"
+8. **Hand off** — Provide context for next session
+
+**CRITICAL:** Work is NOT complete until `git push` succeeds (both feature branch AND dev branch). NEVER stop before pushing. If push fails, resolve and retry until it succeeds.
+
+## Maintaining This Document
+
+**Living Document Philosophy:** Update this file as the project, tools, and workflows evolve. When a better approach is identified, updating this doc should be proposed.
+
+**When to update:** MCP tools added/replaced/removed, workflows improve, test baselines shift, patterns emerge, instructions cause confusion
+
+**How to update:**
+1. Edit `.github/copilot-instructions.md` directly
+2. Commit: `docs: update copilot instructions - <reason>`
+3. Push to dev branch
+
+**Deprecating tools:** Document issues inline, suggest alternatives, disable in `.vscode/mcp.json`, remove after grace period
+
+**Feedback loop:** Update instructions immediately when they fail or cause confusion. Propose improvements when discovering better approaches. Use git history as changelog.

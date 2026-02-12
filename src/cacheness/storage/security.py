@@ -13,12 +13,12 @@ Features:
 
 Usage:
     from cacheness.storage.security import CacheEntrySigner
-    
+
     signer = CacheEntrySigner(key_file_path=Path("cache/.signing_key"))
-    
+
     # Sign an entry
     signature = signer.sign_entry(entry_data)
-    
+
     # Verify an entry
     is_valid = signer.verify_entry(entry_data, signature)
 """

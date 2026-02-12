@@ -659,4 +659,3 @@ Cacheness provides **automatic optimization with extensibility**:
 - [Backend Selection Guide](BACKEND_SELECTION.md) - Choosing metadata and blob backends
 - [Configuration Options](CONFIGURATION.md) - Customizing behavior
 - [Custom Metadata Guide](CUSTOM_METADATA.md) - Working with custom schemas
-- [Architecture Overview](DEVELOPMENT_PLANNING.md) - System design and planning

@@ -10,20 +10,23 @@ wheels/
 .venv
 
 # Test suite
+.pytest_cache/
 .hypothesis/
+logs/
 
 # Cache system
-*.bin
-*.db
-*.db-shm
-*.db-wal
-*.json
-*.pkl
-*.pkl.*
-*.b2nd
-*.npz
-*.parquet
+cache/*.bin
+cache/*.db
+cache/*.db-shm
+cache/*.db-wal
+cache/*.json
+cache/*.pkl
+cache/*.pkl.*
+cache/*.b2nd
+cache/*.npz
+cache/*.parquet
 .DS_Store
+cache_metadata.db
 cache/cache_signing_key.bin
 delete_empty_files.sh
 
@@ -34,3 +37,12 @@ config/my_*.yaml
 config/my_*.json
 docker-compose.override.yml
 .env
+
+# Worktree-specific metadata (not committed)
+WORKTREE.md
+
+# Git worktrees (parallel development)
+/worktrees/
+
+# Quality check error logs
+.quality-errors.log

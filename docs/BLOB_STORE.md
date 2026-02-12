@@ -2,6 +2,13 @@
 
 `BlobStore` provides a simple key-value storage API for Python objects with metadata support. Unlike the high-level `cacheness()` API, BlobStore does **not** implement caching semantics (TTL, eviction) - it's pure storage.
 
+BlobStore also serves as the composition target for `UnifiedCache` — all storage I/O in the cache layer delegates through BlobStore's internal API (`_write_blob`, `_read_blob`, `_calculate_file_hash`). Features include:
+
+- **xxhash-based integrity verification** — file hashes detect corruption
+- **Cryptographic signing** — HMAC signatures ensure entry authenticity
+- **Config-aware handler dispatch** — respects `CacheConfig` for serialization options
+- **Thread safety** — shared `RLock` for concurrent access
+
 ## When to Use BlobStore
 
 Use `BlobStore` when you need:
@@ -50,6 +57,45 @@ model_keys = store.list(prefix="model_")
 store.delete("model_v1")
 ```
 
+## Blob Backend Configuration
+
+BlobStore supports pluggable blob backends for file lifecycle operations (delete, exists checks). By default, it uses the filesystem backend.
+
+### Using Built-in Backends
+
+`python
+from cacheness.storage import BlobStore
+
+# Default: filesystem backend
+store = BlobStore(cache_dir="./data")
+
+# Explicit filesystem backend
+store = BlobStore(cache_dir="./data", blob_backend="filesystem")
+
+# In-memory backend (for testing)
+store = BlobStore(cache_dir="./temp", blob_backend="memory")
+`
+
+### Custom Blob Backend Instance
+
+`python
+from cacheness.storage import BlobStore
+from cacheness.storage.backends import FilesystemBlobBackend
+
+# Custom configuration
+custom_backend = FilesystemBlobBackend(
+    base_dir="./cache",
+    shard_chars=3  # Use 3-char sharding (abc/abc123...)
+)
+
+store = BlobStore(
+    cache_dir="./cache",
+    blob_backend=custom_backend
+)
+`
+
+> **Note:** Handlers still manage format-specific serialization to local paths. Blob backends manage file lifecycle (delete, exists). See [Architecture Guide](ARCHITECTURE.md) for details on the separation of concerns.
+
 ## API Reference
 
 ### Constructor
@@ -61,6 +107,7 @@ BlobStore(
     compression: str = "lz4",
     compression_level: int = 3,
     content_addressable: bool = False,
+    blob_backend: str | BlobBackend | None = None,
 )
 ```
 
@@ -71,6 +118,9 @@ BlobStore(
 | `compression` | `str` | `"lz4"` | Compression codec (lz4, zstd, gzip, blosclz) |
 | `compression_level` | `int` | `3` | Compression level (1-9) |
 | `content_addressable` | `bool` | `False` | Use content hash as key (enables deduplication) |
+| `blob_backend` | `BlobBackend \| None` | `None` | Blob storage backend for file lifecycle operations. Defaults to `FilesystemBlobBackend`. |
+
+> **Architecture note:** The `backend` parameter controls _metadata_ storage (key index, timestamps). The `blob_backend` parameter controls _file lifecycle_ operations (delete, exists). Serialization is handled by handlers. See the [Architecture Guide](ARCHITECTURE.md) for details.
 
 ### Methods
 
@@ -405,15 +455,26 @@ model.load_state_dict(state)
 
 ## Comparison: BlobStore vs cacheness()
 
-| Feature | `BlobStore` | `cacheness()` |
-|---------|-------------|---------------|
-| **Use case** | Pure storage | Function caching |
-| **TTL support** | ❌ No | ✅ Yes |
-| **Eviction policies** | ❌ No | ✅ Yes (LRU, size-based) |
-| **Function memoization** | ❌ No | ✅ Yes |
-| **Custom metadata** | ✅ Yes | ✅ Yes |
-| **Content-addressable** | ✅ Yes | ❌ No |
-| **Key-value API** | ✅ Direct | Abstracted |
+| Feature | `BlobStore` | `cacheness()` | `cacheness(storage_mode=True)` |
+|---------|-------------|---------------|-------------------------------|
+| **Use case** | Pure storage | Function caching | Durable key-value storage |
+| **TTL support** | ❌ No | ✅ Yes | ❌ Disabled |
+| **Eviction policies** | ❌ No | ✅ Yes (LRU, size-based) | ❌ Disabled |
+| **Function memoization** | ❌ No | ✅ Yes | ❌ Not targeted |
+| **Custom metadata** | ✅ Yes | ✅ Yes | ✅ Yes |
+| **Content-addressable** | ✅ Yes | ❌ No | ✅ `content_key()` |
+| **Key-value API** | ✅ Direct | Abstracted | ✅ `hash_key` alias |
+| **Integrity verification** | ✅ Yes (xxhash) | ✅ Yes | ✅ Yes (no auto-delete) |
+| **Entry signing** | ✅ Yes (HMAC) | ✅ Yes | ✅ Yes (no auto-delete) |
+| **Hit/miss stats** | ❌ No | ✅ Yes | ❌ Disabled |
+| **Auto-delete on error** | N/A | ✅ Yes | ❌ Preserves entries |
+
+> **Architecture note:** `UnifiedCache` internally composes a `BlobStore` instance
+> and delegates all storage I/O through it. When `storage_mode=True`, the cache
+> layer early-returns to passthrough methods that skip TTL, eviction, and stats,
+> effectively exposing BlobStore capabilities with added signing enrichment.
+> `BlobStore` remains available as a standalone API for projects that don't need
+> any `UnifiedCache` wrapper.
 
 ## Related Documentation
 

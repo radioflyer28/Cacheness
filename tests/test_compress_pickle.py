@@ -137,8 +137,6 @@ class TestCompressPickle:
         assert read_data.shape == test_data_large_numpy.shape
         assert read_data.dtype == test_data_large_numpy.dtype
 
-
-
     def test_all_compression_codecs_v2(self, temp_dir, test_data_simple):
         """Test all blosc v2+ compression codecs."""
         version = compress_pickle.blosc.__version__
@@ -181,8 +179,6 @@ class TestCompressPickle:
                 # Some codecs might not be available or might fail with specific data
                 pytest.skip(f"Codec {codec_name} failed: {e}")
 
-
-
     def test_numpy_with_all_codecs_v2(self, temp_dir, test_data_numpy):
         """Test numpy arrays with all blosc v2+ codecs using pack_array."""
         version = compress_pickle.blosc.__version__
@@ -219,7 +215,9 @@ class TestCompressPickle:
             filepath = Path(f"{base_filepath}_{clevel}.pkl")
 
             # Write with specific compression level
-            compress_pickle.write_file(test_data_complex, filepath, codec="lz4", clevel=clevel)
+            compress_pickle.write_file(
+                test_data_complex, filepath, codec="lz4", clevel=clevel
+            )
 
             # Read back and verify
             read_data = compress_pickle.read_file(filepath, nparray=False)
@@ -237,7 +235,9 @@ class TestCompressPickle:
             pickle.dump(test_data_large_numpy, f)
 
         # Save compressed with blosc2
-        compress_pickle.write_file(test_data_large_numpy, filepath_compressed, codec="zstd", nparray=True)
+        compress_pickle.write_file(
+            test_data_large_numpy, filepath_compressed, codec="zstd", nparray=True
+        )
 
         # Check file sizes
         uncompressed_size = filepath_uncompressed.stat().st_size
