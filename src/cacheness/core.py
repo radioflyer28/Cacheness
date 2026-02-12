@@ -944,6 +944,189 @@ class UnifiedCache:
         if removed_count > 0:
             logger.info(f"Cleaned up {removed_count} expired cache entries")
 
+    # ── Storage-mode passthrough methods ──────────────────────────────
+    # When storage_mode=True these bypass cache concerns (TTL, eviction,
+    # stats, auto-delete on errors) and delegate directly to BlobStore.
+
+    def _storage_mode_put(
+        self,
+        data: Any,
+        cache_key: str,
+        prefix: str,
+        description: str,
+    ) -> str:
+        """BlobStore passthrough for put() — no signing enrichment, eviction, or stats."""
+        base_file_path = self._get_cache_file_path(cache_key, prefix)
+
+        handler, result, file_hash = self._blob_store._write_blob(
+            data, base_file_path, compute_hash=True
+        )
+
+        metadata_dict = {
+            **result["metadata"],
+            "prefix": prefix,
+            "actual_path": result.get("actual_path", str(base_file_path)),
+            "file_hash": file_hash,
+        }
+
+        entry_data = {
+            "data_type": handler.data_type,
+            "prefix": prefix,
+            "description": description,
+            "file_size": result["file_size"],
+            "metadata": metadata_dict,
+        }
+
+        self.metadata_backend.put_entry(cache_key, entry_data)
+
+        logger.debug(f"Stored {handler.data_type} {cache_key} (storage mode)")
+        return cache_key
+
+    def _storage_mode_get(
+        self,
+        cache_key: str,
+        prefix: str,
+    ) -> Optional[Any]:
+        """BlobStore passthrough for get() — no TTL, stats, or auto-delete.
+
+        Integrity and signature verification are still performed if enabled,
+        but entries are never deleted on failure (storage-mode guarantee).
+        """
+        entry = self.metadata_backend.get_entry(cache_key)
+        if entry is None:
+            return None
+
+        data_type = entry.get("data_type")
+        if not data_type:
+            return None
+
+        metadata = entry.get("metadata", {})
+        actual_path = metadata.get("actual_path")
+        file_path = (
+            Path(actual_path)
+            if actual_path
+            else self._get_cache_file_path(cache_key, prefix)
+        )
+
+        # Integrity verification — return None without deleting
+        if self.config.metadata.verify_cache_integrity:
+            stored_hash = metadata.get("file_hash")
+            if stored_hash is not None:
+                current_hash = self._blob_store._calculate_file_hash(file_path)
+                if current_hash != stored_hash:
+                    logger.warning(
+                        f"Cache integrity verification failed for {cache_key}: "
+                        f"stored hash {stored_hash} != current hash {current_hash}. "
+                        f"Entry preserved (storage mode)."
+                    )
+                    return None
+
+        # Signature verification — return None without deleting
+        if self.signer and self.config.security.enable_entry_signing:
+            stored_signature = metadata.get("entry_signature")
+            if stored_signature is not None:
+                cache_key_params = metadata.get("cache_key_params")
+                verify_data = self._extract_signable_fields(
+                    cache_key=cache_key,
+                    entry_data=entry,
+                    metadata=metadata,
+                    cache_key_params=cache_key_params,
+                )
+                if not self.signer.verify_entry(verify_data, stored_signature):
+                    logger.warning(
+                        f"Entry signature verification failed for {cache_key}. "
+                        f"Entry preserved (storage mode)."
+                    )
+                    return None
+            elif not self.config.security.allow_unsigned_entries:
+                logger.warning(
+                    f"Entry {cache_key} has no signature but unsigned entries "
+                    f"are not allowed. Entry preserved (storage mode)."
+                )
+                return None
+
+        try:
+            data = self._blob_store._read_blob(file_path, data_type, metadata)
+            self.metadata_backend.update_access_time(cache_key)
+            return data
+        except Exception as e:
+            # Never delete metadata in storage mode
+            logger.warning(
+                f"Failed to load {data_type} {cache_key}: "
+                f"{type(e).__name__}: {e} (entry preserved, storage mode)"
+            )
+            return None
+
+    def _storage_mode_get_with_metadata(
+        self,
+        cache_key: str,
+        prefix: str,
+    ) -> Optional[tuple[Any, Dict[str, Any]]]:
+        """BlobStore passthrough for get_with_metadata() — no TTL, stats, or auto-delete."""
+        entry = self.metadata_backend.get_entry(cache_key)
+        if entry is None:
+            return None
+
+        data_type = entry.get("data_type")
+        if not data_type:
+            return None
+
+        metadata = entry.get("metadata", {})
+        actual_path = metadata.get("actual_path")
+        file_path = (
+            Path(actual_path)
+            if actual_path
+            else self._get_cache_file_path(cache_key, prefix)
+        )
+
+        # Integrity verification — return None without deleting
+        if self.config.metadata.verify_cache_integrity:
+            stored_hash = metadata.get("file_hash")
+            if stored_hash is not None:
+                current_hash = self._blob_store._calculate_file_hash(file_path)
+                if current_hash != stored_hash:
+                    logger.warning(
+                        f"Cache integrity verification failed for {cache_key}. "
+                        f"Entry preserved (storage mode)."
+                    )
+                    return None
+
+        # Signature verification — return None without deleting
+        if self.signer and self.config.security.enable_entry_signing:
+            stored_signature = metadata.get("entry_signature")
+            if stored_signature is not None:
+                cache_key_params = metadata.get("cache_key_params")
+                verify_data = self._extract_signable_fields(
+                    cache_key=cache_key,
+                    entry_data=entry,
+                    metadata=metadata,
+                    cache_key_params=cache_key_params,
+                )
+                if not self.signer.verify_entry(verify_data, stored_signature):
+                    logger.warning(
+                        f"Entry signature verification failed for {cache_key}. "
+                        f"Entry preserved (storage mode)."
+                    )
+                    return None
+            elif not self.config.security.allow_unsigned_entries:
+                logger.warning(
+                    f"Entry {cache_key} unsigned, not allowed. "
+                    f"Entry preserved (storage mode)."
+                )
+                return None
+
+        try:
+            data = self._blob_store._read_blob(file_path, data_type, metadata)
+            self.metadata_backend.update_access_time(cache_key)
+            entry["cache_key"] = cache_key
+            return (data, entry)
+        except Exception as e:
+            logger.warning(
+                f"Failed to load {data_type} {cache_key}: "
+                f"{type(e).__name__}: {e} (entry preserved, storage mode)"
+            )
+            return None
+
     def put(
         self,
         data: Any,
@@ -988,6 +1171,10 @@ class UnifiedCache:
         with self._lock:
             cache_key = self._resolve_hash_key_alias(cache_key, hash_key)
             cache_key = self._resolve_cache_key(cache_key, on, kwargs)
+
+            if self.config.storage_mode:
+                return self._storage_mode_put(data, cache_key, prefix, description)
+
             base_file_path = self._get_cache_file_path(cache_key, prefix)
 
             try:
@@ -1143,6 +1330,9 @@ class UnifiedCache:
             cache_key = self._resolve_hash_key_alias(cache_key, hash_key)
             cache_key = self._resolve_cache_key(cache_key, on, kwargs)
 
+            if self.config.storage_mode:
+                return self._storage_mode_get(cache_key, prefix)
+
             # Check if entry exists and is not expired
             entry = self.metadata_backend.get_entry(cache_key)
             if not entry or self._is_expired(cache_key, ttl_seconds):
@@ -1176,8 +1366,7 @@ class UnifiedCache:
                                 f"stored hash {stored_hash} != current hash {current_hash}. "
                                 f"Removing corrupted cache entry."
                             )
-                            if not self.config.storage_mode:
-                                self.metadata_backend.remove_entry(cache_key)
+                            self.metadata_backend.remove_entry(cache_key)
                             self._record_miss()
                             return None
 
@@ -1203,8 +1392,7 @@ class UnifiedCache:
                                     f"Entry signature verification failed for {cache_key}. "
                                     f"Removing potentially tampered cache entry."
                                 )
-                                if not self.config.storage_mode:
-                                    self.metadata_backend.remove_entry(cache_key)
+                                self.metadata_backend.remove_entry(cache_key)
                                 self._record_miss()
                                 return None
                             else:
@@ -1219,8 +1407,7 @@ class UnifiedCache:
                             f"Entry {cache_key} has no signature but unsigned entries are not allowed. "
                             f"Removing entry."
                         )
-                        if not self.config.storage_mode:
-                            self.metadata_backend.remove_entry(cache_key)
+                        self.metadata_backend.remove_entry(cache_key)
                         self._record_miss()
                         return None
 
@@ -1252,8 +1439,7 @@ class UnifiedCache:
                 logger.warning(
                     f"Failed to load cached {data_type} {cache_key}: {type(e).__name__}: {e}"
                 )
-                if not self.config.storage_mode:
-                    self.metadata_backend.remove_entry(cache_key)
+                self.metadata_backend.remove_entry(cache_key)
                 self._record_miss()
                 return None
 
@@ -1297,6 +1483,9 @@ class UnifiedCache:
         with self._lock:
             cache_key = self._resolve_hash_key_alias(cache_key, hash_key)
             cache_key = self._resolve_cache_key(cache_key, on, kwargs)
+
+            if self.config.storage_mode:
+                return self._storage_mode_get_with_metadata(cache_key, prefix)
 
             # Single metadata lookup
             entry = self.metadata_backend.get_entry(cache_key)
@@ -1358,8 +1547,7 @@ class UnifiedCache:
                                 f"stored hash {stored_hash} != current hash {current_hash}. "
                                 f"Removing corrupted cache entry."
                             )
-                            if not self.config.storage_mode:
-                                self.metadata_backend.remove_entry(cache_key)
+                            self.metadata_backend.remove_entry(cache_key)
                             self._record_miss()
                             return None
 
@@ -1385,8 +1573,7 @@ class UnifiedCache:
                                     f"Entry signature verification failed for {cache_key}. "
                                     f"Removing potentially tampered cache entry."
                                 )
-                                if not self.config.storage_mode:
-                                    self.metadata_backend.remove_entry(cache_key)
+                                self.metadata_backend.remove_entry(cache_key)
                                 self._record_miss()
                                 return None
                             else:
@@ -1401,8 +1588,7 @@ class UnifiedCache:
                             f"Entry {cache_key} has no signature but unsigned entries are not allowed. "
                             f"Removing entry."
                         )
-                        if not self.config.storage_mode:
-                            self.metadata_backend.remove_entry(cache_key)
+                        self.metadata_backend.remove_entry(cache_key)
                         self._record_miss()
                         return None
 
@@ -1437,8 +1623,7 @@ class UnifiedCache:
                 logger.warning(
                     f"Failed to load cached {data_type} {cache_key}: {type(e).__name__}: {e}"
                 )
-                if not self.config.storage_mode:
-                    self.metadata_backend.remove_entry(cache_key)
+                self.metadata_backend.remove_entry(cache_key)
                 self._record_miss()
                 return None
 
