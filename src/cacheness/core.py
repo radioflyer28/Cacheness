@@ -7,8 +7,6 @@ The main UnifiedCache class is now focused on coordination and delegates format-
 operations to specialized handlers.
 """
 
-import os
-import xxhash
 import inspect
 import threading
 import logging
@@ -101,6 +99,10 @@ class UnifiedCache:
 
         # Initialize entry signer for metadata integrity
         self._init_entry_signer()
+
+        # Initialize internal BlobStore for storage delegation
+        # Shares metadata_backend, handlers, lock, signer, and config
+        self._init_blob_store()
 
         # Clean up expired entries on initialization
         if self.config.storage.cleanup_on_init:
@@ -283,6 +285,29 @@ class UnifiedCache:
         except Exception as e:
             logger.warning(f"Failed to initialize entry signer: {e}")
             self.signer = None
+
+    def _init_blob_store(self):
+        """Initialize internal BlobStore for storage delegation.
+
+        The BlobStore shares the same metadata_backend, handler registry,
+        lock, signer, and config as the UnifiedCache.  This avoids resource
+        duplication and ensures consistent behaviour.
+
+        Storage operations (file I/O, handler dispatch, integrity verification)
+        are delegated to BlobStore while UnifiedCache retains cache-specific
+        concerns (TTL, eviction, stats, decorators).
+        """
+        from .storage import BlobStore
+
+        self._blob_store = BlobStore(
+            cache_dir=self.cache_dir,
+            backend=self.metadata_backend,  # shared metadata backend
+            config=self.config,
+        )
+        # Share resources — avoids duplication and double-initialization
+        self._blob_store._lock = self._lock  # same reentrant lock
+        self._blob_store.handlers = self.handlers  # same handler registry
+        self._blob_store.signer = self.signer  # same signer (may be None)
 
     def _store_custom_metadata(self, cache_key: str, custom_metadata):
         """Store custom metadata using link table architecture."""
@@ -892,28 +917,12 @@ class UnifiedCache:
         return signable_data
 
     def _calculate_file_hash(self, file_path: Path) -> Optional[str]:
+        """Calculate XXH3_64 hash of a cache file.
+
+        Delegates to BlobStore._calculate_file_hash().
+        Kept for backward compatibility.
         """
-        Calculate XXH3_64 hash of a cache file for integrity verification.
-
-        Args:
-            file_path: Path to the cache file
-
-        Returns:
-            Hex string of the file hash, or None if file doesn't exist or error
-        """
-        try:
-            if not file_path.exists():
-                return None
-
-            hasher = xxhash.xxh3_64()
-            with open(file_path, "rb") as f:
-                # Read in chunks to handle large files efficiently
-                for chunk in iter(lambda: f.read(8192), b""):
-                    hasher.update(chunk)
-            return hasher.hexdigest()
-        except Exception as e:
-            logger.warning(f"Failed to calculate hash for {file_path}: {e}")
-            return None
+        return self._blob_store._calculate_file_hash(file_path)
 
     def _record_hit(self):
         """Record a cache hit if stats tracking is enabled."""
@@ -977,24 +986,20 @@ class UnifiedCache:
             cache.put(data, date='2026-02-08', region='CA')
         """
         with self._lock:
-            # Get appropriate handler
-            handler = self.handlers.get_handler(data)
             cache_key = self._resolve_hash_key_alias(cache_key, hash_key)
             cache_key = self._resolve_cache_key(cache_key, on, kwargs)
             base_file_path = self._get_cache_file_path(cache_key, prefix)
 
             try:
-                # Use handler to store the data
-                result = handler.put(data, base_file_path, self.config)
+                # Delegate file I/O + handler dispatch to BlobStore
+                handler, result, file_hash = self._blob_store._write_blob(
+                    data,
+                    base_file_path,
+                    compute_hash=self.config.metadata.verify_cache_integrity,
+                )
 
                 # Track the blob path so we can clean up on failure
                 blob_path = Path(result.get("actual_path", str(base_file_path)))
-
-                # Calculate file hash for integrity verification (if enabled)
-                file_hash = None
-                if self.config.metadata.verify_cache_integrity:
-                    actual_path = result.get("actual_path", str(base_file_path))
-                    file_hash = self._calculate_file_hash(Path(actual_path))
 
                 # Update metadata
                 metadata_dict = {
@@ -1093,7 +1098,8 @@ class UnifiedCache:
                         logger.debug(f"Cleaned up orphaned blob: {blob_path}")
                     except OSError:
                         pass
-                logger.error(f"Failed to cache {handler.data_type} (I/O error): {e}")
+                data_type = handler.data_type if "handler" in dir() else "unknown"
+                logger.error(f"Failed to cache {data_type} (I/O error): {e}")
                 raise
             except Exception as e:
                 # Clean up orphaned blob file if it was written
@@ -1104,9 +1110,8 @@ class UnifiedCache:
                     except OSError:
                         pass
                 # Include exception type for easier debugging
-                logger.error(
-                    f"Failed to cache {handler.data_type}: {type(e).__name__}: {e}"
-                )
+                data_type = handler.data_type if "handler" in dir() else "unknown"
+                logger.error(f"Failed to cache {data_type}: {type(e).__name__}: {e}")
                 raise
 
     def get(
@@ -1144,14 +1149,12 @@ class UnifiedCache:
                 self._record_miss()
                 return None
 
-            # Get appropriate handler
             data_type = entry.get("data_type")
             if not data_type:
                 self._record_miss()
                 return None
 
             try:
-                handler = self.handlers.get_handler_by_type(data_type)
                 base_file_path = self._get_cache_file_path(cache_key, prefix)
 
                 # Use actual path from metadata if available, otherwise use base path
@@ -1166,7 +1169,7 @@ class UnifiedCache:
                 if self.config.metadata.verify_cache_integrity:
                     stored_hash = metadata.get("file_hash")
                     if stored_hash is not None:
-                        current_hash = self._calculate_file_hash(file_path)
+                        current_hash = self._blob_store._calculate_file_hash(file_path)
                         if current_hash != stored_hash:
                             logger.warning(
                                 f"Cache integrity verification failed for {cache_key}: "
@@ -1221,8 +1224,8 @@ class UnifiedCache:
                         self._record_miss()
                         return None
 
-                # Use handler to load the data
-                data = handler.get(file_path, metadata)
+                # Delegate blob read to BlobStore
+                data = self._blob_store._read_blob(file_path, data_type, metadata)
 
                 # Update access time
                 self.metadata_backend.update_access_time(cache_key)
@@ -1334,7 +1337,6 @@ class UnifiedCache:
                 return None
 
             try:
-                handler = self.handlers.get_handler_by_type(data_type)
                 base_file_path = self._get_cache_file_path(cache_key, prefix)
 
                 # Use actual path from metadata if available, otherwise use base path
@@ -1349,7 +1351,7 @@ class UnifiedCache:
                 if self.config.metadata.verify_cache_integrity:
                     stored_hash = metadata.get("file_hash")
                     if stored_hash is not None:
-                        current_hash = self._calculate_file_hash(file_path)
+                        current_hash = self._blob_store._calculate_file_hash(file_path)
                         if current_hash != stored_hash:
                             logger.warning(
                                 f"Cache integrity verification failed for {cache_key}: "
@@ -1404,8 +1406,8 @@ class UnifiedCache:
                         self._record_miss()
                         return None
 
-                # Use handler to load the data
-                data = handler.get(file_path, metadata)
+                # Delegate blob read to BlobStore
+                data = self._blob_store._read_blob(file_path, data_type, metadata)
 
                 # Update access time
                 self.metadata_backend.update_access_time(cache_key)
@@ -1591,14 +1593,14 @@ class UnifiedCache:
                 return False
 
             # Get appropriate handler for the data type
-            handler = self.handlers.get_handler(data)
-
             # Reconstruct file path from existing metadata (blob I/O belongs here, not in metadata layer)
             prefix = existing_entry.get("prefix", "")
             base_file_path = self._get_cache_file_path(cache_key, prefix)
 
-            # Perform blob I/O: write new data to disk
-            result = handler.put(data, base_file_path, self.config)
+            # Delegate blob I/O to BlobStore
+            handler, result, _ = self._blob_store._write_blob(
+                data, base_file_path, compute_hash=False
+            )
 
             # Build metadata updates dict from handler result
             updates = {
@@ -1620,7 +1622,7 @@ class UnifiedCache:
                 updates["s3_etag"] = result["s3_etag"]
 
             # Delegate metadata-only update to backend (no I/O in metadata layer)
-            success = self.metadata_backend.update_entry_metadata(
+            self.metadata_backend.update_entry_metadata(
                 cache_key=cache_key, updates=updates
             )
 
@@ -1634,7 +1636,9 @@ class UnifiedCache:
                         metadata = updated_entry.get("metadata", {})
                         actual_path = metadata.get("actual_path")
                         if actual_path and self.config.metadata.verify_cache_integrity:
-                            new_file_hash = self._calculate_file_hash(Path(actual_path))
+                            new_file_hash = self._blob_store._calculate_file_hash(
+                                Path(actual_path)
+                            )
                             metadata["file_hash"] = new_file_hash
 
                         # Extract signable fields and create new signature
@@ -2038,6 +2042,8 @@ class UnifiedCache:
         """
         Invalidate (remove) specific cache entries.
 
+        Delegates blob file deletion and metadata removal to BlobStore.delete().
+
         Args:
             cache_key: Direct cache key (if provided, on and **kwargs are ignored)
             hash_key: Alias for cache_key (storage-oriented name).
@@ -2050,35 +2056,8 @@ class UnifiedCache:
             cache_key = self._resolve_hash_key_alias(cache_key, hash_key)
             cache_key = self._resolve_cache_key(cache_key, on, kwargs)
 
-            # Look up the entry to find the blob path before removing metadata
-            entry = self.metadata_backend.get_entry(cache_key)
-            blob_deleted = False
-            if entry:
-                actual_path = None
-                # actual_path may be in the top-level entry or nested in metadata
-                metadata = entry.get("metadata", {})
-                if isinstance(metadata, dict):
-                    actual_path = metadata.get("actual_path")
-                if not actual_path:
-                    actual_path = entry.get("actual_path")
-                if actual_path:
-                    blob_file = Path(actual_path)
-                    if blob_file.exists():
-                        try:
-                            blob_file.unlink()
-                            blob_deleted = True
-                        except OSError as exc:
-                            logger.warning(
-                                f"Failed to delete blob file {actual_path} for "
-                                f"cache entry {cache_key}: {exc}"
-                            )
-
-            # Remove from metadata backend
-            if self.metadata_backend.remove_entry(cache_key):
-                logger.info(
-                    f"Invalidated cache entry {cache_key}"
-                    + (" (blob deleted)" if blob_deleted else "")
-                )
+            if self._blob_store.delete(cache_key):
+                logger.info(f"Invalidated cache entry {cache_key}")
             else:
                 logger.debug(f"Cache entry {cache_key} not found for invalidation")
 
@@ -2088,7 +2067,7 @@ class UnifiedCache:
         """
         Verify cache integrity by cross-checking blob files and metadata entries.
 
-        Detects:
+        Delegates to the internal BlobStore which performs:
         - Orphaned blobs: files in cache_dir with no metadata entry
         - Dangling metadata: entries pointing to missing blob files
         - Size mismatches: metadata file_size != actual file size on disk
@@ -2102,182 +2081,18 @@ class UnifiedCache:
             Dict with keys: orphaned_blobs, dangling_entries, size_mismatches,
             hash_mismatches (if verify_hashes), repaired (if repair).
         """
-        import glob
-
-        with self._lock:
-            # 1. Inventory all blob files in cache_dir
-            blob_extensions = ["pkl", "npz", "b2nd", "b2tr", "parquet"]
-            pickle_codecs = ["lz4", "zstd", "gzip", "zst", "gz", "bz2", "xz"]
-
-            blob_files: set[str] = set()
-            patterns = [str(self.cache_dir / f"*.{ext}") for ext in blob_extensions]
-            for codec in pickle_codecs:
-                patterns.append(str(self.cache_dir / f"*.pkl.{codec}"))
-            patterns.append(str(self.cache_dir / "*.pkl.*"))
-
-            for pattern in patterns:
-                for file_path in glob.glob(pattern):
-                    blob_files.add(os.path.normpath(file_path))
-
-            # 2. Inventory all metadata entries and their actual_paths
-            entry_paths: dict[
-                str, dict
-            ] = {}  # actual_path -> {cache_key, file_size, file_hash}
-            for entry in self.metadata_backend.iter_entry_summaries():
-                actual_path = entry.get("actual_path")
-                if actual_path:
-                    norm_path = os.path.normpath(actual_path)
-                    entry_paths[norm_path] = {
-                        "cache_key": entry["cache_key"],
-                        "file_size": entry.get("file_size"),
-                        "file_hash": entry.get("file_hash"),
-                    }
-
-            # 3. Find orphaned blobs (files with no metadata entry)
-            known_paths = set(entry_paths.keys())
-            orphaned_blobs = sorted(blob_files - known_paths)
-
-            # 4. Find dangling metadata (entries pointing to missing files)
-            dangling_entries = []
-            for path, info in entry_paths.items():
-                if not os.path.exists(path):
-                    dangling_entries.append(
-                        {
-                            "cache_key": info["cache_key"],
-                            "expected_path": path,
-                        }
-                    )
-
-            # 5. Check size mismatches
-            size_mismatches = []
-            for path, info in entry_paths.items():
-                if os.path.exists(path) and info["file_size"] is not None:
-                    actual_size = os.path.getsize(path)
-                    if actual_size != info["file_size"]:
-                        size_mismatches.append(
-                            {
-                                "cache_key": info["cache_key"],
-                                "path": path,
-                                "expected_size": info["file_size"],
-                                "actual_size": actual_size,
-                            }
-                        )
-
-            # 6. Check hash mismatches (optional, expensive)
-            hash_mismatches = []
-            if verify_hashes:
-                for path, info in entry_paths.items():
-                    if os.path.exists(path) and info.get("file_hash"):
-                        current_hash = self._calculate_file_hash(Path(path))
-                        if current_hash != info["file_hash"]:
-                            hash_mismatches.append(
-                                {
-                                    "cache_key": info["cache_key"],
-                                    "path": path,
-                                    "expected_hash": info["file_hash"],
-                                    "actual_hash": current_hash,
-                                }
-                            )
-
-            # 7. Repair if requested
-            repaired = {"orphans_deleted": 0, "dangling_removed": 0}
-            if repair:
-                for blob_path in orphaned_blobs:
-                    try:
-                        os.remove(blob_path)
-                        repaired["orphans_deleted"] += 1
-                    except OSError as e:
-                        logger.warning(
-                            f"Failed to remove orphaned blob {blob_path}: {e}"
-                        )
-
-                for entry in dangling_entries:
-                    try:
-                        self.metadata_backend.remove_entry(entry["cache_key"])
-                        repaired["dangling_removed"] += 1
-                    except Exception as e:
-                        logger.warning(
-                            f"Failed to remove dangling entry {entry['cache_key']}: {e}"
-                        )
-
-            report = {
-                "orphaned_blobs": orphaned_blobs,
-                "dangling_entries": dangling_entries,
-                "size_mismatches": size_mismatches,
-            }
-            if verify_hashes:
-                report["hash_mismatches"] = hash_mismatches
-            if repair:
-                report["repaired"] = repaired
-
-            total_issues = (
-                len(orphaned_blobs)
-                + len(dangling_entries)
-                + len(size_mismatches)
-                + len(hash_mismatches)
-            )
-            if total_issues == 0:
-                logger.info("Cache integrity check passed — no issues found")
-            else:
-                logger.warning(
-                    f"Cache integrity check found {total_issues} issue(s): "
-                    f"{len(orphaned_blobs)} orphaned blobs, "
-                    f"{len(dangling_entries)} dangling entries, "
-                    f"{len(size_mismatches)} size mismatches"
-                    + (
-                        f", {len(hash_mismatches)} hash mismatches"
-                        if verify_hashes
-                        else ""
-                    )
-                )
-
-            return report
+        return self._blob_store.verify_integrity(
+            repair=repair, verify_hashes=verify_hashes
+        )
 
     def clear_all(self):
-        """Clear all cache entries and remove cache files."""
-        import glob
+        """Clear all cache entries and remove cache files.
 
+        Delegates blob file cleanup and metadata clearing to BlobStore.clear().
+        """
         with self._lock:
-            # Clear metadata first and get count
-            removed_count = self.metadata_backend.clear_all()
-
-            # Remove all cache files - comprehensive pattern matching
-            # Primary extensions
-            cache_patterns = [
-                str(self.cache_dir / "*.pkl"),  # Uncompressed pickle
-                str(self.cache_dir / "*.npz"),  # NumPy arrays
-                str(self.cache_dir / "*.b2nd"),  # Blosc2 arrays
-                str(self.cache_dir / "*.b2tr"),  # TensorFlow tensors with blosc2
-                str(self.cache_dir / "*.parquet"),  # DataFrame files
-            ]
-
-            # Compressed pickle files with valid compression codecs
-            pickle_codecs = ["lz4", "zstd", "gzip", "zst", "gz", "bz2", "xz"]
-            for codec in pickle_codecs:
-                cache_patterns.append(str(self.cache_dir / f"*.pkl.{codec}"))
-
-            # Additional patterns for any other compression extensions user might use
-            # This catches any .pkl.* pattern that might not be in our known list
-            cache_patterns.append(str(self.cache_dir / "*.pkl.*"))
-
-            files_removed = 0
-            processed_files = set()  # Avoid double-counting due to overlapping patterns
-
-            for pattern in cache_patterns:
-                for file_path in glob.glob(pattern):
-                    if file_path not in processed_files:
-                        try:
-                            os.remove(file_path)
-                            files_removed += 1
-                            processed_files.add(file_path)
-                        except OSError as e:
-                            logger.warning(
-                                f"Failed to remove cache file {file_path}: {e}"
-                            )
-
-            logger.info(
-                f"Cleared {removed_count} cache entries and removed {files_removed} cache files"
-            )
+            removed_count = self._blob_store.clear()
+            logger.info(f"Cleared {removed_count} cache entries and cache files")
             return removed_count
 
     def clear(self):

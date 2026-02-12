@@ -506,13 +506,18 @@ class BlobStore:
 
     def clear(self) -> int:
         """
-        Remove all blobs.
+        Remove all blobs and their files.
 
         Returns:
-            Number of blobs removed
+            Number of metadata entries removed
         """
         with self._lock:
-            return self.backend.clear_all()
+            files_removed = self._clear_blob_files()
+            count = self.backend.clear_all()
+            logger.debug(
+                f"Cleared {count} entries and removed {files_removed} blob files"
+            )
+            return count
 
     def close(self):
         """Close the blob store and release resources."""
@@ -675,6 +680,94 @@ class BlobStore:
                 )
 
             return report
+
+    # ── Low-level composition API ─────────────────────────────────────
+    # These methods are used by UnifiedCache to delegate storage operations
+    # without going through the full BlobStore.put/get pipeline.
+
+    def _write_blob(
+        self,
+        data: Any,
+        base_path: Path,
+        config: Optional["CacheConfig"] = None,
+        compute_hash: bool = True,
+    ) -> tuple:
+        """
+        Low-level: serialize data to disk via handler.
+
+        Does NOT acquire the lock — caller is responsible for synchronization.
+        Does NOT write metadata — caller handles metadata storage.
+
+        Args:
+            data: The data to serialize
+            base_path: Base file path (handler adds extension)
+            config: Optional CacheConfig override
+            compute_hash: Whether to compute xxhash file hash
+
+        Returns:
+            Tuple of (handler, result_dict, file_hash_or_None)
+        """
+        handler = self.handlers.get_handler(data)
+        result = handler.put(data, base_path, config or self.config)
+        file_hash = None
+        if compute_hash:
+            actual_path = Path(str(result.get("actual_path", base_path)))
+            file_hash = self._calculate_file_hash(actual_path)
+        return handler, result, file_hash
+
+    def _read_blob(
+        self,
+        path: Path,
+        data_type: str,
+        handler_metadata: Dict[str, Any],
+    ) -> Any:
+        """
+        Low-level: deserialize data from disk via handler.
+
+        Does NOT acquire the lock — caller is responsible for synchronization.
+        Does NOT check metadata or verify signatures.
+
+        Args:
+            path: Path to the blob file
+            data_type: Handler data type identifier (e.g. "dataframe", "array")
+            handler_metadata: Metadata dict passed to handler.get()
+
+        Returns:
+            Deserialized data object
+        """
+        handler = self.handlers.get_handler_by_type(data_type)
+        if handler is None:
+            return read_file(path)
+        return handler.get(path, handler_metadata)
+
+    def _clear_blob_files(self) -> int:
+        """
+        Delete all blob files from the cache directory.
+
+        Does NOT acquire the lock — caller is responsible for synchronization.
+
+        Returns:
+            Number of blob files deleted
+        """
+        blob_extensions = ["pkl", "npz", "b2nd", "b2tr", "parquet"]
+        pickle_codecs = ["lz4", "zstd", "gzip", "zst", "gz", "bz2", "xz"]
+
+        patterns = [str(self.cache_dir / f"*.{ext}") for ext in blob_extensions]
+        for codec in pickle_codecs:
+            patterns.append(str(self.cache_dir / f"*.pkl.{codec}"))
+        patterns.append(str(self.cache_dir / "*.pkl.*"))
+
+        processed: set[str] = set()
+        for pattern in patterns:
+            for file_path in glob.glob(pattern):
+                if file_path not in processed:
+                    try:
+                        os.remove(file_path)
+                        processed.add(file_path)
+                    except OSError as e:
+                        logger.warning(f"Failed to remove blob file {file_path}: {e}")
+
+        return len(processed)
 
     # ── Private helper methods ────────────────────────────────────────
 
