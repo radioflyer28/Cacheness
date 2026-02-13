@@ -886,6 +886,11 @@ class JsonBackend(MetadataBackend):
         )  # Use RLock to allow reentrant calls (cleanup_by_size -> get_stats)
         self._metadata = self._load_from_disk()
 
+        # --- Namespace registry ---
+        # Registry lives in the same directory as the metadata file.
+        self._registry_file = self.metadata_file.parent / "cacheness_namespaces.json"
+        self._ensure_namespace_registry()
+
     def _load_from_disk(self) -> Dict[str, Any]:
         """Load metadata from JSON file."""
         if self.metadata_file.exists():
@@ -1289,6 +1294,239 @@ class JsonBackend(MetadataBackend):
         with self._lock:
             self._metadata = metadata
             self._save_to_disk()
+
+    # --- Namespace registry helpers ---
+
+    def _load_registry(self) -> Dict[str, Any]:
+        """Load the namespace registry from disk."""
+        if self._registry_file.exists():
+            try:
+                with open(self._registry_file, "r") as f:
+                    data = json_loads(f.read())
+                if isinstance(data, dict) and "namespaces" in data:
+                    return data
+            except Exception:
+                logger.warning("Namespace registry corrupted, starting fresh")
+        return {"namespaces": {}}
+
+    def _save_registry(self, registry: Dict[str, Any]) -> None:
+        """Save the namespace registry to disk atomically."""
+        import tempfile
+        import shutil
+
+        try:
+            if not self._registry_file.parent.exists():
+                return
+            fd, temp_path = tempfile.mkstemp(
+                suffix=".json.tmp",
+                dir=self._registry_file.parent,
+                prefix="cacheness_ns_",
+            )
+            try:
+                with os.fdopen(fd, "w") as f:
+                    f.write(json_dumps(registry, default=str))
+                shutil.move(temp_path, self._registry_file)
+            except Exception:
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+                raise
+        except Exception as e:
+            logger.error(f"Failed to save namespace registry: {e}")
+
+    def _ensure_namespace_registry(self) -> None:
+        """Ensure the namespace registry exists with a 'default' entry.
+
+        Seeds the 'default' namespace pointing to the existing metadata file
+        on first use.  Subsequent calls are no-ops.
+        """
+        registry = self._load_registry()
+        if DEFAULT_NAMESPACE not in registry["namespaces"]:
+            now = datetime.now(timezone.utc).isoformat()
+            registry["namespaces"][DEFAULT_NAMESPACE] = {
+                "namespace_id": DEFAULT_NAMESPACE,
+                "display_name": "Default",
+                "schema_version": 1,
+                "created_at": now,
+                "signature": None,
+            }
+            self._save_registry(registry)
+            logger.info("Registered 'default' namespace in JSON registry")
+
+    def _metadata_file_for_namespace(self, namespace_id: str) -> Path:
+        """Return the metadata file path for a given namespace.
+
+        The 'default' namespace maps to the existing ``metadata_file`` (no
+        suffix) for backward compatibility.  Other namespaces get a
+        ``{namespace_id}_metadata.json`` file in the same directory.
+        """
+        if namespace_id == DEFAULT_NAMESPACE:
+            return self.metadata_file
+        return self.metadata_file.parent / f"{namespace_id}_metadata.json"
+
+    # --- Schema versioning overrides ---
+
+    def get_schema_version(self, namespace_id: str = DEFAULT_NAMESPACE) -> int:
+        """Read schema version from the JSON namespace registry."""
+        with self._lock:
+            registry = self._load_registry()
+            ns = registry["namespaces"].get(namespace_id)
+            return ns["schema_version"] if ns else 0
+
+    def set_schema_version(self, namespace_id: str, version: int) -> None:
+        """Write schema version to the JSON namespace registry."""
+        with self._lock:
+            registry = self._load_registry()
+            ns = registry["namespaces"].get(namespace_id)
+            if ns is not None:
+                ns["schema_version"] = version
+                self._save_registry(registry)
+
+    def get_migrations(self) -> list:
+        """Return JSON-specific schema migrations.
+
+        Currently there are no JSON-specific migrations (the format has
+        always been the same), so this returns an empty list.  When the
+        JSON schema changes in the future, migrations will be added here.
+        """
+        return []
+
+    # --- Namespace registry overrides ---
+
+    def create_namespace(
+        self,
+        namespace_id: str,
+        display_name: str = "",
+    ) -> NamespaceInfo:
+        """Register a new namespace and create its metadata file."""
+        validate_namespace_id(namespace_id)
+
+        if namespace_id == DEFAULT_NAMESPACE:
+            raise ValueError(
+                "The 'default' namespace is pre-registered and cannot be created"
+            )
+
+        with self._lock:
+            registry = self._load_registry()
+
+            if namespace_id in registry["namespaces"]:
+                raise ValueError(f"Namespace {namespace_id!r} already exists")
+
+            now = datetime.now(timezone.utc)
+
+            # Create the per-namespace metadata file with empty structure
+            ns_file = self._metadata_file_for_namespace(namespace_id)
+            if not ns_file.exists():
+                ns_data = {
+                    "entries": {},
+                    "cache_hits": 0,
+                    "cache_misses": 0,
+                }
+                try:
+                    with open(ns_file, "w") as f:
+                        f.write(json_dumps(ns_data, default=str))
+                except Exception as e:
+                    raise OSError(
+                        f"Failed to create metadata file for namespace "
+                        f"{namespace_id!r}: {e}"
+                    ) from e
+
+            # Register in the namespace registry
+            registry["namespaces"][namespace_id] = {
+                "namespace_id": namespace_id,
+                "display_name": display_name,
+                "schema_version": 1,
+                "created_at": now.isoformat(),
+                "signature": None,
+            }
+            self._save_registry(registry)
+
+            logger.info(f"Created namespace {namespace_id!r} with file {ns_file}")
+
+            return NamespaceInfo(
+                namespace_id=namespace_id,
+                display_name=display_name,
+                schema_version=1,
+                created_at=now,
+            )
+
+    def drop_namespace(self, namespace_id: str) -> bool:
+        """Remove a namespace, its metadata file, and registry entry."""
+        if namespace_id == DEFAULT_NAMESPACE:
+            raise ValueError("Cannot drop the 'default' namespace")
+
+        validate_namespace_id(namespace_id)
+
+        with self._lock:
+            registry = self._load_registry()
+
+            if namespace_id not in registry["namespaces"]:
+                return False
+
+            # Delete the per-namespace metadata file
+            ns_file = self._metadata_file_for_namespace(namespace_id)
+            if ns_file.exists():
+                try:
+                    os.remove(ns_file)
+                except OSError as e:
+                    logger.warning(
+                        f"Failed to remove metadata file for namespace "
+                        f"{namespace_id!r}: {e}"
+                    )
+
+            # Remove from registry
+            del registry["namespaces"][namespace_id]
+            self._save_registry(registry)
+
+            logger.info(f"Dropped namespace {namespace_id!r}")
+            return True
+
+    def list_namespaces(self) -> List[NamespaceInfo]:
+        """List all registered namespaces from the JSON registry."""
+        with self._lock:
+            registry = self._load_registry()
+            result = []
+            for ns_data in registry["namespaces"].values():
+                created_at = ns_data.get("created_at")
+                if isinstance(created_at, str):
+                    try:
+                        created_at = datetime.fromisoformat(created_at)
+                    except (ValueError, TypeError):
+                        created_at = datetime.now(timezone.utc)
+                result.append(
+                    NamespaceInfo(
+                        namespace_id=ns_data["namespace_id"],
+                        display_name=ns_data.get("display_name", ""),
+                        schema_version=ns_data.get("schema_version", 0),
+                        created_at=created_at,
+                        signature=ns_data.get("signature"),
+                    )
+                )
+            # Sort by created_at for consistent ordering
+            result.sort(key=lambda ns: ns.created_at)
+            return result
+
+    def get_namespace(self, namespace_id: str) -> Optional[NamespaceInfo]:
+        """Get info for a specific namespace from the JSON registry."""
+        with self._lock:
+            registry = self._load_registry()
+            ns_data = registry["namespaces"].get(namespace_id)
+            if ns_data is None:
+                return None
+            created_at = ns_data.get("created_at")
+            if isinstance(created_at, str):
+                try:
+                    created_at = datetime.fromisoformat(created_at)
+                except (ValueError, TypeError):
+                    created_at = datetime.now(timezone.utc)
+            return NamespaceInfo(
+                namespace_id=ns_data["namespace_id"],
+                display_name=ns_data.get("display_name", ""),
+                schema_version=ns_data.get("schema_version", 0),
+                created_at=created_at,
+                signature=ns_data.get("signature"),
+            )
 
     def close(self):
         """Close and clean up resources (JSON backend saves any pending changes)."""

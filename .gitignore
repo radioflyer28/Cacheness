@@ -27,6 +27,7 @@ cache/*.npz
 cache/*.parquet
 .DS_Store
 cache_metadata.db
+cacheness_namespaces.json
 cache/cache_signing_key.bin
 delete_empty_files.sh
 
