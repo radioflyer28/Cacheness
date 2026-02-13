@@ -109,6 +109,7 @@ class BlobStore:
         signing_key_file: str = "cache_signing_key.bin",
         use_in_memory_key: bool = False,
         config: Optional[CacheConfig] = None,
+        namespace: str = "default",
     ):
         """
         Initialize a BlobStore.
@@ -127,6 +128,8 @@ class BlobStore:
             use_in_memory_key: If True, use ephemeral in-memory signing key
             config: Optional CacheConfig for handler configuration. If not provided,
                 a default config is created from compression parameters.
+            namespace: Namespace for blob isolation. Non-default namespaces store
+                blobs in a subdirectory. Defaults to "default".
         """
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -134,6 +137,7 @@ class BlobStore:
         self.compression = compression
         self.compression_level = compression_level
         self.content_addressable = content_addressable
+        self._namespace = namespace
 
         # Thread safety
         self._lock = threading.RLock()
@@ -168,7 +172,9 @@ class BlobStore:
 
         # Initialize blob backend for file operations (delete, exists)
         if blob_backend is None or blob_backend == "filesystem":
-            self.blob_backend = FilesystemBlobBackend(self.cache_dir, shard_chars=0)
+            self.blob_backend = FilesystemBlobBackend(
+                self.cache_dir, shard_chars=0, namespace=self._namespace
+            )
         elif isinstance(blob_backend, str):
             # Use registry to get backend by name
             if blob_backend == "memory":
@@ -176,7 +182,10 @@ class BlobStore:
             else:
                 # Pass cache_dir for filesystem-like backends
                 self.blob_backend = get_blob_backend(
-                    blob_backend, base_dir=self.cache_dir, shard_chars=0
+                    blob_backend,
+                    base_dir=self.cache_dir,
+                    shard_chars=0,
+                    namespace=self._namespace,
                 )
         elif isinstance(blob_backend, BlobBackend):
             self.blob_backend = blob_backend

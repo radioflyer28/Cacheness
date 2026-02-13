@@ -314,6 +314,7 @@ class UnifiedCache:
             cache_dir=self.cache_dir,
             backend=self.metadata_backend,  # shared metadata backend
             config=self.config,
+            namespace=self.namespace,
         )
         # Share resources — avoids duplication and double-initialization
         self._blob_store._lock = self._lock  # same reentrant lock

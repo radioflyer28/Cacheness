@@ -218,19 +218,33 @@ class FilesystemBlobBackend(BlobBackend):
         shard_chars: Number of leading characters for directory sharding (0 to disable)
     """
 
-    def __init__(self, base_dir: Union[str, Path], shard_chars: int = 2):
+    def __init__(
+        self,
+        base_dir: Union[str, Path],
+        shard_chars: int = 2,
+        namespace: str = "default",
+    ):
         """
         Initialize filesystem blob backend.
 
         Args:
             base_dir: Directory where blobs will be stored
             shard_chars: Number of leading chars for Git-style sharding (default: 2)
+            namespace: Namespace for blob isolation. Non-default namespaces store
+                blobs under ``base_dir/{namespace}/``. The default namespace
+                stores directly under ``base_dir/`` for backward compatibility.
         """
-        self.base_dir = Path(base_dir)
+        root = Path(base_dir)
+        if namespace != "default":
+            self.base_dir = root / namespace
+        else:
+            self.base_dir = root
         self.shard_chars = shard_chars
+        self._namespace = namespace
         self.base_dir.mkdir(parents=True, exist_ok=True)
         logger.debug(
-            f"FilesystemBlobBackend initialized at {self.base_dir} (shard_chars={shard_chars})"
+            f"FilesystemBlobBackend initialized at {self.base_dir} "
+            f"(shard_chars={shard_chars}, namespace={namespace})"
         )
 
     def write_blob(self, blob_id: str, data: bytes) -> str:
