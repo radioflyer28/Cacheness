@@ -226,6 +226,28 @@ try:
 
         # No composite indexes needed - single row table
 
+    class CacheNamespace(Base):
+        """SQLAlchemy model for the namespace registry.
+
+        Tracks registered namespaces with per-namespace schema versioning.
+        Each namespace maps to its own set of tables:
+        - ``'default'`` → existing ``cache_entries`` / ``cache_stats``
+        - other → ``cache_entries_{namespace_id}`` / ``cache_stats_{namespace_id}``
+        """
+
+        __tablename__ = "cacheness_namespaces"
+
+        namespace_id = Column(String(48), primary_key=True)
+        display_name = Column(String(200), default="", nullable=False)
+        schema_version = Column(Integer, default=1, nullable=False)
+        created_at = Column(
+            DateTime(timezone=True),
+            default=lambda: datetime.now(timezone.utc),
+            nullable=False,
+        )
+        # HMAC signature for integrity verification (optional)
+        signature = Column(String(64), nullable=True)
+
 except ImportError:
     # SQLAlchemy not available
     SQLALCHEMY_AVAILABLE = False
@@ -236,6 +258,9 @@ except ImportError:
         pass
 
     class CacheStats:
+        pass
+
+    class CacheNamespace:  # type: ignore[no-redef]
         pass
 
     Base = None
@@ -1345,54 +1370,305 @@ class SqliteBackend(MetadataBackend):
         )
         self._lock = threading.Lock()
 
-        # Create tables
+        # Create tables (including cacheness_namespaces registry)
         Base.metadata.create_all(self.engine)
 
-        # Run migrations for schema evolution
-        self._run_migrations()
+        # Run formal schema versioning migrations
+        self._ensure_namespace_registry()
+        self.run_migrations(DEFAULT_NAMESPACE)
 
         # Initialize stats if not exists
         self._init_stats()
 
         logger.info(f"✅ SQLAlchemy metadata backend initialized: {db_file}")
 
-    def _run_migrations(self):
-        """Run schema migrations to add missing columns to existing databases."""
+    # --- Schema versioning overrides ---
+
+    def _ensure_namespace_registry(self):
+        """Ensure the namespace registry exists and has a 'default' entry.
+
+        This handles the v0→v1 transition: if cacheness_namespaces was just
+        created (by ``create_all``), seed it with the ``'default'`` namespace
+        pointing to the existing unsuffixed tables.
+        """
         with self.SessionLocal() as session:
-            # Check if cache_entries table exists
-            inspector = inspect(self.engine)
-            if "cache_entries" not in inspector.get_table_names():
-                return  # Table doesn't exist yet, will be created by create_all
-
-            existing_columns = {
-                col["name"] for col in inspector.get_columns("cache_entries")
-            }
-
-            # Migration 1: Add s3_etag column if missing
-            if "s3_etag" not in existing_columns:
-                logger.info("Migrating: Adding s3_etag column to cache_entries")
-                session.execute(
-                    text("ALTER TABLE cache_entries ADD COLUMN s3_etag VARCHAR(100)")
+            existing = session.execute(
+                select(CacheNamespace).where(
+                    CacheNamespace.namespace_id == DEFAULT_NAMESPACE
                 )
+            ).scalar_one_or_none()
+
+            if existing is None:
+                # Seed the default namespace
+                ns = CacheNamespace(
+                    namespace_id=DEFAULT_NAMESPACE,
+                    display_name="Default",
+                    schema_version=1,
+                )
+                session.add(ns)
+                session.commit()
+                logger.info("Registered 'default' namespace in cacheness_namespaces")
+
+    def get_schema_version(self, namespace_id: str = DEFAULT_NAMESPACE) -> int:
+        """Read schema version from the namespace registry."""
+        with self.SessionLocal() as session:
+            ns = session.execute(
+                select(CacheNamespace).where(
+                    CacheNamespace.namespace_id == namespace_id
+                )
+            ).scalar_one_or_none()
+            return ns.schema_version if ns else 0
+
+    def set_schema_version(self, namespace_id: str, version: int) -> None:
+        """Write schema version to the namespace registry."""
+        with self.SessionLocal() as session:
+            session.execute(
+                update(CacheNamespace)
+                .where(CacheNamespace.namespace_id == namespace_id)
+                .values(schema_version=version)
+            )
+            session.commit()
+
+    def get_migrations(self) -> list:
+        """Return SQLite-specific schema migrations.
+
+        v0 → v1: Legacy column additions (s3_etag, cache_key_params, metadata_dict).
+                  These used to be ad-hoc checks; now formalized.
+        """
+
+        def _migrate_v0_to_v1(backend: "SqliteBackend", namespace_id: str):
+            """Add columns that may be missing from pre-versioning databases."""
+            with backend.SessionLocal() as session:
+                inspector = inspect(backend.engine)
+                table_name = "cache_entries"  # default namespace only for v0→v1
+                if table_name not in inspector.get_table_names():
+                    return
+                existing = {col["name"] for col in inspector.get_columns(table_name)}
+                if "s3_etag" not in existing:
+                    logger.info("Migrating: Adding s3_etag column to cache_entries")
+                    session.execute(
+                        text(
+                            "ALTER TABLE cache_entries ADD COLUMN s3_etag VARCHAR(100)"
+                        )
+                    )
+                if "cache_key_params" not in existing:
+                    logger.info(
+                        "Migrating: Adding cache_key_params column to cache_entries"
+                    )
+                    session.execute(
+                        text(
+                            "ALTER TABLE cache_entries ADD COLUMN cache_key_params TEXT"
+                        )
+                    )
+                if "metadata_dict" not in existing:
+                    logger.info(
+                        "Migrating: Adding metadata_dict column to cache_entries"
+                    )
+                    session.execute(
+                        text("ALTER TABLE cache_entries ADD COLUMN metadata_dict TEXT")
+                    )
                 session.commit()
 
-            # Migration 2: Add cache_key_params column if missing
-            if "cache_key_params" not in existing_columns:
-                logger.info(
-                    "Migrating: Adding cache_key_params column to cache_entries"
-                )
-                session.execute(
-                    text("ALTER TABLE cache_entries ADD COLUMN cache_key_params TEXT")
-                )
-                session.commit()
+        return [
+            (0, 1, _migrate_v0_to_v1),
+        ]
 
-            # Migration 3: Add metadata_dict column if missing
-            if "metadata_dict" not in existing_columns:
-                logger.info("Migrating: Adding metadata_dict column to cache_entries")
-                session.execute(
-                    text("ALTER TABLE cache_entries ADD COLUMN metadata_dict TEXT")
+    # --- Namespace registry overrides ---
+
+    def create_namespace(
+        self,
+        namespace_id: str,
+        display_name: str = "",
+    ) -> NamespaceInfo:
+        """Register a new namespace and create its backing tables."""
+        validate_namespace_id(namespace_id)
+
+        if namespace_id == DEFAULT_NAMESPACE:
+            raise ValueError(
+                "The 'default' namespace is pre-registered and cannot be created"
+            )
+
+        with self._lock, self.SessionLocal() as session:
+            # Check for duplicates
+            existing = session.execute(
+                select(CacheNamespace).where(
+                    CacheNamespace.namespace_id == namespace_id
                 )
-                session.commit()
+            ).scalar_one_or_none()
+            if existing is not None:
+                raise ValueError(f"Namespace {namespace_id!r} already exists")
+
+            # Create the per-namespace tables
+            entries_table = f"cache_entries_{namespace_id}"
+            stats_table = f"cache_stats_{namespace_id}"
+
+            session.execute(
+                text(f"""
+                CREATE TABLE IF NOT EXISTS "{entries_table}" (
+                    cache_key       VARCHAR(16) PRIMARY KEY,
+                    description     VARCHAR(500) NOT NULL DEFAULT '',
+                    data_type       VARCHAR(20) NOT NULL,
+                    prefix          VARCHAR(100) NOT NULL DEFAULT '',
+                    created_at      DATETIME NOT NULL,
+                    accessed_at     DATETIME NOT NULL,
+                    file_size       INTEGER NOT NULL DEFAULT 0,
+                    file_hash       VARCHAR(16),
+                    entry_signature VARCHAR(64),
+                    s3_etag         VARCHAR(100),
+                    object_type     VARCHAR(100),
+                    storage_format  VARCHAR(20),
+                    serializer      VARCHAR(20),
+                    compression_codec VARCHAR(20),
+                    actual_path     VARCHAR(500),
+                    cache_key_params TEXT,
+                    metadata_dict   TEXT
+                )
+            """)
+            )
+
+            session.execute(
+                text(f"""
+                CREATE TABLE IF NOT EXISTS "{stats_table}" (
+                    id              INTEGER PRIMARY KEY DEFAULT 1,
+                    cache_hits      INTEGER NOT NULL DEFAULT 0,
+                    cache_misses    INTEGER NOT NULL DEFAULT 0,
+                    last_updated    DATETIME NOT NULL
+                )
+            """)
+            )
+
+            # Create indexes matching the default table layout
+            session.execute(
+                text(
+                    f'CREATE INDEX IF NOT EXISTS "idx_{namespace_id}_list_entries" '
+                    f'ON "{entries_table}" (created_at DESC)'
+                )
+            )
+            session.execute(
+                text(
+                    f'CREATE INDEX IF NOT EXISTS "idx_{namespace_id}_cleanup" '
+                    f'ON "{entries_table}" (created_at)'
+                )
+            )
+            session.execute(
+                text(
+                    f'CREATE INDEX IF NOT EXISTS "idx_{namespace_id}_size_mgmt" '
+                    f'ON "{entries_table}" (file_size, created_at)'
+                )
+            )
+
+            # Register in the namespace registry
+            now = datetime.now(timezone.utc)
+            ns = CacheNamespace(
+                namespace_id=namespace_id,
+                display_name=display_name,
+                schema_version=1,
+                created_at=now,
+            )
+            session.add(ns)
+
+            # Initialize stats row for the new namespace
+            session.execute(
+                text(
+                    f'INSERT OR IGNORE INTO "{stats_table}" '
+                    f"(id, cache_hits, cache_misses, last_updated) "
+                    f"VALUES (1, 0, 0, :now)"
+                ),
+                {"now": now},
+            )
+
+            session.commit()
+
+            return NamespaceInfo(
+                namespace_id=namespace_id,
+                display_name=display_name,
+                schema_version=1,
+                created_at=now,
+            )
+
+    def drop_namespace(self, namespace_id: str) -> bool:
+        """Remove a namespace and drop its tables."""
+        if namespace_id == DEFAULT_NAMESPACE:
+            raise ValueError("Cannot drop the 'default' namespace")
+
+        validate_namespace_id(namespace_id)
+
+        with self._lock, self.SessionLocal() as session:
+            existing = session.execute(
+                select(CacheNamespace).where(
+                    CacheNamespace.namespace_id == namespace_id
+                )
+            ).scalar_one_or_none()
+
+            if existing is None:
+                return False
+
+            # Drop per-namespace tables
+            entries_table = f"cache_entries_{namespace_id}"
+            stats_table = f"cache_stats_{namespace_id}"
+            session.execute(text(f'DROP TABLE IF EXISTS "{entries_table}"'))
+            session.execute(text(f'DROP TABLE IF EXISTS "{stats_table}"'))
+
+            # Remove from registry
+            session.execute(
+                delete(CacheNamespace).where(
+                    CacheNamespace.namespace_id == namespace_id
+                )
+            )
+            session.commit()
+
+            logger.info(f"Dropped namespace {namespace_id!r} and its tables")
+            return True
+
+    def list_namespaces(self) -> list:
+        """List all registered namespaces from the registry."""
+        with self.SessionLocal() as session:
+            rows = (
+                session.execute(
+                    select(CacheNamespace).order_by(CacheNamespace.created_at)
+                )
+                .scalars()
+                .all()
+            )
+            return [
+                NamespaceInfo(
+                    namespace_id=row.namespace_id,
+                    display_name=row.display_name,
+                    schema_version=row.schema_version,
+                    created_at=row.created_at,
+                    signature=row.signature,
+                )
+                for row in rows
+            ]
+
+    def get_namespace(self, namespace_id: str):
+        """Get info for a specific namespace."""
+        with self.SessionLocal() as session:
+            row = session.execute(
+                select(CacheNamespace).where(
+                    CacheNamespace.namespace_id == namespace_id
+                )
+            ).scalar_one_or_none()
+
+            if row is None:
+                return None
+
+            return NamespaceInfo(
+                namespace_id=row.namespace_id,
+                display_name=row.display_name,
+                schema_version=row.schema_version,
+                created_at=row.created_at,
+                signature=row.signature,
+            )
+
+    def _run_migrations(self):
+        """Legacy migration method — delegates to formal schema versioning.
+
+        Kept for backward compatibility.  New code should call
+        ``run_migrations()`` directly.
+        """
+        # Already handled in __init__ via run_migrations()
+        pass
 
     def _init_stats(self):
         """Initialize cache stats if not exists."""
