@@ -81,6 +81,9 @@ class UnifiedCache:
         # Use provided config or create default
         self.config = config or CacheConfig()
 
+        # Namespace is immutable after init
+        self.namespace = self.config.namespace
+
         self.cache_dir = Path(self.config.storage.cache_dir)
         self.cache_dir.mkdir(exist_ok=True, parents=True)
 

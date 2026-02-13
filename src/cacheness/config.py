@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from typing import Optional, List, Union
 from pathlib import Path
 
+from .metadata import validate_namespace_id, DEFAULT_NAMESPACE
+
 logger = logging.getLogger(__name__)
 
 # Sentinel value to distinguish between None (infinite TTL) and unspecified (use default)
@@ -357,6 +359,7 @@ class CacheConfig:
     serialization: SerializationConfig = field(default_factory=SerializationConfig)
     handlers: HandlerConfig = field(default_factory=HandlerConfig)
     security: SecurityConfig = field(default_factory=SecurityConfig)
+    namespace: str = DEFAULT_NAMESPACE
     storage_mode: bool = False  # When True, disables TTL, eviction, stats, auto-delete
 
     def __init__(
@@ -368,6 +371,8 @@ class CacheConfig:
         serialization: Optional[SerializationConfig] = None,
         handlers: Optional[HandlerConfig] = None,
         security: Optional[SecurityConfig] = None,
+        # Namespace isolation (immutable after init)
+        namespace: str = DEFAULT_NAMESPACE,
         # Backwards compatibility parameters
         cache_dir: Optional[str] = None,
         default_ttl_seconds: Optional[float] = None,
@@ -416,6 +421,9 @@ class CacheConfig:
         **kwargs,
     ):
         """Initialize configuration with backwards compatibility support."""
+
+        # Validate and store namespace (immutable after init)
+        self.namespace = validate_namespace_id(namespace)
 
         # Initialize sub-configurations with defaults
         self.storage = storage or CacheStorageConfig()
