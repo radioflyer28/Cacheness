@@ -79,7 +79,12 @@ except ImportError:
     except ImportError:
         PSYCOPG_AVAILABLE = False
 
-from .base import MetadataBackend, NamespaceInfo, validate_namespace_id, DEFAULT_NAMESPACE  # noqa: E402
+from .base import (
+    MetadataBackend,
+    NamespaceInfo,
+    validate_namespace_id,
+    DEFAULT_NAMESPACE,
+)  # noqa: E402
 
 # JSON serialization utilities
 try:
