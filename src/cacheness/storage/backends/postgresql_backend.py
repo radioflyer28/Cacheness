@@ -79,12 +79,12 @@ except ImportError:
     except ImportError:
         PSYCOPG_AVAILABLE = False
 
-from .base import (
+from .base import (  # noqa: E402
     MetadataBackend,
     NamespaceInfo,
     validate_namespace_id,
     DEFAULT_NAMESPACE,
-)  # noqa: E402
+)
 
 # JSON serialization utilities
 try:
@@ -222,6 +222,7 @@ class PostgresBackend(MetadataBackend):
         pool_recycle: int = 3600,
         echo: bool = False,
         table_prefix: str = "",
+        namespace: str = DEFAULT_NAMESPACE,
     ):
         if not SQLALCHEMY_AVAILABLE:
             raise ImportError(
@@ -235,6 +236,7 @@ class PostgresBackend(MetadataBackend):
                 "Install with: pip install psycopg2-binary  OR  pip install psycopg[binary]"
             )
 
+        self._active_namespace = validate_namespace_id(namespace)
         self.connection_url = connection_url
         self.table_prefix = table_prefix
 
