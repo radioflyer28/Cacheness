@@ -278,6 +278,14 @@ class MetadataBackend(ABC):
     same type.
     """
 
+    @property
+    def active_namespace(self) -> str:
+        """Return the active namespace for this backend instance.
+
+        Defaults to DEFAULT_NAMESPACE if not set by subclass __init__.
+        """
+        return getattr(self, "_active_namespace", DEFAULT_NAMESPACE)
+
     @abstractmethod
     def load_metadata(self) -> Dict[str, Any]:
         """Load complete metadata structure."""
@@ -652,6 +660,10 @@ class CachedMetadataBackend(MetadataBackend):
         self.config = config
         self._lock = threading.RLock()
 
+        # Proxy the active namespace from the wrapped backend
+        if hasattr(wrapped_backend, "_active_namespace"):
+            self._active_namespace = wrapped_backend._active_namespace
+
         # Initialize memory cache layer if cachetools is available and enabled
         if CACHETOOLS_AVAILABLE and config.enable_memory_cache:
             self._memory_cache = create_entry_cache(
@@ -869,17 +881,44 @@ class CachedMetadataBackend(MetadataBackend):
         if hasattr(self.backend, "close"):
             self.backend.close()
 
+    # --- Namespace registry delegation to wrapped backend ---
+
+    def create_namespace(
+        self, namespace_id: str, display_name: str | None = None
+    ) -> NamespaceInfo:
+        return self.backend.create_namespace(namespace_id, display_name)
+
+    def drop_namespace(self, namespace_id: str) -> bool:
+        return self.backend.drop_namespace(namespace_id)
+
+    def list_namespaces(self) -> list:
+        return self.backend.list_namespaces()
+
+    def get_namespace(self, namespace_id: str):
+        return self.backend.get_namespace(namespace_id)
+
+    def get_schema_version(self, namespace_id: str = DEFAULT_NAMESPACE) -> int:
+        return self.backend.get_schema_version(namespace_id)
+
+    def set_schema_version(self, namespace_id: str, version: int) -> None:
+        return self.backend.set_schema_version(namespace_id, version)
+
+    def get_migrations(self) -> list:
+        return self.backend.get_migrations()
+
 
 class JsonBackend(MetadataBackend):
     """JSON file-based metadata backend with batching support."""
 
-    def __init__(self, metadata_file: Path):
+    def __init__(self, metadata_file: Path, namespace: str = DEFAULT_NAMESPACE):
         """
         Initialize JSON metadata backend.
 
         Args:
             metadata_file: Path to JSON metadata file
+            namespace: Active namespace for this backend instance
         """
+        self._active_namespace = validate_namespace_id(namespace)
         self.metadata_file = metadata_file
         self._lock = (
             threading.RLock()
@@ -1538,14 +1577,21 @@ class JsonBackend(MetadataBackend):
 class SqliteBackend(MetadataBackend):
     """SQLite database-based metadata backend using SQLAlchemy ORM."""
 
-    def __init__(self, db_file: str = "cache_metadata.db", echo: bool = False):
+    def __init__(
+        self,
+        db_file: str = "cache_metadata.db",
+        echo: bool = False,
+        namespace: str = DEFAULT_NAMESPACE,
+    ):
         """
         Initialize SQLite metadata backend.
 
         Args:
             db_file: Path to SQLite database file
             echo: Whether to echo SQL queries (for debugging)
+            namespace: Active namespace for this backend instance
         """
+        self._active_namespace = validate_namespace_id(namespace)
         if not SQLALCHEMY_AVAILABLE:
             raise ImportError(
                 "SQLAlchemy is required for SQLite backend. Install with: pip install sqlalchemy"
@@ -2457,6 +2503,7 @@ def create_metadata_backend(backend_type: str = "auto", **kwargs) -> MetadataBac
         backend_type: "auto", "sqlite", "json", "sqlite_memory", or "postgresql"
                      "auto" prefers SQLite (file-based) if available, falls back to in-memory SQLite, then JSON
         **kwargs: Backend-specific configuration including optional 'config' for caching
+                  and 'namespace' for multi-tenant namespace isolation
 
     Returns:
         MetadataBackend instance (potentially wrapped with caching)
@@ -2464,10 +2511,13 @@ def create_metadata_backend(backend_type: str = "auto", **kwargs) -> MetadataBac
     # Extract cache config if provided
     cache_config = kwargs.pop("config", None)
 
+    # Extract namespace (defaults to 'default' for backward compatibility)
+    namespace = kwargs.pop("namespace", DEFAULT_NAMESPACE)
+
     # Create the base backend
     if backend_type == "json":
         metadata_file = kwargs.get("metadata_file", Path("cache_metadata.json"))
-        backend = JsonBackend(metadata_file)
+        backend = JsonBackend(metadata_file, namespace=namespace)
     elif backend_type == "sqlite":
         if not SQLALCHEMY_AVAILABLE:
             raise ImportError(
@@ -2475,14 +2525,14 @@ def create_metadata_backend(backend_type: str = "auto", **kwargs) -> MetadataBac
             )
         db_file = kwargs.get("db_file", "cache_metadata.db")
         echo = kwargs.get("echo", False)
-        backend = SqliteBackend(db_file, echo)
+        backend = SqliteBackend(db_file, echo, namespace=namespace)
     elif backend_type == "sqlite_memory":
         if not SQLALCHEMY_AVAILABLE:
             raise ImportError(
                 "SQLAlchemy is required for in-memory SQLite backend but is not available. Install with: uv add sqlalchemy"
             )
         echo = kwargs.get("echo", False)
-        backend = SqliteBackend(":memory:", echo)  # In-memory SQLite database
+        backend = SqliteBackend(":memory:", echo, namespace=namespace)
     elif backend_type == "postgresql":
         # Import PostgresBackend from the storage backends
         try:
@@ -2504,6 +2554,7 @@ def create_metadata_backend(backend_type: str = "auto", **kwargs) -> MetadataBac
             pool_recycle=kwargs.get("pool_recycle", 3600),
             echo=kwargs.get("echo", False),
             table_prefix=kwargs.get("table_prefix", ""),
+            namespace=namespace,
         )
     elif backend_type == "auto":
         # Auto mode: prefer file-based SQLite > in-memory SQLite > JSON
@@ -2512,24 +2563,24 @@ def create_metadata_backend(backend_type: str = "auto", **kwargs) -> MetadataBac
                 # Try file-based SQLite first
                 db_file = kwargs.get("db_file", "cache_metadata.db")
                 echo = kwargs.get("echo", False)
-                backend = SqliteBackend(db_file, echo)
+                backend = SqliteBackend(db_file, echo, namespace=namespace)
             except Exception:
                 try:
                     # Fall back to in-memory SQLite if file-based fails
                     logger.warning("File-based SQLite failed, using in-memory SQLite")
                     echo = kwargs.get("echo", False)
-                    backend = SqliteBackend(":memory:", echo)
+                    backend = SqliteBackend(":memory:", echo, namespace=namespace)
                 except Exception:
                     # Final fallback to JSON
                     logger.warning("SQLite backends failed, falling back to JSON")
                     metadata_file = kwargs.get(
                         "metadata_file", Path("cache_metadata.json")
                     )
-                    backend = JsonBackend(metadata_file)
+                    backend = JsonBackend(metadata_file, namespace=namespace)
         else:
             # SQLAlchemy not available, use JSON
             metadata_file = kwargs.get("metadata_file", Path("cache_metadata.json"))
-            backend = JsonBackend(metadata_file)
+            backend = JsonBackend(metadata_file, namespace=namespace)
     else:
         raise ValueError(
             f"Unknown backend type: {backend_type}. Supported: 'auto', 'json', 'sqlite', 'sqlite_memory', 'postgresql'"

@@ -141,6 +141,7 @@ class UnifiedCache:
                 "json",
                 metadata_file=self.cache_dir / "cache_metadata.json",
                 config=self.config.metadata,
+                namespace=self.namespace,
             )
             self.actual_backend = "json"
 
@@ -149,12 +150,15 @@ class UnifiedCache:
                 "sqlite",
                 db_file=str(self.cache_dir / self.config.metadata.sqlite_db_file),
                 config=self.config.metadata,
+                namespace=self.namespace,
             )
             self.actual_backend = "sqlite"
 
         elif requested == "sqlite_memory":
             self.metadata_backend = create_metadata_backend(
-                "sqlite_memory", config=self.config.metadata
+                "sqlite_memory",
+                config=self.config.metadata,
+                namespace=self.namespace,
             )
             self.actual_backend = "sqlite_memory"
             logger.info("⚡ Using in-memory SQLite backend (no persistence)")
@@ -176,6 +180,7 @@ class UnifiedCache:
                 echo=opts.get("echo", False),
                 table_prefix=opts.get("table_prefix", ""),
                 config=self.config.metadata,
+                namespace=self.namespace,
             )
             self.actual_backend = "postgresql"
 
@@ -191,6 +196,7 @@ class UnifiedCache:
                     "sqlite",
                     db_file=str(self.cache_dir / self.config.metadata.sqlite_db_file),
                     config=self.config.metadata,
+                    namespace=self.namespace,
                 )
                 self.actual_backend = "sqlite"
                 logger.info(
@@ -206,6 +212,7 @@ class UnifiedCache:
             "json",
             metadata_file=self.cache_dir / "cache_metadata.json",
             config=self.config.metadata,
+            namespace=self.namespace,
         )
         self.actual_backend = "json"
 
