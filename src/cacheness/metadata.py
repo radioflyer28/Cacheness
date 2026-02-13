@@ -29,17 +29,83 @@ Usage:
 """
 
 import os
+import re
 import threading
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple, Callable
 
 import logging
 
 from .json_utils import dumps as json_dumps, loads as json_loads
 
 logger = logging.getLogger(__name__)
+
+# --- Namespace validation ---
+
+#: Regex pattern for valid namespace identifiers.
+#: Only lowercase alphanumeric and underscores, 1-48 chars.
+#: These IDs are used as table/file suffixes, so must be SQL-identifier-safe.
+NAMESPACE_ID_PATTERN = re.compile(r"^[a-z0-9_]{1,48}$")
+
+#: Default namespace ID. Maps to existing unsuffixed tables for backward compat.
+DEFAULT_NAMESPACE = "default"
+
+
+def validate_namespace_id(namespace_id: str) -> str:
+    """Validate and return a namespace identifier.
+
+    Namespace IDs are used as suffixes for table names and file names, so they
+    must be safe SQL identifiers.  Only lowercase alphanumeric characters and
+    underscores are allowed, 1-48 characters long.
+
+    Args:
+        namespace_id: The identifier to validate.
+
+    Returns:
+        The validated namespace_id (unchanged).
+
+    Raises:
+        ValueError: If the namespace_id doesn't match the required pattern.
+    """
+    if not isinstance(namespace_id, str):
+        raise ValueError(
+            f"Namespace ID must be a string, got {type(namespace_id).__name__}"
+        )
+    if not NAMESPACE_ID_PATTERN.match(namespace_id):
+        raise ValueError(
+            f"Invalid namespace ID {namespace_id!r}: must match "
+            f"{NAMESPACE_ID_PATTERN.pattern} (lowercase alphanumeric + "
+            f"underscore, 1-48 chars)"
+        )
+    return namespace_id
+
+
+@dataclass
+class NamespaceInfo:
+    """Information about a registered namespace.
+
+    Attributes:
+        namespace_id: Unique identifier used as table/file suffix.
+        display_name: Optional human-readable name.
+        schema_version: Current schema version for this namespace's tables.
+        created_at: When the namespace was registered.
+        signature: HMAC signature for integrity verification (optional).
+    """
+
+    namespace_id: str
+    display_name: str = ""
+    schema_version: int = 1
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    signature: Optional[str] = None
+
+
+#: Type alias for a schema migration step.
+#: Each migration is a tuple of (from_version, to_version, callable).
+#: The callable receives the backend instance and namespace_id.
+Migration = Tuple[int, int, Callable[["MetadataBackend", str], None]]
 
 # Try to import cachetools for entry caching
 try:
@@ -337,6 +403,167 @@ class MetadataBackend(ABC):
             flat.update(entry.get("metadata", {}))
             result.append(flat)
         return result
+
+    # --- Schema versioning ---
+
+    def get_schema_version(self, namespace_id: str = DEFAULT_NAMESPACE) -> int:
+        """Get the current schema version for a namespace.
+
+        Backends that support schema versioning should override this to read
+        the version from their persistent registry.  The default returns 0,
+        meaning "no version tracked yet" (pre-versioning database).
+
+        Args:
+            namespace_id: The namespace to query.
+
+        Returns:
+            The current schema version integer, or 0 if untracked.
+        """
+        return 0
+
+    def set_schema_version(self, namespace_id: str, version: int) -> None:
+        """Set the schema version for a namespace.
+
+        Backends that support schema versioning should override this to
+        persist the version in their registry.  The default is a no-op.
+
+        Args:
+            namespace_id: The namespace to update.
+            version: The new schema version.
+        """
+        pass
+
+    def get_migrations(self) -> List[Migration]:
+        """Return the ordered list of schema migrations for this backend.
+
+        Each migration is a ``(from_version, to_version, callable)`` tuple.
+        Migrations are applied sequentially: only migrations whose
+        ``from_version`` matches the current version are executed.
+
+        Subclasses should override this to provide backend-specific
+        migrations.  The default returns an empty list (no migrations).
+
+        Returns:
+            List of ``(from_version, to_version, callable)`` tuples.
+        """
+        return []
+
+    def run_migrations(self, namespace_id: str = DEFAULT_NAMESPACE) -> int:
+        """Run pending schema migrations for a namespace.
+
+        Finds the current schema version, then applies each migration whose
+        ``from_version`` matches, in order.  After each successful migration
+        the version is updated.
+
+        Args:
+            namespace_id: The namespace to migrate.
+
+        Returns:
+            The final schema version after all migrations.
+        """
+        current = self.get_schema_version(namespace_id)
+        for from_ver, to_ver, migrate_fn in self.get_migrations():
+            if current == from_ver:
+                logger.info(
+                    "Migrating namespace %r schema v%d -> v%d",
+                    namespace_id,
+                    from_ver,
+                    to_ver,
+                )
+                migrate_fn(self, namespace_id)
+                self.set_schema_version(namespace_id, to_ver)
+                current = to_ver
+        return current
+
+    # --- Namespace registry ---
+
+    def create_namespace(
+        self,
+        namespace_id: str,
+        display_name: str = "",
+    ) -> NamespaceInfo:
+        """Register a new namespace and create its backing tables/files.
+
+        The ``namespace_id`` must pass :func:`validate_namespace_id`.  The
+        ``'default'`` namespace is pre-registered (maps to existing unsuffixed
+        tables) and cannot be created again.
+
+        Subclasses that support namespaces must override this method to
+        create per-namespace tables/files and insert a registry row.
+
+        Args:
+            namespace_id: Unique identifier (``^[a-z0-9_]{1,48}$``).
+            display_name: Optional human-readable name.
+
+        Returns:
+            A :class:`NamespaceInfo` describing the new namespace.
+
+        Raises:
+            ValueError: If *namespace_id* is invalid or already exists.
+            NotImplementedError: If the backend does not support namespaces.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not support namespaces")
+
+    def drop_namespace(self, namespace_id: str) -> bool:
+        """Remove a namespace and all its data (tables, files, entries).
+
+        The ``'default'`` namespace cannot be dropped.
+
+        Subclasses that support namespaces must override this method to
+        drop per-namespace tables/files and remove the registry row.
+
+        Args:
+            namespace_id: The namespace to remove.
+
+        Returns:
+            True if the namespace existed and was removed.
+
+        Raises:
+            ValueError: If attempting to drop the ``'default'`` namespace.
+            NotImplementedError: If the backend does not support namespaces.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not support namespaces")
+
+    def list_namespaces(self) -> List[NamespaceInfo]:
+        """List all registered namespaces.
+
+        Subclasses that support namespaces should override this to read
+        from the registry.  The default returns a single ``'default'``
+        namespace to preserve backward compatibility.
+
+        Returns:
+            List of :class:`NamespaceInfo` objects.
+        """
+        return [
+            NamespaceInfo(
+                namespace_id=DEFAULT_NAMESPACE,
+                display_name="Default",
+                schema_version=self.get_schema_version(DEFAULT_NAMESPACE),
+            )
+        ]
+
+    def get_namespace(self, namespace_id: str) -> Optional[NamespaceInfo]:
+        """Get info for a specific namespace.
+
+        Default implementation searches :meth:`list_namespaces`.
+
+        Args:
+            namespace_id: The namespace to look up.
+
+        Returns:
+            :class:`NamespaceInfo` if found, else ``None``.
+        """
+        for ns in self.list_namespaces():
+            if ns.namespace_id == namespace_id:
+                return ns
+        return None
+
+    def namespace_exists(self, namespace_id: str) -> bool:
+        """Check whether a namespace is registered.
+
+        Default implementation delegates to :meth:`get_namespace`.
+        """
+        return self.get_namespace(namespace_id) is not None
 
     def close(self):
         """Close and clean up any resources (default implementation does nothing)."""

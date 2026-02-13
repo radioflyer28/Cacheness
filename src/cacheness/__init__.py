@@ -32,7 +32,13 @@ Quick Start:
 from .core import CacheConfig, UnifiedCache as cacheness, get_cache
 from .decorators import cached, cache_if
 from .handlers import ArrayHandler, HandlerRegistry, ObjectHandler
-from .metadata import JsonBackend, create_metadata_backend
+from .metadata import (
+    JsonBackend,
+    create_metadata_backend,
+    NamespaceInfo,  # noqa: F401
+    validate_namespace_id,  # noqa: F401
+    DEFAULT_NAMESPACE,  # noqa: F401
+)
 from .interfaces import CacheHandler  # Export interface for custom handlers
 
 # Import config validation and file loading (Phase 2.4)

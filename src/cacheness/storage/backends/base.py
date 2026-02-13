@@ -15,6 +15,16 @@ circular imports (``storage.backends.__init__`` imports concrete
 backends from ``cacheness.metadata``).
 """
 
-from cacheness.metadata import MetadataBackend
+from cacheness.metadata import (
+    MetadataBackend,
+    NamespaceInfo,
+    validate_namespace_id,
+    DEFAULT_NAMESPACE,
+)
 
-__all__ = ["MetadataBackend"]
+__all__ = [
+    "MetadataBackend",
+    "NamespaceInfo",
+    "validate_namespace_id",
+    "DEFAULT_NAMESPACE",
+]
