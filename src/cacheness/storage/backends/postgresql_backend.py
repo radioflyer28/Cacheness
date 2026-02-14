@@ -109,10 +109,13 @@ if SQLALCHEMY_AVAILABLE:
     # Create a separate base for PostgreSQL to avoid conflicts with SQLite models
     PostgresBase = declarative_base()
 
-    class PgCacheEntry(PostgresBase):
-        """PostgreSQL cache entry model."""
+    # ------------------------------------------------------------------
+    # Abstract mixin bases for the EntityName pattern (dynamic table
+    # names per namespace).  Concrete subclasses provide __tablename__.
+    # ------------------------------------------------------------------
 
-        __tablename__ = "cache_entries"
+    class PgCacheEntryMixin:
+        """Column definitions shared by all PG cache_entries tables."""
 
         cache_key = Column(String(16), primary_key=True)
         description = Column(String(500), default="", nullable=False)
@@ -133,19 +136,34 @@ if SQLALCHEMY_AVAILABLE:
         file_size = Column(Integer, default=0, nullable=False)
         file_hash = Column(String(16), nullable=True)
         entry_signature = Column(String(64), nullable=True)
+        s3_etag = Column(String(100), nullable=True)
 
-        # S3 ETag for S3-backed blob storage (separate from file_hash)
-        s3_etag = Column(String(100), nullable=True)  # S3 ETag (MD5 or multipart hash)
-
-        # Backend technical metadata
         object_type = Column(String(100), nullable=True)
         storage_format = Column(String(20), nullable=True)
         serializer = Column(String(20), nullable=True)
         compression_codec = Column(String(20), nullable=True)
         actual_path = Column(String(500), nullable=True)
 
-        # Cache key parameters (optional, only populated when store_full_metadata=True)
         cache_key_params = Column(Text, nullable=True)
+
+    class PgCacheStatsMixin:
+        """Column definitions shared by all PG cache_stats tables."""
+
+        id = Column(Integer, primary_key=True, default=1)
+        cache_hits = Column(Integer, default=0, nullable=False)
+        cache_misses = Column(Integer, default=0, nullable=False)
+        total_entries = Column(Integer, default=0, nullable=False)
+        total_size_bytes = Column(Integer, default=0, nullable=False)
+        last_cleanup_at = Column(DateTime(timezone=True), nullable=True)
+
+    # ------------------------------------------------------------------
+    # Default-namespace concrete models (backward-compatible table names)
+    # ------------------------------------------------------------------
+
+    class PgCacheEntry(PgCacheEntryMixin, PostgresBase):
+        """PostgreSQL cache entry model (default namespace)."""
+
+        __tablename__ = "cache_entries"
 
         __table_args__ = (
             Index("idx_pg_list_entries", desc("created_at")),
@@ -155,17 +173,66 @@ if SQLALCHEMY_AVAILABLE:
             Index("idx_pg_prefix", "prefix"),
         )
 
-    class PgCacheStats(PostgresBase):
-        """PostgreSQL cache statistics model."""
+    class PgCacheStats(PgCacheStatsMixin, PostgresBase):
+        """PostgreSQL cache statistics model (default namespace)."""
 
         __tablename__ = "cache_stats"
 
-        id = Column(Integer, primary_key=True, default=1)
-        cache_hits = Column(Integer, default=0, nullable=False)
-        cache_misses = Column(Integer, default=0, nullable=False)
-        total_entries = Column(Integer, default=0, nullable=False)
-        total_size_bytes = Column(Integer, default=0, nullable=False)
-        last_cleanup_at = Column(DateTime(timezone=True), nullable=True)
+    # ------------------------------------------------------------------
+    # Model factory — EntityName pattern (Mike Bayer's recommendation)
+    # ------------------------------------------------------------------
+
+    _pg_ns_model_cache: Dict[str, tuple] = {}
+
+    def _get_pg_namespace_models(
+        namespace_id: str, base: type = PostgresBase
+    ) -> "tuple[type, type]":
+        """Return ``(PgCacheEntryModel, PgCacheStatsModel)`` for *namespace_id*.
+
+        For ``'default'`` the canonical ``PgCacheEntry`` / ``PgCacheStats``
+        classes are returned.  For other namespaces, dynamic subclasses
+        with ``cache_entries_{namespace_id}`` / ``cache_stats_{namespace_id}``
+        table names are created once and cached.
+        """
+        if namespace_id in _pg_ns_model_cache:
+            return _pg_ns_model_cache[namespace_id]
+
+        if namespace_id == DEFAULT_NAMESPACE:
+            pair = (PgCacheEntry, PgCacheStats)
+            _pg_ns_model_cache[namespace_id] = pair
+            return pair
+
+        entries_table = f"cache_entries_{namespace_id}"
+        stats_table = f"cache_stats_{namespace_id}"
+
+        NsEntry = type(
+            f"PgCacheEntry_{namespace_id}",
+            (PgCacheEntryMixin, base),
+            {
+                "__tablename__": entries_table,
+                "__table_args__": (
+                    Index(f"idx_pg_{namespace_id}_list_entries", desc("created_at")),
+                    Index(f"idx_pg_{namespace_id}_cleanup", "created_at"),
+                    Index(
+                        f"idx_pg_{namespace_id}_size_mgmt", "file_size", "created_at"
+                    ),
+                    Index(f"idx_pg_{namespace_id}_data_type", "data_type"),
+                    Index(f"idx_pg_{namespace_id}_prefix", "prefix"),
+                ),
+            },
+        )
+
+        NsStats = type(
+            f"PgCacheStats_{namespace_id}",
+            (PgCacheStatsMixin, base),
+            {
+                "__tablename__": stats_table,
+            },
+        )
+
+        pair = (NsEntry, NsStats)
+        _pg_ns_model_cache[namespace_id] = pair
+        return pair
 
     class PgCacheNamespace(PostgresBase):
         """PostgreSQL namespace registry model."""
@@ -259,6 +326,18 @@ class PostgresBackend(MetadataBackend):
 
         # Create tables (including cacheness_namespaces)
         PostgresBase.metadata.create_all(self.engine)
+
+        # Resolve namespace-specific ORM models (EntityName pattern)
+        self._PgCacheEntry, self._PgCacheStats = _get_pg_namespace_models(
+            self._active_namespace
+        )
+        self._entries_table = self._PgCacheEntry.__tablename__
+        self._stats_table = self._PgCacheStats.__tablename__
+
+        # For non-default namespaces, ensure their tables exist too
+        if self._active_namespace != DEFAULT_NAMESPACE:
+            self._PgCacheEntry.__table__.create(self.engine, checkfirst=True)
+            self._PgCacheStats.__table__.create(self.engine, checkfirst=True)
 
         # Ensure the namespace registry has a 'default' entry
         self._ensure_namespace_registry()
@@ -568,11 +647,11 @@ class PostgresBackend(MetadataBackend):
         with self.SessionLocal() as session:
             try:
                 stats = session.execute(
-                    select(PgCacheStats).where(PgCacheStats.id == 1)
+                    select(self._PgCacheStats).where(self._PgCacheStats.id == 1)
                 ).scalar_one_or_none()
 
                 if not stats:
-                    stats = PgCacheStats(id=1)
+                    stats = self._PgCacheStats(id=1)
                     session.add(stats)
                     session.commit()
             except Exception as e:
@@ -582,7 +661,7 @@ class PostgresBackend(MetadataBackend):
     def load_metadata(self) -> Dict[str, Any]:
         """Load complete metadata (mainly for compatibility)."""
         with self.SessionLocal() as session:
-            entries = session.execute(select(PgCacheEntry)).scalars().all()
+            entries = session.execute(select(self._PgCacheEntry)).scalars().all()
 
             result = {"entries": {}, "stats": self.get_stats()}
             for entry in entries:
@@ -608,7 +687,9 @@ class PostgresBackend(MetadataBackend):
         """Get cache entry metadata."""
         with self.SessionLocal() as session:
             entry = session.execute(
-                select(PgCacheEntry).where(PgCacheEntry.cache_key == cache_key)
+                select(self._PgCacheEntry).where(
+                    self._PgCacheEntry.cache_key == cache_key
+                )
             ).scalar_one_or_none()
 
             if entry is None:
@@ -693,14 +774,14 @@ class PostgresBackend(MetadataBackend):
 
         # Check if entry exists
         existing = session.execute(
-            select(PgCacheEntry).where(PgCacheEntry.cache_key == cache_key)
+            select(self._PgCacheEntry).where(self._PgCacheEntry.cache_key == cache_key)
         ).scalar_one_or_none()
 
         if existing:
             # Update existing entry
             session.execute(
-                update(PgCacheEntry)
-                .where(PgCacheEntry.cache_key == cache_key)
+                update(self._PgCacheEntry)
+                .where(self._PgCacheEntry.cache_key == cache_key)
                 .values(
                     description=entry_data.get("description", ""),
                     data_type=entry_data.get("data_type", "unknown"),
@@ -721,7 +802,7 @@ class PostgresBackend(MetadataBackend):
             )
         else:
             # Insert new entry
-            entry = PgCacheEntry(
+            entry = self._PgCacheEntry(
                 cache_key=cache_key,
                 description=entry_data.get("description", ""),
                 data_type=entry_data.get("data_type", "unknown"),
@@ -808,7 +889,9 @@ class PostgresBackend(MetadataBackend):
             with self.SessionLocal() as session:
                 try:
                     result = session.execute(
-                        delete(PgCacheEntry).where(PgCacheEntry.cache_key == cache_key)
+                        delete(self._PgCacheEntry).where(
+                            self._PgCacheEntry.cache_key == cache_key
+                        )
                     )
                     session.commit()
                     return result.rowcount > 0
@@ -836,7 +919,9 @@ class PostgresBackend(MetadataBackend):
                 try:
                     # Check if entry exists
                     entry = session.execute(
-                        select(PgCacheEntry).where(PgCacheEntry.cache_key == cache_key)
+                        select(self._PgCacheEntry).where(
+                            self._PgCacheEntry.cache_key == cache_key
+                        )
                     ).scalar_one_or_none()
 
                     if not entry:
@@ -877,14 +962,15 @@ class PostgresBackend(MetadataBackend):
     def iter_entry_summaries(self) -> List[Dict[str, Any]]:
         """Return lightweight flat entry dicts — raw SQL, no ORM hydration."""
         with self.SessionLocal() as session:
+            tbl = self._entries_table
             rows = session.execute(
                 text(
-                    "SELECT cache_key, data_type, description, prefix, "
-                    "       file_size, created_at, accessed_at, "
-                    "       object_type, storage_format, serializer, "
-                    "       compression_codec, actual_path, "
-                    "       file_hash, entry_signature "
-                    "FROM cache_entries"
+                    f"SELECT cache_key, data_type, description, prefix, "
+                    f"       file_size, created_at, accessed_at, "
+                    f"       object_type, storage_format, serializer, "
+                    f"       compression_codec, actual_path, "
+                    f"       file_hash, entry_signature "
+                    f'FROM "{tbl}"'
                 )
             ).fetchall()
             result = []
@@ -920,7 +1006,9 @@ class PostgresBackend(MetadataBackend):
         with self.SessionLocal() as session:
             entries = (
                 session.execute(
-                    select(PgCacheEntry).order_by(desc(PgCacheEntry.created_at))
+                    select(self._PgCacheEntry).order_by(
+                        desc(self._PgCacheEntry.created_at)
+                    )
                 )
                 .scalars()
                 .all()
@@ -932,7 +1020,7 @@ class PostgresBackend(MetadataBackend):
         """Get cache statistics."""
         with self.SessionLocal() as session:
             stats = session.execute(
-                select(PgCacheStats).where(PgCacheStats.id == 1)
+                select(self._PgCacheStats).where(self._PgCacheStats.id == 1)
             ).scalar_one_or_none()
 
             if stats is None:
@@ -958,8 +1046,8 @@ class PostgresBackend(MetadataBackend):
         with self.SessionLocal() as session:
             try:
                 session.execute(
-                    update(PgCacheEntry)
-                    .where(PgCacheEntry.cache_key == cache_key)
+                    update(self._PgCacheEntry)
+                    .where(self._PgCacheEntry.cache_key == cache_key)
                     .values(accessed_at=datetime.now(timezone.utc))
                 )
                 session.commit()
@@ -972,9 +1060,9 @@ class PostgresBackend(MetadataBackend):
         with self.SessionLocal() as session:
             try:
                 session.execute(
-                    update(PgCacheStats)
-                    .where(PgCacheStats.id == 1)
-                    .values(cache_hits=PgCacheStats.cache_hits + 1)
+                    update(self._PgCacheStats)
+                    .where(self._PgCacheStats.id == 1)
+                    .values(cache_hits=self._PgCacheStats.cache_hits + 1)
                 )
                 session.commit()
             except Exception as e:
@@ -986,9 +1074,9 @@ class PostgresBackend(MetadataBackend):
         with self.SessionLocal() as session:
             try:
                 session.execute(
-                    update(PgCacheStats)
-                    .where(PgCacheStats.id == 1)
-                    .values(cache_misses=PgCacheStats.cache_misses + 1)
+                    update(self._PgCacheStats)
+                    .where(self._PgCacheStats.id == 1)
+                    .values(cache_misses=self._PgCacheStats.cache_misses + 1)
                 )
                 session.commit()
             except Exception as e:
@@ -1011,21 +1099,23 @@ class PostgresBackend(MetadataBackend):
                     count = (
                         session.execute(
                             select(func.count())
-                            .select_from(PgCacheEntry)
-                            .where(PgCacheEntry.created_at < cutoff)
+                            .select_from(self._PgCacheEntry)
+                            .where(self._PgCacheEntry.created_at < cutoff)
                         ).scalar()
                         or 0
                     )
 
                     if count > 0:
                         session.execute(
-                            delete(PgCacheEntry).where(PgCacheEntry.created_at < cutoff)
+                            delete(self._PgCacheEntry).where(
+                                self._PgCacheEntry.created_at < cutoff
+                            )
                         )
 
                         # Update last cleanup timestamp
                         session.execute(
-                            update(PgCacheStats)
-                            .where(PgCacheStats.id == 1)
+                            update(self._PgCacheStats)
+                            .where(self._PgCacheStats.id == 1)
                             .values(last_cleanup_at=datetime.now(timezone.utc))
                         )
 
@@ -1047,10 +1137,9 @@ class PostgresBackend(MetadataBackend):
             with self.SessionLocal() as session:
                 try:
                     # Get current total size
+                    CE = self._PgCacheEntry
                     result = session.execute(
-                        select(func.sum(PgCacheEntry.file_size)).select_from(
-                            PgCacheEntry
-                        )
+                        select(func.sum(CE.file_size)).select_from(CE)
                     )
                     total_size_bytes = result.scalar() or 0
                     total_size_mb = total_size_bytes / (1024 * 1024)
@@ -1067,10 +1156,10 @@ class PostgresBackend(MetadataBackend):
                     # Get entries sorted by accessed_at (oldest first) with actual_path
                     entries_to_delete = session.execute(
                         select(
-                            PgCacheEntry.cache_key,
-                            PgCacheEntry.file_size,
-                            PgCacheEntry.actual_path,
-                        ).order_by(PgCacheEntry.accessed_at.asc())
+                            CE.cache_key,
+                            CE.file_size,
+                            CE.actual_path,
+                        ).order_by(CE.accessed_at.asc())
                     ).all()
 
                     # Calculate which entries to delete to reach target
@@ -1089,15 +1178,15 @@ class PostgresBackend(MetadataBackend):
                         # Delete the selected entries
                         removed_keys = [e["cache_key"] for e in removed_entries]
                         session.execute(
-                            delete(PgCacheEntry).where(
-                                PgCacheEntry.cache_key.in_(removed_keys)
+                            delete(self._PgCacheEntry).where(
+                                self._PgCacheEntry.cache_key.in_(removed_keys)
                             )
                         )
 
                         # Update last cleanup timestamp
                         session.execute(
-                            update(PgCacheStats)
-                            .where(PgCacheStats.id == 1)
+                            update(self._PgCacheStats)
+                            .where(self._PgCacheStats.id == 1)
                             .values(last_cleanup_at=datetime.now(timezone.utc))
                         )
 
@@ -1123,17 +1212,17 @@ class PostgresBackend(MetadataBackend):
                 try:
                     count = (
                         session.execute(
-                            select(func.count()).select_from(PgCacheEntry)
+                            select(func.count()).select_from(self._PgCacheEntry)
                         ).scalar()
                         or 0
                     )
 
-                    session.execute(delete(PgCacheEntry))
+                    session.execute(delete(self._PgCacheEntry))
 
                     # Reset stats
                     session.execute(
-                        update(PgCacheStats)
-                        .where(PgCacheStats.id == 1)
+                        update(self._PgCacheStats)
+                        .where(self._PgCacheStats.id == 1)
                         .values(
                             cache_hits=0,
                             cache_misses=0,

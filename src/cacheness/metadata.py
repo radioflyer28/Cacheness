@@ -141,90 +141,135 @@ try:
     # Create declarative base
     Base = declarative_base()
 
-    class CacheEntry(Base):
-        """SQLAlchemy model for cache entry metadata."""
+    # ------------------------------------------------------------------
+    # Abstract mixin bases for the EntityName pattern (dynamic table
+    # names per namespace).  Concrete subclasses provide __tablename__.
+    # ------------------------------------------------------------------
 
-        __tablename__ = "cache_entries"
+    class CacheEntryMixin:
+        """Column definitions shared by all cache_entries tables."""
 
         cache_key = Column(String(16), primary_key=True)
         description = Column(String(500), default="", nullable=False)
-        # Remove individual indexes - will be covered by composite indexes
-        data_type = Column(String(20), nullable=False)  # Removed index=True
-        prefix = Column(String(100), default="", nullable=False)  # Removed index=True
+        data_type = Column(String(20), nullable=False)
+        prefix = Column(String(100), default="", nullable=False)
 
-        # Timestamps - no individual indexes, use composite indexes only
         created_at = Column(
             DateTime(timezone=True),
             default=lambda: datetime.now(timezone.utc),
             nullable=False,
-        )  # Removed index=True
+        )
         accessed_at = Column(
             DateTime(timezone=True),
             default=lambda: datetime.now(timezone.utc),
             nullable=False,
-        )  # Removed index=True
-
-        # File info - no individual index, use composite
-        file_size = Column(Integer, default=0, nullable=False)  # Removed index=True
-
-        # Cache integrity verification
-        file_hash = Column(String(16), nullable=True)  # XXH3_64 hash (16 hex chars)
-
-        # Entry signature for metadata integrity protection
-        entry_signature = Column(
-            String(64), nullable=True
-        )  # HMAC-SHA256 hex (64 chars)
-
-        # S3 ETag for S3-backed blob storage (separate from file_hash)
-        s3_etag = Column(String(100), nullable=True)  # S3 ETag (MD5 or multipart hash)
-
-        # Backend technical metadata (previously stored in metadata_json)
-        object_type = Column(String(100), nullable=True)  # e.g., "<class 'int'>"
-        storage_format = Column(String(20), nullable=True)  # e.g., "pickle", "parquet"
-        serializer = Column(String(20), nullable=True)  # e.g., "pickle", "dill"
-        compression_codec = Column(String(20), nullable=True)  # e.g., "zstd", "lz4"
-        actual_path = Column(String(500), nullable=True)  # Full path to cache file
-
-        # Original cache key parameters - only store, don't index (rarely queried)
-        # Only populated when store_full_metadata=True config option is enabled
-        cache_key_params = Column(
-            Text, nullable=True
-        )  # JSON-serialized kwargs used for cache key
-
-        # User metadata dict - simple key-value metadata for filtering/querying
-        # Raw values stored for easy JSON_EXTRACT queries (not hashed like cache_key_params)
-        metadata_dict = Column(
-            Text, nullable=True
-        )  # JSON dict for query_meta() filtering
-
-        # Optimized composite indexes for actual query patterns only
-        __table_args__ = (
-            # PRIMARY: List entries by creation time (most common - list_entries)
-            Index("idx_list_entries", desc("created_at")),
-            # CLEANUP: TTL-based cleanup operations
-            Index("idx_cleanup", "created_at"),
-            # SIZE MANAGEMENT: Combined file size + time for cache management
-            Index("idx_size_mgmt", "file_size", "created_at"),
-            # STATS: Data type for statistics (if needed)
-            Index("idx_data_type", "data_type"),
         )
 
-    class CacheStats(Base):
-        """SQLAlchemy model for cache statistics with minimal indexing."""
+        file_size = Column(Integer, default=0, nullable=False)
+        file_hash = Column(String(16), nullable=True)
+        entry_signature = Column(String(64), nullable=True)
+        s3_etag = Column(String(100), nullable=True)
 
-        __tablename__ = "cache_stats"
+        object_type = Column(String(100), nullable=True)
+        storage_format = Column(String(20), nullable=True)
+        serializer = Column(String(20), nullable=True)
+        compression_codec = Column(String(20), nullable=True)
+        actual_path = Column(String(500), nullable=True)
+
+        cache_key_params = Column(Text, nullable=True)
+        metadata_dict = Column(Text, nullable=True)
+
+    class CacheStatsMixin:
+        """Column definitions shared by all cache_stats tables."""
 
         id = Column(Integer, primary_key=True, default=1)
-        # Remove individual indexes - stats table is tiny and rarely queried
-        cache_hits = Column(Integer, default=0, nullable=False)  # Removed index=True
-        cache_misses = Column(Integer, default=0, nullable=False)  # Removed index=True
+        cache_hits = Column(Integer, default=0, nullable=False)
+        cache_misses = Column(Integer, default=0, nullable=False)
         last_updated = Column(
             DateTime(timezone=True),
             default=lambda: datetime.now(timezone.utc),
             nullable=False,
-        )  # Removed index=True
+        )
 
-        # No composite indexes needed - single row table
+    # ------------------------------------------------------------------
+    # Default-namespace concrete models (backward-compatible table names)
+    # ------------------------------------------------------------------
+
+    class CacheEntry(CacheEntryMixin, Base):
+        """SQLAlchemy model for cache entry metadata (default namespace)."""
+
+        __tablename__ = "cache_entries"
+
+        __table_args__ = (
+            Index("idx_list_entries", desc("created_at")),
+            Index("idx_cleanup", "created_at"),
+            Index("idx_size_mgmt", "file_size", "created_at"),
+            Index("idx_data_type", "data_type"),
+        )
+
+    class CacheStats(CacheStatsMixin, Base):
+        """SQLAlchemy model for cache statistics (default namespace)."""
+
+        __tablename__ = "cache_stats"
+
+    # ------------------------------------------------------------------
+    # Model factory — EntityName pattern (Mike Bayer's recommendation)
+    # ------------------------------------------------------------------
+    # For each non-default namespace we dynamically create ORM classes
+    # with per-namespace __tablename__ using ``type()``.  Results are
+    # cached so that each namespace only produces one class pair.
+    # ------------------------------------------------------------------
+
+    _ns_model_cache: Dict[str, tuple] = {}
+
+    def _get_namespace_models(
+        namespace_id: str, base: type = Base
+    ) -> "tuple[type, type]":
+        """Return ``(CacheEntryModel, CacheStatsModel)`` for *namespace_id*.
+
+        For the ``'default'`` namespace the canonical ``CacheEntry`` /
+        ``CacheStats`` classes are returned (unchanged table names).
+
+        For any other namespace, dynamic subclasses with table names
+        ``cache_entries_{namespace_id}`` / ``cache_stats_{namespace_id}``
+        are created once and cached.
+        """
+        if namespace_id in _ns_model_cache:
+            return _ns_model_cache[namespace_id]
+
+        if namespace_id == DEFAULT_NAMESPACE:
+            pair = (CacheEntry, CacheStats)
+            _ns_model_cache[namespace_id] = pair
+            return pair
+
+        entries_table = f"cache_entries_{namespace_id}"
+        stats_table = f"cache_stats_{namespace_id}"
+
+        NsEntry = type(
+            f"CacheEntry_{namespace_id}",
+            (CacheEntryMixin, base),
+            {
+                "__tablename__": entries_table,
+                "__table_args__": (
+                    Index(f"idx_{namespace_id}_list_entries", desc("created_at")),
+                    Index(f"idx_{namespace_id}_cleanup", "created_at"),
+                    Index(f"idx_{namespace_id}_size_mgmt", "file_size", "created_at"),
+                    Index(f"idx_{namespace_id}_data_type", "data_type"),
+                ),
+            },
+        )
+
+        NsStats = type(
+            f"CacheStats_{namespace_id}",
+            (CacheStatsMixin, base),
+            {
+                "__tablename__": stats_table,
+            },
+        )
+
+        pair = (NsEntry, NsStats)
+        _ns_model_cache[namespace_id] = pair
+        return pair
 
     class CacheNamespace(Base):
         """SQLAlchemy model for the namespace registry.
@@ -254,15 +299,25 @@ except ImportError:
     logger.warning("SQLAlchemy not available, SQLite backend will not work")
 
     # Define dummy classes to avoid runtime errors
-    class CacheEntry:
+    class CacheEntryMixin:  # type: ignore[no-redef]
         pass
 
-    class CacheStats:
+    class CacheStatsMixin:  # type: ignore[no-redef]
+        pass
+
+    class CacheEntry:  # type: ignore[no-redef]
+        pass
+
+    class CacheStats:  # type: ignore[no-redef]
         pass
 
     class CacheNamespace:  # type: ignore[no-redef]
         pass
 
+    def _get_namespace_models(namespace_id: str, base: type = None) -> tuple:  # type: ignore[no-redef]
+        return (CacheEntry, CacheStats)
+
+    _ns_model_cache: Dict[str, tuple] = {}
     Base = None
 
 
@@ -915,19 +970,26 @@ class JsonBackend(MetadataBackend):
         Initialize JSON metadata backend.
 
         Args:
-            metadata_file: Path to JSON metadata file
+            metadata_file: Path to the *default* namespace's JSON metadata file.
+                Non-default namespaces automatically resolve to a
+                ``{namespace_id}_metadata.json`` file in the same directory.
             namespace: Active namespace for this backend instance
         """
         self._active_namespace = validate_namespace_id(namespace)
-        self.metadata_file = metadata_file
+        # Store the root metadata file for _metadata_file_for_namespace()
+        self._root_metadata_file = Path(metadata_file)
+        # Resolve to the namespace-specific file (default → metadata_file as-is)
+        self.metadata_file = self._metadata_file_for_namespace(namespace)
         self._lock = (
             threading.RLock()
         )  # Use RLock to allow reentrant calls (cleanup_by_size -> get_stats)
         self._metadata = self._load_from_disk()
 
         # --- Namespace registry ---
-        # Registry lives in the same directory as the metadata file.
-        self._registry_file = self.metadata_file.parent / "cacheness_namespaces.json"
+        # Registry lives in the same directory as the root metadata file.
+        self._registry_file = (
+            self._root_metadata_file.parent / "cacheness_namespaces.json"
+        )
         self._ensure_namespace_registry()
 
     def _load_from_disk(self) -> Dict[str, Any]:
@@ -1396,13 +1458,14 @@ class JsonBackend(MetadataBackend):
     def _metadata_file_for_namespace(self, namespace_id: str) -> Path:
         """Return the metadata file path for a given namespace.
 
-        The 'default' namespace maps to the existing ``metadata_file`` (no
+        The 'default' namespace maps to the root ``metadata_file`` (no
         suffix) for backward compatibility.  Other namespaces get a
         ``{namespace_id}_metadata.json`` file in the same directory.
         """
+        root = self._root_metadata_file
         if namespace_id == DEFAULT_NAMESPACE:
-            return self.metadata_file
-        return self.metadata_file.parent / f"{namespace_id}_metadata.json"
+            return root
+        return root.parent / f"{namespace_id}_metadata.json"
 
     # --- Schema versioning overrides ---
 
@@ -1656,6 +1719,18 @@ class SqliteBackend(MetadataBackend):
 
         # Create tables (including cacheness_namespaces registry)
         Base.metadata.create_all(self.engine)
+
+        # Resolve namespace-specific ORM models (EntityName pattern)
+        self._CacheEntry, self._CacheStats = _get_namespace_models(
+            self._active_namespace
+        )
+        self._entries_table = self._CacheEntry.__tablename__
+        self._stats_table = self._CacheStats.__tablename__
+
+        # For non-default namespaces, ensure their tables exist too
+        if self._active_namespace != DEFAULT_NAMESPACE:
+            self._CacheEntry.__table__.create(self.engine, checkfirst=True)
+            self._CacheStats.__table__.create(self.engine, checkfirst=True)
 
         # Run formal schema versioning migrations
         self._ensure_namespace_registry()
@@ -1958,22 +2033,22 @@ class SqliteBackend(MetadataBackend):
         """Initialize cache stats if not exists."""
         with self.SessionLocal() as session:
             stats = session.execute(
-                select(CacheStats).where(CacheStats.id == 1)
+                select(self._CacheStats).where(self._CacheStats.id == 1)
             ).scalar_one_or_none()
 
             if not stats:
-                stats = CacheStats(id=1)
+                stats = self._CacheStats(id=1)
                 session.add(stats)
                 session.commit()
 
     def _get_stats_row(self, session) -> "CacheStats":
         """Get the single stats row."""
         stats = session.execute(
-            select(CacheStats).where(CacheStats.id == 1)
+            select(self._CacheStats).where(self._CacheStats.id == 1)
         ).scalar_one_or_none()
 
         if not stats:
-            stats = CacheStats(id=1)
+            stats = self._CacheStats(id=1)
             session.add(stats)
             session.commit()
         return stats
@@ -1983,7 +2058,7 @@ class SqliteBackend(MetadataBackend):
         with self.SessionLocal() as session:
             # Single optimized query - get entry using columns only
             entry = session.execute(
-                select(CacheEntry).where(CacheEntry.cache_key == cache_key)
+                select(self._CacheEntry).where(self._CacheEntry.cache_key == cache_key)
             ).scalar_one_or_none()
 
             if not entry:
@@ -2098,9 +2173,10 @@ class SqliteBackend(MetadataBackend):
             # Use efficient INSERT OR REPLACE with dedicated columns - zero JSON overhead
             from sqlalchemy import text
 
+            tbl = self._entries_table
             session.execute(
-                text("""
-                    INSERT OR REPLACE INTO cache_entries 
+                text(f"""
+                    INSERT OR REPLACE INTO "{tbl}"
                     (cache_key, description, data_type, prefix, file_size, 
                      file_hash, entry_signature, s3_etag, cache_key_params, metadata_dict,
                      object_type, storage_format, serializer, compression_codec, actual_path,
@@ -2138,7 +2214,7 @@ class SqliteBackend(MetadataBackend):
             # Delete cache entry - custom metadata records will cascade delete automatically
             # due to ondelete="CASCADE" on the cache_key foreign key
             result = session.execute(
-                delete(CacheEntry).where(CacheEntry.cache_key == cache_key)
+                delete(self._CacheEntry).where(self._CacheEntry.cache_key == cache_key)
             )
             session.commit()
             return result.rowcount > 0
@@ -2160,7 +2236,7 @@ class SqliteBackend(MetadataBackend):
         with self._lock, self.SessionLocal() as session:
             # Check if entry exists
             entry = session.execute(
-                select(CacheEntry).where(CacheEntry.cache_key == cache_key)
+                select(self._CacheEntry).where(self._CacheEntry.cache_key == cache_key)
             ).scalar_one_or_none()
 
             if not entry:
@@ -2197,14 +2273,15 @@ class SqliteBackend(MetadataBackend):
         from sqlalchemy import text
 
         with self.SessionLocal() as session:
+            tbl = self._entries_table
             rows = session.execute(
                 text(
-                    "SELECT cache_key, data_type, description, prefix, "
-                    "       file_size, created_at, accessed_at, "
-                    "       object_type, storage_format, serializer, "
-                    "       compression_codec, actual_path, "
-                    "       file_hash, entry_signature "
-                    "FROM cache_entries"
+                    f"SELECT cache_key, data_type, description, prefix, "
+                    f"       file_size, created_at, accessed_at, "
+                    f"       object_type, storage_format, serializer, "
+                    f"       compression_codec, actual_path, "
+                    f"       file_hash, entry_signature "
+                    f'FROM "{tbl}"'
                 )
             ).fetchall()
             result = []
@@ -2242,7 +2319,7 @@ class SqliteBackend(MetadataBackend):
             # Use a single optimized query to get all data at once
             entries = (
                 session.execute(
-                    select(CacheEntry).order_by(desc(CacheEntry.created_at))
+                    select(self._CacheEntry).order_by(desc(self._CacheEntry.created_at))
                 )
                 .scalars()
                 .all()
@@ -2300,20 +2377,19 @@ class SqliteBackend(MetadataBackend):
         """Get cache statistics using SQL aggregates (no full table scan)."""
         with self.SessionLocal() as session:
             # Single aggregation query — no Python-side iteration
+            CE = self._CacheEntry
             row = session.execute(
                 select(
-                    func.count(CacheEntry.cache_key).label("total"),
-                    func.coalesce(func.sum(CacheEntry.file_size), 0).label(
-                        "total_size"
-                    ),
+                    func.count(CE.cache_key).label("total"),
+                    func.coalesce(func.sum(CE.file_size), 0).label("total_size"),
                     func.count(
                         case(
-                            (CacheEntry.data_type == "dataframe", 1),
+                            (CE.data_type == "dataframe", 1),
                         )
                     ).label("dataframe_count"),
                     func.count(
                         case(
-                            (CacheEntry.data_type == "array", 1),
+                            (CE.data_type == "array", 1),
                         )
                     ).label("array_count"),
                 )
@@ -2343,8 +2419,8 @@ class SqliteBackend(MetadataBackend):
         """Update last access time for cache entry."""
         with self._lock, self.SessionLocal() as session:
             session.execute(
-                update(CacheEntry)
-                .where(CacheEntry.cache_key == cache_key)
+                update(self._CacheEntry)
+                .where(self._CacheEntry.cache_key == cache_key)
                 .values(accessed_at=datetime.now(timezone.utc))
             )
             session.commit()
@@ -2353,10 +2429,10 @@ class SqliteBackend(MetadataBackend):
         """Increment cache hits counter."""
         with self._lock, self.SessionLocal() as session:
             session.execute(
-                update(CacheStats)
-                .where(CacheStats.id == 1)
+                update(self._CacheStats)
+                .where(self._CacheStats.id == 1)
                 .values(
-                    cache_hits=CacheStats.cache_hits + 1,
+                    cache_hits=self._CacheStats.cache_hits + 1,
                     last_updated=datetime.now(timezone.utc),
                 )
             )
@@ -2366,10 +2442,10 @@ class SqliteBackend(MetadataBackend):
         """Increment cache misses counter."""
         with self._lock, self.SessionLocal() as session:
             session.execute(
-                update(CacheStats)
-                .where(CacheStats.id == 1)
+                update(self._CacheStats)
+                .where(self._CacheStats.id == 1)
                 .values(
-                    cache_misses=CacheStats.cache_misses + 1,
+                    cache_misses=self._CacheStats.cache_misses + 1,
                     last_updated=datetime.now(timezone.utc),
                 )
             )
@@ -2383,7 +2459,9 @@ class SqliteBackend(MetadataBackend):
         with self._lock, self.SessionLocal() as session:
             # Delete expired entries
             result = session.execute(
-                delete(CacheEntry).where(CacheEntry.created_at < cutoff_time)
+                delete(self._CacheEntry).where(
+                    self._CacheEntry.created_at < cutoff_time
+                )
             )
             deleted_count = result.rowcount
             session.commit()
@@ -2393,9 +2471,8 @@ class SqliteBackend(MetadataBackend):
         """Remove least-recently-accessed entries until cache size drops to or below target."""
         with self._lock, self.SessionLocal() as session:
             # Get current total size
-            result = session.execute(
-                select(func.sum(CacheEntry.file_size)).select_from(CacheEntry)
-            )
+            CE = self._CacheEntry
+            result = session.execute(select(func.sum(CE.file_size)).select_from(CE))
             total_size_bytes = result.scalar() or 0
             total_size_mb = total_size_bytes / (1024 * 1024)
 
@@ -2407,9 +2484,9 @@ class SqliteBackend(MetadataBackend):
 
             # Get entries sorted by accessed_at (oldest first) with actual_path
             entries_to_delete = session.execute(
-                select(
-                    CacheEntry.cache_key, CacheEntry.file_size, CacheEntry.actual_path
-                ).order_by(CacheEntry.accessed_at.asc())
+                select(CE.cache_key, CE.file_size, CE.actual_path).order_by(
+                    CE.accessed_at.asc()
+                )
             ).all()
 
             # Calculate which entries to delete to reach target
@@ -2428,7 +2505,9 @@ class SqliteBackend(MetadataBackend):
                 # Delete the selected entries
                 removed_keys = [e["cache_key"] for e in removed_entries]
                 session.execute(
-                    delete(CacheEntry).where(CacheEntry.cache_key.in_(removed_keys))
+                    delete(self._CacheEntry).where(
+                        self._CacheEntry.cache_key.in_(removed_keys)
+                    )
                 )
                 session.commit()
 
@@ -2438,15 +2517,15 @@ class SqliteBackend(MetadataBackend):
         """Remove all cache entries and return count removed."""
         with self._lock, self.SessionLocal() as session:
             # Count existing entries
-            result = session.execute(select(func.count(CacheEntry.cache_key)))
+            result = session.execute(select(func.count(self._CacheEntry.cache_key)))
             entry_count = result.scalar() or 0
 
             # Delete all entries
-            session.execute(delete(CacheEntry))
+            session.execute(delete(self._CacheEntry))
 
             # Reset stats
             stats = session.execute(
-                select(CacheStats).where(CacheStats.id == 1)
+                select(self._CacheStats).where(self._CacheStats.id == 1)
             ).scalar_one_or_none()
 
             if stats:
