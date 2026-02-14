@@ -98,14 +98,12 @@ cache = cacheness(config)
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `enable_entry_signing` | bool | `True` | Enable HMAC-SHA256 cache entry signing |
-| `security_level` | str | `"enhanced"` | Security level: "minimal", "enhanced", "paranoid" |
+| `signing_key_file` | str | `"cache_signing_key.bin"` | Path to signing key file (relative to `cache_dir`) |
 | `use_in_memory_key` | bool | `False` | Use in-memory signing key (no disk persistence) |
-| `delete_invalid_signatures` | bool | `True` | Auto-delete entries with invalid signatures |
 | `allow_unsigned_entries` | bool | `True` | Accept entries created before signing was enabled |
-| `signing_key_file` | str | `"cache_signing_key.bin"` | Path to signing key file |
-| `custom_signed_fields` | list | `None` | Custom fields to sign (overrides security_level) |
+| `delete_invalid_signatures` | bool | `True` | Auto-delete entries with invalid signatures |
 
-**See [Security Guide](SECURITY.md) for comprehensive security configuration.**
+**See [Security Guide](SECURITY.md) for comprehensive security configuration, namespace key isolation patterns, and migration guides.**
 
 ### Compression Configuration (`CompressionConfig`)
 

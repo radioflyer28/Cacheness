@@ -1,6 +1,6 @@
 # Security Guide
 
-This guide covers cache entry signing, integrity protection, and security best practices for Cacheness.
+This guide covers cache entry signing, integrity protection, namespace-aware key management, and security best practices for Cacheness.
 
 ## Overview
 
@@ -11,16 +11,16 @@ Cacheness provides cryptographic signing for cache metadata entries to prevent t
 ```python
 from cacheness import cacheness, CacheConfig, SecurityConfig
 
-# Default configuration - signing enabled with enhanced field set
-cache = cacheness()  # ✅ Entry signing active with 11 security fields
+# Default configuration - signing enabled with 10 metadata fields
+cache = cacheness()  # ✅ Entry signing active (v2 signature, 10 fields)
 
 # High-security configuration
 secure_config = CacheConfig(
     security=SecurityConfig(
-        enable_entry_signing=True,        # Enable HMAC signing
+        enable_entry_signing=True,        # Enable HMAC signing (default)
         use_in_memory_key=True,           # No key persistence
-        delete_invalid_signatures=True,   # Auto-cleanup
-        custom_signed_fields=None         # Use default enhanced fields
+        delete_invalid_signatures=True,   # Auto-cleanup (default)
+        allow_unsigned_entries=False,      # Reject unsigned entries
     )
 )
 cache = cacheness(secure_config)
@@ -31,13 +31,17 @@ cache = cacheness(secure_config)
 ### How It Works
 
 1. **Signature Generation**: When storing cache entries, Cacheness creates HMAC-SHA256 signatures of critical metadata fields
-2. **Signature Storage**: The signature is stored alongside the cache entry metadata
+2. **Signature Storage**: The signature is stored alongside the cache entry metadata as `entry_signature`
 3. **Signature Verification**: On every cache retrieval, the signature is verified against the current metadata
 4. **Tamper Detection**: If verification fails, the entry is treated as corrupted/tampered
 
-### Default Signed Fields
+### Signature Versions
 
-Cacheness signs **11 fields** by default for enhanced security:
+Signed fields are managed via version-based field lists. The current version is **v2**.
+
+**Signature format:** `v{N}:{hex_hmac_sha256}` (e.g., `v2:abcdef01...`). Legacy bare-hex signatures are treated as v1.
+
+#### v2 Fields (Current — 10 fields)
 
 | Field | Purpose | Security Value |
 |-------|---------|----------------|
@@ -50,39 +54,13 @@ Cacheness signs **11 fields** by default for enhanced security:
 | `storage_format` | Serialization format | Detects format tampering |
 | `serializer` | Serializer used | Prevents deserialize attacks |
 | `compression_codec` | Compression method | Detects compression tampering |
-| `actual_path` | File location | Prevents path substitution |
 | `created_at` | Timestamp | Prevents replay attacks |
 
-### Custom Field Selection
+#### v1 Fields (Legacy — 11 fields)
 
-You can customize which fields are signed based on your security requirements:
+v1 includes all v2 fields **plus** `actual_path`. Legacy entries without a stored signature version are verified with the v1 field list. New entries always use v2.
 
-```python
-# Minimal security - only essential fields (faster)
-minimal_config = CacheConfig(
-    security=SecurityConfig(
-        custom_signed_fields=["cache_key", "file_hash", "data_type", "file_size"]
-    )
-)
-
-# Maximum security - all available fields (comprehensive)
-paranoid_config = CacheConfig(
-    security=SecurityConfig(
-        custom_signed_fields=[
-            "cache_key", "file_hash", "data_type", "file_size",
-            "created_at", "prefix", "description", "actual_path",
-            "object_type", "storage_format", "serializer", "compression_codec"
-        ]
-    )
-)
-
-# Default enhanced security (recommended)
-enhanced_config = CacheConfig(
-    security=SecurityConfig(
-        custom_signed_fields=None  # Uses default 11 fields
-    )
-)
-```
+> **Note:** Field selection is not configurable. The signer uses the version-appropriate field list automatically. This design prevents misconfiguration and ensures consistent verification.
 
 ## Key Management
 
@@ -125,8 +103,8 @@ config = CacheConfig(
 ### Key Generation
 
 ```python
-# Automatic key generation
-cache = cacheness()  # Auto-generates 32-byte HMAC-SHA256 key
+# Automatic key generation (32-byte random secret via secrets.token_bytes)
+cache = cacheness()  # Auto-generates signing key
 
 # Key file location
 print(cache.config.security.signing_key_file)  # "cache_signing_key.bin"
@@ -137,6 +115,146 @@ config = CacheConfig(
         signing_key_file="custom_signing_key.bin"
     )
 )
+```
+
+### Key Rotation
+
+```python
+# For key rotation, simply delete the key file and restart
+import os
+os.remove("cache_signing_key.bin")  # Forces new key generation
+
+# Or use in-memory keys for automatic rotation per process
+config = CacheConfig(
+    security=SecurityConfig(use_in_memory_key=True)
+)
+```
+
+> **Important:** After key rotation, existing entries will fail signature verification. Set `allow_unsigned_entries=True` or `delete_invalid_signatures=True` during the transition period.
+
+## Signing Keys and Namespaces
+
+### Current Behavior
+
+All namespaces sharing the same `cache_dir` share the **same signing key file** (`cache_signing_key.bin` by default). The key file path is derived from `cache_dir`, not from the namespace:
+
+```
+cache_dir/
+├── cache_signing_key.bin    ← shared by ALL namespaces
+├── cache_metadata.json      ← default namespace metadata
+├── analytics/               ← "analytics" namespace blob storage
+│   └── ...
+└── ml_pipeline/             ← "ml_pipeline" namespace blob storage
+    └── ...
+```
+
+This means:
+- **Cross-namespace verification works** — an entry signed by namespace A can be verified by namespace B (same key)
+- **No cryptographic isolation** between namespaces sharing a `cache_dir`
+- The signed `prefix` field provides logical namespace attribution but not cryptographic separation
+
+### Per-Namespace Key Configuration
+
+To achieve cryptographic isolation between namespaces, use separate `cache_dir` paths or separate `signing_key_file` names:
+
+```python
+from cacheness import cacheness, CacheConfig, SecurityConfig
+
+# Namespace A with its own signing key
+config_a = CacheConfig(
+    cache_dir="./cache",
+    namespace="team_alpha",
+    security=SecurityConfig(
+        signing_key_file="signing_key_alpha.bin"
+    )
+)
+cache_a = cacheness(config_a)
+
+# Namespace B with its own signing key
+config_b = CacheConfig(
+    cache_dir="./cache",
+    namespace="team_beta",
+    security=SecurityConfig(
+        signing_key_file="signing_key_beta.bin"
+    )
+)
+cache_b = cacheness(config_b)
+```
+
+### Multi-Tenant Deployment Patterns
+
+#### Shared Key (Simple — Default)
+
+All namespaces share a single key. Suitable when namespaces are used for organizational purposes and all tenants are trusted.
+
+```python
+# All namespaces use the same key (default)
+cache_prod = cacheness(CacheConfig(namespace="production"))
+cache_staging = cacheness(CacheConfig(namespace="staging"))
+# Both use cache_signing_key.bin in their cache_dir
+```
+
+#### Isolated Keys (Secure — Multi-Tenant)
+
+Each namespace has its own signing key. Use when namespaces represent different security domains or untrusted tenants.
+
+```python
+# Each namespace gets its own cache directory and key
+for tenant in ["client_a", "client_b", "client_c"]:
+    config = CacheConfig(
+        cache_dir=f"./cache/{tenant}",
+        namespace=tenant,
+        security=SecurityConfig(
+            signing_key_file="signing_key.bin",  # unique per cache_dir
+            allow_unsigned_entries=False,
+        )
+    )
+    cache = cacheness(config)
+```
+
+#### Per-Namespace Key File (Shared Directory)
+
+When tenants must share a `cache_dir` but need separate keys:
+
+```python
+for tenant in ["client_a", "client_b"]:
+    config = CacheConfig(
+        cache_dir="./shared_cache",
+        namespace=tenant,
+        security=SecurityConfig(
+            signing_key_file=f"signing_key_{tenant}.bin",
+        )
+    )
+    cache = cacheness(config)
+```
+
+> **Note:** Key files are always stored relative to `cache_dir`. With per-namespace key files, you get `cache_dir/signing_key_client_a.bin` and `cache_dir/signing_key_client_b.bin`.
+
+### Migration Guide: Adding Namespaces to an Existing Cache
+
+When migrating from a single-namespace cache to multi-namespace:
+
+1. **Existing entries stay in the `default` namespace** — signed with the original key
+2. **New namespaces can use the same key** (shared model) or separate keys (isolated model)
+3. **No re-signing needed** — existing entries remain valid under the `default` namespace
+
+```python
+# Step 1: Existing cache continues working (default namespace)
+legacy_cache = cacheness(CacheConfig(
+    cache_dir="./existing_cache",
+    security=SecurityConfig(
+        allow_unsigned_entries=True,  # Accept pre-signing entries
+    )
+))
+
+# Step 2: New namespace uses same key (entries are cross-verifiable)
+new_cache = cacheness(CacheConfig(
+    cache_dir="./existing_cache",
+    namespace="v2_pipeline",
+    security=SecurityConfig(
+        allow_unsigned_entries=False,  # New namespace: strict from the start
+    )
+))
 ```
 
 ## Signature Verification
@@ -175,6 +293,19 @@ config_debug = CacheConfig(
 )
 ```
 
+### Storage Mode Behavior
+
+In storage mode (`storage_mode=True`), entries are **never deleted** even if signature verification fails — only `None` is returned. This preserves the storage-mode guarantee of data durability.
+
+### The `allow_unsigned_entries` Flag
+
+Controls handling of entries that have **no** signature (e.g., created before signing was enabled):
+
+| `allow_unsigned_entries` | Entry has no signature | Entry has invalid signature |
+|---|---|---|
+| `True` (default) | ✅ Accepted | Depends on `delete_invalid_signatures` |
+| `False` | ❌ Rejected (deleted) | Depends on `delete_invalid_signatures` |
+
 ## Security Best Practices
 
 ### Production Environments
@@ -184,10 +315,9 @@ config_debug = CacheConfig(
 production_config = CacheConfig(
     security=SecurityConfig(
         enable_entry_signing=True,
-        custom_signed_fields=None,          # Use default enhanced fields (6 fields)
         use_in_memory_key=True,             # No key persistence
         delete_invalid_signatures=True,     # Auto-cleanup
-        allow_unsigned_entries=False        # Strict mode
+        allow_unsigned_entries=False,        # Strict mode
     )
 )
 ```
@@ -199,10 +329,9 @@ production_config = CacheConfig(
 dev_config = CacheConfig(
     security=SecurityConfig(
         enable_entry_signing=True,
-        custom_signed_fields=None,          # Use default enhanced fields
         use_in_memory_key=False,            # Persistent across restarts
         delete_invalid_signatures=False,    # Keep for debugging
-        allow_unsigned_entries=True         # Backward compatibility
+        allow_unsigned_entries=True,         # Backward compatibility
     )
 )
 ```
@@ -215,7 +344,6 @@ container_config = CacheConfig(
     security=SecurityConfig(
         use_in_memory_key=True,             # No persistent state
         delete_invalid_signatures=True,     # Clean startup
-        custom_signed_fields=None           # Use default enhanced fields
     )
 )
 ```
@@ -230,7 +358,7 @@ migration_config = CacheConfig(
     security=SecurityConfig(
         enable_entry_signing=True,
         allow_unsigned_entries=True,        # Accept legacy entries
-        delete_invalid_signatures=False     # Don't delete during migration
+        delete_invalid_signatures=False,    # Don't delete during migration
     )
 )
 ```
@@ -258,7 +386,7 @@ no_signing_config = CacheConfig(
 - ✅ Unauthorized cache entry creation
 
 **Not Protected Against:**
-- ❌ Direct file system access to cached data files
+- ❌ Direct file system access to cached data files (blobs are not encrypted)
 - ❌ Complete database replacement
 - ❌ Process memory attacks
 - ❌ OS-level privilege escalation
@@ -266,47 +394,11 @@ no_signing_config = CacheConfig(
 ### Risk Assessment
 
 | Configuration | Security Level | Performance Impact | Use Case |
-|---------------|----------------|-------------------|----------|
+|---|---|---|---|
 | `enable_entry_signing=False` | Low | None | Development only |
-| `custom_signed_fields=[4 minimal fields]` | Medium | Minimal | Basic integrity |
-| `custom_signed_fields=None` (default) | High | Low | **Recommended default** |
-| `custom_signed_fields=[8 maximum fields]` | Very High | Medium | High-security environments |
+| Default (`enable_entry_signing=True`) | High | ~0.1ms per op | **Recommended** |
 | `use_in_memory_key=True` | Very High | None | Production/containers |
-
-### Custom Field Performance
-
-Different field combinations have varying performance characteristics:
-
-```python
-# Minimal fields - fastest signing/verification
-minimal_fields = ["cache_key", "file_hash", "data_type", "file_size"]
-
-# Default enhanced fields - balanced performance/security
-default_fields = None  # Uses built-in enhanced set (6 fields)
-
-# Maximum security fields - comprehensive but slower
-maximum_fields = [
-    "cache_key", "file_hash", "data_type", "file_size",
-    "created_at", "prefix", "description", "actual_path"
-]
-
-config = CacheConfig(
-    security=SecurityConfig(custom_signed_fields=minimal_fields)
-)
-```
-
-### Key Rotation
-
-```python
-# For key rotation, simply delete the key file and restart
-import os
-os.remove("cache_signing_key.bin")  # Forces new key generation
-
-# Or use in-memory keys for automatic rotation
-config = CacheConfig(
-    security=SecurityConfig(use_in_memory_key=True)
-)
-```
+| `allow_unsigned_entries=False` | Very High | None | Strict environments |
 
 ## Performance Impact
 
@@ -314,40 +406,11 @@ config = CacheConfig(
 
 | Operation | Overhead | Notes |
 |-----------|----------|-------|
-| **cache.put()** | ~0.1ms | HMAC generation |
-| **cache.get()** | ~0.1ms | HMAC verification |
+| **cache.put()** | ~0.1ms | HMAC generation (10 fields) |
+| **cache.get()** | ~0.1ms | HMAC verification (10 fields) |
 | **Key generation** | ~5ms | One-time cost |
 
-### Field Count Performance
-
-```python
-import time
-
-# Benchmark different field configurations
-field_configs = {
-    "minimal": ["cache_key", "file_hash", "data_type", "file_size"],
-    "default": None,  # Uses default enhanced (6 fields)
-    "maximum": ["cache_key", "file_hash", "data_type", "file_size", 
-               "created_at", "prefix", "description", "actual_path"]
-}
-
-for name, fields in field_configs.items():
-    config = CacheConfig(
-        security=SecurityConfig(custom_signed_fields=fields)
-    )
-    cache = cacheness(config)
-    
-    start = time.time()
-    for i in range(1000):
-        cache.put(f"data_{i}", test_field=i)
-    elapsed = time.time() - start
-    print(f"{name}: {elapsed:.2f}s for 1000 operations")
-```
-
-**Typical Results:**
-- **minimal**: ~1.2s (4 fields)
-- **default**: ~1.4s (6 fields) - **Recommended**
-- **maximum**: ~1.8s (8 fields)
+Signing overhead is negligible compared to I/O. The 10-field v2 signature provides comprehensive protection with minimal performance impact.
 
 ## Troubleshooting
 
@@ -355,10 +418,10 @@ for name, fields in field_configs.items():
 
 **Signature verification failures after restart:**
 ```python
-# Check if using in-memory keys
-print(cache.config.security.use_in_memory_key)  # True = expected behavior
+# Check if using in-memory keys (expected behavior with in-memory keys)
+print(cache.config.security.use_in_memory_key)  # True = expected
 
-# Switch to persistent keys if needed
+# Switch to persistent keys if you need entries to survive restarts
 config = CacheConfig(
     security=SecurityConfig(use_in_memory_key=False)
 )
@@ -366,22 +429,15 @@ config = CacheConfig(
 
 **Cache not accessible after key file deletion:**
 ```python
-# Expected behavior - regenerate cache or restore key file
-# Set allow_unsigned_entries=True for migration period
-```
-
-**Performance concerns with maximum fields:**
-```python
-# Switch to default enhanced fields for better performance
+# Expected behavior - old entries can't be verified
+# Option 1: Allow unsigned entries during migration
 config = CacheConfig(
-    security=SecurityConfig(custom_signed_fields=None)  # Use default 6 fields
+    security=SecurityConfig(allow_unsigned_entries=True)
 )
 
-# Or use minimal fields for fastest performance
+# Option 2: Delete invalid and rebuild cache
 config = CacheConfig(
-    security=SecurityConfig(
-        custom_signed_fields=["cache_key", "file_hash", "data_type", "file_size"]
-    )
+    security=SecurityConfig(delete_invalid_signatures=True)
 )
 ```
 
@@ -391,19 +447,10 @@ config = CacheConfig(
 # Get signer information
 if cache.signer:
     info = cache.signer.get_field_info()
-    print(f"Signed fields: {info['signed_fields']}")
+    print(f"Signature version: {info['signature_version']}")
+    print(f"Signed fields ({len(info['signed_fields'])}): {info['signed_fields']}")
     print(f"In-memory key: {info['use_in_memory_key']}")
     print(f"Key file exists: {info['key_exists']}")
-    
-    # Check field count for performance analysis
-    field_count = len(info['signed_fields'])
-    print(f"Signing {field_count} fields")
-    if field_count <= 4:
-        print("Performance: Optimal (minimal fields)")
-    elif field_count <= 6:
-        print("Performance: Good (default enhanced)")
-    else:
-        print("Performance: Slower (maximum security)")
 ```
 
 ## Examples
@@ -420,11 +467,7 @@ ml_config = CacheConfig(
         enable_entry_signing=True,
         use_in_memory_key=True,             # No key persistence
         delete_invalid_signatures=True,     # Auto-cleanup
-        custom_signed_fields=[              # Maximum protection - all 8 fields
-            "cache_key", "file_hash", "data_type", "file_size",
-            "created_at", "prefix", "description", "actual_path"
-        ],
-        allow_unsigned_entries=False        # Strict mode
+        allow_unsigned_entries=False,        # Strict mode
     )
 )
 
@@ -432,38 +475,35 @@ cache = cacheness(ml_config)
 
 # Store sensitive model data
 sensitive_model = train_confidential_model(private_data)
-cache.put(sensitive_model, 
-          project="confidential", 
-          model="neural_net", 
+cache.put(sensitive_model,
+          project="confidential",
+          model="neural_net",
           version="1.0")
 
 # Data automatically protected with cryptographic signatures
 # Cache invalidated on restart for maximum security
 ```
 
-### Development with Debugging
+### Multi-Tenant with Isolated Keys
 
 ```python
-# Developer-friendly configuration
-dev_config = CacheConfig(
-    security=SecurityConfig(
-        enable_entry_signing=True,
-        use_in_memory_key=False,            # Survive restarts
-        delete_invalid_signatures=False,    # Keep for debugging
-        custom_signed_fields=None           # Use default enhanced fields
-    )
-)
+from cacheness import cacheness, CacheConfig, SecurityConfig
 
-cache = cacheness(dev_config)
+def create_tenant_cache(tenant_id: str):
+    """Create a cache with tenant-specific signing key."""
+    return cacheness(CacheConfig(
+        cache_dir=f"./cache/{tenant_id}",
+        namespace=tenant_id,
+        security=SecurityConfig(
+            enable_entry_signing=True,
+            allow_unsigned_entries=False,
+            delete_invalid_signatures=True,
+        )
+    ))
 
-# Debug signature issues
-try:
-    data = cache.get(experiment="test")
-    if data is None:
-        print("Cache miss or signature verification failed")
-        # Check logs for signature warnings
-except Exception as e:
-    print(f"Cache error: {e}")
+# Each tenant has completely isolated signing keys and blob storage
+cache_acme = create_tenant_cache("acme_corp")
+cache_globex = create_tenant_cache("globex_inc")
 ```
 
 ### Container Deployment
@@ -474,7 +514,6 @@ container_config = CacheConfig(
     security=SecurityConfig(
         use_in_memory_key=True,             # No persistent state
         delete_invalid_signatures=True,     # Clean startup
-        custom_signed_fields=None,          # Use default enhanced fields
     )
 )
 
@@ -482,5 +521,3 @@ container_config = CacheConfig(
 # Old cache entries automatically cleaned up
 cache = cacheness(container_config)
 ```
-
-This security model provides robust protection against cache tampering while maintaining flexibility for different deployment scenarios.
