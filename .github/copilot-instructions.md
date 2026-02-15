@@ -21,7 +21,7 @@ These constraints apply to EVERY task. Violating any of them is a bug.
 **Testing:**
 - **Test command:** `uv run pytest tests/ -x -q --ignore=tests/test_tensorflow_handler.py`
 - **Windows:** Always add `--ignore=tests/test_tensorflow_handler.py` — TF tests hang
-- **Baseline:** 1014 passed, 97 skipped, 0 failures
+- **Baseline:** 1092 passed, 97 skipped, 0 failures
 
 **Imports:**
 - `from cacheness import UnifiedCache` does NOT work — it's exported as `cacheness`. Use `from cacheness.core import UnifiedCache` in tests.
@@ -161,7 +161,7 @@ uv run ruff check . && uv run ty check             # Phase 2
 
 ## Test Suite
 
-**Baseline:** 1014 passed, 97 skipped, 0 failures
+**Baseline:** 1092 passed, 97 skipped, 0 failures
 **Command:** `uv run pytest tests/ -x -q --ignore=tests/test_tensorflow_handler.py`
 **Key files:** `test_core.py`, `test_update_operations.py`, `test_handlers.py`, `test_metadata.py`, `test_security.py`, `test_schema_versioning.py`, `test_sqlite_schema_versioning.py`, `test_json_schema_versioning.py`, `test_pg_schema_versioning.py`, `test_namespace_config.py`
 
