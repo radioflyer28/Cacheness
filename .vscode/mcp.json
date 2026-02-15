@@ -28,6 +28,7 @@
       ]
     },
     // for external memory storage of the AI assistant
+    // disabled since using GitHub CoPilot's memory feature instead...
     // "memory": {
     //   "command": "npx",
     //   "args": ["-y", "@modelcontextprotocol/server-memory"]
