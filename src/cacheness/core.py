@@ -893,13 +893,22 @@ class UnifiedCache:
         return self._create_cache_key(kwargs)
 
     def _get_cache_file_path(self, cache_key: str, prefix: str = "") -> Path:
-        """Get base cache file path (without extension)."""
+        """Get base cache file path (without extension).
+
+        For non-default namespaces the path is rooted under
+        ``cache_dir/{namespace}/`` so that blob files mirror the
+        namespace isolation provided by the metadata backend.
+        """
         if prefix:
             filename_base = f"{prefix}_{cache_key}"
         else:
             filename_base = cache_key
 
-        return self.cache_dir / filename_base
+        base = self.cache_dir
+        if self.namespace != DEFAULT_NAMESPACE:
+            base = base / self.namespace
+            base.mkdir(parents=True, exist_ok=True)
+        return base / filename_base
 
     def _is_expired(self, cache_key: str, ttl_seconds=_DEFAULT_TTL) -> bool:
         """Check if cache entry is expired.
