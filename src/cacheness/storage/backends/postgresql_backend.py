@@ -120,7 +120,6 @@ if SQLALCHEMY_AVAILABLE:
         cache_key = Column(String(16), primary_key=True)
         description = Column(String(500), default="", nullable=False)
         data_type = Column(String(20), nullable=False)
-        prefix = Column(String(100), default="", nullable=False)
 
         created_at = Column(
             DateTime(timezone=True),
@@ -170,7 +169,6 @@ if SQLALCHEMY_AVAILABLE:
             Index("idx_pg_cleanup", "created_at"),
             Index("idx_pg_size_mgmt", "file_size", "created_at"),
             Index("idx_pg_data_type", "data_type"),
-            Index("idx_pg_prefix", "prefix"),
         )
 
     class PgCacheStats(PgCacheStatsMixin, PostgresBase):
@@ -217,7 +215,6 @@ if SQLALCHEMY_AVAILABLE:
                         f"idx_pg_{namespace_id}_size_mgmt", "file_size", "created_at"
                     ),
                     Index(f"idx_pg_{namespace_id}_data_type", "data_type"),
-                    Index(f"idx_pg_{namespace_id}_prefix", "prefix"),
                 ),
             },
         )
@@ -414,41 +411,10 @@ class PostgresBackend(MetadataBackend):
     def get_migrations(self) -> list:
         """Return PostgreSQL-specific schema migrations.
 
-        v0 → v1: Legacy column additions (s3_etag, cache_key_params).
-                  These used to be ad-hoc checks; now formalized.
+        Schema baseline is v1 (current).  No legacy migrations exist.
+        Future migrations (v1 → v2, etc.) will be added here.
         """
-
-        def _migrate_v0_to_v1(backend: "PostgresBackend", namespace_id: str):
-            """Add columns that may be missing from pre-versioning databases."""
-            from sqlalchemy import inspect as sa_inspect
-
-            with backend.SessionLocal() as session:
-                inspector = sa_inspect(backend.engine)
-                table_name = "cache_entries"  # default namespace only for v0→v1
-                if table_name not in inspector.get_table_names():
-                    return
-                existing = {col["name"] for col in inspector.get_columns(table_name)}
-                if "s3_etag" not in existing:
-                    logger.info("Migrating: Adding s3_etag column to cache_entries")
-                    session.execute(
-                        text(
-                            "ALTER TABLE cache_entries ADD COLUMN s3_etag VARCHAR(100)"
-                        )
-                    )
-                if "cache_key_params" not in existing:
-                    logger.info(
-                        "Migrating: Adding cache_key_params column to cache_entries"
-                    )
-                    session.execute(
-                        text(
-                            "ALTER TABLE cache_entries ADD COLUMN cache_key_params TEXT"
-                        )
-                    )
-                session.commit()
-
-        return [
-            (0, 1, _migrate_v0_to_v1),
-        ]
+        return []
 
     # --- Namespace registry overrides ---
 
@@ -486,7 +452,6 @@ class PostgresBackend(MetadataBackend):
                         cache_key       VARCHAR(16) PRIMARY KEY,
                         description     VARCHAR(500) NOT NULL DEFAULT '',
                         data_type       VARCHAR(20) NOT NULL,
-                        prefix          VARCHAR(100) NOT NULL DEFAULT '',
                         created_at      TIMESTAMP WITH TIME ZONE NOT NULL,
                         accessed_at     TIMESTAMP WITH TIME ZONE NOT NULL,
                         file_size       INTEGER NOT NULL DEFAULT 0,
@@ -785,7 +750,6 @@ class PostgresBackend(MetadataBackend):
                 .values(
                     description=entry_data.get("description", ""),
                     data_type=entry_data.get("data_type", "unknown"),
-                    prefix=entry_data.get("prefix", ""),
                     created_at=created_at,
                     accessed_at=accessed_at,
                     file_size=entry_data.get("file_size", 0),
@@ -806,7 +770,6 @@ class PostgresBackend(MetadataBackend):
                 cache_key=cache_key,
                 description=entry_data.get("description", ""),
                 data_type=entry_data.get("data_type", "unknown"),
-                prefix=entry_data.get("prefix", ""),
                 created_at=created_at,
                 accessed_at=accessed_at,
                 file_size=entry_data.get("file_size", 0),
@@ -828,7 +791,6 @@ class PostgresBackend(MetadataBackend):
             "cache_key": entry.cache_key,
             "description": entry.description or "",
             "data_type": entry.data_type,
-            "prefix": entry.prefix or "",
             "created_at": entry.created_at.astimezone(timezone.utc).isoformat()
             if entry.created_at
             else None,
@@ -965,7 +927,7 @@ class PostgresBackend(MetadataBackend):
             tbl = self._entries_table
             rows = session.execute(
                 text(
-                    f"SELECT cache_key, data_type, description, prefix, "
+                    f"SELECT cache_key, data_type, description, "
                     f"       file_size, created_at, accessed_at, "
                     f"       object_type, storage_format, serializer, "
                     f"       compression_codec, actual_path, "
@@ -979,25 +941,24 @@ class PostgresBackend(MetadataBackend):
                     "cache_key": row[0],
                     "data_type": row[1],
                     "description": row[2] or "",
-                    "prefix": row[3] or "",
-                    "file_size": row[4] or 0,
-                    "created_at": row[5],
-                    "accessed_at": row[6],
+                    "file_size": row[3] or 0,
+                    "created_at": row[4],
+                    "accessed_at": row[5],
                 }
+                if row[6] is not None:
+                    flat["object_type"] = row[6]
                 if row[7] is not None:
-                    flat["object_type"] = row[7]
+                    flat["storage_format"] = row[7]
                 if row[8] is not None:
-                    flat["storage_format"] = row[8]
+                    flat["serializer"] = row[8]
                 if row[9] is not None:
-                    flat["serializer"] = row[9]
+                    flat["compression_codec"] = row[9]
                 if row[10] is not None:
-                    flat["compression_codec"] = row[10]
+                    flat["actual_path"] = row[10]
                 if row[11] is not None:
-                    flat["actual_path"] = row[11]
+                    flat["file_hash"] = row[11]
                 if row[12] is not None:
-                    flat["file_hash"] = row[12]
-                if row[13] is not None:
-                    flat["entry_signature"] = row[13]
+                    flat["entry_signature"] = row[12]
                 result.append(flat)
             return result
 

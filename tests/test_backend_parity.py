@@ -45,7 +45,6 @@ class TestBackendParity:
             "cache_key": "test_key_123",
             "description": "Test entry",
             "data_type": "array",
-            "prefix": "test",
             "file_size": 2048,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "metadata": {
@@ -83,7 +82,6 @@ class TestBackendParity:
                 "cache_key": f"key_{i}",
                 "description": f"Entry {i}",
                 "data_type": "dataframe",
-                "prefix": "df",
                 "file_size": 1024 * (i + 1),
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "metadata": {
@@ -113,7 +111,6 @@ class TestBackendParity:
             "cache_key": "remove_test",
             "description": "To be removed",
             "data_type": "object",
-            "prefix": "obj",
             "file_size": 512,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "metadata": {},
@@ -133,7 +130,6 @@ class TestBackendParity:
             "cache_key": "access_test",
             "description": "Access time test",
             "data_type": "array",
-            "prefix": "arr",
             "file_size": 256,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "metadata": {},
@@ -185,7 +181,6 @@ class TestBackendParity:
             "cache_key": "old_key",
             "description": "Old entry",
             "data_type": "object",
-            "prefix": "old",
             "file_size": 128,
             "created_at": old_time,
             "metadata": {},
@@ -195,7 +190,6 @@ class TestBackendParity:
             "cache_key": "recent_key",
             "description": "Recent entry",
             "data_type": "object",
-            "prefix": "recent",
             "file_size": 128,
             "created_at": recent_time,
             "metadata": {},
@@ -224,7 +218,6 @@ class TestBackendParity:
             "cache_key": "recent_large",
             "description": "Recent large entry",
             "data_type": "array",
-            "prefix": "size_test",
             "file_size": 1024 * 1024,  # 1 MB
             "actual_path": "/tmp/recent_large.pkl",
             "created_at": base_time.isoformat(),
@@ -237,7 +230,6 @@ class TestBackendParity:
             "cache_key": "mid_large",
             "description": "Mid-age large entry",
             "data_type": "array",
-            "prefix": "size_test",
             "file_size": 2 * 1024 * 1024,  # 2 MB
             "actual_path": "/tmp/mid_large.pkl",
             "created_at": base_time.isoformat(),
@@ -250,7 +242,6 @@ class TestBackendParity:
             "cache_key": "old_large",
             "description": "Old large entry",
             "data_type": "array",
-            "prefix": "size_test",
             "file_size": 3 * 1024 * 1024,  # 3 MB
             "actual_path": "/tmp/old_large.pkl",
             "created_at": base_time.isoformat(),
@@ -300,7 +291,6 @@ class TestBackendParity:
                 "cache_key": f"clear_{i}",
                 "description": f"Clear test {i}",
                 "data_type": "object",
-                "prefix": "clear",
                 "file_size": 64,
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "metadata": {},
@@ -325,7 +315,6 @@ class TestBackendParity:
             "cache_key": "special_test",
             "description": "Test with 特殊字符 и символы",
             "data_type": "object",
-            "prefix": "special",
             "file_size": 1024,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "metadata": {
@@ -352,7 +341,6 @@ class TestBackendParity:
             "cache_key": "tech_meta",
             "description": "Technical metadata test",
             "data_type": "object",
-            "prefix": "tech",
             "file_size": 4096,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "metadata": {
@@ -386,7 +374,6 @@ class TestBackendParity:
                 "cache_key": f"concurrent_{i}",
                 "description": f"Concurrent entry {i}",
                 "data_type": "object",
-                "prefix": "concurrent",
                 "file_size": 256,
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "metadata": {"thread_id": i},

@@ -41,13 +41,12 @@ Signed fields are managed via version-based field lists. The current version is 
 
 **Signature format:** `v{N}:{hex_hmac_sha256}` (e.g., `v2:abcdef01...`). Legacy bare-hex signatures are treated as v1.
 
-#### v2 Fields (Current — 10 fields)
+#### v2 Fields (Current — 9 fields)
 
 | Field | Purpose | Security Value |
 |-------|---------|----------------|
 | `cache_key` | Unique identifier | Prevents key substitution |
 | `data_type` | Type classification | Prevents type confusion |
-| `prefix` | Key prefix | Namespace protection |
 | `file_size` | Size verification | Detects partial corruption |
 | `file_hash` | Content integrity | Detects file tampering |
 | `object_type` | Original object type | Prevents type spoofing |
@@ -58,7 +57,7 @@ Signed fields are managed via version-based field lists. The current version is 
 
 #### v1 Fields (Legacy — 11 fields)
 
-v1 includes all v2 fields **plus** `actual_path`. Legacy entries without a stored signature version are verified with the v1 field list. New entries always use v2.
+v1 includes all v2 fields **plus** `actual_path`.
 
 > **Note:** Field selection is not configurable. The signer uses the version-appropriate field list automatically. This design prevents misconfiguration and ensures consistent verification.
 
@@ -151,7 +150,6 @@ cache_dir/
 This means:
 - **Cross-namespace verification works** — an entry signed by namespace A can be verified by namespace B (same key)
 - **No cryptographic isolation** between namespaces sharing a `cache_dir`
-- The signed `prefix` field provides logical namespace attribution but not cryptographic separation
 
 ### Per-Namespace Key Configuration
 

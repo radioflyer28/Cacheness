@@ -161,7 +161,6 @@ class TestCacheIntegrity:
             entry_data = {
                 "description": entry["description"],
                 "data_type": entry["data_type"],
-                "prefix": entry["prefix"],
                 "file_size": entry["file_size"],
                 "metadata": metadata,
             }

@@ -818,7 +818,6 @@ data = cache.get(experiment: "exp_001")
 
 1. **Storage Backend Layer**
    - [ ] `update_blob_data(cache_key, new_data)` - Replace data at key
-   - [ ] `delete_by_prefix(prefix)` - Bulk delete
    - [ ] `delete_where(filter_fn)` - Conditional bulk delete
    - [ ] `get_entries_batch(cache_keys)` - Batch get metadata
    - [ ] `delete_entries_batch(cache_keys)` - Batch delete

@@ -48,7 +48,6 @@ class CacheEntrySigner:
         1: [
             "cache_key",
             "data_type",
-            "prefix",
             "file_size",
             "file_hash",
             "object_type",
@@ -61,7 +60,6 @@ class CacheEntrySigner:
         2: [
             "cache_key",
             "data_type",
-            "prefix",
             "file_size",
             "file_hash",
             "object_type",

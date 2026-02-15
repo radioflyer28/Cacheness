@@ -867,7 +867,7 @@ class UnifiedCache:
 
         This centralizes the key resolution logic used by all public methods.
         The ``on`` parameter prevents namespace collisions between user key
-        parameters and cache control parameters (prefix, description, etc.).
+        parameters and cache control parameters (description, etc.).
 
         Args:
             cache_key: Explicit pre-computed cache key (highest priority)
@@ -892,17 +892,14 @@ class UnifiedCache:
             return self._create_cache_key(on)
         return self._create_cache_key(kwargs)
 
-    def _get_cache_file_path(self, cache_key: str, prefix: str = "") -> Path:
+    def _get_cache_file_path(self, cache_key: str) -> Path:
         """Get base cache file path (without extension).
 
         For non-default namespaces the path is rooted under
         ``cache_dir/{namespace}/`` so that blob files mirror the
         namespace isolation provided by the metadata backend.
         """
-        if prefix:
-            filename_base = f"{prefix}_{cache_key}"
-        else:
-            filename_base = cache_key
+        filename_base = cache_key
 
         base = self.cache_dir
         if self.namespace != DEFAULT_NAMESPACE:
@@ -968,7 +965,7 @@ class UnifiedCache:
 
         Args:
             cache_key: The cache key
-            entry_data: The entry data dictionary (data_type, prefix, etc.)
+            entry_data: The entry data dictionary (data_type, etc.)
             metadata: The metadata dictionary from handler result
 
         Returns:
@@ -994,7 +991,6 @@ class UnifiedCache:
         signable_data = {
             "cache_key": cache_key,
             "data_type": entry_data.get("data_type"),
-            "prefix": entry_data.get("prefix", ""),
             "file_size": entry_data.get("file_size", 0),
             "created_at": created_at,
             "actual_path": metadata.get("actual_path", ""),
@@ -1044,11 +1040,10 @@ class UnifiedCache:
         self,
         data: Any,
         cache_key: str,
-        prefix: str,
         description: str,
     ) -> str:
         """BlobStore passthrough for put() — no eviction or stats."""
-        base_file_path = self._get_cache_file_path(cache_key, prefix)
+        base_file_path = self._get_cache_file_path(cache_key)
 
         handler, result, file_hash = self._blob_store._write_blob(
             data, base_file_path, compute_hash=True
@@ -1056,14 +1051,12 @@ class UnifiedCache:
 
         metadata_dict = {
             **result["metadata"],
-            "prefix": prefix,
             "actual_path": result.get("actual_path", str(base_file_path)),
             "file_hash": file_hash,
         }
 
         entry_data = {
             "data_type": handler.data_type,
-            "prefix": prefix,
             "description": description,
             "file_size": result["file_size"],
             "metadata": metadata_dict,
@@ -1096,7 +1089,6 @@ class UnifiedCache:
     def _storage_mode_get(
         self,
         cache_key: str,
-        prefix: str,
     ) -> Optional[Any]:
         """BlobStore passthrough for get() — no TTL, stats, or auto-delete.
 
@@ -1114,9 +1106,7 @@ class UnifiedCache:
         metadata = entry.get("metadata", {})
         actual_path = metadata.get("actual_path")
         file_path = (
-            Path(actual_path)
-            if actual_path
-            else self._get_cache_file_path(cache_key, prefix)
+            Path(actual_path) if actual_path else self._get_cache_file_path(cache_key)
         )
 
         # Integrity verification — return None without deleting
@@ -1169,7 +1159,6 @@ class UnifiedCache:
     def _storage_mode_get_with_metadata(
         self,
         cache_key: str,
-        prefix: str,
     ) -> Optional[tuple[Any, Dict[str, Any]]]:
         """BlobStore passthrough for get_with_metadata() — no TTL, stats, or auto-delete."""
         entry = self.metadata_backend.get_entry(cache_key)
@@ -1183,9 +1172,7 @@ class UnifiedCache:
         metadata = entry.get("metadata", {})
         actual_path = metadata.get("actual_path")
         file_path = (
-            Path(actual_path)
-            if actual_path
-            else self._get_cache_file_path(cache_key, prefix)
+            Path(actual_path) if actual_path else self._get_cache_file_path(cache_key)
         )
 
         # Integrity verification — return None without deleting
@@ -1239,7 +1226,6 @@ class UnifiedCache:
         data: Any,
         cache_key: Optional[str] = None,
         on: Optional[Dict] = None,
-        prefix: str = "",
         description: str = "",
         custom_metadata=None,
         hash_key: Optional[str] = None,
@@ -1255,8 +1241,7 @@ class UnifiedCache:
                 used together with cache_key.
             on: Dictionary of key parameters for cache key derivation.
                 Use this to avoid namespace collisions with cache control
-                parameters like prefix, description, etc.
-            prefix: Descriptive prefix prepended to the cache filename
+                parameters like description, etc.
             description: Human-readable description
             custom_metadata: Custom metadata for the cache entry. Supports:
                            - Single metadata object: experiment_metadata
@@ -1280,9 +1265,9 @@ class UnifiedCache:
             cache_key = self._resolve_cache_key(cache_key, on, kwargs)
 
             if self.config.storage_mode:
-                return self._storage_mode_put(data, cache_key, prefix, description)
+                return self._storage_mode_put(data, cache_key, description)
 
-            base_file_path = self._get_cache_file_path(cache_key, prefix)
+            base_file_path = self._get_cache_file_path(cache_key)
 
             try:
                 # Delegate file I/O + handler dispatch to BlobStore
@@ -1298,7 +1283,6 @@ class UnifiedCache:
                 # Update metadata
                 metadata_dict = {
                     **result["metadata"],
-                    "prefix": prefix,
                     "actual_path": result.get("actual_path", str(base_file_path)),
                     "file_hash": file_hash,  # Store file hash for verification
                 }
@@ -1330,7 +1314,6 @@ class UnifiedCache:
 
                 entry_data = {
                     "data_type": handler.data_type,
-                    "prefix": prefix,
                     "description": description,
                     "file_size": result["file_size"],
                     "metadata": metadata_dict,
@@ -1408,7 +1391,6 @@ class UnifiedCache:
         cache_key: Optional[str] = None,
         on: Optional[Dict] = None,
         ttl_seconds: Optional[float] = None,
-        prefix: str = "",
         hash_key: Optional[str] = None,
         **kwargs,
     ) -> Optional[Any]:
@@ -1420,9 +1402,8 @@ class UnifiedCache:
             hash_key: Alias for cache_key (storage-oriented name).
             on: Dictionary of key parameters for cache key derivation.
                 Use this to avoid namespace collisions with cache control
-                parameters like prefix, ttl_seconds, etc.
+                parameters like ttl_seconds, etc.
             ttl_seconds: Custom TTL in seconds (overrides default). None = never expire.
-            prefix: Descriptive prefix prepended to the cache filename
             **kwargs: Parameters identifying the cached data (legacy, use 'on' instead)
 
         Returns:
@@ -1433,7 +1414,7 @@ class UnifiedCache:
             cache_key = self._resolve_cache_key(cache_key, on, kwargs)
 
             if self.config.storage_mode:
-                return self._storage_mode_get(cache_key, prefix)
+                return self._storage_mode_get(cache_key)
 
             # Check if entry exists and is not expired
             entry = self.metadata_backend.get_entry(cache_key)
@@ -1447,7 +1428,7 @@ class UnifiedCache:
                 return None
 
             try:
-                base_file_path = self._get_cache_file_path(cache_key, prefix)
+                base_file_path = self._get_cache_file_path(cache_key)
 
                 # Use actual path from metadata if available, otherwise use base path
                 metadata = entry.get("metadata", {})
@@ -1547,7 +1528,6 @@ class UnifiedCache:
         cache_key: Optional[str] = None,
         on: Optional[Dict] = None,
         ttl_seconds=_DEFAULT_TTL,
-        prefix: str = "",
         hash_key: Optional[str] = None,
         **kwargs,
     ) -> Optional[tuple[Any, Dict[str, Any]]]:
@@ -1565,7 +1545,6 @@ class UnifiedCache:
                 Use this to avoid namespace collisions with cache control parameters.
             ttl_seconds: Custom TTL in seconds (overrides default). None = never expire.
                          Use _DEFAULT_TTL sentinel (default) to use config's default_ttl_seconds.
-            prefix: Descriptive prefix prepended to the cache filename
             **kwargs: Parameters identifying the cached data (legacy, use 'on' instead)
 
         Returns:
@@ -1584,7 +1563,7 @@ class UnifiedCache:
             cache_key = self._resolve_cache_key(cache_key, on, kwargs)
 
             if self.config.storage_mode:
-                return self._storage_mode_get_with_metadata(cache_key, prefix)
+                return self._storage_mode_get_with_metadata(cache_key)
 
             # Single metadata lookup
             entry = self.metadata_backend.get_entry(cache_key)
@@ -1625,7 +1604,7 @@ class UnifiedCache:
                 return None
 
             try:
-                base_file_path = self._get_cache_file_path(cache_key, prefix)
+                base_file_path = self._get_cache_file_path(cache_key)
 
                 # Use actual path from metadata if available, otherwise use base path
                 metadata = entry.get("metadata", {})
@@ -1775,7 +1754,6 @@ class UnifiedCache:
         self,
         cache_key: Optional[str] = None,
         on: Optional[Dict] = None,
-        prefix: str = "",
         check_expiration: bool = True,
         hash_key: Optional[str] = None,
         **kwargs,
@@ -1790,7 +1768,6 @@ class UnifiedCache:
             cache_key: Direct cache key (if provided, on and **kwargs are ignored)
             on: Dictionary of key parameters for cache key derivation.
                 Use this to avoid namespace collisions with cache control parameters.
-            prefix: Descriptive prefix prepended to the cache filename (not used for check)
             check_expiration: If True, returns False for expired entries (default: True)
             **kwargs: Parameters identifying the cached data (legacy, use 'on' instead)
 
@@ -1875,8 +1852,7 @@ class UnifiedCache:
 
             # Get appropriate handler for the data type
             # Reconstruct file path from existing metadata (blob I/O belongs here, not in metadata layer)
-            prefix = existing_entry.get("prefix", "")
-            base_file_path = self._get_cache_file_path(cache_key, prefix)
+            base_file_path = self._get_cache_file_path(cache_key)
 
             # Delegate blob I/O to BlobStore
             handler, result, _ = self._blob_store._write_blob(
@@ -2182,9 +2158,7 @@ class UnifiedCache:
                 # Strip named params that get() consumes so the cache key
                 # matches the one computed during put()
                 hash_kwargs = {
-                    k: v
-                    for k, v in kw.items()
-                    if k not in ("cache_key", "prefix", "ttl_seconds")
+                    k: v for k, v in kw.items() if k not in ("cache_key", "ttl_seconds")
                 }
                 cache_key = kw.get("cache_key") or self._create_cache_key(hash_kwargs)
                 results[cache_key] = self.get(**kw)
@@ -2219,8 +2193,7 @@ class UnifiedCache:
                 hash_kwargs = {
                     k: v
                     for k, v in kw.items()
-                    if k
-                    not in ("cache_key", "prefix", "description", "custom_metadata")
+                    if k not in ("cache_key", "description", "custom_metadata")
                 }
                 cache_key = kw.get("cache_key") or self._create_cache_key(hash_kwargs)
                 entry = self.metadata_backend.get_entry(cache_key)
@@ -2306,7 +2279,6 @@ class UnifiedCache:
         self,
         cache_key: Optional[str] = None,
         on: Optional[Dict] = None,
-        prefix: str = "",
         hash_key: Optional[str] = None,
         **kwargs,
     ):
@@ -2320,7 +2292,6 @@ class UnifiedCache:
             hash_key: Alias for cache_key (storage-oriented name).
             on: Dictionary of key parameters for cache key derivation.
                 Use this to avoid namespace collisions with cache control parameters.
-            prefix: Descriptive prefix of the cache filename
             **kwargs: Parameters identifying the cached data (legacy, use 'on' instead)
         """
         with self._lock:

@@ -794,14 +794,11 @@ class TestCacheness:
     def test_cache_file_path_generation(self, cache):
         """Test cache file path generation."""
         cache_key = "test_key_123"
-        prefix = "test_prefix"
 
-        file_path = cache._get_cache_file_path(cache_key, prefix)
+        file_path = cache._get_cache_file_path(cache_key)
 
         assert isinstance(file_path, Path)
         assert cache_key in str(file_path)
-        if prefix:
-            assert prefix in str(file_path)
         assert str(cache.config.storage.cache_dir) in str(file_path)
 
     def test_ttl_expiration(self, cache):

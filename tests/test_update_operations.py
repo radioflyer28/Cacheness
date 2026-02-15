@@ -146,7 +146,6 @@ class TestUpdateEntryMetadataBackends:
             {
                 "description": "test",
                 "data_type": "dict",
-                "prefix": "",
                 "file_size": 100,
                 "metadata": {"content_hash": "abc123"},
             },
@@ -188,7 +187,6 @@ class TestUpdateEntryMetadataBackends:
             {
                 "description": "test",
                 "data_type": "dict",
-                "prefix": "",
                 "file_size": 100,
                 "metadata": {},
             },
@@ -225,7 +223,6 @@ class TestUpdateEntryMetadataBackends:
             {
                 "description": "test",
                 "data_type": "dict",
-                "prefix": "",
                 "file_size": 100,
                 "metadata": {},
             },

@@ -24,7 +24,6 @@ class TestS3ETagSQLiteBackend:
             "cache_key": "test_s3_entry",
             "description": "Test S3 ETag storage",
             "data_type": "array",
-            "prefix": "s3_test",
             "file_size": 1024,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "metadata": {
@@ -63,7 +62,6 @@ class TestS3ETagSQLiteBackend:
                 "cache_key": "s3_entry_1",
                 "description": "S3 Entry 1",
                 "data_type": "dataframe",
-                "prefix": "df",
                 "file_size": 2048,
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "metadata": {
@@ -75,7 +73,6 @@ class TestS3ETagSQLiteBackend:
                 "cache_key": "local_entry_1",
                 "description": "Local Entry",
                 "data_type": "array",
-                "prefix": "arr",
                 "file_size": 512,
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "metadata": {
@@ -86,7 +83,6 @@ class TestS3ETagSQLiteBackend:
                 "cache_key": "s3_entry_2",
                 "description": "S3 Entry 2",
                 "data_type": "object",
-                "prefix": "obj",
                 "file_size": 4096,
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "metadata": {
@@ -127,7 +123,6 @@ class TestS3ETagSQLiteBackend:
             "cache_key": "filesystem_entry",
             "description": "Filesystem Entry",
             "data_type": "object",
-            "prefix": "fs",
             "file_size": 256,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "metadata": {
@@ -172,7 +167,6 @@ class TestS3ETagPostgreSQLBackend:
             "cache_key": "pg_s3_test",
             "description": "PostgreSQL S3 ETag test",
             "data_type": "array",
-            "prefix": "pg_s3",
             "file_size": 8192,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "metadata": {

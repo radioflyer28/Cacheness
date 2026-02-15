@@ -283,7 +283,6 @@ class TestJsonBackendCorruption:
             "key1",
             {
                 "data_type": "test",
-                "prefix": "",
                 "description": "test entry",
                 "file_size": 100,
                 "metadata": {},

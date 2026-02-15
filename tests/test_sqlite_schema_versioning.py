@@ -248,7 +248,6 @@ class TestSqliteBackwardCompatibility:
             {
                 "description": "test",
                 "data_type": "pickle",
-                "prefix": "",
                 "file_size": 100,
             },
         )

@@ -58,7 +58,7 @@ json_values = st.one_of(
 param_dicts = st.dictionaries(
     keys=st.text(min_size=1, max_size=30).filter(
         lambda k: k
-        not in ("prefix", "description", "custom_metadata", "ttl_seconds", "cache_key")
+        not in ("description", "custom_metadata", "ttl_seconds", "cache_key")
     ),
     values=json_values,
     min_size=1,
@@ -234,7 +234,6 @@ class TestCacheKeyDeterminism:
         assume(
             extra_key
             not in (
-                "prefix",
                 "description",
                 "custom_metadata",
                 "ttl_seconds",
@@ -261,12 +260,11 @@ class TestCacheKeyDeterminism:
 
     @given(
         params=param_dicts,
-        prefix=st.text(max_size=20),
         description=st.text(max_size=50),
     )
     @settings(max_examples=100, deadline=None)
-    def test_named_params_stripped_before_hashing(self, params, prefix, description):
-        """Named params (prefix, description, etc.) must not affect cache key."""
+    def test_named_params_stripped_before_hashing(self, params, description):
+        """Named params (description, etc.) must not affect cache key."""
         key_without = create_unified_cache_key(params)
 
         # These should be stripped by the caller (UnifiedCache._create_cache_key)
@@ -429,7 +427,6 @@ def make_entry_data(cache_key: str, data_type: str = "test") -> dict:
     return {
         "description": f"test entry {cache_key}",
         "data_type": data_type,
-        "prefix": "",
         "created_at": now,
         "accessed_at": now,
         "file_size": 100,

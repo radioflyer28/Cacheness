@@ -148,7 +148,7 @@ Cache key generation doesn't properly distinguish between different argument com
 
 3. **Use custom cache key:**
    ```python
-   cache.put(result, x=x, y=y, prefix="unique_operation")
+   cache.put(result, x=x, y=y, cache_key="unique_operation")
    ```
 
 ## Test Failures After Changes
