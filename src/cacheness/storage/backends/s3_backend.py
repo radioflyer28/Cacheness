@@ -5,6 +5,18 @@ S3 Blob Storage Backend
 S3-compatible blob storage backend for distributed caching.
 Supports Amazon S3, MinIO, and other S3-compatible services.
 
+Namespace isolation
+-------------------
+When a non-default ``namespace`` is supplied, blobs are stored under
+``{prefix}{namespace_id}/``.  The default namespace uses the base prefix
+unchanged for backward compatibility.
+
+Examples::
+
+    prefix="cache/v1/", namespace="default"  → s3://bucket/cache/v1/<shard>/<blob>
+    prefix="cache/v1/", namespace="staging"  → s3://bucket/cache/v1/staging/<shard>/<blob>
+    prefix="",          namespace="staging"  → s3://bucket/staging/<shard>/<blob>
+
 Requirements:
     pip install cacheness[s3]
     # or
@@ -103,6 +115,7 @@ class S3BlobBackend(BlobBackend):
         access_key: Optional[str] = None,
         secret_key: Optional[str] = None,
         shard_chars: int = 2,
+        namespace: str = "default",
         **kwargs,
     ):
         """
@@ -117,6 +130,10 @@ class S3BlobBackend(BlobBackend):
             access_key: AWS access key (optional, falls back to credential chain)
             secret_key: AWS secret key (optional, falls back to credential chain)
             shard_chars: Number of leading chars for directory sharding (default: 2)
+            namespace: Namespace for blob isolation. Non-default namespaces
+                auto-derive the S3 prefix as ``{prefix}{namespace}/``.
+                The default namespace uses the base *prefix* unchanged for
+                backward compatibility.
             **kwargs: Additional boto3 client options
         """
         if not BOTO3_AVAILABLE:
@@ -126,9 +143,20 @@ class S3BlobBackend(BlobBackend):
             )
 
         self.bucket = bucket
-        self.prefix = (
+        self._namespace = namespace
+
+        # Normalise base prefix (ensure trailing slash if non-empty)
+        base_prefix = (
             prefix.rstrip("/") + "/" if prefix and not prefix.endswith("/") else prefix
         )
+        self._base_prefix = base_prefix
+
+        # Auto-derive namespace prefix
+        if namespace != "default":
+            self.prefix = f"{base_prefix}{namespace}/"
+        else:
+            self.prefix = base_prefix
+
         self.region = region
         self.endpoint_url = endpoint_url
         self.use_ssl = use_ssl
@@ -154,7 +182,8 @@ class S3BlobBackend(BlobBackend):
 
         logger.debug(
             f"S3BlobBackend initialized: bucket={bucket}, prefix={self.prefix}, "
-            f"region={region}, endpoint={endpoint_url}, shard_chars={shard_chars}"
+            f"namespace={namespace}, region={region}, endpoint={endpoint_url}, "
+            f"shard_chars={shard_chars}"
         )
 
     def _get_s3_key(self, blob_id: str) -> str:
@@ -502,6 +531,41 @@ class S3BlobBackend(BlobBackend):
 
         # Assume it's already a key
         return blob_path
+
+    def delete_namespace_blobs(self, namespace_id: str) -> int:
+        """Delete all S3 objects under a namespace prefix.
+
+        Used during :meth:`drop_namespace` to clean up blob storage for a
+        removed namespace.
+
+        Args:
+            namespace_id: The namespace whose blobs should be deleted.
+
+        Returns:
+            Number of objects deleted.
+        """
+        ns_prefix = f"{self._base_prefix}{namespace_id}/"
+        deleted = 0
+        paginator = self._client.get_paginator("list_objects_v2")
+
+        try:
+            for page in paginator.paginate(Bucket=self.bucket, Prefix=ns_prefix):
+                objects = [{"Key": obj["Key"]} for obj in page.get("Contents", [])]
+                if objects:
+                    self._client.delete_objects(
+                        Bucket=self.bucket,
+                        Delete={"Objects": objects, "Quiet": True},
+                    )
+                    deleted += len(objects)
+
+            logger.info(
+                f"Deleted {deleted} S3 objects for namespace {namespace_id!r} "
+                f"(prefix={ns_prefix})"
+            )
+        except ClientError as e:
+            logger.error(f"Failed to delete namespace blobs for {namespace_id!r}: {e}")
+
+        return deleted
 
     def close(self) -> None:
         """Close S3 client (boto3 handles connection pooling automatically)."""

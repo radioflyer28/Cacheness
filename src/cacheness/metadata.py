@@ -653,6 +653,27 @@ class MetadataBackend(ABC):
         """
         return self.get_namespace(namespace_id) is not None
 
+    def clear_all_namespaces(self) -> Dict[str, int]:
+        """Nuclear option: drop every non-default namespace and clear the default.
+
+        Iterates the namespace registry.  Non-default namespaces are fully
+        dropped (tables/files removed via :meth:`drop_namespace`).  The
+        default namespace is cleared (rows deleted, stats reset via
+        :meth:`clear_all`).
+
+        Returns:
+            Mapping of ``namespace_id`` → entries removed (``-1`` means the
+            namespace was dropped entirely rather than row-cleared).
+        """
+        results: Dict[str, int] = {}
+        for ns in self.list_namespaces():
+            if ns.namespace_id == DEFAULT_NAMESPACE:
+                results[DEFAULT_NAMESPACE] = self.clear_all()
+            else:
+                self.drop_namespace(ns.namespace_id)
+                results[ns.namespace_id] = -1
+        return results
+
     def close(self):
         """Close and clean up any resources (default implementation does nothing)."""
         pass
@@ -836,6 +857,17 @@ class CachedMetadataBackend(MetadataBackend):
                 logger.debug("Memory cache cleared")
 
         return count
+
+    def clear_all_namespaces(self) -> Dict[str, int]:
+        """Delegate to wrapped backend and clear memory cache."""
+        results = self.backend.clear_all_namespaces()
+
+        if self._memory_cache is not None:
+            with self._lock:
+                self._memory_cache.clear()
+                logger.debug("Memory cache cleared (all namespaces)")
+
+        return results
 
     def get_cache_stats(self) -> Dict[str, Any]:
         """Get memory cache layer statistics."""

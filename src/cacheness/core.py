@@ -16,6 +16,7 @@ from typing import Optional, Dict, Any, List, Callable, Tuple
 
 from .config import CacheConfig, _DEFAULT_TTL, create_cache_config
 from .handlers import HandlerRegistry
+from .metadata import DEFAULT_NAMESPACE
 from .serialization import create_unified_cache_key
 
 logger = logging.getLogger(__name__)
@@ -2365,6 +2366,49 @@ class UnifiedCache:
             int: The number of cache entries removed.
         """
         return self.clear_all()
+
+    def clear_all_namespaces(self) -> Dict[str, int]:
+        """Nuclear option: drop all non-default namespaces and clear the default.
+
+        Removes metadata *and* blob files across every registered namespace.
+        Non-default namespaces are fully dropped (tables + blob directory
+        removed).  The default namespace has its rows deleted and stats reset
+        while its tables/directory are preserved.
+
+        Returns:
+            Mapping of ``namespace_id`` → entries removed (``-1`` means the
+            namespace was dropped entirely rather than row-cleared).
+        """
+        import shutil
+
+        with self._lock:
+            cache_root = Path(self.config.storage.cache_dir)
+
+            # Discover namespace blob directories *before* metadata drop
+            ns_dirs: list[Path] = []
+            for ns in self.metadata_backend.list_namespaces():
+                if ns.namespace_id != DEFAULT_NAMESPACE:
+                    ns_dir = cache_root / ns.namespace_id
+                    if ns_dir.is_dir():
+                        ns_dirs.append(ns_dir)
+
+            # Clear default namespace blob files
+            self._blob_store._clear_blob_files()
+
+            # Drop metadata for all namespaces
+            results = self.metadata_backend.clear_all_namespaces()
+
+            # Remove non-default namespace blob directories
+            for ns_dir in ns_dirs:
+                try:
+                    shutil.rmtree(ns_dir)
+                except OSError as exc:
+                    logger.warning(
+                        f"Failed to remove namespace blob dir {ns_dir}: {exc}"
+                    )
+
+            logger.info(f"Cleared all namespaces: {results}")
+            return results
 
     def cleanup_expired(self, ttl_seconds: Optional[float] = None) -> int:
         """Remove all expired cache entries and their blob files.
