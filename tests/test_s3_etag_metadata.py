@@ -5,6 +5,8 @@ This module tests that the s3_etag field can be properly stored and retrieved
 from both SQLite and PostgreSQL metadata backends.
 """
 
+import os
+
 import pytest
 from datetime import datetime, timezone
 
@@ -148,19 +150,21 @@ class TestS3ETagSQLiteBackend:
 class TestS3ETagPostgreSQLBackend:
     """Test s3_etag field storage in PostgreSQL backend."""
 
-    @pytest.mark.skipif(
-        True,  # Skip by default since it requires Docker/PostgreSQL running
-        reason="Requires PostgreSQL instance (run Docker integration tests separately)",
-    )
-    def test_s3_etag_storage_postgresql(self):
+    @pytest.fixture
+    def postgres_url(self):
+        """Get PostgreSQL connection URL from environment or skip."""
+        url = os.environ.get("CACHENESS_TEST_POSTGRES_URL")
+        if not url:
+            pytest.skip(
+                "PostgreSQL tests require CACHENESS_TEST_POSTGRES_URL environment variable"
+            )
+        return url
+
+    def test_s3_etag_storage_postgresql(self, postgres_url):
         """Test storing and retrieving s3_etag in PostgreSQL backend."""
         from cacheness.storage.backends.postgresql_backend import PostgresBackend
 
-        # This test is designed to run with Docker integration tests
-        # where PostgreSQL is available at localhost:5432
-        backend = PostgresBackend(
-            connection_url="postgresql://cacheness_test:test_password@localhost:5432/cacheness_test"
-        )
+        backend = PostgresBackend(connection_url=postgres_url)
 
         # Store entry with s3_etag
         entry_data = {

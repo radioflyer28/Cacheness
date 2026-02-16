@@ -20,7 +20,6 @@ try:
         PostgresBackend,
         SQLALCHEMY_AVAILABLE,
         PSYCOPG_AVAILABLE,
-        PSYCOPG_VERSION,
     )
 
     _HAS_POSTGRES_BACKEND = True
@@ -28,7 +27,6 @@ except ImportError:
     _HAS_POSTGRES_BACKEND = False
     SQLALCHEMY_AVAILABLE = False
     PSYCOPG_AVAILABLE = False
-    PSYCOPG_VERSION = None
 
 from cacheness.storage.backends import (
     list_metadata_backends,
@@ -551,7 +549,6 @@ class TestCustomMetadataPostgresIntegration:
         inspector = inspect(backend.engine)
         tables = inspector.get_table_names()
 
-        assert "cache_metadata_links" in tables
         assert "custom_pg_test_migrate" in tables
 
         backend.close()

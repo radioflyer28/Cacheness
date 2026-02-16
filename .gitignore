@@ -47,3 +47,5 @@ WORKTREE.md
 
 # Quality check error logs
 .quality-errors.log
+cache_metadata.json
+team_data_metadata.json

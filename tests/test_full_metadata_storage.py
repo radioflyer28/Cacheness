@@ -5,6 +5,8 @@ This feature stores complete cache key parameters (kwargs) as JSON in the cache_
 database column for debugging and querying purposes. It's disabled by default for performance.
 """
 
+import os
+
 import numpy as np
 import pytest
 from pathlib import Path
@@ -242,29 +244,26 @@ class TestFullMetadataStorageSQLite:
         cache.close()
 
 
-@pytest.mark.skip(reason="Requires Docker container with PostgreSQL")
+@pytest.mark.skipif(
+    not os.environ.get("CACHENESS_TEST_POSTGRES_URL"),
+    reason="Requires CACHENESS_TEST_POSTGRES_URL environment variable",
+)
 class TestFullMetadataStoragePostgreSQL:
     """Test full_metadata storage with PostgreSQL backend."""
 
     @pytest.fixture
-    def postgres_config(self):
-        """PostgreSQL configuration for Docker tests."""
-        return {
-            "host": "localhost",
-            "port": 5432,
-            "database": "cache_test",
-            "user": "cache_user",
-            "password": "cache_pass",
-        }
+    def postgres_url(self):
+        """Get PostgreSQL connection URL from environment."""
+        return os.environ["CACHENESS_TEST_POSTGRES_URL"]
 
-    def test_full_metadata_postgresql(self, tmp_path, postgres_config):
+    def test_full_metadata_postgresql(self, tmp_path, postgres_url):
         """Verify full_metadata works with PostgreSQL backend."""
         cache_dir = tmp_path / "cache"
 
         config = CacheConfig(
             cache_dir=str(cache_dir),
             metadata_backend="postgresql",
-            metadata_backend_options=postgres_config,
+            metadata_backend_options={"connection_url": postgres_url},
             store_full_metadata=True,
         )
 
@@ -273,8 +272,9 @@ class TestFullMetadataStoragePostgreSQL:
         cache.put(data, experiment="pg_test", model="neural_net", epochs=50)
 
         # Verify cache_key_params stored
-        cache_key = list(cache.metadata_backend._entries_cache.keys())[0]
-        entry = cache.metadata_backend.get_entry(cache_key)
+        entries = cache.metadata_backend.list_entries()
+        assert len(entries) >= 1
+        entry = entries[0]
 
         assert "cache_key_params" in entry["metadata"]
         full_meta = entry["metadata"]["cache_key_params"]
