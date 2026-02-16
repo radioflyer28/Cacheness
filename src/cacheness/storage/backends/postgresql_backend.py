@@ -144,6 +144,7 @@ if SQLALCHEMY_AVAILABLE:
         actual_path = Column(String(500), nullable=True)
 
         cache_key_params = Column(Text, nullable=True)
+        metadata_dict = Column(Text, nullable=True)
 
     class PgCacheStatsMixin:
         """Column definitions shared by all PG cache_stats tables."""
@@ -245,6 +246,29 @@ if SQLALCHEMY_AVAILABLE:
             nullable=False,
         )
         signature = Column(String(128), nullable=True)
+
+
+# ------------------------------------------------------------------
+# Schema migrations
+# ------------------------------------------------------------------
+
+
+def _pg_migrate_v1_to_v2(backend: "PostgresBackend", namespace_id: str) -> None:
+    """Add ``metadata_dict`` column to an existing entries table.
+
+    v1 tables were created without ``metadata_dict``.  This migration
+    adds the column so that ``query_meta()`` works on PostgreSQL.
+    """
+    if namespace_id == DEFAULT_NAMESPACE:
+        table = "cache_entries"
+    else:
+        table = f"cache_entries_{namespace_id}"
+
+    with backend.SessionLocal() as session:
+        session.execute(
+            text(f'ALTER TABLE "{table}" ADD COLUMN IF NOT EXISTS metadata_dict TEXT')
+        )
+        session.commit()
 
 
 class PostgresBackend(MetadataBackend):
@@ -411,10 +435,12 @@ class PostgresBackend(MetadataBackend):
     def get_migrations(self) -> list:
         """Return PostgreSQL-specific schema migrations.
 
-        Schema baseline is v1 (current).  No legacy migrations exist.
-        Future migrations (v1 → v2, etc.) will be added here.
+        Schema baseline is v1 (current).
+        v1 → v2: add ``metadata_dict`` column for ``query_meta()`` parity.
         """
-        return []
+        return [
+            (1, 2, _pg_migrate_v1_to_v2),
+        ]
 
     # --- Namespace registry overrides ---
 
@@ -463,7 +489,8 @@ class PostgresBackend(MetadataBackend):
                         serializer      VARCHAR(20),
                         compression_codec VARCHAR(20),
                         actual_path     VARCHAR(500),
-                        cache_key_params TEXT
+                        cache_key_params TEXT,
+                        metadata_dict TEXT
                     )
                 """)
                 )
@@ -695,6 +722,7 @@ class PostgresBackend(MetadataBackend):
         entry_signature = metadata.pop("entry_signature", None)
         s3_etag = metadata.pop("s3_etag", None)  # S3 ETag if using S3 backend
         cache_key_params = metadata.pop("cache_key_params", None)
+        metadata_dict_value = metadata.pop("metadata_dict", None)
 
         # Handle timestamps - always use UTC
         created_at = entry_data.get("created_at")
@@ -765,6 +793,7 @@ class PostgresBackend(MetadataBackend):
                     compression_codec=compression_codec,
                     actual_path=actual_path,
                     cache_key_params=serialized_params,
+                    metadata_dict=metadata_dict_value,
                 )
             )
         else:
@@ -785,6 +814,7 @@ class PostgresBackend(MetadataBackend):
                 compression_codec=compression_codec,
                 actual_path=actual_path,
                 cache_key_params=serialized_params,
+                metadata_dict=metadata_dict_value,
             )
             session.add(entry)
 
@@ -821,12 +851,6 @@ class PostgresBackend(MetadataBackend):
             metadata["entry_signature"] = entry.entry_signature
         if entry.s3_etag:
             metadata["s3_etag"] = entry.s3_etag
-        if entry.actual_path:
-            metadata["actual_path"] = entry.actual_path
-        if entry.file_hash:
-            metadata["file_hash"] = entry.file_hash
-        if entry.entry_signature:
-            metadata["entry_signature"] = entry.entry_signature
 
         if metadata:
             result["metadata"] = metadata
@@ -916,6 +940,8 @@ class PostgresBackend(MetadataBackend):
                         entry.object_type = updates["object_type"]
                     if "s3_etag" in updates:
                         entry.s3_etag = updates["s3_etag"]
+                    if "metadata_dict" in updates:
+                        entry.metadata_dict = updates["metadata_dict"]
 
                     session.commit()
                     return True
@@ -934,7 +960,7 @@ class PostgresBackend(MetadataBackend):
                     f"       file_size, created_at, accessed_at, "
                     f"       object_type, storage_format, serializer, "
                     f"       compression_codec, actual_path, "
-                    f"       file_hash, entry_signature "
+                    f"       file_hash, entry_signature, metadata_dict "
                     f'FROM "{tbl}"'
                 )
             ).fetchall()
@@ -962,6 +988,8 @@ class PostgresBackend(MetadataBackend):
                     flat["file_hash"] = row[11]
                 if row[12] is not None:
                     flat["entry_signature"] = row[12]
+                if row[13] is not None:
+                    flat["metadata_dict"] = row[13]
                 result.append(flat)
             return result
 

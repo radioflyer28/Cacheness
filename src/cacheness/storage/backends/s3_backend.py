@@ -231,6 +231,7 @@ class S3BlobBackend(BlobBackend):
             )
 
             etag = response.get("ETag", "").strip('"')
+            self._last_write_metadata = {"s3_etag": etag}
 
             logger.debug(
                 f"Wrote blob {blob_id} ({len(data)} bytes) to s3://{self.bucket}/{s3_key} "
@@ -242,6 +243,13 @@ class S3BlobBackend(BlobBackend):
         except ClientError as e:
             logger.error(f"Failed to write blob {blob_id} to S3: {e}")
             raise
+
+    def get_write_metadata(self) -> dict:
+        """Return metadata from the last ``write_blob()`` call.
+
+        Returns a dict containing ``s3_etag`` from the S3 PUT response.
+        """
+        return getattr(self, "_last_write_metadata", {})
 
     def read_blob(self, blob_path: str) -> bytes:
         """

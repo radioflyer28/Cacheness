@@ -705,6 +705,12 @@ class BlobStore:
         Does NOT acquire the lock — caller is responsible for synchronization.
         Does NOT write metadata — caller handles metadata storage.
 
+        When the blob backend is not a local filesystem (e.g. S3), the
+        handler first writes to local disk, then the bytes are uploaded
+        via ``blob_backend.write_blob()``.  Any backend-specific metadata
+        (such as ``s3_etag``) is injected into the result dict's
+        ``metadata`` so it flows to the metadata backend.
+
         Args:
             data: The data to serialize
             base_path: Base file path (handler adds extension)
@@ -720,6 +726,22 @@ class BlobStore:
         if compute_hash:
             actual_path = Path(str(result.get("actual_path", base_path)))
             file_hash = self._calculate_file_hash(actual_path)
+
+        # If blob backend is not local filesystem, upload the serialized
+        # bytes and capture any backend-specific metadata (e.g. s3_etag).
+        if not isinstance(self.blob_backend, FilesystemBlobBackend):
+            actual_path = Path(str(result.get("actual_path", base_path)))
+            if actual_path.exists():
+                blob_bytes = actual_path.read_bytes()
+                blob_uri = self.blob_backend.write_blob(actual_path.stem, blob_bytes)
+                # Inject backend write metadata (e.g. s3_etag) into result
+                write_meta = self.blob_backend.get_write_metadata()
+                if write_meta:
+                    result.setdefault("metadata", {})
+                    result["metadata"].update(write_meta)
+                # Store the remote URI as actual_path so reads go to S3
+                result["actual_path"] = blob_uri
+
         return handler, result, file_hash
 
     def _read_blob(

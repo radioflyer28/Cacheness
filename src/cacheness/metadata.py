@@ -2286,7 +2286,7 @@ class SqliteBackend(MetadataBackend):
                     f"       file_size, created_at, accessed_at, "
                     f"       object_type, storage_format, serializer, "
                     f"       compression_codec, actual_path, "
-                    f"       file_hash, entry_signature "
+                    f"       file_hash, entry_signature, metadata_dict "
                     f'FROM "{tbl}"'
                 )
             ).fetchall()
@@ -2315,6 +2315,8 @@ class SqliteBackend(MetadataBackend):
                     flat["file_hash"] = row[11]
                 if row[12] is not None:
                     flat["entry_signature"] = row[12]
+                if row[13] is not None:
+                    flat["metadata_dict"] = row[13]
                 result.append(flat)
             return result
 

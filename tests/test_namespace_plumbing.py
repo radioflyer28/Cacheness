@@ -192,7 +192,7 @@ class TestMetadataBackendABCProperty:
             def remove_entry(self, cache_key):
                 return False
 
-            def list_entries(self, prefix=None, data_type=None):
+            def list_entries(self):
                 return []
 
             def get_stats(self):
@@ -247,7 +247,7 @@ class TestMetadataBackendABCProperty:
             def remove_entry(self, cache_key):
                 return False
 
-            def list_entries(self, prefix=None, data_type=None):
+            def list_entries(self):
                 return []
 
             def get_stats(self):

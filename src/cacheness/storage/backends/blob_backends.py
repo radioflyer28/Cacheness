@@ -126,6 +126,15 @@ class BlobBackend(ABC):
         """
         pass
 
+    def get_write_metadata(self) -> Dict[str, str]:
+        """Return metadata from the last ``write_blob()`` call.
+
+        Backends that produce extra metadata during writes (e.g. an S3
+        ETag) should override this.  The default implementation returns
+        an empty dict.
+        """
+        return {}
+
     def write_blob_stream(self, blob_id: str, stream: BinaryIO) -> str:
         """
         Write blob from a stream (for large objects).
