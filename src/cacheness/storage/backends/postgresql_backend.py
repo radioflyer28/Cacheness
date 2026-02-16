@@ -340,7 +340,7 @@ class PostgresBackend(MetadataBackend):
         self._ensure_namespace_registry()
 
         # Run formal migrations for schema evolution
-        self.run_migrations(DEFAULT_NAMESPACE)
+        self.run_all_migrations()
 
         # Initialize stats
         self._init_stats()
@@ -524,10 +524,13 @@ class PostgresBackend(MetadataBackend):
 
                 session.commit()
 
+                # Run migrations for the new namespace
+                self.run_migrations(namespace_id)
+
                 return NamespaceInfo(
                     namespace_id=namespace_id,
                     display_name=display_name,
-                    schema_version=1,
+                    schema_version=self.get_schema_version(namespace_id),
                     created_at=now,
                 )
 

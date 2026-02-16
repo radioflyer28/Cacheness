@@ -206,6 +206,89 @@ class TestMetadataBackendSchemaVersioning:
         assert final == 2
         assert backend.get_schema_version(DEFAULT_NAMESPACE) == 2
 
+    def test_run_all_migrations_single_namespace(self):
+        """run_all_migrations should migrate the default namespace."""
+        backend = self.DummyBackend()
+        backend.run_all_migrations()
+        assert backend.get_schema_version(DEFAULT_NAMESPACE) == 2
+        assert backend._migration_log == [
+            (DEFAULT_NAMESPACE, 0, 1),
+            (DEFAULT_NAMESPACE, 1, 2),
+        ]
+
+    def test_run_all_migrations_multiple_namespaces(self):
+        """run_all_migrations should iterate all registered namespaces."""
+
+        class MultiNsBackend(self.DummyBackend):
+            """DummyBackend that reports multiple namespaces."""
+
+            def __init__(self):
+                super().__init__()
+                self._namespaces = [DEFAULT_NAMESPACE, "alpha", "beta"]
+
+            def list_namespaces(self):
+                return [
+                    NamespaceInfo(
+                        namespace_id=ns_id,
+                        display_name=ns_id.title(),
+                        schema_version=self.get_schema_version(ns_id),
+                    )
+                    for ns_id in self._namespaces
+                ]
+
+        backend = MultiNsBackend()
+        backend.run_all_migrations()
+
+        # All three namespaces should be at version 2
+        assert backend.get_schema_version(DEFAULT_NAMESPACE) == 2
+        assert backend.get_schema_version("alpha") == 2
+        assert backend.get_schema_version("beta") == 2
+
+        # Each namespace should have had both migrations applied
+        assert len(backend._migration_log) == 6  # 3 namespaces * 2 migrations
+
+    def test_run_all_migrations_skips_already_migrated(self):
+        """Namespaces already at the latest version are skipped."""
+
+        class MultiNsBackend(self.DummyBackend):
+            def __init__(self):
+                super().__init__()
+                self._namespaces = [DEFAULT_NAMESPACE, "already_done"]
+                # 'already_done' is already at latest version
+                self._versions["already_done"] = 2
+
+            def list_namespaces(self):
+                return [
+                    NamespaceInfo(
+                        namespace_id=ns_id,
+                        display_name=ns_id.title(),
+                        schema_version=self.get_schema_version(ns_id),
+                    )
+                    for ns_id in self._namespaces
+                ]
+
+        backend = MultiNsBackend()
+        backend.run_all_migrations()
+
+        # Only default should have migration entries
+        assert backend._migration_log == [
+            (DEFAULT_NAMESPACE, 0, 1),
+            (DEFAULT_NAMESPACE, 1, 2),
+        ]
+        assert backend.get_schema_version("already_done") == 2
+
+    def test_run_all_migrations_no_migrations_defined(self):
+        """When get_migrations() returns [], run_all_migrations is a no-op."""
+
+        class NoMigrationBackend(self.DummyBackend):
+            def get_migrations(self):
+                return []
+
+        backend = NoMigrationBackend()
+        backend.run_all_migrations()
+        assert backend._migration_log == []
+        assert backend.get_schema_version(DEFAULT_NAMESPACE) == 0
+
 
 class TestMetadataBackendNamespaceRegistry:
     """Tests for namespace registry defaults on MetadataBackend ABC."""

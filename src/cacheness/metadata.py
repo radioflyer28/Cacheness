@@ -561,6 +561,17 @@ class MetadataBackend(ABC):
                 current = to_ver
         return current
 
+    def run_all_migrations(self) -> None:
+        """Run pending migrations for every registered namespace.
+
+        Iterates the namespace registry and calls :meth:`run_migrations`
+        on each.  Safe to call during init — the default namespace is
+        always present, and any future namespaces are migrated lazily
+        when created or at the next startup.
+        """
+        for ns in self.list_namespaces():
+            self.run_migrations(ns.namespace_id)
+
     # --- Namespace registry ---
 
     def create_namespace(
@@ -1021,6 +1032,7 @@ class JsonBackend(MetadataBackend):
             self._root_metadata_file.parent / "cacheness_namespaces.json"
         )
         self._ensure_namespace_registry()
+        self.run_all_migrations()
 
     def _load_from_disk(self) -> Dict[str, Any]:
         """Load metadata from JSON file."""
@@ -1572,12 +1584,15 @@ class JsonBackend(MetadataBackend):
             }
             self._save_registry(registry)
 
+            # Run migrations for the new namespace
+            self.run_migrations(namespace_id)
+
             logger.info(f"Created namespace {namespace_id!r} with file {ns_file}")
 
             return NamespaceInfo(
                 namespace_id=namespace_id,
                 display_name=display_name,
-                schema_version=1,
+                schema_version=self.get_schema_version(namespace_id),
                 created_at=now,
             )
 
@@ -1762,7 +1777,7 @@ class SqliteBackend(MetadataBackend):
 
         # Run formal schema versioning migrations
         self._ensure_namespace_registry()
-        self.run_migrations(DEFAULT_NAMESPACE)
+        self.run_all_migrations()
 
         # Initialize stats if not exists
         self._init_stats()
@@ -1929,10 +1944,13 @@ class SqliteBackend(MetadataBackend):
 
             session.commit()
 
+            # Run migrations for the new namespace
+            self.run_migrations(namespace_id)
+
             return NamespaceInfo(
                 namespace_id=namespace_id,
                 display_name=display_name,
-                schema_version=1,
+                schema_version=self.get_schema_version(namespace_id),
                 created_at=now,
             )
 
