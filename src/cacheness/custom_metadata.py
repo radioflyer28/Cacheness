@@ -50,7 +50,7 @@ Usage:
 
 import logging
 from datetime import datetime, timezone
-from typing import Dict, Type, Optional, List
+from typing import Any, Dict, Type, Optional, List
 
 try:
     from sqlalchemy import (
@@ -88,8 +88,18 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# Global registry for custom metadata models
+# Global registry for custom metadata models (schema_name → template class)
 _custom_metadata_registry: Dict[str, Type] = {}
+
+# Cache for namespace-specific custom metadata ORM classes.
+# Key: (schema_name, namespace_id), Value: ORM class.
+# For the default namespace, the template class from _custom_metadata_registry
+# is reused directly.  For other namespaces, a dynamic class with the correct
+# __tablename__ and FK target is created lazily and cached here.
+_ns_custom_model_cache: Dict[tuple, Type] = {}
+
+# Column names defined by CustomMetadataBase (not user-defined).
+_BASE_COLUMN_NAMES = frozenset({"id", "cache_key", "created_at", "updated_at"})
 
 
 if SQLALCHEMY_AVAILABLE:
@@ -136,17 +146,31 @@ if SQLALCHEMY_AVAILABLE:
             return f"<{self.__class__.__name__}(id={self.id}, cache_key={cache_key_display})>"
 
         @classmethod
-        def cleanup_orphaned_metadata(cls, session) -> int:
-            """Remove metadata records with no corresponding cache entry."""
-            from sqlalchemy import delete, select
-            from .metadata import CacheEntry
+        def cleanup_orphaned_metadata(cls, session, cache_entry_model=None) -> int:
+            """Remove metadata records with no corresponding cache entry.
 
-            # Find metadata with cache keys that don't exist in cache_entries
+            Args:
+                session: SQLAlchemy session.
+                cache_entry_model: The CacheEntry ORM class for the target
+                    namespace.  When *None*, defaults to the canonical
+                    ``CacheEntry`` (the default-namespace model).
+            """
+            from sqlalchemy import delete, select
+
+            if cache_entry_model is None:
+                from .metadata import CacheEntry
+
+                cache_entry_model = CacheEntry
+
+            # Find metadata with cache keys that don't exist in the target entries table
             orphaned_subquery = (
                 select(cls.cache_key)
                 .select_from(cls)
-                .outerjoin(CacheEntry, cls.cache_key == CacheEntry.cache_key)
-                .where(CacheEntry.cache_key.is_(None))
+                .outerjoin(
+                    cache_entry_model,
+                    cls.cache_key == cache_entry_model.cache_key,
+                )
+                .where(cache_entry_model.cache_key.is_(None))
             )
 
             result = session.execute(
@@ -289,9 +313,128 @@ def _reset_registry():
 
     This function is intended for use in test environments to ensure
     clean state between test runs.
+
+    NOTE: ``_ns_custom_model_cache`` is intentionally NOT cleared here.
+    Those dynamic ORM classes are registered in SQLAlchemy's ``MetaData``
+    and remain valid.  Clearing and recreating them would cause duplicate
+    index definitions.
     """
     global _custom_metadata_registry
     _custom_metadata_registry.clear()
+
+
+# ---------------------------------------------------------------------------
+# Namespace-aware custom metadata model factory
+# ---------------------------------------------------------------------------
+
+
+def _recreate_column(col):
+    """Create a new Column mirroring *col*, detached from any table.
+
+    Handles the common column attributes (type, nullable, unique, index,
+    default, onupdate) and preserves any user-defined foreign keys.
+    """
+    kwargs: Dict[str, Any] = {"nullable": col.nullable}
+    if col.unique:
+        kwargs["unique"] = True
+    if col.index:
+        kwargs["index"] = True
+    if col.primary_key:
+        kwargs["primary_key"] = True
+    if col.default is not None:
+        kwargs["default"] = getattr(col.default, "arg", None)
+    if col.onupdate is not None:
+        kwargs["onupdate"] = getattr(col.onupdate, "arg", None)
+    # Preserve user-defined FKs (unlikely on user columns, but possible)
+    fk_args = [
+        ForeignKey(fk.target_fullname, ondelete=fk.ondelete) for fk in col.foreign_keys
+    ]
+    return Column(col.type, *fk_args, **kwargs)
+
+
+def get_namespace_custom_model(schema_name: str, namespace_id: str) -> Optional[Type]:
+    """Return a namespace-specific custom metadata ORM model.
+
+    For the **default** namespace the template class (registered via
+    ``@custom_metadata_model``) is returned unchanged — its FK already
+    points to ``cache_entries``.
+
+    For any other namespace a dynamic ORM class is created (once, then
+    cached) with:
+
+    * ``__tablename__`` = ``<template_tablename>_<namespace_id>``
+    * ``cache_key`` FK pointing to ``cache_entries_<namespace_id>``
+    * All user-defined columns recreated as fresh ``Column`` instances
+
+    The ``id``, ``created_at`` and ``updated_at`` columns are supplied by
+    ``CustomMetadataBase`` via ``@declared_attr``.
+    """
+    from .metadata import DEFAULT_NAMESPACE
+
+    template = _custom_metadata_registry.get(schema_name)
+    if template is None:
+        return None
+
+    if namespace_id == DEFAULT_NAMESPACE:
+        return template
+
+    key = (schema_name, namespace_id)
+    if key in _ns_custom_model_cache:
+        return _ns_custom_model_cache[key]
+
+    from .metadata import Base
+
+    ns_tablename = f"{template.__tablename__}_{namespace_id}"
+    entries_table = f"cache_entries_{namespace_id}"
+
+    # --- Build the class dict ---
+    # Override cache_key with namespace-specific FK target.
+    class_dict: Dict[str, Any] = {
+        "__tablename__": ns_tablename,
+        "__table_args__": {"extend_existing": True},
+        "_schema_name": schema_name,
+        "cache_key": Column(
+            String(16),
+            ForeignKey(f"{entries_table}.cache_key", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        ),
+    }
+
+    # Recreate user-defined columns (those NOT provided by CustomMetadataBase).
+    for col in template.__table__.columns:
+        if col.name not in _BASE_COLUMN_NAMES:
+            class_dict[col.name] = _recreate_column(col)
+
+    # Inherit from (Base, CustomMetadataBase) — the declared_attrs on
+    # CustomMetadataBase will supply ``id``, ``created_at``, ``updated_at``.
+    # The explicit ``cache_key`` in *class_dict* overrides the declared_attr.
+    NsModel = type(
+        f"{template.__name__}_{namespace_id}",
+        (Base, CustomMetadataBase),
+        class_dict,
+    )
+
+    _ns_custom_model_cache[key] = NsModel
+    return NsModel
+
+
+def convert_to_namespace_instance(source, namespace_model):
+    """Copy column values from a template instance to a *namespace_model* instance.
+
+    Users instantiate the template class (the one decorated with
+    ``@custom_metadata_model``).  For non-default namespaces the ORM
+    needs an instance of the namespace-specific class instead.  This
+    helper copies all column values across.
+    """
+    target = namespace_model()
+    for col in namespace_model.__table__.columns:
+        if col.name == "id":
+            continue  # Auto-increment PK — skip
+        value = getattr(source, col.name, None)
+        if value is not None:
+            setattr(target, col.name, value)
+    return target
 
 
 def is_custom_metadata_available() -> bool:
@@ -421,7 +564,9 @@ def migrate_custom_metadata_tables(engine=None):
         logger.error(f"Failed to migrate custom metadata tables: {e}")
 
 
-def cleanup_orphaned_metadata(engine=None, model_class=None) -> int:
+def cleanup_orphaned_metadata(
+    engine=None, model_class=None, namespace_id: Optional[str] = None
+) -> int:
     """
     Clean up orphaned custom metadata records that no longer have corresponding cache entries.
 
@@ -431,6 +576,8 @@ def cleanup_orphaned_metadata(engine=None, model_class=None) -> int:
     Args:
         engine: SQLAlchemy engine (if None, will try to get from metadata backend)
         model_class: Specific model class to clean (if None, cleans all registered models)
+        namespace_id: Namespace to clean up in.  When *None*, defaults to the
+            ``'default'`` namespace.
 
     Returns:
         Number of orphaned metadata records removed
@@ -440,6 +587,11 @@ def cleanup_orphaned_metadata(engine=None, model_class=None) -> int:
         return 0
 
     try:
+        from .metadata import DEFAULT_NAMESPACE, _get_namespace_models
+
+        ns = namespace_id or DEFAULT_NAMESPACE
+        cache_entry_model, _ = _get_namespace_models(ns)
+
         if engine is None:
             try:
                 from .core import get_cache
@@ -471,7 +623,9 @@ def cleanup_orphaned_metadata(engine=None, model_class=None) -> int:
 
             for model in models_to_clean:
                 if hasattr(model, "cleanup_orphaned_metadata"):
-                    count = model.cleanup_orphaned_metadata(session)
+                    count = model.cleanup_orphaned_metadata(
+                        session, cache_entry_model=cache_entry_model
+                    )
                     total_cleaned += count
 
             if total_cleaned > 0:

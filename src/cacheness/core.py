@@ -401,6 +401,8 @@ class UnifiedCache:
         try:
             from .custom_metadata import (
                 get_custom_metadata_model,
+                get_namespace_custom_model,
+                convert_to_namespace_instance,
             )
             from .metadata import Base
 
@@ -412,21 +414,34 @@ class UnifiedCache:
             # Get SQLAlchemy session from the metadata backend
             if hasattr(self.metadata_backend, "SessionLocal"):
                 with self.metadata_backend.SessionLocal() as session:
-                    # Create only the tables needed for the metadata being
-                    # stored — NOT all registered models.  Creating every
-                    # registered model's table can trigger index collisions
-                    # when stale models remain in the global registry
-                    # (CACHE-qg3).
+                    # Resolve namespace-specific model classes and ensure
+                    # their tables exist.  For non-default namespaces the
+                    # model (and therefore the table) is created dynamically.
                     tables_to_create = set()
                     for metadata_instance in metadata_objects:
-                        tbl = getattr(type(metadata_instance), "__table__", None)
-                        if tbl is not None:
-                            tables_to_create.add(tbl)
-                    if tables_to_create:
-                        Base.metadata.create_all(
-                            self.metadata_backend.engine,
-                            tables=list(tables_to_create),
+                        schema_name = getattr(
+                            type(metadata_instance), "_schema_name", None
                         )
+                        if schema_name:
+                            ns_model = get_namespace_custom_model(
+                                schema_name, self.namespace
+                            )
+                            if ns_model is not None:
+                                tbl = getattr(ns_model, "__table__", None)
+                                if tbl is not None:
+                                    tables_to_create.add(tbl)
+                    if tables_to_create:
+                        # Create tables individually so that a stale index
+                        # or duplicate definition on one table doesn't block
+                        # the others (mirrors migrate_custom_metadata_tables).
+                        for tbl in tables_to_create:
+                            try:
+                                Base.metadata.create_all(
+                                    self.metadata_backend.engine,
+                                    tables=[tbl],
+                                )
+                            except Exception:
+                                pass  # table already exists — fine
 
                     for metadata_instance in metadata_objects:
                         # Get schema name from the metadata object's class
@@ -439,19 +454,33 @@ class UnifiedCache:
                             )
                             continue
 
-                        model_class = get_custom_metadata_model(schema_name)
-                        if not model_class:
+                        template_class = get_custom_metadata_model(schema_name)
+                        if not template_class:
                             logger.warning(
                                 f"Unknown custom metadata schema: {schema_name}"
                             )
                             continue
 
-                        # Ensure metadata instance is of the correct type
-                        if not isinstance(metadata_instance, model_class):
+                        # Ensure metadata instance is of the correct template type
+                        if not isinstance(metadata_instance, template_class):
                             logger.warning(
                                 f"Invalid metadata type for schema {schema_name}"
                             )
                             continue
+
+                        # Resolve the namespace-specific model
+                        ns_model = get_namespace_custom_model(
+                            schema_name, self.namespace
+                        )
+                        if ns_model is None:
+                            continue
+
+                        # For non-default namespaces, convert the template
+                        # instance to the namespace-specific model class.
+                        if ns_model is not type(metadata_instance):
+                            metadata_instance = convert_to_namespace_instance(
+                                metadata_instance, ns_model
+                            )
 
                         # Set the cache_key on the metadata instance (direct FK)
                         metadata_instance.cache_key = cache_key
@@ -460,8 +489,8 @@ class UnifiedCache:
                         # cache_key + schema before inserting.  This ensures
                         # overwriting a cache entry replaces its custom
                         # metadata rather than accumulating duplicate rows.
-                        session.query(model_class).filter(
-                            model_class.cache_key == cache_key
+                        session.query(ns_model).filter(
+                            ns_model.cache_key == cache_key
                         ).delete()
 
                         # Save the metadata instance
@@ -473,7 +502,7 @@ class UnifiedCache:
             logger.error(f"Failed to store custom metadata: {e}")
 
     def _get_custom_metadata(self, cache_key: str) -> Dict[str, Any]:
-        """Retrieve custom metadata for a cache key."""
+        """Retrieve custom metadata for a cache key in the current namespace."""
         if not self._supports_custom_metadata():
             return {}
 
@@ -482,21 +511,23 @@ class UnifiedCache:
                 with self.metadata_backend.SessionLocal() as session:
                     from sqlalchemy import select
                     from sqlalchemy.exc import OperationalError as SAOperationalError
+                    from .custom_metadata import get_namespace_custom_model
 
                     result = {}
-                    # Query each registered schema for metadata with this cache_key.
-                    # Skip schemas whose tables don't exist in this database
-                    # (the global registry may contain models from other
-                    # sessions/tests — CACHE-qg3).
-                    for (
-                        schema_name,
-                        model_class,
-                    ) in self._get_registered_schemas().items():
+                    # Query each registered schema's namespace-specific
+                    # table for metadata with this cache_key.  Skip schemas
+                    # whose tables don't exist in this database (the global
+                    # registry may contain models from other sessions/tests
+                    # — CACHE-qg3).
+                    for schema_name in self._get_registered_schemas():
+                        ns_model = get_namespace_custom_model(
+                            schema_name, self.namespace
+                        )
+                        if ns_model is None:
+                            continue
                         try:
                             metadata_instance = session.execute(
-                                select(model_class).where(
-                                    model_class.cache_key == cache_key
-                                )
+                                select(ns_model).where(ns_model.cache_key == cache_key)
                             ).scalar_one_or_none()
 
                             if metadata_instance:
@@ -554,24 +585,24 @@ class UnifiedCache:
             return []
 
         try:
-            from .custom_metadata import get_custom_metadata_model
+            from .custom_metadata import get_namespace_custom_model
 
-            model_class = get_custom_metadata_model(schema_name)
-            if not model_class:
+            ns_model = get_namespace_custom_model(schema_name, self.namespace)
+            if not ns_model:
                 logger.warning(f"Unknown custom metadata schema: {schema_name}")
                 return []
 
             if hasattr(self.metadata_backend, "SessionLocal"):
                 # Use context manager to ensure proper session cleanup
                 with self.metadata_backend.SessionLocal() as session:
-                    query = session.query(model_class)
+                    query = session.query(ns_model)
 
                     # Apply optional filters
                     if filters:
                         for field_name, value in filters.items():
-                            if hasattr(model_class, field_name):
+                            if hasattr(ns_model, field_name):
                                 query = query.filter(
-                                    getattr(model_class, field_name) == value
+                                    getattr(ns_model, field_name) == value
                                 )
                             else:
                                 logger.warning(
@@ -619,10 +650,10 @@ class UnifiedCache:
                     "Custom metadata querying not supported - requires SQLite or PostgreSQL backend"
                 )
 
-            from .custom_metadata import get_custom_metadata_model
+            from .custom_metadata import get_namespace_custom_model
 
-            model_class = get_custom_metadata_model(schema_name)
-            if not model_class:
+            ns_model = get_namespace_custom_model(schema_name, self.namespace)
+            if not ns_model:
                 raise ValueError(f"Unknown custom metadata schema: {schema_name}")
 
             if not hasattr(self.metadata_backend, "SessionLocal"):
@@ -630,7 +661,7 @@ class UnifiedCache:
 
             session = self.metadata_backend.SessionLocal()
             try:
-                yield session.query(model_class)
+                yield session.query(ns_model)
             finally:
                 session.close()
 
