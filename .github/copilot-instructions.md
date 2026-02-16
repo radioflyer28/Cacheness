@@ -19,9 +19,10 @@ These constraints apply to EVERY task. Violating any of them is a bug.
 - `uv run pytest ...` / `uv run python ...` / `uv sync` / `uv add <pkg>`
 
 **Testing:**
-- **Test command:** `uv run pytest tests/ -x -q --ignore=tests/test_tensorflow_handler.py`
+- **Full suite:** `uv run pytest tests/ -x -q --ignore=tests/test_tensorflow_handler.py`
 - **Windows:** Always add `--ignore=tests/test_tensorflow_handler.py` — TF tests hang
 - **Baseline:** 1096 passed, 97 skipped, 0 failures
+- **Incremental testing:** During development, run only targeted tests (see [Test Suite](#test-suite) for details). Full suite runs only once — right before push.
 
 **Imports:**
 - `from cacheness import UnifiedCache` does NOT work — it's exported as `cacheness`. Use `from cacheness.core import UnifiedCache` in tests.
@@ -74,10 +75,19 @@ Use this for any code change, test addition, or issue-tracked work.
    uv run ruff check $(git diff --name-only --diff-filter=ACMR HEAD -- '*.py')
    uv run ty check $(git diff --name-only --diff-filter=ACMR HEAD -- '*.py')
    ```
-5. **Run tests:** `uv run pytest tests/ -x -q --ignore=tests/test_tensorflow_handler.py`
-6. **Update docs** if changing public API
-7. **Push feature branch:** `git push -u origin beads-<hash>-<desc>`
-8. **Integrate to dev:**
+5. **Incremental tests** (after each code change):
+   ```bash
+   # Tier 1 — directly affected tests only (~seconds)
+   uv run pytest tests/test_blob_store.py tests/test_core.py -x -q --ignore=tests/test_tensorflow_handler.py
+   # Tier 2 — add regression-risk tests if Tier 1 passes (~30-60s)
+   uv run pytest tests/test_blob_store.py tests/test_core.py tests/test_cache_integrity.py -x -q --ignore=tests/test_tensorflow_handler.py
+   ```
+   Select test files based on what you changed — see [Test Suite](#test-suite).
+6. **Full test suite** (once, right before push):
+   `uv run pytest tests/ -x -q --ignore=tests/test_tensorflow_handler.py`
+7. **Update docs** if changing public API
+8. **Push feature branch:** `git push -u origin beads-<hash>-<desc>`
+9. **Integrate to dev:**
    ```bash
    cd ../..                                          # Back to Cacheness/
    git checkout dev
@@ -86,14 +96,14 @@ Use this for any code change, test addition, or issue-tracked work.
    # If real merge: uv run pytest tests/ -x -q --ignore=tests/test_tensorflow_handler.py
    git push origin dev
    ```
-9. **Cleanup:**
+10. **Cleanup:**
    ```bash
    git worktree remove worktrees/beads-<hash> --force   # Always needs --force (.venv/pycache)
    git branch -d beads-<hash>-<desc>
    git push origin --delete beads-<hash>-<desc>
    ```
    - Close issue: beads MCP `close`, or CLI `uv run bd close <id> --force` (needed for child issues of epics)
-10. **Verify** — `git status` confirms "up to date with origin"
+11. **Verify** — `git status` confirms "up to date with origin"
 
 ### Workflow B: Direct-to-dev (no worktree)
 
@@ -162,8 +172,47 @@ uv run ruff check . && uv run ty check             # Phase 2
 ## Test Suite
 
 **Baseline:** 1096 passed, 97 skipped, 0 failures
-**Command:** `uv run pytest tests/ -x -q --ignore=tests/test_tensorflow_handler.py`
-**Key files:** `test_core.py`, `test_update_operations.py`, `test_handlers.py`, `test_metadata.py`, `test_security.py`, `test_schema_versioning.py`, `test_sqlite_schema_versioning.py`, `test_json_schema_versioning.py`, `test_pg_schema_versioning.py`, `test_namespace_config.py`
+**Full command:** `uv run pytest tests/ -x -q --ignore=tests/test_tensorflow_handler.py`
+
+### Incremental Testing Strategy
+
+During development, use **tiered testing** to minimize feedback time:
+
+| Tier | When | What to run | Time |
+|------|------|-------------|------|
+| **Tier 1** | After each code change | Tests that directly exercise modified code | ~5-15s |
+| **Tier 2** | After Tier 1 passes | Add tests for likely regression areas | ~30-60s |
+| **Full suite** | Once before push | All tests | ~5 min |
+
+**Selecting Tier 1 tests:** Match changed source files to their primary test files:
+
+| Source file changed | Primary test files |
+|---------------------|--------------------|
+| `core.py` | `test_core.py`, `test_storage_mode.py` |
+| `blob_store.py` | `test_blob_store.py`, `test_blob_namespace.py` |
+| `blob_backends.py` | `test_blob_store.py`, `test_blob_namespace.py`, `test_s3_blob_backend.py` |
+| `s3_backend.py` | `test_s3_blob_backend.py` |
+| `handlers/*.py` | `test_handlers.py` |
+| `metadata.py` / backends | `test_metadata.py`, `test_sqlite_schema_versioning.py` |
+| `security.py` | `test_security.py` |
+| Path/namespace logic | `test_directory_sharding.py`, `test_namespace_config.py` |
+
+**Selecting Tier 2 tests:** Add tests that cover cross-cutting concerns:
+- Changed `core.py`? → Add `test_cache_integrity.py`, `test_update_operations.py`, `test_fault_injection.py`
+- Changed blob layer? → Add `test_cache_integrity_verification.py`
+- Changed metadata? → Add `test_backend_parity.py`, `test_backend_compatibility.py`
+
+**Example workflow:**
+```bash
+# Editing core.py and blob_store.py — Tier 1
+uv run pytest tests/test_core.py tests/test_blob_store.py tests/test_storage_mode.py -x -q --ignore=tests/test_tensorflow_handler.py
+# Tier 2 (after Tier 1 passes)
+uv run pytest tests/test_core.py tests/test_blob_store.py tests/test_storage_mode.py tests/test_cache_integrity.py tests/test_update_operations.py tests/test_cache_integrity_verification.py -x -q --ignore=tests/test_tensorflow_handler.py
+# Full suite (once, before push)
+uv run pytest tests/ -x -q --ignore=tests/test_tensorflow_handler.py
+```
+
+**Key test files:** `test_core.py`, `test_update_operations.py`, `test_handlers.py`, `test_metadata.py`, `test_security.py`, `test_schema_versioning.py`, `test_sqlite_schema_versioning.py`, `test_json_schema_versioning.py`, `test_pg_schema_versioning.py`, `test_namespace_config.py`
 
 
 ## MCP Tools Reference
