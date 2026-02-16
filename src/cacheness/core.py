@@ -59,6 +59,72 @@ def _normalize_function_args(
         return param_dict
 
 
+class _PutCleanup:
+    """Tracks resources written during ``put()`` so they can be rolled back.
+
+    Usage::
+
+        cleanup = _PutCleanup()
+        try:
+            # ... write blob ...
+            cleanup.blob_path = Path(actual_path)
+            # ... upload to S3 ...
+            cleanup.set_remote(blob_backend, blob_uri)
+            # ... write metadata ...
+            cleanup.commit()   # disarm — nothing will be rolled back
+        except Exception:
+            cleanup.rollback()
+            raise
+
+    On ``rollback()``, every tracked resource is deleted (local file **and**
+    remote object).  ``commit()`` disarms the cleanup so ``rollback()`` is a
+    no-op.
+    """
+
+    __slots__ = ("_committed", "blob_path", "_blob_backend", "_blob_uri")
+
+    def __init__(self) -> None:
+        self._committed = False
+        self.blob_path: Optional[Path] = None
+        self._blob_backend: Any = None
+        self._blob_uri: Optional[str] = None
+
+    def set_remote(self, blob_backend: Any, blob_uri: str) -> None:
+        """Register a remote blob (e.g. S3 object) for rollback."""
+        self._blob_backend = blob_backend
+        self._blob_uri = blob_uri
+
+    def commit(self) -> None:
+        """Disarm — a subsequent ``rollback()`` will be a no-op."""
+        self._committed = True
+
+    def rollback(self) -> None:
+        """Delete every tracked resource.  Safe to call multiple times."""
+        if self._committed:
+            return
+
+        # Clean up local blob file
+        if self.blob_path is not None:
+            try:
+                if self.blob_path.exists():
+                    self.blob_path.unlink()
+                    logger.debug(f"Cleaned up orphaned local blob: {self.blob_path}")
+            except OSError:
+                pass
+
+        # Clean up remote blob (e.g. S3 object)
+        if self._blob_backend is not None and self._blob_uri is not None:
+            try:
+                self._blob_backend.delete_blob(self._blob_uri)
+                logger.debug(f"Cleaned up orphaned remote blob: {self._blob_uri}")
+            except Exception:
+                logger.warning(
+                    f"Failed to clean up orphaned remote blob: {self._blob_uri}"
+                )
+
+        self._committed = True  # prevent double-rollback
+
+
 class UnifiedCache:
     """
     Simplified unified caching system using the Strategy pattern.
@@ -1044,47 +1110,64 @@ class UnifiedCache:
     ) -> str:
         """BlobStore passthrough for put() — no eviction or stats."""
         base_file_path = self._get_cache_file_path(cache_key)
+        cleanup = _PutCleanup()
 
-        handler, result, file_hash = self._blob_store._write_blob(
-            data, base_file_path, compute_hash=True
-        )
+        try:
+            handler, result, file_hash = self._blob_store._write_blob(
+                data, base_file_path, compute_hash=True
+            )
 
-        metadata_dict = {
-            **result["metadata"],
-            "actual_path": result.get("actual_path", str(base_file_path)),
-            "file_hash": file_hash,
-        }
+            actual_path_str = result.get("actual_path", str(base_file_path))
+            cleanup.blob_path = Path(actual_path_str)
 
-        entry_data = {
-            "data_type": handler.data_type,
-            "description": description,
-            "file_size": result["file_size"],
-            "metadata": metadata_dict,
-        }
+            if actual_path_str.startswith("s3://"):
+                cleanup.set_remote(self._blob_store.blob_backend, actual_path_str)
 
-        # Sign the entry if signing is enabled (same as normal put path)
-        if self.signer:
-            try:
-                creation_timestamp = datetime.now(timezone.utc)
-                entry_data["created_at"] = creation_timestamp.isoformat()
+            metadata_dict = {
+                **result["metadata"],
+                "actual_path": actual_path_str,
+                "file_hash": file_hash,
+            }
 
-                complete_entry_data = self._extract_signable_fields(
-                    cache_key=cache_key,
-                    entry_data=entry_data,
-                    metadata=metadata_dict,
-                )
+            entry_data = {
+                "data_type": handler.data_type,
+                "description": description,
+                "file_size": result["file_size"],
+                "metadata": metadata_dict,
+            }
 
-                signature = self.signer.sign_entry(complete_entry_data)
-                metadata_dict["entry_signature"] = signature
+            # Sign the entry if signing is enabled (same as normal put path)
+            if self.signer:
+                try:
+                    creation_timestamp = datetime.now(timezone.utc)
+                    entry_data["created_at"] = creation_timestamp.isoformat()
 
-                logger.debug(f"Created signature for entry {cache_key}")
-            except Exception as e:
-                logger.warning(f"Failed to sign entry {cache_key}: {e}")
+                    complete_entry_data = self._extract_signable_fields(
+                        cache_key=cache_key,
+                        entry_data=entry_data,
+                        metadata=metadata_dict,
+                    )
 
-        self.metadata_backend.put_entry(cache_key, entry_data)
+                    signature = self.signer.sign_entry(complete_entry_data)
+                    metadata_dict["entry_signature"] = signature
 
-        logger.debug(f"Stored {handler.data_type} {cache_key} (storage mode)")
-        return cache_key
+                    logger.debug(f"Created signature for entry {cache_key}")
+                except Exception as e:
+                    logger.warning(f"Failed to sign entry {cache_key}: {e}")
+
+            self.metadata_backend.put_entry(cache_key, entry_data)
+
+            logger.debug(f"Stored {handler.data_type} {cache_key} (storage mode)")
+            cleanup.commit()
+            return cache_key
+
+        except Exception as e:
+            cleanup.rollback()
+            data_type = handler.data_type if "handler" in locals() else "unknown"
+            logger.error(
+                f"Failed to store {data_type} (storage mode): {type(e).__name__}: {e}"
+            )
+            raise
 
     def _storage_mode_get(
         self,
@@ -1268,6 +1351,7 @@ class UnifiedCache:
                 return self._storage_mode_put(data, cache_key, description)
 
             base_file_path = self._get_cache_file_path(cache_key)
+            cleanup = _PutCleanup()
 
             try:
                 # Delegate file I/O + handler dispatch to BlobStore
@@ -1278,7 +1362,13 @@ class UnifiedCache:
                 )
 
                 # Track the blob path so we can clean up on failure
-                blob_path = Path(result.get("actual_path", str(base_file_path)))
+                actual_path_str = result.get("actual_path", str(base_file_path))
+                cleanup.blob_path = Path(actual_path_str)
+
+                # If the blob was uploaded to a remote backend (e.g. S3),
+                # track it for rollback in case metadata write fails.
+                if actual_path_str.startswith("s3://"):
+                    cleanup.set_remote(self._blob_store.blob_backend, actual_path_str)
 
                 # Update metadata
                 metadata_dict = {
@@ -1359,30 +1449,17 @@ class UnifiedCache:
                     f"Cached {handler.data_type} {cache_key} ({file_size_mb:.3f}MB) {format_info}: {description}"
                 )
 
+                cleanup.commit()
                 return cache_key
 
             except (OSError, IOError) as e:
-                # I/O errors (disk full, permissions, etc.)
-                # Clean up orphaned blob file if it was written
-                if "blob_path" in locals() and blob_path.exists():
-                    try:
-                        blob_path.unlink()
-                        logger.debug(f"Cleaned up orphaned blob: {blob_path}")
-                    except OSError:
-                        pass
-                data_type = handler.data_type if "handler" in dir() else "unknown"
+                cleanup.rollback()
+                data_type = handler.data_type if "handler" in locals() else "unknown"
                 logger.error(f"Failed to cache {data_type} (I/O error): {e}")
                 raise
             except Exception as e:
-                # Clean up orphaned blob file if it was written
-                if "blob_path" in locals() and blob_path.exists():
-                    try:
-                        blob_path.unlink()
-                        logger.debug(f"Cleaned up orphaned blob: {blob_path}")
-                    except OSError:
-                        pass
-                # Include exception type for easier debugging
-                data_type = handler.data_type if "handler" in dir() else "unknown"
+                cleanup.rollback()
+                data_type = handler.data_type if "handler" in locals() else "unknown"
                 logger.error(f"Failed to cache {data_type}: {type(e).__name__}: {e}")
                 raise
 
@@ -1853,73 +1930,96 @@ class UnifiedCache:
             # Get appropriate handler for the data type
             # Reconstruct file path from existing metadata (blob I/O belongs here, not in metadata layer)
             base_file_path = self._get_cache_file_path(cache_key)
+            cleanup = _PutCleanup()
 
-            # Delegate blob I/O to BlobStore
-            handler, result, _ = self._blob_store._write_blob(
-                data, base_file_path, compute_hash=False
-            )
+            try:
+                # Delegate blob I/O to BlobStore
+                handler, result, _ = self._blob_store._write_blob(
+                    data, base_file_path, compute_hash=False
+                )
 
-            # Build metadata updates dict from handler result
-            updates = {
-                "file_size": result.get("file_size", 0),
-                "content_hash": result.get("content_hash"),
-                "file_hash": result.get("file_hash"),
-                "actual_path": str(result.get("actual_path", base_file_path)),
-                "storage_format": result.get("storage_format"),
-            }
-            if hasattr(handler, "data_type"):
-                updates["data_type"] = handler.data_type
-            if hasattr(handler, "serializer"):
-                updates["serializer"] = handler.serializer
-            if result.get("compression_codec"):
-                updates["compression_codec"] = result["compression_codec"]
-            if result.get("object_type"):
-                updates["object_type"] = result["object_type"]
-            if result.get("s3_etag"):
-                updates["s3_etag"] = result["s3_etag"]
+                actual_path_str = str(result.get("actual_path", base_file_path))
+                cleanup.blob_path = Path(actual_path_str)
 
-            # Delegate metadata-only update to backend (no I/O in metadata layer)
-            self.metadata_backend.update_entry_metadata(
-                cache_key=cache_key, updates=updates
-            )
+                # Track remote blob for rollback on S3
+                if actual_path_str.startswith("s3://"):
+                    cleanup.set_remote(self._blob_store.blob_backend, actual_path_str)
 
-            # Re-sign the entry if signing is enabled (security: signature must match updated data)
-            if self.signer:
-                try:
-                    # Get the updated entry from backend
-                    updated_entry = self.metadata_backend.get_entry(cache_key)
-                    if updated_entry:
-                        # Recalculate file hash for integrity verification
-                        metadata = updated_entry.get("metadata", {})
-                        actual_path = metadata.get("actual_path")
-                        if actual_path and self.config.metadata.verify_cache_integrity:
-                            new_file_hash = self._blob_store._calculate_file_hash(
-                                Path(actual_path)
+                # Build metadata updates dict from handler result
+                updates = {
+                    "file_size": result.get("file_size", 0),
+                    "content_hash": result.get("content_hash"),
+                    "file_hash": result.get("file_hash"),
+                    "actual_path": actual_path_str,
+                    "storage_format": result.get("storage_format"),
+                }
+                if hasattr(handler, "data_type"):
+                    updates["data_type"] = handler.data_type
+                if hasattr(handler, "serializer"):
+                    updates["serializer"] = handler.serializer
+                if result.get("compression_codec"):
+                    updates["compression_codec"] = result["compression_codec"]
+                if result.get("object_type"):
+                    updates["object_type"] = result["object_type"]
+                if result.get("s3_etag"):
+                    updates["s3_etag"] = result["s3_etag"]
+
+                # Delegate metadata-only update to backend (no I/O in metadata layer)
+                self.metadata_backend.update_entry_metadata(
+                    cache_key=cache_key, updates=updates
+                )
+
+                # Re-sign the entry if signing is enabled (security: signature must match updated data)
+                if self.signer:
+                    try:
+                        # Get the updated entry from backend
+                        updated_entry = self.metadata_backend.get_entry(cache_key)
+                        if updated_entry:
+                            # Recalculate file hash for integrity verification
+                            metadata = updated_entry.get("metadata", {})
+                            actual_path = metadata.get("actual_path")
+                            if (
+                                actual_path
+                                and self.config.metadata.verify_cache_integrity
+                            ):
+                                new_file_hash = self._blob_store._calculate_file_hash(
+                                    Path(actual_path)
+                                )
+                                metadata["file_hash"] = new_file_hash
+
+                            # Extract signable fields and create new signature
+                            complete_entry_data = self._extract_signable_fields(
+                                cache_key=cache_key,
+                                entry_data=updated_entry,
+                                metadata=metadata,
                             )
-                            metadata["file_hash"] = new_file_hash
 
-                        # Extract signable fields and create new signature
-                        complete_entry_data = self._extract_signable_fields(
-                            cache_key=cache_key,
-                            entry_data=updated_entry,
-                            metadata=metadata,
+                            # Generate new signature for updated entry
+                            new_signature = self.signer.sign_entry(complete_entry_data)
+                            metadata["entry_signature"] = new_signature
+
+                            # Update entry with new signature and file hash
+                            updated_entry["metadata"] = metadata
+                            self.metadata_backend.put_entry(cache_key, updated_entry)
+
+                            logger.debug(f"Re-signed updated entry {cache_key}")
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to re-sign updated entry {cache_key}: {e}"
                         )
+                        # Continue - update succeeded, just missing signature
 
-                        # Generate new signature for updated entry
-                        new_signature = self.signer.sign_entry(complete_entry_data)
-                        metadata["entry_signature"] = new_signature
+                logger.info(f"Updated cache entry: {cache_key[:16]}...")
+                cleanup.commit()
+                return True
 
-                        # Update entry with new signature and file hash
-                        updated_entry["metadata"] = metadata
-                        self.metadata_backend.put_entry(cache_key, updated_entry)
-
-                        logger.debug(f"Re-signed updated entry {cache_key}")
-                except Exception as e:
-                    logger.warning(f"Failed to re-sign updated entry {cache_key}: {e}")
-                    # Continue - update succeeded, just missing signature
-
-            logger.info(f"✅ Updated cache entry: {cache_key[:16]}...")
-            return True
+            except Exception as e:
+                cleanup.rollback()
+                logger.error(
+                    f"Failed to update cache entry {cache_key[:16]}...: "
+                    f"{type(e).__name__}: {e}"
+                )
+                raise
 
     def touch(
         self,
