@@ -760,3 +760,97 @@ class TestBlobCleanupOnDelete:
         # Should not raise, just remove metadata
         memory_cache.invalidate(item="ghost")
         assert memory_cache.get(item="ghost") is None
+
+
+class TestUpdateDataWriteThenSwap:
+    """Verify that update_data() uses write-then-swap: old blob is preserved
+    when metadata update fails (CACHE-c1e)."""
+
+    def test_old_data_preserved_on_metadata_failure(self, memory_cache, cache_dir):
+        """When metadata update fails after blob write, old data must survive."""
+        from unittest.mock import patch
+
+        # Store original data
+        original = {"value": "original"}
+        memory_cache.put(original, key="swap_test")
+
+        # Verify we can read it
+        assert memory_cache.get(key="swap_test") == original
+
+        # Snapshot blob files before the failed update
+        blob_dir = Path(cache_dir)
+        blobs_before = {p for p in blob_dir.rglob("*") if p.is_file()}
+
+        # Make metadata update fail
+        with patch.object(
+            memory_cache.metadata_backend,
+            "update_entry_metadata",
+            side_effect=RuntimeError("simulated metadata failure"),
+        ):
+            with pytest.raises(RuntimeError, match="simulated metadata failure"):
+                memory_cache.update_data({"value": "new"}, key="swap_test")
+
+        # The original blob files must still exist
+        blobs_after = {p for p in blob_dir.rglob("*") if p.is_file()}
+        missing = blobs_before - blobs_after
+        assert not missing, f"Original blob(s) were deleted: {missing}"
+
+        # The original data MUST still be readable
+        result = memory_cache.get(key="swap_test")
+        assert result == original, (
+            "Old data was lost after metadata failure in update_data()"
+        )
+
+    def test_staging_blob_cleaned_up_on_failure(self, memory_cache, cache_dir):
+        """Staging blob should be deleted when update_data() fails."""
+        from unittest.mock import patch
+
+        original = np.array([1, 2, 3])
+        memory_cache.put(original, key="cleanup_test")
+
+        # Count blobs before the failed update
+        blob_dir = Path(cache_dir)
+        blobs_before = set(blob_dir.rglob("*"))
+
+        with patch.object(
+            memory_cache.metadata_backend,
+            "update_entry_metadata",
+            side_effect=RuntimeError("boom"),
+        ):
+            with pytest.raises(RuntimeError):
+                memory_cache.update_data(np.array([10, 20]), key="cleanup_test")
+
+        # After rollback, no extra staging blobs should remain
+        blobs_after = set(blob_dir.rglob("*"))
+        # Only the original blob (and dirs) should exist — no staging leftover
+        new_files = {
+            p for p in blobs_after - blobs_before if p.is_file() and "_stg" in p.name
+        }
+        assert len(new_files) == 0, f"Staging blob not cleaned up: {new_files}"
+
+    def test_old_blob_deleted_on_successful_update(self, memory_cache, cache_dir):
+        """After successful update, the old blob should be removed."""
+        original = {"val": "old"}
+        memory_cache.put(original, key="del_old_test")
+
+        blob_dir = Path(cache_dir)
+        blobs_before = {p for p in blob_dir.rglob("*") if p.is_file()}
+
+        new_data = {"val": "new"}
+        memory_cache.update_data(new_data, key="del_old_test")
+
+        blobs_after = {p for p in blob_dir.rglob("*") if p.is_file()}
+
+        # The old blob should be gone, a new staging-named blob should exist
+        result = memory_cache.get(key="del_old_test")
+        assert result == new_data
+
+        # There should be exactly one data blob (the new one), not two
+        data_blobs = {
+            p
+            for p in blobs_after
+            if p.suffix in (".pkl", ".parquet", ".npy", ".json", ".dill")
+        }
+        assert len(data_blobs) == 1, (
+            f"Expected 1 data blob after update, found {len(data_blobs)}: {data_blobs}"
+        )

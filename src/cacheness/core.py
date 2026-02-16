@@ -10,6 +10,7 @@ operations to specialized handlers.
 import inspect
 import threading
 import logging
+import uuid
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List, Callable, Tuple
@@ -1957,18 +1958,28 @@ class UnifiedCache:
                 )
                 return False
 
-            # Get appropriate handler for the data type
-            # Reconstruct file path from existing metadata (blob I/O belongs here, not in metadata layer)
+            # Capture old blob path so we can delete it AFTER metadata
+            # succeeds.  This is the write-then-swap strategy: write the
+            # new blob to a staging location, update metadata, then
+            # remove the old blob.  If metadata update fails, rollback
+            # deletes only the staging blob; the old data stays intact.
+            old_metadata = existing_entry.get("metadata", {})
+            old_actual_path: Optional[str] = old_metadata.get("actual_path")
+
             base_file_path = self._get_cache_file_path(cache_key)
+            staging_suffix = f"_stg{uuid.uuid4().hex[:8]}"
+            staging_base = base_file_path.parent / (
+                base_file_path.name + staging_suffix
+            )
             cleanup = _PutCleanup()
 
             try:
-                # Delegate blob I/O to BlobStore
+                # Write new blob to staging path (different blob_id)
                 handler, result, _ = self._blob_store._write_blob(
-                    data, base_file_path, compute_hash=False
+                    data, staging_base, compute_hash=False
                 )
 
-                actual_path_str = str(result.get("actual_path", base_file_path))
+                actual_path_str = str(result.get("actual_path", staging_base))
                 if "://" not in actual_path_str:
                     cleanup.blob_path = self._resolve_actual_path(actual_path_str)
 
@@ -2039,6 +2050,21 @@ class UnifiedCache:
                             f"Failed to re-sign updated entry {cache_key}: {e}"
                         )
                         # Continue - update succeeded, just missing signature
+
+                # Delete the OLD blob now that metadata points to the
+                # new staging location.  Failure here is non-fatal: the
+                # update already succeeded; the old blob is just orphaned.
+                if old_actual_path and old_actual_path != actual_path_str:
+                    try:
+                        old_resolved = self._resolve_actual_path(old_actual_path)
+                        self._blob_store.blob_backend.delete_blob(str(old_resolved))
+                        logger.debug(
+                            f"Deleted old blob after update: {old_actual_path}"
+                        )
+                    except Exception:
+                        logger.warning(
+                            f"Failed to delete old blob after update: {old_actual_path}"
+                        )
 
                 logger.info(f"Updated cache entry: {cache_key[:16]}...")
                 cleanup.commit()
