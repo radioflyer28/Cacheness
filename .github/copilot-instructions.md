@@ -21,7 +21,7 @@ These constraints apply to EVERY task. Violating any of them is a bug.
 **Testing:**
 - **Full suite:** `uv run pytest tests/ -x -q --ignore=tests/test_tensorflow_handler.py`
 - **Windows:** Always add `--ignore=tests/test_tensorflow_handler.py` — TF tests hang
-- **Baseline:** 1164 passed, 65 skipped, 0 failures
+- **Baseline:** 1202 passed, 65 skipped, 0 failures
 - **Incremental testing:** During development, run only targeted tests (see [Test Suite](#test-suite) for details). Full suite runs only once — right before push.
 
 **Imports:**
@@ -174,7 +174,7 @@ uv run ruff check . && uv run ty check             # Phase 2
 
 ## Test Suite
 
-**Baseline:** 1164 passed, 65 skipped, 0 failures
+**Baseline:** 1202 passed, 65 skipped, 0 failures
 **Full command:** `uv run pytest tests/ -x -q --ignore=tests/test_tensorflow_handler.py`
 
 ### Incremental Testing Strategy
