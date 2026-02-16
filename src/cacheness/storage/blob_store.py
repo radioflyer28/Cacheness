@@ -565,31 +565,21 @@ class BlobStore:
             hash_mismatches (if verify_hashes), repaired (if repair).
         """
         with self._lock:
-            is_local = isinstance(self.blob_backend, FilesystemBlobBackend)
+            # 1. Inventory all blobs in storage (delegates to blob_backend
+            #    which handles sharding / recursive listing automatically)
+            blob_files: set[str] = set(self.blob_backend.list_blobs())
 
-            # 1. Inventory all blobs in storage
-            if is_local:
-                blob_extensions = ["pkl", "npz", "b2nd", "b2tr", "parquet"]
-                pickle_codecs = ["lz4", "zstd", "gzip", "zst", "gz", "bz2", "xz"]
-
-                blob_files: set[str] = set()
-                patterns = [str(self.cache_dir / f"*.{ext}") for ext in blob_extensions]
-                for codec in pickle_codecs:
-                    patterns.append(str(self.cache_dir / f"*.pkl.{codec}"))
-                patterns.append(str(self.cache_dir / "*.pkl.*"))
-
-                for pattern in patterns:
-                    for file_path in glob.glob(pattern):
-                        blob_files.add(os.path.normpath(file_path))
-            else:
-                blob_files = set(self.blob_backend.list_blobs())
-
+            # 2. Collect metadata entry paths
             entry_paths: dict[str, dict] = {}
             for entry in self.backend.iter_entry_summaries():
                 actual_path = entry.get("actual_path")
                 if actual_path:
+                    # Normalize filesystem paths for consistent matching;
+                    # leave URIs (s3://, etc.) untouched.
                     norm_path = (
-                        os.path.normpath(actual_path) if is_local else actual_path
+                        os.path.normpath(actual_path)
+                        if "://" not in actual_path
+                        else actual_path
                     )
                     entry_paths[norm_path] = {
                         "cache_key": entry.get("cache_key", ""),
@@ -604,11 +594,7 @@ class BlobStore:
             # 4. Find dangling metadata (entries pointing to missing blobs)
             dangling_entries = []
             for path, info in entry_paths.items():
-                if is_local:
-                    blob_exists = os.path.exists(path)
-                else:
-                    blob_exists = self.blob_backend.exists(path)
-                if not blob_exists:
+                if not self.blob_backend.exists(path):
                     dangling_entries.append(
                         {
                             "cache_key": info["cache_key"],
@@ -621,14 +607,9 @@ class BlobStore:
             for path, info in entry_paths.items():
                 if info["file_size"] is None:
                     continue
-                if is_local:
-                    if not os.path.exists(path):
-                        continue
-                    actual_size = os.path.getsize(path)
-                else:
-                    actual_size = self.blob_backend.get_size(path)
-                    if actual_size == -1:
-                        continue
+                actual_size = self.blob_backend.get_size(path)
+                if actual_size == -1:
+                    continue
                 if actual_size != info["file_size"]:
                     size_mismatches.append(
                         {
@@ -645,12 +626,7 @@ class BlobStore:
                 for path, info in entry_paths.items():
                     if not info.get("file_hash"):
                         continue
-                    if is_local:
-                        if not os.path.exists(path):
-                            continue
-                        current_hash = self._calculate_file_hash(Path(path))
-                    else:
-                        current_hash = self._calculate_blob_hash(path)
+                    current_hash = self._calculate_blob_hash(path)
                     if current_hash and current_hash != info["file_hash"]:
                         hash_mismatches.append(
                             {
@@ -666,10 +642,7 @@ class BlobStore:
             if repair:
                 for blob_path in orphaned_blobs:
                     try:
-                        if is_local:
-                            os.remove(blob_path)
-                        else:
-                            self.blob_backend.delete_blob(blob_path)
+                        self.blob_backend.delete_blob(blob_path)
                         repaired["orphans_deleted"] += 1
                     except OSError as e:
                         logger.warning(
