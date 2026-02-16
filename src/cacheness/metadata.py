@@ -291,6 +291,20 @@ try:
         # HMAC signature for integrity verification (optional)
         signature = Column(String(64), nullable=True)
 
+    # ------------------------------------------------------------------
+    # Core table registry — only these are created by SqliteBackend.__init__.
+    # Custom metadata tables (from @custom_metadata_model) are created
+    # separately via migrate_custom_metadata_tables() so they don't
+    # pollute unrelated databases when Base.metadata is shared globally.
+    # ------------------------------------------------------------------
+    _CORE_TABLES = frozenset(
+        {
+            CacheEntry.__table__,
+            CacheStats.__table__,
+            CacheNamespace.__table__,
+        }
+    )
+
 except ImportError:
     # SQLAlchemy not available
     SQLALCHEMY_AVAILABLE = False
@@ -1760,8 +1774,11 @@ class SqliteBackend(MetadataBackend):
         )
         self._lock = threading.Lock()
 
-        # Create tables (including cacheness_namespaces registry)
-        Base.metadata.create_all(self.engine)
+        # Create core tables only (cache_entries, cache_stats,
+        # cacheness_namespaces).  Custom metadata tables are created
+        # separately via migrate_custom_metadata_tables() to prevent
+        # stale models from polluting unrelated databases (CACHE-qg3).
+        Base.metadata.create_all(self.engine, tables=list(_CORE_TABLES))
 
         # Resolve namespace-specific ORM models (EntityName pattern)
         self._CacheEntry, self._CacheStats = _get_namespace_models(

@@ -393,15 +393,17 @@ def migrate_custom_metadata_tables(engine=None):
         # Create only the custom metadata tables
         # This avoids conflicts with cache_entries/cache_stats tables
         # which may be managed by different backends (SQLite vs PostgreSQL)
-        tables_to_create = []
-
-        # Add all registered custom metadata model tables
+        #
+        # Create tables individually so that one stale / duplicate-index
+        # model doesn't prevent other tables from being created (CACHE-qg3).
         for schema_name, model_class in _custom_metadata_registry.items():
             if hasattr(model_class, "__table__") and model_class.__table__ is not None:
-                tables_to_create.append(model_class.__table__)
-
-        # Create only the specified tables (safe to call multiple times)
-        Base.metadata.create_all(engine, tables=tables_to_create)
+                try:
+                    Base.metadata.create_all(engine, tables=[model_class.__table__])
+                except Exception as table_err:
+                    logger.debug(
+                        f"Skipping table for schema '{schema_name}': {table_err}"
+                    )
 
         logger.info(
             f"✅ Custom metadata tables migrated for {len(_custom_metadata_registry)} schemas"

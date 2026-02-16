@@ -399,7 +399,6 @@ class UnifiedCache:
         try:
             from .custom_metadata import (
                 get_custom_metadata_model,
-                get_all_custom_metadata_models,
             )
             from .metadata import Base
 
@@ -411,19 +410,21 @@ class UnifiedCache:
             # Get SQLAlchemy session from the metadata backend
             if hasattr(self.metadata_backend, "SessionLocal"):
                 with self.metadata_backend.SessionLocal() as session:
-                    # Create only custom metadata tables
-                    # This avoids conflicts with cache_entries/cache_stats tables
-                    # which are managed by the metadata backend
-                    tables_to_create = []
-                    for model_class in get_all_custom_metadata_models().values():
-                        if (
-                            hasattr(model_class, "__table__")
-                            and model_class.__table__ is not None
-                        ):
-                            tables_to_create.append(model_class.__table__)
-                    Base.metadata.create_all(
-                        self.metadata_backend.engine, tables=tables_to_create
-                    )
+                    # Create only the tables needed for the metadata being
+                    # stored — NOT all registered models.  Creating every
+                    # registered model's table can trigger index collisions
+                    # when stale models remain in the global registry
+                    # (CACHE-qg3).
+                    tables_to_create = set()
+                    for metadata_instance in metadata_objects:
+                        tbl = getattr(type(metadata_instance), "__table__", None)
+                        if tbl is not None:
+                            tables_to_create.add(tbl)
+                    if tables_to_create:
+                        Base.metadata.create_all(
+                            self.metadata_backend.engine,
+                            tables=list(tables_to_create),
+                        )
 
                     for metadata_instance in metadata_objects:
                         # Get schema name from the metadata object's class
@@ -453,6 +454,14 @@ class UnifiedCache:
                         # Set the cache_key on the metadata instance (direct FK)
                         metadata_instance.cache_key = cache_key
 
+                        # Delete any existing custom metadata for this
+                        # cache_key + schema before inserting.  This ensures
+                        # overwriting a cache entry replaces its custom
+                        # metadata rather than accumulating duplicate rows.
+                        session.query(model_class).filter(
+                            model_class.cache_key == cache_key
+                        ).delete()
+
                         # Save the metadata instance
                         session.add(metadata_instance)
 
@@ -470,21 +479,29 @@ class UnifiedCache:
             if hasattr(self.metadata_backend, "SessionLocal"):
                 with self.metadata_backend.SessionLocal() as session:
                     from sqlalchemy import select
+                    from sqlalchemy.exc import OperationalError as SAOperationalError
 
                     result = {}
-                    # Query each registered schema for metadata with this cache_key
+                    # Query each registered schema for metadata with this cache_key.
+                    # Skip schemas whose tables don't exist in this database
+                    # (the global registry may contain models from other
+                    # sessions/tests — CACHE-qg3).
                     for (
                         schema_name,
                         model_class,
                     ) in self._get_registered_schemas().items():
-                        metadata_instance = session.execute(
-                            select(model_class).where(
-                                model_class.cache_key == cache_key
-                            )
-                        ).scalar_one_or_none()
+                        try:
+                            metadata_instance = session.execute(
+                                select(model_class).where(
+                                    model_class.cache_key == cache_key
+                                )
+                            ).scalar_one_or_none()
 
-                        if metadata_instance:
-                            result[schema_name] = metadata_instance
+                            if metadata_instance:
+                                result[schema_name] = metadata_instance
+                        except SAOperationalError:
+                            # Table doesn't exist in this database — skip
+                            session.rollback()
 
                     return result
         except Exception as e:

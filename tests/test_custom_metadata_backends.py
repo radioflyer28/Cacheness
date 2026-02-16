@@ -13,6 +13,7 @@ identically on both SQLite and PostgreSQL backends. Tests cover:
 """
 
 import pytest
+import os
 import tempfile
 import shutil
 from sqlalchemy import Column, String, Float, Integer, DateTime, Boolean
@@ -52,14 +53,15 @@ def temp_cache_dir():
 @pytest.fixture
 def postgres_available():
     """Check if PostgreSQL is available for testing."""
+    pg_url = os.environ.get("CACHENESS_TEST_POSTGRES_URL")
+    if not pg_url:
+        return False
     try:
-        import psycopg
+        import psycopg  # noqa: F401
         from cacheness.storage.backends.postgresql_backend import PostgresBackend
 
-        # Try to connect to test database
-        test_url = "postgresql://localhost/test_cacheness"
         try:
-            backend = PostgresBackend(test_url)
+            backend = PostgresBackend(pg_url)
             backend.close()
             return True
         except Exception:
@@ -92,13 +94,12 @@ def cache_with_backend(
             metadata=CacheMetadataConfig(metadata_backend="sqlite"),
         )
     else:  # postgresql
+        pg_url = os.environ.get("CACHENESS_TEST_POSTGRES_URL")
         config = CacheConfig(
             cache_dir=temp_cache_dir,
             metadata=CacheMetadataConfig(
                 metadata_backend="postgresql",
-                metadata_backend_options={
-                    "connection_url": "postgresql://localhost/test_cacheness"
-                },
+                metadata_backend_options={"connection_url": pg_url},
             ),
         )
 
