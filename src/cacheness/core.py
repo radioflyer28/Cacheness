@@ -764,6 +764,9 @@ class UnifiedCache:
         try:
             from sqlalchemy import text
 
+            # Use the namespace-specific table name (EntityName pattern)
+            table = self.metadata_backend._entries_table
+
             with self.metadata_backend.SessionLocal() as session:
                 where_conditions: list[str] = []
                 params: dict = {}
@@ -785,15 +788,15 @@ class UnifiedCache:
                     query = f"""
                         SELECT cache_key, description, data_type, created_at, accessed_at,
                                file_size, metadata_dict
-                        FROM cache_entries
+                        FROM {table}
                         WHERE metadata_dict IS NOT NULL AND ({where_clause})
                         ORDER BY created_at DESC
                     """
                 else:
-                    query = """
+                    query = f"""
                         SELECT cache_key, description, data_type, created_at, accessed_at,
                                file_size, metadata_dict
-                        FROM cache_entries
+                        FROM {table}
                         WHERE metadata_dict IS NOT NULL
                         ORDER BY created_at DESC
                     """
