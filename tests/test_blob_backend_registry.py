@@ -81,6 +81,9 @@ class MockBlobBackend(BlobBackend):
     def exists(self, blob_path: str) -> bool:
         return blob_path in self._storage
 
+    def list_blobs(self) -> list[str]:
+        return sorted(self._storage.keys())
+
 
 class AnotherMockBackend(BlobBackend):
     """Another mock backend for testing multiple registrations."""
@@ -99,6 +102,9 @@ class AnotherMockBackend(BlobBackend):
 
     def exists(self, blob_path: str) -> bool:
         return False
+
+    def list_blobs(self) -> list[str]:
+        return []
 
 
 class NotABackend:

@@ -187,6 +187,16 @@ class BlobBackend(ABC):
         except Exception:
             return -1
 
+    @abstractmethod
+    def list_blobs(self) -> List[str]:
+        """
+        List all blob paths/URIs in this backend.
+
+        Returns:
+            List of blob paths/URIs that can be passed to read_blob/delete_blob.
+        """
+        pass
+
     def close(self) -> None:
         """
         Close and clean up any resources.
@@ -330,6 +340,24 @@ class FilesystemBlobBackend(BlobBackend):
             return path.stat().st_size
         return -1
 
+    def list_blobs(self) -> List[str]:
+        """List all blob files in the storage directory."""
+        import glob as _glob
+
+        blob_extensions = ["pkl", "npz", "b2nd", "b2tr", "parquet"]
+        pickle_codecs = ["lz4", "zstd", "gzip", "zst", "gz", "bz2", "xz"]
+
+        results: set[str] = set()
+        for ext in blob_extensions:
+            for f in _glob.glob(str(self.base_dir / "**" / f"*.{ext}"), recursive=True):
+                results.add(os.path.normpath(f))
+        for codec in pickle_codecs:
+            for f in _glob.glob(
+                str(self.base_dir / "**" / f"*.pkl.{codec}"), recursive=True
+            ):
+                results.add(os.path.normpath(f))
+        return sorted(results)
+
     def _get_blob_path(self, blob_id: str) -> Path:
         """
         Convert blob ID to filesystem path with Git-style directory sharding.
@@ -406,6 +434,10 @@ class InMemoryBlobBackend(BlobBackend):
         count = len(self._storage)
         self._storage.clear()
         return count
+
+    def list_blobs(self) -> List[str]:
+        """List all blob paths in memory."""
+        return sorted(self._storage.keys())
 
 
 # =============================================================================

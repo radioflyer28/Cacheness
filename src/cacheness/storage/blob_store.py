@@ -548,10 +548,12 @@ class BlobStore:
         Verify blob store integrity by cross-checking blob files and metadata.
 
         Detects:
-        - Orphaned blobs: files in cache_dir with no metadata entry
-        - Dangling metadata: entries pointing to missing blob files
-        - Size mismatches: metadata file_size != actual file size on disk
+        - Orphaned blobs: blobs in storage with no metadata entry
+        - Dangling metadata: entries pointing to missing blobs
+        - Size mismatches: metadata file_size != actual size in storage
         - Hash mismatches: metadata file_hash != actual file hash (if verify_hashes)
+
+        Works with any blob backend (filesystem, S3, in-memory, etc.).
 
         Args:
             repair: If True, delete orphaned blobs and remove dangling entries.
@@ -563,39 +565,50 @@ class BlobStore:
             hash_mismatches (if verify_hashes), repaired (if repair).
         """
         with self._lock:
-            # 1. Inventory all blob files in cache_dir
-            blob_extensions = ["pkl", "npz", "b2nd", "b2tr", "parquet"]
-            pickle_codecs = ["lz4", "zstd", "gzip", "zst", "gz", "bz2", "xz"]
+            is_local = isinstance(self.blob_backend, FilesystemBlobBackend)
 
-            blob_files: set[str] = set()
-            patterns = [str(self.cache_dir / f"*.{ext}") for ext in blob_extensions]
-            for codec in pickle_codecs:
-                patterns.append(str(self.cache_dir / f"*.pkl.{codec}"))
-            patterns.append(str(self.cache_dir / "*.pkl.*"))
+            # 1. Inventory all blobs in storage
+            if is_local:
+                blob_extensions = ["pkl", "npz", "b2nd", "b2tr", "parquet"]
+                pickle_codecs = ["lz4", "zstd", "gzip", "zst", "gz", "bz2", "xz"]
 
-            for pattern in patterns:
-                for file_path in glob.glob(pattern):
-                    blob_files.add(os.path.normpath(file_path))
+                blob_files: set[str] = set()
+                patterns = [str(self.cache_dir / f"*.{ext}") for ext in blob_extensions]
+                for codec in pickle_codecs:
+                    patterns.append(str(self.cache_dir / f"*.pkl.{codec}"))
+                patterns.append(str(self.cache_dir / "*.pkl.*"))
+
+                for pattern in patterns:
+                    for file_path in glob.glob(pattern):
+                        blob_files.add(os.path.normpath(file_path))
+            else:
+                blob_files = set(self.blob_backend.list_blobs())
 
             entry_paths: dict[str, dict] = {}
             for entry in self.backend.iter_entry_summaries():
                 actual_path = entry.get("actual_path")
                 if actual_path:
-                    norm_path = os.path.normpath(actual_path)
+                    norm_path = (
+                        os.path.normpath(actual_path) if is_local else actual_path
+                    )
                     entry_paths[norm_path] = {
                         "cache_key": entry.get("cache_key", ""),
                         "file_size": entry.get("file_size"),
                         "file_hash": entry.get("file_hash"),
                     }
 
-            # 3. Find orphaned blobs (files with no metadata entry)
+            # 3. Find orphaned blobs (blobs with no metadata entry)
             known_paths = set(entry_paths.keys())
             orphaned_blobs = sorted(blob_files - known_paths)
 
-            # 4. Find dangling metadata (entries pointing to missing files)
+            # 4. Find dangling metadata (entries pointing to missing blobs)
             dangling_entries = []
             for path, info in entry_paths.items():
-                if not os.path.exists(path):
+                if is_local:
+                    blob_exists = os.path.exists(path)
+                else:
+                    blob_exists = self.blob_backend.exists(path)
+                if not blob_exists:
                     dangling_entries.append(
                         {
                             "cache_key": info["cache_key"],
@@ -606,40 +619,57 @@ class BlobStore:
             # 5. Check size mismatches
             size_mismatches = []
             for path, info in entry_paths.items():
-                if os.path.exists(path) and info["file_size"] is not None:
+                if info["file_size"] is None:
+                    continue
+                if is_local:
+                    if not os.path.exists(path):
+                        continue
                     actual_size = os.path.getsize(path)
-                    if actual_size != info["file_size"]:
-                        size_mismatches.append(
-                            {
-                                "cache_key": info["cache_key"],
-                                "path": path,
-                                "expected_size": info["file_size"],
-                                "actual_size": actual_size,
-                            }
-                        )
+                else:
+                    actual_size = self.blob_backend.get_size(path)
+                    if actual_size == -1:
+                        continue
+                if actual_size != info["file_size"]:
+                    size_mismatches.append(
+                        {
+                            "cache_key": info["cache_key"],
+                            "path": path,
+                            "expected_size": info["file_size"],
+                            "actual_size": actual_size,
+                        }
+                    )
 
             # 6. Check hash mismatches (optional, expensive)
             hash_mismatches = []
             if verify_hashes:
                 for path, info in entry_paths.items():
-                    if os.path.exists(path) and info.get("file_hash"):
+                    if not info.get("file_hash"):
+                        continue
+                    if is_local:
+                        if not os.path.exists(path):
+                            continue
                         current_hash = self._calculate_file_hash(Path(path))
-                        if current_hash != info["file_hash"]:
-                            hash_mismatches.append(
-                                {
-                                    "cache_key": info["cache_key"],
-                                    "path": path,
-                                    "expected_hash": info["file_hash"],
-                                    "actual_hash": current_hash,
-                                }
-                            )
+                    else:
+                        current_hash = self._calculate_blob_hash(path)
+                    if current_hash and current_hash != info["file_hash"]:
+                        hash_mismatches.append(
+                            {
+                                "cache_key": info["cache_key"],
+                                "path": path,
+                                "expected_hash": info["file_hash"],
+                                "actual_hash": current_hash,
+                            }
+                        )
 
             # 7. Repair if requested
             repaired = {"orphans_deleted": 0, "dangling_removed": 0}
             if repair:
                 for blob_path in orphaned_blobs:
                     try:
-                        os.remove(blob_path)
+                        if is_local:
+                            os.remove(blob_path)
+                        else:
+                            self.blob_backend.delete_blob(blob_path)
                         repaired["orphans_deleted"] += 1
                     except OSError as e:
                         logger.warning(
@@ -821,6 +851,28 @@ class BlobStore:
             return hasher.hexdigest()
         except Exception as e:
             logger.warning(f"Failed to calculate hash for {file_path}: {e}")
+            return None
+
+    def _calculate_blob_hash(self, blob_path: str) -> Optional[str]:
+        """
+        Calculate XXH3_64 hash of a remote blob for integrity verification.
+
+        Downloads the blob via the blob backend and hashes it in chunks.
+
+        Args:
+            blob_path: Blob path/URI understood by the blob backend
+
+        Returns:
+            Hex string of the blob hash, or None on error
+        """
+        try:
+            stream = self.blob_backend.read_blob_stream(blob_path)
+            hasher = xxhash.xxh3_64()
+            for chunk in iter(lambda: stream.read(8192), b""):
+                hasher.update(chunk)
+            return hasher.hexdigest()
+        except Exception as e:
+            logger.warning(f"Failed to calculate hash for {blob_path}: {e}")
             return None
 
     def _compute_content_hash(self, data: Any) -> str:

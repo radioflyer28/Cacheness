@@ -593,6 +593,10 @@ class S3BlobBackend(BlobBackend):
             logger.error(f"Failed to list objects in S3: {e}")
             return []
 
+    def list_blobs(self) -> List[str]:
+        """List all blob URIs in the S3 backend."""
+        return self.list_keys()
+
     def _parse_blob_path(self, blob_path: str) -> str:
         """
         Parse blob path to extract S3 key.

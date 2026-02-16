@@ -421,3 +421,125 @@ class TestSqliteBackend:
         report = sqlite_store.verify_integrity()
         assert report["orphaned_blobs"] == []
         assert report["dangling_entries"] == []
+
+
+# ── verify_integrity with non-local blob backend (CACHE-rqa) ──────
+
+
+class TestVerifyIntegrityNonLocal:
+    """verify_integrity() should work with non-filesystem blob backends.
+
+    BlobStore.put() writes through handlers (to filesystem) and stores
+    filesystem paths in metadata. When using InMemoryBlobBackend we must
+    manually mirror the blob data into the memory backend so that
+    verify_integrity()'s non-local code path can be exercised.
+    """
+
+    @pytest.fixture
+    def memory_store(self, blob_dir):
+        """BlobStore backed by InMemoryBlobBackend."""
+        return BlobStore(cache_dir=blob_dir, backend="json", blob_backend="memory")
+
+    @staticmethod
+    def _sync_blobs_to_memory(store):
+        """Mirror on-disk blob files into the InMemoryBlobBackend.
+
+        After put() writes via handler to filesystem, the in-memory backend
+        has no record of those blobs. This helper reads the disk files and
+        writes them into the memory backend so verify_integrity() sees them.
+        """
+        for entry in store.backend.iter_entry_summaries():
+            actual_path = entry.get("actual_path")
+            if not actual_path:
+                nested = entry.get("metadata", {})
+                actual_path = nested.get("actual_path") if nested else None
+            if actual_path and os.path.exists(actual_path):
+                with open(actual_path, "rb") as f:
+                    store.blob_backend._storage[actual_path] = f.read()
+
+    def test_clean_memory_store_passes(self, memory_store):
+        memory_store.put("a", key="k1")
+        memory_store.put("b", key="k2")
+        self._sync_blobs_to_memory(memory_store)
+        report = memory_store.verify_integrity()
+        assert report["orphaned_blobs"] == []
+        assert report["dangling_entries"] == []
+        assert report["size_mismatches"] == []
+
+    def test_empty_memory_store_passes(self, memory_store):
+        report = memory_store.verify_integrity()
+        assert report["orphaned_blobs"] == []
+        assert report["dangling_entries"] == []
+        assert report["size_mismatches"] == []
+
+    def test_detects_dangling_metadata_memory(self, memory_store):
+        key = memory_store.put("data", key="dangling")
+        self._sync_blobs_to_memory(memory_store)
+        meta = memory_store.get_metadata(key)
+        nested = meta.get("metadata", {})
+        actual_path = meta.get("actual_path") or nested.get("actual_path")
+        # Delete from blob backend but keep metadata
+        memory_store.blob_backend.delete_blob(actual_path)
+
+        report = memory_store.verify_integrity()
+        assert len(report["dangling_entries"]) == 1
+        assert report["dangling_entries"][0]["cache_key"] == key
+
+    def test_detects_orphaned_blobs_memory(self, memory_store):
+        key = memory_store.put("orphan-data", key="orphan")
+        self._sync_blobs_to_memory(memory_store)
+        # Remove metadata but keep blob in memory backend
+        memory_store.backend.remove_entry(key)
+
+        report = memory_store.verify_integrity()
+        assert len(report["orphaned_blobs"]) >= 1
+
+    def test_detects_size_mismatch_memory(self, memory_store):
+        key = memory_store.put("size-check", key="sizecheck")
+        self._sync_blobs_to_memory(memory_store)
+        entry = memory_store.backend.get_entry(key)
+        entry["file_size"] = 1  # Wrong size
+        memory_store.backend.put_entry(key, entry)
+
+        report = memory_store.verify_integrity()
+        assert len(report["size_mismatches"]) == 1
+
+    def test_repair_removes_orphans_memory(self, memory_store):
+        key = memory_store.put("repair-me", key="repair-orphan")
+        self._sync_blobs_to_memory(memory_store)
+        meta = memory_store.get_metadata(key)
+        nested = meta.get("metadata", {})
+        actual_path = meta.get("actual_path") or nested.get("actual_path")
+        # Remove metadata → blob becomes orphan in memory backend
+        memory_store.backend.remove_entry(key)
+        assert memory_store.blob_backend.exists(actual_path)
+
+        report = memory_store.verify_integrity(repair=True)
+        assert report["repaired"]["orphans_deleted"] >= 1
+        assert not memory_store.blob_backend.exists(actual_path)
+
+    def test_repair_removes_dangling_memory(self, memory_store):
+        key = memory_store.put("repair-dangling", key="repair-dang")
+        self._sync_blobs_to_memory(memory_store)
+        meta = memory_store.get_metadata(key)
+        nested = meta.get("metadata", {})
+        actual_path = meta.get("actual_path") or nested.get("actual_path")
+        # Remove blob from memory backend → metadata becomes dangling
+        memory_store.blob_backend.delete_blob(actual_path)
+
+        report = memory_store.verify_integrity(repair=True)
+        assert report["repaired"]["dangling_removed"] == 1
+        assert memory_store.get_metadata(key) is None
+
+    def test_hash_verification_memory(self, memory_store):
+        key = memory_store.put("hash-check", key="hashcheck")
+        self._sync_blobs_to_memory(memory_store)
+        entry = memory_store.backend.get_entry(key)
+        nested = entry.get("metadata", {})
+        nested["file_hash"] = "badhash000000000"
+        entry["metadata"] = nested
+        memory_store.backend.put_entry(key, entry)
+
+        report = memory_store.verify_integrity(verify_hashes=True)
+        assert "hash_mismatches" in report
+        assert len(report["hash_mismatches"]) == 1
