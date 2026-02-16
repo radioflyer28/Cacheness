@@ -34,8 +34,8 @@ These constraints apply to EVERY task. Violating any of them is a bug.
 **Work tracking:**
 - File a beads issue for ANY work, even small fixes
 - Every code change goes through the Mandatory Workflow below
-- **Critical issues** discovered during work → file immediately (don't lose context)
-- **Non-critical issues** discovered during work → note them, propose them when closing out the current issue, and file them with consensus from affected parties (agents, devs, etc.)
+- **Critical issues** discovered during work (not related to the current issue) → file immediately (don't lose context)
+- **Non-critical issues** discovered during work → note them, propose them when closing out the current issue
 
 
 ## Mandatory Workflow
@@ -63,7 +63,8 @@ Use this for any code change, test addition, or issue-tracked work.
    - Mark issue in-progress: beads MCP `update`, or CLI `uv run bd update <id> --claim`
    - Create `WORKTREE.md` with issue details
 3. **Do the work** — code, tests, docs updates
-4. **Quality gates** (if .py files changed):
+4. **Critical issues** discovered during work (not related to the current issue) → file immediately (don't lose context)
+5. **Quality gates** (if .py files changed):
    ```powershell
    # PowerShell (Windows)
    $files = git diff --name-only --diff-filter=ACMR HEAD -- '*.py'
@@ -77,7 +78,7 @@ Use this for any code change, test addition, or issue-tracked work.
    uv run ruff check $(git diff --name-only --diff-filter=ACMR HEAD -- '*.py')
    uv run ty check $(git diff --name-only --diff-filter=ACMR HEAD -- '*.py')
    ```
-5. **Incremental tests** (after each code change):
+6. **Incremental tests** (after each code change):
    ```bash
    # Tier 1 — directly affected tests only (~seconds)
    uv run pytest tests/test_blob_store.py tests/test_core.py -x -q --ignore=tests/test_tensorflow_handler.py
@@ -85,11 +86,11 @@ Use this for any code change, test addition, or issue-tracked work.
    uv run pytest tests/test_blob_store.py tests/test_core.py tests/test_cache_integrity.py -x -q --ignore=tests/test_tensorflow_handler.py
    ```
    Select test files based on what you changed — see [Test Suite](#test-suite).
-6. **Full test suite** (once, right before push):
+7. **Full test suite** (once, right before push):
    `uv run pytest tests/ -x -q --ignore=tests/test_tensorflow_handler.py`
-7. **Update docs** if changing public API
-8. **Push feature branch:** `git push -u origin beads-<hash>-<desc>`
-9. **Integrate to dev:**
+8. **Update docs** if changing public API
+9. **Push feature branch:** `git push -u origin beads-<hash>-<desc>`
+10. **Integrate to dev:**
    ```bash
    cd ../..                                          # Back to Cacheness/
    git checkout dev
@@ -98,14 +99,14 @@ Use this for any code change, test addition, or issue-tracked work.
    # If real merge: uv run pytest tests/ -x -q --ignore=tests/test_tensorflow_handler.py
    git push origin dev
    ```
-10. **Cleanup:**
+11. **Cleanup:**
    ```bash
    git worktree remove worktrees/beads-<hash> --force   # Always needs --force (.venv/pycache)
    git branch -d beads-<hash>-<desc>
    git push origin --delete beads-<hash>-<desc>
    ```
    - Close issue: beads MCP `close`, or CLI `uv run bd close <id> --force` (needed for child issues of epics)
-11. **Verify** — `git status` confirms "up to date with origin"
+12. **Verify** — `git status` confirms "up to date with origin"
 
 ### Workflow B: Direct-to-dev (no worktree)
 
@@ -117,9 +118,9 @@ Use this for docs-only changes, config tweaks, or trivial fixes that don't need 
 
 ### Completion
 
-**CRITICAL:** Work is NOT complete until `git push` succeeds (both feature branch AND dev branch). NEVER stop before pushing. If push fails, resolve and retry until it succeeds.
-
-When handing off at session end, provide context for the next session.
+- **CRITICAL:** Work is NOT complete until `git push` succeeds (both feature branch AND dev branch). NEVER stop before pushing. If push fails, resolve and retry until it succeeds.
+- **Non-critical issues** discovered during work → note them, propose them when closing out the current issue
+- **Handoff:** when handing off at session end, provide context for the next session.
 
 
 ## Git Worktree Details

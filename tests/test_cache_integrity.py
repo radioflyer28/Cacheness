@@ -189,7 +189,9 @@ class TestCacheIntegrity:
             cache_key = cache_enabled._create_cache_key({"test_key": "value"})
             entry = cache_enabled.metadata_backend.get_entry(cache_key)
             assert entry is not None, "Cache entry should exist"
-            file_path = cache_enabled._resolve_actual_path(entry["metadata"]["actual_path"])
+            file_path = cache_enabled._resolve_actual_path(
+                entry["metadata"]["actual_path"]
+            )
 
             with open(file_path, "ab") as f:
                 f.write(b"CORRUPTED")
