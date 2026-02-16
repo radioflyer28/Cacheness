@@ -163,7 +163,7 @@ class TestGetTransientIOErrors:
 
         # Delete the actual blob file
         entry = cache.metadata_backend.get_entry(cache_key)
-        actual_path = entry["metadata"]["actual_path"]
+        actual_path = cache._resolve_actual_path(entry["metadata"]["actual_path"])
         os.remove(actual_path)
 
         # get() should return None AND clean up the dangling metadata
@@ -193,7 +193,7 @@ class TestGetDeserializationFailure:
 
         cache_key = cache.put(data, test_key="corrupt_test")
         entry = cache.metadata_backend.get_entry(cache_key)
-        actual_path = entry["metadata"]["actual_path"]
+        actual_path = cache._resolve_actual_path(entry["metadata"]["actual_path"])
 
         # Corrupt the blob file
         with open(actual_path, "wb") as f:
@@ -360,7 +360,7 @@ class TestTOCTOURace:
 
         # Get the actual path from metadata
         entry = cache.metadata_backend.get_entry(cache_key)
-        actual_path = entry["metadata"]["actual_path"]
+        actual_path = cache._resolve_actual_path(entry["metadata"]["actual_path"])
 
         # Delete the file right before handler.get() is called
         handler = cache.handlers.get_handler_by_type("object")
@@ -368,8 +368,8 @@ class TestTOCTOURace:
 
         def get_after_delete(*args, **kwargs):
             # Delete the file, then try to load it
-            if os.path.exists(actual_path):
-                os.remove(actual_path)
+            if actual_path.exists():
+                actual_path.unlink()
             return original_get(*args, **kwargs)
 
         with patch.object(handler, "get", side_effect=get_after_delete):

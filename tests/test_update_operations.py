@@ -638,11 +638,11 @@ class TestBlobCleanupOnDelete:
     }
 
     def _get_blob_files(self, cache_dir: Path) -> set:
-        """Return the set of cache blob files currently on disk."""
+        """Return the set of cache blob files currently on disk (recursive)."""
         if not cache_dir.exists():
             return set()
         blobs = set()
-        for f in cache_dir.iterdir():
+        for f in cache_dir.rglob("*"):
             if not f.is_file():
                 continue
             # Check primary extension and compound extensions (e.g. .pkl.lz4)

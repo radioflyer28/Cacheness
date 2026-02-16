@@ -199,6 +199,53 @@ class BlobStore:
 
         logger.debug(f"BlobStore initialized at {self.cache_dir}")
 
+    # ── Path normalization helpers ────────────────────────────────────
+
+    def _to_relative_path(self, path_str: str) -> str:
+        """Convert an absolute path to a cache-dir-relative, forward-slash path.
+
+        URIs (containing ``://``) are returned unchanged.  Absolute paths
+        that start with ``self.cache_dir`` have the prefix stripped.  All
+        backslashes are replaced with forward slashes so that metadata is
+        portable across platforms.
+        """
+        if "://" in path_str:
+            return path_str
+
+        # Normalize to an absolute Path for comparison
+        p = Path(path_str).resolve()
+        cache_root = self.cache_dir.resolve()
+
+        try:
+            rel = p.relative_to(cache_root)
+        except ValueError:
+            # Already relative or from a different root — normalise separators
+            rel = Path(path_str)
+
+        return rel.as_posix()
+
+    def _resolve_actual_path(self, actual_path_str: str) -> str:
+        """Resolve a stored ``actual_path`` to a backend-usable path string.
+
+        - URIs (``://``) are returned unchanged.
+        - Relative paths (new format) are joined with ``self.cache_dir``.
+        - Legacy absolute paths are returned unchanged.
+
+        Returns a string suitable for ``blob_backend.exists()``,
+        ``blob_backend.delete_blob()``, etc.  Callers that need a
+        filesystem ``Path`` should wrap the result.
+        """
+        if "://" in actual_path_str:
+            return actual_path_str
+
+        p = Path(actual_path_str)
+        if p.is_absolute():
+            # Legacy absolute path — use directly
+            return str(p)
+
+        # Relative (new format) — resolve against cache_dir
+        return str(self.cache_dir / p)
+
     def _init_signer(
         self,
         signing_key_file: str,
@@ -283,7 +330,7 @@ class BlobStore:
             # We store file_hash and entry_signature in nested metadata too so
             # JsonBackend preserves them (it only keeps specific top-level fields).
             custom_metadata = metadata or {}
-            custom_metadata["actual_path"] = final_path
+            custom_metadata["actual_path"] = self._to_relative_path(final_path)
             custom_metadata["storage_format"] = result.get("storage_format", "pickle")
             custom_metadata["compression_codec"] = self.compression
             if file_hash:
@@ -353,7 +400,8 @@ class BlobStore:
             actual_path_str = entry.get("actual_path") or nested_meta.get("actual_path")
 
             if actual_path_str:
-                actual_path = Path(actual_path_str)
+                resolved = self._resolve_actual_path(actual_path_str)
+                actual_path = Path(resolved)
             else:
                 # Fallback: try common extensions
                 for ext in [".pkl", ".b2nd", ".parquet", ".npz", ""]:
@@ -452,10 +500,12 @@ class BlobStore:
             # Delete the file via blob backend
             nested_meta = entry.get("metadata", {})
             actual_path_str = entry.get("actual_path") or nested_meta.get("actual_path")
-            actual_path = Path(
-                actual_path_str if actual_path_str else self.cache_dir / key
+            resolved = (
+                self._resolve_actual_path(actual_path_str)
+                if actual_path_str
+                else str(self.cache_dir / key)
             )
-            self.blob_backend.delete_blob(str(actual_path))
+            self.blob_backend.delete_blob(resolved)
 
             # Remove metadata
             self.backend.remove_entry(key)
@@ -481,10 +531,12 @@ class BlobStore:
             # Also verify the file exists via blob backend
             nested_meta = entry.get("metadata", {})
             actual_path_str = entry.get("actual_path") or nested_meta.get("actual_path")
-            actual_path = Path(
-                actual_path_str if actual_path_str else self.cache_dir / key
+            resolved = (
+                self._resolve_actual_path(actual_path_str)
+                if actual_path_str
+                else str(self.cache_dir / key)
             )
-            return self.blob_backend.exists(str(actual_path))
+            return self.blob_backend.exists(resolved)
 
     def list(
         self,
@@ -589,13 +641,9 @@ class BlobStore:
             for entry in self.backend.iter_entry_summaries():
                 actual_path = entry.get("actual_path")
                 if actual_path:
-                    # Normalize filesystem paths for consistent matching;
-                    # leave URIs (s3://, etc.) untouched.
-                    norm_path = (
-                        os.path.normpath(actual_path)
-                        if "://" not in actual_path
-                        else actual_path
-                    )
+                    # Resolve to the same format that list_blobs() produces
+                    # so set-comparison works correctly.
+                    norm_path = self._resolve_actual_path(actual_path)
                     entry_paths[norm_path] = {
                         "cache_key": entry.get("cache_key", ""),
                         "file_size": entry.get("file_size"),
@@ -753,8 +801,8 @@ class BlobStore:
             result.setdefault("metadata", {})
             result["metadata"].update(write_meta)
 
-        # Update actual_path to the final storage location
-        result["actual_path"] = final_path
+        # Update actual_path to the final storage location (relative)
+        result["actual_path"] = self._to_relative_path(final_path)
 
         # Compute file hash from final location
         file_hash = None

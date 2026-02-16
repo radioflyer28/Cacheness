@@ -27,9 +27,9 @@ class TestFilesystemBlobBackendNamespace:
     """Test FilesystemBlobBackend namespace isolation."""
 
     def test_default_namespace_uses_base_dir(self, tmp_path):
-        """Default namespace stores blobs directly under base_dir."""
+        """Default namespace stores blobs under base_dir/default/."""
         backend = FilesystemBlobBackend(tmp_path / "blobs", shard_chars=0)
-        assert backend.base_dir == tmp_path / "blobs"
+        assert backend.base_dir == tmp_path / "blobs" / "default"
         assert backend._namespace == "default"
 
     def test_default_namespace_explicit(self, tmp_path):
@@ -37,7 +37,7 @@ class TestFilesystemBlobBackendNamespace:
         backend = FilesystemBlobBackend(
             tmp_path / "blobs", shard_chars=0, namespace="default"
         )
-        assert backend.base_dir == tmp_path / "blobs"
+        assert backend.base_dir == tmp_path / "blobs" / "default"
         assert backend._namespace == "default"
 
     def test_custom_namespace_uses_subdirectory(self, tmp_path):
@@ -60,7 +60,7 @@ class TestFilesystemBlobBackendNamespace:
         """Write and read a blob in the default namespace."""
         backend = FilesystemBlobBackend(tmp_path / "blobs", shard_chars=0)
         path = backend.write_blob("test_blob", b"hello default")
-        assert Path(path).parent == tmp_path / "blobs"
+        assert Path(path).parent == tmp_path / "blobs" / "default"
         assert backend.read_blob(path) == b"hello default"
 
     def test_blob_write_read_custom_namespace(self, tmp_path):
@@ -150,11 +150,11 @@ class TestBlobStoreNamespacePlumbing:
     """Test that BlobStore passes namespace to FilesystemBlobBackend."""
 
     def test_blobstore_default_namespace(self, tmp_path):
-        """BlobStore with default namespace uses base_dir directly."""
+        """BlobStore with default namespace uses base_dir/default/."""
         store = BlobStore(cache_dir=tmp_path / "store")
         assert store._namespace == "default"
         assert store.blob_backend._namespace == "default"
-        assert store.blob_backend.base_dir == tmp_path / "store"
+        assert store.blob_backend.base_dir == tmp_path / "store" / "default"
 
     def test_blobstore_custom_namespace(self, tmp_path):
         """BlobStore with custom namespace creates namespaced blob backend."""
@@ -197,11 +197,11 @@ class TestUnifiedCacheBlobNamespaceWiring:
     """Test that UnifiedCache wires namespace to BlobStore."""
 
     def test_default_namespace_blob_path(self, tmp_path):
-        """UnifiedCache with default namespace stores blobs in cache_dir."""
+        """UnifiedCache with default namespace stores blobs in cache_dir/default/."""
         config = CacheConfig(cache_dir=str(tmp_path / "cache"))
         cache = UnifiedCache(config=config)
         assert cache._blob_store._namespace == DEFAULT_NAMESPACE
-        assert cache._blob_store.blob_backend.base_dir == tmp_path / "cache"
+        assert cache._blob_store.blob_backend.base_dir == tmp_path / "cache" / "default"
 
     def test_custom_namespace_blob_path(self, tmp_path):
         """UnifiedCache with custom namespace stores blobs in subdirectory."""

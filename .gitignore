@@ -15,16 +15,16 @@ wheels/
 logs/
 
 # Cache system
-cache/*.bin
-cache/*.db
-cache/*.db-shm
-cache/*.db-wal
-cache/*.json
-cache/*.pkl
-cache/*.pkl.*
-cache/*.b2nd
-cache/*.npz
-cache/*.parquet
+cache/**/*.bin
+cache/**/*.db
+cache/**/*.db-shm
+cache/**/*.db-wal
+cache/**/*.json
+cache/**/*.pkl
+cache/**/*.pkl.*
+cache/**/*.b2nd
+cache/**/*.npz
+cache/**/*.parquet
 .DS_Store
 cache_metadata.db
 cacheness_namespaces.json

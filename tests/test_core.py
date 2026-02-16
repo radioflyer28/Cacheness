@@ -527,7 +527,7 @@ class TestCacheness:
         # Get the cache entry to find the blob file path
         cache_key = cache._create_cache_key({"large_test": "data"})
         entry = cache.metadata_backend.get_entry(cache_key)
-        blob_path = Path(entry.get("metadata", {}).get("actual_path"))
+        blob_path = cache._resolve_actual_path(entry.get("metadata", {}).get("actual_path"))
 
         # Delete the blob file (but keep metadata)
         if blob_path.exists():
@@ -723,7 +723,7 @@ class TestCacheness:
             # Get actual_path from metadata (may be nested)
             metadata = entry.get("metadata", {})
             actual_path = metadata.get("actual_path") or entry.get("actual_path")
-            blob_path = Path(actual_path)
+            blob_path = cache._resolve_actual_path(actual_path)
 
             # Verify blob file exists
             assert blob_path.exists()

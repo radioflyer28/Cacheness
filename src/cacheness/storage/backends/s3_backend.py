@@ -129,7 +129,7 @@ class S3BlobBackend(BlobBackend):
         use_ssl: bool = True,
         access_key: Optional[str] = None,
         secret_key: Optional[str] = None,
-        shard_chars: int = 2,
+        shard_chars: int = 0,
         namespace: str = "default",
         verify_on_read: bool = True,
         strict_etag: bool = False,

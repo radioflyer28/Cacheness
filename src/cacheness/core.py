@@ -978,17 +978,30 @@ class UnifiedCache:
     def _get_cache_file_path(self, cache_key: str) -> Path:
         """Get base cache file path (without extension).
 
-        For non-default namespaces the path is rooted under
+        All namespaces (including default) store blob files under
         ``cache_dir/{namespace}/`` so that blob files mirror the
         namespace isolation provided by the metadata backend.
         """
         filename_base = cache_key
 
-        base = self.cache_dir
-        if self.namespace != DEFAULT_NAMESPACE:
-            base = base / self.namespace
-            base.mkdir(parents=True, exist_ok=True)
+        base = self.cache_dir / self.namespace
+        base.mkdir(parents=True, exist_ok=True)
         return base / filename_base
+
+    def _resolve_actual_path(self, actual_path_str: str) -> Path:
+        """Resolve a stored ``actual_path`` to an absolute filesystem Path.
+
+        - URIs (containing ``://``) are wrapped in Path as-is (callers
+          handling URIs must check before using filesystem operations).
+        - Relative paths (new format) are joined with ``self.cache_dir``.
+        - Legacy absolute paths are returned unchanged.
+        """
+        if "://" in actual_path_str:
+            return Path(actual_path_str)
+        p = Path(actual_path_str)
+        if p.is_absolute():
+            return p
+        return self.cache_dir / p
 
     def _is_expired(self, cache_key: str, ttl_seconds=_DEFAULT_TTL) -> bool:
         """Check if cache entry is expired.
@@ -1135,9 +1148,9 @@ class UnifiedCache:
             )
 
             actual_path_str = result.get("actual_path", str(base_file_path))
-            cleanup.blob_path = Path(actual_path_str)
+            cleanup.blob_path = self._resolve_actual_path(actual_path_str)
 
-            if actual_path_str.startswith("s3://"):
+            if "://" in actual_path_str:
                 cleanup.set_remote(self._blob_store.blob_backend, actual_path_str)
 
             metadata_dict = {
@@ -1206,7 +1219,9 @@ class UnifiedCache:
         metadata = entry.get("metadata", {})
         actual_path = metadata.get("actual_path")
         file_path = (
-            Path(actual_path) if actual_path else self._get_cache_file_path(cache_key)
+            self._resolve_actual_path(actual_path)
+            if actual_path
+            else self._get_cache_file_path(cache_key)
         )
 
         # Integrity verification — return None without deleting
@@ -1272,7 +1287,9 @@ class UnifiedCache:
         metadata = entry.get("metadata", {})
         actual_path = metadata.get("actual_path")
         file_path = (
-            Path(actual_path) if actual_path else self._get_cache_file_path(cache_key)
+            self._resolve_actual_path(actual_path)
+            if actual_path
+            else self._get_cache_file_path(cache_key)
         )
 
         # Integrity verification — return None without deleting
@@ -1380,11 +1397,11 @@ class UnifiedCache:
 
                 # Track the blob path so we can clean up on failure
                 actual_path_str = result.get("actual_path", str(base_file_path))
-                cleanup.blob_path = Path(actual_path_str)
+                cleanup.blob_path = self._resolve_actual_path(actual_path_str)
 
                 # If the blob was uploaded to a remote backend (e.g. S3),
                 # track it for rollback in case metadata write fails.
-                if actual_path_str.startswith("s3://"):
+                if "://" in actual_path_str:
                     cleanup.set_remote(self._blob_store.blob_backend, actual_path_str)
 
                 # Update metadata
@@ -1528,7 +1545,7 @@ class UnifiedCache:
                 metadata = entry.get("metadata", {})
                 actual_path = metadata.get("actual_path")
                 if actual_path:
-                    file_path = Path(actual_path)
+                    file_path = self._resolve_actual_path(actual_path)
                 else:
                     file_path = base_file_path
 
@@ -1704,7 +1721,7 @@ class UnifiedCache:
                 metadata = entry.get("metadata", {})
                 actual_path = metadata.get("actual_path")
                 if actual_path:
-                    file_path = Path(actual_path)
+                    file_path = self._resolve_actual_path(actual_path)
                 else:
                     file_path = base_file_path
 
@@ -1956,10 +1973,10 @@ class UnifiedCache:
                 )
 
                 actual_path_str = str(result.get("actual_path", base_file_path))
-                cleanup.blob_path = Path(actual_path_str)
+                cleanup.blob_path = self._resolve_actual_path(actual_path_str)
 
                 # Track remote blob for rollback on S3
-                if actual_path_str.startswith("s3://"):
+                if "://" in actual_path_str:
                     cleanup.set_remote(self._blob_store.blob_backend, actual_path_str)
 
                 # Build metadata updates dict from handler result
@@ -2000,7 +2017,7 @@ class UnifiedCache:
                                 and self.config.metadata.verify_cache_integrity
                             ):
                                 new_file_hash = self._blob_store._calculate_file_hash(
-                                    Path(actual_path)
+                                    self._resolve_actual_path(actual_path)
                                 )
                                 metadata["file_hash"] = new_file_hash
 
@@ -2376,7 +2393,7 @@ class UnifiedCache:
         for entry in removed_entries:
             actual_path = entry.get("actual_path")
             if actual_path:
-                blob_file = Path(actual_path)
+                blob_file = self._resolve_actual_path(actual_path)
                 if blob_file.exists():
                     try:
                         blob_file.unlink()
@@ -2567,7 +2584,7 @@ class UnifiedCache:
             for entry in expired_entries:
                 actual_path = entry.get("actual_path")
                 if actual_path:
-                    blob_file = Path(actual_path)
+                    blob_file = self._resolve_actual_path(actual_path)
                     if blob_file.exists():
                         try:
                             blob_file.unlink()

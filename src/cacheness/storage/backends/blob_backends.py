@@ -270,15 +270,11 @@ class FilesystemBlobBackend(BlobBackend):
         Args:
             base_dir: Directory where blobs will be stored
             shard_chars: Number of leading chars for Git-style sharding (default: 2)
-            namespace: Namespace for blob isolation. Non-default namespaces store
-                blobs under ``base_dir/{namespace}/``. The default namespace
-                stores directly under ``base_dir/`` for backward compatibility.
+            namespace: Namespace for blob isolation. All namespaces (including
+                default) store blobs under ``base_dir/{namespace}/``.
         """
         root = Path(base_dir)
-        if namespace != "default":
-            self.base_dir = root / namespace
-        else:
-            self.base_dir = root
+        self.base_dir = root / namespace
         self.shard_chars = shard_chars
         self._namespace = namespace
         self.base_dir.mkdir(parents=True, exist_ok=True)

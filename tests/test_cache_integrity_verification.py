@@ -88,8 +88,10 @@ class TestOrphanedBlobDetection:
         cache = _make_cache(tmp_path)
         cache.put("real data", test_key="real")
 
-        # Create an orphaned .pkl file
-        orphan = tmp_path / "orphaned_file.pkl"
+        # Create an orphaned .pkl file in the namespace blob directory
+        ns_dir = tmp_path / "default"
+        ns_dir.mkdir(exist_ok=True)
+        orphan = ns_dir / "orphaned_file.pkl"
         orphan.write_bytes(b"fake pickle data")
 
         report = cache.verify_integrity()
@@ -101,7 +103,9 @@ class TestOrphanedBlobDetection:
     def test_detects_orphaned_npz(self, tmp_path):
         cache = _make_cache(tmp_path)
 
-        orphan = tmp_path / "orphaned_array.npz"
+        ns_dir = tmp_path / "default"
+        ns_dir.mkdir(exist_ok=True)
+        orphan = ns_dir / "orphaned_array.npz"
         orphan.write_bytes(b"fake npz data")
 
         report = cache.verify_integrity()
@@ -111,7 +115,9 @@ class TestOrphanedBlobDetection:
     def test_detects_orphaned_compressed_pkl(self, tmp_path):
         cache = _make_cache(tmp_path)
 
-        orphan = tmp_path / "orphaned.pkl.zstd"
+        ns_dir = tmp_path / "default"
+        ns_dir.mkdir(exist_ok=True)
+        orphan = ns_dir / "orphaned.pkl.zstd"
         orphan.write_bytes(b"fake compressed data")
 
         report = cache.verify_integrity()
@@ -121,9 +127,11 @@ class TestOrphanedBlobDetection:
     def test_detects_multiple_orphans(self, tmp_path):
         cache = _make_cache(tmp_path)
 
-        (tmp_path / "orphan1.pkl").write_bytes(b"data1")
-        (tmp_path / "orphan2.npz").write_bytes(b"data2")
-        (tmp_path / "orphan3.parquet").write_bytes(b"data3")
+        ns_dir = tmp_path / "default"
+        ns_dir.mkdir(exist_ok=True)
+        (ns_dir / "orphan1.pkl").write_bytes(b"data1")
+        (ns_dir / "orphan2.npz").write_bytes(b"data2")
+        (ns_dir / "orphan3.parquet").write_bytes(b"data3")
 
         report = cache.verify_integrity()
 
@@ -132,7 +140,9 @@ class TestOrphanedBlobDetection:
     def test_repair_deletes_orphaned_blobs(self, tmp_path):
         cache = _make_cache(tmp_path)
 
-        orphan = tmp_path / "orphaned.pkl"
+        ns_dir = tmp_path / "default"
+        ns_dir.mkdir(exist_ok=True)
+        orphan = ns_dir / "orphaned.pkl"
         orphan.write_bytes(b"garbage")
 
         report = cache.verify_integrity(repair=True)
@@ -145,7 +155,9 @@ class TestOrphanedBlobDetection:
         cache.put("keep me", test_key="valid")
 
         # Add an orphan
-        (tmp_path / "orphan.pkl").write_bytes(b"delete me")
+        ns_dir = tmp_path / "default"
+        ns_dir.mkdir(exist_ok=True)
+        (ns_dir / "orphan.pkl").write_bytes(b"delete me")
 
         report = cache.verify_integrity(repair=True)
 
@@ -168,7 +180,7 @@ class TestDanglingMetadataDetection:
 
         # Delete the blob file but keep metadata
         entry = cache.metadata_backend.get_entry(cache_key)
-        actual_path = entry["metadata"]["actual_path"]
+        actual_path = cache._resolve_actual_path(entry["metadata"]["actual_path"])
         os.remove(actual_path)
 
         report = cache.verify_integrity()
@@ -181,7 +193,7 @@ class TestDanglingMetadataDetection:
         cache_key = cache.put("disappearing", test_key="gone")
 
         entry = cache.metadata_backend.get_entry(cache_key)
-        os.remove(entry["metadata"]["actual_path"])
+        os.remove(cache._resolve_actual_path(entry["metadata"]["actual_path"]))
 
         report = cache.verify_integrity(repair=True)
 
@@ -209,7 +221,7 @@ class TestSizeMismatchDetection:
         cache_key = cache.put("original data", test_key="modified")
 
         entry = cache.metadata_backend.get_entry(cache_key)
-        actual_path = entry["metadata"]["actual_path"]
+        actual_path = cache._resolve_actual_path(entry["metadata"]["actual_path"])
 
         # Modify the file externally (change its size)
         with open(actual_path, "ab") as f:
@@ -227,7 +239,7 @@ class TestSizeMismatchDetection:
         cache_key = cache.put("some data to truncate", test_key="truncated")
 
         entry = cache.metadata_backend.get_entry(cache_key)
-        actual_path = entry["metadata"]["actual_path"]
+        actual_path = cache._resolve_actual_path(entry["metadata"]["actual_path"])
 
         # Truncate the file
         with open(actual_path, "wb") as f:
@@ -268,7 +280,7 @@ class TestHashVerification:
         cache_key = cache.put("hash test data", test_key="hash_test")
 
         entry = cache.metadata_backend.get_entry(cache_key)
-        actual_path = entry["metadata"]["actual_path"]
+        actual_path = cache._resolve_actual_path(entry["metadata"]["actual_path"])
 
         # Corrupt the file without changing its size (overwrite some bytes)
         with open(actual_path, "r+b") as f:
@@ -320,12 +332,14 @@ class TestVerifyIntegrityCombined:
         cache.put("valid", test_key="ok")
 
         # 2. Create orphaned blob
-        (tmp_path / "orphan.pkl").write_bytes(b"orphan data")
+        ns_dir = tmp_path / "default"
+        ns_dir.mkdir(exist_ok=True)
+        (ns_dir / "orphan.pkl").write_bytes(b"orphan data")
 
         # 3. Create dangling metadata (put then delete blob)
         cache_key = cache.put("will dangle", test_key="dangle")
         entry = cache.metadata_backend.get_entry(cache_key)
-        os.remove(entry["metadata"]["actual_path"])
+        os.remove(cache._resolve_actual_path(entry["metadata"]["actual_path"]))
 
         report = cache.verify_integrity()
 
@@ -340,13 +354,15 @@ class TestVerifyIntegrityCombined:
         cache.put("survivor", test_key="keep")
 
         # Orphan
-        orphan = tmp_path / "orphan.pkl"
+        ns_dir = tmp_path / "default"
+        ns_dir.mkdir(exist_ok=True)
+        orphan = ns_dir / "orphan.pkl"
         orphan.write_bytes(b"delete me")
 
         # Dangling
         cache_key = cache.put("ghost", test_key="ghost")
         entry = cache.metadata_backend.get_entry(cache_key)
-        os.remove(entry["metadata"]["actual_path"])
+        os.remove(cache._resolve_actual_path(entry["metadata"]["actual_path"]))
 
         report = cache.verify_integrity(repair=True)
 

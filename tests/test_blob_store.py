@@ -165,7 +165,8 @@ class TestFileHash:
         file_hash = meta.get("file_hash") or nested.get("file_hash")
 
         # Calculate hash of the actual file
-        actual_path = Path(meta.get("actual_path") or nested.get("actual_path"))
+        actual_path_str = meta.get("actual_path") or nested.get("actual_path")
+        actual_path = Path(store._resolve_actual_path(actual_path_str))
         hasher = xxhash.xxh3_64()
         with open(actual_path, "rb") as f:
             for chunk in iter(lambda: f.read(8192), b""):
@@ -247,8 +248,8 @@ class TestVerifyIntegrity:
         # Delete the blob file but keep metadata
         meta = store.get_metadata(key)
         nested = meta.get("metadata", {})
-        actual_path = meta.get("actual_path") or nested.get("actual_path")
-        os.remove(actual_path)
+        actual_path_str = meta.get("actual_path") or nested.get("actual_path")
+        os.remove(store._resolve_actual_path(actual_path_str))
 
         report = store.verify_integrity()
         assert len(report["dangling_entries"]) == 1
@@ -289,22 +290,23 @@ class TestVerifyIntegrity:
         key = store.put("repair-me", key="repair-orphan")
         meta = store.get_metadata(key)
         nested = meta.get("metadata", {})
-        actual_path = meta.get("actual_path") or nested.get("actual_path")
+        actual_path_str = meta.get("actual_path") or nested.get("actual_path")
+        resolved = store._resolve_actual_path(actual_path_str)
         # Remove metadata → blob becomes orphan
         store.backend.remove_entry(key)
-        assert os.path.exists(actual_path)
+        assert os.path.exists(resolved)
 
         report = store.verify_integrity(repair=True)
         assert report["repaired"]["orphans_deleted"] >= 1
-        assert not os.path.exists(actual_path)
+        assert not os.path.exists(resolved)
 
     def test_repair_removes_dangling(self, store):
         key = store.put("repair-dangling", key="repair-dang")
         meta = store.get_metadata(key)
         nested = meta.get("metadata", {})
-        actual_path = meta.get("actual_path") or nested.get("actual_path")
+        actual_path_str = meta.get("actual_path") or nested.get("actual_path")
         # Remove blob file → metadata becomes dangling
-        os.remove(actual_path)
+        os.remove(store._resolve_actual_path(actual_path_str))
 
         report = store.verify_integrity(repair=True)
         assert report["repaired"]["dangling_removed"] == 1

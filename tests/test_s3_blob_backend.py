@@ -216,8 +216,8 @@ class TestS3BlobBackendBasics:
 class TestS3Sharding:
     """Test Git-style directory sharding in S3BlobBackend."""
 
-    def test_default_shard_chars_is_two(self, aws_credentials, s3_bucket):
-        """Default shard_chars should be 2."""
+    def test_default_shard_chars_is_zero(self, aws_credentials, s3_bucket):
+        """Default shard_chars should be 0 (no sharding)."""
         from cacheness.storage.backends.s3_backend import S3BlobBackend
 
         with mock_aws():
@@ -225,7 +225,7 @@ class TestS3Sharding:
             client.create_bucket(Bucket=s3_bucket)
 
             backend = S3BlobBackend(bucket=s3_bucket)
-            assert backend.shard_chars == 2
+            assert backend.shard_chars == 0
 
     def test_sharding_creates_correct_key(self, aws_credentials, s3_bucket):
         """Test that sharding creates correct S3 keys."""

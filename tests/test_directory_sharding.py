@@ -86,9 +86,9 @@ class TestFilesystemSharding:
         data = b"test data"
         blob_path = backend.write_blob(blob_id, data)
 
-        # Should be directly in base_dir, not in a subdirectory
+        # Should be directly in base_dir (which is temp_dir/default for default namespace)
         path = Path(blob_path)
-        assert path.parent == temp_dir
+        assert path.parent == temp_dir / "default"
         assert path.name == blob_id
 
     def test_shard_chars_two_creates_subdirectory(self, temp_dir):
@@ -99,10 +99,10 @@ class TestFilesystemSharding:
         data = b"test data"
         blob_path = backend.write_blob(blob_id, data)
 
-        # Should be in ab/ subdirectory
+        # Should be in ab/ subdirectory under base_dir (temp_dir/default)
         path = Path(blob_path)
         assert path.parent.name == "ab"
-        assert path.parent.parent == temp_dir
+        assert path.parent.parent == temp_dir / "default"
         assert path.name == blob_id
 
     def test_shard_chars_three_creates_subdirectory(self, temp_dir):
@@ -153,7 +153,7 @@ class TestFilesystemSharding:
         assert backend.exists(blob_path)
 
         # Non-existent path
-        fake_path = str(temp_dir / "ch" / "nonexistent")
+        fake_path = str(temp_dir / "default" / "ch" / "nonexistent")
         assert not backend.exists(fake_path)
 
     def test_multiple_blobs_same_shard(self, temp_dir):
@@ -167,7 +167,7 @@ class TestFilesystemSharding:
             backend.write_blob(blob_id, f"data_{blob_id}".encode())
 
         # Check all are in the "ab" directory
-        ab_dir = temp_dir / "ab"
+        ab_dir = temp_dir / "default" / "ab"
         assert ab_dir.exists()
         files_in_ab = list(ab_dir.iterdir())
         assert len(files_in_ab) == 4
@@ -183,7 +183,7 @@ class TestFilesystemSharding:
 
         # Check each shard directory exists
         for prefix in ["aa", "bb", "cc", "dd"]:
-            shard_dir = temp_dir / prefix
+            shard_dir = temp_dir / "default" / prefix
             assert shard_dir.exists()
             files = list(shard_dir.iterdir())
             assert len(files) == 1
@@ -196,9 +196,9 @@ class TestFilesystemSharding:
         data = b"short id data"
         blob_path = backend.write_blob(blob_id, data)
 
-        # Should be directly in base_dir
+        # Should be directly in base_dir (i.e. temp_dir/default)
         path = Path(blob_path)
-        assert path.parent == temp_dir
+        assert path.parent == temp_dir / "default"
         assert path.name == blob_id
 
     def test_blob_id_equal_to_shard_chars(self, temp_dir):
@@ -250,13 +250,13 @@ class TestFilesystemSharding:
             backend.write_blob(blob_id, b"data")
 
         # First two share "a1" shard
-        a1_dir = temp_dir / "a1"
+        a1_dir = temp_dir / "default" / "a1"
         assert a1_dir.exists()
         assert len(list(a1_dir.iterdir())) == 2
 
         # Check other shards
-        assert (temp_dir / "00").exists()
-        assert (temp_dir / "ff").exists()
+        assert (temp_dir / "default" / "00").exists()
+        assert (temp_dir / "default" / "ff").exists()
 
 
 # =============================================================================
@@ -289,6 +289,7 @@ class TestShardingEdgeCases:
             temp_dir in path.parents
             or path.parent == temp_dir
             or path.parent.parent == temp_dir
+            or (temp_dir / "default") in path.parents
         )
         # Should not escape temp_dir
         assert str(blob_path).startswith(str(temp_dir))
