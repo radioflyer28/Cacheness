@@ -134,7 +134,7 @@ if SQLALCHEMY_AVAILABLE:
 
         file_size = Column(Integer, default=0, nullable=False)
         file_hash = Column(String(16), nullable=True)
-        entry_signature = Column(String(64), nullable=True)
+        entry_signature = Column(String(100), nullable=True)
         s3_etag = Column(String(100), nullable=True)
 
         object_type = Column(String(100), nullable=True)
@@ -254,21 +254,21 @@ if SQLALCHEMY_AVAILABLE:
 
 
 def _pg_migrate_v1_to_v2(backend: "PostgresBackend", namespace_id: str) -> None:
-    """Add ``metadata_dict`` column to an existing entries table.
+    """Placeholder for future v1 → v2 schema migration.
 
-    v1 tables were created without ``metadata_dict``.  This migration
-    adds the column so that ``query_meta()`` works on PostgreSQL.
+    This function is wired but not yet referenced in ``get_migrations()``
+    because v2 does not exist yet.  When a v2 schema change is needed,
+    add the DDL here and register ``(1, 2, _pg_migrate_v1_to_v2)`` in
+    the migration list.
     """
-    if namespace_id == DEFAULT_NAMESPACE:
-        table = "cache_entries"
-    else:
-        table = f"cache_entries_{namespace_id}"
-
-    with backend.SessionLocal() as session:
-        session.execute(
-            text(f'ALTER TABLE "{table}" ADD COLUMN IF NOT EXISTS metadata_dict TEXT')
-        )
-        session.commit()
+    # Example structure for when v2 is defined:
+    #
+    # table = "cache_entries" if namespace_id == DEFAULT_NAMESPACE \
+    #     else f"cache_entries_{namespace_id}"
+    # with backend.SessionLocal() as session:
+    #     session.execute(text(f'ALTER TABLE "{table}" ...'))
+    #     session.commit()
+    pass
 
 
 class PostgresBackend(MetadataBackend):
@@ -436,10 +436,12 @@ class PostgresBackend(MetadataBackend):
         """Return PostgreSQL-specific schema migrations.
 
         Schema baseline is v1 (current).
-        v1 → v2: add ``metadata_dict`` column for ``query_meta()`` parity.
+        v1 → v2: wired via ``_pg_migrate_v1_to_v2`` but v2 does not
+                  exist yet.  Uncomment the entry below when a v2 schema
+                  change is defined.
         """
         return [
-            (1, 2, _pg_migrate_v1_to_v2),
+            # (1, 2, _pg_migrate_v1_to_v2),  # uncomment when v2 is defined
         ]
 
     # --- Namespace registry overrides ---
@@ -482,7 +484,7 @@ class PostgresBackend(MetadataBackend):
                         accessed_at     TIMESTAMP WITH TIME ZONE NOT NULL,
                         file_size       INTEGER NOT NULL DEFAULT 0,
                         file_hash       VARCHAR(16),
-                        entry_signature VARCHAR(64),
+                        entry_signature VARCHAR(100),
                         s3_etag         VARCHAR(100),
                         object_type     VARCHAR(100),
                         storage_format  VARCHAR(20),

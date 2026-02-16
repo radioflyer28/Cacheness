@@ -1,12 +1,12 @@
 """
-Comprehensive Docker integration tests for PostgreSQL and S3/MinIO.
+Comprehensive Docker integration tests for PostgreSQL and S3/Garage.
 
 These tests require Docker containers to be running:
     docker-compose up -d
 
 Coverage:
 - PostgreSQL metadata backend operations
-- S3/MinIO blob storage operations
+- S3/Garage blob storage operations
 - Cross-backend data integrity
 - Signature verification with PostgreSQL
 - Query metadata with PostgreSQL
@@ -105,7 +105,7 @@ def test_postgresql_timezone_handling(cacheness_cache_from_yaml):
     # (Signature verification requires consistent UTC timestamps)
 
 
-# ==================== S3/MinIO Backend Tests ====================
+# ==================== S3/Garage Backend Tests ====================
 
 
 def test_s3_basic_operations(cacheness_cache_from_yaml):
@@ -116,7 +116,7 @@ def test_s3_basic_operations(cacheness_cache_from_yaml):
     assert cache.config.blob.blob_backend == "s3"
 
     # Store data (should go to S3)
-    data = {"s3_test": True, "storage": "minio"}
+    data = {"s3_test": True, "storage": "garage"}
     cache.put(data, key="s3_basic_test")
 
     # Retrieve from S3
@@ -189,7 +189,7 @@ def test_postgresql_s3_coordination(cacheness_cache_from_yaml):
     # Store complex data
     data = {
         "metadata_in": "postgresql",
-        "blob_in": "s3/minio",
+        "blob_in": "s3/garage",
         "timestamp": datetime.now().isoformat(),
         "values": list(range(100)),
     }
@@ -450,7 +450,7 @@ PostgreSQL Backend:
 ✓ Timezone handling
 ✓ Connection resilience
 
-S3/MinIO Backend:
+S3/Garage Backend:
 ✓ Basic storage operations
 ✓ Large object storage
 ✓ DataFrame storage

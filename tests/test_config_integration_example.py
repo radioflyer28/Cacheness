@@ -2,7 +2,7 @@
 Example integration test using configuration files.
 
 This demonstrates how to use the pre-configured YAML/JSON config files
-for integration testing with PostgreSQL and S3/MinIO.
+for integration testing with PostgreSQL and S3/Garage.
 """
 
 import pytest
@@ -67,7 +67,7 @@ def test_backend_config_from_yaml(cacheness_config_from_yaml):
     # Verify S3 blob backend
     assert config.blob.blob_backend == "s3"
     assert config.blob.blob_backend_options["bucket"] == "cache-bucket"
-    assert config.blob.blob_backend_options["endpoint_url"] == "http://localhost:9000"
+    assert config.blob.blob_backend_options["endpoint_url"] == "http://localhost:3900"
 
     # Verify sharding config
     assert config.blob.shard_chars == 2
@@ -207,7 +207,7 @@ To run these tests:
    make test-integration
 
 Configuration files used:
-- config/test_config.yaml (PostgreSQL + MinIO)
+- config/test_config.yaml (PostgreSQL + Garage S3)
 - config/test_config.json (same as YAML)
 - config/local_sqlite_fs.yaml (no Docker needed)
 

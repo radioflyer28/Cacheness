@@ -483,32 +483,32 @@ class TestS3ListKeys:
 
 
 # =============================================================================
-# S3 MinIO Compatibility Tests
+# S3 Compatibility Tests
 # =============================================================================
 
 
-class TestS3MinIOCompatibility:
-    """Test MinIO-specific configuration."""
+class TestS3Compatibility:
+    """Test S3-compatible endpoint configuration."""
 
     def test_custom_endpoint_url(self, aws_credentials, s3_bucket):
-        """Test custom endpoint_url for MinIO."""
+        """Test custom endpoint_url for S3-compatible backends (e.g. Garage)."""
         from cacheness.storage.backends.s3_backend import S3BlobBackend
 
         with mock_aws():
-            # Note: moto doesn't really simulate MinIO, but we can test the config
+            # Note: moto doesn't really simulate Garage, but we can test the config
             client = boto3.client("s3", region_name="us-east-1")
             client.create_bucket(Bucket=s3_bucket)
 
             # This tests that custom endpoint_url is accepted
             backend = S3BlobBackend(
                 bucket=s3_bucket,
-                endpoint_url="http://localhost:9000",  # MinIO endpoint
-                access_key="minioadmin",
-                secret_key="minioadmin",
+                endpoint_url="http://localhost:3900",  # Garage S3 endpoint
+                access_key="GKdeadbeef02d4b4e901234567",
+                secret_key="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
                 use_ssl=False,
             )
 
-            assert backend.endpoint_url == "http://localhost:9000"
+            assert backend.endpoint_url == "http://localhost:3900"
             assert backend.use_ssl is False
 
 

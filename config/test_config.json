@@ -14,9 +14,9 @@
     "blob_backend": "s3",
     "blob_backend_options": {
       "bucket": "cache-bucket",
-      "endpoint_url": "http://localhost:9000",
-      "aws_access_key_id": "minioadmin",
-      "aws_secret_access_key": "minioadmin",
+      "endpoint_url": "http://localhost:3900",
+      "aws_access_key_id": "GKdeadbeef02d4b4e901234567",
+      "aws_secret_access_key": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
       "region_name": "us-east-1"
     },
     "shard_chars": 2

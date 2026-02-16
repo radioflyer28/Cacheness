@@ -1,0 +1,5 @@
+# Multi-stage: grab the garage binary, put it in Alpine for shell support
+FROM dxflrs/garage:v1.3.1 AS garage-bin
+FROM alpine:3.19
+RUN apk add --no-cache openssl
+COPY --from=garage-bin /garage /usr/local/bin/garage

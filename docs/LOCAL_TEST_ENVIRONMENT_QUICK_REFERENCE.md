@@ -5,7 +5,7 @@
 Pre-configured YAML/JSON files in `config/`:
 
 ```bash
-config/test_config.yaml       # PostgreSQL + MinIO (needs Docker)
+config/test_config.yaml       # PostgreSQL + Garage (needs Docker)
 config/test_config.json       # Same as above (JSON format)
 config/local_sqlite_fs.yaml   # SQLite + Filesystem (no Docker)
 ```
@@ -65,11 +65,10 @@ docker-compose down -v
 
 ## Connection Details
 
-| Service     | Host/URL                          | Port | User        | Password             |
-|-------------|-----------------------------------|------|-------------|----------------------|
-| PostgreSQL  | localhost                         | 5432 | cacheness   | cacheness_dev_pass   |
-| MinIO API   | http://localhost:9000             | 9000 | minioadmin  | minioadmin           |
-| MinIO Web   | http://localhost:9001             | 9001 | minioadmin  | minioadmin           |
+| Service     | Host/URL                          | Port | User        | Password                                    |
+|-------------|-----------------------------------|------|-------------|---------------------------------------------|
+| PostgreSQL  | localhost                         | 5432 | cacheness   | cacheness_dev_pass                          |
+| Garage API  | http://localhost:3900             | 3900 | GKdeadbeef02d4b4e901234567 | 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef |
 
 ## Common Test Commands
 
@@ -121,7 +120,7 @@ def test_with_postgres(postgres_connection):
     pass
 
 def test_with_s3(s3_client, s3_bucket):
-    """Test requiring MinIO."""
+    """Test requiring Garage S3."""
     pass
 
 def test_integration(cacheness_postgres_s3_config):
@@ -140,7 +139,7 @@ docker ps
 
 # Check logs
 docker-compose logs postgres
-docker-compose logs minio
+docker-compose logs garage
 
 # Free up ports (Windows)
 netstat -ano | findstr :5432

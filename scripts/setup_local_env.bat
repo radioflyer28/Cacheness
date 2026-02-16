@@ -52,7 +52,7 @@ if !attempts! geq !max_attempts! (
     echo.
     echo Troubleshooting:
     echo   docker-compose logs postgres
-    echo   docker-compose logs minio
+    echo   docker-compose logs garage
     exit /b 1
 )
 
@@ -79,11 +79,10 @@ echo   User:     cacheness
 echo   Password: cacheness_dev_password
 echo   URL:      postgresql://cacheness:cacheness_dev_password@localhost:5432/cacheness_test
 echo.
-echo MinIO (S3-compatible):
-echo   Endpoint: http://localhost:9000
-echo   Console:  http://localhost:9001
-echo   Access:   minioadmin
-echo   Secret:   minioadmin
+echo Garage (S3-compatible):
+echo   Endpoint: http://localhost:3900
+echo   Access:   GKdeadbeef02d4b4e901234567
+echo   Secret:   0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 echo   Buckets:  cache-bucket, test-bucket
 echo.
 echo ============================================================
@@ -98,10 +97,7 @@ echo.
 echo   2. Run integration tests:
 echo      pytest tests/test_postgres_s3_integration.py -v
 echo.
-echo   3. View MinIO console:
-echo      http://localhost:9001
-echo.
-echo   4. Full guide: docs\LOCAL_TEST_ENVIRONMENT.md
+echo   3. Full guide: docs\LOCAL_TEST_ENVIRONMENT.md
 echo.
 echo To stop services:
 echo   docker-compose down

@@ -1,4 +1,4 @@
-# Local Test Environment Setup: PostgreSQL + S3/MinIO
+# Local Test Environment Setup: PostgreSQL + S3/Garage
 
 This guide explains how to set up a local test environment for testing the PostgreSQL metadata backend and S3 blob backend integration.
 
@@ -12,7 +12,7 @@ This guide explains how to set up a local test environment for testing the Postg
 ### Start Services
 
 ```bash
-# Start PostgreSQL and MinIO
+# Start PostgreSQL and Garage (S3-compatible storage)
 docker-compose up -d
 
 # Verify services are healthy
@@ -21,8 +21,7 @@ docker-compose ps
 # Expected output:
 # NAME                      COMMAND                 SERVICE             STATUS
 # cacheness-postgres        postgres -c fsync...    postgres            Up (healthy)
-# cacheness-minio           minio server /data      minio               Up (healthy)
-# cacheness-minio-init      /bin/sh -c /usr/b...    minio-init          Exited 0
+# cacheness-garage          /bin/sh -c ...          garage              Up (healthy)
 ```
 
 ### Connection Details
@@ -35,11 +34,11 @@ docker-compose ps
 - Password: `cacheness_dev_password` ⚠️ **(dev only)**
 - Connection string: `postgresql://cacheness:cacheness_dev_password@localhost:5432/cacheness_test`
 
-**MinIO (S3-compatible):**
-- S3 API: `http://localhost:9000`
-- Console: `http://localhost:9001`
-- Access Key: `minioadmin` ⚠️ **(dev only)**
-- Secret Key: `minioadmin` ⚠️ **(dev only)**
+**Garage (S3-compatible):**
+- S3 API: `http://localhost:3900`
+- Admin API: `http://localhost:3903`
+- Access Key: `GKdeadbeef02d4b4e901234567` ⚠️ **(dev only)**
+- Secret Key: `0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef` ⚠️ **(dev only)**
 - Buckets created: `cache-bucket`, `test-bucket`
 
 > **🔒 Security Note:** These credentials are hardcoded for local testing only and are safe because services only listen on localhost. Never use these credentials in production. See [config/README.md](../config/README.md) for production security guidance.
@@ -61,7 +60,7 @@ The test environment includes pre-configured YAML and JSON files in the [`config
 
 ### Available Configurations
 
-1. **`config/test_config.yaml`** - PostgreSQL + MinIO (requires Docker containers)
+1. **`config/test_config.yaml`** - PostgreSQL + Garage (requires Docker containers)
 2. **`config/test_config.json`** - Same as above in JSON format
 3. **`config/local_sqlite_fs.yaml`** - SQLite + Filesystem (no containers needed)
 
@@ -170,10 +169,10 @@ export POSTGRES_USER=cacheness
 export POSTGRES_PASSWORD=mypassword
 export POSTGRES_DB=cacheness_test
 
-# Custom MinIO/S3
-export S3_ENDPOINT_URL=http://my-minio-host:9000
-export S3_ACCESS_KEY=minioadmin
-export S3_SECRET_KEY=minioadmin
+# Custom Garage/S3
+export S3_ENDPOINT_URL=http://localhost:3900
+export S3_ACCESS_KEY=GKdeadbeef02d4b4e901234567
+export S3_SECRET_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 export S3_BUCKET=cache-bucket
 export S3_REGION=us-east-1
 
@@ -213,7 +212,7 @@ The container provides:
 - Python 3.11 with `venv`
 - All development dependencies
 - Docker access (can run docker-compose from inside)
-- Automatic port forwarding for PostgreSQL (5432), MinIO S3 API (9000), MinIO Console (9001)
+- Automatic port forwarding for PostgreSQL (5432), Garage S3 API (3900), Garage Admin (3903)
 
 ```bash
 # From inside the container, start services
@@ -284,11 +283,11 @@ def test_postgres_clean_db(postgres_clean_db):
     pass
 ```
 
-### S3/MinIO Fixtures
+### S3/Garage Fixtures
 
 ```python
-def test_minio_upload(s3_client, s3_bucket):
-    """Test S3 operations against MinIO."""
+def test_garage_upload(s3_client, s3_bucket):
+    """Test S3 operations against Garage."""
     s3_client.put_object(
         Bucket=s3_bucket,
         Key="test-file.txt",
@@ -350,25 +349,25 @@ docker-compose logs postgres
 psql -h localhost -U cacheness -d cacheness_test -W
 ```
 
-### MinIO Not Responding
+### Garage Not Responding
 
 ```bash
 # Check if container is running
 docker-compose ps
 
 # If not running, start it
-docker-compose up -d minio minio-init
+docker-compose up -d garage
 
 # Check logs
-docker-compose logs minio
+docker-compose logs garage
 
 # Verify connectivity
-aws s3 ls --endpoint-url http://localhost:9000
+aws s3 ls --endpoint-url http://localhost:3900
 ```
 
 ### Port Already in Use
 
-If port 5432 or 9000 is already in use:
+If port 5432 or 3900 is already in use:
 
 ```bash
 # Option 1: Stop the conflicting service
@@ -382,7 +381,7 @@ netstat -ano | findstr :5432
 
 ### Slow/Hanging Tests
 
-MinIO and PostgreSQL need time to become healthy. The fixtures check this automatically:
+Garage and PostgreSQL need time to become healthy. The fixtures check this automatically:
 
 ```python
 # This will skip if services aren't ready
@@ -399,7 +398,7 @@ docker-compose up -d && sleep 10 && pytest tests/ -v
 
 # Option 2: Explicit wait
 docker-compose up -d
-docker wait cacheness-minio-init  # Wait for bucket creation
+# Wait for Garage healthcheck to pass
 pytest tests/ -v
 ```
 
@@ -442,10 +441,10 @@ services:
     ports:
       - "5433:5432"  # Use different port if 5432 is busy
 
-  minio:
+  garage:
     ports:
-      - "9010:9000"  # Use different port if 9000 is busy
-      - "9011:9001"
+      - "3910:3900"  # Use different port if 3900 is busy
+      - "3913:3903"
 ```
 
 This file is auto-loaded and won't be committed to git (add to `.gitignore`).
@@ -481,18 +480,15 @@ jobs:
         ports:
           - 5432:5432
       
-      minio:
-        image: minio/minio:latest
-        env:
-          MINIO_ROOT_USER: minioadmin
-          MINIO_ROOT_PASSWORD: minioadmin
+      garage:
+        image: dxflrs/garage:v1.3.1
         options: >-
-          --health-cmd "curl -f http://localhost:9000/minio/health/live"
+          --health-cmd "garage status 2>&1 | grep -q 'running'"
           --health-interval 10s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 10
         ports:
-          - 9000:9000
+          - 3900:3900
 
     steps:
       - uses: actions/checkout@v4
@@ -507,7 +503,7 @@ jobs:
         run: pytest tests/ -v
         env:
           POSTGRES_HOST: postgres
-          S3_ENDPOINT_URL: http://minio:9000
+          S3_ENDPOINT_URL: http://garage:3900
 ```
 
 ---

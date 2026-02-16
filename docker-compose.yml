@@ -25,47 +25,34 @@ services:
     networks:
       - cacheness-network
 
-  # MinIO for S3-compatible testing
-  minio:
-    image: minio/minio:latest
-    container_name: cacheness-minio
-    environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
-    command: server /data --console-address ":9001"
+  # Garage for S3-compatible testing (replaces MinIO)
+  garage:
+    build:
+      context: .
+      dockerfile: config/Dockerfile.garage
+    container_name: cacheness-garage
+    entrypoint: ["/bin/sh", "/etc/garage/garage-init.sh"]
     ports:
-      - "9000:9000"  # S3 API endpoint
-      - "9001:9001"  # Console
+      - "3900:3900"  # S3 API endpoint
+      - "3903:3903"  # Admin API
     volumes:
-      - minio_data:/data
+      - garage_meta:/var/lib/garage/meta
+      - garage_data:/var/lib/garage/data
+      - ./config/garage.toml:/etc/garage.toml:ro
+      - ./config/garage-init.sh:/etc/garage/garage-init.sh:ro
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      test: ["CMD", "garage", "status"]
       interval: 10s
       timeout: 5s
-      retries: 5
-    networks:
-      - cacheness-network
-
-  # MinIO client to create test bucket on startup
-  minio-init:
-    image: minio/mc:latest
-    container_name: cacheness-minio-init
-    depends_on:
-      minio:
-        condition: service_healthy
-    entrypoint: >
-      /bin/sh -c "
-      /usr/bin/mc alias set minio http://minio:9000 minioadmin minioadmin &&
-      /usr/bin/mc mb minio/cache-bucket --ignore-existing &&
-      /usr/bin/mc mb minio/test-bucket --ignore-existing &&
-      exit 0
-      "
+      retries: 10
+      start_period: 15s
     networks:
       - cacheness-network
 
 volumes:
   postgres_data:
-  minio_data:
+  garage_meta:
+  garage_data:
 
 networks:
   cacheness-network:

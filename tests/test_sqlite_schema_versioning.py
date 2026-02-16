@@ -305,7 +305,7 @@ class TestSqliteBackwardCompatibility:
                     accessed_at DATETIME NOT NULL,
                     file_size INTEGER NOT NULL DEFAULT 0,
                     file_hash VARCHAR(16),
-                    entry_signature VARCHAR(64),
+                    entry_signature VARCHAR(100),
                     s3_etag VARCHAR(100),
                     object_type VARCHAR(100),
                     storage_format VARCHAR(20),

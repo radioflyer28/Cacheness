@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Interactive setup script for local test environment.
-Helps configure PostgreSQL and MinIO containers.
+Helps configure PostgreSQL and Garage containers.
 """
 
 import os
@@ -65,7 +65,7 @@ def check_docker_compose() -> bool:
 
 
 def start_services() -> bool:
-    """Start PostgreSQL and MinIO services."""
+    """Start PostgreSQL and Garage services."""
     print("\n" + "=" * 60)
     print("▶ Starting services...")
     print("=" * 60)
@@ -80,8 +80,8 @@ def start_services() -> bool:
         )
         if "cacheness-postgres" in result.stdout and "healthy" in result.stdout:
             print("✓ PostgreSQL is already running")
-        if "cacheness-minio" in result.stdout and "healthy" in result.stdout:
-            print("✓ MinIO is already running")
+        if "cacheness-garage" in result.stdout and "healthy" in result.stdout:
+            print("✓ Garage is already running")
     except FileNotFoundError:
         pass
 
@@ -112,13 +112,13 @@ def wait_for_services() -> bool:
             postgres_healthy = (
                 "cacheness-postgres" in result.stdout and "healthy" in result.stdout
             )
-            minio_healthy = (
-                "cacheness-minio" in result.stdout and "healthy" in result.stdout
+            garage_healthy = (
+                "cacheness-garage" in result.stdout and "healthy" in result.stdout
             )
 
-            if postgres_healthy and minio_healthy:
+            if postgres_healthy and garage_healthy:
                 print("✓ PostgreSQL is healthy")
-                print("✓ MinIO is healthy")
+                print("✓ Garage is healthy")
                 return True
 
             attempt += 1
@@ -155,11 +155,12 @@ def show_connection_info() -> None:
         "  URL:      postgresql://cacheness:cacheness_dev_password@localhost:5432/cacheness_test"
     )
 
-    print("\n💾 MinIO (S3-compatible):")
-    print("  Endpoint: http://localhost:9000")
-    print("  Console:  http://localhost:9001")
-    print("  Access:   minioadmin")
-    print("  Secret:   minioadmin")
+    print("\n💾 Garage (S3-compatible):")
+    print("  Endpoint: http://localhost:3900")
+    print("  Access:   GKdeadbeef02d4b4e901234567")
+    print(
+        "  Secret:   0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    )
     print("  Buckets:  cache-bucket, test-bucket")
 
 
@@ -176,10 +177,7 @@ def show_next_steps() -> None:
     print("  2. Run integration tests:")
     print("     pytest tests/test_postgres_s3_integration.py -v")
     print()
-    print("  3. View MinIO console:")
-    print("     http://localhost:9001 (minioadmin / minioadmin)")
-    print()
-    print("  4. Or explore with psql:")
+    print("  3. Or explore with psql:")
     print("     psql -h localhost -U cacheness -d cacheness_test")
     print()
     print("📖 Full guide: docs/LOCAL_TEST_ENVIRONMENT.md")
@@ -217,7 +215,7 @@ def main():
         print("\n✗ Services failed to become healthy")
         print("\nTroubleshooting:")
         print("  docker-compose logs postgres")
-        print("  docker-compose logs minio")
+        print("  docker-compose logs garage")
         sys.exit(1)
 
     # Success

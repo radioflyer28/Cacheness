@@ -45,11 +45,14 @@ def get_postgres_url() -> str:
 
 
 def get_s3_config() -> dict:
-    """Get S3/MinIO configuration from environment."""
+    """Get S3/Garage configuration from environment."""
     return {
-        "endpoint_url": os.getenv("S3_ENDPOINT_URL", "http://localhost:9000"),
-        "access_key": os.getenv("S3_ACCESS_KEY", "minioadmin"),
-        "secret_key": os.getenv("S3_SECRET_KEY", "minioadmin"),
+        "endpoint_url": os.getenv("S3_ENDPOINT_URL", "http://localhost:3900"),
+        "access_key": os.getenv("S3_ACCESS_KEY", "GKdeadbeef02d4b4e901234567"),
+        "secret_key": os.getenv(
+            "S3_SECRET_KEY",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ),
         "bucket": os.getenv("S3_BUCKET", "cache-bucket"),
         "region": os.getenv("S3_REGION", "us-east-1"),
     }
@@ -107,12 +110,12 @@ def postgres_clean_db(postgres_connection):
     postgres_connection.commit()
 
 
-# ==================== S3/MinIO Fixtures ====================
+# ==================== S3/Garage Fixtures ====================
 
 
 @pytest.fixture(scope="session")
 def s3_available() -> bool:
-    """Check if MinIO/S3 is available (with a short timeout)."""
+    """Check if Garage/S3 is available (with a short timeout)."""
     try:
         from botocore.config import Config as BotoConfig
 
@@ -137,9 +140,9 @@ def s3_available() -> bool:
 
 @pytest.fixture
 def s3_client(s3_available):
-    """Provide an S3 client for MinIO testing."""
+    """Provide an S3 client for Garage testing."""
     if not s3_available:
-        pytest.skip("MinIO/S3 not available")
+        pytest.skip("Garage/S3 not available")
 
     config = get_s3_config()
     client = boto3.client(

@@ -165,7 +165,7 @@ try:
 
         file_size = Column(Integer, default=0, nullable=False)
         file_hash = Column(String(16), nullable=True)
-        entry_signature = Column(String(64), nullable=True)
+        entry_signature = Column(String(100), nullable=True)
         s3_etag = Column(String(100), nullable=True)
 
         object_type = Column(String(100), nullable=True)
@@ -1878,7 +1878,7 @@ class SqliteBackend(MetadataBackend):
                     accessed_at     DATETIME NOT NULL,
                     file_size       INTEGER NOT NULL DEFAULT 0,
                     file_hash       VARCHAR(16),
-                    entry_signature VARCHAR(64),
+                    entry_signature VARCHAR(100),
                     s3_etag         VARCHAR(100),
                     object_type     VARCHAR(100),
                     storage_format  VARCHAR(20),
