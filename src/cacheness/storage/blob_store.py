@@ -64,6 +64,7 @@ from .backends import MetadataBackend, JsonBackend
 from .backends.blob_backends import BlobBackend, FilesystemBlobBackend, get_blob_backend
 from .handlers import HandlerRegistry
 from .compression import read_file
+from .paths import resolve_actual_path, to_relative_path
 
 # Import CacheConfig for proper handler configuration
 from ..config import CacheConfig, CompressionConfig
@@ -204,47 +205,18 @@ class BlobStore:
     def _to_relative_path(self, path_str: str) -> str:
         """Convert an absolute path to a cache-dir-relative, forward-slash path.
 
-        URIs (containing ``://``) are returned unchanged.  Absolute paths
-        that start with ``self.cache_dir`` have the prefix stripped.  All
-        backslashes are replaced with forward slashes so that metadata is
-        portable across platforms.
+        Delegates to :func:`cacheness.storage.paths.to_relative_path`.
         """
-        if "://" in path_str:
-            return path_str
-
-        # Normalize to an absolute Path for comparison
-        p = Path(path_str).resolve()
-        cache_root = self.cache_dir.resolve()
-
-        try:
-            rel = p.relative_to(cache_root)
-        except ValueError:
-            # Already relative or from a different root — normalise separators
-            rel = Path(path_str)
-
-        return rel.as_posix()
+        return to_relative_path(path_str, self.cache_dir)
 
     def _resolve_actual_path(self, actual_path_str: str) -> str:
         """Resolve a stored ``actual_path`` to a backend-usable path string.
 
-        - URIs (``://``) are returned unchanged.
-        - Relative paths (new format) are joined with ``self.cache_dir``.
-        - Legacy absolute paths are returned unchanged.
-
-        Returns a string suitable for ``blob_backend.exists()``,
-        ``blob_backend.delete_blob()``, etc.  Callers that need a
-        filesystem ``Path`` should wrap the result.
+        Returns a *string* suitable for ``blob_backend.exists()``,
+        ``blob_backend.delete_blob()``, etc.  Delegates to
+        :func:`cacheness.storage.paths.resolve_actual_path`.
         """
-        if "://" in actual_path_str:
-            return actual_path_str
-
-        p = Path(actual_path_str)
-        if p.is_absolute():
-            # Legacy absolute path — use directly
-            return str(p)
-
-        # Relative (new format) — resolve against cache_dir
-        return str(self.cache_dir / p)
+        return str(resolve_actual_path(actual_path_str, self.cache_dir))
 
     def _init_signer(
         self,

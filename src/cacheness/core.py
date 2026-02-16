@@ -18,6 +18,7 @@ from .config import CacheConfig, _DEFAULT_TTL, create_cache_config
 from .handlers import HandlerRegistry
 from .metadata import DEFAULT_NAMESPACE
 from .serialization import create_unified_cache_key
+from .storage.paths import resolve_actual_path
 
 logger = logging.getLogger(__name__)
 
@@ -988,20 +989,13 @@ class UnifiedCache:
         base.mkdir(parents=True, exist_ok=True)
         return base / filename_base
 
-    def _resolve_actual_path(self, actual_path_str: str) -> Path:
-        """Resolve a stored ``actual_path`` to an absolute filesystem Path.
+    def _resolve_actual_path(self, actual_path_str: str) -> Path | str:
+        """Resolve a stored ``actual_path`` to a usable path.
 
-        - URIs (containing ``://``) are wrapped in Path as-is (callers
-          handling URIs must check before using filesystem operations).
-        - Relative paths (new format) are joined with ``self.cache_dir``.
-        - Legacy absolute paths are returned unchanged.
+        Returns ``Path`` for filesystem paths, ``str`` for URIs.
+        Delegates to :func:`cacheness.storage.paths.resolve_actual_path`.
         """
-        if "://" in actual_path_str:
-            return Path(actual_path_str)
-        p = Path(actual_path_str)
-        if p.is_absolute():
-            return p
-        return self.cache_dir / p
+        return resolve_actual_path(actual_path_str, self.cache_dir)
 
     def _is_expired(self, cache_key: str, ttl_seconds=_DEFAULT_TTL) -> bool:
         """Check if cache entry is expired.
@@ -1148,7 +1142,8 @@ class UnifiedCache:
             )
 
             actual_path_str = result.get("actual_path", str(base_file_path))
-            cleanup.blob_path = self._resolve_actual_path(actual_path_str)
+            if "://" not in actual_path_str:
+                cleanup.blob_path = self._resolve_actual_path(actual_path_str)
 
             if "://" in actual_path_str:
                 cleanup.set_remote(self._blob_store.blob_backend, actual_path_str)
@@ -1397,7 +1392,8 @@ class UnifiedCache:
 
                 # Track the blob path so we can clean up on failure
                 actual_path_str = result.get("actual_path", str(base_file_path))
-                cleanup.blob_path = self._resolve_actual_path(actual_path_str)
+                if "://" not in actual_path_str:
+                    cleanup.blob_path = self._resolve_actual_path(actual_path_str)
 
                 # If the blob was uploaded to a remote backend (e.g. S3),
                 # track it for rollback in case metadata write fails.
@@ -1973,7 +1969,8 @@ class UnifiedCache:
                 )
 
                 actual_path_str = str(result.get("actual_path", base_file_path))
-                cleanup.blob_path = self._resolve_actual_path(actual_path_str)
+                if "://" not in actual_path_str:
+                    cleanup.blob_path = self._resolve_actual_path(actual_path_str)
 
                 # Track remote blob for rollback on S3
                 if "://" in actual_path_str:
@@ -2392,9 +2389,9 @@ class UnifiedCache:
         blobs_deleted = 0
         for entry in removed_entries:
             actual_path = entry.get("actual_path")
-            if actual_path:
+            if actual_path and "://" not in actual_path:
                 blob_file = self._resolve_actual_path(actual_path)
-                if blob_file.exists():
+                if isinstance(blob_file, Path) and blob_file.exists():
                     try:
                         blob_file.unlink()
                         blobs_deleted += 1
@@ -2583,9 +2580,9 @@ class UnifiedCache:
             blobs_deleted = 0
             for entry in expired_entries:
                 actual_path = entry.get("actual_path")
-                if actual_path:
+                if actual_path and "://" not in actual_path:
                     blob_file = self._resolve_actual_path(actual_path)
-                    if blob_file.exists():
+                    if isinstance(blob_file, Path) and blob_file.exists():
                         try:
                             blob_file.unlink()
                             blobs_deleted += 1
