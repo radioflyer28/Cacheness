@@ -604,3 +604,318 @@ class TestS3ErrorHandling:
 
             size = backend.get_size(f"s3://{s3_bucket}/nonexistent")
             assert size == -1
+
+
+# =============================================================================
+# S3 ETag Verification on Read Tests
+# =============================================================================
+
+
+class TestS3ETagVerification:
+    """Test ETag verification on read_blob()."""
+
+    def test_read_blob_with_matching_etag(self, aws_credentials, s3_bucket):
+        """Test read_blob succeeds when ETag matches."""
+        from cacheness.storage.backends.s3_backend import S3BlobBackend
+
+        with mock_aws():
+            client = boto3.client("s3", region_name="us-east-1")
+            client.create_bucket(Bucket=s3_bucket)
+
+            backend = S3BlobBackend(bucket=s3_bucket, verify_on_read=True)
+
+            blob_id = "etag_verify_match"
+            data = b"verify me"
+
+            blob_path = backend.write_blob(blob_id, data)
+            write_meta = backend.get_write_metadata()
+            expected_etag = write_meta["s3_etag"]
+
+            # Should succeed without error
+            result = backend.read_blob(blob_path, expected_etag=expected_etag)
+            assert result == data
+
+    def test_read_blob_with_mismatched_etag_warns(
+        self, aws_credentials, s3_bucket
+    ):
+        """Test read_blob logs warning on ETag mismatch (non-strict)."""
+        from cacheness.storage.backends.s3_backend import S3BlobBackend
+
+        with mock_aws():
+            client = boto3.client("s3", region_name="us-east-1")
+            client.create_bucket(Bucket=s3_bucket)
+
+            backend = S3BlobBackend(
+                bucket=s3_bucket, verify_on_read=True, strict_etag=False
+            )
+
+            blob_id = "etag_verify_mismatch"
+            data = b"mismatch data"
+
+            blob_path = backend.write_blob(blob_id, data)
+
+            # Should return data but log warning (non-strict)
+            result = backend.read_blob(blob_path, expected_etag="wrong_etag")
+            assert result == data
+
+    def test_read_blob_with_mismatched_etag_strict_raises(
+        self, aws_credentials, s3_bucket
+    ):
+        """Test read_blob raises S3IntegrityError on mismatch in strict mode."""
+        from cacheness.storage.backends.s3_backend import (
+            S3BlobBackend,
+            S3IntegrityError,
+        )
+
+        with mock_aws():
+            client = boto3.client("s3", region_name="us-east-1")
+            client.create_bucket(Bucket=s3_bucket)
+
+            backend = S3BlobBackend(
+                bucket=s3_bucket, verify_on_read=True, strict_etag=True
+            )
+
+            blob_id = "etag_strict_fail"
+            data = b"strict data"
+
+            blob_path = backend.write_blob(blob_id, data)
+
+            with pytest.raises(S3IntegrityError) as exc_info:
+                backend.read_blob(blob_path, expected_etag="wrong_etag")
+
+            assert "wrong_etag" in str(exc_info.value)
+            assert exc_info.value.blob_path == blob_path
+
+    def test_read_blob_no_etag_skips_verification(
+        self, aws_credentials, s3_bucket
+    ):
+        """Test read_blob skips verification when no expected_etag given."""
+        from cacheness.storage.backends.s3_backend import S3BlobBackend
+
+        with mock_aws():
+            client = boto3.client("s3", region_name="us-east-1")
+            client.create_bucket(Bucket=s3_bucket)
+
+            backend = S3BlobBackend(
+                bucket=s3_bucket, verify_on_read=True, strict_etag=True
+            )
+
+            blob_id = "etag_no_expected"
+            data = b"no expected etag"
+
+            blob_path = backend.write_blob(blob_id, data)
+
+            # Should succeed without error even in strict mode
+            result = backend.read_blob(blob_path)
+            assert result == data
+
+    def test_read_blob_verify_disabled(self, aws_credentials, s3_bucket):
+        """Test read_blob skips verification when verify_on_read=False."""
+        from cacheness.storage.backends.s3_backend import S3BlobBackend
+
+        with mock_aws():
+            client = boto3.client("s3", region_name="us-east-1")
+            client.create_bucket(Bucket=s3_bucket)
+
+            backend = S3BlobBackend(
+                bucket=s3_bucket, verify_on_read=False, strict_etag=True
+            )
+
+            blob_id = "etag_verify_disabled"
+            data = b"no verify"
+
+            blob_path = backend.write_blob(blob_id, data)
+
+            # Should succeed even with wrong etag because verify is disabled
+            result = backend.read_blob(blob_path, expected_etag="wrong_etag")
+            assert result == data
+
+
+# =============================================================================
+# S3 Content-MD5 on Write Tests
+# =============================================================================
+
+
+class TestS3ContentMD5:
+    """Test Content-MD5 header on write_blob()."""
+
+    def test_write_blob_with_content_md5(self, aws_credentials, s3_bucket):
+        """Test that write_blob sends Content-MD5 and succeeds."""
+        from cacheness.storage.backends.s3_backend import S3BlobBackend
+
+        with mock_aws():
+            client = boto3.client("s3", region_name="us-east-1")
+            client.create_bucket(Bucket=s3_bucket)
+
+            backend = S3BlobBackend(bucket=s3_bucket)
+
+            blob_id = "md5_test"
+            data = b"content md5 test data"
+
+            blob_path = backend.write_blob(blob_id, data)
+
+            # Verify data was written correctly
+            read_data = backend.read_blob(blob_path)
+            assert read_data == data
+
+    def test_write_blob_captures_etag(self, aws_credentials, s3_bucket):
+        """Test that write_blob captures ETag in write metadata."""
+        from cacheness.storage.backends.s3_backend import S3BlobBackend
+
+        with mock_aws():
+            client = boto3.client("s3", region_name="us-east-1")
+            client.create_bucket(Bucket=s3_bucket)
+
+            backend = S3BlobBackend(bucket=s3_bucket)
+
+            blob_path = backend.write_blob("etag_capture", b"capture etag")
+            meta = backend.get_write_metadata()
+
+            assert "s3_etag" in meta
+            assert len(meta["s3_etag"]) > 0
+
+
+# =============================================================================
+# S3 Stream Upload ETag Capture Tests
+# =============================================================================
+
+
+class TestS3StreamETagCapture:
+    """Test ETag capture on write_blob_stream()."""
+
+    def test_write_blob_stream_captures_etag(self, aws_credentials, s3_bucket):
+        """Test that write_blob_stream captures ETag via head_object."""
+        from cacheness.storage.backends.s3_backend import S3BlobBackend
+
+        with mock_aws():
+            client = boto3.client("s3", region_name="us-east-1")
+            client.create_bucket(Bucket=s3_bucket)
+
+            backend = S3BlobBackend(bucket=s3_bucket)
+
+            data = b"streamed data for etag capture"
+            stream = BytesIO(data)
+
+            blob_path = backend.write_blob_stream("stream_etag", stream)
+            meta = backend.get_write_metadata()
+
+            assert "s3_etag" in meta
+            assert len(meta["s3_etag"]) > 0
+
+            # Verify data integrity
+            read_data = backend.read_blob(blob_path)
+            assert read_data == data
+
+    def test_write_blob_stream_etag_matches_head(
+        self, aws_credentials, s3_bucket
+    ):
+        """Test that stream upload ETag matches a subsequent head_object."""
+        from cacheness.storage.backends.s3_backend import S3BlobBackend
+
+        with mock_aws():
+            client = boto3.client("s3", region_name="us-east-1")
+            client.create_bucket(Bucket=s3_bucket)
+
+            backend = S3BlobBackend(bucket=s3_bucket)
+
+            data = b"stream etag consistency check"
+            stream = BytesIO(data)
+
+            blob_path = backend.write_blob_stream("stream_etag_check", stream)
+            write_etag = backend.get_write_metadata().get("s3_etag")
+            head_etag = backend.get_etag(blob_path)
+
+            assert write_etag is not None
+            assert write_etag == head_etag
+
+
+# =============================================================================
+# S3IntegrityError Tests
+# =============================================================================
+
+
+class TestS3IntegrityError:
+    """Test S3IntegrityError exception."""
+
+    def test_integrity_error_attributes(self):
+        """Test S3IntegrityError has correct attributes."""
+        from cacheness.storage.backends.s3_backend import S3IntegrityError
+
+        err = S3IntegrityError("s3://bucket/key", "expected123", "actual456")
+        assert err.blob_path == "s3://bucket/key"
+        assert err.expected_etag == "expected123"
+        assert err.actual_etag == "actual456"
+        assert "expected123" in str(err)
+        assert "actual456" in str(err)
+
+    def test_integrity_error_is_exception(self):
+        """Test S3IntegrityError inherits from Exception."""
+        from cacheness.storage.backends.s3_backend import S3IntegrityError
+
+        assert issubclass(S3IntegrityError, Exception)
+
+
+# =============================================================================
+# S3 Redundant Upload Skip Tests
+# =============================================================================
+
+
+class TestS3RedundantUploadSkip:
+    """Test skipping redundant uploads when object already exists."""
+
+    def test_skip_redundant_upload(self, aws_credentials, s3_bucket):
+        """Test that identical data is not re-uploaded."""
+        from cacheness.storage.backends.s3_backend import S3BlobBackend
+        from unittest.mock import patch
+
+        with mock_aws():
+            client = boto3.client("s3", region_name="us-east-1")
+            client.create_bucket(Bucket=s3_bucket)
+
+            backend = S3BlobBackend(bucket=s3_bucket)
+
+            blob_id = "dedup_test"
+            data = b"deduplicate this"
+
+            # First write
+            path1 = backend.write_blob(blob_id, data)
+            etag1 = backend.get_write_metadata()["s3_etag"]
+
+            # Second write with same data — should skip upload
+            with patch.object(
+                backend._client, "put_object", wraps=backend._client.put_object
+            ) as mock_put:
+                path2 = backend.write_blob(blob_id, data)
+                etag2 = backend.get_write_metadata()["s3_etag"]
+
+                # put_object should NOT have been called
+                mock_put.assert_not_called()
+
+            assert path1 == path2
+            assert etag1 == etag2
+
+    def test_no_skip_for_different_data(self, aws_credentials, s3_bucket):
+        """Test that different data IS uploaded even to same key."""
+        from cacheness.storage.backends.s3_backend import S3BlobBackend
+
+        with mock_aws():
+            client = boto3.client("s3", region_name="us-east-1")
+            client.create_bucket(Bucket=s3_bucket)
+
+            backend = S3BlobBackend(bucket=s3_bucket)
+
+            blob_id = "dedup_diff"
+
+            # First write
+            backend.write_blob(blob_id, b"version 1")
+            etag1 = backend.get_write_metadata()["s3_etag"]
+
+            # Second write with different data
+            backend.write_blob(blob_id, b"version 2")
+            etag2 = backend.get_write_metadata()["s3_etag"]
+
+            assert etag1 != etag2
+
+            # Verify latest data is readable
+            blob_path = f"s3://{s3_bucket}/{backend._get_s3_key(blob_id)}"
+            assert backend.read_blob(blob_path) == b"version 2"

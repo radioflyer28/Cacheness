@@ -47,12 +47,27 @@ Usage:
     )
 """
 
+import base64
+import hashlib
 import logging
 from typing import BinaryIO, Dict, List, Optional, Any
 
 from .blob_backends import BlobBackend
 
 logger = logging.getLogger(__name__)
+
+
+class S3IntegrityError(Exception):
+    """Raised when S3 ETag verification fails on read."""
+
+    def __init__(self, blob_path: str, expected_etag: str, actual_etag: str):
+        self.blob_path = blob_path
+        self.expected_etag = expected_etag
+        self.actual_etag = actual_etag
+        super().__init__(
+            f"S3 ETag mismatch for {blob_path}: "
+            f"expected {expected_etag}, got {actual_etag}"
+        )
 
 
 # Check for boto3 availability
@@ -116,6 +131,8 @@ class S3BlobBackend(BlobBackend):
         secret_key: Optional[str] = None,
         shard_chars: int = 2,
         namespace: str = "default",
+        verify_on_read: bool = True,
+        strict_etag: bool = False,
         **kwargs,
     ):
         """
@@ -134,6 +151,11 @@ class S3BlobBackend(BlobBackend):
                 auto-derive the S3 prefix as ``{prefix}{namespace}/``.
                 The default namespace uses the base *prefix* unchanged for
                 backward compatibility.
+            verify_on_read: When True (default), compare stored ETag with
+                GET response ETag on ``read_blob()`` if ``expected_etag``
+                is provided.
+            strict_etag: When True, raise ``S3IntegrityError`` on ETag
+                mismatch instead of just logging a warning.
             **kwargs: Additional boto3 client options
         """
         if not BOTO3_AVAILABLE:
@@ -161,6 +183,8 @@ class S3BlobBackend(BlobBackend):
         self.endpoint_url = endpoint_url
         self.use_ssl = use_ssl
         self.shard_chars = shard_chars
+        self.verify_on_read = verify_on_read
+        self.strict_etag = strict_etag
 
         # Build client config
         client_kwargs = {
@@ -211,6 +235,11 @@ class S3BlobBackend(BlobBackend):
         """
         Write blob to S3.
 
+        Sends a Content-MD5 header for server-side integrity verification
+        on single-part uploads.  When the object already exists with the
+        same content (matching ETag/MD5), the upload is skipped and the
+        existing ETag is reused.
+
         Args:
             blob_id: Unique identifier for the blob
             data: Raw bytes to store
@@ -222,12 +251,29 @@ class S3BlobBackend(BlobBackend):
             Exception: If upload fails
         """
         s3_key = self._get_s3_key(blob_id)
+        blob_uri = f"s3://{self.bucket}/{s3_key}"
+
+        # Compute MD5 for integrity and dedup check
+        md5_hash = hashlib.md5(data)
+        content_md5 = base64.b64encode(md5_hash.digest()).decode("ascii")
+        local_md5_hex = md5_hash.hexdigest()
+
+        # Skip upload if object already exists with identical content
+        existing_etag = self.get_etag(blob_uri)
+        if existing_etag and existing_etag == local_md5_hex:
+            logger.debug(
+                f"Skipping upload for {blob_id}: object already exists "
+                f"with matching ETag {existing_etag}"
+            )
+            self._last_write_metadata = {"s3_etag": existing_etag}
+            return blob_uri
 
         try:
             response = self._client.put_object(
                 Bucket=self.bucket,
                 Key=s3_key,
                 Body=data,
+                ContentMD5=content_md5,
             )
 
             etag = response.get("ETag", "").strip('"')
@@ -238,7 +284,7 @@ class S3BlobBackend(BlobBackend):
                 f"(ETag: {etag})"
             )
 
-            return f"s3://{self.bucket}/{s3_key}"
+            return blob_uri
 
         except ClientError as e:
             logger.error(f"Failed to write blob {blob_id} to S3: {e}")
@@ -251,18 +297,25 @@ class S3BlobBackend(BlobBackend):
         """
         return getattr(self, "_last_write_metadata", {})
 
-    def read_blob(self, blob_path: str) -> bytes:
+    def read_blob(self, blob_path: str, expected_etag: Optional[str] = None) -> bytes:
         """
         Read blob from S3.
 
+        When ``verify_on_read`` is enabled and *expected_etag* is provided,
+        the ETag from the GET response is compared against the expected value.
+        A mismatch logs a warning; if ``strict_etag`` is also set the method
+        raises :class:`S3IntegrityError`.
+
         Args:
             blob_path: S3 URI (s3://bucket/key) or just the key
+            expected_etag: Optional ETag to verify against the GET response
 
         Returns:
             Raw bytes of the blob
 
         Raises:
             FileNotFoundError: If blob doesn't exist
+            S3IntegrityError: If ETag verification fails and strict_etag is True
         """
         s3_key = self._parse_blob_path(blob_path)
 
@@ -273,6 +326,19 @@ class S3BlobBackend(BlobBackend):
             )
 
             data = response["Body"].read()
+
+            # ETag verification
+            if self.verify_on_read and expected_etag is not None:
+                actual_etag = response.get("ETag", "").strip('"')
+                expected_clean = expected_etag.strip('"')
+                if actual_etag and actual_etag != expected_clean:
+                    logger.warning(
+                        f"S3 ETag mismatch for {blob_path}: "
+                        f"expected {expected_clean}, got {actual_etag}"
+                    )
+                    if self.strict_etag:
+                        raise S3IntegrityError(blob_path, expected_clean, actual_etag)
+
             logger.debug(
                 f"Read blob from s3://{self.bucket}/{s3_key} ({len(data)} bytes)"
             )
@@ -340,6 +406,9 @@ class S3BlobBackend(BlobBackend):
         """
         Write blob from stream to S3 (supports multipart upload for large objects).
 
+        After upload, performs a HEAD request to capture the ETag for the
+        uploaded object and stores it in ``_last_write_metadata``.
+
         Args:
             blob_id: Unique identifier for the blob
             stream: File-like object with read() method
@@ -356,6 +425,19 @@ class S3BlobBackend(BlobBackend):
                 self.bucket,
                 s3_key,
             )
+
+            # Capture ETag via HEAD request after upload
+            try:
+                head_resp = self._client.head_object(
+                    Bucket=self.bucket, Key=s3_key
+                )
+                etag = head_resp.get("ETag", "").strip('"')
+                self._last_write_metadata = {"s3_etag": etag}
+            except ClientError:
+                logger.warning(
+                    f"Failed to retrieve ETag after stream upload for {blob_id}"
+                )
+                self._last_write_metadata = {}
 
             logger.debug(f"Wrote blob stream {blob_id} to s3://{self.bucket}/{s3_key}")
             return f"s3://{self.bucket}/{s3_key}"
@@ -587,5 +669,6 @@ class S3BlobBackend(BlobBackend):
 
 __all__ = [
     "S3BlobBackend",
+    "S3IntegrityError",
     "BOTO3_AVAILABLE",
 ]

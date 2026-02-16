@@ -268,7 +268,7 @@ from .blob_backends import (  # noqa: F401, E402
 
 # Conditionally import S3BlobBackend
 try:
-    from .s3_backend import S3BlobBackend, BOTO3_AVAILABLE  # noqa: F401
+    from .s3_backend import S3BlobBackend, S3IntegrityError, BOTO3_AVAILABLE  # noqa: F401
 
     _HAS_S3 = BOTO3_AVAILABLE
 except ImportError:
