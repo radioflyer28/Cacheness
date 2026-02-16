@@ -428,9 +428,7 @@ class S3BlobBackend(BlobBackend):
 
             # Capture ETag via HEAD request after upload
             try:
-                head_resp = self._client.head_object(
-                    Bucket=self.bucket, Key=s3_key
-                )
+                head_resp = self._client.head_object(Bucket=self.bucket, Key=s3_key)
                 etag = head_resp.get("ETag", "").strip('"')
                 self._last_write_metadata = {"s3_etag": etag}
             except ClientError:

@@ -343,6 +343,7 @@ class TestS3ETag:
 
             blob_path = backend.write_blob(blob_id, data)
             etag = backend.get_etag(blob_path)
+            assert etag is not None
 
             # Should verify correctly
             assert backend.verify_etag(blob_path, etag)
@@ -635,9 +636,7 @@ class TestS3ETagVerification:
             result = backend.read_blob(blob_path, expected_etag=expected_etag)
             assert result == data
 
-    def test_read_blob_with_mismatched_etag_warns(
-        self, aws_credentials, s3_bucket
-    ):
+    def test_read_blob_with_mismatched_etag_warns(self, aws_credentials, s3_bucket):
         """Test read_blob logs warning on ETag mismatch (non-strict)."""
         from cacheness.storage.backends.s3_backend import S3BlobBackend
 
@@ -686,9 +685,7 @@ class TestS3ETagVerification:
             assert "wrong_etag" in str(exc_info.value)
             assert exc_info.value.blob_path == blob_path
 
-    def test_read_blob_no_etag_skips_verification(
-        self, aws_credentials, s3_bucket
-    ):
+    def test_read_blob_no_etag_skips_verification(self, aws_credentials, s3_bucket):
         """Test read_blob skips verification when no expected_etag given."""
         from cacheness.storage.backends.s3_backend import S3BlobBackend
 
@@ -806,9 +803,7 @@ class TestS3StreamETagCapture:
             read_data = backend.read_blob(blob_path)
             assert read_data == data
 
-    def test_write_blob_stream_etag_matches_head(
-        self, aws_credentials, s3_bucket
-    ):
+    def test_write_blob_stream_etag_matches_head(self, aws_credentials, s3_bucket):
         """Test that stream upload ETag matches a subsequent head_object."""
         from cacheness.storage.backends.s3_backend import S3BlobBackend
 
