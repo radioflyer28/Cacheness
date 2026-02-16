@@ -256,19 +256,34 @@ class BlobStore:
             # Determine file path
             base_path = self.cache_dir / blob_key
 
-            # Store the data using the handler
+            # Store the data using the handler (writes to local filesystem)
             result = handler.put(data, base_path, self.config)
 
+            # Persist through blob_backend (may rename, upload, etc.)
+            handler_path = Path(str(result.get("actual_path", base_path)))
+            final_path = self.blob_backend.write_blob_from_path(
+                str(handler_path), handler_path.name
+            )
+            # Capture any backend-specific write metadata (e.g. s3_etag)
+            write_meta = self.blob_backend.get_write_metadata()
+            if write_meta:
+                result.setdefault("metadata", {})
+                result["metadata"].update(write_meta)
+
+            actual_path = Path(final_path) if "://" not in final_path else None
+
             # Calculate file hash for integrity verification
-            actual_path = Path(str(result.get("actual_path", base_path)))
-            file_hash = self._calculate_file_hash(actual_path)
+            if actual_path is not None:
+                file_hash = self._calculate_file_hash(actual_path)
+            else:
+                file_hash = self._calculate_blob_hash(final_path)
 
             # Build entry metadata
             # Note: JsonBackend stores custom fields in nested 'metadata' dict
             # We store file_hash and entry_signature in nested metadata too so
             # JsonBackend preserves them (it only keeps specific top-level fields).
             custom_metadata = metadata or {}
-            custom_metadata["actual_path"] = str(actual_path)
+            custom_metadata["actual_path"] = final_path
             custom_metadata["storage_format"] = result.get("storage_format", "pickle")
             custom_metadata["compression_codec"] = self.compression
             if file_hash:
@@ -703,16 +718,16 @@ class BlobStore:
         compute_hash: bool = True,
     ) -> tuple:
         """
-        Low-level: serialize data to disk via handler.
+        Low-level: serialize data to disk via handler, then persist
+        through the blob backend.
 
         Does NOT acquire the lock — caller is responsible for synchronization.
         Does NOT write metadata — caller handles metadata storage.
 
-        When the blob backend is not a local filesystem (e.g. S3), the
-        handler first writes to local disk, then the bytes are uploaded
-        via ``blob_backend.write_blob()``.  Any backend-specific metadata
-        (such as ``s3_etag``) is injected into the result dict's
-        ``metadata`` so it flows to the metadata backend.
+        The handler writes to a local staging path (``base_path`` + extension).
+        The blob backend then persists the file (filesystem rename, S3 upload,
+        in-memory store, etc.).  Any backend-specific write metadata (e.g.
+        ``s3_etag``) is injected into the result dict.
 
         Args:
             data: The data to serialize
@@ -725,25 +740,29 @@ class BlobStore:
         """
         handler = self.handlers.get_handler(data)
         result = handler.put(data, base_path, config or self.config)
+
+        # Persist through blob_backend (rename, upload, etc.)
+        handler_path = Path(str(result.get("actual_path", base_path)))
+        final_path = self.blob_backend.write_blob_from_path(
+            str(handler_path), handler_path.name
+        )
+
+        # Inject backend write metadata (e.g. s3_etag)
+        write_meta = self.blob_backend.get_write_metadata()
+        if write_meta:
+            result.setdefault("metadata", {})
+            result["metadata"].update(write_meta)
+
+        # Update actual_path to the final storage location
+        result["actual_path"] = final_path
+
+        # Compute file hash from final location
         file_hash = None
         if compute_hash:
-            actual_path = Path(str(result.get("actual_path", base_path)))
-            file_hash = self._calculate_file_hash(actual_path)
-
-        # If blob backend is not local filesystem, upload the serialized
-        # bytes and capture any backend-specific metadata (e.g. s3_etag).
-        if not isinstance(self.blob_backend, FilesystemBlobBackend):
-            actual_path = Path(str(result.get("actual_path", base_path)))
-            if actual_path.exists():
-                blob_bytes = actual_path.read_bytes()
-                blob_uri = self.blob_backend.write_blob(actual_path.stem, blob_bytes)
-                # Inject backend write metadata (e.g. s3_etag) into result
-                write_meta = self.blob_backend.get_write_metadata()
-                if write_meta:
-                    result.setdefault("metadata", {})
-                    result["metadata"].update(write_meta)
-                # Store the remote URI as actual_path so reads go to S3
-                result["actual_path"] = blob_uri
+            if "://" not in final_path:
+                file_hash = self._calculate_file_hash(Path(final_path))
+            else:
+                file_hash = self._calculate_blob_hash(final_path)
 
         return handler, result, file_hash
 

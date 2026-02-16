@@ -135,6 +135,27 @@ class BlobBackend(ABC):
         """
         return {}
 
+    def write_blob_from_path(self, source_path: str, blob_id: str) -> str:
+        """
+        Persist a locally-written blob into this backend.
+
+        Handlers write serialized data to a local file.  This method
+        moves or uploads that file into the backend's managed storage.
+
+        The default implementation reads the file into memory and
+        delegates to :meth:`write_blob`.  Backends that can avoid the
+        round-trip (e.g. filesystem rename) should override.
+
+        Args:
+            source_path: Absolute path to the file written by a handler
+            blob_id: Blob identifier (typically ``<hash>.<ext>``)
+
+        Returns:
+            Final storage path/URL for the blob
+        """
+        data = Path(source_path).read_bytes()
+        return self.write_blob(blob_id, data)
+
     def write_blob_stream(self, blob_id: str, stream: BinaryIO) -> str:
         """
         Write blob from a stream (for large objects).
@@ -283,6 +304,26 @@ class FilesystemBlobBackend(BlobBackend):
 
         logger.debug(f"Wrote blob {blob_id} ({len(data)} bytes) to {blob_path}")
         return str(blob_path)
+
+    def write_blob_from_path(self, source_path: str, blob_id: str) -> str:
+        """Persist a handler-written file into the managed blob directory.
+
+        If the source file is already at the target location (common when
+        ``shard_chars=0`` and no namespace prefix), this is a no-op.
+        Otherwise the file is atomically renamed/moved.
+        """
+        target = self._get_blob_path(blob_id)
+        source = Path(source_path)
+
+        # Fast path: file already in the right place
+        if source.resolve() == target.resolve():
+            return str(target)
+
+        # Move file to target (atomic on same filesystem)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        source.replace(target)
+        logger.debug(f"Moved blob {source} -> {target}")
+        return str(target)
 
     def read_blob(self, blob_path: str) -> bytes:
         """Read blob from filesystem."""
