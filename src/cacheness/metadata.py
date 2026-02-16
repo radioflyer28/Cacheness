@@ -2303,7 +2303,8 @@ class SqliteBackend(MetadataBackend):
                     f"       file_size, created_at, accessed_at, "
                     f"       object_type, storage_format, serializer, "
                     f"       compression_codec, actual_path, "
-                    f"       file_hash, entry_signature, metadata_dict "
+                    f"       file_hash, entry_signature, metadata_dict, "
+                    f"       s3_etag "
                     f'FROM "{tbl}"'
                 )
             ).fetchall()
@@ -2334,6 +2335,8 @@ class SqliteBackend(MetadataBackend):
                     flat["entry_signature"] = row[12]
                 if row[13] is not None:
                     flat["metadata_dict"] = row[13]
+                if row[14] is not None:
+                    flat["s3_etag"] = row[14]
                 result.append(flat)
             return result
 

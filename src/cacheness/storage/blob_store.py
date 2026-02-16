@@ -620,6 +620,7 @@ class BlobStore:
                         "cache_key": entry.get("cache_key", ""),
                         "file_size": entry.get("file_size"),
                         "file_hash": entry.get("file_hash"),
+                        "s3_etag": entry.get("s3_etag"),
                     }
 
             # 3. Find orphaned blobs (blobs with no metadata entry)
@@ -656,11 +657,52 @@ class BlobStore:
                     )
 
             # 6. Check hash mismatches (optional, expensive)
+            #    For remote blobs (S3), use a cheap ETag HEAD check instead
+            #    of downloading the entire blob for xxhash verification.
+            #    A matching ETag confirms the blob hasn't changed since
+            #    upload.  A mismatching ETag is a definitive integrity
+            #    failure — the object was modified or replaced.
+            #    Full download + xxhash is only used when:
+            #      - No stored s3_etag (older entries, non-S3 backends)
+            #      - Non-remote blob (local files always use xxhash)
             hash_mismatches = []
             if verify_hashes:
                 for path, info in entry_paths.items():
                     if not info.get("file_hash"):
                         continue
+
+                    # Remote blob with stored ETag → cheap HEAD check
+                    if (
+                        "://" in path
+                        and info.get("s3_etag")
+                        and hasattr(self.blob_backend, "verify_etag")
+                    ):
+                        if self.blob_backend.verify_etag(  # type: ignore[call-non-callable]
+                            path, info["s3_etag"]
+                        ):
+                            # ETag matches — blob is unchanged, skip download
+                            continue
+                        # ETag mismatch — object was modified/replaced
+                        actual_etag = None
+                        if hasattr(self.blob_backend, "get_etag"):
+                            actual_etag = self.blob_backend.get_etag(  # type: ignore[call-non-callable]
+                                path
+                            )
+                        logger.warning(
+                            f"S3 ETag mismatch for {path}: "
+                            f"expected {info['s3_etag']}, "
+                            f"got {actual_etag}"
+                        )
+                        hash_mismatches.append(
+                            {
+                                "cache_key": info["cache_key"],
+                                "path": path,
+                                "expected_hash": info["file_hash"],
+                                "actual_hash": f"etag-mismatch:{actual_etag}",
+                            }
+                        )
+                        continue
+
                     current_hash = self._calculate_blob_hash(path)
                     if current_hash and current_hash != info["file_hash"]:
                         hash_mismatches.append(
