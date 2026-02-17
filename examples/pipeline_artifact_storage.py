@@ -14,16 +14,15 @@ Features demonstrated:
 
 Usage:
     uv run python examples/pipeline_artifact_storage.py
+
+Requires:
+    uv add numpy pandas
 """
 
-import sys
-from pathlib import Path
 import tempfile
-from datetime import datetime
 import time
-
-# Add source directory to path
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+from datetime import datetime
+from pathlib import Path
 
 from cacheness.storage import BlobStore
 import numpy as np

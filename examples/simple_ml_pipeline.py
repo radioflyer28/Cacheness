@@ -1,111 +1,75 @@
 #!/usr/bin/env python3
 """
-Simple ML Pipeline Example
-==========================
+ML Pipeline Caching
+===================
 
-Demonstrates caching in ML workflows with the new simplified API.
-Much easier than the complex multi-stage version!
+Cache expensive ML steps (data loading, feature engineering, training)
+so re-runs are instant. No special ML decorator needed — @cached works
+with DataFrames, NumPy arrays, and sklearn models out of the box.
 
 Usage:
-    python simple_ml_pipeline.py
+    uv run python examples/simple_ml_pipeline.py
+
+Requires:
+    uv add scikit-learn pandas numpy
 """
 
-from cacheness import cached
+import numpy as np
 import pandas as pd
 from sklearn.datasets import make_classification
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
+from sklearn.model_selection import train_test_split
+
+from cacheness import cached
 
 
-# Use the new analytics-optimized decorator for ML workflows
-@cached.for_analytics(ttl_seconds=172800)  # 48 hours - Cache ML results for 2 days
-def create_dataset(n_samples=1000, n_features=20, random_state=42):
-    """Create a synthetic dataset for ML."""
-    print(f"🔬 Creating dataset: {n_samples} samples, {n_features} features")
-
+@cached(ttl_seconds="2d")
+def create_dataset(n_samples=1000, n_features=20, seed=42):
+    """Generate a synthetic classification dataset."""
+    print("  Creating dataset...")
     X, y = make_classification(
         n_samples=n_samples,
         n_features=n_features,
         n_informative=15,
-        n_redundant=5,
-        random_state=random_state,
+        random_state=seed,
     )
-
     return pd.DataFrame(X), pd.Series(y)
 
 
-@cached.for_analytics(ttl_seconds=604800)  # 168 hours - Cache models for 1 week
-def train_model(X_train, y_train, n_estimators=100, random_state=42):
-    """Train a Random Forest model."""
-    print(f"🤖 Training model: {len(X_train)} samples, {n_estimators} trees")
-
-    model = RandomForestClassifier(
-        n_estimators=n_estimators, random_state=random_state, n_jobs=-1
-    )
-
+@cached(ttl_seconds="1w")
+def train_model(X_train, y_train, n_estimators=100, seed=42):
+    """Train a Random Forest classifier."""
+    print("  Training model...")
+    model = RandomForestClassifier(n_estimators=n_estimators, random_state=seed)
     model.fit(X_train, y_train)
     return model
 
 
-@cached.for_lookup(ttl_seconds=86400)  # 24 hours - Cache predictions for 1 day
-def evaluate_model(model, X_test, y_test):
-    """Evaluate model performance."""
-    print(f"📊 Evaluating model on {len(X_test)} test samples")
-
-    predictions = model.predict(X_test)
-    accuracy = accuracy_score(y_test, predictions)
-
-    return {
-        "accuracy": accuracy,
-        "predictions": predictions,
-        "n_test_samples": len(X_test),
-    }
-
-
-def main():
-    """Demonstrate simple ML pipeline caching."""
-
-    print("=== Simple ML Pipeline Demo ===\n")
-
-    # Step 1: Create dataset (cached)
-    X, y = create_dataset(n_samples=2000, n_features=15)
-    print(f"✅ Dataset created: {X.shape}")
-
-    # Step 2: Split data
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42
-    )
-    print(f"✅ Data split: {len(X_train)} train, {len(X_test)} test\n")
-
-    # Step 3: Train model (cached - expensive operation)
-    model = train_model(X_train, y_train, n_estimators=50)
-    print("✅ Model trained and cached\n")
-
-    # Step 4: Evaluate model (cached)
-    results = evaluate_model(model, X_test, y_test)
-    print(f"✅ Model accuracy: {results['accuracy']:.3f}")
-    print(f"✅ Test samples: {results['n_test_samples']}\n")
-
-    print("=" * 50)
-    print("🔄 Running pipeline again (should use cache)...")
-
-    # Run again - should use cached results
-    X2, y2 = create_dataset(n_samples=2000, n_features=15)  # Cached
-    X_train2, X_test2, y_train2, y_test2 = train_test_split(
-        X2, y2, test_size=0.2, random_state=42
-    )
-
-    model2 = train_model(X_train2, y_train2, n_estimators=50)  # Cached
-    results2 = evaluate_model(model2, X_test2, y_test2)  # Cached
-
-    print(f"✅ Cached accuracy: {results2['accuracy']:.3f}")
-    print("\n🎯 Benefits:")
-    print("   • Expensive dataset creation cached")
-    print("   • Model training cached (no retraining)")
-    print("   • Evaluation results cached")
-    print("   • Automatic analytics optimization")
+@cached(ttl_seconds="1d")
+def evaluate(model, X_test, y_test):
+    """Compute accuracy on the test set."""
+    print("  Evaluating model...")
+    return {"accuracy": accuracy_score(y_test, model.predict(X_test))}
 
 
 if __name__ == "__main__":
-    main()
+    # Run 1 — computes everything
+    X, y = create_dataset(n_samples=2000, n_features=15)
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42
+    )
+
+    model = train_model(X_train, y_train, n_estimators=50)
+    results = evaluate(model, X_test, y_test)
+    print(f"Accuracy: {results['accuracy']:.3f}\n")
+
+    # Run 2 — all cached (no "Creating / Training / Evaluating" printed)
+    print("Running again (should be cached):")
+    X2, y2 = create_dataset(n_samples=2000, n_features=15)
+    X_tr2, X_te2, y_tr2, y_te2 = train_test_split(
+        X2, y2, test_size=0.2, random_state=42
+    )
+    model2 = train_model(X_tr2, y_tr2, n_estimators=50)
+    results2 = evaluate(model2, X_te2, y_te2)
+    print(f"Cached accuracy: {results2['accuracy']:.3f}")

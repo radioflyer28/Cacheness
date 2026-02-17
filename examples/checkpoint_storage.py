@@ -14,14 +14,13 @@ Features demonstrated:
 
 Usage:
     uv run python examples/checkpoint_storage.py
+
+Requires:
+    uv add numpy
 """
 
-import sys
-from pathlib import Path
 import tempfile
-
-# Add source directory to path
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+from pathlib import Path
 
 from cacheness.storage import BlobStore
 import numpy as np
@@ -154,7 +153,7 @@ def main():
 
             for key in sorted(checkpoints):
                 meta = checkpoint_store.get_metadata(key)
-                size = meta.get("file_size", 0)
+                size = meta.get("file_size", 0) if meta else 0
                 print(f"   {key} ({size:,} bytes)")
 
             print(f"\n🏆 Best training loss was {best_loss:.4f} at epoch {best_epoch}")

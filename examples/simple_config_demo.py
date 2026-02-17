@@ -1,94 +1,79 @@
 #!/usr/bin/env python3
 """
-Simple Configuration Example
-============================
+Configuration Basics
+====================
 
-Shows basic configuration options without overwhelming technical details.
-Much simpler than the complex serialization demo!
+Common configuration patterns: custom cache directories,
+TTL strategies, and metadata backends.
 
 Usage:
-    python simple_config_demo.py
+    uv run python examples/simple_config_demo.py
 """
 
-from cacheness import cached
-import pandas as pd
-from datetime import datetime
-
-# ===== Basic Configuration Examples =====
+from cacheness import cached, cacheness, CacheConfig
 
 
-# Example 1: Custom cache directory
-@cached.for_api(ttl_seconds=21600)  # 6 hours
-def fetch_weather_default(city):
-    """Uses default cache location."""
-    print(f"🌤️  Fetching weather for {city} (default cache)")
+# -- Custom cache directory ------------------------------------------------
+@cached.for_api(ttl_seconds="6h", cache_dir="./weather_cache")
+def fetch_weather(city):
+    """Cached to a custom directory."""
+    print(f"  Fetching weather for {city}...")
     return {"city": city, "temp": 72, "conditions": "sunny"}
 
 
-# Example 2: Different cache directories for different purposes
-@cached.for_api(ttl_seconds=14400, cache_dir="./custom_weather_cache")  # 4 hours
-def fetch_weather_custom(city):
-    """Uses custom cache location."""
-    print(f"🌤️  Fetching weather for {city} (custom cache)")
-    return {"city": city, "temp": 68, "conditions": "cloudy"}
-
-
-# Example 3: Different TTL for different data types
-@cached(ttl_seconds=7200)  # 2 hours - Short TTL for user data (returns dict)
+# -- Short vs long TTL -----------------------------------------------------
+@cached(ttl_seconds="2h")
 def get_user_status(user_id):
-    """Get user status - changes frequently."""
-    print(f"👤 Checking status for user {user_id}")
-    return {"user_id": user_id, "status": "online", "last_seen": str(datetime.now())}
+    """Frequently changing data — short TTL."""
+    print(f"  Checking status for user {user_id}...")
+    return {"user_id": user_id, "status": "online"}
 
 
-@cached(ttl_seconds=172800)  # 48 hours - Long TTL for reports (returns DataFrame)
-def generate_monthly_report(month, year):
-    """Generate monthly report - expensive, changes rarely."""
-    print(f"📊 Generating report for {month}/{year}")
-    return pd.DataFrame(
-        {"month": [month], "year": [year], "sales": [150000], "users": [1250]}
-    )
+@cached(ttl_seconds="2d")
+def generate_report(month, year):
+    """Expensive, rarely changing — long TTL."""
+    print(f"  Generating report for {month}/{year}...")
+    return {"month": month, "year": year, "revenue": 150_000}
 
 
-def main():
-    """Demonstrate simple configuration options."""
+# -- Explicit cache instance -----------------------------------------------
+config = CacheConfig(
+    cache_dir="./analytics_cache",
+    metadata_backend="sqlite",
+    default_ttl="12h",
+    max_cache_size="500mb",
+)
+analytics_cache = cacheness(config)
 
-    print("=== Simple Configuration Demo ===\n")
 
-    # Default caching
-    print("🔧 DEFAULT CACHING:")
-    weather1 = fetch_weather_default("Seattle")
-    print(f"✅ Weather: {weather1['temp']}°F, {weather1['conditions']}")
-
-    weather2 = fetch_weather_default("Seattle")  # Cached
-    print(f"✅ Cached weather: {weather2['temp']}°F\n")
-
-    # Custom cache directory
-    print("🔧 CUSTOM CACHE DIRECTORY:")
-    weather3 = fetch_weather_custom("Portland")
-    print(f"✅ Custom weather: {weather3['temp']}°F, {weather3['conditions']}")
-
-    weather4 = fetch_weather_custom("Portland")  # Cached
-    print(f"✅ Cached custom: {weather4['temp']}°F\n")
-
-    # Different TTL strategies
-    print("🔧 TTL STRATEGIES:")
-
-    # Short TTL for frequently changing data
-    status1 = get_user_status(123)
-    print(f"✅ User status: {status1['status']} (TTL: 2 hours)")
-
-    # Long TTL for expensive, stable data
-    report1 = generate_monthly_report("March", 2024)
-    print(f"✅ Monthly report: ${report1.iloc[0]['sales']:,} sales (TTL: 48 hours)")
-
-    print("\n🎯 Configuration Tips:")
-    print("   • Use @cached() for any Python object (auto-optimized)")
-    print("   • Use @cached.for_api() for external API calls")
-    print("   • Adjust TTL based on how often data changes")
-    print("   • UnifiedCache auto-detects optimal storage format")
-    print("   • DataFrames → Parquet, NumPy → Blosc, Objects → Pickle")
+@cached(cache_instance=analytics_cache, ttl_seconds="1d")
+def run_analytics(query):
+    """Uses a dedicated cache instance with SQLite backend."""
+    print(f"  Running analytics: {query}...")
+    return {"query": query, "rows": 42_000}
 
 
 if __name__ == "__main__":
-    main()
+    # Custom directory
+    w = fetch_weather("Seattle")
+    print(f"Weather: {w}")
+    w = fetch_weather("Seattle")  # cached
+    print(f"Cached:  {w}\n")
+
+    # Short TTL
+    s = get_user_status(123)
+    print(f"Status: {s}")
+    s = get_user_status(123)  # cached
+    print(f"Cached: {s}\n")
+
+    # Long TTL
+    r = generate_report("March", 2024)
+    print(f"Report: {r}")
+    r = generate_report("March", 2024)  # cached
+    print(f"Cached: {r}\n")
+
+    # Dedicated cache instance
+    a = run_analytics("top customers")
+    print(f"Analytics: {a}")
+    a = run_analytics("top customers")  # cached
+    print(f"Cached:    {a}")

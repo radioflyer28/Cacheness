@@ -30,13 +30,10 @@ Usage:
 """
 
 import sys
-from pathlib import Path
 import tempfile
-import numpy as np
 from datetime import datetime, timezone
 
-# Add source directory to path
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+import numpy as np
 
 from cacheness import cacheness, CacheConfig
 from cacheness.config import CacheMetadataConfig
