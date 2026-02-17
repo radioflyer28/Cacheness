@@ -143,7 +143,7 @@ class TestMetadataBackendSchemaVersioning:
         def cleanup_expired(self, ttl_seconds):
             return 0
 
-        def cleanup_by_size(self, target_size_mb):
+        def cleanup_by_size(self, target_size_bytes):
             return {"count": 0, "removed_entries": []}
 
         def clear_all(self):
@@ -332,7 +332,7 @@ class TestMetadataBackendNamespaceRegistry:
         def cleanup_expired(self, ttl_seconds):
             return 0
 
-        def cleanup_by_size(self, target_size_mb):
+        def cleanup_by_size(self, target_size_bytes):
             return {"count": 0, "removed_entries": []}
 
         def clear_all(self):

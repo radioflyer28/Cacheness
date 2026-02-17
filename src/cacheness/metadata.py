@@ -40,6 +40,7 @@ from typing import Dict, Any, Optional, List, Tuple, Callable
 import logging
 
 from .json_utils import dumps as json_dumps, loads as json_loads
+from .size_utils import bytes_to_mb_display
 
 logger = logging.getLogger(__name__)
 
@@ -457,11 +458,11 @@ class MetadataBackend(ABC):
         pass
 
     @abstractmethod
-    def cleanup_by_size(self, target_size_mb: float) -> Dict[str, Any]:
+    def cleanup_by_size(self, target_size_bytes: int) -> Dict[str, Any]:
         """Remove least-recently-accessed entries until cache size drops to or below target.
 
         Args:
-            target_size_mb: Target cache size in megabytes
+            target_size_bytes: Target cache size in bytes
 
         Returns:
             Dict with 'count' (int) and 'removed_entries' (list of dicts with 'cache_key' and 'actual_path')
@@ -966,9 +967,9 @@ class CachedMetadataBackend(MetadataBackend):
 
         return count
 
-    def cleanup_by_size(self, target_size_mb: float) -> Dict[str, Any]:
+    def cleanup_by_size(self, target_size_bytes: int) -> Dict[str, Any]:
         """Delegate cleanup_by_size to wrapped backend and clear memory cache."""
-        result = self.backend.cleanup_by_size(target_size_mb)
+        result = self.backend.cleanup_by_size(target_size_bytes)
 
         # Clear entire memory cache after cleanup (entries might be stale)
         removed_count = result.get("count", 0)
@@ -1260,7 +1261,7 @@ class JsonBackend(MetadataBackend):
                     "metadata": entry.get("metadata", {}),
                     "created": creation_time,
                     "last_accessed": access_time,
-                    "size_mb": round(entry.get("file_size", 0) / (1024 * 1024), 3),
+                    "size_mb": bytes_to_mb_display(entry.get("file_size", 0)),
                 }
 
                 entries.append(list_entry)
@@ -1277,10 +1278,11 @@ class JsonBackend(MetadataBackend):
             # Count total entries
             total_entries = len(entries)
 
-            # Calculate total size
-            total_size_mb = sum(
+            # Calculate total size in bytes (canonical)
+            total_size_bytes = sum(
                 entry.get("file_size", 0) for entry in entries.values()
-            ) / (1024 * 1024)
+            )
+            total_size_mb = total_size_bytes / (1024 * 1024)
 
             # Count by data type
             dataframe_count = sum(
@@ -1299,7 +1301,8 @@ class JsonBackend(MetadataBackend):
                 "total_entries": total_entries,
                 "dataframe_entries": dataframe_count,
                 "array_entries": array_count,
-                "total_size_mb": total_size_mb,  # Don't round - precise size needed for cleanup calculations
+                "total_size_bytes": total_size_bytes,
+                "total_size_mb": total_size_mb,  # Backward compat — prefer total_size_bytes
                 "cache_hits": hits,
                 "cache_misses": misses,
                 "hit_rate": round(hit_rate, 3),
@@ -1355,18 +1358,18 @@ class JsonBackend(MetadataBackend):
 
             return len(expired_keys)
 
-    def cleanup_by_size(self, target_size_mb: float) -> Dict[str, Any]:
+    def cleanup_by_size(self, target_size_bytes: int) -> Dict[str, Any]:
         """Remove least-recently-accessed entries until cache size drops to or below target."""
         with self._lock:
-            # Get current total size
+            # Get current total size in bytes
             stats = self.get_stats()
-            total_size_mb = stats.get("total_size_mb", 0)
+            current_size_bytes = stats.get("total_size_bytes", 0)
 
             logger.debug(
-                f"cleanup_by_size: current size {total_size_mb:.6f}MB, target {target_size_mb:.6f}MB"
+                f"cleanup_by_size: current size {current_size_bytes} bytes, target {target_size_bytes} bytes"
             )
 
-            if total_size_mb <= target_size_mb:
+            if current_size_bytes <= target_size_bytes:
                 return {"count": 0, "removed_entries": []}  # Already at or below target
 
             entries = self._metadata.get("entries", {})
@@ -1381,8 +1384,6 @@ class JsonBackend(MetadataBackend):
             )
 
             # Calculate how many bytes we need to remove
-            target_size_bytes = target_size_mb * 1024 * 1024
-            current_size_bytes = total_size_mb * 1024 * 1024
             bytes_to_remove = current_size_bytes - target_size_bytes
 
             logger.debug(f"cleanup_by_size: need to remove {bytes_to_remove:.0f} bytes")
@@ -2394,7 +2395,7 @@ class SqliteBackend(MetadataBackend):
                         "metadata": entry_metadata,
                         "created": entry.created_at.isoformat(),
                         "last_accessed": entry.accessed_at.isoformat(),
-                        "size_mb": round(entry.file_size / (1024 * 1024), 3),
+                        "size_mb": bytes_to_mb_display(entry.file_size),
                     }
                 )
 
@@ -2422,7 +2423,8 @@ class SqliteBackend(MetadataBackend):
                 )
             ).one()
 
-            total_size_mb = row.total_size / (1024 * 1024)
+            total_size_bytes = row.total_size
+            total_size_mb = total_size_bytes / (1024 * 1024)
 
             # Get hit/miss stats
             stats = self._get_stats_row(session)
@@ -2436,7 +2438,8 @@ class SqliteBackend(MetadataBackend):
                 "total_entries": row.total,
                 "dataframe_entries": row.dataframe_count,
                 "array_entries": row.array_count,
-                "total_size_mb": round(total_size_mb, 2),
+                "total_size_bytes": total_size_bytes,
+                "total_size_mb": total_size_mb,  # Backward compat — prefer total_size_bytes
                 "cache_hits": stats.cache_hits,
                 "cache_misses": stats.cache_misses,
                 "hit_rate": round(hit_rate, 3),
@@ -2494,20 +2497,18 @@ class SqliteBackend(MetadataBackend):
             session.commit()
             return deleted_count
 
-    def cleanup_by_size(self, target_size_mb: float) -> Dict[str, Any]:
+    def cleanup_by_size(self, target_size_bytes: int) -> Dict[str, Any]:
         """Remove least-recently-accessed entries until cache size drops to or below target."""
         with self._lock, self.SessionLocal() as session:
-            # Get current total size
+            # Get current total size in bytes
             CE = self._CacheEntry
             result = session.execute(select(func.sum(CE.file_size)).select_from(CE))
-            total_size_bytes = result.scalar() or 0
-            total_size_mb = total_size_bytes / (1024 * 1024)
+            current_size_bytes = result.scalar() or 0
 
-            if total_size_mb <= target_size_mb:
+            if current_size_bytes <= target_size_bytes:
                 return {"count": 0, "removed_entries": []}  # Already at or below target
 
-            target_size_bytes = target_size_mb * 1024 * 1024
-            bytes_to_remove = total_size_bytes - target_size_bytes
+            bytes_to_remove = current_size_bytes - target_size_bytes
 
             # Get entries sorted by accessed_at (oldest first) with actual_path
             entries_to_delete = session.execute(

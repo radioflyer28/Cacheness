@@ -12,6 +12,7 @@ from typing import Optional, List, Union
 from pathlib import Path
 
 from .metadata import validate_namespace_id, DEFAULT_NAMESPACE
+from .size_utils import parse_size, format_size
 
 logger = logging.getLogger(__name__)
 
@@ -21,10 +22,22 @@ _DEFAULT_TTL = object()
 
 @dataclass
 class CacheStorageConfig:
-    """Configuration for cache storage and directory management."""
+    """Configuration for cache storage and directory management.
+
+    Size limits can be specified via either field:
+
+    - ``max_cache_size`` — human-readable string (``"2GB"``, ``"500MB"``)
+      or raw bytes (``int``).  **Preferred.**
+    - ``max_cache_size_mb`` — legacy, size in megabytes (``int``).
+      Still works but ``max_cache_size`` takes precedence when both are set.
+
+    Internally all size arithmetic uses bytes (``int``) via
+    :attr:`max_cache_size_bytes`.
+    """
 
     cache_dir: str = "./cache"
-    max_cache_size_mb: Optional[int] = 2000  # Match test expectation
+    max_cache_size: Optional[Union[str, int]] = None  # "2GB", "500MB", or bytes int
+    max_cache_size_mb: Optional[int] = 2000  # Legacy — still works
     cleanup_on_init: bool = True  # Match test expectation
     verify_cache_integrity: bool = True
     create_cache_dir: bool = (
@@ -34,9 +47,28 @@ class CacheStorageConfig:
         None  # Temporary directory for atomic writes (None = use cache_dir/tmp)
     )
 
+    @property
+    def max_cache_size_bytes(self) -> Optional[int]:
+        """Canonical size limit in bytes (``int``).
+
+        Resolves ``max_cache_size`` (preferred) or ``max_cache_size_mb``
+        (legacy) into a single bytes value.  Returns ``None`` when no
+        limit is configured.
+        """
+        if self.max_cache_size is not None:
+            return parse_size(self.max_cache_size)
+        if self.max_cache_size_mb is not None:
+            return int(self.max_cache_size_mb * 1024 * 1024)
+        return None
+
     def __post_init__(self):
         """Validate storage configuration."""
-        if self.max_cache_size_mb is not None and self.max_cache_size_mb <= 0:
+        if self.max_cache_size is not None:
+            # Eagerly validate so typos like "2 Gigglebytes" fail fast
+            parsed = parse_size(self.max_cache_size)
+            if parsed <= 0:
+                raise ValueError("max_cache_size must be positive")
+        elif self.max_cache_size_mb is not None and self.max_cache_size_mb <= 0:
             raise ValueError("max_cache_size_mb must be positive")
 
         # Convert relative path to absolute to avoid directory confusion, but preserve "./cache" and "./yaml_cache" as is for backwards compatibility
@@ -46,8 +78,13 @@ class CacheStorageConfig:
         ):
             self.cache_dir = str(Path.cwd() / self.cache_dir)
 
+        limit_display = (
+            format_size(self.max_cache_size_bytes)
+            if self.max_cache_size_bytes
+            else "unlimited"
+        )
         logger.debug(
-            f"Storage configured: dir={self.cache_dir}, max_size={self.max_cache_size_mb}MB"
+            f"Storage configured: dir={self.cache_dir}, max_size={limit_display}"
         )
 
 
@@ -387,6 +424,7 @@ class CacheConfig:
         metadata_backend_options: Optional[dict] = None,
         enable_metadata: Optional[bool] = None,
         max_cache_size_mb: Optional[int] = None,
+        max_cache_size: Optional[Union[str, int]] = None,
         cleanup_on_init: Optional[bool] = None,
         store_cache_key_params: Optional[bool] = None,
         store_full_metadata: Optional[bool] = None,
@@ -464,6 +502,8 @@ class CacheConfig:
             self.metadata.enable_metadata = enable_metadata
         if max_cache_size_mb is not None:
             self.storage.max_cache_size_mb = max_cache_size_mb
+        if max_cache_size is not None:
+            self.storage.max_cache_size = max_cache_size
         if cleanup_on_init is not None:
             self.storage.cleanup_on_init = cleanup_on_init
 
@@ -582,6 +622,7 @@ class CacheConfig:
         self.storage_mode = storage_mode
         if self.storage_mode:
             self.metadata.default_ttl_seconds = None
+            self.storage.max_cache_size = None
             self.storage.max_cache_size_mb = None
             self.storage.cleanup_on_init = False
             self.metadata.enable_cache_stats = False
@@ -814,7 +855,27 @@ def validate_config(config: CacheConfig) -> List["ConfigValidationError"]:
             )
         )
 
-    if config.storage.max_cache_size_mb is not None:
+    # Validate size limit (prefer max_cache_size, fall back to legacy max_cache_size_mb)
+    if config.storage.max_cache_size is not None:
+        try:
+            parsed = parse_size(config.storage.max_cache_size)
+            if parsed <= 0:
+                errors.append(
+                    ConfigValidationError(
+                        "storage.max_cache_size",
+                        "must be positive",
+                        config.storage.max_cache_size,
+                    )
+                )
+        except (ValueError, TypeError):
+            errors.append(
+                ConfigValidationError(
+                    "storage.max_cache_size",
+                    'must be a size string (e.g. "2GB") or int bytes',
+                    config.storage.max_cache_size,
+                )
+            )
+    elif config.storage.max_cache_size_mb is not None:
         if not isinstance(config.storage.max_cache_size_mb, (int, float)):
             errors.append(
                 ConfigValidationError(

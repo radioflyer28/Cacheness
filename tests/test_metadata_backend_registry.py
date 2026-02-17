@@ -113,7 +113,7 @@ class MockMetadataBackend(MetadataBackend):
     def cleanup_expired(self, ttl_seconds: float) -> int:
         return 0  # Mock doesn't track TTL
 
-    def cleanup_by_size(self, target_size_mb: float):
+    def cleanup_by_size(self, target_size_bytes: int):
         return {"count": 0, "removed_entries": []}
 
     def clear_all(self) -> int:
@@ -173,7 +173,7 @@ class AnotherMockBackend(MetadataBackend):
     def cleanup_expired(self, ttl_seconds: float) -> int:
         return 0
 
-    def cleanup_by_size(self, target_size_mb: float):
+    def cleanup_by_size(self, target_size_bytes: int):
         return {"count": 0, "removed_entries": []}
 
     def clear_all(self) -> int:

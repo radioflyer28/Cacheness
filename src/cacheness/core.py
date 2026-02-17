@@ -19,6 +19,7 @@ from .config import CacheConfig, _DEFAULT_TTL, create_cache_config
 from .handlers import HandlerRegistry
 from .metadata import DEFAULT_NAMESPACE
 from .serialization import create_unified_cache_key
+from .size_utils import format_size
 from .storage.paths import resolve_actual_path
 
 logger = logging.getLogger(__name__)
@@ -1566,10 +1567,10 @@ class UnifiedCache:
 
                 self._enforce_size_limit()
 
-                file_size_mb = result["file_size"] / (1024 * 1024)
+                file_size_display = format_size(result["file_size"])
                 format_info = f"({result['storage_format']} format)"
                 logger.info(
-                    f"Cached {handler.data_type} {cache_key} ({file_size_mb:.3f}MB) {format_info}: {description}"
+                    f"Cached {handler.data_type} {cache_key} ({file_size_display}) {format_info}: {description}"
                 )
 
                 cleanup.commit()
@@ -2486,22 +2487,21 @@ class UnifiedCache:
 
     def _enforce_size_limit(self):
         """Enforce cache size limits using LRU eviction."""
-        if self.config.storage.max_cache_size_mb is None:
+        max_size_bytes = self.config.storage.max_cache_size_bytes
+        if max_size_bytes is None:
             return  # No size limit configured
 
         # Get current total size from metadata backend
         stats = self.metadata_backend.get_stats()
-        total_size_mb = stats.get("total_size_mb", 0)
+        total_size_bytes = stats.get("total_size_bytes", 0)
 
-        if total_size_mb <= self.config.storage.max_cache_size_mb:
+        if total_size_bytes <= max_size_bytes:
             return
 
-        # Use metadata backend's cleanup functionality
-        target_size = (
-            self.config.storage.max_cache_size_mb * 0.8
-        )  # Clean to 80% of limit
+        # Use metadata backend's cleanup functionality — clean to 80% of limit
+        target_size_bytes = int(max_size_bytes * 0.8)
 
-        result = self.metadata_backend.cleanup_by_size(target_size)
+        result = self.metadata_backend.cleanup_by_size(target_size_bytes)
         removed_count = result.get("count", 0)
         removed_entries = result.get("removed_entries", [])
 
@@ -2730,7 +2730,8 @@ class UnifiedCache:
         stats.update(
             {
                 "cache_dir": str(self.cache_dir),
-                "max_size_mb": self.config.storage.max_cache_size_mb,
+                "max_size_bytes": self.config.storage.max_cache_size_bytes,
+                "max_size_mb": self.config.storage.max_cache_size_mb,  # Backward compat
                 "default_ttl_seconds": self.config.metadata.default_ttl_seconds,
                 "backend_type": self.actual_backend,  # Report actual backend used
             }

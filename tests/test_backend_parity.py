@@ -263,10 +263,10 @@ class TestBackendParity:
         time.sleep(0.01)
         sqlite_backend.get_entry("recent_large")  # Accessed third (most recent)
 
-        # Total size: 6 MB, target: 2 MB
+        # Total size: 6 MB, target: 2 MB (in bytes)
         # Should remove oldest entries (old_large: 3MB, then mid_large: 2MB)
         # Leaving only recent_large (1MB)
-        result = sqlite_backend.cleanup_by_size(target_size_mb=2.0)
+        result = sqlite_backend.cleanup_by_size(target_size_bytes=2 * 1024 * 1024)
 
         # Verify result structure
         assert "count" in result

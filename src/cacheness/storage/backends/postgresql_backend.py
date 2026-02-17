@@ -40,6 +40,8 @@ import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from ...size_utils import format_size
+
 logger = logging.getLogger(__name__)
 
 # Check SQLAlchemy availability
@@ -1030,6 +1032,8 @@ class PostgresBackend(MetadataBackend):
                 "misses": stats.cache_misses,
                 "total_entries": stats.total_entries,
                 "total_size_bytes": stats.total_size_bytes,
+                "total_size_mb": stats.total_size_bytes
+                / (1024 * 1024),  # Backward compat
                 "last_cleanup_at": (
                     stats.last_cleanup_at.isoformat() if stats.last_cleanup_at else None
                 ),
@@ -1125,27 +1129,25 @@ class PostgresBackend(MetadataBackend):
                     logger.error(f"Cleanup failed: {e}")
                     return 0
 
-    def cleanup_by_size(self, target_size_mb: float) -> Dict[str, Any]:
+    def cleanup_by_size(self, target_size_bytes: int) -> Dict[str, Any]:
         """Remove least-recently-accessed entries until cache size drops to or below target."""
         with self._lock:
             with self.SessionLocal() as session:
                 try:
-                    # Get current total size
+                    # Get current total size in bytes
                     CE = self._PgCacheEntry
                     result = session.execute(
                         select(func.sum(CE.file_size)).select_from(CE)
                     )
-                    total_size_bytes = result.scalar() or 0
-                    total_size_mb = total_size_bytes / (1024 * 1024)
+                    current_size_bytes = result.scalar() or 0
 
-                    if total_size_mb <= target_size_mb:
+                    if current_size_bytes <= target_size_bytes:
                         return {
                             "count": 0,
                             "removed_entries": [],
                         }  # Already at or below target
 
-                    target_size_bytes = target_size_mb * 1024 * 1024
-                    bytes_to_remove = total_size_bytes - target_size_bytes
+                    bytes_to_remove = current_size_bytes - target_size_bytes
 
                     # Get entries sorted by accessed_at (oldest first) with actual_path
                     entries_to_delete = session.execute(
@@ -1186,7 +1188,7 @@ class PostgresBackend(MetadataBackend):
 
                         session.commit()
                         logger.info(
-                            f"LRU cleanup: removed {len(removed_entries)} entries to reach {target_size_mb:.2f}MB"
+                            f"LRU cleanup: removed {len(removed_entries)} entries to reach {format_size(target_size_bytes)}"
                         )
 
                     return {
