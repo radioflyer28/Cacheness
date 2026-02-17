@@ -21,7 +21,7 @@ These constraints apply to EVERY task. Violating any of them is a bug.
 **Testing:**
 - **Full suite:** `uv run pytest tests/ -x -q --ignore=tests/test_tensorflow_handler.py`
 - **Windows:** Always add `--ignore=tests/test_tensorflow_handler.py` — TF tests hang
-- **Baseline:** 1202 passed, 65 skipped, 0 failures
+- **Baseline:** 1212 passed, 65 skipped, 0 failures
 - **Incremental testing:** During development, run only targeted tests (see [Test Suite](#test-suite) for details). Full suite runs only once — right before push.
 
 **Imports:**
@@ -174,7 +174,7 @@ uv run ruff check . && uv run ty check             # Phase 2
 
 ## Test Suite
 
-**Baseline:** 1202 passed, 65 skipped, 0 failures
+**Baseline:** 1212 passed, 65 skipped, 0 failures
 **Full command:** `uv run pytest tests/ -x -q --ignore=tests/test_tensorflow_handler.py`
 
 ### Incremental Testing Strategy
@@ -184,7 +184,7 @@ During development, use **tiered testing** to minimize feedback time:
 | Tier | When | What to run | Time |
 |------|------|-------------|------|
 | **Tier 1** | After each code change | Tests that directly exercise modified code | ~5-15s |
-| **Tier 2** | After Tier 1 passes | Add tests for likely regression areas | ~30-60s |
+| **Tier 2** | After all planned changes for rapid debug before full suite | Add tests for likely regression areas | ~30-60s |
 | **Full suite** | Once before push | All tests | ~5 min |
 
 **Selecting Tier 1 tests:** Match changed source files to their primary test files:
