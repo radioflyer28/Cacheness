@@ -1,15 +1,23 @@
-"""Size conversion utilities for Cacheness.
+"""Unit conversion utilities for Cacheness.
 
-Convention
-----------
+Size Convention
+---------------
 - **Internal storage / calculations**: all sizes in **bytes** (``int``).
 - **Config / public API**: accepts human-readable strings (``"2GB"``)
   or raw byte counts.
 - **Display**: converted to MB only at output boundaries using
   :func:`format_size` or :func:`bytes_to_mb_display`.
 
-These helpers centralise every byte ↔ human-readable conversion so that
-rounding errors cannot sneak into cleanup or eviction logic.
+Duration Convention
+-------------------
+- **Internal**: all durations in **seconds** (``float``).
+- **Config / public API**: accepts human-readable strings with
+  shorthand suffixes (``s``, ``m``, ``h``, ``d``, ``w``, ``mo``, ``y``)
+  or raw seconds.
+- **Display**: converted via :func:`format_duration`.
+
+These helpers centralise every unit conversion so that rounding errors
+cannot sneak into cleanup, eviction, or TTL logic.
 """
 
 from __future__ import annotations
@@ -119,3 +127,139 @@ def bytes_to_mb_display(size_bytes: int, decimals: int = 3) -> float:
         1.0
     """
     return round(size_bytes / _BYTES_PER_MB, decimals)
+
+
+# =====================================================================
+# Duration parsing / formatting
+# =====================================================================
+
+_SECONDS_PER_MINUTE: float = 60
+_SECONDS_PER_HOUR: float = 3600
+_SECONDS_PER_DAY: float = 86400
+_SECONDS_PER_WEEK: float = 604800
+_SECONDS_PER_MONTH: float = 86400 * 30  # 30 days
+_SECONDS_PER_YEAR: float = 86400 * 365  # 365 days
+
+# Shorthand-only suffixes → multiplier (seconds).
+# "mo" must sort before "m" in the regex alternation (longest first).
+_DURATION_UNITS: dict[str, float] = {
+    "mo": _SECONDS_PER_MONTH,
+    "s": 1,
+    "m": _SECONDS_PER_MINUTE,
+    "h": _SECONDS_PER_HOUR,
+    "d": _SECONDS_PER_DAY,
+    "w": _SECONDS_PER_WEEK,
+    "y": _SECONDS_PER_YEAR,
+}
+
+# Build regex alternation from longest suffix first to avoid partial matches.
+_DURATION_SUFFIX_RE: str = "|".join(
+    sorted(list(_DURATION_UNITS.keys()), key=len, reverse=True)
+)
+_DURATION_RE = re.compile(
+    rf"^(\d+(?:\.\d+)?)\s*({_DURATION_SUFFIX_RE})$",
+    re.IGNORECASE,
+)
+
+
+def parse_duration(value: str | int | float) -> float:
+    """Parse a human-readable duration string into seconds.
+
+    Accepts:
+    - An ``int`` or ``float`` (treated as seconds).
+    - A string with a single value and shorthand unit, e.g. ``"30s"``,
+      ``"5m"``, ``"6h"``, ``"7d"``, ``"2w"``, ``"3mo"``, ``"1y"``.
+      Case-insensitive.  If no unit suffix is found the string is
+      interpreted as seconds.
+
+    Returns:
+        float: Duration in seconds.
+
+    Raises:
+        ValueError: If the string cannot be parsed.
+        TypeError: If the value is not str/int/float.
+
+    Examples:
+        >>> parse_duration("30s")
+        30.0
+        >>> parse_duration("5m")
+        300.0
+        >>> parse_duration("6h")
+        21600.0
+        >>> parse_duration("7d")
+        604800.0
+        >>> parse_duration("3mo")
+        7776000.0
+        >>> parse_duration("1y")
+        31536000.0
+        >>> parse_duration(3600)
+        3600.0
+        >>> parse_duration("1.5h")
+        5400.0
+    """
+    if isinstance(value, (int, float)):
+        return float(value)
+
+    if not isinstance(value, str):
+        raise TypeError(f"Expected str, int, or float, got {type(value).__name__}")
+
+    value = value.strip()
+    if not value:
+        raise ValueError("Empty duration string")
+
+    match = _DURATION_RE.match(value)
+    if match:
+        number = float(match.group(1))
+        unit = match.group(2).lower()
+        return number * _DURATION_UNITS[unit]
+
+    # Try plain numeric string (interpret as seconds)
+    try:
+        return float(value)
+    except ValueError:
+        raise ValueError(
+            f"Cannot parse duration: {value!r}.  "
+            f"Expected a number with optional unit "
+            f"(s, m, h, d, w, mo, y)."
+        ) from None
+
+
+def format_duration(seconds: float) -> str:
+    """Format seconds as a concise human-readable duration string.
+
+    Chooses the largest single unit that keeps the numeric part ≥ 1.
+    For exact multiples the result is an integer (``"7d"``); otherwise
+    it uses up to two decimal places (``"1.50h"``).
+
+    Examples:
+        >>> format_duration(86400)
+        '1d'
+        >>> format_duration(3600)
+        '1h'
+        >>> format_duration(300)
+        '5m'
+        >>> format_duration(45)
+        '45s'
+        >>> format_duration(5400)
+        '1.50h'
+    """
+    if seconds <= 0:
+        return "0s"
+
+    for suffix, divisor in (
+        ("y", _SECONDS_PER_YEAR),
+        ("mo", _SECONDS_PER_MONTH),
+        ("w", _SECONDS_PER_WEEK),
+        ("d", _SECONDS_PER_DAY),
+        ("h", _SECONDS_PER_HOUR),
+        ("m", _SECONDS_PER_MINUTE),
+    ):
+        if seconds >= divisor:
+            val = seconds / divisor
+            if val == int(val):
+                return f"{int(val)}{suffix}"
+            return f"{val:.2f}{suffix}"
+    # Less than a minute — show seconds
+    if seconds == int(seconds):
+        return f"{int(seconds)}s"
+    return f"{seconds:.2f}s"

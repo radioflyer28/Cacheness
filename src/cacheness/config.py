@@ -12,7 +12,7 @@ from typing import Optional, List, Union
 from pathlib import Path
 
 from .metadata import validate_namespace_id, DEFAULT_NAMESPACE
-from .size_utils import parse_size, format_size
+from .size_utils import parse_size, format_size, parse_duration
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +103,9 @@ class CacheMetadataConfig:
 
     # TTL configuration (standardized on seconds for consistency)
     default_ttl_seconds: float = 86400  # Cache TTL in seconds (default: 24 hours)
+    default_ttl: Optional[Union[str, int, float]] = (
+        None  # Human-readable TTL (e.g. "24h", "30m"). Overrides default_ttl_seconds.
+    )
 
     verify_cache_integrity: bool = True
     store_full_metadata: bool = False  # Store complete cache key parameters (kwargs) as JSON for debugging/querying - DISABLED by default for performance
@@ -118,12 +121,25 @@ class CacheMetadataConfig:
         1000  # Maximum number of metadata entries to cache in memory
     )
     memory_cache_ttl_seconds: float = 300  # 5 minutes TTL for memory-cached entries
+    memory_cache_ttl: Optional[Union[str, int, float]] = (
+        None  # Human-readable TTL (e.g. "5m"). Overrides memory_cache_ttl_seconds.
+    )
     memory_cache_stats: bool = (
         False  # Enable cache hit/miss statistics for memory cache layer
     )
 
+    def resolve_duration_fields(self):
+        """Resolve human-readable duration fields to their canonical seconds fields."""
+        if self.default_ttl is not None:
+            self.default_ttl_seconds = parse_duration(self.default_ttl)
+        if self.memory_cache_ttl is not None:
+            self.memory_cache_ttl_seconds = parse_duration(self.memory_cache_ttl)
+
     def __post_init__(self):
         """Validate metadata backend configuration."""
+        # Resolve human-readable duration strings before validation
+        self.resolve_duration_fields()
+
         # Note: Custom backends are validated when get_metadata_backend() is called
 
         # Validate TTL (None means infinite / no expiration)
@@ -412,6 +428,7 @@ class CacheConfig:
         namespace: str = DEFAULT_NAMESPACE,
         # Backwards compatibility parameters
         cache_dir: Optional[str] = None,
+        default_ttl: Optional[Union[str, int, float]] = None,
         default_ttl_seconds: Optional[float] = None,
         verify_cache_integrity: Optional[bool] = None,
         hash_path_content: Optional[bool] = None,
@@ -452,6 +469,7 @@ class CacheConfig:
         enable_memory_cache: Optional[bool] = None,
         memory_cache_type: Optional[str] = None,
         memory_cache_maxsize: Optional[int] = None,
+        memory_cache_ttl: Optional[Union[str, int, float]] = None,
         memory_cache_ttl_seconds: Optional[float] = None,
         memory_cache_stats: Optional[bool] = None,
         # Storage mode
@@ -476,7 +494,9 @@ class CacheConfig:
         if cache_dir is not None:
             self.storage.cache_dir = cache_dir
 
-        # Map TTL parameter
+        # Map TTL parameters (default_ttl takes priority over default_ttl_seconds)
+        if default_ttl is not None:
+            self.metadata.default_ttl = default_ttl
         if default_ttl_seconds is not None:
             self.metadata.default_ttl_seconds = default_ttl_seconds
 
@@ -570,6 +590,8 @@ class CacheConfig:
             self.metadata.memory_cache_type = memory_cache_type
         if memory_cache_maxsize is not None:
             self.metadata.memory_cache_maxsize = memory_cache_maxsize
+        if memory_cache_ttl is not None:
+            self.metadata.memory_cache_ttl = memory_cache_ttl
         if memory_cache_ttl_seconds is not None:
             self.metadata.memory_cache_ttl_seconds = memory_cache_ttl_seconds
         if memory_cache_stats is not None:
@@ -618,10 +640,14 @@ class CacheConfig:
                     f"Unknown configuration parameter ignored: {key}={value}"
                 )
 
+        # Re-resolve human-readable duration fields after kwargs override
+        self.metadata.resolve_duration_fields()
+
         # Storage mode: disable cache-specific behaviors for pure storage use
         self.storage_mode = storage_mode
         if self.storage_mode:
             self.metadata.default_ttl_seconds = None
+            self.metadata.default_ttl = None
             self.storage.max_cache_size = None
             self.storage.max_cache_size_mb = None
             self.storage.cleanup_on_init = False

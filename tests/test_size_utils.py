@@ -1,10 +1,13 @@
-"""Tests for size_utils module and size-related integration behavior.
+"""Tests for size_utils module and size/duration-related integration behavior.
 
 Covers:
 - parse_size() parsing of human-readable strings and raw values
 - format_size() formatting bytes to human-readable strings
 - bytes_to_mb_display() backward-compat display helper
+- parse_duration() parsing of human-readable duration strings
+- format_duration() formatting seconds to human-readable strings
 - Config max_cache_size / max_cache_size_bytes property
+- Config default_ttl / memory_cache_ttl duration fields
 - get_stats() returns total_size_bytes (JSON + SQLite backends)
 - cleanup_by_size() uses bytes internally — no rounding errors
 """
@@ -12,8 +15,14 @@ Covers:
 import pytest
 
 from cacheness import CacheConfig, cacheness
-from cacheness.size_utils import parse_size, format_size, bytes_to_mb_display
-from cacheness.config import CacheStorageConfig
+from cacheness.size_utils import (
+    parse_size,
+    format_size,
+    bytes_to_mb_display,
+    parse_duration,
+    format_duration,
+)
+from cacheness.config import CacheStorageConfig, CacheMetadataConfig
 
 
 # ==================== parse_size() ====================
@@ -346,4 +355,291 @@ class TestCacheGetStatsMaxSizeBytes:
         stats = cache.get_stats()
         assert stats["max_size_bytes"] is None
         assert stats["max_size_mb"] is None
+        cache.close()
+
+
+# ==================== parse_duration() ====================
+
+
+class TestParseDuration:
+    """Unit tests for parse_duration() — shorthand suffixes only."""
+
+    # --- Passthrough for numeric types ---
+
+    def test_int_passthrough(self):
+        assert parse_duration(3600) == 3600.0
+
+    def test_float_passthrough(self):
+        assert parse_duration(1.5) == 1.5
+
+    def test_zero(self):
+        assert parse_duration(0) == 0.0
+
+    # --- Each shorthand suffix ---
+
+    def test_seconds(self):
+        assert parse_duration("30s") == 30.0
+
+    def test_minutes(self):
+        assert parse_duration("5m") == 300.0
+
+    def test_hours(self):
+        assert parse_duration("6h") == 21600.0
+
+    def test_days(self):
+        assert parse_duration("7d") == 604800.0
+
+    def test_weeks(self):
+        assert parse_duration("2w") == 1209600.0
+
+    def test_months(self):
+        assert parse_duration("3mo") == 3 * 86400 * 30
+
+    def test_years(self):
+        assert parse_duration("1y") == 86400 * 365
+
+    # --- Fractional values ---
+
+    def test_fractional_hours(self):
+        assert parse_duration("1.5h") == 5400.0
+
+    def test_fractional_minutes(self):
+        assert parse_duration("2.5m") == 150.0
+
+    def test_fractional_days(self):
+        assert parse_duration("0.5d") == 43200.0
+
+    # --- Case insensitivity ---
+
+    def test_case_insensitive_upper(self):
+        assert parse_duration("6H") == 21600.0
+
+    def test_case_insensitive_upper_mo(self):
+        assert parse_duration("1MO") == 86400 * 30
+
+    # --- Whitespace handling ---
+
+    def test_whitespace_between(self):
+        assert parse_duration("6 h") == 21600.0
+
+    def test_leading_trailing_whitespace(self):
+        assert parse_duration("  30s  ") == 30.0
+
+    # --- Plain numeric string fallback ---
+
+    def test_plain_numeric_string(self):
+        assert parse_duration("3600") == 3600.0
+
+    def test_plain_float_string(self):
+        assert parse_duration("1.5") == 1.5
+
+    # --- "mo" must not be consumed as "m" + trailing "o" ---
+
+    def test_mo_not_parsed_as_m(self):
+        """'1mo' should be 1 month, not 1 minute."""
+        assert parse_duration("1mo") == 86400 * 30
+        assert parse_duration("1m") == 60.0
+
+    # --- Error cases ---
+
+    def test_empty_string_raises(self):
+        with pytest.raises(ValueError, match="Empty duration string"):
+            parse_duration("")
+
+    def test_invalid_unit_raises(self):
+        with pytest.raises(ValueError, match="Cannot parse duration"):
+            parse_duration("10x")
+
+    def test_full_word_not_accepted(self):
+        """Full words like 'hours' are not accepted — shorthand only."""
+        with pytest.raises(ValueError, match="Cannot parse duration"):
+            parse_duration("6hours")
+
+    def test_garbage_raises(self):
+        with pytest.raises(ValueError, match="Cannot parse duration"):
+            parse_duration("hello")
+
+    def test_wrong_type_raises(self):
+        with pytest.raises(TypeError, match="Expected str, int, or float"):
+            parse_duration([1, 2, 3])  # type: ignore[arg-type]
+
+
+# ==================== format_duration() ====================
+
+
+class TestFormatDuration:
+    """Unit tests for format_duration()."""
+
+    def test_zero(self):
+        assert format_duration(0) == "0s"
+
+    def test_seconds(self):
+        assert format_duration(45) == "45s"
+
+    def test_minutes_exact(self):
+        assert format_duration(300) == "5m"
+
+    def test_hours_exact(self):
+        assert format_duration(3600) == "1h"
+
+    def test_days_exact(self):
+        assert format_duration(86400) == "1d"
+
+    def test_weeks_exact(self):
+        assert format_duration(604800) == "1w"
+
+    def test_months_exact(self):
+        assert format_duration(86400 * 30) == "1mo"
+
+    def test_years_exact(self):
+        assert format_duration(86400 * 365) == "1y"
+
+    def test_fractional_hours(self):
+        assert format_duration(5400) == "1.50h"
+
+    def test_fractional_minutes(self):
+        assert format_duration(90) == "1.50m"
+
+    def test_large_seconds_shows_hours(self):
+        assert format_duration(7200) == "2h"
+
+    def test_large_days(self):
+        assert format_duration(172800) == "2d"
+
+    def test_fractional_seconds(self):
+        assert format_duration(0.5) == "0.50s"
+
+    def test_multiple_years(self):
+        assert format_duration(86400 * 365 * 2) == "2y"
+
+
+# ==================== Config duration integration ====================
+
+
+class TestCacheMetadataConfigDuration:
+    """Tests for CacheMetadataConfig duration fields."""
+
+    def test_default_ttl_string_resolves(self):
+        """default_ttl string overrides default_ttl_seconds."""
+        cfg = CacheMetadataConfig(default_ttl="6h")
+        assert cfg.default_ttl_seconds == 21600.0
+
+    def test_default_ttl_numeric_passthrough(self):
+        """default_ttl as int/float sets default_ttl_seconds."""
+        cfg = CacheMetadataConfig(default_ttl=7200)
+        assert cfg.default_ttl_seconds == 7200.0
+
+    def test_default_ttl_precedence(self):
+        """default_ttl takes precedence over default_ttl_seconds."""
+        cfg = CacheMetadataConfig(default_ttl="1h", default_ttl_seconds=9999)
+        assert cfg.default_ttl_seconds == 3600.0
+
+    def test_memory_cache_ttl_string_resolves(self):
+        """memory_cache_ttl string overrides memory_cache_ttl_seconds."""
+        cfg = CacheMetadataConfig(memory_cache_ttl="10m")
+        assert cfg.memory_cache_ttl_seconds == 600.0
+
+    def test_memory_cache_ttl_numeric_passthrough(self):
+        cfg = CacheMetadataConfig(memory_cache_ttl=120)
+        assert cfg.memory_cache_ttl_seconds == 120.0
+
+    def test_memory_cache_ttl_precedence(self):
+        """memory_cache_ttl takes precedence over memory_cache_ttl_seconds."""
+        cfg = CacheMetadataConfig(memory_cache_ttl="15m", memory_cache_ttl_seconds=9999)
+        assert cfg.memory_cache_ttl_seconds == 900.0
+
+    def test_default_unchanged_when_not_set(self):
+        """When neither is specified, defaults are preserved."""
+        cfg = CacheMetadataConfig()
+        assert cfg.default_ttl_seconds == 86400
+        assert cfg.memory_cache_ttl_seconds == 300
+
+    def test_legacy_seconds_still_works(self):
+        """Setting only the legacy field still works."""
+        cfg = CacheMetadataConfig(default_ttl_seconds=7200)
+        assert cfg.default_ttl_seconds == 7200
+
+    def test_invalid_duration_string_raises(self):
+        with pytest.raises(ValueError, match="Cannot parse duration"):
+            CacheMetadataConfig(default_ttl="10xyz")
+
+
+class TestCacheConfigDuration:
+    """Tests for CacheConfig duration kwargs."""
+
+    def test_default_ttl_kwarg(self):
+        cfg = CacheConfig(default_ttl="12h")
+        assert cfg.metadata.default_ttl_seconds == 43200.0
+
+    def test_memory_cache_ttl_kwarg(self):
+        cfg = CacheConfig(memory_cache_ttl="10m")
+        assert cfg.metadata.memory_cache_ttl_seconds == 600.0
+
+    def test_default_ttl_kwarg_precedence(self):
+        """default_ttl kwarg takes precedence over default_ttl_seconds."""
+        cfg = CacheConfig(default_ttl="2h", default_ttl_seconds=9999)
+        assert cfg.metadata.default_ttl_seconds == 7200.0
+
+    def test_legacy_default_ttl_seconds_kwarg(self):
+        """Legacy default_ttl_seconds kwarg still works alone."""
+        cfg = CacheConfig(default_ttl_seconds=1800)
+        assert cfg.metadata.default_ttl_seconds == 1800
+
+    def test_storage_mode_clears_ttl(self):
+        """Storage mode sets default_ttl_seconds to None even if default_ttl was set."""
+        cfg = CacheConfig(default_ttl="6h", storage_mode=True)
+        assert cfg.metadata.default_ttl_seconds is None
+        assert cfg.metadata.default_ttl is None
+
+
+# ==================== core.py get() with duration strings ====================
+
+
+class TestGetWithDurationString:
+    """Tests that get() accepts human-readable duration strings for ttl_seconds."""
+
+    @pytest.fixture
+    def cache(self, tmp_path):
+        config = CacheConfig(
+            cache_dir=str(tmp_path / "cache"),
+            metadata_backend="json",
+            default_ttl_seconds=86400,
+            cleanup_on_init=False,
+        )
+        config.security.enable_signing = False
+        cache = cacheness(config)
+        yield cache
+        cache.close()
+
+    def test_get_with_string_ttl(self, cache):
+        """get() with a duration string like '1h' should work."""
+        cache.put("hello", on={"key": "v1"})
+        result = cache.get(on={"key": "v1"}, ttl_seconds="1h")
+        assert result == "hello"
+
+    def test_get_with_short_string_ttl_expires(self, cache):
+        """get() with '0s' TTL should expire immediately (or very short)."""
+        import time
+
+        cache.put("hello", on={"key": "v2"})
+        time.sleep(0.01)
+        result = cache.get(on={"key": "v2"}, ttl_seconds="0s")
+        # 0s TTL means already expired
+        assert result is None
+
+
+# ==================== for_api() with duration strings ====================
+
+
+class TestForApiDurationString:
+    """Tests that UnifiedCache.for_api() accepts duration strings."""
+
+    def test_for_api_string_ttl(self, tmp_path):
+        cache = cacheness.for_api(cache_dir=str(tmp_path / "cache"), ttl_seconds="2h")
+        assert cache.config.metadata.default_ttl_seconds == 7200.0
+        cache.close()
+
+    def test_for_api_numeric_still_works(self, tmp_path):
+        cache = cacheness.for_api(cache_dir=str(tmp_path / "cache"), ttl_seconds=3600)
+        assert cache.config.metadata.default_ttl_seconds == 3600
         cache.close()

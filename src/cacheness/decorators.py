@@ -14,6 +14,7 @@ from typing import Any, Callable, Optional, Union, Dict, Tuple, Set, cast
 
 from .core import UnifiedCache, CacheConfig, _normalize_function_args
 from .serialization import create_unified_cache_key
+from .size_utils import parse_duration
 
 # Track decorator-created cache instances for cleanup
 _decorator_cache_instances: list[weakref.ref[UnifiedCache]] = []
@@ -112,7 +113,7 @@ class cached:
 
     def __init__(
         self,
-        ttl_seconds: Optional[float] = None,
+        ttl_seconds: Optional["float | str"] = None,
         key_prefix: Optional[str] = None,
         cache_instance: Optional[UnifiedCache] = None,
         key_func: Optional[Callable[[Callable, Tuple, Dict], str]] = None,
@@ -122,14 +123,17 @@ class cached:
         Initialize the caching decorator.
 
         Args:
-            ttl_seconds: Time-to-live in seconds (uses cache default if None).
+            ttl_seconds: Time-to-live in seconds or human-readable duration
+                (e.g. "6h", "30m"). Uses cache default if None.
                 Pass None explicitly to never expire.
             key_prefix: Prefix for cache keys (useful for versioning)
             cache_instance: Specific cache instance to use (creates default if None)
             key_func: Custom function for generating cache keys
             ignore_errors: If True, cache errors don't prevent function execution
         """
-        self.ttl_seconds = ttl_seconds
+        self.ttl_seconds = (
+            parse_duration(ttl_seconds) if isinstance(ttl_seconds, str) else ttl_seconds
+        )
 
         self.key_prefix = key_prefix
         self.cache_instance = cache_instance
@@ -300,7 +304,9 @@ class cached:
                 pass  # Ignore errors during cleanup
 
     @classmethod
-    def for_api(cls, ttl_seconds: float = 21600, ignore_errors: bool = True, **kwargs):
+    def for_api(
+        cls, ttl_seconds: "float | str" = 21600, ignore_errors: bool = True, **kwargs
+    ):
         """
         Decorator optimized for API requests.
 
@@ -356,7 +362,7 @@ class cache_if:
     def __init__(
         self,
         condition: Callable[[Any], bool],
-        ttl_seconds: Optional[float] = None,
+        ttl_seconds: Optional["float | str"] = None,
         key_prefix: Optional[str] = None,
         cache_instance: Optional[UnifiedCache] = None,
         key_func: Optional[Callable[[Callable, Tuple, Dict], str]] = None,
@@ -368,7 +374,8 @@ class cache_if:
         Args:
             condition: Function that receives the result and returns True if it
                 should be cached. Signature: condition(result) -> bool
-            ttl_seconds: Time-to-live in seconds (uses cache default if None).
+            ttl_seconds: Time-to-live in seconds or human-readable duration
+                (e.g. "6h", "30m"). Uses cache default if None.
                 Pass None explicitly to never expire.
             key_prefix: Prefix for cache keys (useful for versioning)
             cache_instance: Specific cache instance to use (creates default if None)
@@ -376,7 +383,9 @@ class cache_if:
             ignore_errors: If True, cache errors don't prevent function execution
         """
         self.condition = condition
-        self.ttl_seconds = ttl_seconds
+        self.ttl_seconds = (
+            parse_duration(ttl_seconds) if isinstance(ttl_seconds, str) else ttl_seconds
+        )
         self.key_prefix = key_prefix
         self.cache_instance = cache_instance
         self.key_func = key_func
