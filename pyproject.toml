@@ -73,6 +73,7 @@ dev = [
     "moto[s3]>=5.0.0",
     "hypothesis>=6.151.5",
     "beads-mcp>=0.1.0",
+    "pytest-xdist>=3.8.0",
 ]
 tensorflow = [
     "tensorflow>=2.0.0",
@@ -100,6 +101,8 @@ addopts = [
     "-ra",
     "-q", 
     "--strict-markers",
+    "-n", "auto",
+    "--dist", "loadgroup",
 ]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
@@ -111,6 +114,7 @@ markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests",
     "optional_deps: tests that require optional dependencies like polars/pandas",
+    "xdist_group: group tests to run on the same xdist worker",
 ]
 
 # Logging configuration — use WARNING to keep test output concise;

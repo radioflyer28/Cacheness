@@ -14,9 +14,12 @@ Coverage:
 - Concurrent access patterns
 """
 
+import pytest
 import numpy as np
 import pandas as pd
 from datetime import datetime
+
+pytestmark = pytest.mark.xdist_group("docker")
 
 
 # ==================== PostgreSQL Backend Tests ====================

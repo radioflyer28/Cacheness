@@ -114,9 +114,7 @@ class TestDunderMethods:
 
         # Each entry should be a dict with cache_key
         keys = {e["cache_key"] for e in entries}
-        expected_keys = {
-            cache._create_cache_key({"k": v}) for v in ("i1", "i2", "i3")
-        }
+        expected_keys = {cache._create_cache_key({"k": v}) for v in ("i1", "i2", "i3")}
         assert keys == expected_keys
 
     def test_iter_entry_has_expected_fields(self, cache):

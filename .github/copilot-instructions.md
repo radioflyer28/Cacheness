@@ -20,8 +20,10 @@ These constraints apply to EVERY task. Violating any of them is a bug.
 
 **Testing:**
 - **Full suite:** `uv run pytest tests/ -x -q --ignore=tests/test_tensorflow_handler.py`
+- **Sequential run:** `uv run pytest tests/ -x -q --ignore=tests/test_tensorflow_handler.py -p no:xdist` (disables parallel execution)
 - **Windows:** Always add `--ignore=tests/test_tensorflow_handler.py` — TF tests hang
-- **Baseline:** 1277 passed, 65 skipped, 0 failures
+- **Baseline:** 1335 passed, 64 skipped, 0 failures (~33s parallel, ~237s sequential)
+- **Parallel execution:** Enabled by default via `pytest-xdist` (`-n auto --dist loadgroup`). Tests sharing external resources (Docker PostgreSQL/S3) are grouped via `@pytest.mark.xdist_group("docker")`.
 - **Incremental testing:** During development, run only targeted tests (see [Test Suite](#test-suite) for details). Full suite runs only once — right before push.
 
 **Imports:**
@@ -174,7 +176,7 @@ uv run ruff check . && uv run ty check             # Phase 2
 
 ## Test Suite
 
-**Baseline:** 1277 passed, 65 skipped, 0 failures
+**Baseline:** 1335 passed, 64 skipped, 0 failures
 **Full command:** `uv run pytest tests/ -x -q --ignore=tests/test_tensorflow_handler.py`
 
 ### Incremental Testing Strategy
@@ -185,7 +187,7 @@ During development, use **tiered testing** to minimize feedback time:
 |------|------|-------------|------|
 | **Tier 1** | After each code change | Tests that directly exercise modified code | ~5-15s |
 | **Tier 2** | After all planned changes for rapid debug before full suite | Add tests for likely regression areas | ~30-60s |
-| **Full suite** | Once before push | All tests | ~5 min |
+| **Full suite** | Once before push | All tests | ~33s parallel |
 
 **Selecting Tier 1 tests:** Match changed source files to their primary test files:
 
