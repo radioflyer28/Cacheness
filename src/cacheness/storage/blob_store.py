@@ -458,6 +458,11 @@ class BlobStore:
         """
         Delete a blob and its metadata.
 
+        Uses metadata-first ordering: removes the metadata entry before
+        deleting the blob file.  This ensures a crash between the two steps
+        leaves an orphaned blob (harmless) rather than a dangling metadata
+        pointer (dangerous).
+
         Args:
             key: The blob key
 
@@ -469,7 +474,7 @@ class BlobStore:
             if entry is None:
                 return False
 
-            # Delete the file via blob backend
+            # Resolve blob path BEFORE removing metadata (need entry data)
             nested_meta = entry.get("metadata", {})
             actual_path_str = entry.get("actual_path") or nested_meta.get("actual_path")
             resolved = (
@@ -477,10 +482,19 @@ class BlobStore:
                 if actual_path_str
                 else str(self.cache_dir / key)
             )
-            self.blob_backend.delete_blob(resolved)
 
-            # Remove metadata
+            # Remove metadata first — crash here leaves entry intact (safe)
             self.backend.remove_entry(key)
+
+            # Delete blob second — crash here leaves orphaned blob (harmless,
+            # cleaned by verify_integrity)
+            try:
+                self.blob_backend.delete_blob(resolved)
+            except Exception as exc:
+                logger.warning(
+                    f"Failed to delete blob file for {key} at {resolved}: {exc}. "
+                    f"Orphaned blob will be cleaned by verify_integrity."
+                )
 
             logger.debug(f"Deleted blob: {key}")
             return True

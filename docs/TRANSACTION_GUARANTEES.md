@@ -20,16 +20,16 @@ What you can rely on when calling the Cacheness API:
 
 | Operation | Guarantee | Caveat |
 |-----------|-----------|--------|
-| **`put()`** | Data is either fully stored or not stored at all. | On crash between blob write and metadata write, an orphaned blob may remain (harmless, cleaned by `verify_integrity`). Duplicate keys silently overwrite (`INSERT OR REPLACE`). |
-| **`get()`** | Returns the stored value or `None`. | **Destructive on corruption:** if the blob is missing or corrupt, `get()` auto-deletes the metadata entry and returns `None`. Transient I/O errors are re-raised without deleting. |
+| **`put()`** | Data is either fully stored or not stored at all. | On crash between blob write and metadata write, an orphaned blob may remain (harmless, cleaned by `verify_integrity`). Duplicate keys silently overwrite — old blob is cleaned up if the file path changes. |
+| **`get()`** | Returns the stored value or `None`. | **Destructive on corruption:** if the blob is missing or corrupt, `get()` auto-deletes both the blob file and metadata entry, then returns `None`. Transient I/O errors are re-raised without deleting. |
 | **`update_data()`** | Old value remains readable until the new value is fully written. | Uses a staging path — the old entry is valid until metadata swaps to the new blob. Old blob deletion is best-effort. |
-| **`invalidate()`** | Entry is removed. | On crash between blob and metadata deletion, a dangling pointer may remain. The next `get()` self-heals it. |
+| **`invalidate()`** | Entry is removed. | Uses metadata-first ordering. On crash between steps, an orphaned blob may remain (harmless, cleaned by `verify_integrity`). |
 | **`verify_integrity()`** | Detects and optionally repairs all inconsistencies. | Scans all entries — not for hot paths. |
 
 **Key behaviors to know:**
-- **`get()` is destructive on errors** — it deletes entries with missing or corrupt blobs (except transient I/O errors). This is intentional self-healing, not a bug.
-- **Duplicate keys overwrite** — calling `put()` with a key that already exists silently replaces the entry.
-- **No cross-layer atomicity** — blob storage and metadata are two independent atomic operations. Crashes between them are handled by self-healing reads and `verify_integrity`.
+- **`get()` is destructive on errors** — it deletes both the blob file and metadata entry for corrupt/missing blobs (except transient I/O errors). This is intentional self-healing, not a bug.
+- **Duplicate keys overwrite** — calling `put()` with a key that already exists silently replaces the entry. If the data type changes (different file extension), the old blob is cleaned up.
+- **No cross-layer atomicity** — blob storage and metadata are two independent atomic operations. All operations are ordered so that crashes can only produce harmless orphaned blobs, never dangling metadata pointers.
 
 ### Storage Mode Differences
 
@@ -72,7 +72,7 @@ These two layers are **not wrapped in a single transaction**. Each operation per
 
 **Key invariant:** A blob without metadata is a harmless orphan (cleaned up by `verify_integrity`). Metadata pointing to a missing blob is a **dangling pointer** — the dangerous failure mode.
 
-**Write operations** (`put`, `update_data`) use blob-first ordering, so crashes can only produce harmless orphans, never dangling pointers. **Delete operations** (`invalidate`) use blob-first ordering too, which means a crash *can* leave a dangling pointer — but the next `get()` call self-heals it automatically.
+**All operations** are ordered so that crashes can only produce **orphaned blobs** (harmless), never **dangling pointers** (data loss). Write operations (`put`, `update_data`) write the blob first, then metadata. Delete operations (`invalidate`) remove metadata first, then delete the blob. Both orderings guarantee that the only possible crash artifact is an orphaned blob.
 
 ## Per-Backend Guarantees
 
@@ -122,7 +122,7 @@ These two layers are **not wrapped in a single transaction**. Each operation per
 3. Deserialize blob → Python object   (in-memory)
 ```
 
-**Self-healing (destructive on errors):** If step 2 fails (blob missing or corrupt), `get()` **automatically deletes the metadata entry** and returns `None`. This means a read can mutate state — it is the primary recovery mechanism for dangling pointers, but callers should be aware that a failed `get()` permanently removes the entry. Transient I/O errors are the exception — they are re-raised without deleting.
+**Self-healing (destructive on errors):** If step 2 fails (blob missing or corrupt), `get()` **automatically deletes both the blob file and metadata entry**, then returns `None`. This means a read can mutate state — it is the primary recovery mechanism for dangling pointers, but callers should be aware that a failed `get()` permanently removes the entry. Transient I/O errors are the exception — they are re-raised without deleting.
 
 ### `update_data()` — Modify Existing Entry
 
@@ -144,13 +144,12 @@ This is the most complex operation, using a **write-then-swap** pattern:
 
 ```
 1. Look up metadata by key            ← Metadata layer (read)
-2. Delete blob from storage            ← Blob layer (atomic)
+2. Resolve blob path from entry       (in-memory)
 3. Remove metadata entry               ← Metadata layer (atomic)
+4. Delete blob from storage            ← Blob layer (best-effort)
 ```
 
-**Failure window:** Between steps 2 and 3, a crash leaves metadata pointing to a deleted blob (dangling pointer). This is the **one operation where blob-first ordering creates the dangerous state**. However, the next `get()` call will self-heal by detecting the missing blob and removing the stale metadata.
-
-> **Design note:** Reversing the order (metadata-first) would leave an orphaned blob instead, which is safer on crash. However, it would also create a window where the blob exists but is unreachable — and if the metadata delete succeeds but blob delete fails, the orphan is permanent. The current ordering prioritizes the common case (no crash) where self-healing handles the rare failure.
+**Metadata-first ordering:** Metadata is removed before the blob is deleted. A crash between steps 3 and 4 leaves an orphaned blob (harmless — cleaned by `verify_integrity`), never a dangling pointer. Blob deletion is best-effort — if it fails, a warning is logged and the orphan remains for `verify_integrity` to clean up.
 
 ### `verify_integrity()` — Audit & Repair
 
@@ -215,8 +214,8 @@ The effective guarantees depend on which blob + metadata backends are paired:
 | Crash during `update_data()` step 2 (staging write) | Orphaned staging blob | `verify_integrity(repair=True)` cleans orphan |
 | Crash during `update_data()` step 3 (metadata swap) | Old entry still valid OR new entry in place | Either state is consistent |
 | Crash during `update_data()` step 4 (old blob delete) | Old blob orphaned, new entry valid | `verify_integrity(repair=True)` cleans orphan |
-| Crash during `delete()` step 2 (blob delete) | **Dangling pointer** — blob gone, metadata present | `get()` self-heals (removes stale metadata) |
-| Crash during `delete()` step 3 (metadata delete) | Both gone | Clean state |
+| Crash during `delete()` step 3 (metadata remove) | Orphaned blob, no metadata | `verify_integrity(repair=True)` cleans orphan |
+| Crash during `delete()` step 4 (blob delete) | Both gone or orphaned blob | Clean state or `verify_integrity` cleans orphan |
 | JSON backend: crash during file rewrite | **Corrupt metadata file** | Manual recovery required |
 | SQLite backend: crash during write | WAL rollback restores last consistent state | Automatic |
 | PostgreSQL: crash during write | Transaction rollback | Automatic |

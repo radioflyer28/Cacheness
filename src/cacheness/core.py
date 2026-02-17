@@ -1171,6 +1171,14 @@ class UnifiedCache:
         base_file_path = self._get_cache_file_path(cache_key)
         cleanup = _PutCleanup()
 
+        # Save old blob path before overwriting — if the data type changes,
+        # the new blob may use a different file extension, orphaning the old one
+        old_blob_path: Optional[str] = None
+        existing = self.metadata_backend.get_entry(cache_key)
+        if existing:
+            old_meta = existing.get("metadata", {})
+            old_blob_path = old_meta.get("actual_path")
+
         try:
             handler, result, file_hash = self._blob_store._write_blob(
                 data, base_file_path, compute_hash=True
@@ -1216,6 +1224,27 @@ class UnifiedCache:
                     logger.warning(f"Failed to sign entry {cache_key}: {e}")
 
             self.metadata_backend.put_entry(cache_key, entry_data)
+
+            # Clean up old blob if the path changed (e.g., type change:
+            # .parquet → .pkl.lz4).  Best-effort — failure just leaves
+            # an orphan for verify_integrity to clean.
+            new_actual_path = result.get("actual_path", str(base_file_path))
+            if old_blob_path and old_blob_path != new_actual_path:
+                try:
+                    if "://" in old_blob_path:
+                        self._blob_store.blob_backend.delete_blob(old_blob_path)
+                    else:
+                        old_resolved = self._resolve_actual_path(old_blob_path)
+                        if isinstance(old_resolved, Path) and old_resolved.exists():
+                            old_resolved.unlink()
+                    logger.debug(
+                        f"Cleaned up old blob for {cache_key}: {old_blob_path}"
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        f"Failed to clean up old blob for {cache_key} "
+                        f"at {old_blob_path}: {exc}"
+                    )
 
             logger.debug(f"Stored {handler.data_type} {cache_key} (storage mode)")
             cleanup.commit()
@@ -1417,6 +1446,14 @@ class UnifiedCache:
             base_file_path = self._get_cache_file_path(cache_key)
             cleanup = _PutCleanup()
 
+            # Save old blob path before overwriting — if the data type changes,
+            # the new blob may use a different file extension, orphaning the old one
+            old_blob_path: Optional[str] = None
+            existing = self.metadata_backend.get_entry(cache_key)
+            if existing:
+                old_meta = existing.get("metadata", {})
+                old_blob_path = old_meta.get("actual_path")
+
             try:
                 # Delegate file I/O + handler dispatch to BlobStore
                 handler, result, file_hash = self._blob_store._write_blob(
@@ -1501,6 +1538,27 @@ class UnifiedCache:
                         # Continue without signature for backward compatibility
 
                 self.metadata_backend.put_entry(cache_key, entry_data)
+
+                # Clean up old blob if the path changed (e.g., type change:
+                # .parquet → .pkl.lz4).  Best-effort — failure just leaves
+                # an orphan for verify_integrity to clean.
+                new_actual_path = result.get("actual_path", str(base_file_path))
+                if old_blob_path and old_blob_path != new_actual_path:
+                    try:
+                        if "://" in old_blob_path:
+                            self._blob_store.blob_backend.delete_blob(old_blob_path)
+                        else:
+                            old_resolved = self._resolve_actual_path(old_blob_path)
+                            if isinstance(old_resolved, Path) and old_resolved.exists():
+                                old_resolved.unlink()
+                        logger.debug(
+                            f"Cleaned up old blob for {cache_key}: {old_blob_path}"
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            f"Failed to clean up old blob for {cache_key} "
+                            f"at {old_blob_path}: {exc}"
+                        )
 
                 # Handle custom metadata if provided
                 if custom_metadata and self._supports_custom_metadata():
@@ -1591,7 +1649,7 @@ class UnifiedCache:
                                 f"stored hash {stored_hash} != current hash {current_hash}. "
                                 f"Removing corrupted cache entry."
                             )
-                            self.metadata_backend.remove_entry(cache_key)
+                            self._blob_store.delete(cache_key)
                             self._record_miss()
                             return None
 
@@ -1614,7 +1672,7 @@ class UnifiedCache:
                                     f"Entry signature verification failed for {cache_key}. "
                                     f"Removing potentially tampered cache entry."
                                 )
-                                self.metadata_backend.remove_entry(cache_key)
+                                self._blob_store.delete(cache_key)
                                 self._record_miss()
                                 return None
                             else:
@@ -1629,7 +1687,7 @@ class UnifiedCache:
                             f"Entry {cache_key} has no signature but unsigned entries are not allowed. "
                             f"Removing entry."
                         )
-                        self.metadata_backend.remove_entry(cache_key)
+                        self._blob_store.delete(cache_key)
                         self._record_miss()
                         return None
 
@@ -1644,7 +1702,8 @@ class UnifiedCache:
                 return data
 
             except FileNotFoundError as e:
-                # Cache file was deleted externally — permanent, clean up metadata
+                # Cache file was deleted externally — blob already gone,
+                # just clean up metadata (no blob to delete)
                 logger.warning(f"Cache file missing for {cache_key}: {e}")
                 self.metadata_backend.remove_entry(cache_key)
                 self._record_miss()
@@ -1657,11 +1716,11 @@ class UnifiedCache:
                 return None
             except Exception as e:
                 # Unexpected errors (deserialization failures, corruption, etc.)
-                # These are likely permanent — clean up the metadata entry
+                # These are likely permanent — clean up blob and metadata
                 logger.warning(
                     f"Failed to load cached {data_type} {cache_key}: {type(e).__name__}: {e}"
                 )
-                self.metadata_backend.remove_entry(cache_key)
+                self._blob_store.delete(cache_key)
                 self._record_miss()
                 return None
 
@@ -1767,7 +1826,7 @@ class UnifiedCache:
                                 f"stored hash {stored_hash} != current hash {current_hash}. "
                                 f"Removing corrupted cache entry."
                             )
-                            self.metadata_backend.remove_entry(cache_key)
+                            self._blob_store.delete(cache_key)
                             self._record_miss()
                             return None
 
@@ -1790,7 +1849,7 @@ class UnifiedCache:
                                     f"Entry signature verification failed for {cache_key}. "
                                     f"Removing potentially tampered cache entry."
                                 )
-                                self.metadata_backend.remove_entry(cache_key)
+                                self._blob_store.delete(cache_key)
                                 self._record_miss()
                                 return None
                             else:
@@ -1805,7 +1864,7 @@ class UnifiedCache:
                             f"Entry {cache_key} has no signature but unsigned entries are not allowed. "
                             f"Removing entry."
                         )
-                        self.metadata_backend.remove_entry(cache_key)
+                        self._blob_store.delete(cache_key)
                         self._record_miss()
                         return None
 
@@ -1823,7 +1882,8 @@ class UnifiedCache:
                 return (data, entry)
 
             except FileNotFoundError as e:
-                # Cache file was deleted externally — permanent, clean up metadata
+                # Cache file was deleted externally — blob already gone,
+                # just clean up metadata (no blob to delete)
                 logger.warning(f"Cache file missing for {cache_key}: {e}")
                 self.metadata_backend.remove_entry(cache_key)
                 self._record_miss()
@@ -1836,11 +1896,11 @@ class UnifiedCache:
                 return None
             except Exception as e:
                 # Unexpected errors (deserialization failures, corruption, etc.)
-                # These are likely permanent — clean up the metadata entry
+                # These are likely permanent — clean up blob and metadata
                 logger.warning(
                     f"Failed to load cached {data_type} {cache_key}: {type(e).__name__}: {e}"
                 )
-                self.metadata_backend.remove_entry(cache_key)
+                self._blob_store.delete(cache_key)
                 self._record_miss()
                 return None
 
