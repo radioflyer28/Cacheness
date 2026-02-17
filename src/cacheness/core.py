@@ -19,7 +19,7 @@ from .config import CacheConfig, _DEFAULT_TTL, create_cache_config
 from .handlers import HandlerRegistry
 from .metadata import DEFAULT_NAMESPACE
 from .serialization import create_unified_cache_key
-from .size_utils import format_size, parse_duration
+from .size_utils import format_size, resolve_ttl
 from .storage.paths import resolve_actual_path
 
 logger = logging.getLogger(__name__)
@@ -1038,8 +1038,7 @@ class UnifiedCache:
 
         Args:
             cache_key: The cache key to check
-            ttl_seconds: TTL in seconds, or a human-readable duration string
-                (e.g. "6h", "30m"). None means never expire.
+            ttl_seconds: TTL in seconds (numeric). None means never expire.
                 Use _DEFAULT_TTL sentinel to fall back to config default.
         """
         entry = self.metadata_backend.get_entry(cache_key)
@@ -1054,11 +1053,12 @@ class UnifiedCache:
             if ttl_seconds is None:
                 return False  # Config says never expire
 
-        # Parse human-readable duration strings
-        if isinstance(ttl_seconds, str):
-            ttl_seconds = parse_duration(ttl_seconds)
-
         # Type guard to ensure ttl is numeric
+        if isinstance(ttl_seconds, str):
+            raise TypeError(
+                f'ttl_seconds must be numeric, got string "{ttl_seconds}". '
+                f'Use ttl="{ttl_seconds}" for duration strings.'
+            )
         assert isinstance(ttl_seconds, (int, float)), (
             f"TTL must be numeric, got {type(ttl_seconds)}"
         )
@@ -1596,7 +1596,8 @@ class UnifiedCache:
         self,
         cache_key: Optional[str] = None,
         on: Optional[Dict] = None,
-        ttl_seconds: Optional["float | str"] = None,
+        ttl: Optional[str] = None,
+        ttl_seconds: Optional[float] = None,
         hash_key: Optional[str] = None,
         **kwargs,
     ) -> Optional[Any]:
@@ -1608,15 +1609,20 @@ class UnifiedCache:
             hash_key: Alias for cache_key (storage-oriented name).
             on: Dictionary of key parameters for cache key derivation.
                 Use this to avoid namespace collisions with cache control
-                parameters like ttl_seconds, etc.
-            ttl_seconds: Custom TTL in seconds or human-readable duration
-                (e.g. "6h", "30m"). Overrides default. None = never expire.
+                parameters like ttl, ttl_seconds, etc.
+            ttl: TTL as a human-readable duration string (e.g. "6h", "2d").
+                Overrides default. Mutually exclusive with ``ttl_seconds``.
+            ttl_seconds: TTL in seconds (numeric only). Overrides default.
+                Mutually exclusive with ``ttl``. None = never expire.
             **kwargs: Parameters identifying the cached data (legacy, use 'on' instead)
 
         Returns:
             Cached data or None if not found/expired
         """
         with self._lock:
+            resolved_ttl = resolve_ttl(
+                ttl, ttl_seconds, _param_owner="UnifiedCache.get"
+            )
             cache_key = self._resolve_hash_key_alias(cache_key, hash_key)
             cache_key = self._resolve_cache_key(cache_key, on, kwargs)
 
@@ -1625,7 +1631,7 @@ class UnifiedCache:
 
             # Check if entry exists and is not expired
             entry = self.metadata_backend.get_entry(cache_key)
-            if not entry or self._is_expired(cache_key, ttl_seconds):
+            if not entry or self._is_expired(cache_key, resolved_ttl):
                 self._record_miss()
                 return None
 
@@ -2835,7 +2841,8 @@ class UnifiedCache:
     def for_api(
         cls,
         cache_dir: Optional[str] = None,
-        ttl_seconds: "float | str" = 21600,  # 6 hours
+        ttl: Optional[str] = None,
+        ttl_seconds: Optional[float] = None,
         ignore_errors: bool = True,
         **kwargs,
     ) -> "UnifiedCache":
@@ -2849,14 +2856,15 @@ class UnifiedCache:
 
         Args:
             cache_dir: Cache directory (default: ./cache)
-            ttl_seconds: Time-to-live in seconds or human-readable duration
-                (e.g. "6h", "30m"). Default: 21600 = 6 hours.
+            ttl: TTL as a human-readable duration string (e.g. "6h").
+                Mutually exclusive with ``ttl_seconds``.
+            ttl_seconds: TTL in seconds (numeric only). Default: 21600 = 6 hours.
+                Mutually exclusive with ``ttl``.
             ignore_errors: Continue on cache errors
             **kwargs: Additional config options
         """
-        ttl_value = (
-            parse_duration(ttl_seconds) if isinstance(ttl_seconds, str) else ttl_seconds
-        )
+        resolved = resolve_ttl(ttl, ttl_seconds, _param_owner="UnifiedCache.for_api")
+        ttl_value = resolved if resolved is not None else 21600
         config = create_cache_config(
             cache_dir=cache_dir or "./cache",
             default_ttl_seconds=ttl_value,

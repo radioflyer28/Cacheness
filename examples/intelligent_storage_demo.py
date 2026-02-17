@@ -30,14 +30,14 @@ class UserProfile:
     prefs: dict
 
 
-@cached(ttl_seconds="12h")
+@cached(ttl="12h")
 def load_profile(user_id):
     """Custom object → pickle."""
     print("  Building profile...")
     return UserProfile(user_id, f"User {user_id}", {"theme": "dark"})
 
 
-@cached(ttl_seconds="1d")
+@cached(ttl="1d")
 def make_report(department):
     """DataFrame → parquet."""
     print("  Generating report...")
@@ -50,14 +50,14 @@ def make_report(department):
     )
 
 
-@cached(ttl_seconds="6h")
+@cached(ttl="6h")
 def compute_matrix(size):
     """NumPy array → blosc."""
     print("  Computing matrix...")
     return np.random.random((size, size))
 
 
-@cached.for_api(ttl_seconds="4h")
+@cached.for_api(ttl="4h")
 def fetch_items(endpoint):
     """Dict/JSON → LZ4."""
     print("  Fetching items...")

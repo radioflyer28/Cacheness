@@ -49,7 +49,7 @@ print(data)  # {"results": [1, 2, 3]}
 ```python
 from cacheness import cached
 
-@cached(ttl_seconds="24h")
+@cached(ttl="24h")
 def expensive_computation(n):
     """This function will be automatically cached."""
     import time
@@ -159,7 +159,7 @@ cached_df = cache.get(source="transactions", date_range="2024_q1")
 
 ```python
 # Cache function results with TTL
-@cached(ttl_seconds="6h")
+@cached(ttl="6h")
 def fetch_weather_data(city, units="metric"):
     return api_call(f"weather/{city}", units=units)
 

@@ -24,7 +24,7 @@ from sklearn.model_selection import train_test_split
 from cacheness import cached
 
 
-@cached(ttl_seconds="2d")
+@cached(ttl="2d")
 def create_dataset(n_samples=1000, n_features=20, seed=42):
     """Generate a synthetic classification dataset."""
     print("  Creating dataset...")
@@ -37,7 +37,7 @@ def create_dataset(n_samples=1000, n_features=20, seed=42):
     return pd.DataFrame(X), pd.Series(y)
 
 
-@cached(ttl_seconds="1w")
+@cached(ttl="1w")
 def train_model(X_train, y_train, n_estimators=100, seed=42):
     """Train a Random Forest classifier."""
     print("  Training model...")
@@ -46,7 +46,7 @@ def train_model(X_train, y_train, n_estimators=100, seed=42):
     return model
 
 
-@cached(ttl_seconds="1d")
+@cached(ttl="1d")
 def evaluate(model, X_test, y_test):
     """Compute accuracy on the test set."""
     print("  Evaluating model...")

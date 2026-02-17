@@ -13,7 +13,7 @@ Usage:
 from cacheness import cached
 
 
-@cached(ttl_seconds="1h")
+@cached(ttl="1h")
 def expensive_computation(n):
     """Simulate a slow computation."""
     print(f"  Computing fib({n})...")
@@ -23,7 +23,7 @@ def expensive_computation(n):
     return a
 
 
-@cached.for_api(ttl_seconds="6h")
+@cached.for_api(ttl="6h")
 def fetch_user(user_id):
     """Simulate an API call — for_api adds error handling."""
     print(f"  Fetching user {user_id} from API...")

@@ -224,6 +224,54 @@ def parse_duration(value: str | int | float) -> float:
         ) from None
 
 
+def resolve_ttl(
+    ttl: "str | None" = None,
+    ttl_seconds: "float | int | None" = None,
+    *,
+    _param_owner: str = "",
+) -> "float | None":
+    """Resolve ``ttl`` / ``ttl_seconds`` into a numeric seconds value.
+
+    Rules:
+    - ``ttl`` accepts a human-readable duration string (``"6h"``, ``"2d"``).
+    - ``ttl_seconds`` accepts a numeric value (int or float) only.
+    - Passing **both** raises ``ValueError``.
+    - Passing a *string* to ``ttl_seconds`` raises ``TypeError`` with a
+      helpful message telling the caller to use ``ttl=`` instead.
+    - If neither is provided, returns ``None`` (meaning "use the default").
+
+    Args:
+        ttl: Human-readable duration string.
+        ttl_seconds: Numeric TTL in seconds.
+        _param_owner: Optional context string for error messages
+            (e.g. ``"@cached"``).
+
+    Returns:
+        Resolved TTL in seconds, or ``None`` when both inputs are ``None``.
+    """
+    ctx = f" in {_param_owner}" if _param_owner else ""
+
+    # Guard: ttl_seconds must be numeric if provided
+    if ttl_seconds is not None and isinstance(ttl_seconds, str):
+        raise TypeError(
+            f"ttl_seconds{ctx} must be numeric (int/float). "
+            f'Use ttl="{ttl_seconds}" for duration strings.'
+        )
+
+    # Guard: mutually exclusive
+    if ttl is not None and ttl_seconds is not None:
+        raise ValueError(
+            f"Cannot specify both ttl and ttl_seconds{ctx}. "
+            f"Use ttl for duration strings or ttl_seconds for numeric values."
+        )
+
+    if ttl is not None:
+        return parse_duration(ttl)
+    if ttl_seconds is not None:
+        return float(ttl_seconds)
+    return None
+
+
 def format_duration(seconds: float) -> str:
     """Format seconds as a concise human-readable duration string.
 

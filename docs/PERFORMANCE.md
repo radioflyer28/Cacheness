@@ -377,7 +377,7 @@ api_config = CacheConfig(
 # Use with decorators for maximum performance
 from cacheness import cached
 
-@cached(cache_instance=cacheness(api_config), ttl_seconds="1h")
+@cached(cache_instance=cacheness(api_config), ttl="1h")
 def fetch_api_data(endpoint, params):
     # Fast caching with minimal overhead
     return api_call(endpoint, params)
@@ -542,7 +542,7 @@ class PerformanceTracker:
 tracker = PerformanceTracker()
 
 # Measure cache performance
-@cached(ttl_seconds="24h")
+@cached(ttl="24h")
 def expensive_computation(data):
     time.sleep(1)  # Simulate work
     return len(data)
@@ -586,13 +586,13 @@ cache.put(model, proj="customer", model="xgb", ver="2.1")
 
 ```python
 # Different TTL for different data types
-@cached(ttl_seconds="1h")
+@cached(ttl="1h")
 def get_stock_price(symbol): pass
 
-@cached(ttl_seconds="24h")
+@cached(ttl="24h")
 def get_weather_forecast(city): pass
 
-@cached(ttl_seconds="1w")
+@cached(ttl="1w")
 def train_ml_model(data): pass
 
 @cached(ttl_seconds=None)      # Permanent: reference data

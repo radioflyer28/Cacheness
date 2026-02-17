@@ -277,12 +277,13 @@ with cacheness() as cache:
 
 #### Factory Methods
 
-##### `cacheness.for_api(cache_dir=None, ttl_seconds="6h", **kwargs)`
+##### `cacheness.for_api(cache_dir=None, ttl="6h", **kwargs)`
 Create a cache instance optimized for API requests.
 
 **Parameters:**
 - `cache_dir` (Optional[str]): Cache directory (default: "./cache")
-- `ttl_seconds` (str|int): Default TTL — duration string (`"6h"`) or seconds (default: `"6h"`)
+- `ttl` (Optional[str]): TTL as a duration string (e.g., `"6h"`, `"30m"`) — default: `"6h"`
+- `ttl_seconds` (Optional[float]): TTL in seconds (mutually exclusive with `ttl`)
 - `**kwargs`: Additional configuration options
 
 **Returns:**
@@ -290,7 +291,7 @@ Create a cache instance optimized for API requests.
 
 **Example:**
 ```python
-api_cache = cacheness.for_api(cache_dir="./api_cache", ttl_seconds="4h")
+api_cache = cacheness.for_api(cache_dir="./api_cache", ttl="4h")
 api_cache.put({"users": [...]}, endpoint="users", version="v1")
 ```
 
@@ -824,6 +825,7 @@ Decorator for caching function results with intelligent TTL management.
 ```python
 def cached(
     cache_instance: Optional[cacheness] = None,
+    ttl: Optional[str] = None,
     ttl_seconds: Optional[float] = None,
     cache_key_prefix: Optional[str] = None,
     include_defaults: bool = True,
@@ -833,14 +835,15 @@ def cached(
 
 **Parameters:**
 - `cache_instance` (Optional[cacheness]): Cache instance to use (uses global if None)
-- `ttl_seconds` (Optional[float]): Time-to-live in seconds
+- `ttl` (Optional[str]): TTL as a duration string (e.g., `"24h"`, `"30m"`)
+- `ttl_seconds` (Optional[float]): TTL in seconds (mutually exclusive with `ttl`)
 - `cache_key_prefix` (Optional[str]): Prefix for cache keys
 - `include_defaults` (bool): Whether to include default parameter values in cache key
 - `metadata` (Optional[dict]): Custom metadata to store with cached results
 
 **Example:**
 ```python
-@cached(ttl_seconds="24h", cache_key_prefix="weather")
+@cached(ttl="24h", cache_key_prefix="weather")
 def get_weather(city: str, units: str = "metric"):
     return fetch_weather_api(city, units)
 
@@ -856,14 +859,15 @@ weather = get_weather("London")  # Cache hit - returns cached result
 Decorator optimized for API requests with error handling.
 
 ```python
-@cached.for_api(ttl_seconds="6h", ignore_errors=True)
+@cached.for_api(ttl="6h", ignore_errors=True)
 def fetch_user_data(user_id):
     response = requests.get(f"/api/users/{user_id}")
     return response.json()
 ```
 
 **Parameters:**
-- `ttl_seconds` (int): Time-to-live in seconds (default: 21600 = 6 hours)
+- `ttl` (Optional[str]): TTL as a duration string (e.g., `"6h"`) — default: `"6h"`
+- `ttl_seconds` (Optional[float]): TTL in seconds (mutually exclusive with `ttl`; default: 21600)
 - `ignore_errors` (bool): Continue on cache errors (default: True)
 - Uses LZ4 compression optimized for JSON/text data
 
@@ -875,6 +879,7 @@ Conditional caching decorator that only caches when a condition is met.
 def cache_if(
     condition: Callable[[Any], bool],
     cache_instance: Optional[cacheness] = None,
+    ttl: Optional[str] = None,
     ttl_seconds: Optional[float] = None,
     **kwargs
 ) -> Callable
@@ -886,7 +891,7 @@ def cache_if(
 
 **Example:**
 ```python
-@cache_if(lambda result: result['status'] == 'success', ttl_seconds="1h")
+@cache_if(lambda result: result['status'] == 'success', ttl="1h")
 def api_call(endpoint):
     response = requests.get(endpoint)
     return response.json()
@@ -898,7 +903,7 @@ Async version of the cached decorator.
 
 **Example:**
 ```python
-@cache_async(ttl_seconds="2h")
+@cache_async(ttl="2h")
 async def fetch_data(url: str):
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as response:
@@ -1111,7 +1116,7 @@ config = CacheConfig(
 set_default_cache(cacheness(config))
 
 # Now all @cached decorators use this configuration
-@cached(ttl_seconds="2h")
+@cached(ttl="2h")
 def my_function():
     return expensive_computation()
 ```

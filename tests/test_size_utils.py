@@ -592,11 +592,51 @@ class TestCacheConfigDuration:
         assert cfg.metadata.default_ttl is None
 
 
+# ==================== resolve_ttl helper ====================
+
+
+class TestResolveTtl:
+    """Tests for the resolve_ttl() helper function."""
+
+    def test_ttl_string_resolved(self):
+        from cacheness.size_utils import resolve_ttl
+
+        assert resolve_ttl(ttl="6h") == 21600.0
+
+    def test_ttl_seconds_numeric(self):
+        from cacheness.size_utils import resolve_ttl
+
+        assert resolve_ttl(ttl_seconds=3600) == 3600.0
+
+    def test_neither_returns_none(self):
+        from cacheness.size_utils import resolve_ttl
+
+        assert resolve_ttl() is None
+
+    def test_both_raises_value_error(self):
+        from cacheness.size_utils import resolve_ttl
+
+        with pytest.raises(ValueError, match="Cannot specify both"):
+            resolve_ttl(ttl="6h", ttl_seconds=3600)
+
+    def test_ttl_seconds_string_raises_type_error(self):
+        from cacheness.size_utils import resolve_ttl
+
+        with pytest.raises(TypeError, match="ttl_seconds.*must be numeric"):
+            resolve_ttl(ttl_seconds="6h")
+
+    def test_context_in_error_message(self):
+        from cacheness.size_utils import resolve_ttl
+
+        with pytest.raises(TypeError, match="@cached"):
+            resolve_ttl(ttl_seconds="1h", _param_owner="@cached")
+
+
 # ==================== core.py get() with duration strings ====================
 
 
 class TestGetWithDurationString:
-    """Tests that get() accepts human-readable duration strings for ttl_seconds."""
+    """Tests that get() accepts the ``ttl`` parameter for duration strings."""
 
     @pytest.fixture
     def cache(self, tmp_path):
@@ -611,31 +651,49 @@ class TestGetWithDurationString:
         yield cache
         cache.close()
 
-    def test_get_with_string_ttl(self, cache):
-        """get() with a duration string like '1h' should work."""
+    def test_get_with_ttl_string(self, cache):
+        """get(ttl='1h') should work."""
         cache.put("hello", on={"key": "v1"})
-        result = cache.get(on={"key": "v1"}, ttl_seconds="1h")
+        result = cache.get(on={"key": "v1"}, ttl="1h")
         assert result == "hello"
 
-    def test_get_with_short_string_ttl_expires(self, cache):
-        """get() with '0s' TTL should expire immediately (or very short)."""
+    def test_get_with_short_ttl_string_expires(self, cache):
+        """get(ttl='0s') should expire immediately."""
         import time
 
         cache.put("hello", on={"key": "v2"})
         time.sleep(0.01)
-        result = cache.get(on={"key": "v2"}, ttl_seconds="0s")
+        result = cache.get(on={"key": "v2"}, ttl="0s")
         # 0s TTL means already expired
         assert result is None
+
+    def test_get_ttl_seconds_rejects_string(self, cache):
+        """get(ttl_seconds='1h') should raise TypeError."""
+        cache.put("hello", on={"key": "v3"})
+        with pytest.raises(TypeError, match="ttl_seconds.*must be numeric"):
+            cache.get(on={"key": "v3"}, ttl_seconds="1h")
+
+    def test_get_ttl_and_ttl_seconds_mutually_exclusive(self, cache):
+        """get(ttl='1h', ttl_seconds=3600) should raise ValueError."""
+        cache.put("hello", on={"key": "v4"})
+        with pytest.raises(ValueError, match="Cannot specify both"):
+            cache.get(on={"key": "v4"}, ttl="1h", ttl_seconds=3600)
+
+    def test_get_ttl_seconds_numeric_still_works(self, cache):
+        """get(ttl_seconds=3600) with numeric value should still work."""
+        cache.put("hello", on={"key": "v5"})
+        result = cache.get(on={"key": "v5"}, ttl_seconds=3600)
+        assert result == "hello"
 
 
 # ==================== for_api() with duration strings ====================
 
 
 class TestForApiDurationString:
-    """Tests that UnifiedCache.for_api() accepts duration strings."""
+    """Tests that UnifiedCache.for_api() accepts duration strings via ``ttl``."""
 
-    def test_for_api_string_ttl(self, tmp_path):
-        cache = cacheness.for_api(cache_dir=str(tmp_path / "cache"), ttl_seconds="2h")
+    def test_for_api_ttl_string(self, tmp_path):
+        cache = cacheness.for_api(cache_dir=str(tmp_path / "cache"), ttl="2h")
         assert cache.config.metadata.default_ttl_seconds == 7200.0
         cache.close()
 
@@ -643,3 +701,13 @@ class TestForApiDurationString:
         cache = cacheness.for_api(cache_dir=str(tmp_path / "cache"), ttl_seconds=3600)
         assert cache.config.metadata.default_ttl_seconds == 3600
         cache.close()
+
+    def test_for_api_ttl_seconds_rejects_string(self, tmp_path):
+        with pytest.raises(TypeError, match="ttl_seconds.*must be numeric"):
+            cacheness.for_api(cache_dir=str(tmp_path / "cache"), ttl_seconds="2h")
+
+    def test_for_api_ttl_and_ttl_seconds_mutually_exclusive(self, tmp_path):
+        with pytest.raises(ValueError, match="Cannot specify both"):
+            cacheness.for_api(
+                cache_dir=str(tmp_path / "cache"), ttl="2h", ttl_seconds=3600
+            )

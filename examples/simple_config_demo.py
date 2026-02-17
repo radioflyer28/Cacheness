@@ -14,7 +14,7 @@ from cacheness import cached, cacheness, CacheConfig
 
 
 # -- Custom cache directory ------------------------------------------------
-@cached.for_api(ttl_seconds="6h", cache_dir="./weather_cache")
+@cached.for_api(ttl="6h", cache_dir="./weather_cache")
 def fetch_weather(city):
     """Cached to a custom directory."""
     print(f"  Fetching weather for {city}...")
@@ -22,14 +22,14 @@ def fetch_weather(city):
 
 
 # -- Short vs long TTL -----------------------------------------------------
-@cached(ttl_seconds="2h")
+@cached(ttl="2h")
 def get_user_status(user_id):
     """Frequently changing data — short TTL."""
     print(f"  Checking status for user {user_id}...")
     return {"user_id": user_id, "status": "online"}
 
 
-@cached(ttl_seconds="2d")
+@cached(ttl="2d")
 def generate_report(month, year):
     """Expensive, rarely changing — long TTL."""
     print(f"  Generating report for {month}/{year}...")
@@ -46,7 +46,7 @@ config = CacheConfig(
 analytics_cache = cacheness(config)
 
 
-@cached(cache_instance=analytics_cache, ttl_seconds="1d")
+@cached(cache_instance=analytics_cache, ttl="1d")
 def run_analytics(query):
     """Uses a dedicated cache instance with SQLite backend."""
     print(f"  Running analytics: {query}...")

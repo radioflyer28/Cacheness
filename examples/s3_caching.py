@@ -38,7 +38,7 @@ class S3DataManager:
         self.s3 = session.client("s3")
         self.bucket = bucket
 
-    @cached(cache_instance=s3_cache, ttl_seconds="1d", key_prefix="s3_file")
+    @cached(cache_instance=s3_cache, ttl="1d", key_prefix="s3_file")
     def download(self, key: str):
         """Download a single S3 object (cached for 24 h)."""
         print(f"  Downloading s3://{self.bucket}/{key} ...")
@@ -50,13 +50,13 @@ class S3DataManager:
             "etag": resp.get("ETag", "").strip('"'),
         }
 
-    @cached(cache_instance=s3_cache, ttl_seconds="2d", key_prefix="s3_df")
+    @cached(cache_instance=s3_cache, ttl="2d", key_prefix="s3_df")
     def read_csv(self, key: str, **kwargs):
         """Read a CSV from S3 into a DataFrame (cached for 48 h)."""
         data = self.download(key)
         return pd.read_csv(BytesIO(data["content"]), **kwargs)
 
-    @cached(cache_instance=s3_cache, ttl_seconds="1w", key_prefix="s3_list")
+    @cached(cache_instance=s3_cache, ttl="1w", key_prefix="s3_list")
     def list_files(self, prefix: str = "", ext: str | None = None):
         """List objects under *prefix* (cached for 1 week)."""
         print(f"  Listing s3://{self.bucket}/{prefix} ...")

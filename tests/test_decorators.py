@@ -155,6 +155,30 @@ class TestCachedDecorator:
         result2 = time_sensitive_function(10)
         assert result2 == "result_10"
 
+    def test_decorator_with_ttl_duration_string(self):
+        """Test decorator with ttl= duration string."""
+
+        @cached(ttl="1h")
+        def time_sensitive_function(x):
+            return f"result_{x}"
+
+        result = time_sensitive_function(10)
+        assert result == "result_10"
+
+        # Should hit cache
+        result2 = time_sensitive_function(10)
+        assert result2 == "result_10"
+
+    def test_decorator_ttl_seconds_rejects_string(self):
+        """Test that ttl_seconds= rejects string values."""
+        with pytest.raises(TypeError, match="ttl_seconds.*must be numeric"):
+            cached(ttl_seconds="1h")
+
+    def test_decorator_ttl_and_ttl_seconds_mutually_exclusive(self):
+        """Test that ttl and ttl_seconds cannot both be specified."""
+        with pytest.raises(ValueError, match="Cannot specify both"):
+            cached(ttl="1h", ttl_seconds=3600)
+
     def test_decorator_with_key_prefix(self):
         """Test decorator with custom key prefix."""
 

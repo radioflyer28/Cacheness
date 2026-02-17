@@ -672,7 +672,7 @@ multiply_by_10 = partial(operator.mul, 10)
 cache.put(multiply_by_10, operation="partial_multiply")
 
 # Complex nested functions
-@cached(ttl_seconds="24h")
+@cached(ttl="24h")
 def create_complex_processor():
     import numpy as np
     base_value = np.random.rand()

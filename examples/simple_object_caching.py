@@ -21,7 +21,7 @@ class UserProfile:
     preferences: dict
 
 
-@cached(ttl_seconds="12h")
+@cached(ttl="12h")
 def load_profile(user_id: int) -> UserProfile:
     """Simulate an expensive lookup."""
     print(f"  Loading profile {user_id}...")
@@ -32,7 +32,7 @@ def load_profile(user_id: int) -> UserProfile:
     )
 
 
-@cached(ttl_seconds="24h")
+@cached(ttl="24h")
 def process_items(items: list[str]) -> dict:
     """Simulate heavy processing."""
     print(f"  Processing {len(items)} items...")

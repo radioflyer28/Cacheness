@@ -33,7 +33,7 @@ class WeatherClient:
         self.api_key = api_key
         self.base = "https://api.weatherapi.com/v1"
 
-    @cached(cache_instance=api_cache, ttl_seconds="6h", key_prefix="weather")
+    @cached(cache_instance=api_cache, ttl="6h", key_prefix="weather")
     def current(self, city: str, units: str = "metric"):
         """Current conditions — refreshed every 6 hours."""
         print(f"  Fetching current weather for {city}...")
@@ -44,7 +44,7 @@ class WeatherClient:
         r.raise_for_status()
         return r.json()
 
-    @cached(cache_instance=api_cache, ttl_seconds="1w", key_prefix="forecast")
+    @cached(cache_instance=api_cache, ttl="1w", key_prefix="forecast")
     def forecast(self, city: str, days: int = 7):
         """Weekly forecast — refreshed once a week."""
         print(f"  Fetching {days}-day forecast for {city}...")
@@ -55,7 +55,7 @@ class WeatherClient:
         r.raise_for_status()
         return r.json()
 
-    @cached(cache_instance=api_cache, ttl_seconds="1y", key_prefix="history")
+    @cached(cache_instance=api_cache, ttl="1y", key_prefix="history")
     def historical(self, city: str, date: str):
         """Historical data — essentially immutable."""
         print(f"  Fetching historical data for {city} on {date}...")

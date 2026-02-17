@@ -13,14 +13,14 @@ Usage:
 from cacheness import cached
 
 
-@cached.for_api(ttl_seconds="6h")
+@cached.for_api(ttl="6h")
 def get_weather(city):
     """Fetch weather data (simulated)."""
     print(f"  Calling weather API for {city}...")
     return {"city": city, "temp_f": 72, "conditions": "sunny"}
 
 
-@cached(ttl_seconds="4h")
+@cached(ttl="4h")
 def get_stock_price(symbol):
     """Fetch stock price (simulated)."""
     print(f"  Calling stock API for {symbol}...")
