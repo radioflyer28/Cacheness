@@ -13,8 +13,8 @@ from cacheness import cacheness, CacheConfig
 config = CacheConfig(
     cache_dir="./my_cache",
     metadata_backend="sqlite",     # "sqlite", "json", or "auto"  
-    default_ttl_seconds=172800,     # Default TTL for entries (48 hours)
-    max_cache_size_mb=5000,        # Maximum cache size
+    default_ttl="2d",              # Duration strings: s, m, h, d, w, mo, y
+    max_cache_size="5gb",          # Size strings: kb, mb, gb, tb
 )
 
 cache = cacheness(config)
@@ -36,13 +36,13 @@ from cacheness.config import (
 config = CacheConfig(
     storage=CacheStorageConfig(
         cache_dir="./advanced_cache",
-        max_cache_size_mb=10000,
+        max_cache_size="10gb",
         cleanup_on_init=True
     ),
     metadata=CacheMetadataConfig(
         backend="sqlite",
         verify_cache_integrity=True,
-        store_cache_key_params=True
+        store_full_metadata=True
     ),
     compression=CompressionConfig(
         use_blosc2_arrays=True,
@@ -54,7 +54,7 @@ config = CacheConfig(
         security_level="enhanced",
         delete_invalid_signatures=True
     ),
-    default_ttl_seconds=172800  # 48 hours
+    default_ttl="2d"
 )
 
 cache = cacheness(config)
@@ -67,15 +67,18 @@ cache = cacheness(config)
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `cache_dir` | str | `"./cache"` | Cache directory path |
-| `default_ttl_seconds` | int | `86400` | Default time-to-live in seconds (86400 = 24 hours) |
-| `max_cache_size_mb` | int | `2000` | Maximum cache size in MB |
+| `default_ttl` | str/int/float | `None` | Duration string (`"24h"`, `"2d"`) or seconds. Overrides `default_ttl_seconds` |
+| `default_ttl_seconds` | float | `86400` | Legacy: TTL in seconds (use `default_ttl` instead) |
+| `max_cache_size` | str/int | `None` | Size string (`"2gb"`, `"500mb"`) or bytes. Overrides `max_cache_size_mb` |
+| `max_cache_size_mb` | int | `2000` | Legacy: max size in MB (use `max_cache_size` instead) |
 
 ### Storage Configuration (`CacheStorageConfig`)
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `cache_dir` | str | `"./cache"` | Cache directory path |
-| `max_cache_size_mb` | int | `2000` | Maximum cache size in MB |
+| `max_cache_size` | str/int | `None` | Size string (`"2gb"`) or bytes int. Overrides `max_cache_size_mb` |
+| `max_cache_size_mb` | int | `2000` | Legacy: max size in MB (use `max_cache_size` instead) |
 | `cleanup_on_init` | bool | `True` | Clean expired entries on initialization |
 
 ### Metadata Configuration (`CacheMetadataConfig`)
@@ -85,7 +88,8 @@ cache = cacheness(config)
 | `backend` | str | `"auto"` | Backend: "auto", "sqlite", "json" |
 | `database_url` | str | `None` | Custom SQLite database path |
 | `verify_cache_integrity` | bool | `False` | Enable file hash verification |
-| `store_cache_key_params` | bool | `False` | Store cache key parameters (enable for querying, disable for performance) |
+| `store_full_metadata` | bool | `False` | Store cache key parameters as JSON (enable for querying, disable for performance) |
+| `store_cache_key_params` | bool | — | Deprecated alias for `store_full_metadata` |
 | **Memory Cache Layer** | | | |
 | `enable_memory_cache` | bool | `False` | Enable memory cache layer for disk backends |
 | `memory_cache_type` | str | `"lru"` | Cache algorithm: "lru", "lfu", "fifo", "rr" |
@@ -163,12 +167,12 @@ Default handler priority:
 ml_config = CacheConfig(
     storage=CacheStorageConfig(
         cache_dir="./ml_cache",
-        max_cache_size_mb=10000,  # Large cache for datasets
+        max_cache_size="10gb",
         cleanup_on_init=True
     ),
     metadata=CacheMetadataConfig(
         backend="sqlite",  # Fast metadata operations
-        store_cache_key_params=True  # Track experiment parameters
+        store_full_metadata=True  # Track experiment parameters
     ),
     compression=CompressionConfig(
         use_blosc2_arrays=True,      # Optimal for numeric data
@@ -187,7 +191,7 @@ ml_config = CacheConfig(
             "object_pickle"
         ]
     ),
-    default_ttl_seconds=604800  # 1 week
+    default_ttl="1w"
 )
 ```
 
@@ -198,12 +202,12 @@ ml_config = CacheConfig(
 api_config = CacheConfig(
     storage=CacheStorageConfig(
         cache_dir="./api_cache",
-        max_cache_size_mb=1000,
+        max_cache_size="1gb",
         cleanup_on_init=True
     ),
     metadata=CacheMetadataConfig(
         backend="sqlite",
-        store_cache_key_params=False  # No sensitive API params
+        store_full_metadata=False  # No sensitive API params
     ),
     compression=CompressionConfig(
         pickle_compression_codec="lz4",  # Fast compression
@@ -213,7 +217,7 @@ api_config = CacheConfig(
         enable_collections=False,    # Skip deep introspection
         max_tuple_recursive_length=3
     ),
-    default_ttl_seconds=21600  # Short TTL for API data (6 hours)
+    default_ttl="6h"
 )
 ```
 
@@ -224,12 +228,12 @@ api_config = CacheConfig(
 data_config = CacheConfig(
     storage=CacheStorageConfig(
         cache_dir="./data_cache",
-        max_cache_size_mb=15000,  # Large data cache
+        max_cache_size="15gb",
     ),
     metadata=CacheMetadataConfig(
         backend="sqlite",
         verify_cache_integrity=True,  # Ensure data integrity
-        store_cache_key_params=True
+        store_full_metadata=True
     ),
     compression=CompressionConfig(
         use_blosc2_arrays=True,
@@ -250,7 +254,7 @@ data_config = CacheConfig(
             "object_pickle"
         ]
     ),
-    default_ttl_seconds=259200  # 3 days
+    default_ttl="3d"
 )
 ```
 
@@ -268,8 +272,8 @@ is never reached.
 
 | Behaviour | Cache (default) | Storage mode |
 |---|---|---|
-| TTL expiration | Entries expire after `default_ttl_seconds` | Entries **never expire** |
-| Size-based eviction | LRU eviction at `max_cache_size_mb` | **No eviction** |
+| TTL expiration | Entries expire after `default_ttl` | Entries **never expire** |
+| Size-based eviction | LRU eviction at `max_cache_size` | **No eviction** |
 | Startup cleanup | Expired entries removed on init | **No cleanup on init** |
 | Hit/miss stats | Tracked by `increment_hits/misses` | **Disabled** |
 | Auto-delete on errors | Corrupted/invalid entries deleted | **Preserved** (logged) |
@@ -529,7 +533,7 @@ compact_config = CacheConfig(
         parquet_compression="gzip"
     ),
     storage=CacheStorageConfig(
-        max_cache_size_mb=50000,         # Large cache with high compression
+        max_cache_size="50gb",         # Large cache with high compression
         cleanup_on_init=True
     )
 )
@@ -562,7 +566,7 @@ For comprehensive security configuration, see the [Security Guide](SECURITY.md).
 secure_config = CacheConfig(
     metadata=CacheMetadataConfig(
         backend="sqlite",
-        store_cache_key_params=False     # Don't store sensitive params
+        store_full_metadata=False     # Don't store sensitive params
     )
 )
 
@@ -590,10 +594,10 @@ integrity_config = CacheConfig(
 ```python
 dev_config = CacheConfig(
     cache_dir="./dev_cache",
-    default_ttl_seconds=7200,             # Short TTL (2 hours)
+    default_ttl="2h",
     cleanup_on_init=True,                # Clean start
     metadata_backend="json",             # Simple backend
-    max_cache_size_mb=500               # Small cache
+    max_cache_size="500mb"
 )
 ```
 
@@ -603,7 +607,7 @@ dev_config = CacheConfig(
 prod_config = CacheConfig(
     storage=CacheStorageConfig(
         cache_dir="/var/cache/app",
-        max_cache_size_mb=20000,
+        max_cache_size="20gb",
         cleanup_on_init=False            # Preserve cache across restarts
     ),
     metadata=CacheMetadataConfig(
@@ -621,7 +625,7 @@ prod_config = CacheConfig(
         use_in_memory_key=True,          # No key persistence in production
         delete_invalid_signatures=True   # Auto-cleanup
     ),
-    default_ttl_seconds=604800           # 1 week
+    default_ttl="1w"
 )
 ```
 
@@ -633,7 +637,7 @@ test_config = CacheConfig(
     default_ttl_seconds=None,           # No expiration during tests
     cleanup_on_init=True,               # Fresh cache for each test
     metadata_backend="json",            # Simple, no external dependencies
-    max_cache_size_mb=100              # Small test cache
+    max_cache_size="100mb"
 )
 ```
 
@@ -668,7 +672,7 @@ multiply_by_10 = partial(operator.mul, 10)
 cache.put(multiply_by_10, operation="partial_multiply")
 
 # Complex nested functions
-@cached(ttl_seconds=86400)  # 24 hours
+@cached(ttl_seconds="24h")
 def create_complex_processor():
     import numpy as np
     base_value = np.random.rand()
@@ -752,7 +756,7 @@ production_config = CacheConfig(
 # Enable parameter storage for debugging
 debug_config = CacheConfig(
     metadata=CacheMetadataConfig(
-        store_cache_key_params=True      # See what parameters were used
+        store_full_metadata=True      # See what parameters were used
     )
 )
 
@@ -779,8 +783,8 @@ if stats['total_entries'] > 1000:
 ```python
 # Monitor cache size
 stats = cache.get_stats()
-if stats['total_size_mb'] > config.max_cache_size_mb * 0.9:
-    print("Cache nearly full - consider cleanup or size increase")
+size_bytes = stats['total_size_bytes']
+print(f"Cache size: {size_bytes / 1024**2:.0f} MB")
 ```
 
 ### Debug Configuration
@@ -794,7 +798,7 @@ logging.basicConfig(level=logging.DEBUG)
 debug_config = CacheConfig(
     metadata=CacheMetadataConfig(
         backend="sqlite",
-        store_cache_key_params=True,
+        store_full_metadata=True,
         verify_cache_integrity=True
     )
 )

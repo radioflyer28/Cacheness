@@ -538,7 +538,7 @@ from cacheness.config import CacheMetadataConfig
 config = CacheConfig(
     metadata=CacheMetadataConfig(
         backend="sqlite",                    # Better for complex queries
-        store_cache_key_params=True,        # Enable parameter storage
+        store_full_metadata=True,        # Enable parameter storage
         verify_cache_integrity=True         # Enable integrity checks
     )
 )

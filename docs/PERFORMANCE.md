@@ -186,7 +186,7 @@ from cacheness import CacheConfig
 config = CacheConfig(
     cache_dir="./dev_cache",
     metadata_backend="json",
-    max_cache_size_mb=1000
+    max_cache_size="1gb"
 )
 ```
 
@@ -210,7 +210,7 @@ config = CacheConfig(
 config = CacheConfig(
     cache_dir="/fast_storage/cache",
     metadata_backend="sqlite",
-    max_cache_size_mb=10000
+    max_cache_size="10gb"
 )
 ```
 
@@ -236,7 +236,7 @@ config = CacheConfig(
 config = CacheConfig(
     cache_dir="./temp_cache",
     metadata_backend="sqlite_memory",
-    max_cache_size_mb=2000
+    max_cache_size="2gb"
 )
 ```
 
@@ -356,12 +356,12 @@ df_config = CacheConfig(
 api_config = CacheConfig(
     storage=CacheStorageConfig(
         cache_dir="./api_cache",
-        max_cache_size_mb=2000,
+        max_cache_size="2gb",
         cleanup_on_init=True
     ),
     metadata=CacheMetadataConfig(
         backend="sqlite",              # Fast metadata ops
-        store_cache_key_params=False   # Skip parameter storage for speed
+        store_full_metadata=False      # Skip parameter storage for speed
     ),
     compression=CompressionConfig(
         pickle_compression_codec="lz4",  # Fastest compression
@@ -371,13 +371,13 @@ api_config = CacheConfig(
         enable_collections=False,        # Skip deep analysis
         max_tuple_recursive_length=3
     ),
-    default_ttl_seconds=21600  # 6 hours
+    default_ttl="6h"
 )
 
 # Use with decorators for maximum performance
 from cacheness import cached
 
-@cached(cache_instance=cacheness(api_config), ttl_seconds=3600)  # 1 hour
+@cached(cache_instance=cacheness(api_config), ttl_seconds="1h")
 def fetch_api_data(endpoint, params):
     # Fast caching with minimal overhead
     return api_call(endpoint, params)
@@ -389,12 +389,12 @@ def fetch_api_data(endpoint, params):
 ml_config = CacheConfig(
     storage=CacheStorageConfig(
         cache_dir="./ml_cache",
-        max_cache_size_mb=20000,       # Large cache for datasets
+        max_cache_size="20gb",       # Large cache for datasets
         cleanup_on_init=False          # Preserve models across sessions
     ),
     metadata=CacheMetadataConfig(
         backend="sqlite",              # Handle many experiments
-        store_cache_key_params=True,   # Track experiment parameters
+        store_full_metadata=True,      # Track experiment parameters
         verify_cache_integrity=True    # Ensure model integrity
     ),
     compression=CompressionConfig(
@@ -410,7 +410,7 @@ ml_config = CacheConfig(
             "object_pickle"            # Models and misc objects
         ]
     ),
-    default_ttl_seconds=604800        # 1 week
+    default_ttl="1w"
 )
 ```
 
@@ -420,7 +420,7 @@ ml_config = CacheConfig(
 data_config = CacheConfig(
     storage=CacheStorageConfig(
         cache_dir="/fast_ssd/data_cache",  # Use fast storage
-        max_cache_size_mb=50000,           # Very large cache
+        max_cache_size="50gb",           # Very large cache
         cleanup_on_init=False
     ),
     metadata=CacheMetadataConfig(
@@ -434,7 +434,7 @@ data_config = CacheConfig(
         pickle_compression_codec="zstd",
         pickle_compression_level=3          # Balanced for large objects
     ),
-    default_ttl_seconds=259200  # 72 hours
+    default_ttl="3d"
 )
 ```
 
@@ -495,8 +495,8 @@ print(f"Average entry size: {stats['avg_entry_size_mb']:.3f} MB")
 if stats['hit_rate'] < 0.5:
     print("Low hit rate - check cache TTL and key consistency")
 
-if stats['total_size_mb'] > config.max_cache_size_mb * 0.9:
-    print("Cache nearly full - consider cleanup or size increase")
+if stats['total_size_mb'] > 1000:
+    print("Cache over 1 GB — consider cleanup or size increase")
 ```
 
 ### Debug Logging
@@ -542,7 +542,7 @@ class PerformanceTracker:
 tracker = PerformanceTracker()
 
 # Measure cache performance
-@cached(ttl_seconds=86400)  # 24 hours
+@cached(ttl_seconds="24h")
 def expensive_computation(data):
     time.sleep(1)  # Simulate work
     return len(data)
@@ -586,13 +586,13 @@ cache.put(model, proj="customer", model="xgb", ver="2.1")
 
 ```python
 # Different TTL for different data types
-@cached(ttl_seconds=3600)      # Short: real-time data (1 hour)
+@cached(ttl_seconds="1h")
 def get_stock_price(symbol): pass
 
-@cached(ttl_seconds=86400)     # Medium: daily data (24 hours)
+@cached(ttl_seconds="24h")
 def get_weather_forecast(city): pass
 
-@cached(ttl_seconds=604800)    # Long: stable data (1 week)
+@cached(ttl_seconds="1w")
 def train_ml_model(data): pass
 
 @cached(ttl_seconds=None)      # Permanent: reference data
@@ -698,7 +698,7 @@ def process_large_dataset(data_path):
 fast_config = CacheConfig(
     storage=CacheStorageConfig(
         cache_dir="/fast_ssd/cache",     # SSD storage
-        max_cache_size_mb=20000
+        max_cache_size="20gb"
     ),
     metadata=CacheMetadataConfig(
         database_url="/fast_ssd/metadata.db"  # Fast storage for metadata

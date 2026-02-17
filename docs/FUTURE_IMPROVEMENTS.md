@@ -139,7 +139,7 @@ data1, data2, data3 = await asyncio.gather(
 **Proposed:**
 
 ```python
-from cacheness import UnifiedCache
+from cacheness.core import UnifiedCache
 from cacheness.eviction import LRUPolicy, LFUPolicy, SizeBasedPolicy
 
 # Least Recently Used (LRU)
@@ -299,7 +299,7 @@ cacheness verify ./cache
 **Proposed:**
 
 ```python
-from cacheness import UnifiedCache
+from cacheness.core import UnifiedCache
 from cacheness.backends import PostgreSQLBackend
 
 # Connection pool configuration
@@ -356,7 +356,7 @@ backend = PostgreSQLBackend(engine=engine)
 
 ```python
 from typing import TypeVar, Generic, Optional
-from cacheness import UnifiedCache
+from cacheness.core import UnifiedCache
 import pandas as pd
 
 T = TypeVar('T')
@@ -748,7 +748,7 @@ If multi-language access is required, provide **thin client libraries** instead 
 #### Python (Full Cacheness)
 
 ```python
-from cacheness import UnifiedCache
+from cacheness.core import UnifiedCache
 from cacheness.backends import PostgreSQLBackend
 from cacheness.blob_stores import S3BlobStore
 

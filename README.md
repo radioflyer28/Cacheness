@@ -4,11 +4,10 @@ Fast Python disk cache with key-value store hashing and a "cachetools-like" deco
 
 **Key Features:**
 - **Function decorators** for automatic caching with `@cached`
-- **Multi-format storage** with automatic type detection and optimal format selection
+- **Multi-format storage** automated, optimized storage format handling (parquet for pandas/polars, blosc/npz for numpy arrays)
 - **Key-based caching** using xxhash (XXH3_64) for fast, deterministic cache keys
-- **Advanced compression** using Blosc2 and LZ4 for fast compression
-- **Multiple backends** with SQLite and JSON metadata support
-- **Performance-optimized** parallel processing for hashing large directories
+- **Advanced compression** using Blosc2 (LZ4) and zstd for fast compression
+- **Multiple backends** with SQLite, Postgres, and JSON metadata support. Local filesystem or S3 for blob/file storage.
 - **Cross-platform** fully compatible with Windows, Linux, and macOS
 
 ## Quick Start
@@ -50,7 +49,7 @@ print(data)  # {"results": [1, 2, 3]}
 ```python
 from cacheness import cached
 
-@cached(ttl_seconds=86400)  # 24 hours
+@cached(ttl_seconds="24h")
 def expensive_computation(n):
     """This function will be automatically cached."""
     import time
@@ -126,8 +125,8 @@ from cacheness import cacheness, CacheConfig
 config = CacheConfig(
     cache_dir="./my_cache",
     metadata_backend="sqlite",     # "sqlite" (production), "json" (dev), or "auto"  
-    default_ttl_seconds=172800,      # Default TTL in seconds (48 hours)
-    max_cache_size_mb=5000,        # Maximum cache size
+    default_ttl="2d",              # Duration strings: s, m, h, d, w, mo, y
+    max_cache_size="5gb",          # Size strings: kb, mb, gb, tb
 )
 
 cache = cacheness(config)
@@ -160,12 +159,12 @@ cached_df = cache.get(source="transactions", date_range="2024_q1")
 
 ```python
 # Cache function results with TTL
-@cached(ttl_seconds=21600)  # 6 hours
+@cached(ttl_seconds="6h")
 def fetch_weather_data(city, units="metric"):
     return api_call(f"weather/{city}", units=units)
 
 # Custom cache instance for specific use cases
-ml_cache = cacheness(CacheConfig(cache_dir="./ml_cache", default_ttl_seconds=604800))  # 1 week
+ml_cache = cacheness(CacheConfig(cache_dir="./ml_cache", default_ttl="1w"))
 
 @cached(cache_instance=ml_cache)
 def train_model(data, hyperparams):
@@ -488,8 +487,8 @@ from cacheness import cacheness, CacheConfig
 config = CacheConfig(
     cache_dir="./my_cache",
     metadata_backend="sqlite",    # "sqlite" (recommended) or "json"
-    default_ttl_seconds=172800,     # Default TTL in seconds (48 hours)
-    max_cache_size_mb=5000,       # Maximum cache size
+    default_ttl="2d",             # Duration strings: s, m, h, d, w, mo, y
+    max_cache_size="5gb",          # Size strings: kb, mb, gb, tb
     cleanup_on_init=True          # Clean expired entries on startup
 )
 
@@ -535,13 +534,13 @@ from cacheness.config import CacheStorageConfig, CacheMetadataConfig, Compressio
 config = CacheConfig(
     storage=CacheStorageConfig(
         cache_dir="./advanced_cache",
-        max_cache_size_mb=10000,
+        max_cache_size="10gb",
         cleanup_on_init=True
     ),
     metadata=CacheMetadataConfig(
         backend="sqlite",
         verify_cache_integrity=True,
-        store_cache_key_params=True
+        store_full_metadata=True
     ),
     compression=CompressionConfig(
         pickle_compression_codec="zstd",
@@ -549,7 +548,7 @@ config = CacheConfig(
         use_blosc2_arrays=True,
         blosc2_array_codec="lz4"
     ),
-    default_ttl_seconds=172800  # 48 hours in seconds
+    default_ttl="2d"
 )
 ```
 

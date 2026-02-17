@@ -277,12 +277,12 @@ with cacheness() as cache:
 
 #### Factory Methods
 
-##### `cacheness.for_api(cache_dir=None, ttl_seconds=21600, **kwargs)`
+##### `cacheness.for_api(cache_dir=None, ttl_seconds="6h", **kwargs)`
 Create a cache instance optimized for API requests.
 
 **Parameters:**
 - `cache_dir` (Optional[str]): Cache directory (default: "./cache")
-- `ttl_seconds` (int): Default TTL in seconds (default: 21600 = 6 hours)
+- `ttl_seconds` (str|int): Default TTL — duration string (`"6h"`) or seconds (default: `"6h"`)
 - `**kwargs`: Additional configuration options
 
 **Returns:**
@@ -290,7 +290,7 @@ Create a cache instance optimized for API requests.
 
 **Example:**
 ```python
-api_cache = cacheness.for_api(cache_dir="./api_cache", ttl_seconds=14400)  # 4 hours
+api_cache = cacheness.for_api(cache_dir="./api_cache", ttl_seconds="4h")
 api_cache.put({"users": [...]}, endpoint="users", version="v1")
 ```
 
@@ -486,6 +486,38 @@ Touch (refresh TTL of) all cache entries whose metadata matches the given key/va
 ```python
 # Extend TTL for all entries in a project
 touched = cache.touch_batch(project="ml_models")
+```
+
+#### Dunder Methods
+
+`UnifiedCache` supports Python dunder methods for idiomatic cache interaction.
+
+##### `len(cache)` — `__len__`
+Return the number of entries in the cache.
+
+```python
+cache = cacheness()
+cache.put("a", key="x")
+cache.put("b", key="y")
+print(len(cache))  # 2
+```
+
+##### `key in cache` — `__contains__`
+Check whether a cache key exists (not expired).
+
+```python
+if "my_key" in cache:
+    data = cache.get(cache_key="my_key")
+```
+
+##### `list(cache)` / `for key in cache` — `__iter__`
+Iterate over all non-expired cache keys.
+
+```python
+for key in cache:
+    print(key)
+
+all_keys = list(cache)  # ["key1", "key2", ...]
 ```
 
 ---
@@ -808,7 +840,7 @@ def cached(
 
 **Example:**
 ```python
-@cached(ttl_seconds=86400, cache_key_prefix="weather")  # 24 hours
+@cached(ttl_seconds="24h", cache_key_prefix="weather")
 def get_weather(city: str, units: str = "metric"):
     return fetch_weather_api(city, units)
 
@@ -824,7 +856,7 @@ weather = get_weather("London")  # Cache hit - returns cached result
 Decorator optimized for API requests with error handling.
 
 ```python
-@cached.for_api(ttl_seconds=21600, ignore_errors=True)  # 6 hours
+@cached.for_api(ttl_seconds="6h", ignore_errors=True)
 def fetch_user_data(user_id):
     response = requests.get(f"/api/users/{user_id}")
     return response.json()
@@ -854,7 +886,7 @@ def cache_if(
 
 **Example:**
 ```python
-@cache_if(lambda result: result['status'] == 'success', ttl_seconds=3600)  # 1 hour
+@cache_if(lambda result: result['status'] == 'success', ttl_seconds="1h")
 def api_call(endpoint):
     response = requests.get(endpoint)
     return response.json()
@@ -866,7 +898,7 @@ Async version of the cached decorator.
 
 **Example:**
 ```python
-@cache_async(ttl_seconds=7200)  # 2 hours
+@cache_async(ttl_seconds="2h")
 async def fetch_data(url: str):
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as response:
@@ -887,7 +919,8 @@ class CacheConfig:
     compression: CompressionConfig = field(default_factory=CompressionConfig)
     serialization: SerializationConfig = field(default_factory=SerializationConfig)
     handlers: HandlerConfig = field(default_factory=HandlerConfig)
-    default_ttl_seconds: Optional[float] = None
+    default_ttl: Optional[Union[str, int, float]] = None  # "24h", "2d", or seconds
+    default_ttl_seconds: Optional[float] = None  # Legacy — use default_ttl instead
 ```
 
 ### `CacheStorageConfig`
@@ -898,13 +931,15 @@ Configuration for cache storage options.
 @dataclass
 class CacheStorageConfig:
     cache_dir: str = "./cache"
-    max_cache_size_mb: int = 10000
+    max_cache_size: Optional[Union[str, int]] = None  # "2gb", "500mb"
+    max_cache_size_mb: Optional[int] = 2000  # Legacy — use max_cache_size instead
     cleanup_on_init: bool = False
 ```
 
 **Fields:**
 - `cache_dir` (str): Directory for cache files
-- `max_cache_size_mb` (int): Maximum cache size in MB
+- `max_cache_size` (str|int): Size string (`"2gb"`) or bytes int. Overrides `max_cache_size_mb`
+- `max_cache_size_mb` (int): Legacy: Maximum cache size in MB (use `max_cache_size` instead)
 - `cleanup_on_init` (bool): Whether to clean expired entries on initialization
 
 ### `CacheMetadataConfig`
@@ -916,7 +951,7 @@ Configuration for metadata storage backend and memory cache layer.
 class CacheMetadataConfig:
     backend: Literal["json", "sqlite"] = "sqlite"
     database_url: Optional[str] = None
-    store_cache_key_params: bool = True
+    store_full_metadata: bool = False  # Preferred (replaces store_cache_key_params)
     verify_cache_integrity: bool = True
     # Memory cache layer for disk-persistent backends
     enable_memory_cache: bool = False
@@ -929,7 +964,7 @@ class CacheMetadataConfig:
 **Core Fields:**
 - `backend` (str): Metadata backend ("json" or "sqlite")
 - `database_url` (Optional[str]): SQLite database path (auto-generated if None)
-- `store_cache_key_params` (bool): Whether to store cache key parameters
+- `store_full_metadata` (bool): Whether to store cache key parameters (replaces `store_cache_key_params`)
 - `verify_cache_integrity` (bool): Whether to verify file integrity
 
 **Memory Cache Layer Fields:**
@@ -1070,13 +1105,13 @@ from cacheness import set_default_cache, CacheConfig
 # Configure default cache for all @cached decorators
 config = CacheConfig(
     storage=CacheStorageConfig(cache_dir="./project_cache"),
-    default_ttl_seconds=86400  # 24 hours
+    default_ttl="24h"
 )
 
 set_default_cache(cacheness(config))
 
 # Now all @cached decorators use this configuration
-@cached(ttl_seconds=7200)  # 2 hours
+@cached(ttl_seconds="2h")
 def my_function():
     return expensive_computation()
 ```
