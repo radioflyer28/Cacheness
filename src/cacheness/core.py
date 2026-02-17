@@ -2754,6 +2754,59 @@ class UnifiedCache:
             if hasattr(self.metadata_backend, "close"):
                 self.metadata_backend.close()
 
+    def __len__(self) -> int:
+        """Return the number of cache entries.
+
+        Enables ``len(cache)`` to check how many entries exist.
+        This is a lightweight metadata-only operation.
+
+        Returns:
+            int: Total number of cache entries.
+
+        Example:
+            cache = UnifiedCache(cache_dir="/tmp/cache")
+            cache.put("value", on={"key": "a"})
+            assert len(cache) == 1
+        """
+        with self._lock:
+            stats = self.metadata_backend.get_stats()
+            return stats.get("total_entries", 0)
+
+    def __contains__(self, cache_key: str) -> bool:
+        """Check if a cache key exists (metadata-only, respects TTL).
+
+        Enables ``"my_key" in cache`` syntax.  Delegates to :meth:`exists`
+        so expired entries are treated as absent.
+
+        Args:
+            cache_key: The cache key to look up.
+
+        Returns:
+            bool: True if the entry exists and has not expired.
+
+        Example:
+            if "my_key" in cache:
+                data = cache.get(cache_key="my_key")
+        """
+        return self.exists(cache_key=cache_key)
+
+    def __iter__(self):
+        """Iterate over entry summaries.
+
+        Enables ``for entry in cache`` to loop over all cached entries.
+        Each yielded item is a lightweight summary dict produced by
+        :meth:`metadata_backend.iter_entry_summaries`.
+
+        Yields:
+            dict: Entry summary dictionaries.
+
+        Example:
+            for entry in cache:
+                print(entry["cache_key"])
+        """
+        with self._lock:
+            yield from self.metadata_backend.iter_entry_summaries()
+
     def __del__(self):
         """Ensure resources are cleaned up when the cache is garbage collected."""
         try:
