@@ -25,7 +25,7 @@ def main():
     tmp = tempfile.mkdtemp(prefix="cacheness_mgmt_demo_")
 
     try:
-        config = CacheConfig(cache_dir=tmp, metadata_backend="sqlite_memory")
+        config = CacheConfig(cache_dir=tmp, metadata_backend="sqlite")
         cache = cacheness(config)
 
         # ── 1. Put & get_metadata ───────────────────────────────────────
