@@ -64,7 +64,7 @@ def benchmark_raw_backend_performance():
                 config = CacheConfig(
                     cache_dir=cache_dir,
                     metadata_backend=backend,
-                    max_cache_size_mb=5000,
+                    max_cache_size="5GB",
                     # Disable memory cache layer for raw performance
                     enable_memory_cache=False,
                     memory_cache_stats=False,
@@ -124,11 +124,11 @@ def benchmark_memory_cache_layer_impact():
                 config = CacheConfig(
                     cache_dir=cache_dir,
                     metadata_backend=backend,
-                    max_cache_size_mb=5000,
+                    max_cache_size="5GB",
                     enable_memory_cache=cache_enabled,
                     memory_cache_type="lru",
                     memory_cache_maxsize=100,
-                    memory_cache_ttl_seconds=300,
+                    memory_cache_ttl="5m",
                     memory_cache_stats=True,
                 )
                 cache = cacheness(config)
@@ -206,11 +206,11 @@ def benchmark_realistic_workload_patterns():
                     config = CacheConfig(
                         cache_dir=cache_dir,
                         metadata_backend=backend,
-                        max_cache_size_mb=5000,
+                        max_cache_size="5GB",
                         enable_memory_cache=cache_enabled,
                         memory_cache_type="lru",
                         memory_cache_maxsize=200,  # 20% of cache size
-                        memory_cache_ttl_seconds=300,
+                        memory_cache_ttl="5m",
                         memory_cache_stats=True,
                     )
                     cache = cacheness(config)
@@ -270,7 +270,7 @@ def benchmark_scaling_characteristics():
                 config = CacheConfig(
                     cache_dir=cache_dir,
                     metadata_backend=backend,
-                    max_cache_size_mb=10000,
+                    max_cache_size="10GB",
                     enable_memory_cache=False,  # Test raw performance
                 )
                 cache = cacheness(config)
@@ -316,11 +316,11 @@ def benchmark_memory_cache_effectiveness():
             config = CacheConfig(
                 cache_dir=cache_dir,
                 metadata_backend=backend,
-                max_cache_size_mb=5000,
+                max_cache_size="5GB",
                 enable_memory_cache=cache_enabled,
                 memory_cache_type="lru",
                 memory_cache_maxsize=100,
-                memory_cache_ttl_seconds=300,
+                memory_cache_ttl="5m",
                 memory_cache_stats=True,
             )
             cache = cacheness(config)

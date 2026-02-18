@@ -31,7 +31,7 @@ def analyze_list_performance():
                 config = CacheConfig(
                     cache_dir=cache_dir,
                     metadata_backend=backend,
-                    max_cache_size_mb=5000,  # Large enough for test
+                    max_cache_size="5GB",  # Large enough for test
                     # Explicitly disable memory cache layer for JSON/SQLite
                     enable_memory_cache=False,
                     memory_cache_stats=False,
@@ -90,7 +90,7 @@ def analyze_list_operations_detail():
             config = CacheConfig(
                 cache_dir=cache_dir,
                 metadata_backend=backend,
-                max_cache_size_mb=5000,
+                max_cache_size="5GB",
                 # Explicitly disable memory cache layer
                 enable_memory_cache=False,
                 memory_cache_stats=False,
@@ -155,7 +155,7 @@ def compare_scaling_patterns():
                 config = CacheConfig(
                     cache_dir=cache_dir,
                     metadata_backend=backend,
-                    max_cache_size_mb=10000,
+                    max_cache_size="10GB",
                     # Disable memory cache layer to test raw performance
                     enable_memory_cache=False,
                     memory_cache_stats=False,
