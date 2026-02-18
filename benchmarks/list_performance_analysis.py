@@ -1,7 +1,19 @@
 #!/usr/bin/env python3
 """
 Detailed analysis of list_entries() performance across backends.
-This benchmark reveals why SQLite appears slow and Memory/JSON have similar times.
+
+Measures raw backend performance (memory cache layer disabled) at increasing
+cache sizes to compare scaling behaviour between JSON, SQLite, and
+SQLite in-memory backends.
+
+CALIBRATION NOTE (CACHE-nck)
+-----------------------------
+list_entries() and get_entry() were switched from full ORM hydration
+(select(CacheEntry)) to SQLAlchemy Core column selects in commit 114db6e.
+The SQLAlchemy session identity-map previously tracked every row for the
+lifetime of the session, adding per-row overhead that compounded
+super-linearly.  Core column selects return lightweight Row tuples and
+bypass the identity-map entirely, making SQLite scale closer to linear.
 """
 
 import time
@@ -12,7 +24,7 @@ from cacheness import CacheConfig, cacheness
 
 def analyze_list_performance():
     """Detailed analysis of list_entries() performance patterns."""
-    print("🔍 List Performance Deep Dive")
+    print("List Performance Deep Dive")
     print("=" * 60)
     print(
         "NOTE: Memory cache layer DISABLED for JSON/SQLite to test raw backend performance"
@@ -22,7 +34,7 @@ def analyze_list_performance():
     cache_sizes = [50, 200, 500, 1000]
 
     for size in cache_sizes:
-        print(f"\n📊 Testing with {size} entries:")
+        print(f"\nTesting with {size} entries:")
 
         for backend in backends:
             with tempfile.TemporaryDirectory() as temp_dir:
@@ -74,7 +86,7 @@ def analyze_list_performance():
 
 def analyze_list_operations_detail():
     """Analyze what operations are actually happening in list_entries()."""
-    print("\n\n🔬 List Operations Analysis")
+    print("\n\nList Operations Analysis")
     print("=" * 60)
     print("Testing with memory cache layer DISABLED for all backends")
 
@@ -82,7 +94,7 @@ def analyze_list_operations_detail():
     size = 500
 
     for backend in ["json", "sqlite", "sqlite_memory"]:
-        print(f"\n🔍 {backend.upper()} Backend Analysis:")
+        print(f"\n{backend.upper()} Backend Analysis:")
 
         with tempfile.TemporaryDirectory() as temp_dir:
             cache_dir = os.path.join(temp_dir, f"{backend}_analysis")
@@ -132,9 +144,10 @@ def analyze_list_operations_detail():
 
 def compare_scaling_patterns():
     """Compare how each backend scales with cache size."""
-    print("\n\n📈 Scaling Pattern Comparison")
+    print("\n\nScaling Pattern Comparison")
     print("=" * 60)
     print("Testing RAW backend performance (no memory cache layer)")
+    print("SQLite uses Core column selects (CACHE-nck) -- expect near-linear scaling.")
 
     sizes = [10, 50, 100, 200, 500, 1000, 2000]
 
@@ -197,16 +210,19 @@ if __name__ == "__main__":
     analyze_list_operations_detail()
     results = compare_scaling_patterns()
 
-    print("\n\n🎯 Key Insights:")
+    print("\n\nKey Insights:")
     print("=" * 60)
-    print("• SQLite In-Memory: Pure in-memory via :memory:, no file I/O")
-    print("• JSONBackend: File-based storage, no internal caching")
-    print("• SQLiteBackend: Database storage with dedicated columns")
-    print("• Memory cache layer: Can be enabled/disabled for JSON/SQLite backends")
-    print("\n💡 Recommendations:")
-    print("• SQLite: Some overhead due to DB queries vs JSON file reads")
-    print("• JSON vs SQLite In-Memory: Similar performance for list operations")
-    print(
-        "• Enable memory cache layer for JSON/SQLite if doing frequent list_entries() calls"
-    )
-    print("• SQLite In-Memory: Best raw performance, no persistence")
+    print("  SQLite In-Memory : Pure :memory: DB -- no file I/O, fastest raw reads")
+    print("  JSON backend     : Entire file loaded to RAM on startup; list_entries()")
+    print("                     iterates an in-memory dict -- O(n).")
+    print("  SQLite (file)    : Core column selects (CACHE-nck) bypass the ORM")
+    print("                     identity-map, eliminating per-row session overhead.")
+    print("                     Scaling is now near-linear like JSON.")
+    print("  Memory cache layer: wraps any backend; list_entries() returns a cached")
+    print("                     snapshot -- effectively O(1) after first call.")
+    print("")
+    print("Recommendations:")
+    print("  - Use SQLite for production caches (concurrent-safe, near-linear scaling)")
+    print("  - Use JSON only for dev / single-process caches < ~200 entries")
+    print("  - Enable memory cache layer when list_entries() is called in hot loops")
+    print("  - SQLite in-memory is useful for isolated tests requiring top speed")

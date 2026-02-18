@@ -22,7 +22,7 @@ from cacheness import CacheConfig, cacheness
 
 def analyze_sqlite_schema():
     """Analyze current SQLite schema and column utilization."""
-    print("🔍 SQLite Schema Analysis")
+    print("SQLite Schema Analysis")
     print("=" * 60)
     print("Examining dedicated column storage in SQLite backend")
     print()
@@ -59,7 +59,7 @@ def analyze_sqlite_schema():
         # Get column info
         cursor.execute("PRAGMA table_info(cache_entries)")
         columns = cursor.fetchall()
-        print("📋 Schema Columns:")
+        print("Schema Columns:")
         for col in columns:
             cid, name, col_type, not_null, default, pk = col
             flags = []
@@ -76,19 +76,18 @@ def analyze_sqlite_schema():
 
         # Analyze each stored entry
         cursor.execute("""
-            SELECT cache_key, data_type, prefix, file_size,
+            SELECT cache_key, data_type, file_size,
                    object_type, storage_format, serializer, compression_codec,
                    actual_path, cache_key_params, metadata_dict
             FROM cache_entries
         """)
 
         rows = cursor.fetchall()
-        print(f"📊 Stored Entries ({len(rows)}):")
+        print(f"Stored Entries ({len(rows)}):")
         for row in rows:
             (
                 cache_key,
                 data_type,
-                prefix,
                 file_size,
                 object_type,
                 storage_format,
@@ -98,7 +97,6 @@ def analyze_sqlite_schema():
                 cache_key_params,
                 metadata_dict,
             ) = row
-
             print(f"\n   Cache Key: {cache_key}")
             print(f"   data_type: '{data_type}'")
             print(f"   storage_format: '{storage_format}'")
@@ -133,7 +131,7 @@ def analyze_sqlite_schema():
         stats = cursor.fetchone()
         total, avg_key, avg_size, avg_params, avg_meta, avg_path = stats
 
-        print("\n\n📏 Storage Statistics:")
+        print("\n\nStorage Statistics:")
         print(f"   Total entries: {total}")
         print(f"   Avg cache_key length: {avg_key:.0f} chars")
         print(f"   Avg file_size: {avg_size:.0f} bytes")
@@ -152,7 +150,7 @@ def analyze_sqlite_schema():
 
 def benchmark_column_query_performance():
     """Benchmark query performance using dedicated columns."""
-    print("\n\n⚡ Column Query Performance Benchmark")
+    print("\n\nColumn Query Performance Benchmark")
     print("=" * 60)
     print("Testing query speed on dedicated columns vs full table scan")
     print()
@@ -247,7 +245,7 @@ def benchmark_column_query_performance():
 
 def benchmark_list_performance_comparison():
     """Compare list_entries performance across backends."""
-    print("\n\n📊 List Performance: JSON vs SQLite")
+    print("\n\nList Performance: JSON vs SQLite (Core column selects, CACHE-nck)")
     print("=" * 60)
 
     cache_size = 200
@@ -268,7 +266,7 @@ def benchmark_list_performance_comparison():
             cache = cacheness(config)
 
             # Populate cache
-            print(f"📊 Testing {backend.upper()} backend...")
+            print(f"  Testing {backend.upper()} backend...")
             for i in range(cache_size):
                 cache.put(test_data, test_id=i)
 
@@ -289,7 +287,7 @@ def benchmark_list_performance_comparison():
 
     # Compare results
     print()
-    print("📈 Performance Comparison:")
+    print("Performance Comparison:")
     ratio = results["sqlite"] / results["json"] if results["json"] > 0 else 0
     print(f"   JSON backend:    {results['json']:.1f}ms")
     print(f"   SQLite backend:  {results['sqlite']:.1f}ms")
@@ -297,18 +295,18 @@ def benchmark_list_performance_comparison():
     print()
 
     if ratio > 5:
-        print("⚠️  SQLite is significantly slower for list_entries.")
-        print("   Consider enabling memory cache layer for repeated access.")
+        print("[!] SQLite is significantly slower for list_entries.")
+        print("    Consider enabling memory cache layer for repeated access.")
     elif ratio > 2:
-        print("📊 SQLite has moderate overhead compared to JSON.")
-        print("   Expected for database-backed storage. Memory cache helps.")
+        print("[~] SQLite has moderate overhead compared to JSON.")
+        print("    Expected for database-backed storage. Memory cache helps.")
     else:
-        print("✅ Performance gap is acceptable.")
+        print("[ok] Performance gap is acceptable.")
 
 
 def main():
     """Run SQLite schema analysis."""
-    print("🏆 SQLite Backend Schema Analysis")
+    print("SQLite Backend Schema Analysis")
     print("=" * 60)
     print("Analyzing current dedicated-column schema efficiency")
     print()
@@ -319,26 +317,24 @@ def main():
         benchmark_list_performance_comparison()
 
         print()
-        print("🎯 Key Findings")
+        print("Key Findings (post CACHE-nck: Core column selects)")
         print("=" * 60)
-        print("Current Schema Benefits:")
-        print("• Dedicated columns eliminate JSON parsing overhead")
-        print("• Column-based queries are faster than full table scans")
-        print("• get_stats() uses SQL aggregates instead of loading all rows")
-        print("• cache_key_params stored only when configured (NULL by default)")
+        print("  - list_entries() / get_entry() use Core column selects (CACHE-nck)")
+        print("    bypassing the ORM identity-map -- near-linear scaling at large N")
+        print("  - Dedicated columns eliminate JSON parsing overhead")
+        print("  - Column-based queries are faster than full table scans")
+        print("  - get_stats() uses SQL aggregates instead of loading all rows")
+        print("  - cache_key_params stored only when configured (NULL by default)")
+        print("")
+        print("Optimization Notes:")
+        print("  - metadata_dict column stores query_meta() params as JSON")
+        print("  - cache_key_params optional -- only stored when store_full_metadata=True")
+        print("  - actual_path stored for direct file access without recomputation")
+        print("  - Enable memory cache layer for frequent repeated access patterns")
         print()
-        print("💡 Optimization Notes:")
-        print("• metadata_dict column stores query_meta() params as JSON")
-        print("• cache_key_params is optional - only stored when enabled")
-        print("• actual_path stored for direct file access without recomputation")
-        print("• Enable memory cache layer for frequent repeated access patterns")
-        print()
-        print("✅ Analysis complete!")
-
-    except KeyboardInterrupt:
-        print("\n⚠️  Analysis interrupted by user")
+        print("Analysis complete.")
     except Exception as e:
-        print(f"\n❌ Analysis failed: {e}")
+        print(f"\nAnalysis failed: {e}")
         import traceback
 
         traceback.print_exc()
