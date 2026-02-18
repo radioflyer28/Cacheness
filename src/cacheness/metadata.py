@@ -2081,64 +2081,80 @@ class SqliteBackend(MetadataBackend):
         return stats
 
     def get_entry(self, cache_key: str) -> Optional[Dict[str, Any]]:
-        """Get specific cache entry metadata using columns directly - zero JSON parsing."""
+        """Get specific cache entry metadata — Core column select, no ORM hydration."""
         with self.SessionLocal() as session:
-            # Single optimized query - get entry using columns only
-            entry = session.execute(
-                select(self._CacheEntry).where(self._CacheEntry.cache_key == cache_key)
-            ).scalar_one_or_none()
+            CE = self._CacheEntry
+            # Core column select — avoids ORM identity-map overhead
+            row = session.execute(
+                select(
+                    CE.description,
+                    CE.data_type,
+                    CE.created_at,
+                    CE.accessed_at,
+                    CE.file_size,
+                    CE.object_type,
+                    CE.storage_format,
+                    CE.serializer,
+                    CE.compression_codec,
+                    CE.actual_path,
+                    CE.file_hash,
+                    CE.entry_signature,
+                    CE.s3_etag,
+                    CE.cache_key_params,
+                ).where(CE.cache_key == cache_key)
+            ).one_or_none()
 
-            if not entry:
+            if row is None:
                 return None
 
-            # Build metadata from columns directly - zero JSON parsing for backend data
-            metadata = {}
+            # Build metadata dict from Row tuple — no ORM attribute overhead
+            metadata: Dict[str, Any] = {}
 
-            # Add backend technical metadata from dedicated columns (not JSON)
-            if entry.object_type is not None:
-                metadata["object_type"] = entry.object_type
-            if entry.storage_format is not None:
-                metadata["storage_format"] = entry.storage_format
-            if entry.serializer is not None:
-                metadata["serializer"] = entry.serializer
-            if entry.compression_codec is not None:
-                metadata["compression_codec"] = entry.compression_codec
-            if entry.actual_path is not None:
-                metadata["actual_path"] = entry.actual_path
+            # Backend technical metadata from dedicated columns (not JSON)
+            if row.object_type is not None:
+                metadata["object_type"] = row.object_type
+            if row.storage_format is not None:
+                metadata["storage_format"] = row.storage_format
+            if row.serializer is not None:
+                metadata["serializer"] = row.serializer
+            if row.compression_codec is not None:
+                metadata["compression_codec"] = row.compression_codec
+            if row.actual_path is not None:
+                metadata["actual_path"] = row.actual_path
 
-            # Add optional security fields from columns (not JSON)
-            if entry.file_hash is not None:
-                metadata["file_hash"] = entry.file_hash
-            if entry.entry_signature is not None:
-                metadata["entry_signature"] = entry.entry_signature
-            if entry.s3_etag is not None:
-                metadata["s3_etag"] = entry.s3_etag
+            # Optional security fields
+            if row.file_hash is not None:
+                metadata["file_hash"] = row.file_hash
+            if row.entry_signature is not None:
+                metadata["entry_signature"] = row.entry_signature
+            if row.s3_etag is not None:
+                metadata["s3_etag"] = row.s3_etag
 
-            # Only parse cache_key_params JSON if it exists (should be disabled by default)
-            if entry.cache_key_params is not None:
+            # Only parse cache_key_params JSON if it exists (disabled by default)
+            if row.cache_key_params is not None:
                 try:
-                    metadata["cache_key_params"] = json_loads(entry.cache_key_params)
+                    metadata["cache_key_params"] = json_loads(row.cache_key_params)
                 except (ValueError, TypeError):
                     pass  # Skip malformed cache_key_params
 
             # Ensure timestamps are always in UTC for consistency
             created_at_utc = (
-                entry.created_at.astimezone(timezone.utc)
-                if entry.created_at.tzinfo
-                else entry.created_at.replace(tzinfo=timezone.utc)
+                row.created_at.astimezone(timezone.utc)
+                if row.created_at.tzinfo
+                else row.created_at.replace(tzinfo=timezone.utc)
             )
             accessed_at_utc = (
-                entry.accessed_at.astimezone(timezone.utc)
-                if entry.accessed_at.tzinfo
-                else entry.accessed_at.replace(tzinfo=timezone.utc)
+                row.accessed_at.astimezone(timezone.utc)
+                if row.accessed_at.tzinfo
+                else row.accessed_at.replace(tzinfo=timezone.utc)
             )
 
             return {
-                "description": entry.description,
-                "data_type": entry.data_type,
+                "description": row.description,
+                "data_type": row.data_type,
                 "created_at": created_at_utc.isoformat(),
                 "accessed_at": accessed_at_utc.isoformat(),
-                "file_size": entry.file_size,
+                "file_size": row.file_size,
                 "metadata": metadata,
             }
 
@@ -2342,60 +2358,73 @@ class SqliteBackend(MetadataBackend):
             return result
 
     def list_entries(self) -> List[Dict[str, Any]]:
-        """List all cache entries using columns directly - zero JSON parsing overhead for backend data."""
+        """List all cache entries — Core column select, no ORM hydration."""
         with self.SessionLocal() as session:
-            # Use a single optimized query to get all data at once
-            entries = (
-                session.execute(
-                    select(self._CacheEntry).order_by(desc(self._CacheEntry.created_at))
-                )
-                .scalars()
-                .all()
-            )
+            CE = self._CacheEntry
+            # Core column select — avoids SQLAlchemy ORM identity-map overhead
+            rows = session.execute(
+                select(
+                    CE.cache_key,
+                    CE.data_type,
+                    CE.description,
+                    CE.created_at,
+                    CE.accessed_at,
+                    CE.file_size,
+                    CE.object_type,
+                    CE.storage_format,
+                    CE.serializer,
+                    CE.compression_codec,
+                    CE.actual_path,
+                    CE.file_hash,
+                    CE.entry_signature,
+                    CE.s3_etag,
+                    CE.cache_key_params,
+                ).order_by(desc(CE.created_at))
+            ).fetchall()
 
             result = []
-            for entry in entries:
-                # Build metadata from columns directly - zero JSON parsing for backend data
-                entry_metadata = {}
+            for row in rows:
+                # Build metadata dict from Row tuple — no ORM attribute overhead
+                entry_metadata: Dict[str, Any] = {}
 
-                # Add backend technical metadata from dedicated columns (not JSON)
-                if entry.object_type is not None:
-                    entry_metadata["object_type"] = entry.object_type
-                if entry.storage_format is not None:
-                    entry_metadata["storage_format"] = entry.storage_format
-                if entry.serializer is not None:
-                    entry_metadata["serializer"] = entry.serializer
-                if entry.compression_codec is not None:
-                    entry_metadata["compression_codec"] = entry.compression_codec
-                if entry.actual_path is not None:
-                    entry_metadata["actual_path"] = entry.actual_path
+                # Backend technical metadata from dedicated columns (not JSON)
+                if row.object_type is not None:
+                    entry_metadata["object_type"] = row.object_type
+                if row.storage_format is not None:
+                    entry_metadata["storage_format"] = row.storage_format
+                if row.serializer is not None:
+                    entry_metadata["serializer"] = row.serializer
+                if row.compression_codec is not None:
+                    entry_metadata["compression_codec"] = row.compression_codec
+                if row.actual_path is not None:
+                    entry_metadata["actual_path"] = row.actual_path
 
-                # Add optional security fields from columns (not JSON)
-                if entry.file_hash is not None:
-                    entry_metadata["file_hash"] = entry.file_hash
-                if entry.entry_signature is not None:
-                    entry_metadata["entry_signature"] = entry.entry_signature
-                if entry.s3_etag is not None:
-                    entry_metadata["s3_etag"] = entry.s3_etag
+                # Optional security fields
+                if row.file_hash is not None:
+                    entry_metadata["file_hash"] = row.file_hash
+                if row.entry_signature is not None:
+                    entry_metadata["entry_signature"] = row.entry_signature
+                if row.s3_etag is not None:
+                    entry_metadata["s3_etag"] = row.s3_etag
 
-                # Only parse cache_key_params JSON if it exists (should be disabled by default)
-                if entry.cache_key_params is not None:
+                # Only parse cache_key_params JSON if it exists (disabled by default)
+                if row.cache_key_params is not None:
                     try:
                         entry_metadata["cache_key_params"] = json_loads(
-                            entry.cache_key_params
+                            row.cache_key_params
                         )
                     except (ValueError, TypeError):
                         pass  # Skip malformed cache_key_params
 
                 result.append(
                     {
-                        "cache_key": entry.cache_key,
-                        "data_type": entry.data_type,
-                        "description": entry.description,
+                        "cache_key": row.cache_key,
+                        "data_type": row.data_type,
+                        "description": row.description,
                         "metadata": entry_metadata,
-                        "created": entry.created_at.isoformat(),
-                        "last_accessed": entry.accessed_at.isoformat(),
-                        "size_mb": bytes_to_mb_display(entry.file_size),
+                        "created": row.created_at.isoformat(),
+                        "last_accessed": row.accessed_at.isoformat(),
+                        "size_mb": bytes_to_mb_display(row.file_size),
                     }
                 )
 
