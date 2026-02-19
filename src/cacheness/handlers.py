@@ -765,104 +765,28 @@ class ObjectHandler(CacheHandler):
     """Handler for general Python objects using compressed pickle."""
 
     def can_handle(self, data: Any, config: Any = None) -> bool:
-        """Check if data can be pickled or dill-serialized (and isn't handled by other handlers)."""
-        # Don't handle DataFrames if specialized handlers can handle them
-        if POLARS_AVAILABLE and pl is not None and isinstance(data, pl.DataFrame):
-            # Check if PolarsDataFrameHandler would reject this (Object types, etc.)
-            try:
-                import io
+        """Check if data can be pickled or dill-serialized.
 
-                data.write_parquet(io.BytesIO())
-                return False  # Specialized handler can handle it
-            except Exception:
-                # Try pickle first
-                if is_pickleable(data):
-                    return True
-                # Then try dill as fallback if enabled
-                if (
-                    config
-                    and hasattr(config, "handlers")
-                    and config.handlers.enable_dill_fallback
-                ):
-                    return is_dill_serializable(data)
-                return False
-
-        if PANDAS_AVAILABLE and pd is not None and isinstance(data, pd.DataFrame):
-            # Check if PandasDataFrameHandler would reject this (complex objects, etc.)
-            try:
-                import io
-
-                data.to_parquet(io.BytesIO())
-                return False  # Specialized handler can handle it
-            except Exception:
-                # Try pickle first
-                if is_pickleable(data):
-                    return True
-                # Then try dill as fallback if enabled
-                if (
-                    config
-                    and hasattr(config, "handlers")
-                    and config.handlers.enable_dill_fallback
-                ):
-                    return is_dill_serializable(data)
-                return False
-
-        # For Series, only handle if specialized handlers can't (i.e., mixed-type Series)
-        if POLARS_AVAILABLE and pl is not None and isinstance(data, pl.Series):
-            # Check if PolarsSeriesHandler would reject this (mixed types)
-            try:
-                temp_df = data.to_frame()
-                import io
-
-                temp_df.write_parquet(io.BytesIO())
-                return False  # Specialized handler can handle it
-            except Exception:
-                # Try pickle first
-                if is_pickleable(data):
-                    return True
-                # Then try dill as fallback if enabled
-                if (
-                    config
-                    and hasattr(config, "handlers")
-                    and config.handlers.enable_dill_fallback
-                ):
-                    return is_dill_serializable(data)
-                return False
-
-        if PANDAS_AVAILABLE and pd is not None and isinstance(data, pd.Series):
-            # Check if PandasSeriesHandler would reject this (mixed types)
-            try:
-                temp_df = data.to_frame()
-                import io
-
-                temp_df.to_parquet(
-                    io.BytesIO()
-                )  # Keep index for proper compatibility check
-                return False  # Specialized handler can handle it
-            except Exception:
-                # Try pickle first
-                if is_pickleable(data):
-                    return True
-                # Then try dill as fallback if enabled
-                if (
-                    config
-                    and hasattr(config, "handlers")
-                    and config.handlers.enable_dill_fallback
-                ):
-                    return is_dill_serializable(data)
-                return False
-
-        # Don't handle arrays - let ArrayHandler do that
+        ObjectHandler is always last in the registry's priority list.  By the
+        time this method runs every specialised handler (DataFrame, Series,
+        TensorFlow) has already declined, so we don't need to re-test their
+        logic.  The only types we must still skip are ``np.ndarray`` and
+        dict-of-arrays, because :class:`ArrayHandler` never rejects those.
+        """
+        # ArrayHandler always accepts these — don't claim them
         if isinstance(data, np.ndarray):
             return False
-        if isinstance(data, dict) and all(
-            isinstance(v, np.ndarray) for v in data.values()
+        if (
+            isinstance(data, dict)
+            and data
+            and all(isinstance(v, np.ndarray) for v in data.values())
         ):
             return False
 
         # Try pickle first
         if is_pickleable(data):
             return True
+
         # Then try dill as fallback if enabled
         if (
             config
@@ -870,6 +794,7 @@ class ObjectHandler(CacheHandler):
             and config.handlers.enable_dill_fallback
         ):
             return is_dill_serializable(data)
+
         return False
 
     def put(self, data: Any, file_path: Path, config: Any) -> HandlerResult:

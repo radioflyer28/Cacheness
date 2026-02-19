@@ -18,7 +18,7 @@ from typing import Optional, Dict, Any, List, Callable, Tuple
 from .config import CacheConfig, _DEFAULT_TTL, create_cache_config
 from .entry_list import EntryList
 from .handlers import HandlerRegistry
-from .interfaces import IntegrityReport
+from .interfaces import IntegrityReport, SignableFields
 from .metadata import DEFAULT_NAMESPACE
 from .serialization import create_unified_cache_key
 from .size_utils import format_size, resolve_ttl
@@ -211,57 +211,58 @@ class UnifiedCache:
                 f"Install with: uv add sqlalchemy"
             )
 
-        if requested == "json":
-            self.metadata_backend = create_metadata_backend(
-                "json",
-                metadata_file=self.cache_dir / "cache_metadata.json",
-                config=self.config.metadata,
-                namespace=self.namespace,
-            )
-            self.actual_backend = "json"
+        # Build kwargs for the factory based on backend type
+        kwargs = self._build_backend_kwargs(requested)
 
-        elif requested == "sqlite":
-            self.metadata_backend = create_metadata_backend(
-                "sqlite",
-                db_file=str(self.cache_dir / self.config.metadata.sqlite_db_file),
-                config=self.config.metadata,
-                namespace=self.namespace,
-            )
-            self.actual_backend = "sqlite"
+        if requested == "auto":
+            self._init_auto_backend(create_metadata_backend, SQLALCHEMY_AVAILABLE)
+        else:
+            self.metadata_backend = create_metadata_backend(requested, **kwargs)
+            self.actual_backend = requested
+            if requested == "sqlite_memory":
+                logger.info("⚡ Using in-memory SQLite backend (no persistence)")
+
+    def _build_backend_kwargs(self, requested: str) -> Dict[str, Any]:
+        """Build keyword arguments for ``create_metadata_backend``.
+
+        Centralises the per-backend kwargs construction that was previously
+        duplicated across five ``if/elif`` branches.
+        """
+        base: Dict[str, Any] = {
+            "config": self.config.metadata,
+            "namespace": self.namespace,
+        }
+
+        if requested == "json":
+            base["metadata_file"] = self.cache_dir / "cache_metadata.json"
+
+        elif requested in ("sqlite", "auto"):
+            base["db_file"] = str(self.cache_dir / self.config.metadata.sqlite_db_file)
 
         elif requested == "sqlite_memory":
-            self.metadata_backend = create_metadata_backend(
-                "sqlite_memory",
-                config=self.config.metadata,
-                namespace=self.namespace,
-            )
-            self.actual_backend = "sqlite_memory"
-            logger.info("⚡ Using in-memory SQLite backend (no persistence)")
+            pass  # no extra kwargs needed
 
         elif requested == "postgresql":
             opts = self.config.metadata.metadata_backend_options or {}
             connection_url = opts.get("connection_url")
             if not connection_url:
                 raise ValueError(
-                    "PostgreSQL backend requires 'connection_url' in metadata_backend_options"
+                    "PostgreSQL backend requires 'connection_url' in "
+                    "metadata_backend_options"
                 )
-            self.metadata_backend = create_metadata_backend(
-                "postgresql",
-                connection_url=connection_url,
-                pool_size=opts.get("pool_size", 10),
-                max_overflow=opts.get("max_overflow", 20),
-                pool_pre_ping=opts.get("pool_pre_ping", True),
-                pool_recycle=opts.get("pool_recycle", 3600),
-                echo=opts.get("echo", False),
-                table_prefix=opts.get("table_prefix", ""),
-                config=self.config.metadata,
-                namespace=self.namespace,
+            base.update(
+                {
+                    "connection_url": connection_url,
+                    "pool_size": opts.get("pool_size", 10),
+                    "max_overflow": opts.get("max_overflow", 20),
+                    "pool_pre_ping": opts.get("pool_pre_ping", True),
+                    "pool_recycle": opts.get("pool_recycle", 3600),
+                    "echo": opts.get("echo", False),
+                    "table_prefix": opts.get("table_prefix", ""),
+                }
             )
-            self.actual_backend = "postgresql"
 
-        else:
-            # Auto mode: prefer SQLite if available, fallback to JSON
-            self._init_auto_backend(create_metadata_backend, SQLALCHEMY_AVAILABLE)
+        return base
 
     def _init_auto_backend(self, create_metadata_backend, sqlalchemy_available: bool):
         """Auto-select the best available metadata backend."""
@@ -1131,7 +1132,7 @@ class UnifiedCache:
         cache_key: str,
         entry_data: Dict[str, Any],
         metadata: Dict[str, Any],
-    ) -> Dict[str, Any]:
+    ) -> SignableFields:
         """
         Extract fields for signing/verification in a consistent manner.
 
@@ -1146,7 +1147,7 @@ class UnifiedCache:
             metadata: The metadata dictionary from handler result
 
         Returns:
-            Dictionary containing all fields that may be signed
+            SignableFields containing all fields that may be signed
         """
         # Normalize created_at to ISO format string without timezone
         # This ensures consistent signatures regardless of database format
@@ -1165,14 +1166,13 @@ class UnifiedCache:
 
         # Build complete entry data with all potentially-signable fields.
         # The signer's version-based field list determines which are actually used.
-        signable_data = {
+        signable_data: SignableFields = {
             "cache_key": cache_key,
             "data_type": entry_data.get("data_type"),
             "file_size": entry_data.get("file_size", 0),
             "created_at": created_at,
             "actual_path": metadata.get("actual_path", ""),
             "file_hash": metadata.get("file_hash"),
-            # Include handler-specific metadata fields
             "object_type": metadata.get("object_type"),
             "storage_format": metadata.get("storage_format"),
             "serializer": metadata.get("serializer"),

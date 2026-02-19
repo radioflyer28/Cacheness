@@ -27,6 +27,8 @@ from pathlib import Path
 from typing import Dict, Any, List
 from datetime import datetime
 
+from .interfaces import SignableFields
+
 logger = logging.getLogger(__name__)
 
 
@@ -155,7 +157,7 @@ class CacheEntrySigner:
             return key
 
     def _create_signature_payload(
-        self, entry_data: Dict[str, Any], version: int
+        self, entry_data: SignableFields, version: int
     ) -> str:
         """
         Create deterministic payload string from entry data.
@@ -199,7 +201,7 @@ class CacheEntrySigner:
         )
         return payload
 
-    def sign_entry(self, entry_data: Dict[str, Any]) -> str:
+    def sign_entry(self, entry_data: SignableFields) -> str:
         """
         Create HMAC signature for cache entry using the current version.
 
@@ -253,7 +255,7 @@ class CacheEntrySigner:
 
     def verify_entry(
         self,
-        entry_data: Dict[str, Any],
+        entry_data: SignableFields,
         stored_signature: str,
     ) -> bool:
         """

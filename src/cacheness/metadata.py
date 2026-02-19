@@ -39,6 +39,7 @@ from typing import Dict, Any, Optional, List, Tuple, Callable
 
 import logging
 
+from .interfaces import EntrySummary
 from .json_utils import dumps as json_dumps, loads as json_loads
 from .size_utils import bytes_to_mb_display
 
@@ -474,7 +475,7 @@ class MetadataBackend(ABC):
         """Remove all cache entries and return count removed."""
         pass
 
-    def iter_entry_summaries(self) -> List[Dict[str, Any]]:
+    def iter_entry_summaries(self) -> List[EntrySummary]:
         """Return lightweight entry summaries for internal filtering.
 
         Each dict contains flat, unprocessed column values:
@@ -498,11 +499,11 @@ class MetadataBackend(ABC):
         backends that haven't overridden this method.
         """
         # Fallback: flatten list_entries() output for custom backends
-        result = []
+        result: List[EntrySummary] = []
         for entry in self.list_entries():
-            flat = {k: v for k, v in entry.items() if k != "metadata"}
+            flat: Dict[str, Any] = {k: v for k, v in entry.items() if k != "metadata"}
             flat.update(entry.get("metadata", {}))
-            result.append(flat)
+            result.append(flat)  # type: ignore[arg-type]
         return result
 
     # --- Schema versioning ---
@@ -938,7 +939,7 @@ class CachedMetadataBackend(MetadataBackend):
     def list_entries(self) -> List[Dict[str, Any]]:
         return self.backend.list_entries()
 
-    def iter_entry_summaries(self) -> List[Dict[str, Any]]:
+    def iter_entry_summaries(self) -> List[EntrySummary]:
         return self.backend.iter_entry_summaries()
 
     def get_stats(self) -> Dict[str, Any]:
@@ -1215,12 +1216,12 @@ class JsonBackend(MetadataBackend):
             self._save_to_disk()
             return True
 
-    def iter_entry_summaries(self) -> List[Dict[str, Any]]:
+    def iter_entry_summaries(self) -> List[EntrySummary]:
         """Return lightweight flat entry dicts for internal filtering."""
         with self._lock:
-            result = []
+            result: List[EntrySummary] = []
             for cache_key, entry in self._metadata.get("entries", {}).items():
-                flat = {
+                flat: Dict[str, Any] = {
                     "cache_key": cache_key,
                     "data_type": entry.get("data_type", "unknown"),
                     "description": entry.get("description", ""),
@@ -1232,7 +1233,7 @@ class JsonBackend(MetadataBackend):
                 for k, v in entry.get("metadata", {}).items():
                     if k not in flat:
                         flat[k] = v
-                result.append(flat)
+                result.append(flat)  # type: ignore[arg-type]
             return result
 
     def list_entries(self) -> List[Dict[str, Any]]:
@@ -2342,7 +2343,7 @@ class SqliteBackend(MetadataBackend):
             session.commit()
             return True
 
-    def iter_entry_summaries(self) -> List[Dict[str, Any]]:
+    def iter_entry_summaries(self) -> List[EntrySummary]:
         """Return lightweight flat entry dicts — raw SQL, no ORM hydration."""
         from sqlalchemy import text
 
@@ -2359,9 +2360,9 @@ class SqliteBackend(MetadataBackend):
                     f'FROM "{tbl}"'
                 )
             ).fetchall()
-            result = []
+            result: List[EntrySummary] = []
             for row in rows:
-                flat = {
+                flat: EntrySummary = {
                     "cache_key": row[0],
                     "data_type": row[1],
                     "description": row[2] or "",

@@ -40,6 +40,7 @@ import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from ...interfaces import EntrySummary
 from ...size_utils import format_size
 
 logger = logging.getLogger(__name__)
@@ -964,7 +965,7 @@ class PostgresBackend(MetadataBackend):
                     logger.error(f"Failed to update entry {cache_key}: {e}")
                     raise
 
-    def iter_entry_summaries(self) -> List[Dict[str, Any]]:
+    def iter_entry_summaries(self) -> List[EntrySummary]:
         """Return lightweight flat entry dicts — raw SQL, no ORM hydration."""
         with self.SessionLocal() as session:
             tbl = self._entries_table
@@ -974,13 +975,14 @@ class PostgresBackend(MetadataBackend):
                     f"       file_size, created_at, accessed_at, "
                     f"       object_type, storage_format, serializer, "
                     f"       compression_codec, actual_path, "
-                    f"       file_hash, entry_signature, metadata_dict "
+                    f"       file_hash, entry_signature, metadata_dict, "
+                    f"       s3_etag "
                     f'FROM "{tbl}"'
                 )
             ).fetchall()
-            result = []
+            result: List[EntrySummary] = []
             for row in rows:
-                flat = {
+                flat: EntrySummary = {
                     "cache_key": row[0],
                     "data_type": row[1],
                     "description": row[2] or "",
@@ -1004,6 +1006,8 @@ class PostgresBackend(MetadataBackend):
                     flat["entry_signature"] = row[12]
                 if row[13] is not None:
                     flat["metadata_dict"] = row[13]
+                if row[14] is not None:
+                    flat["s3_etag"] = row[14]
                 result.append(flat)
             return result
 

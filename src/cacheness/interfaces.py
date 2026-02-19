@@ -9,10 +9,69 @@ Each interface is responsible for a specific aspect of cache handling.
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+from typing_extensions import TypedDict
 from pathlib import Path
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Typed contracts for metadata dicts
+# ---------------------------------------------------------------------------
+
+
+class SignableFields(TypedDict, total=False):
+    """Superset of fields that may be included in cache-entry HMAC signatures.
+
+    Built by ``UnifiedCache._extract_signable_fields()`` and consumed by
+    ``CacheEntrySigner.sign_entry()`` / ``verify_entry()``.
+
+    ``total=False`` because individual fields may legitimately be ``None``
+    (the signer coerces missing values to empty strings).
+    """
+
+    cache_key: str
+    data_type: str
+    file_size: int
+    created_at: str  # ISO-format, timezone stripped for consistency
+    actual_path: str
+    file_hash: Optional[str]
+    object_type: Optional[str]
+    storage_format: Optional[str]
+    serializer: Optional[str]
+    compression_codec: Optional[str]
+
+
+class EntrySummary(TypedDict, total=False):
+    """Lightweight flat dict returned by ``iter_entry_summaries()``.
+
+    Required keys are always present; optional keys appear only when the
+    backend column is non-NULL.  All backends (JSON, SQLite, PostgreSQL)
+    MUST return at least the required keys.
+
+    Unlike ``list_entries()``, timestamps are **raw** (no isoformat conversion),
+    there is no nested ``metadata`` dict, and no ``size_mb`` calculation.
+    """
+
+    # --- always present ---
+    cache_key: str
+    data_type: str
+    description: str
+    created_at: Any  # raw timestamp — str or datetime depending on backend
+    accessed_at: Any
+    file_size: int
+
+    # --- present when non-NULL ---
+    object_type: str
+    storage_format: str
+    serializer: str
+    compression_codec: str
+    actual_path: str
+    file_hash: str
+    entry_signature: str
+    metadata_dict: str
+    s3_etag: str
 
 
 @dataclass
