@@ -68,7 +68,7 @@ from .paths import resolve_actual_path, to_relative_path
 
 # Import CacheConfig for proper handler configuration
 from ..config import CacheConfig, CompressionConfig
-from ..interfaces import WriteBlobResult, IntegrityReport
+from ..interfaces import BlobReadContext, WriteBlobResult, IntegrityReport
 
 logger = logging.getLogger(__name__)
 
@@ -843,7 +843,7 @@ class BlobStore:
         self,
         path: Path,
         data_type: str,
-        handler_metadata: Dict[str, Any],
+        handler_metadata: BlobReadContext,
     ) -> Any:
         """
         Low-level: deserialize data from disk via handler.

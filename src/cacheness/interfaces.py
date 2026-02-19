@@ -74,6 +74,36 @@ class EntrySummary(TypedDict, total=False):
     s3_etag: str
 
 
+class BlobReadContext(TypedDict, total=False):
+    """Metadata dict passed to ``handler.get()`` during deserialization.
+
+    Contains handler-specific fields written during ``put()`` plus
+    metadata columns like ``actual_path`` and ``file_hash``.
+
+    All keys are optional (``total=False``) because each handler reads
+    only the subset it needs.  The dict is built from the entry's
+    ``metadata`` sub-dict by ``UnifiedCache`` before calling ``_read_blob``.
+
+    This is a **documentation-only** contract — existing handlers and
+    plugins that accept ``Dict[str, Any]`` remain compatible.
+    """
+
+    # Storage / serialization info (ObjectHandler, ArrayHandler)
+    storage_format: str
+    serializer: str
+    compression_codec: str
+    object_type: str
+    actual_path: str
+    file_hash: Optional[str]
+
+    # Series metadata (PandasSeriesHandler, PolarsSeriesHandler)
+    is_series: bool
+    series_name: str
+
+    # Signature (present when entry signing is enabled)
+    entry_signature: str
+
+
 @dataclass
 class HandlerResult:
     """Typed return contract for handler put() methods.
@@ -268,13 +298,14 @@ class CacheReader(ABC):
     """Interface for reading data from cache."""
 
     @abstractmethod
-    def get(self, file_path: Path, metadata: Dict[str, Any]) -> Any:
+    def get(self, file_path: Path, metadata: "BlobReadContext") -> Any:
         """
         Retrieve data from cache file.
 
         Args:
             file_path: Path to the cached file
-            metadata: Metadata from when data was cached
+            metadata: Handler metadata from when data was cached.
+                See :class:`BlobReadContext` for available keys.
 
         Returns:
             The cached data

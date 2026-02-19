@@ -40,6 +40,7 @@ from .metadata import (
     DEFAULT_NAMESPACE,  # noqa: F401
 )
 from .interfaces import (
+    BlobReadContext,
     CacheHandler,
     EntrySummary,
     HandlerResult,
@@ -242,6 +243,7 @@ __all__ = [
     "IntegrityReport",  # Typed return contract for verify_integrity()
     "SignableFields",  # Typed contract for signable entry fields
     "EntrySummary",  # Typed contract for iter_entry_summaries()
+    "BlobReadContext",  # Typed contract for handler.get() metadata
     "EntryList",  # Rich result wrapper for list_entries/query
     # Handler registration API
     "register_handler",

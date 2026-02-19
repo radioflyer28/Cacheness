@@ -14,6 +14,7 @@ import logging
 
 # Import focused interfaces
 from .interfaces import (
+    BlobReadContext,
     CacheHandler,
     CacheWriteError,
     CacheReadError,
@@ -179,7 +180,7 @@ class PolarsDataFrameHandler(CacheHandler):
                     data_type=type(data).__name__,
                 ) from e
 
-    def get(self, file_path: Path, metadata: Dict[str, Any]) -> Any:
+    def get(self, file_path: Path, metadata: BlobReadContext) -> Any:
         """Load Polars DataFrame from Parquet with proper error handling."""
         with cache_operation_context("load_polars_dataframe", file_path=str(file_path)):
             try:
@@ -265,7 +266,7 @@ class PandasSeriesHandler(CacheHandler):
             },
         )
 
-    def get(self, file_path: Path, metadata: Dict[str, Any]) -> Any:
+    def get(self, file_path: Path, metadata: BlobReadContext) -> Any:
         """Load Pandas Series from Parquet."""
         df = pd.read_parquet(file_path)
 
@@ -340,7 +341,7 @@ class PolarsSeriesHandler(CacheHandler):
             },
         )
 
-    def get(self, file_path: Path, metadata: Dict[str, Any]) -> Any:
+    def get(self, file_path: Path, metadata: BlobReadContext) -> Any:
         """Load Polars Series from Parquet."""
         df = pl.read_parquet(file_path)
 
@@ -409,7 +410,7 @@ class PandasDataFrameHandler(CacheHandler):
             },
         )
 
-    def get(self, file_path: Path, metadata: Dict[str, Any]) -> Any:
+    def get(self, file_path: Path, metadata: BlobReadContext) -> Any:
         """Load Pandas DataFrame from Parquet."""
         if not PANDAS_AVAILABLE or pd is None:
             raise ImportError("Pandas not available for loading DataFrame")
@@ -575,7 +576,7 @@ class ArrayHandler(CacheHandler):
             dtype = np.dtype(dtype_str)
             return np.frombuffer(decompressed, dtype=dtype).reshape(shape)
 
-    def get(self, file_path: Path, metadata: Dict[str, Any]) -> Any:
+    def get(self, file_path: Path, metadata: BlobReadContext) -> Any:
         """Load array(s) from file with format detection."""
         storage_format = metadata.get("storage_format", "npz")
 
@@ -710,7 +711,7 @@ class TensorFlowTensorHandler(CacheHandler):
                     data_type=type(data).__name__,
                 ) from e
 
-    def get(self, file_path: Path, metadata: Dict[str, Any]) -> Any:
+    def get(self, file_path: Path, metadata: BlobReadContext) -> Any:
         """Load TensorFlow tensor from blosc2 tensor file with proper error handling."""
         tf_module, tf_available = _lazy_import_tensorflow()
 
@@ -962,7 +963,7 @@ class ObjectHandler(CacheHandler):
         # Deserialize with dill
         return dill.loads(decompressed_data)
 
-    def get(self, file_path: Path, metadata: Dict[str, Any]) -> Any:
+    def get(self, file_path: Path, metadata: BlobReadContext) -> Any:
         """Load object using compressed pickle/dill or standard pickle/dill."""
         storage_format = metadata.get("storage_format", "compressed_pickle")
         serializer = metadata.get("serializer", "pickle")
