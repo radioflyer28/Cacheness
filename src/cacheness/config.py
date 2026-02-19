@@ -111,6 +111,7 @@ class CacheMetadataConfig:
     store_full_metadata: bool = False  # Store complete cache key parameters (kwargs) as JSON for debugging/querying - DISABLED by default for performance
     enable_cache_stats: bool = True  # Track cache hit/miss statistics
     auto_cleanup_expired: bool = True  # Automatically clean up expired entries
+    delete_on_error: bool = True  # Auto-delete cache entries on deserialization/corruption errors. Set False to preserve entries and return None instead.
 
     # Memory cache layer (sits between application and disk-persistent backends)
     enable_memory_cache: bool = (
@@ -465,6 +466,8 @@ class CacheConfig:
         # Security parameters
         delete_invalid_signatures: Optional[bool] = None,
         use_in_memory_key: Optional[bool] = None,
+        # Error handling
+        delete_on_error: Optional[bool] = None,
         # Memory cache layer parameters (sits between application and disk backends)
         enable_memory_cache: Optional[bool] = None,
         memory_cache_type: Optional[str] = None,
@@ -582,6 +585,10 @@ class CacheConfig:
             self.security.delete_invalid_signatures = delete_invalid_signatures
         if use_in_memory_key is not None:
             self.security.use_in_memory_key = use_in_memory_key
+
+        # Map error handling configuration parameters
+        if delete_on_error is not None:
+            self.metadata.delete_on_error = delete_on_error
 
         # Map memory cache layer configuration parameters
         if enable_memory_cache is not None:
@@ -706,6 +713,10 @@ class CacheConfig:
     @property
     def verify_cache_integrity(self) -> bool:
         return self.metadata.verify_cache_integrity
+
+    @property
+    def delete_on_error(self) -> bool:
+        return self.metadata.delete_on_error
 
     @property
     def hash_path_content(self) -> bool:

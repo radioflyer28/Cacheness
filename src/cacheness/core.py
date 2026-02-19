@@ -1715,12 +1715,19 @@ class UnifiedCache:
                     if stored_hash is not None:
                         current_hash = self._blob_store._calculate_file_hash(file_path)
                         if current_hash != stored_hash:
-                            logger.warning(
-                                f"Cache integrity verification failed for {cache_key}: "
-                                f"stored hash {stored_hash} != current hash {current_hash}. "
-                                f"Removing corrupted cache entry."
-                            )
-                            self._blob_store.delete(cache_key)
+                            if self.config.metadata.delete_on_error:
+                                logger.warning(
+                                    f"Cache integrity verification failed for {cache_key}: "
+                                    f"stored hash {stored_hash} != current hash {current_hash}. "
+                                    f"Removing corrupted cache entry."
+                                )
+                                self._blob_store.delete(cache_key)
+                            else:
+                                logger.warning(
+                                    f"Cache integrity verification failed for {cache_key}: "
+                                    f"stored hash {stored_hash} != current hash {current_hash}. "
+                                    f"Entry retained due to delete_on_error=False."
+                                )
                             self._record_miss()
                             return None
 
@@ -1787,11 +1794,17 @@ class UnifiedCache:
                 return None
             except Exception as e:
                 # Unexpected errors (deserialization failures, corruption, etc.)
-                # These are likely permanent — clean up blob and metadata
-                logger.warning(
-                    f"Failed to load cached {data_type} {cache_key}: {type(e).__name__}: {e}"
-                )
-                self._blob_store.delete(cache_key)
+                if self.config.metadata.delete_on_error:
+                    logger.warning(
+                        f"Failed to load cached {data_type} {cache_key}: {type(e).__name__}: {e}. "
+                        f"Removing corrupted cache entry."
+                    )
+                    self._blob_store.delete(cache_key)
+                else:
+                    logger.warning(
+                        f"Failed to load cached {data_type} {cache_key}: {type(e).__name__}: {e}. "
+                        f"Entry retained due to delete_on_error=False."
+                    )
                 self._record_miss()
                 return None
 
@@ -1892,12 +1905,19 @@ class UnifiedCache:
                     if stored_hash is not None:
                         current_hash = self._blob_store._calculate_file_hash(file_path)
                         if current_hash != stored_hash:
-                            logger.warning(
-                                f"Cache integrity verification failed for {cache_key}: "
-                                f"stored hash {stored_hash} != current hash {current_hash}. "
-                                f"Removing corrupted cache entry."
-                            )
-                            self._blob_store.delete(cache_key)
+                            if self.config.metadata.delete_on_error:
+                                logger.warning(
+                                    f"Cache integrity verification failed for {cache_key}: "
+                                    f"stored hash {stored_hash} != current hash {current_hash}. "
+                                    f"Removing corrupted cache entry."
+                                )
+                                self._blob_store.delete(cache_key)
+                            else:
+                                logger.warning(
+                                    f"Cache integrity verification failed for {cache_key}: "
+                                    f"stored hash {stored_hash} != current hash {current_hash}. "
+                                    f"Entry retained due to delete_on_error=False."
+                                )
                             self._record_miss()
                             return None
 
@@ -1967,11 +1987,17 @@ class UnifiedCache:
                 return None
             except Exception as e:
                 # Unexpected errors (deserialization failures, corruption, etc.)
-                # These are likely permanent — clean up blob and metadata
-                logger.warning(
-                    f"Failed to load cached {data_type} {cache_key}: {type(e).__name__}: {e}"
-                )
-                self._blob_store.delete(cache_key)
+                if self.config.metadata.delete_on_error:
+                    logger.warning(
+                        f"Failed to load cached {data_type} {cache_key}: {type(e).__name__}: {e}. "
+                        f"Removing corrupted cache entry."
+                    )
+                    self._blob_store.delete(cache_key)
+                else:
+                    logger.warning(
+                        f"Failed to load cached {data_type} {cache_key}: {type(e).__name__}: {e}. "
+                        f"Entry retained due to delete_on_error=False."
+                    )
                 self._record_miss()
                 return None
 
