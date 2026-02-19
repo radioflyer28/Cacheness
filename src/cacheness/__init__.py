@@ -39,7 +39,10 @@ from .metadata import (
     validate_namespace_id,  # noqa: F401
     DEFAULT_NAMESPACE,  # noqa: F401
 )
-from .interfaces import CacheHandler  # Export interface for custom handlers
+from .interfaces import (
+    CacheHandler,
+    HandlerResult,
+)  # Export interface for custom handlers
 
 # Import config validation and file loading (Phase 2.4)
 from .config import (
@@ -229,6 +232,7 @@ __all__ = [
     "ObjectHandler",
     "ArrayHandler",
     "CacheHandler",  # Interface for custom handlers
+    "HandlerResult",  # Typed return contract for handler put()
     # Handler registration API
     "register_handler",
     "unregister_handler",

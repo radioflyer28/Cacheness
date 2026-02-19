@@ -279,15 +279,14 @@ class BlobStore:
             result = handler.put(data, base_path, self.config)
 
             # Persist through blob_backend (may rename, upload, etc.)
-            handler_path = Path(str(result.get("actual_path", base_path)))
+            handler_path = Path(result.actual_path)
             final_path = self.blob_backend.write_blob_from_path(
                 str(handler_path), handler_path.name
             )
             # Capture any backend-specific write metadata (e.g. s3_etag)
             write_meta = self.blob_backend.get_write_metadata()
             if write_meta:
-                result.setdefault("metadata", {})
-                result["metadata"].update(write_meta)
+                result.extra.update(write_meta)
 
             actual_path = Path(final_path) if "://" not in final_path else None
 
@@ -303,7 +302,7 @@ class BlobStore:
             # JsonBackend preserves them (it only keeps specific top-level fields).
             custom_metadata = metadata or {}
             custom_metadata["actual_path"] = self._to_relative_path(final_path)
-            custom_metadata["storage_format"] = result.get("storage_format", "pickle")
+            custom_metadata["storage_format"] = result.storage_format
             custom_metadata["compression_codec"] = self.compression
             if file_hash:
                 custom_metadata["file_hash"] = file_hash
@@ -311,7 +310,7 @@ class BlobStore:
             entry_data = {
                 "cache_key": blob_key,
                 "data_type": handler.data_type,
-                "file_size": result.get("file_size", 0),
+                "file_size": result.file_size,
                 "file_hash": file_hash,
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "metadata": custom_metadata,
@@ -818,7 +817,7 @@ class BlobStore:
         result = handler.put(data, base_path, config or self.config)
 
         # Persist through blob_backend (rename, upload, etc.)
-        handler_path = Path(str(result.get("actual_path", base_path)))
+        handler_path = Path(result.actual_path)
         final_path = self.blob_backend.write_blob_from_path(
             str(handler_path), handler_path.name
         )
@@ -826,11 +825,10 @@ class BlobStore:
         # Inject backend write metadata (e.g. s3_etag)
         write_meta = self.blob_backend.get_write_metadata()
         if write_meta:
-            result.setdefault("metadata", {})
-            result["metadata"].update(write_meta)
+            result.extra.update(write_meta)
 
         # Update actual_path to the final storage location (relative)
-        result["actual_path"] = self._to_relative_path(final_path)
+        result.actual_path = self._to_relative_path(final_path)
 
         # Compute file hash from final location
         file_hash = None

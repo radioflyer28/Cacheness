@@ -17,6 +17,7 @@ from .interfaces import (
     CacheHandler,
     CacheWriteError,
     CacheReadError,
+    HandlerResult,
 )
 from .error_handling import cache_operation_context
 
@@ -139,7 +140,7 @@ class PolarsDataFrameHandler(CacheHandler):
             logger.debug(f"Polars DataFrame validation failed: {e}")
             return False
 
-    def put(self, data: Any, file_path: Path, config: Any) -> Dict[str, Any]:
+    def put(self, data: Any, file_path: Path, config: Any) -> HandlerResult:
         """Store Polars DataFrame as Parquet with proper error handling."""
         with cache_operation_context(
             "store_polars_dataframe", shape=data.shape, columns=len(data.columns)
@@ -158,18 +159,18 @@ class PolarsDataFrameHandler(CacheHandler):
                     f"Polars DataFrame written successfully: {file_size} bytes"
                 )
 
-                return {
-                    "storage_format": "parquet",
-                    "file_size": file_size,
-                    "actual_path": str(parquet_path),
-                    "metadata": {
+                return HandlerResult(
+                    storage_format="parquet",
+                    file_size=file_size,
+                    actual_path=str(parquet_path),
+                    compression_codec=compression,
+                    extra={
                         "shape": data.shape,
                         "columns": data.columns,
                         "dtypes": [str(dtype) for dtype in data.dtypes],
-                        "compression_codec": compression,
                         "backend": "polars",
                     },
-                }
+                )
 
             except Exception as e:
                 raise CacheWriteError(
@@ -235,7 +236,7 @@ class PandasSeriesHandler(CacheHandler):
             # This Series has mixed types that can't be handled by Parquet
             return False
 
-    def put(self, data: Any, file_path: Path, config: Any) -> Dict[str, Any]:
+    def put(self, data: Any, file_path: Path, config: Any) -> HandlerResult:
         """Store Pandas Series as Parquet."""
         # Convert Series to DataFrame for Parquet storage
         df = data.to_frame()
@@ -249,20 +250,20 @@ class PandasSeriesHandler(CacheHandler):
         )
 
         file_size = parquet_path.stat().st_size
-        return {
-            "file_size": file_size,
-            "actual_path": str(parquet_path),
-            "storage_format": "parquet",
-            "metadata": {
+        return HandlerResult(
+            storage_format="parquet",
+            file_size=file_size,
+            actual_path=str(parquet_path),
+            compression_codec=config.compression.parquet_compression,
+            extra={
                 "shape": list(df.shape),
                 "columns": list(df.columns),
                 "dtypes": [str(dtype) for dtype in df.dtypes],
-                "compression_codec": config.compression.parquet_compression,
                 "backend": "pandas",
                 "is_series": True,
                 "series_name": data.name,
             },
-        }
+        )
 
     def get(self, file_path: Path, metadata: Dict[str, Any]) -> Any:
         """Load Pandas Series from Parquet."""
@@ -312,7 +313,7 @@ class PolarsSeriesHandler(CacheHandler):
             # This Series has mixed types that can't be handled by Parquet
             return False
 
-    def put(self, data: Any, file_path: Path, config: Any) -> Dict[str, Any]:
+    def put(self, data: Any, file_path: Path, config: Any) -> HandlerResult:
         """Store Polars Series as Parquet."""
         # Convert Series to DataFrame for Parquet storage
         df = data.to_frame()
@@ -324,20 +325,20 @@ class PolarsSeriesHandler(CacheHandler):
         )
 
         file_size = parquet_path.stat().st_size
-        return {
-            "file_size": file_size,
-            "actual_path": str(parquet_path),
-            "storage_format": "parquet",
-            "metadata": {
+        return HandlerResult(
+            storage_format="parquet",
+            file_size=file_size,
+            actual_path=str(parquet_path),
+            compression_codec=config.compression.parquet_compression,
+            extra={
                 "shape": list(df.shape),
                 "columns": list(df.columns),
                 "dtypes": [str(dtype) for dtype in df.dtypes],
-                "compression_codec": config.compression.parquet_compression,
                 "backend": "polars",
                 "is_series": True,
                 "series_name": data.name,
             },
-        }
+        )
 
     def get(self, file_path: Path, metadata: Dict[str, Any]) -> Any:
         """Load Polars Series from Parquet."""
@@ -386,7 +387,7 @@ class PandasDataFrameHandler(CacheHandler):
             # DataFrame has types that can't be written to Parquet, let ObjectHandler handle it
             return False
 
-    def put(self, data: Any, file_path: Path, config: Any) -> Dict[str, Any]:
+    def put(self, data: Any, file_path: Path, config: Any) -> HandlerResult:
         """Store Pandas DataFrame as Parquet."""
         parquet_path = file_path.with_suffix("").with_suffix(".parquet")
         data.to_parquet(
@@ -395,18 +396,18 @@ class PandasDataFrameHandler(CacheHandler):
             # Keep index=True by default to preserve DataFrame index
         )
 
-        return {
-            "storage_format": "parquet",
-            "file_size": parquet_path.stat().st_size,
-            "actual_path": str(parquet_path),
-            "metadata": {
+        return HandlerResult(
+            storage_format="parquet",
+            file_size=parquet_path.stat().st_size,
+            actual_path=str(parquet_path),
+            compression_codec=config.compression.parquet_compression,
+            extra={
                 "shape": data.shape,
                 "columns": data.columns.tolist(),
                 "dtypes": [str(dtype) for dtype in data.dtypes],
-                "compression_codec": config.compression.parquet_compression,
                 "backend": "pandas",
             },
-        }
+        )
 
     def get(self, file_path: Path, metadata: Dict[str, Any]) -> Any:
         """Load Pandas DataFrame from Parquet."""
@@ -435,7 +436,7 @@ class ArrayHandler(CacheHandler):
             return all(isinstance(v, np.ndarray) for v in data.values())
         return False
 
-    def put(self, data: Any, file_path: Path, config: Any) -> Dict[str, Any]:
+    def put(self, data: Any, file_path: Path, config: Any) -> HandlerResult:
         """Store array(s) using optimal format."""
         if isinstance(data, np.ndarray):
             return self._put_single_array(data, file_path, config)
@@ -448,7 +449,7 @@ class ArrayHandler(CacheHandler):
 
     def _put_single_array(
         self, data: np.ndarray, file_path: Path, config: Any
-    ) -> Dict[str, Any]:
+    ) -> HandlerResult:
         """Store a single numpy array, trying blosc2 first, then NPZ fallback."""
         # Try blosc2 compression first if enabled
         if config.compression.use_blosc2_arrays and BLOSC2_AVAILABLE:
@@ -457,17 +458,16 @@ class ArrayHandler(CacheHandler):
                 blosc2_path = file_path.with_suffix("").with_suffix(".b2nd")
                 self._write_blosc2_array(data, blosc2_path, config)
 
-                return {
-                    "storage_format": "blosc2_array",
-                    "file_size": blosc2_path.stat().st_size,
-                    "actual_path": str(blosc2_path),
-                    "metadata": {
+                return HandlerResult(
+                    storage_format="blosc2_array",
+                    file_size=blosc2_path.stat().st_size,
+                    actual_path=str(blosc2_path),
+                    compression_codec=config.compression.blosc2_array_codec,
+                    extra={
                         "shape": data.shape,
                         "dtype": str(data.dtype),
-                        "storage_format": "blosc2_array",
-                        "compression_codec": config.compression.blosc2_array_codec,
                     },
-                }
+                )
             except Exception as e:
                 logger.warning(f"blosc2 compression failed, falling back to NPZ: {e}")
 
@@ -478,23 +478,20 @@ class ArrayHandler(CacheHandler):
         else:
             np.savez(npz_path, data=data)
 
-        return {
-            "storage_format": "npz",
-            "file_size": npz_path.stat().st_size,
-            "actual_path": str(npz_path),
-            "metadata": {
+        return HandlerResult(
+            storage_format="npz",
+            file_size=npz_path.stat().st_size,
+            actual_path=str(npz_path),
+            compression_codec="zlib" if config.compression.npz_compression else "none",
+            extra={
                 "shape": data.shape,
                 "dtype": str(data.dtype),
-                "storage_format": "npz",
-                "compression_codec": "zlib"
-                if config.compression.npz_compression
-                else "none",
             },
-        }
+        )
 
     def _put_array_dict(
         self, data: Dict[str, np.ndarray], file_path: Path, config: Any
-    ) -> Dict[str, Any]:
+    ) -> HandlerResult:
         """Store a dictionary of arrays using NPZ format."""
         # Filter to only numpy arrays
         array_data = {k: v for k, v in data.items() if isinstance(v, np.ndarray)}
@@ -505,21 +502,18 @@ class ArrayHandler(CacheHandler):
         else:
             np.savez(npz_path, **array_data)
 
-        return {
-            "storage_format": "npz",
-            "file_size": npz_path.stat().st_size,
-            "actual_path": str(npz_path),
-            "metadata": {
+        return HandlerResult(
+            storage_format="npz",
+            file_size=npz_path.stat().st_size,
+            actual_path=str(npz_path),
+            compression_codec="zlib" if config.compression.npz_compression else "none",
+            extra={
                 "arrays": {
                     key: {"shape": arr.shape, "dtype": str(arr.dtype)}
                     for key, arr in array_data.items()
                 },
-                "storage_format": "npz",
-                "compression_codec": "zlib"
-                if config.compression.npz_compression
-                else "none",
             },
-        }
+        )
 
     def _write_blosc2_array(
         self, data: np.ndarray, file_path: Path, config: Any
@@ -646,7 +640,7 @@ class TensorFlowTensorHandler(CacheHandler):
         except Exception:
             return False
 
-    def put(self, data: Any, file_path: Path, config: Any) -> Dict[str, Any]:
+    def put(self, data: Any, file_path: Path, config: Any) -> HandlerResult:
         """Store TensorFlow tensor using blosc2.save_tensor with proper error handling."""
         tf_module, tf_available = _lazy_import_tensorflow()
         if not tf_available or tf_module is None:
@@ -695,20 +689,19 @@ class TensorFlowTensorHandler(CacheHandler):
                     f"TensorFlow tensor written successfully: {file_size} bytes"
                 )
 
-                return {
-                    "storage_format": "blosc2_tensor",
-                    "file_size": file_size,
-                    "actual_path": str(b2tr_path),
-                    "metadata": {
+                return HandlerResult(
+                    storage_format="blosc2_tensor",
+                    file_size=file_size,
+                    actual_path=str(b2tr_path),
+                    compression_codec=config.compression.blosc2_array_codec,
+                    extra={
                         "shape": tensor_data.shape.as_list()
                         if hasattr(tensor_data.shape, "as_list")
                         else list(tensor_data.shape),
                         "dtype": str(tensor_data.dtype),
-                        "storage_format": "blosc2_tensor",
-                        "compression_codec": config.compression.blosc2_array_codec,
                         "was_variable": isinstance(data, tf_module.Variable),
                     },
-                }
+                )
 
             except Exception as e:
                 raise CacheWriteError(
@@ -879,7 +872,7 @@ class ObjectHandler(CacheHandler):
             return is_dill_serializable(data)
         return False
 
-    def put(self, data: Any, file_path: Path, config: Any) -> Dict[str, Any]:
+    def put(self, data: Any, file_path: Path, config: Any) -> HandlerResult:
         """Store object using compressed pickle with dill fallback."""
         # Determine serialization method: try pickle first, then dill if enabled
         use_pickle = is_pickleable(data)
@@ -981,21 +974,16 @@ class ObjectHandler(CacheHandler):
                     pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
             storage_format = serializer_name
 
-        metadata = {
-            "object_type": str(type(data)),
-            "storage_format": storage_format,
-            "serializer": serializer_name,
-            "compression_codec": config.compression.pickle_compression_codec
+        return HandlerResult(
+            storage_format=storage_format,
+            file_size=pickle_path.stat().st_size,
+            actual_path=str(pickle_path),
+            compression_codec=config.compression.pickle_compression_codec
             if BLOSC_AVAILABLE
             else None,
-        }
-
-        return {
-            "storage_format": storage_format,
-            "file_size": pickle_path.stat().st_size,
-            "actual_path": str(pickle_path),
-            "metadata": metadata,
-        }
+            serializer=serializer_name,
+            object_type=str(type(data)),
+        )
 
     def _write_compressed_dill(
         self, data: Any, file_path: Path, compression_params: Dict[str, Any]

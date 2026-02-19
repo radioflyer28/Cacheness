@@ -7,11 +7,77 @@ Each interface is responsible for a specific aspect of cache handling.
 """
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 from pathlib import Path
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class HandlerResult:
+    """Typed return contract for handler put() methods.
+
+    Replaces the untyped Dict[str, Any] previously returned by handlers.
+    Eliminates top-level vs nested key ambiguity (root cause of CACHE-198).
+
+    Top-level fields map to dedicated metadata columns in the backend.
+    The ``extra`` dict carries handler-specific metadata (shape, dtypes,
+    backend, is_series, etc.) that goes into the nested metadata blob.
+
+    Provides dict-compatible accessors (__getitem__, get, setdefault)
+    so existing code that treats the result as a dict continues to work
+    during the migration period.
+    """
+
+    storage_format: str
+    file_size: int
+    actual_path: str
+    compression_codec: Optional[str] = None
+    serializer: Optional[str] = None
+    object_type: Optional[str] = None
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+    # -- dict-compatible accessors for transitional use --
+
+    def _as_legacy_dict(self) -> Dict[str, Any]:
+        """Return the legacy dict representation for backward compatibility."""
+        metadata = dict(self.extra)
+        if self.compression_codec is not None:
+            metadata["compression_codec"] = self.compression_codec
+        if self.serializer is not None:
+            metadata["serializer"] = self.serializer
+        if self.object_type is not None:
+            metadata["object_type"] = self.object_type
+        # Some handlers duplicated storage_format inside metadata
+        metadata.setdefault("storage_format", self.storage_format)
+        return {
+            "storage_format": self.storage_format,
+            "file_size": self.file_size,
+            "actual_path": self.actual_path,
+            "metadata": metadata,
+        }
+
+    def __getitem__(self, key: str) -> Any:
+        d = self._as_legacy_dict()
+        return d[key]
+
+    def __contains__(self, key: object) -> bool:
+        """Support ``'actual_path' in result`` checks."""
+        d = self._as_legacy_dict()
+        return key in d
+
+    def get(self, key: str, default: Any = None) -> Any:
+        d = self._as_legacy_dict()
+        return d.get(key, default)
+
+    def setdefault(self, key: str, default: Any = None) -> Any:
+        """Support ``result.setdefault('metadata', {})`` pattern in blob_store."""
+        if key == "metadata":
+            return self.extra
+        d = self._as_legacy_dict()
+        return d.setdefault(key, default)
 
 
 class CacheabilityChecker(ABC):
@@ -35,7 +101,7 @@ class CacheWriter(ABC):
     """Interface for writing data to cache."""
 
     @abstractmethod
-    def put(self, data: Any, file_path: Path, config: Any) -> Dict[str, Any]:
+    def put(self, data: Any, file_path: Path, config: Any) -> HandlerResult:
         """
         Store data to cache and return metadata.
 
@@ -45,11 +111,7 @@ class CacheWriter(ABC):
             config: Cache configuration
 
         Returns:
-            Dictionary containing:
-                - storage_format: Format used for storage
-                - file_size: Size of cached file in bytes
-                - actual_path: Actual file path used (with extension)
-                - metadata: Handler-specific metadata
+            HandlerResult with storage metadata.
 
         Raises:
             CacheWriteError: If data cannot be written

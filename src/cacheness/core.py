@@ -1234,7 +1234,7 @@ class UnifiedCache:
                 data, base_file_path, compute_hash=True
             )
 
-            actual_path_str = result.get("actual_path", str(base_file_path))
+            actual_path_str = result.actual_path
             if "://" not in actual_path_str:
                 cleanup.blob_path = self._resolve_actual_path(actual_path_str)
 
@@ -1242,22 +1242,25 @@ class UnifiedCache:
                 cleanup.set_remote(self._blob_store.blob_backend, actual_path_str)
 
             metadata_dict = {
-                **result["metadata"],
+                **result.extra,
                 "actual_path": actual_path_str,
                 "file_hash": file_hash,
             }
 
             # Transfer handler-level fields into metadata_dict so put_entry
-            # can extract them to dedicated columns (matching update_data()).
-            if result.get("storage_format"):
-                metadata_dict["storage_format"] = result["storage_format"]
-            if hasattr(handler, "serializer"):
-                metadata_dict["serializer"] = handler.serializer
+            # can extract them to dedicated columns.
+            metadata_dict["storage_format"] = result.storage_format
+            if result.serializer:
+                metadata_dict["serializer"] = result.serializer
+            if result.compression_codec:
+                metadata_dict["compression_codec"] = result.compression_codec
+            if result.object_type:
+                metadata_dict["object_type"] = result.object_type
 
             entry_data = {
                 "data_type": handler.data_type,
                 "description": description,
-                "file_size": result["file_size"],
+                "file_size": result.file_size,
                 "metadata": metadata_dict,
             }
 
@@ -1285,7 +1288,7 @@ class UnifiedCache:
             # Clean up old blob if the path changed (e.g., type change:
             # .parquet → .pkl.lz4).  Best-effort — failure just leaves
             # an orphan for verify_integrity to clean.
-            new_actual_path = result.get("actual_path", str(base_file_path))
+            new_actual_path = result.actual_path
             if old_blob_path and old_blob_path != new_actual_path:
                 try:
                     if "://" in old_blob_path:
@@ -1520,7 +1523,7 @@ class UnifiedCache:
                 )
 
                 # Track the blob path so we can clean up on failure
-                actual_path_str = result.get("actual_path", str(base_file_path))
+                actual_path_str = result.actual_path
                 if "://" not in actual_path_str:
                     cleanup.blob_path = self._resolve_actual_path(actual_path_str)
 
@@ -1531,17 +1534,20 @@ class UnifiedCache:
 
                 # Update metadata
                 metadata_dict = {
-                    **result["metadata"],
-                    "actual_path": result.get("actual_path", str(base_file_path)),
+                    **result.extra,
+                    "actual_path": result.actual_path,
                     "file_hash": file_hash,  # Store file hash for verification
                 }
 
                 # Transfer handler-level fields into metadata_dict so put_entry
-                # can extract them to dedicated columns (matching update_data()).
-                if result.get("storage_format"):
-                    metadata_dict["storage_format"] = result["storage_format"]
-                if hasattr(handler, "serializer"):
-                    metadata_dict["serializer"] = handler.serializer
+                # can extract them to dedicated columns.
+                metadata_dict["storage_format"] = result.storage_format
+                if result.serializer:
+                    metadata_dict["serializer"] = result.serializer
+                if result.compression_codec:
+                    metadata_dict["compression_codec"] = result.compression_codec
+                if result.object_type:
+                    metadata_dict["object_type"] = result.object_type
 
                 # Store complete cache key parameters as JSON for debugging/querying (if enabled)
                 # This captures the original kwargs used to derive the cache key
@@ -1571,7 +1577,7 @@ class UnifiedCache:
                 entry_data = {
                     "data_type": handler.data_type,
                     "description": description,
-                    "file_size": result["file_size"],
+                    "file_size": result.file_size,
                     "metadata": metadata_dict,
                 }
 
@@ -1606,7 +1612,7 @@ class UnifiedCache:
                 # Clean up old blob if the path changed (e.g., type change:
                 # .parquet → .pkl.lz4).  Best-effort — failure just leaves
                 # an orphan for verify_integrity to clean.
-                new_actual_path = result.get("actual_path", str(base_file_path))
+                new_actual_path = result.actual_path
                 if old_blob_path and old_blob_path != new_actual_path:
                     try:
                         if "://" in old_blob_path:
@@ -1630,8 +1636,8 @@ class UnifiedCache:
 
                 self._enforce_size_limit()
 
-                file_size_display = format_size(result["file_size"])
-                format_info = f"({result['storage_format']} format)"
+                file_size_display = format_size(result.file_size)
+                format_info = f"({result.storage_format} format)"
                 logger.info(
                     f"Cached {handler.data_type} {cache_key} ({file_size_display}) {format_info}: {description}"
                 )
@@ -2170,7 +2176,7 @@ class UnifiedCache:
                     data, staging_base, compute_hash=False
                 )
 
-                actual_path_str = str(result.get("actual_path", staging_base))
+                actual_path_str = result.actual_path
                 if "://" not in actual_path_str:
                     cleanup.blob_path = self._resolve_actual_path(actual_path_str)
 
@@ -2180,22 +2186,22 @@ class UnifiedCache:
 
                 # Build metadata updates dict from handler result
                 updates = {
-                    "file_size": result.get("file_size", 0),
-                    "content_hash": result.get("content_hash"),
-                    "file_hash": result.get("file_hash"),
+                    "file_size": result.file_size,
+                    "content_hash": result.extra.get("content_hash"),
+                    "file_hash": result.extra.get("file_hash"),
                     "actual_path": actual_path_str,
-                    "storage_format": result.get("storage_format"),
+                    "storage_format": result.storage_format,
                 }
                 if hasattr(handler, "data_type"):
                     updates["data_type"] = handler.data_type
-                if hasattr(handler, "serializer"):
-                    updates["serializer"] = handler.serializer
-                if result.get("compression_codec"):
-                    updates["compression_codec"] = result["compression_codec"]
-                if result.get("object_type"):
-                    updates["object_type"] = result["object_type"]
-                if result.get("s3_etag"):
-                    updates["s3_etag"] = result["s3_etag"]
+                if result.serializer:
+                    updates["serializer"] = result.serializer
+                if result.compression_codec:
+                    updates["compression_codec"] = result.compression_codec
+                if result.object_type:
+                    updates["object_type"] = result.object_type
+                if result.extra.get("s3_etag"):
+                    updates["s3_etag"] = result.extra["s3_etag"]
 
                 # Delegate metadata-only update to backend (no I/O in metadata layer)
                 self.metadata_backend.update_entry_metadata(
