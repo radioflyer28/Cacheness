@@ -346,7 +346,7 @@ class TestBackendParity:
             "metadata": {
                 "actual_path": "/very/long/path/to/file" * 10,
                 "object_type": "<class 'numpy.ndarray'>",
-                "storage_format": "blosc2",
+                "storage_format": "blosc2_array",
                 "serializer": "pickle",
                 "compression_codec": "zstd",
                 "file_hash": "a" * 16,
@@ -361,7 +361,7 @@ class TestBackendParity:
         # All technical fields should be preserved
         assert retrieved["metadata"]["actual_path"] == "/very/long/path/to/file" * 10
         assert retrieved["metadata"]["object_type"] == "<class 'numpy.ndarray'>"
-        assert retrieved["metadata"]["storage_format"] == "blosc2"
+        assert retrieved["metadata"]["storage_format"] == "blosc2_array"
         assert retrieved["metadata"]["file_hash"] == "a" * 16
         assert retrieved["metadata"]["s3_etag"] == "b" * 32
 

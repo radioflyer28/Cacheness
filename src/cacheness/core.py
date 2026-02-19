@@ -1203,6 +1203,13 @@ class UnifiedCache:
                 "file_hash": file_hash,
             }
 
+            # Transfer handler-level fields into metadata_dict so put_entry
+            # can extract them to dedicated columns (matching update_data()).
+            if result.get("storage_format"):
+                metadata_dict["storage_format"] = result["storage_format"]
+            if hasattr(handler, "serializer"):
+                metadata_dict["serializer"] = handler.serializer
+
             entry_data = {
                 "data_type": handler.data_type,
                 "description": description,
@@ -1484,6 +1491,13 @@ class UnifiedCache:
                     "actual_path": result.get("actual_path", str(base_file_path)),
                     "file_hash": file_hash,  # Store file hash for verification
                 }
+
+                # Transfer handler-level fields into metadata_dict so put_entry
+                # can extract them to dedicated columns (matching update_data()).
+                if result.get("storage_format"):
+                    metadata_dict["storage_format"] = result["storage_format"]
+                if hasattr(handler, "serializer"):
+                    metadata_dict["serializer"] = handler.serializer
 
                 # Store complete cache key parameters as JSON for debugging/querying (if enabled)
                 # This captures the original kwargs used to derive the cache key

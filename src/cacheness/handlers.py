@@ -166,7 +166,7 @@ class PolarsDataFrameHandler(CacheHandler):
                         "shape": data.shape,
                         "columns": data.columns,
                         "dtypes": [str(dtype) for dtype in data.dtypes],
-                        "compression": compression,
+                        "compression_codec": compression,
                         "backend": "polars",
                     },
                 }
@@ -257,7 +257,7 @@ class PandasSeriesHandler(CacheHandler):
                 "shape": list(df.shape),
                 "columns": list(df.columns),
                 "dtypes": [str(dtype) for dtype in df.dtypes],
-                "compression": config.compression.parquet_compression,
+                "compression_codec": config.compression.parquet_compression,
                 "backend": "pandas",
                 "is_series": True,
                 "series_name": data.name,
@@ -332,7 +332,7 @@ class PolarsSeriesHandler(CacheHandler):
                 "shape": list(df.shape),
                 "columns": list(df.columns),
                 "dtypes": [str(dtype) for dtype in df.dtypes],
-                "compression": config.compression.parquet_compression,
+                "compression_codec": config.compression.parquet_compression,
                 "backend": "polars",
                 "is_series": True,
                 "series_name": data.name,
@@ -403,7 +403,7 @@ class PandasDataFrameHandler(CacheHandler):
                 "shape": data.shape,
                 "columns": data.columns.tolist(),
                 "dtypes": [str(dtype) for dtype in data.dtypes],
-                "compression": config.compression.parquet_compression,
+                "compression_codec": config.compression.parquet_compression,
                 "backend": "pandas",
             },
         }
@@ -458,14 +458,14 @@ class ArrayHandler(CacheHandler):
                 self._write_blosc2_array(data, blosc2_path, config)
 
                 return {
-                    "storage_format": "blosc2",
+                    "storage_format": "blosc2_array",
                     "file_size": blosc2_path.stat().st_size,
                     "actual_path": str(blosc2_path),
                     "metadata": {
                         "shape": data.shape,
                         "dtype": str(data.dtype),
-                        "storage_format": "blosc2",
-                        "compression": config.compression.blosc2_array_codec,
+                        "storage_format": "blosc2_array",
+                        "compression_codec": config.compression.blosc2_array_codec,
                     },
                 }
             except Exception as e:
@@ -486,7 +486,9 @@ class ArrayHandler(CacheHandler):
                 "shape": data.shape,
                 "dtype": str(data.dtype),
                 "storage_format": "npz",
-                "compression": "zlib" if config.compression.npz_compression else "none",
+                "compression_codec": "zlib"
+                if config.compression.npz_compression
+                else "none",
             },
         }
 
@@ -513,7 +515,9 @@ class ArrayHandler(CacheHandler):
                     for key, arr in array_data.items()
                 },
                 "storage_format": "npz",
-                "compression": "zlib" if config.compression.npz_compression else "none",
+                "compression_codec": "zlib"
+                if config.compression.npz_compression
+                else "none",
             },
         }
 
@@ -581,8 +585,8 @@ class ArrayHandler(CacheHandler):
         """Load array(s) from file with format detection."""
         storage_format = metadata.get("storage_format", "npz")
 
-        # Try the expected format first
-        if storage_format == "blosc2":
+        # Try the expected format first (accept legacy "blosc2" for backward compat)
+        if storage_format in ("blosc2_array", "blosc2"):
             try:
                 # Try blosc2 format
                 blosc2_path = file_path.with_suffix("").with_suffix(".b2nd")
@@ -701,7 +705,7 @@ class TensorFlowTensorHandler(CacheHandler):
                         else list(tensor_data.shape),
                         "dtype": str(tensor_data.dtype),
                         "storage_format": "blosc2_tensor",
-                        "compression": config.compression.blosc2_array_codec,
+                        "compression_codec": config.compression.blosc2_array_codec,
                         "was_variable": isinstance(data, tf_module.Variable),
                     },
                 }
