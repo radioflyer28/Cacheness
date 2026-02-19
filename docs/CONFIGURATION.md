@@ -29,7 +29,8 @@ from cacheness.config import (
     CompressionConfig,
     SerializationConfig,
     HandlerConfig,
-    SecurityConfig
+    SecurityConfig,
+    HooksConfig,
 )
 
 # Advanced configuration with sub-configurations
@@ -109,6 +110,36 @@ cache = cacheness(config)
 | `delete_invalid_signatures` | bool | `True` | Auto-delete entries with invalid signatures |
 
 **See [Security Guide](SECURITY.md) for comprehensive security configuration, namespace key isolation patterns, and migration guides.**
+
+### Hooks Configuration (`HooksConfig`)
+
+Optional lifecycle callbacks invoked synchronously during cache operations. Callbacks must not raise — any exception is logged and swallowed so it never breaks cache operations.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `on_evict` | `Callable` or `None` | `None` | Called when an entry is removed by size-limit enforcement or TTL cleanup. Signature: `(cache_key: str, reason: str) -> None` where *reason* is `"size_limit"` or `"expired"`. |
+| `on_integrity_failure` | `Callable` or `None` | `None` | Called when an entry fails hash or signature verification. Signature: `(cache_key: str, failure_type: str, detail: str) -> None` where *failure_type* is `"hash_mismatch"`, `"signature_invalid"`, or `"unsigned_rejected"`. |
+
+**Usage — sub-config approach:**
+```python
+def my_eviction_handler(cache_key: str, reason: str):
+    print(f"Evicted {cache_key} ({reason})")
+
+config = CacheConfig(
+    hooks=HooksConfig(
+        on_evict=my_eviction_handler,
+        on_integrity_failure=lambda key, typ, detail: logging.warning(f"{key}: {typ}"),
+    ),
+)
+```
+
+**Usage — flat kwargs (convenience):**
+```python
+config = CacheConfig(
+    on_evict=my_eviction_handler,
+    on_integrity_failure=my_integrity_handler,
+)
+```
 
 ### Compression Configuration (`CompressionConfig`)
 

@@ -48,13 +48,13 @@ if not is_custom_metadata_available():
 class Aircraft(Base):
     __tablename__ = "aircraft"
 
-    tail_number   = Column(String(20), primary_key=True)
-    airline       = Column(String(100), nullable=False, index=True)
-    manufacturer  = Column(String(50),  nullable=False, index=True)
-    model         = Column(String(50),  nullable=False, index=True)
-    engine_count  = Column(Integer,     nullable=False)
-    max_range_nm  = Column(Integer,     nullable=False)
-    year_built    = Column(Integer,     nullable=False)
+    tail_number = Column(String(20), primary_key=True)
+    airline = Column(String(100), nullable=False, index=True)
+    manufacturer = Column(String(50), nullable=False, index=True)
+    model = Column(String(50), nullable=False, index=True)
+    engine_count = Column(Integer, nullable=False)
+    max_range_nm = Column(Integer, nullable=False)
+    year_built = Column(Integer, nullable=False)
 
     # back-ref: aircraft_obj.flights → list of FlightMeta rows
     flights = relationship("FlightMeta", back_populates="aircraft")
@@ -71,17 +71,17 @@ class Aircraft(Base):
 class FlightMeta(Base, CustomMetadataBase):
     __tablename__ = "custom_flights"
 
-    tail_number   = Column(
+    tail_number = Column(
         String(20),
         ForeignKey("aircraft.tail_number"),
         nullable=False,
         index=True,
     )
-    flight_number = Column(String(20),  nullable=False, index=True)
-    origin        = Column(String(10),  nullable=False, index=True)
-    destination   = Column(String(10),  nullable=False, index=True)
-    distance_nm   = Column(Float,       nullable=False, index=True)
-    altitude_max_ft = Column(Integer,   nullable=False, index=True)
+    flight_number = Column(String(20), nullable=False, index=True)
+    origin = Column(String(10), nullable=False, index=True)
+    destination = Column(String(10), nullable=False, index=True)
+    distance_nm = Column(Float, nullable=False, index=True)
+    altitude_max_ft = Column(Integer, nullable=False, index=True)
 
     # ORM relationship — free join to Aircraft, no Cacheness involvement
     aircraft = relationship("Aircraft", back_populates="flights")
@@ -91,19 +91,72 @@ class FlightMeta(Base, CustomMetadataBase):
 # Synthetic data
 # ---------------------------------------------------------------------------
 AIRCRAFT_DATA = [
-    dict(tail_number="N12345", airline="United Airlines",    manufacturer="Boeing",  model="737-800",  engine_count=2, max_range_nm=2935, year_built=2008),
-    dict(tail_number="N98765", airline="Delta Air Lines",    manufacturer="Airbus",  model="A321",     engine_count=2, max_range_nm=3200, year_built=2015),
-    dict(tail_number="N55501", airline="Southwest Airlines", manufacturer="Boeing",  model="737 MAX 8",engine_count=2, max_range_nm=3550, year_built=2020),
+    dict(
+        tail_number="N12345",
+        airline="United Airlines",
+        manufacturer="Boeing",
+        model="737-800",
+        engine_count=2,
+        max_range_nm=2935,
+        year_built=2008,
+    ),
+    dict(
+        tail_number="N98765",
+        airline="Delta Air Lines",
+        manufacturer="Airbus",
+        model="A321",
+        engine_count=2,
+        max_range_nm=3200,
+        year_built=2015,
+    ),
+    dict(
+        tail_number="N55501",
+        airline="Southwest Airlines",
+        manufacturer="Boeing",
+        model="737 MAX 8",
+        engine_count=2,
+        max_range_nm=3550,
+        year_built=2020,
+    ),
 ]
 
 FLIGHT_DATA = [
-    dict(tail_number="N12345", flight_number="UA 110",  origin="ORD", destination="LAX", distance_nm=1745, altitude_max_ft=37000, origin_lat=41.978, origin_lon=-87.904),
-    dict(tail_number="N98765", flight_number="DL 402",  origin="ATL", destination="JFK", distance_nm=762,  altitude_max_ft=33000, origin_lat=33.640, origin_lon=-84.427),
-    dict(tail_number="N55501", flight_number="WN 1823", origin="DAL", destination="PHX", distance_nm=868,  altitude_max_ft=39000, origin_lat=32.847, origin_lon=-96.851),
+    dict(
+        tail_number="N12345",
+        flight_number="UA 110",
+        origin="ORD",
+        destination="LAX",
+        distance_nm=1745,
+        altitude_max_ft=37000,
+        origin_lat=41.978,
+        origin_lon=-87.904,
+    ),
+    dict(
+        tail_number="N98765",
+        flight_number="DL 402",
+        origin="ATL",
+        destination="JFK",
+        distance_nm=762,
+        altitude_max_ft=33000,
+        origin_lat=33.640,
+        origin_lon=-84.427,
+    ),
+    dict(
+        tail_number="N55501",
+        flight_number="WN 1823",
+        origin="DAL",
+        destination="PHX",
+        distance_nm=868,
+        altitude_max_ft=39000,
+        origin_lat=32.847,
+        origin_lon=-96.851,
+    ),
 ]
 
 
-def _make_gps_track(origin_lat: float, origin_lon: float, n_points: int = 120, rng=None) -> pd.DataFrame:
+def _make_gps_track(
+    origin_lat: float, origin_lon: float, n_points: int = 120, rng=None
+) -> pd.DataFrame:
     """Return a synthetic GPS track DataFrame."""
     if rng is None:
         rng = np.random.default_rng()
@@ -113,21 +166,26 @@ def _make_gps_track(origin_lat: float, origin_lon: float, n_points: int = 120, r
     lon = origin_lon + np.cumsum(rng.normal(0.015, 0.004, n_points))
     thirds = n_points // 3
     alt = np.clip(
-        np.concatenate([
-            np.linspace(0, 35000, thirds),
-            np.full(thirds, 35000) + rng.normal(0, 100, thirds),
-            np.linspace(35000, 0, n_points - 2 * thirds),
-        ]),
-        0, 41000,
+        np.concatenate(
+            [
+                np.linspace(0, 35000, thirds),
+                np.full(thirds, 35000) + rng.normal(0, 100, thirds),
+                np.linspace(35000, 0, n_points - 2 * thirds),
+            ]
+        ),
+        0,
+        41000,
     )
     speed = np.clip(alt / 35000 * 480 + rng.normal(0, 10, n_points), 0, 600)
-    return pd.DataFrame({
-        "timestamp":    timestamps,
-        "latitude":     lat,
-        "longitude":    lon,
-        "altitude_ft":  alt.astype(int),
-        "speed_kts":    speed.astype(int),
-    })
+    return pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "latitude": lat,
+            "longitude": lon,
+            "altitude_ft": alt.astype(int),
+            "speed_kts": speed.astype(int),
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -136,8 +194,13 @@ def _make_gps_track(origin_lat: float, origin_lon: float, n_points: int = 120, r
 if __name__ == "__main__":
     rng = np.random.default_rng(42)
 
-    with tempfile.TemporaryDirectory() as tmp:
-        config = CacheConfig(cache_dir=tmp, metadata_backend="sqlite")
+    from pathlib import Path
+    
+    tmp = Path("./custom_meta_linked_cache")
+    tmp.mkdir(exist_ok=True)
+    
+    try:
+        config = CacheConfig(cache_dir=str(tmp), metadata_backend="sqlite")
         cache = cacheness(config)
 
         engine = cache.metadata_backend.engine
@@ -190,9 +253,9 @@ if __name__ == "__main__":
         with cache.query_custom_session("flights") as q:
             results = (
                 q.join(FlightMeta.aircraft)
-                 .filter(FlightMeta.distance_nm > 1000)
-                 .filter(Aircraft.manufacturer == "Boeing")
-                 .all()
+                .filter(FlightMeta.distance_nm > 1000)
+                .filter(Aircraft.manufacturer == "Boeing")
+                .all()
             )
             for f in results:
                 print(
@@ -206,9 +269,9 @@ if __name__ == "__main__":
         with cache.query_custom_session("flights") as q:
             results = (
                 q.join(FlightMeta.aircraft)
-                 .filter(Aircraft.manufacturer == "Boeing")
-                 .order_by(Aircraft.year_built.desc())
-                 .all()
+                .filter(Aircraft.manufacturer == "Boeing")
+                .order_by(Aircraft.year_built.desc())
+                .all()
             )
             for f in results:
                 print(
@@ -219,3 +282,8 @@ if __name__ == "__main__":
 
         cache.close()
         print("\nDone.")
+    except Exception as ex:
+        print(f"Error: {ex}")
+    # finally:
+    #     import shutil
+    #     shutil.rmtree(tmp, ignore_errors=True)

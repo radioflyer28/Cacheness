@@ -205,11 +205,19 @@ class MyMetadataBackend(MetadataBackend):
         self._client = redis.Redis.from_url(redis_url)
     
     def put_entry(self, cache_key: str, metadata: Dict[str, Any]) -> None:
-        """Store metadata for a cache entry."""
+        """Store metadata for a cache entry.
+        
+        ``metadata`` conforms to the EntryData TypedDict contract:
+        {description, data_type, created_at, accessed_at, file_size, metadata: {...}}
+        See cacheness.interfaces.EntryData for the full schema.
+        """
         self._client.hset(f"cache:{cache_key}", mapping=metadata)
     
     def get_entry(self, cache_key: str) -> Optional[Dict[str, Any]]:
-        """Retrieve metadata for a cache entry."""
+        """Retrieve metadata for a cache entry.
+        
+        Must return a dict matching the EntryData contract, or None.
+        """
         data = self._client.hgetall(f"cache:{cache_key}")
         return dict(data) if data else None
     

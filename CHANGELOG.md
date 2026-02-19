@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `EntryList` result wrapper for `list_entries()`/`query_meta()` with `.keys()`, `.filter()`, `.sort_by()`, `.to_dataframe()` (CACHE-5d3)
 - `HandlerResult` dataclass replacing untyped dicts from handler `put()` (CACHE-98f)
 - `WriteBlobResult` and `IntegrityReport` typed contracts for `_write_blob()` and `verify_integrity()` (CACHE-d5x)
+- `EntryData` TypedDict — canonical contract for `get_entry()`/`put_entry()` across all metadata backends (CACHE-aqq)
+- `HooksConfig` lifecycle callbacks — `on_evict(cache_key, reason)` and `on_integrity_failure(cache_key, failure_type, detail)` with flat-kwarg convenience in `CacheConfig.__init__` (CACHE-aqq)
 - `delete_on_error` config option (`CacheMetadataConfig`) — when `False`, `get()` returns `None` on errors but preserves cache entries instead of auto-deleting (CACHE-ajv)
 - `__len__`, `__contains__`, `__iter__` dunder methods on `UnifiedCache`
 - Human-readable duration strings for TTL (`"1h"`, `"7d"`, `"30d"`)
@@ -26,6 +28,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Transaction ordering: metadata-first delete, `get()` blob cleanup, `put()` overwrite cleanup
 - File size units standardized to bytes internally (`max_cache_size` accepts `"2gb"` strings)
 - Pre-commit hook re-stages files after `ruff format`
+- All 4 Parquet handlers now consistently raise `CacheWriteError`/`CacheReadError` with `cache_operation_context` (previously only `PolarsDataFrameHandler` had error wrapping) (CACHE-aqq)
+
+### Internal
+
+- **Tier 1 refactors** (CACHE-8yw): `_resolve_hash_key_alias()`, `_resolve_cache_key()`, `_enrich_entry()`, `_merge_entry_metadata()` extracted from core.py
+- **Tier 2 refactors** (CACHE-22z): `_verify_entry()`, `_build_metadata_dict()`, `_sign_entry_if_enabled()`, `_cleanup_stale_blob()`, `BlobReadContext` TypedDict
+- **Tier 3 refactors** (CACHE-aqq): `EntryData` TypedDict, normalized Parquet handler error handling, `HooksConfig` lifecycle callbacks with `_invoke_hook()` dispatch
+- core.py reduced from ~3100 to ~2940 lines across all three tiers
 
 ### Tests
 

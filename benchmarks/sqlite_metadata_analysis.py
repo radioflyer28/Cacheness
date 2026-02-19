@@ -328,7 +328,9 @@ def main():
         print("")
         print("Optimization Notes:")
         print("  - metadata_dict column stores query_meta() params as JSON")
-        print("  - cache_key_params optional -- only stored when store_full_metadata=True")
+        print(
+            "  - cache_key_params optional -- only stored when store_full_metadata=True"
+        )
         print("  - actual_path stored for direct file access without recomputation")
         print("  - Enable memory cache layer for frequent repeated access patterns")
         print()

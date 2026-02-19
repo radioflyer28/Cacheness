@@ -626,6 +626,43 @@ report.hash_mismatches      # Optional[List[Dict]] (when verify_hashes=True)
 report.repaired             # Optional[Dict] (when repair=True)
 ```
 
+### `EntryData` (TypedDict)
+
+Canonical shape for the dict returned by `MetadataBackend.get_entry()` and accepted by `put_entry()`. All metadata backends (JSON, SQLite, PostgreSQL) produce and consume dicts conforming to this contract.
+
+```python
+from cacheness import EntryData
+
+class EntryData(TypedDict, total=False):
+    # Always present from all backends
+    description: str
+    data_type: str
+    created_at: Any       # ISO str or float timestamp depending on backend
+    accessed_at: Any
+    file_size: int
+    metadata: Dict[str, Any]  # Nested handler/storage metadata
+
+    # Present in some backends
+    cache_key: str        # PostgreSQL includes this; JSON/SQLite do not
+```
+
+The nested `metadata` dict contains handler-written fields (`actual_path`, `storage_format`, `file_hash`, `entry_signature`, handler extras). Exact keys vary by handler type.
+
+Primarily relevant for custom metadata backend authors implementing `get_entry()`/`put_entry()`.
+
+### `HooksConfig` (dataclass)
+
+Lifecycle callback configuration for cache events. See [Configuration Guide — Hooks](CONFIGURATION.md#hooks-configuration-hooksconfig) for full details.
+
+```python
+from cacheness import HooksConfig
+
+@dataclass
+class HooksConfig:
+    on_evict: Optional[Callable] = None
+    on_integrity_failure: Optional[Callable] = None
+```
+
 ### `WriteBlobResult`
 
 Internal typed contract returned by `BlobStore._write_blob()`. Replaces the unnamed `tuple[handler, result, file_hash]`.

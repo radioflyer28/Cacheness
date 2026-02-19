@@ -87,6 +87,28 @@ JSON backend has O(n²) scaling - re-serializes entire metadata file on each wri
 - Use SQLite backend for production deployments
 - Monitor cache size and switch before performance degrades
 
+## Handler Error Types Changed (v0.5.2+)
+
+**Symptoms:**
+- Code that previously caught `ImportError` or bare `Exception` from Parquet handler `get()`/`put()` now receives `CacheReadError` or `CacheWriteError`
+- Applies to `PandasDataFrameHandler`, `PandasSeriesHandler`, `PolarsSeriesHandler` (in addition to `PolarsDataFrameHandler` which already had this behavior)
+
+**Cause:**
+As of v0.5.2, all four Parquet handlers consistently wrap errors in `CacheWriteError`/`CacheReadError` with `cache_operation_context`. Previously, only `PolarsDataFrameHandler` did this.
+
+**Solution:**
+Update exception handlers to catch the Cacheness error types:
+```python
+from cacheness.interfaces import CacheReadError, CacheWriteError
+
+try:
+    data = cache.get(cache_key="my_key")
+except CacheReadError as e:
+    print(f"Handler: {e.handler_type}, Message: {e}")
+```
+
+> **Note:** If you were catching bare `Exception`, no change is needed — `CacheReadError`/`CacheWriteError` are subclasses of `Exception`.
+
 ## Import Errors After Adding Dependencies
 
 **Symptoms:**
