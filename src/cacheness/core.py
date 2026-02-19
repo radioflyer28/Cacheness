@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List, Callable, Tuple
 
 from .config import CacheConfig, _DEFAULT_TTL, create_cache_config
+from .entry_list import EntryList
 from .handlers import HandlerRegistry
 from .metadata import DEFAULT_NAMESPACE
 from .serialization import create_unified_cache_key
@@ -749,10 +750,10 @@ class UnifiedCache:
                        comparison for int/float, string equality otherwise).
 
         Returns:
-            List of dicts (one per matching entry) with keys
+            EntryList of dicts (one per matching entry) with keys
             ``cache_key``, ``description``, ``data_type``, ``created_at``,
             ``accessed_at``, ``file_size``, ``metadata_dict``.
-            Returns an empty list when no entries match.
+            Returns an empty EntryList when no entries match.
             Returns ``None`` only on unexpected errors.
 
         Example:
@@ -782,7 +783,7 @@ class UnifiedCache:
 
     # ── Private helpers ─────────────────────────────────────────────
 
-    def _query_meta_generic(self, **filters) -> list | None:
+    def _query_meta_generic(self, **filters) -> EntryList | None:
         """Python-side ``query_meta`` that works with any backend."""
         try:
             from .json_utils import loads as json_loads
@@ -793,7 +794,7 @@ class UnifiedCache:
 
         try:
             summaries = self.metadata_backend.iter_entry_summaries()
-            entries: list[dict] = []
+            entries: EntryList = EntryList()
 
             for summary in summaries:
                 # metadata_dict may be a JSON string or already a dict
@@ -835,7 +836,7 @@ class UnifiedCache:
             logger.error(f"Failed to query metadata (generic): {e}")
             return None
 
-    def _query_meta_sqlite(self, **filters) -> list | None:
+    def _query_meta_sqlite(self, **filters) -> EntryList | None:
         """SQLite fast path using JSON_EXTRACT for ``query_meta``."""
         try:
             from sqlalchemy import text
@@ -879,7 +880,7 @@ class UnifiedCache:
 
                 result = session.execute(text(query), params)
 
-                entries = []
+                entries = EntryList()
                 for row in result:
                     entry = {
                         "cache_key": row.cache_key,
@@ -2841,15 +2842,22 @@ class UnifiedCache:
 
         return stats
 
-    def list_entries(self) -> List[Dict[str, Any]]:
-        """List all cache entries with metadata."""
+    def list_entries(self) -> EntryList:
+        """List all cache entries with metadata.
+
+        Returns:
+            EntryList of entry dicts.  Extends ``list`` so existing
+            iteration/indexing code is unaffected.  Adds convenience
+            methods: ``.to_dataframe()``, ``.to_json()``, ``.keys()``,
+            ``.sort_by()``, ``.filter()``, ``.first()``/``.last()``.
+        """
         entries = self.metadata_backend.list_entries()
 
         # Add expiration status for each entry
         for entry in entries:
             entry["expired"] = self._is_expired(entry["cache_key"])
 
-        return entries
+        return EntryList(entries)
 
     def close(self):
         """Close all resources (database connections, etc.)."""

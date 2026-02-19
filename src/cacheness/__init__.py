@@ -43,6 +43,7 @@ from .interfaces import (
     CacheHandler,
     HandlerResult,
 )  # Export interface for custom handlers
+from .entry_list import EntryList  # noqa: F401
 
 # Import config validation and file loading (Phase 2.4)
 from .config import (
@@ -233,6 +234,7 @@ __all__ = [
     "ArrayHandler",
     "CacheHandler",  # Interface for custom handlers
     "HandlerResult",  # Typed return contract for handler put()
+    "EntryList",  # Rich result wrapper for list_entries/query
     # Handler registration API
     "register_handler",
     "unregister_handler",
