@@ -8,7 +8,7 @@ Configuration is split into focused sub-configurations for better maintainabilit
 
 import logging
 from dataclasses import dataclass, field
-from typing import Optional, List, Union
+from typing import Any, Callable, Optional, List, Union
 from pathlib import Path
 
 from .metadata import validate_namespace_id, DEFAULT_NAMESPACE
@@ -403,6 +403,30 @@ class SecurityConfig:
         )
 
 
+@dataclass
+class HooksConfig:
+    """Optional lifecycle callbacks for cache events.
+
+    All callbacks default to ``None`` (no-op).  When set, the cache invokes
+    them **synchronously** during the relevant operation.  Callbacks MUST
+    NOT raise — any exception is logged and swallowed so it never breaks
+    the cache operation itself.
+
+    Attributes:
+        on_evict: Called when an entry is removed by size-limit enforcement
+            or TTL cleanup.  Signature: ``(cache_key: str, reason: str) -> None``
+            where *reason* is ``"size_limit"`` or ``"expired"``.
+        on_integrity_failure: Called when an entry fails hash or signature
+            verification.  Signature:
+            ``(cache_key: str, failure_type: str, detail: str) -> None``
+            where *failure_type* is ``"hash_mismatch"``, ``"signature_invalid"``,
+            or ``"unsigned_rejected"``.
+    """
+
+    on_evict: Optional[Callable[..., Any]] = None
+    on_integrity_failure: Optional[Callable[..., Any]] = None
+
+
 class CacheConfig:
     """Main configuration class that combines all sub-configurations."""
 
@@ -413,6 +437,7 @@ class CacheConfig:
     serialization: SerializationConfig = field(default_factory=SerializationConfig)
     handlers: HandlerConfig = field(default_factory=HandlerConfig)
     security: SecurityConfig = field(default_factory=SecurityConfig)
+    hooks: HooksConfig = field(default_factory=HooksConfig)
     namespace: str = DEFAULT_NAMESPACE
     storage_mode: bool = False  # When True, disables TTL, eviction, stats, auto-delete
 
@@ -425,6 +450,7 @@ class CacheConfig:
         serialization: Optional[SerializationConfig] = None,
         handlers: Optional[HandlerConfig] = None,
         security: Optional[SecurityConfig] = None,
+        hooks: Optional[HooksConfig] = None,
         # Namespace isolation (immutable after init)
         namespace: str = DEFAULT_NAMESPACE,
         # Backwards compatibility parameters
@@ -468,6 +494,9 @@ class CacheConfig:
         use_in_memory_key: Optional[bool] = None,
         # Error handling
         delete_on_error: Optional[bool] = None,
+        # Lifecycle hooks (flat convenience — prefer HooksConfig object)
+        on_evict: Optional[Callable[..., Any]] = None,
+        on_integrity_failure: Optional[Callable[..., Any]] = None,
         # Memory cache layer parameters (sits between application and disk backends)
         enable_memory_cache: Optional[bool] = None,
         memory_cache_type: Optional[str] = None,
@@ -492,6 +521,13 @@ class CacheConfig:
         self.serialization = serialization or SerializationConfig()
         self.handlers = handlers or HandlerConfig()
         self.security = security or SecurityConfig()
+        self.hooks = hooks or HooksConfig()
+
+        # Map flat hook kwargs into HooksConfig
+        if on_evict is not None:
+            self.hooks.on_evict = on_evict
+        if on_integrity_failure is not None:
+            self.hooks.on_integrity_failure = on_integrity_failure
 
         # Apply backwards compatibility mappings
         if cache_dir is not None:

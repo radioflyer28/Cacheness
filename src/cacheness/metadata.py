@@ -369,7 +369,9 @@ class MetadataBackend(ABC):
     def get_entry(self, cache_key: str) -> Optional[Dict[str, Any]]:
         """Get specific cache entry metadata (internal storage format).
 
-        Returns a dict with internal field names:
+        The returned dict conforms to the :class:`~cacheness.interfaces.EntryData`
+        TypedDict contract::
+
             description, data_type, created_at, accessed_at,
             file_size (bytes), metadata (nested dict)
 
@@ -379,7 +381,11 @@ class MetadataBackend(ABC):
 
     @abstractmethod
     def put_entry(self, cache_key: str, entry_data: Dict[str, Any]):
-        """Store cache entry metadata."""
+        """Store cache entry metadata.
+
+        *entry_data* should conform to the
+        :class:`~cacheness.interfaces.EntryData` contract.
+        """
         pass
 
     @abstractmethod

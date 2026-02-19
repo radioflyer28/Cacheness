@@ -104,6 +104,36 @@ class BlobReadContext(TypedDict, total=False):
     entry_signature: str
 
 
+class EntryData(TypedDict, total=False):
+    """Canonical shape returned by ``get_entry()`` / accepted by ``put_entry()``.
+
+    All metadata backends (JSON, SQLite, PostgreSQL) produce and consume
+    dicts conforming to this contract.  ``total=False`` because optional
+    fields may be absent depending on the backend or entry state.
+
+    **Structure:** Top-level keys are the "envelope" (description, timing,
+    size).  The nested ``metadata`` dict holds handler-written fields
+    (storage format, hashes, handler extras).
+
+    **Backend divergences:**
+
+    * PostgreSQL includes ``cache_key`` at the top level (informational).
+    * ``metadata`` sub-keys vary by handler — only ``actual_path`` and
+      ``storage_format`` are reliably present for on-disk entries.
+    """
+
+    # --- always present from all backends ---
+    description: str
+    data_type: str
+    created_at: Any  # ISO str or float timestamp depending on backend
+    accessed_at: Any
+    file_size: int
+    metadata: Dict[str, Any]  # nested handler / storage metadata
+
+    # --- present in some backends ---
+    cache_key: str  # PostgreSQL includes this; JSON/SQLite do not
+
+
 @dataclass
 class HandlerResult:
     """Typed return contract for handler put() methods.

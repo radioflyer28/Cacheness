@@ -42,6 +42,7 @@ from .metadata import (
 from .interfaces import (
     BlobReadContext,
     CacheHandler,
+    EntryData,
     EntrySummary,
     HandlerResult,
     IntegrityReport,
@@ -58,6 +59,7 @@ from .config import (
     CompressionConfig,
     SerializationConfig,
     HandlerConfig,
+    HooksConfig,
     SecurityConfig,
     ConfigValidationError,
     validate_config,
@@ -225,6 +227,7 @@ __all__ = [
     "SerializationConfig",
     "HandlerConfig",
     "SecurityConfig",
+    "HooksConfig",  # Lifecycle callback configuration
     # Configuration validation (Phase 2.4)
     "ConfigValidationError",
     "validate_config",
@@ -244,6 +247,7 @@ __all__ = [
     "SignableFields",  # Typed contract for signable entry fields
     "EntrySummary",  # Typed contract for iter_entry_summaries()
     "BlobReadContext",  # Typed contract for handler.get() metadata
+    "EntryData",  # Typed contract for get_entry()/put_entry()
     "EntryList",  # Rich result wrapper for list_entries/query
     # Handler registration API
     "register_handler",

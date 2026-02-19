@@ -1189,6 +1189,19 @@ class UnifiedCache:
         """
         return self._blob_store._calculate_file_hash(file_path)
 
+    # ── Lifecycle hook helpers ────────────────────────────────────────
+
+    def _invoke_hook(self, hook_name: str, *args: object) -> None:
+        """Safely invoke a HooksConfig callback (never raises)."""
+        hook = getattr(self.config.hooks, hook_name, None)
+        if hook is not None:
+            try:
+                hook(*args)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    f"Hook {hook_name} raised an exception (swallowed): {exc}"
+                )
+
     def _record_hit(self):
         """Record a cache hit if stats tracking is enabled."""
         if self.config.metadata.enable_cache_stats:
@@ -1230,24 +1243,28 @@ class UnifiedCache:
             if stored_hash is not None:
                 current_hash = self._blob_store._calculate_file_hash(file_path)
                 if current_hash != stored_hash:
+                    detail = f"stored hash {stored_hash} != current hash {current_hash}"
+                    self._invoke_hook(
+                        "on_integrity_failure",
+                        cache_key,
+                        "hash_mismatch",
+                        detail,
+                    )
                     if storage_mode:
                         logger.warning(
                             f"Cache integrity verification failed for {cache_key}: "
-                            f"stored hash {stored_hash} != current hash {current_hash}. "
-                            f"Entry preserved (storage mode)."
+                            f"{detail}. Entry preserved (storage mode)."
                         )
                     elif self.config.metadata.delete_on_error:
                         logger.warning(
                             f"Cache integrity verification failed for {cache_key}: "
-                            f"stored hash {stored_hash} != current hash {current_hash}. "
-                            f"Removing corrupted cache entry."
+                            f"{detail}. Removing corrupted cache entry."
                         )
                         self._blob_store.delete(cache_key)
                     else:
                         logger.warning(
                             f"Cache integrity verification failed for {cache_key}: "
-                            f"stored hash {stored_hash} != current hash {current_hash}. "
-                            f"Entry retained due to delete_on_error=False."
+                            f"{detail}. Entry retained due to delete_on_error=False."
                         )
                     return False
 
@@ -1261,6 +1278,12 @@ class UnifiedCache:
                     metadata=metadata,
                 )
                 if not self.signer.verify_entry(verify_data, stored_signature):
+                    self._invoke_hook(
+                        "on_integrity_failure",
+                        cache_key,
+                        "signature_invalid",
+                        "HMAC signature verification failed",
+                    )
                     if storage_mode:
                         logger.warning(
                             f"Entry signature verification failed for {cache_key}. "
@@ -1282,6 +1305,12 @@ class UnifiedCache:
                         # Continue loading despite invalid signature
 
             elif not self.config.security.allow_unsigned_entries:
+                self._invoke_hook(
+                    "on_integrity_failure",
+                    cache_key,
+                    "unsigned_rejected",
+                    "Entry has no signature and unsigned entries are not allowed",
+                )
                 if storage_mode:
                     logger.warning(
                         f"Entry {cache_key} has no signature but unsigned entries "
@@ -2518,6 +2547,8 @@ class UnifiedCache:
         # Delete blob files for removed entries
         blobs_deleted = 0
         for entry in removed_entries:
+            entry_key = entry.get("cache_key", "unknown")
+            self._invoke_hook("on_evict", entry_key, "size_limit")
             actual_path = entry.get("actual_path")
             if actual_path and "://" not in actual_path:
                 blob_file = self._resolve_actual_path(actual_path)
@@ -2710,6 +2741,8 @@ class UnifiedCache:
             # Delete blob files for expired entries
             blobs_deleted = 0
             for entry in expired_entries:
+                entry_key = entry.get("cache_key", "unknown")
+                self._invoke_hook("on_evict", entry_key, "expired")
                 actual_path = entry.get("actual_path")
                 if actual_path and "://" not in actual_path:
                     blob_file = self._resolve_actual_path(actual_path)
