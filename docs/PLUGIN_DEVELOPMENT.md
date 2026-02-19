@@ -52,7 +52,7 @@ class MyCustomHandler(CacheHandler):
         """Return True if this handler can serialize the data."""
         return isinstance(data, MyCustomType)
     
-    def put(self, data: Any, file_path: Path, config: Any) -> Dict[str, Any]:
+    def put(self, data: Any, file_path: Path, config: Any) -> "HandlerResult":
         """
         Serialize data to file.
         
@@ -62,19 +62,21 @@ class MyCustomHandler(CacheHandler):
             config: Cache configuration object
             
         Returns:
-            Dict with at least 'storage_format' and actual 'file_path' used
+            HandlerResult with storage_format, file_path, and optional extras.
         """
+        from cacheness.handler_result import HandlerResult
+
         output_path = file_path.with_suffix(".mycustom")
         
         # Your serialization logic here
         with open(output_path, "wb") as f:
             f.write(data.to_bytes())
         
-        return {
-            "storage_format": "my_custom_format",
-            "file_path": str(output_path),
-            "custom_field": "any additional metadata",
-        }
+        return HandlerResult(
+            storage_format="my_custom_format",
+            file_path=str(output_path),
+            extras={"custom_field": "any additional metadata"},
+        )
     
     def get(self, file_path: Path, metadata: Dict[str, Any]) -> Any:
         """

@@ -230,6 +230,8 @@ config = CacheConfig(
 - ✅ Complex SQL queries for metadata analysis
 - ✅ Automatic optimization with our tuned pragmas
 
+> **v0.5.2 – Core column-select optimisation:** `iter_entry_summaries()` now uses a SQLAlchemy Core `select()` with explicit columns instead of ORM `query()`, reducing per-row overhead for bulk listing and eviction operations on large caches.
+
 #### In-Memory SQLite - Ultra Fast
 ```python
 # Memory-optimized for temporary high-performance caching

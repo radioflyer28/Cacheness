@@ -96,15 +96,38 @@ def main():
         )
         print(f"   delete_batch: removed {removed}")
 
+        # ── 7. EntryList methods ────────────────────────────────────────
+        print("\n7. EntryList — rich result from list_entries()")
+        for i in range(3):
+            cache.put({"val": i}, series="entrylist_demo", idx=i)
+
+        entries = cache.list_entries()
+        print(f"   len(entries)  = {len(entries)}")
+        print(f"   .keys()       = {len(entries.keys())} keys")
+        first = entries.first()
+        print(
+            f"   .first()      = {first['cache_key'][:16]}…"
+            if first
+            else "   .first()      = (empty)"
+        )
+
+        # Filter and sort
+        recent = entries.sort_by("created_at", reverse=True)
+        newest = recent.first()
+        print(
+            f"   .sort_by()    = newest first: {newest['cache_key'][:16]}…"
+            if newest
+            else "   .sort_by()    = (empty)"
+        )
+
+        filtered = entries.filter(lambda e: e.get("data_type") == "object")
+        print(f"   .filter()     = {len(filtered)} object entries")
+
     finally:
         cache.close()
         shutil.rmtree(tmp, ignore_errors=True)
 
     print("\nDone.")
-
-
-if __name__ == "__main__":
-    main()
 
 
 if __name__ == "__main__":

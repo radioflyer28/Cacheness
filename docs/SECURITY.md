@@ -255,6 +255,40 @@ new_cache = cacheness(CacheConfig(
 ))
 ```
 
+## Namespace Registry Signing
+
+In addition to per-entry signing, Cacheness can sign **namespace registry rows** to detect tampering with namespace metadata (e.g., renaming or altering a namespace's `created_at` timestamp).
+
+### How It Works
+
+When a `UnifiedCache` instance initialises with signing enabled:
+
+1. **First use:** The namespace row is signed with an `ns1:` prefix and persisted via `set_namespace_signature()`.
+2. **Subsequent uses:** The stored signature is verified. A mismatch logs a warning (non-fatal — key rotation may invalidate it).
+
+Only **immutable fields** are signed: `namespace_id`, `display_name`, `created_at`. The `schema_version` column is deliberately excluded because it changes during migrations.
+
+```python
+# Namespace signing happens automatically — no user action needed
+cache = cacheness()  # ✅ Namespace signed (or verified) on init
+```
+
+### Diagnostic Logging
+
+```
+INFO  🔏 Signed namespace 'default'           # First init — signature stored
+DEBUG Namespace 'default' signature verified    # Subsequent init — OK
+WARN  ⚠️  Namespace 'default' signature verification failed (key rotation or tampering?)
+```
+
+### When Verification Fails
+
+Namespace signature failures are **non-fatal warnings**. Common causes:
+- Signing key was rotated (expected after key file deletion/regeneration)
+- Namespace row was manually edited in the database
+
+No automatic remediation occurs — the warning lets operators decide whether to investigate.
+
 ## Signature Verification
 
 ### Automatic Verification

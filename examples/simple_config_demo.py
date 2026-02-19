@@ -11,6 +11,7 @@ Usage:
 """
 
 from cacheness import cached, cacheness, CacheConfig
+from cacheness.config import CacheMetadataConfig
 
 
 # -- Custom cache directory ------------------------------------------------
@@ -76,4 +77,15 @@ if __name__ == "__main__":
     a = run_analytics("top customers")
     print(f"Analytics: {a}")
     a = run_analytics("top customers")  # cached
-    print(f"Cached:    {a}")
+    print(f"Cached:    {a}\n")
+
+    # Non-destructive get — preserve entries on deserialization errors
+    safe_config = CacheConfig(
+        cache_dir="./safe_cache",
+        metadata=CacheMetadataConfig(delete_on_error=False),
+    )
+    safe_cache = cacheness(safe_config)
+    safe_cache.put({"important": True}, key="keep_me")
+    print(
+        f"Non-destructive get config: delete_on_error={safe_config.metadata.delete_on_error}"
+    )

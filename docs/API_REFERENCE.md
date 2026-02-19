@@ -125,6 +125,9 @@ Store data in the cache with optional metadata.
 - `data` (Any): The data to cache
 - `**cache_key_params`: Key-value pairs used to generate the cache key
 - `metadata` (Optional[dict]): Custom metadata to store with the entry
+- `ttl` (Optional[str|int|float]): Per-entry TTL — duration string (`"1h"`, `"7d"`) or seconds. Overrides `default_ttl` for this entry.
+- `ttl_seconds` (Optional[float]): Legacy alias for `ttl`
+- `description` (Optional[str]): Human-readable description for the entry
 
 **Returns:**
 - `str`: The generated cache key
@@ -200,20 +203,34 @@ Remove an entry by its cache key.
 **Returns:**
 - `bool`: True if the entry was found and removed
 
-##### `list_entries(include_metadata: bool = False) -> List[dict]`
+##### `list_entries(include_metadata: bool = False) -> EntryList`
 List all cache entries.
 
 **Parameters:**
 - `include_metadata` (bool): Whether to include custom metadata in results
 
 **Returns:**
-- List of dictionaries containing entry information
+- `EntryList` — a `list` subclass with convenience methods:
+  - `.keys()` — list of cache keys
+  - `.first()` / `.last()` — first/last entry (or `None`)
+  - `.sort_by(field, reverse=False)` — return sorted `EntryList`
+  - `.filter(predicate)` — return filtered `EntryList`
+  - `.to_json(path=None)` — serialize to JSON string or file
+  - `.to_dataframe()` — convert to pandas DataFrame (requires pandas)
 
 **Example:**
 ```python
 entries = cache.list_entries(include_metadata=True)
-for entry in entries:
-    print(f"Key: {entry['cache_key']}, Size: {entry['size_mb']:.2f} MB")
+
+# EntryList convenience methods
+keys = entries.keys()              # ["key1", "key2", ...]
+first = entries.first()            # First entry dict or None
+sorted_ = entries.sort_by("file_size", reverse=True)
+recent = entries.filter(lambda e: e.get("data_type") == "dataframe")
+
+# Serialization
+entries.to_json("entries.json")     # Save to file
+df = entries.to_dataframe()         # pandas DataFrame
 ```
 
 ##### `get_stats() -> dict`
@@ -260,6 +277,37 @@ with cache.query_custom_session("ml_experiments") as query:
 
 ##### `close()`
 Close the cache and release resources. Called automatically if using context manager.
+
+##### `verify_integrity(repair=False, verify_hashes=False) -> IntegrityReport`
+Verify cache integrity by cross-checking blob files and metadata entries.
+
+**Parameters:**
+- `repair` (bool): If `True`, delete orphaned blobs and remove dangling metadata entries
+- `verify_hashes` (bool): If `True`, verify file hashes (slower but catches corruption). For S3 blobs, uses cheap HEAD/ETag check.
+
+**Returns:**
+- `IntegrityReport` with attributes:
+  - `.orphaned_blobs` — blob files with no metadata entry
+  - `.dangling_entries` — metadata entries pointing to missing blobs
+  - `.size_mismatches` — entries where `file_size` != actual size
+  - `.hash_mismatches` — entries where `file_hash` != actual hash (only when `verify_hashes=True`)
+  - `.repaired` — dict with `orphans_deleted` and `dangling_removed` counts (only when `repair=True`)
+
+Supports dict-style access for backward compatibility: `report["orphaned_blobs"]`.
+
+**Example:**
+```python
+# Detect issues
+report = cache.verify_integrity()
+print(f"Orphaned: {len(report.orphaned_blobs)}, Dangling: {len(report.dangling_entries)}")
+
+# Detect and repair
+report = cache.verify_integrity(repair=True)
+print(f"Cleaned {report.repaired['orphans_deleted']} orphans")
+
+# Full check including hash verification
+report = cache.verify_integrity(repair=True, verify_hashes=True)
+```
 
 **Example:**
 ```python
@@ -520,6 +568,79 @@ for key in cache:
 
 all_keys = list(cache)  # ["key1", "key2", ...]
 ```
+
+---
+
+## Typed Contracts
+
+Cacheness uses typed dataclasses for return values across internal and public APIs. These provide IDE autocompletion, named field access, and dict-compatible accessors for backward compatibility.
+
+### `HandlerResult`
+
+Returned by handler `put()` methods. Replaces the legacy untyped `Dict[str, Any]`.
+
+```python
+from cacheness import HandlerResult
+
+@dataclass
+class HandlerResult:
+    storage_format: str              # e.g. "parquet", "blosc2", "pickle"
+    file_size: int                   # Size in bytes
+    actual_path: str                 # Relative path to the blob file
+    compression_codec: Optional[str] # e.g. "lz4", "zstd"
+    serializer: Optional[str]       # e.g. "pickle", "dill"
+    object_type: Optional[str]      # e.g. "pandas.DataFrame"
+    extra: Dict[str, Any]           # Handler-specific metadata (shape, dtypes, etc.)
+```
+
+Provides dict-compatible accessors (`result["storage_format"]`, `"actual_path" in result`) for transitional use.
+
+### `EntryList`
+
+Returned by `list_entries()` and `query_meta()`. A `list` subclass with convenience methods.
+
+```python
+from cacheness import EntryList
+
+entries: EntryList = cache.list_entries()
+entries.keys()                          # ["key1", "key2", ...]
+entries.sort_by("file_size", reverse=True)  # Sorted EntryList
+entries.filter(lambda e: e["data_type"] == "dataframe")  # Filtered EntryList
+entries.to_dataframe()                  # pandas DataFrame
+entries.to_json("entries.json")         # Save to file
+entries.first()                         # First entry or None
+```
+
+### `IntegrityReport`
+
+Returned by `verify_integrity()`. See [verify_integrity](#verify_integrityrepairfalse-verify_hashesfalse---integrityreport) above.
+
+```python
+from cacheness import IntegrityReport
+
+report: IntegrityReport = cache.verify_integrity(repair=True, verify_hashes=True)
+report.orphaned_blobs      # List[str]
+report.dangling_entries     # List[Dict]
+report.size_mismatches      # List[Dict]
+report.hash_mismatches      # Optional[List[Dict]] (when verify_hashes=True)
+report.repaired             # Optional[Dict] (when repair=True)
+```
+
+### `WriteBlobResult`
+
+Internal typed contract returned by `BlobStore._write_blob()`. Replaces the unnamed `tuple[handler, result, file_hash]`.
+
+```python
+from cacheness import WriteBlobResult
+
+@dataclass
+class WriteBlobResult:
+    handler: CacheHandler        # The handler that serialized the data
+    result: HandlerResult        # Serialization metadata
+    file_hash: Optional[str]     # xxhash of the blob file (if computed)
+```
+
+Primarily relevant for plugin/handler developers and internal composition.
 
 ---
 

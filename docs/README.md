@@ -21,6 +21,7 @@ Welcome to the Cacheness documentation! This high-performance caching library pr
 
 - **[Performance Guide](PERFORMANCE.md)** - Optimization strategies and benchmarks
 - **[Custom Metadata](CUSTOM_METADATA.md)** - Working with SQLite backend and custom fields
+- **[API Reference — Typed Contracts](API_REFERENCE.md#typed-contracts)** - `HandlerResult`, `EntryList`, `WriteBlobResult`, `IntegrityReport`
 
 ## Specialized Handlers
 

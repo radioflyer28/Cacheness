@@ -88,6 +88,7 @@ cache = cacheness(config)
 | `backend` | str | `"auto"` | Backend: "auto", "sqlite", "json" |
 | `database_url` | str | `None` | Custom SQLite database path |
 | `verify_cache_integrity` | bool | `False` | Enable file hash verification |
+| `delete_on_error` | bool | `True` | When `False`, `get()` returns `None` on deserialization errors but preserves cache entries instead of auto-deleting them |
 | `store_full_metadata` | bool | `False` | Store cache key parameters as JSON (enable for querying, disable for performance) |
 | `store_cache_key_params` | bool | — | Deprecated alias for `store_full_metadata` |
 | **Memory Cache Layer** | | | |

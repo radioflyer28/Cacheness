@@ -54,6 +54,19 @@ This document describes Cacheness's internal architecture, the separation of res
 
 UnifiedCache adds cache concerns on top: TTL checking, size-based eviction, hit/miss statistics, signing enrichment, and auto-delete on errors.
 
+### Typed Contracts
+
+Cross-cutting operations return **typed dataclass contracts** instead of raw dicts:
+
+| Contract | Returned By | Purpose |
+|----------|-------------|---------|
+| `HandlerResult` | `handler.put()` | Standardises handler output (storage_format, file_path, extras) |
+| `WriteBlobResult` | `BlobStore.put()` | Reports key, path, file_hash, storage_format |
+| `EntryList` | `UnifiedCache.list_entries()` | Rich result wrapper with `.keys()`, `.filter()`, `.sort_by()`, `.to_json()` |
+| `IntegrityReport` | `verify_integrity()` | Structured integrity report with `.ok`, `.orphaned_blobs`, `.missing_blobs` |
+
+These live in `cacheness.handler_result`, `cacheness.storage.blob_store`, `cacheness.entry_list`, and `cacheness.integrity` respectively.
+
 When `storage_mode=True`, UnifiedCache early-returns to dedicated passthrough methods (`_storage_mode_put`, `_storage_mode_get`, `_storage_mode_get_with_metadata`) that delegate to BlobStore without any cache overhead.
 
 ## The Three Backend Types
@@ -163,6 +176,8 @@ User calls cache.invalidate(key="my-key")
 | `storage/backends/` | Metadata + blob backend implementations | Handler logic, serialization |
 | `storage/backends/base.py` | Unified MetadataBackend ABC | Implementation details |
 | `config.py` | Configuration dataclasses | Business logic, I/O |
+| `handler_result.py` | `HandlerResult` typed contract for handler output | I/O, handler selection |
+| `entry_list.py` | `EntryList` result wrapper for `list_entries()` | Metadata operations, serialization |
 | `decorators.py` | @cached, @cache_if decorators | Direct cache operations |
 
 ## `compress_pickle.py` Organization

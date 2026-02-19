@@ -301,7 +301,9 @@ print(cached_tensor.shape)  # (2, 2)
 
 ## Advanced Features
 
-- **Cache Entry Signing**: HMAC-SHA256 signatures for metadata integrity protection
+- **Cache Entry Signing**: HMAC-SHA256 signatures for metadata integrity protection, including namespace registry signing
+- **Typed Contracts**: `HandlerResult`, `EntryList`, `WriteBlobResult`, `IntegrityReport` — structured return types instead of raw dicts
+- **Non-destructive get**: `delete_on_error=False` preserves cache entries on deserialization errors
 - **Custom Metadata**: Rich metadata tracking with SQLAlchemy ORM for experiment tracking and data lineage
 - **Path Content Hashing**: Automatic content-based hashing for cache key, using key values that contain file & directory paths
 - **Multi-format Storage**: Optimized formats for different data types (NPZ, Parquet, compressed pickle)

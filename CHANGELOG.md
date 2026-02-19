@@ -5,6 +5,32 @@ All notable changes to Cacheness will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2] - 2026-02-19
+
+### Added
+
+- `EntryList` result wrapper for `list_entries()`/`query_meta()` with `.keys()`, `.filter()`, `.sort_by()`, `.to_dataframe()` (CACHE-5d3)
+- `HandlerResult` dataclass replacing untyped dicts from handler `put()` (CACHE-98f)
+- `WriteBlobResult` and `IntegrityReport` typed contracts for `_write_blob()` and `verify_integrity()` (CACHE-d5x)
+- `delete_on_error` config option (`CacheMetadataConfig`) — when `False`, `get()` returns `None` on errors but preserves cache entries instead of auto-deleting (CACHE-ajv)
+- `__len__`, `__contains__`, `__iter__` dunder methods on `UnifiedCache`
+- Human-readable duration strings for TTL (`"1h"`, `"7d"`, `"30d"`)
+- `ttl` parameter alias on `put()` (alongside `ttl_seconds`)
+- Namespace registry signing — HMAC-SHA256 signatures on namespace registry rows prevent tampering with namespace metadata (CACHE-0xc)
+- SQLite ORM-to-Core column select optimization for `list_entries()` and `get_entry()` — reduces overhead for large caches
+- `pytest-xdist` parallel test execution (`-n auto --dist loadgroup`)
+
+### Fixed
+
+- `put()` metadata columns (`storage_format`, `compression_codec`, `serializer`, `object_type`) now populated for all 7 handlers (CACHE-198)
+- Transaction ordering: metadata-first delete, `get()` blob cleanup, `put()` overwrite cleanup
+- File size units standardized to bytes internally (`max_cache_size` accepts `"2gb"` strings)
+- Pre-commit hook re-stages files after `ruff format`
+
+### Tests
+
+- Test suite: 1424 passed, 65 skipped, 0 failures (~37s parallel)
+
 ## [0.5.1] - 2026-02-16
 
 ### Added
