@@ -641,6 +641,16 @@ class PostgresBackend(MetadataBackend):
                 signature=row.signature,
             )
 
+    def set_namespace_signature(self, namespace_id: str, signature: str) -> None:
+        """Store namespace signature in the PostgreSQL registry."""
+        with self.SessionLocal() as session:
+            session.execute(
+                update(PgCacheNamespace)
+                .where(PgCacheNamespace.namespace_id == namespace_id)
+                .values(signature=signature)
+            )
+            session.commit()
+
     def _init_stats(self):
         """Initialize cache statistics if not exists."""
         with self.SessionLocal() as session:

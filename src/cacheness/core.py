@@ -173,6 +173,9 @@ class UnifiedCache:
         # Initialize entry signer for metadata integrity
         self._init_entry_signer()
 
+        # Sign / verify the current namespace registry row
+        self._sign_current_namespace()
+
         # Initialize internal BlobStore for storage delegation
         # Shares metadata_backend, handlers, lock, signer, and config
         self._init_blob_store()
@@ -366,6 +369,47 @@ class UnifiedCache:
         except Exception as e:
             logger.warning(f"Failed to initialize entry signer: {e}")
             self.signer = None
+
+    def _sign_current_namespace(self):
+        """Sign or verify the current namespace registry row.
+
+        Called once during ``__init__`` after the signer is available.
+        - If the namespace has no signature yet, compute one and store it.
+        - If a signature already exists, verify it and warn on mismatch
+          (non-fatal — a key rotation or schema change may invalidate it).
+        """
+        if not self.signer:
+            return
+
+        try:
+            ns_info = self.metadata_backend.get_namespace(self.namespace)
+            if ns_info is None:
+                return
+
+            ns_data = {
+                "namespace_id": ns_info.namespace_id,
+                "display_name": ns_info.display_name,
+                "created_at": ns_info.created_at,
+            }
+
+            if ns_info.signature is None:
+                # First time — sign and persist
+                sig = self.signer.sign_namespace(ns_data)
+                self.metadata_backend.set_namespace_signature(ns_info.namespace_id, sig)
+                logger.info(f"🔏 Signed namespace {ns_info.namespace_id!r}")
+            else:
+                # Verify existing signature
+                if not self.signer.verify_namespace(ns_data, ns_info.signature):
+                    logger.warning(
+                        f"⚠️  Namespace {ns_info.namespace_id!r} signature "
+                        f"verification failed (key rotation or tampering?)"
+                    )
+                else:
+                    logger.debug(
+                        f"Namespace {ns_info.namespace_id!r} signature verified"
+                    )
+        except Exception as e:
+            logger.warning(f"Namespace signing/verification failed: {e}")
 
     def _init_blob_store(self):
         """Initialize internal BlobStore for storage delegation.

@@ -290,7 +290,7 @@ try:
             nullable=False,
         )
         # HMAC signature for integrity verification (optional)
-        signature = Column(String(64), nullable=True)
+        signature = Column(String(100), nullable=True)
 
     # ------------------------------------------------------------------
     # Core table registry — only these are created by SqliteBackend.__init__.
@@ -670,6 +670,18 @@ class MetadataBackend(ABC):
                 return ns
         return None
 
+    def set_namespace_signature(self, namespace_id: str, signature: str) -> None:
+        """Store a cryptographic signature for a namespace registry row.
+
+        Subclasses that support namespaces should override this.  The
+        default implementation is a no-op (signature column stays NULL).
+
+        Args:
+            namespace_id: The namespace to update.
+            signature: The HMAC signature string to store.
+        """
+        pass  # default no-op for backends without namespace tables
+
     def namespace_exists(self, namespace_id: str) -> bool:
         """Check whether a namespace is registered.
 
@@ -1007,6 +1019,9 @@ class CachedMetadataBackend(MetadataBackend):
 
     def get_namespace(self, namespace_id: str):
         return self.backend.get_namespace(namespace_id)
+
+    def set_namespace_signature(self, namespace_id: str, signature: str) -> None:
+        return self.backend.set_namespace_signature(namespace_id, signature)
 
     def get_schema_version(self, namespace_id: str = DEFAULT_NAMESPACE) -> int:
         return self.backend.get_schema_version(namespace_id)
@@ -1688,6 +1703,15 @@ class JsonBackend(MetadataBackend):
                 signature=ns_data.get("signature"),
             )
 
+    def set_namespace_signature(self, namespace_id: str, signature: str) -> None:
+        """Store namespace signature in the JSON registry."""
+        with self._lock:
+            registry = self._load_registry()
+            ns_data = registry["namespaces"].get(namespace_id)
+            if ns_data is not None:
+                ns_data["signature"] = signature
+                self._save_registry(registry)
+
     def close(self):
         """Close and clean up resources (JSON backend saves any pending changes)."""
         with self._lock:
@@ -2046,6 +2070,16 @@ class SqliteBackend(MetadataBackend):
                 created_at=row.created_at,
                 signature=row.signature,
             )
+
+    def set_namespace_signature(self, namespace_id: str, signature: str) -> None:
+        """Store namespace signature in the SQLite registry."""
+        with self.SessionLocal() as session:
+            session.execute(
+                update(CacheNamespace)
+                .where(CacheNamespace.namespace_id == namespace_id)
+                .values(signature=signature)
+            )
+            session.commit()
 
     def _run_migrations(self):
         """Legacy migration method — delegates to formal schema versioning.
