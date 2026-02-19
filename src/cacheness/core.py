@@ -18,6 +18,7 @@ from typing import Optional, Dict, Any, List, Callable, Tuple
 from .config import CacheConfig, _DEFAULT_TTL, create_cache_config
 from .entry_list import EntryList
 from .handlers import HandlerRegistry
+from .interfaces import IntegrityReport
 from .metadata import DEFAULT_NAMESPACE
 from .serialization import create_unified_cache_key
 from .size_utils import format_size, resolve_ttl
@@ -1231,9 +1232,8 @@ class UnifiedCache:
             old_blob_path = old_meta.get("actual_path")
 
         try:
-            handler, result, file_hash = self._blob_store._write_blob(
-                data, base_file_path, compute_hash=True
-            )
+            wb = self._blob_store._write_blob(data, base_file_path, compute_hash=True)
+            handler, result, file_hash = wb.handler, wb.result, wb.file_hash
 
             actual_path_str = result.actual_path
             if "://" not in actual_path_str:
@@ -1517,11 +1517,12 @@ class UnifiedCache:
 
             try:
                 # Delegate file I/O + handler dispatch to BlobStore
-                handler, result, file_hash = self._blob_store._write_blob(
+                wb = self._blob_store._write_blob(
                     data,
                     base_file_path,
                     compute_hash=self.config.metadata.verify_cache_integrity,
                 )
+                handler, result, file_hash = wb.handler, wb.result, wb.file_hash
 
                 # Track the blob path so we can clean up on failure
                 actual_path_str = result.actual_path
@@ -2173,9 +2174,10 @@ class UnifiedCache:
 
             try:
                 # Write new blob to staging path (different blob_id)
-                handler, result, _ = self._blob_store._write_blob(
+                wb = self._blob_store._write_blob(
                     data, staging_base, compute_hash=False
                 )
+                handler, result = wb.handler, wb.result
 
                 actual_path_str = result.actual_path
                 if "://" not in actual_path_str:
@@ -2659,7 +2661,7 @@ class UnifiedCache:
 
     def verify_integrity(
         self, repair: bool = False, verify_hashes: bool = False
-    ) -> Dict[str, Any]:
+    ) -> IntegrityReport:
         """
         Verify cache integrity by cross-checking blob files and metadata entries.
 
@@ -2674,8 +2676,9 @@ class UnifiedCache:
             verify_hashes: If True, also verify file hashes (slower but catches corruption).
 
         Returns:
-            Dict with keys: orphaned_blobs, dangling_entries, size_mismatches,
+            IntegrityReport with orphaned_blobs, dangling_entries, size_mismatches,
             hash_mismatches (if verify_hashes), repaired (if repair).
+            Supports dict-style access for backward compatibility.
         """
         return self._blob_store.verify_integrity(
             repair=repair, verify_hashes=verify_hashes

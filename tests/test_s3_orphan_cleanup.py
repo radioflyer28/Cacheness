@@ -20,7 +20,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from cacheness.core import UnifiedCache, _PutCleanup
-from cacheness.interfaces import HandlerResult
+from cacheness.interfaces import HandlerResult, WriteBlobResult
 from cacheness.config import (
     CacheConfig,
     CacheStorageConfig,
@@ -48,7 +48,7 @@ def _make_cache(tmp_dir, storage_mode=False):
 
 
 def _fake_write_blob_result():
-    """Return a minimal handler + result tuple that looks like S3 upload."""
+    """Return a WriteBlobResult that looks like an S3 upload."""
     handler = MagicMock()
     handler.data_type = "pickle"
     handler.serializer = "pickle"
@@ -66,8 +66,7 @@ def _fake_write_blob_result():
             "file_hash": "def456",
         },
     )
-    file_hash = "def456"
-    return handler, result, file_hash
+    return WriteBlobResult(handler=handler, result=result, file_hash="def456")
 
 
 # ===========================================================================

@@ -8,7 +8,7 @@ Each interface is responsible for a specific aspect of cache handling.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from pathlib import Path
 import logging
 
@@ -78,6 +78,92 @@ class HandlerResult:
             return self.extra
         d = self._as_legacy_dict()
         return d.setdefault(key, default)
+
+
+@dataclass
+class WriteBlobResult:
+    """Typed return contract for ``BlobStore._write_blob()``.
+
+    Replaces the unnamed ``tuple[CacheHandler, HandlerResult, Optional[str]]``
+    previously returned.  Named fields make call-site intent explicit and
+    prevent positional-index mistakes.
+    """
+
+    handler: Any  # CacheHandler (avoiding circular import)
+    result: HandlerResult
+    file_hash: Optional[str] = None
+
+
+@dataclass
+class IntegrityReport:
+    """Typed return contract for ``verify_integrity()``.
+
+    Replaces the untyped ``Dict[str, Any]`` previously returned.
+    Provides attribute access while keeping dict-compatible accessors
+    so existing ``report["orphaned_blobs"]`` patterns continue to work.
+    """
+
+    orphaned_blobs: List[str] = field(default_factory=list)
+    dangling_entries: List[Dict[str, Any]] = field(default_factory=list)
+    size_mismatches: List[Dict[str, Any]] = field(default_factory=list)
+    hash_mismatches: Optional[List[Dict[str, Any]]] = None
+    repaired: Optional[Dict[str, Any]] = None
+
+    # -- dict-compatible accessors (76+ test accesses use report["key"]) --
+
+    _FIELDS = frozenset(
+        {
+            "orphaned_blobs",
+            "dangling_entries",
+            "size_mismatches",
+            "hash_mismatches",
+            "repaired",
+        }
+    )
+
+    def _as_dict(self) -> Dict[str, Any]:
+        """Return a dict mirroring the legacy report structure.
+
+        Only includes ``hash_mismatches`` / ``repaired`` when they are set
+        (matching the old conditional-key behaviour).
+        """
+        d: Dict[str, Any] = {
+            "orphaned_blobs": self.orphaned_blobs,
+            "dangling_entries": self.dangling_entries,
+            "size_mismatches": self.size_mismatches,
+        }
+        if self.hash_mismatches is not None:
+            d["hash_mismatches"] = self.hash_mismatches
+        if self.repaired is not None:
+            d["repaired"] = self.repaired
+        return d
+
+    def __getitem__(self, key: str) -> Any:
+        d = self._as_dict()
+        return d[key]
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._as_dict()
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self._as_dict().get(key, default)
+
+    def __len__(self) -> int:
+        """Number of keys in the report (matches dict len)."""
+        return len(self._as_dict())
+
+    def __iter__(self):
+        """Iterate over keys (matches dict iteration)."""
+        return iter(self._as_dict())
+
+    def keys(self):
+        return self._as_dict().keys()
+
+    def values(self):
+        return self._as_dict().values()
+
+    def items(self):
+        return self._as_dict().items()
 
 
 class CacheabilityChecker(ABC):

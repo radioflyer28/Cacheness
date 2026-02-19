@@ -68,6 +68,7 @@ from .paths import resolve_actual_path, to_relative_path
 
 # Import CacheConfig for proper handler configuration
 from ..config import CacheConfig, CompressionConfig
+from ..interfaces import WriteBlobResult, IntegrityReport
 
 logger = logging.getLogger(__name__)
 
@@ -595,7 +596,7 @@ class BlobStore:
 
     def verify_integrity(
         self, repair: bool = False, verify_hashes: bool = False
-    ) -> Dict[str, Any]:
+    ) -> IntegrityReport:
         """
         Verify blob store integrity by cross-checking blob files and metadata.
 
@@ -748,15 +749,13 @@ class BlobStore:
                             f"Failed to remove dangling entry {entry['cache_key']}: {e}"
                         )
 
-            report: Dict[str, Any] = {
-                "orphaned_blobs": orphaned_blobs,
-                "dangling_entries": dangling_entries,
-                "size_mismatches": size_mismatches,
-            }
-            if verify_hashes:
-                report["hash_mismatches"] = hash_mismatches
-            if repair:
-                report["repaired"] = repaired
+            report = IntegrityReport(
+                orphaned_blobs=orphaned_blobs,
+                dangling_entries=dangling_entries,
+                size_mismatches=size_mismatches,
+                hash_mismatches=hash_mismatches if verify_hashes else None,
+                repaired=repaired if repair else None,
+            )
 
             total_issues = (
                 len(orphaned_blobs)
@@ -791,7 +790,7 @@ class BlobStore:
         base_path: Path,
         config: Optional["CacheConfig"] = None,
         compute_hash: bool = True,
-    ) -> tuple:
+    ) -> WriteBlobResult:
         """
         Low-level: serialize data to disk via handler, then persist
         through the blob backend.
@@ -811,7 +810,7 @@ class BlobStore:
             compute_hash: Whether to compute xxhash file hash
 
         Returns:
-            Tuple of (handler, result_dict, file_hash_or_None)
+            WriteBlobResult with handler, result, and optional file hash.
         """
         handler = self.handlers.get_handler(data)
         result = handler.put(data, base_path, config or self.config)
@@ -838,7 +837,7 @@ class BlobStore:
             else:
                 file_hash = self._calculate_blob_hash(final_path)
 
-        return handler, result, file_hash
+        return WriteBlobResult(handler=handler, result=result, file_hash=file_hash)
 
     def _read_blob(
         self,

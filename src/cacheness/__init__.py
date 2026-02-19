@@ -42,6 +42,8 @@ from .metadata import (
 from .interfaces import (
     CacheHandler,
     HandlerResult,
+    IntegrityReport,
+    WriteBlobResult,
 )  # Export interface for custom handlers
 from .entry_list import EntryList  # noqa: F401
 
@@ -234,6 +236,8 @@ __all__ = [
     "ArrayHandler",
     "CacheHandler",  # Interface for custom handlers
     "HandlerResult",  # Typed return contract for handler put()
+    "WriteBlobResult",  # Typed return contract for _write_blob()
+    "IntegrityReport",  # Typed return contract for verify_integrity()
     "EntryList",  # Rich result wrapper for list_entries/query
     # Handler registration API
     "register_handler",
