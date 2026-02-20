@@ -741,9 +741,11 @@ class UnifiedCache:
 
         Works with **all** backends.  When the SQLite backend is active and
         ``store_full_metadata=True``, a fast SQL path using ``JSON_EXTRACT``
-        is used.  For every other backend (JSON, PostgreSQL, custom) a
-        Python-side fallback iterates stored entries and matches against
-        the ``metadata_dict`` field.
+        is used.  When the PostgreSQL backend is active, a fast JSONB path
+        using the ``@>`` containment operator (with GIN index) is used.
+        For every other backend (JSON, custom) a Python-side fallback
+        iterates stored entries and matches against the ``metadata_dict``
+        field.
 
         Args:
             **filters: Key-value pairs to filter cache entries.
@@ -779,6 +781,12 @@ class UnifiedCache:
             self.metadata_backend, "SessionLocal"
         ):
             return self._query_meta_sqlite(**filters)
+
+        # ── PostgreSQL fast path: JSONB @> containment ───────────
+        if self.actual_backend == "postgresql" and hasattr(
+            self.metadata_backend, "SessionLocal"
+        ):
+            return self._query_meta_postgres(**filters)
 
         # ── Generic fallback: Python-side filtering ─────────────────
         return self._query_meta_generic(**filters)
@@ -836,6 +844,76 @@ class UnifiedCache:
 
         except Exception as e:
             logger.error(f"Failed to query metadata (generic): {e}")
+            return None
+
+    def _query_meta_postgres(self, **filters) -> EntryList | None:
+        """PostgreSQL fast path using JSONB ``@>`` containment for ``query_meta``.
+
+        Leverages the GIN ``jsonb_path_ops`` index on ``metadata_dict``
+        for sub-millisecond filtered lookups instead of pulling all rows
+        into Python.
+        """
+        try:
+            from sqlalchemy import text
+
+            table = self.metadata_backend._entries_table
+
+            with self.metadata_backend.SessionLocal() as session:
+                if filters:
+                    # JSONB @> operator — leverages GIN index
+                    from .json_utils import dumps as json_dumps
+
+                    filter_json = json_dumps(filters)
+                    query = (
+                        f"SELECT cache_key, description, data_type, "
+                        f"       created_at, accessed_at, file_size, "
+                        f"       metadata_dict "
+                        f'FROM "{table}" '
+                        f"WHERE metadata_dict @> CAST(:filter_json AS jsonb) "
+                        f"ORDER BY created_at DESC"
+                    )
+                    result = session.execute(text(query), {"filter_json": filter_json})
+                else:
+                    query = (
+                        f"SELECT cache_key, description, data_type, "
+                        f"       created_at, accessed_at, file_size, "
+                        f"       metadata_dict "
+                        f'FROM "{table}" '
+                        f"WHERE metadata_dict IS NOT NULL "
+                        f"ORDER BY created_at DESC"
+                    )
+                    result = session.execute(text(query))
+
+                entries = EntryList()
+                for row in result:
+                    # JSONB may return dict (psycopg3) or str (psycopg2)
+                    meta_raw = row.metadata_dict
+                    if isinstance(meta_raw, str):
+                        try:
+                            from .json_utils import loads as json_loads
+
+                            meta_raw = json_loads(meta_raw)
+                        except Exception:
+                            meta_raw = {}
+                    elif not isinstance(meta_raw, dict):
+                        meta_raw = {}
+
+                    entries.append(
+                        {
+                            "cache_key": row.cache_key,
+                            "description": row.description or "",
+                            "data_type": row.data_type or "unknown",
+                            "created_at": self._fmt_timestamp(row.created_at),
+                            "accessed_at": self._fmt_timestamp(row.accessed_at),
+                            "file_size": row.file_size or 0,
+                            "metadata_dict": meta_raw,
+                        }
+                    )
+
+                return entries
+
+        except Exception as e:
+            logger.error(f"Failed to query metadata (postgres): {e}")
             return None
 
     def _query_meta_sqlite(self, **filters) -> EntryList | None:

@@ -53,7 +53,6 @@ try:
         Integer,
         String,
         DateTime,
-        Text,
         Index,
         select,
         update,
@@ -62,6 +61,7 @@ try:
         func,
         text,
     )
+    from sqlalchemy.dialects.postgresql import JSONB
     from sqlalchemy.orm import sessionmaker, declarative_base
     from sqlalchemy.pool import QueuePool
 
@@ -108,6 +108,25 @@ except ImportError:
         return json.loads(s)
 
 
+def _ensure_jsonb_value(value):
+    """Convert a JSON-encoded string to a Python dict for JSONB storage.
+
+    JSONB columns require a Python dict (or None), not a JSON string.
+    Handles: None → None, dict → dict (pass-through), str → parsed dict.
+    """
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json_loads(value)
+            return parsed if isinstance(parsed, dict) else None
+        except Exception:
+            return None
+    return None
+
+
 if SQLALCHEMY_AVAILABLE:
     # Create a separate base for PostgreSQL to avoid conflicts with SQLite models
     PostgresBase = declarative_base()
@@ -146,8 +165,8 @@ if SQLALCHEMY_AVAILABLE:
         compression_codec = Column(String(20), nullable=True)
         actual_path = Column(String(500), nullable=True)
 
-        cache_key_params = Column(Text, nullable=True)
-        metadata_dict = Column(Text, nullable=True)
+        cache_key_params = Column(JSONB, nullable=True)
+        metadata_dict = Column(JSONB, nullable=True)
 
     class PgCacheStatsMixin:
         """Column definitions shared by all PG cache_stats tables."""
@@ -173,6 +192,12 @@ if SQLALCHEMY_AVAILABLE:
             Index("idx_pg_cleanup", "created_at"),
             Index("idx_pg_size_mgmt", "file_size", "created_at"),
             Index("idx_pg_data_type", "data_type"),
+            Index(
+                "idx_pg_metadata_gin",
+                "metadata_dict",
+                postgresql_using="gin",
+                postgresql_ops={"metadata_dict": "jsonb_path_ops"},
+            ),
         )
 
     class PgCacheStats(PgCacheStatsMixin, PostgresBase):
@@ -219,6 +244,12 @@ if SQLALCHEMY_AVAILABLE:
                         f"idx_pg_{namespace_id}_size_mgmt", "file_size", "created_at"
                     ),
                     Index(f"idx_pg_{namespace_id}_data_type", "data_type"),
+                    Index(
+                        f"idx_pg_{namespace_id}_metadata_gin",
+                        "metadata_dict",
+                        postgresql_using="gin",
+                        postgresql_ops={"metadata_dict": "jsonb_path_ops"},
+                    ),
                 ),
             },
         )
@@ -257,21 +288,47 @@ if SQLALCHEMY_AVAILABLE:
 
 
 def _pg_migrate_v1_to_v2(backend: "PostgresBackend", namespace_id: str) -> None:
-    """Placeholder for future v1 → v2 schema migration.
+    """Migrate v1 → v2: metadata_dict and cache_key_params Text → JSONB.
 
-    This function is wired but not yet referenced in ``get_migrations()``
-    because v2 does not exist yet.  When a v2 schema change is needed,
-    add the DDL here and register ``(1, 2, _pg_migrate_v1_to_v2)`` in
-    the migration list.
+    Converts the columns from Text to JSONB using ``::jsonb`` cast and
+    creates a GIN index on ``metadata_dict`` for fast ``@>`` containment
+    queries.
     """
-    # Example structure for when v2 is defined:
-    #
-    # table = "cache_entries" if namespace_id == DEFAULT_NAMESPACE \
-    #     else f"cache_entries_{namespace_id}"
-    # with backend.SessionLocal() as session:
-    #     session.execute(text(f'ALTER TABLE "{table}" ...'))
-    #     session.commit()
-    pass
+    table = (
+        "cache_entries"
+        if namespace_id == DEFAULT_NAMESPACE
+        else f"cache_entries_{namespace_id}"
+    )
+    with backend.SessionLocal() as session:
+        # Convert metadata_dict Text → JSONB
+        session.execute(
+            text(
+                f'ALTER TABLE "{table}" '
+                f"ALTER COLUMN metadata_dict TYPE JSONB "
+                f"USING metadata_dict::jsonb"
+            )
+        )
+        # Convert cache_key_params Text → JSONB
+        session.execute(
+            text(
+                f'ALTER TABLE "{table}" '
+                f"ALTER COLUMN cache_key_params TYPE JSONB "
+                f"USING cache_key_params::jsonb"
+            )
+        )
+        # Create GIN index for fast JSONB containment queries
+        idx_name = (
+            "idx_pg_metadata_gin"
+            if namespace_id == DEFAULT_NAMESPACE
+            else f"idx_pg_{namespace_id}_metadata_gin"
+        )
+        session.execute(
+            text(
+                f'CREATE INDEX IF NOT EXISTS "{idx_name}" '
+                f'ON "{table}" USING GIN (metadata_dict jsonb_path_ops)'
+            )
+        )
+        session.commit()
 
 
 class PostgresBackend(MetadataBackend):
@@ -444,7 +501,7 @@ class PostgresBackend(MetadataBackend):
                   change is defined.
         """
         return [
-            # (1, 2, _pg_migrate_v1_to_v2),  # uncomment when v2 is defined
+            (1, 2, _pg_migrate_v1_to_v2),
         ]
 
     # --- Namespace registry overrides ---
@@ -494,8 +551,8 @@ class PostgresBackend(MetadataBackend):
                         serializer      VARCHAR(20),
                         compression_codec VARCHAR(20),
                         actual_path     VARCHAR(500),
-                        cache_key_params TEXT,
-                        metadata_dict TEXT
+                        cache_key_params JSONB,
+                        metadata_dict JSONB
                     )
                 """)
                 )
@@ -530,6 +587,12 @@ class PostgresBackend(MetadataBackend):
                     text(
                         f'CREATE INDEX IF NOT EXISTS "idx_{namespace_id}_size_mgmt" '
                         f'ON "{entries_table}" (file_size, created_at)'
+                    )
+                )
+                session.execute(
+                    text(
+                        f'CREATE INDEX IF NOT EXISTS "idx_{namespace_id}_metadata_gin" '
+                        f'ON "{entries_table}" USING GIN (metadata_dict jsonb_path_ops)'
                     )
                 )
 
@@ -775,13 +838,9 @@ class PostgresBackend(MetadataBackend):
             else:
                 accessed_at = accessed_at.astimezone(timezone.utc)
 
-        # Serialize cache_key_params if present
-        serialized_params = None
-        if cache_key_params is not None:
-            try:
-                serialized_params = json_dumps(cache_key_params)
-            except Exception:
-                pass
+        # Convert to JSONB-compatible dicts (handles JSON strings from core.py)
+        jsonb_params = _ensure_jsonb_value(cache_key_params)
+        jsonb_metadata = _ensure_jsonb_value(metadata_dict_value)
 
         # Check if entry exists
         existing = session.execute(
@@ -807,8 +866,8 @@ class PostgresBackend(MetadataBackend):
                     serializer=serializer,
                     compression_codec=compression_codec,
                     actual_path=actual_path,
-                    cache_key_params=serialized_params,
-                    metadata_dict=metadata_dict_value,
+                    cache_key_params=jsonb_params,
+                    metadata_dict=jsonb_metadata,
                 )
             )
         else:
@@ -828,8 +887,8 @@ class PostgresBackend(MetadataBackend):
                 serializer=serializer,
                 compression_codec=compression_codec,
                 actual_path=actual_path,
-                cache_key_params=serialized_params,
-                metadata_dict=metadata_dict_value,
+                cache_key_params=jsonb_params,
+                metadata_dict=jsonb_metadata,
             )
             session.add(entry)
 
@@ -870,14 +929,15 @@ class PostgresBackend(MetadataBackend):
         if metadata:
             result["metadata"] = metadata
 
-        # Parse cache_key_params if present
+        # Parse cache_key_params if present (JSONB returns dict natively)
         if entry.cache_key_params:
             try:
                 if "metadata" not in result:
                     result["metadata"] = {}
-                result["metadata"]["cache_key_params"] = json_loads(
-                    entry.cache_key_params
-                )
+                ckp = entry.cache_key_params
+                if isinstance(ckp, str):
+                    ckp = json_loads(ckp)
+                result["metadata"]["cache_key_params"] = ckp
             except Exception:
                 pass
 
@@ -956,7 +1016,9 @@ class PostgresBackend(MetadataBackend):
                     if "s3_etag" in updates:
                         entry.s3_etag = updates["s3_etag"]
                     if "metadata_dict" in updates:
-                        entry.metadata_dict = updates["metadata_dict"]
+                        entry.metadata_dict = _ensure_jsonb_value(
+                            updates["metadata_dict"]
+                        )
 
                     session.commit()
                     return True
