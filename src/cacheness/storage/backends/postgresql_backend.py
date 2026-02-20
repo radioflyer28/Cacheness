@@ -37,7 +37,7 @@ Requirements:
 
 import logging
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from ...interfaces import EntrySummary
@@ -168,6 +168,10 @@ if SQLALCHEMY_AVAILABLE:
         cache_key_params = Column(JSONB, nullable=True)
         metadata_dict = Column(JSONB, nullable=True)
 
+        access_count = Column(Integer, default=0, nullable=False, server_default="0")
+        ttl_seconds = Column(Integer, nullable=True)
+        expires_at = Column(DateTime(timezone=True), nullable=True)
+
     class PgCacheStatsMixin:
         """Column definitions shared by all PG cache_stats tables."""
 
@@ -198,6 +202,12 @@ if SQLALCHEMY_AVAILABLE:
                 postgresql_using="gin",
                 postgresql_ops={"metadata_dict": "jsonb_path_ops"},
             ),
+            Index(
+                "idx_pg_expires_at",
+                "expires_at",
+                postgresql_where=text("expires_at IS NOT NULL"),
+            ),
+            Index("idx_pg_access_count", "access_count", "accessed_at"),
         )
 
     class PgCacheStats(PgCacheStatsMixin, PostgresBase):
@@ -249,6 +259,16 @@ if SQLALCHEMY_AVAILABLE:
                         "metadata_dict",
                         postgresql_using="gin",
                         postgresql_ops={"metadata_dict": "jsonb_path_ops"},
+                    ),
+                    Index(
+                        f"idx_pg_{namespace_id}_expires_at",
+                        "expires_at",
+                        postgresql_where=text("expires_at IS NOT NULL"),
+                    ),
+                    Index(
+                        f"idx_pg_{namespace_id}_access_count",
+                        "access_count",
+                        "accessed_at",
                     ),
                 ),
             },
@@ -329,6 +349,64 @@ def _pg_migrate_v1_to_v2(backend: "PostgresBackend", namespace_id: str) -> None:
             )
         )
         session.commit()
+
+
+def _pg_migrate_v2_to_v3(backend: "PostgresBackend", namespace_id: str) -> None:
+    """Migrate v2 → v3: add access_count, ttl_seconds, expires_at columns.
+
+    Adds three new columns for per-entry access counting, per-entry TTL
+    storage, and pre-computed expiry timestamps.  Also creates indexes:
+
+    * ``idx_pg_expires_at`` — partial index on ``expires_at`` WHERE NOT NULL.
+    * ``idx_pg_access_count`` — composite (access_count, accessed_at).
+
+    All ALTER TABLE ADD COLUMN uses ``IF NOT EXISTS`` (PG 9.6+) for idempotency.
+    """
+    table = (
+        "cache_entries"
+        if namespace_id == DEFAULT_NAMESPACE
+        else f"cache_entries_{namespace_id}"
+    )
+    prefix = "idx_pg" if namespace_id == DEFAULT_NAMESPACE else f"idx_pg_{namespace_id}"
+
+    with backend.SessionLocal() as session:
+        # Add new columns (PG supports IF NOT EXISTS on ADD COLUMN since 9.6)
+        session.execute(
+            text(
+                f'ALTER TABLE "{table}" '
+                f"ADD COLUMN IF NOT EXISTS access_count INTEGER NOT NULL DEFAULT 0"
+            )
+        )
+        session.execute(
+            text(f'ALTER TABLE "{table}" ADD COLUMN IF NOT EXISTS ttl_seconds INTEGER')
+        )
+        session.execute(
+            text(
+                f'ALTER TABLE "{table}" '
+                f"ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP WITH TIME ZONE"
+            )
+        )
+
+        # Create indexes
+        session.execute(
+            text(
+                f'CREATE INDEX IF NOT EXISTS "{prefix}_expires_at" '
+                f'ON "{table}" (expires_at) '
+                f"WHERE expires_at IS NOT NULL"
+            )
+        )
+        session.execute(
+            text(
+                f'CREATE INDEX IF NOT EXISTS "{prefix}_access_count" '
+                f'ON "{table}" (access_count, accessed_at)'
+            )
+        )
+        session.commit()
+
+    logger.info(
+        "PG v2→v3: added access_count/ttl_seconds/expires_at columns and indexes on %r",
+        table,
+    )
 
 
 class PostgresBackend(MetadataBackend):
@@ -502,6 +580,7 @@ class PostgresBackend(MetadataBackend):
         """
         return [
             (1, 2, _pg_migrate_v1_to_v2),
+            (2, 3, _pg_migrate_v2_to_v3),
         ]
 
     # --- Namespace registry overrides ---
@@ -552,7 +631,10 @@ class PostgresBackend(MetadataBackend):
                         compression_codec VARCHAR(20),
                         actual_path     VARCHAR(500),
                         cache_key_params JSONB,
-                        metadata_dict JSONB
+                        metadata_dict JSONB,
+                        access_count    INTEGER NOT NULL DEFAULT 0,
+                        ttl_seconds     INTEGER,
+                        expires_at      TIMESTAMP WITH TIME ZONE
                     )
                 """)
                 )
@@ -595,13 +677,26 @@ class PostgresBackend(MetadataBackend):
                         f'ON "{entries_table}" USING GIN (metadata_dict jsonb_path_ops)'
                     )
                 )
+                session.execute(
+                    text(
+                        f'CREATE INDEX IF NOT EXISTS "idx_pg_{namespace_id}_expires_at" '
+                        f'ON "{entries_table}" (expires_at) '
+                        f"WHERE expires_at IS NOT NULL"
+                    )
+                )
+                session.execute(
+                    text(
+                        f'CREATE INDEX IF NOT EXISTS "idx_pg_{namespace_id}_access_count" '
+                        f'ON "{entries_table}" (access_count, accessed_at)'
+                    )
+                )
 
                 # Register in the namespace registry
                 now = datetime.now(timezone.utc)
                 ns = PgCacheNamespace(
                     namespace_id=namespace_id,
                     display_name=display_name,
-                    schema_version=1,
+                    schema_version=3,
                     created_at=now,
                 )
                 session.add(ns)
@@ -842,6 +937,21 @@ class PostgresBackend(MetadataBackend):
         jsonb_params = _ensure_jsonb_value(cache_key_params)
         jsonb_metadata = _ensure_jsonb_value(metadata_dict_value)
 
+        # Handle TTL fields
+        ttl_seconds_val = entry_data.get("ttl_seconds")
+        expires_at = entry_data.get("expires_at")
+        if expires_at is None and ttl_seconds_val is not None:
+            # Compute expires_at from created_at + ttl_seconds
+            expires_at = created_at + timedelta(seconds=float(ttl_seconds_val))
+        elif isinstance(expires_at, str):
+            expires_at = datetime.fromisoformat(expires_at)
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            else:
+                expires_at = expires_at.astimezone(timezone.utc)
+
+        access_count_val = entry_data.get("access_count", 0)
+
         # Check if entry exists
         existing = session.execute(
             select(self._PgCacheEntry).where(self._PgCacheEntry.cache_key == cache_key)
@@ -868,6 +978,9 @@ class PostgresBackend(MetadataBackend):
                     actual_path=actual_path,
                     cache_key_params=jsonb_params,
                     metadata_dict=jsonb_metadata,
+                    access_count=access_count_val,
+                    ttl_seconds=ttl_seconds_val,
+                    expires_at=expires_at,
                 )
             )
         else:
@@ -889,6 +1002,9 @@ class PostgresBackend(MetadataBackend):
                 actual_path=actual_path,
                 cache_key_params=jsonb_params,
                 metadata_dict=jsonb_metadata,
+                access_count=access_count_val,
+                ttl_seconds=ttl_seconds_val,
+                expires_at=expires_at,
             )
             session.add(entry)
 
@@ -905,6 +1021,13 @@ class PostgresBackend(MetadataBackend):
             if entry.accessed_at
             else None,
             "file_size": entry.file_size or 0,
+            "access_count": getattr(entry, "access_count", 0) or 0,
+            "ttl_seconds": getattr(entry, "ttl_seconds", None),
+            "expires_at": (
+                entry.expires_at.astimezone(timezone.utc).isoformat()
+                if getattr(entry, "expires_at", None)
+                else None
+            ),
         }
 
         # Build nested metadata
@@ -1038,7 +1161,7 @@ class PostgresBackend(MetadataBackend):
                     f"       object_type, storage_format, serializer, "
                     f"       compression_codec, actual_path, "
                     f"       file_hash, entry_signature, metadata_dict, "
-                    f"       s3_etag "
+                    f"       s3_etag, access_count, ttl_seconds, expires_at "
                     f'FROM "{tbl}"'
                 )
             ).fetchall()
@@ -1070,6 +1193,12 @@ class PostgresBackend(MetadataBackend):
                     flat["metadata_dict"] = row[13]
                 if row[14] is not None:
                     flat["s3_etag"] = row[14]
+                # Phase 1 columns
+                flat["access_count"] = row[15] or 0
+                if row[16] is not None:
+                    flat["ttl_seconds"] = row[16]
+                if row[17] is not None:
+                    flat["expires_at"] = row[17]
                 result.append(flat)
             return result
 
@@ -1116,13 +1245,16 @@ class PostgresBackend(MetadataBackend):
             }
 
     def update_access_time(self, cache_key: str):
-        """Update last access time for cache entry."""
+        """Update last access time and increment access count for cache entry."""
         with self.SessionLocal() as session:
             try:
                 session.execute(
                     update(self._PgCacheEntry)
                     .where(self._PgCacheEntry.cache_key == cache_key)
-                    .values(accessed_at=datetime.now(timezone.utc))
+                    .values(
+                        accessed_at=datetime.now(timezone.utc),
+                        access_count=self._PgCacheEntry.access_count + 1,
+                    )
                 )
                 session.commit()
             except Exception as e:

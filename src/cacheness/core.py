@@ -1746,6 +1746,12 @@ class UnifiedCache:
                     "metadata": metadata_dict,
                 }
 
+                # Populate per-entry TTL from config default (if set)
+                default_ttl = self.config.metadata.default_ttl_seconds
+                if default_ttl is not None:
+                    entry_data["ttl_seconds"] = int(default_ttl)
+                    # expires_at is computed by the backend from created_at + ttl_seconds
+
                 # Sign the entry if signing is enabled
                 self._sign_entry_if_enabled(cache_key, entry_data, metadata_dict)
 

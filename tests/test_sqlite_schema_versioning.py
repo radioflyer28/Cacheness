@@ -57,8 +57,8 @@ class TestSqliteSchemaVersioning:
     def test_migrations_run_on_fresh_db(self, sqlite_backend):
         """Fresh database should have all migrations applied."""
         version = sqlite_backend.get_schema_version(DEFAULT_NAMESPACE)
-        # v1 baseline + v1→v2 partial index migration
-        assert version == 2
+        # v1 baseline + v1→v2 partial index + v2→v3 access_count/ttl/expires_at
+        assert version == 3
 
     def test_migrations_idempotent(self, sqlite_backend_path):
         """Opening the same database twice should not fail or re-run migrations."""
@@ -100,7 +100,7 @@ class TestSqliteNamespaceRegistry:
         ns = sqlite_backend.create_namespace("project_alpha", "Project Alpha")
         assert ns.namespace_id == "project_alpha"
         assert ns.display_name == "Project Alpha"
-        assert ns.schema_version == 2
+        assert ns.schema_version == 3
 
         # Verify tables were created
         from sqlalchemy import inspect
@@ -364,10 +364,10 @@ class TestSqliteBackwardCompatibility:
 class TestSqlitePartialIndex:
     """Test the v2 partial index on metadata_dict IS NOT NULL."""
 
-    def test_schema_version_is_v2(self, sqlite_backend):
-        """Fresh database should be at schema version 2."""
+    def test_schema_version_is_v3(self, sqlite_backend):
+        """Fresh database should be at schema version 3."""
         version = sqlite_backend.get_schema_version(DEFAULT_NAMESPACE)
-        assert version == 2
+        assert version == 3
 
     def test_partial_index_exists_default_table(self, sqlite_backend):
         """Default table should have idx_metadata_notnull partial index."""
@@ -485,11 +485,11 @@ class TestSqlitePartialIndex:
         assert "idx_metadata_notnull" not in index_names
         engine2.dispose()
 
-        # Open with SqliteBackend — should auto-migrate v1→v2
+        # Open with SqliteBackend — should auto-migrate v1→v2→v3
         backend = SqliteBackend(db_file)
 
-        # Schema should now be v2
-        assert backend.get_schema_version(DEFAULT_NAMESPACE) == 2
+        # Schema should now be v3
+        assert backend.get_schema_version(DEFAULT_NAMESPACE) == 3
 
         # Partial index should exist
         inspector = inspect(backend.engine)
@@ -508,7 +508,7 @@ class TestSqlitePartialIndex:
         v2 = backend2.get_schema_version(DEFAULT_NAMESPACE)
         backend2.close()
 
-        assert v1 == v2 == 2
+        assert v1 == v2 == 3
 
     def test_query_plan_uses_partial_index(self, sqlite_backend):
         """EXPLAIN QUERY PLAN should reference the partial index."""
@@ -526,3 +526,248 @@ class TestSqlitePartialIndex:
             plan_text = " ".join(str(row) for row in plan)
             # SQLite should mention the partial index in the plan
             assert "idx_metadata_notnull" in plan_text
+
+
+class TestSqliteV3Columns:
+    """Test v3 schema columns: access_count, ttl_seconds, expires_at."""
+
+    def test_v3_columns_exist_on_fresh_db(self, sqlite_backend):
+        """Fresh database should have the v3 columns."""
+        from sqlalchemy import inspect
+
+        inspector = inspect(sqlite_backend.engine)
+        cols = {c["name"] for c in inspector.get_columns("cache_entries")}
+        assert "access_count" in cols
+        assert "ttl_seconds" in cols
+        assert "expires_at" in cols
+
+    def test_v3_indexes_exist_on_fresh_db(self, sqlite_backend):
+        """Fresh database should have idx_expires_at and idx_access_count."""
+        from sqlalchemy import inspect
+
+        inspector = inspect(sqlite_backend.engine)
+        indexes = inspector.get_indexes("cache_entries")
+        idx_names = {idx["name"] for idx in indexes}
+        assert "idx_expires_at" in idx_names
+        assert "idx_access_count" in idx_names
+
+    def test_v3_columns_on_namespace_table(self, sqlite_backend):
+        """Namespace tables created via create_namespace should have v3 columns."""
+        sqlite_backend.create_namespace("v3_test_ns")
+        from sqlalchemy import inspect
+
+        inspector = inspect(sqlite_backend.engine)
+        cols = {c["name"] for c in inspector.get_columns("cache_entries_v3_test_ns")}
+        assert "access_count" in cols
+        assert "ttl_seconds" in cols
+        assert "expires_at" in cols
+
+    def test_v3_indexes_on_namespace_table(self, sqlite_backend):
+        """Namespace tables should have v3 indexes."""
+        sqlite_backend.create_namespace("v3_idx_ns")
+        from sqlalchemy import inspect
+
+        inspector = inspect(sqlite_backend.engine)
+        indexes = inspector.get_indexes("cache_entries_v3_idx_ns")
+        idx_names = {idx["name"] for idx in indexes}
+        assert "idx_v3_idx_ns_expires_at" in idx_names
+        assert "idx_v3_idx_ns_access_count" in idx_names
+
+    def test_access_count_starts_at_zero(self, sqlite_backend):
+        """New entries should have access_count = 0."""
+        sqlite_backend.put_entry(
+            "ac_test_001",
+            {
+                "data_type": "pickle",
+                "description": "test access count",
+                "file_size": 100,
+                "metadata": {},
+            },
+        )
+        entry = sqlite_backend.get_entry("ac_test_001")
+        assert entry is not None
+        assert entry["access_count"] == 0
+
+    def test_access_count_incremented_on_access(self, sqlite_backend):
+        """update_access_time should increment access_count."""
+        sqlite_backend.put_entry(
+            "ac_test_002",
+            {
+                "data_type": "pickle",
+                "description": "test increment",
+                "file_size": 100,
+                "metadata": {},
+            },
+        )
+
+        sqlite_backend.update_access_time("ac_test_002")
+        entry = sqlite_backend.get_entry("ac_test_002")
+        assert entry["access_count"] == 1
+
+        sqlite_backend.update_access_time("ac_test_002")
+        entry = sqlite_backend.get_entry("ac_test_002")
+        assert entry["access_count"] == 2
+
+    def test_ttl_seconds_stored_on_put(self, sqlite_backend):
+        """put_entry with ttl_seconds should store it and compute expires_at."""
+        sqlite_backend.put_entry(
+            "ttl_test_001",
+            {
+                "data_type": "pickle",
+                "description": "test ttl",
+                "file_size": 100,
+                "ttl_seconds": 3600,
+                "metadata": {},
+            },
+        )
+        entry = sqlite_backend.get_entry("ttl_test_001")
+        assert entry is not None
+        assert entry["ttl_seconds"] == 3600
+        assert entry["expires_at"] is not None
+
+    def test_ttl_null_when_not_provided(self, sqlite_backend):
+        """put_entry without ttl_seconds should leave ttl/expires_at as NULL."""
+        sqlite_backend.put_entry(
+            "ttl_test_002",
+            {
+                "data_type": "pickle",
+                "description": "no ttl",
+                "file_size": 100,
+                "metadata": {},
+            },
+        )
+        entry = sqlite_backend.get_entry("ttl_test_002")
+        assert entry is not None
+        assert entry["ttl_seconds"] is None
+        assert entry["expires_at"] is None
+
+    def test_iter_entry_summaries_includes_v3_fields(self, sqlite_backend):
+        """iter_entry_summaries should include access_count and TTL fields."""
+        sqlite_backend.put_entry(
+            "sum_test_001",
+            {
+                "data_type": "pickle",
+                "description": "summary test",
+                "file_size": 100,
+                "ttl_seconds": 7200,
+                "metadata": {},
+            },
+        )
+        sqlite_backend.update_access_time("sum_test_001")
+
+        summaries = sqlite_backend.iter_entry_summaries()
+        entry = next(s for s in summaries if s["cache_key"] == "sum_test_001")
+        assert entry["access_count"] == 1
+        assert entry["ttl_seconds"] == 7200
+        assert "expires_at" in entry
+
+    def test_migration_from_v1_adds_v3_columns(self, tmp_path):
+        """Opening a v1 database should migrate through v2 and v3."""
+        from sqlalchemy import create_engine, text, inspect
+        from sqlalchemy.orm import sessionmaker
+
+        db_file = str(tmp_path / "legacy_v1_to_v3.db")
+
+        # Create a v1 database manually (no partial index, no v3 columns)
+        engine = create_engine(f"sqlite:///{db_file}")
+        Session = sessionmaker(bind=engine)
+
+        with Session() as session:
+            session.execute(
+                text("""
+                CREATE TABLE cacheness_namespaces (
+                    namespace_id VARCHAR(100) PRIMARY KEY,
+                    display_name VARCHAR(200) NOT NULL DEFAULT '',
+                    schema_version INTEGER NOT NULL DEFAULT 1,
+                    created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+                    signature VARCHAR(200)
+                )
+            """)
+            )
+            session.execute(
+                text("""
+                INSERT INTO cacheness_namespaces
+                    (namespace_id, display_name, schema_version, created_at)
+                VALUES ('default', 'Default', 1, datetime('now'))
+            """)
+            )
+            session.execute(
+                text("""
+                CREATE TABLE cache_entries (
+                    cache_key VARCHAR(16) PRIMARY KEY,
+                    description VARCHAR(500) NOT NULL DEFAULT '',
+                    data_type VARCHAR(20) NOT NULL,
+                    created_at DATETIME NOT NULL,
+                    accessed_at DATETIME NOT NULL,
+                    file_size INTEGER NOT NULL DEFAULT 0,
+                    file_hash VARCHAR(16),
+                    entry_signature VARCHAR(100),
+                    s3_etag VARCHAR(100),
+                    object_type VARCHAR(100),
+                    storage_format VARCHAR(20),
+                    serializer VARCHAR(20),
+                    compression_codec VARCHAR(20),
+                    actual_path VARCHAR(500),
+                    cache_key_params TEXT,
+                    metadata_dict TEXT
+                )
+            """)
+            )
+            session.execute(
+                text("""
+                CREATE TABLE cache_stats (
+                    id INTEGER PRIMARY KEY DEFAULT 1,
+                    cache_hits INTEGER NOT NULL DEFAULT 0,
+                    cache_misses INTEGER NOT NULL DEFAULT 0,
+                    last_updated DATETIME NOT NULL
+                )
+            """)
+            )
+            session.execute(
+                text("CREATE INDEX idx_list_entries ON cache_entries (created_at DESC)")
+            )
+            session.execute(
+                text("CREATE INDEX idx_cleanup ON cache_entries (created_at)")
+            )
+            session.execute(
+                text(
+                    "CREATE INDEX idx_size_mgmt ON cache_entries (file_size, created_at)"
+                )
+            )
+            session.execute(
+                text("CREATE INDEX idx_data_type ON cache_entries (data_type)")
+            )
+            # Insert a test entry at v1
+            session.execute(
+                text("""
+                INSERT INTO cache_entries (cache_key, data_type, created_at, accessed_at, file_size)
+                VALUES ('migrated_001', 'pickle', datetime('now'), datetime('now'), 42)
+            """)
+            )
+            session.commit()
+        engine.dispose()
+
+        # Open with SqliteBackend — should auto-migrate v1→v2→v3
+        backend = SqliteBackend(db_file)
+        assert backend.get_schema_version(DEFAULT_NAMESPACE) == 3
+
+        # v3 columns should exist
+        inspector = inspect(backend.engine)
+        cols = {c["name"] for c in inspector.get_columns("cache_entries")}
+        assert "access_count" in cols
+        assert "ttl_seconds" in cols
+        assert "expires_at" in cols
+
+        # v3 indexes should exist
+        idx_names = {idx["name"] for idx in inspector.get_indexes("cache_entries")}
+        assert "idx_expires_at" in idx_names
+        assert "idx_access_count" in idx_names
+
+        # Pre-existing entry should have defaults (access_count=0, ttl/expires=NULL)
+        entry = backend.get_entry("migrated_001")
+        assert entry is not None
+        assert entry["access_count"] == 0
+        assert entry["ttl_seconds"] is None
+        assert entry["expires_at"] is None
+
+        backend.close()

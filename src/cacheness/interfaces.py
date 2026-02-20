@@ -72,6 +72,9 @@ class EntrySummary(TypedDict, total=False):
     entry_signature: str
     metadata_dict: str
     s3_etag: str
+    access_count: int
+    ttl_seconds: int
+    expires_at: Any  # raw timestamp — str or datetime depending on backend
 
 
 class BlobReadContext(TypedDict, total=False):
@@ -132,6 +135,9 @@ class EntryData(TypedDict, total=False):
 
     # --- present in some backends ---
     cache_key: str  # PostgreSQL includes this; JSON/SQLite do not
+    access_count: int  # per-entry access counter (0 if never read)
+    ttl_seconds: int  # per-entry TTL in seconds (None = use config default)
+    expires_at: Any  # expiry timestamp (None = no TTL)
 
 
 @dataclass

@@ -84,7 +84,7 @@ class TestPgSchemaVersioning:
         pg_backend.set_schema_version(DEFAULT_NAMESPACE, 99)
         assert pg_backend.get_schema_version(DEFAULT_NAMESPACE) == 99
         # Restore
-        pg_backend.set_schema_version(DEFAULT_NAMESPACE, 2)
+        pg_backend.set_schema_version(DEFAULT_NAMESPACE, 3)
 
     def test_get_schema_version_unknown_namespace(self, pg_backend):
         """Unknown namespace returns 0."""
@@ -93,7 +93,7 @@ class TestPgSchemaVersioning:
     def test_migrations_run_on_fresh_db(self, pg_backend):
         """Fresh database should have all migrations applied."""
         version = pg_backend.get_schema_version(DEFAULT_NAMESPACE)
-        assert version == 2
+        assert version == 3
 
     def test_migrations_idempotent(self):
         """Opening the same database twice should not fail or re-run migrations."""
@@ -139,7 +139,7 @@ class TestPgNamespaceRegistry:
         ns = pg_backend.create_namespace("project_alpha", "Project Alpha")
         assert ns.namespace_id == "project_alpha"
         assert ns.display_name == "Project Alpha"
-        assert ns.schema_version == 2
+        assert ns.schema_version == 3
 
         # Per-namespace tables should exist
         from sqlalchemy import inspect
@@ -205,7 +205,7 @@ class TestPgNamespaceRegistry:
         assert ns is not None
         assert ns.namespace_id == "lookup_ns"
         assert ns.display_name == "Lookup Test"
-        assert ns.schema_version == 2
+        assert ns.schema_version == 3
 
         assert pg_backend.get_namespace("nonexistent") is None
 
@@ -254,7 +254,7 @@ class TestPgNamespaceRegistry:
     def test_set_schema_version_on_created_namespace(self, pg_backend):
         """Schema version can be set on namespaces created via create_namespace."""
         pg_backend.create_namespace("versioned_ns")
-        assert pg_backend.get_schema_version("versioned_ns") == 2
+        assert pg_backend.get_schema_version("versioned_ns") == 3
 
         pg_backend.set_schema_version("versioned_ns", 5)
         assert pg_backend.get_schema_version("versioned_ns") == 5
@@ -318,9 +318,9 @@ class TestPgBackwardCompatibility:
 class TestPgJsonbSchema:
     """Test JSONB column types, GIN index, and migration."""
 
-    def test_schema_version_is_v2(self, pg_backend):
-        """After init, default namespace should be at schema v2."""
-        assert pg_backend.get_schema_version(DEFAULT_NAMESPACE) == 2
+    def test_schema_version_is_v3(self, pg_backend):
+        """After init, default namespace should be at schema v3."""
+        assert pg_backend.get_schema_version(DEFAULT_NAMESPACE) == 3
 
     def test_metadata_dict_column_is_jsonb(self, pg_backend):
         """metadata_dict column should be JSONB type."""
@@ -368,7 +368,7 @@ class TestPgJsonbSchema:
         v2 = b2.get_schema_version(DEFAULT_NAMESPACE)
         b2.close()
 
-        assert v1 == v2 == 2
+        assert v1 == v2 == 3
 
 
 @requires_postgres

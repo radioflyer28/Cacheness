@@ -179,6 +179,10 @@ try:
         cache_key_params = Column(Text, nullable=True)
         metadata_dict = Column(Text, nullable=True)
 
+        access_count = Column(Integer, default=0, nullable=False, server_default="0")
+        ttl_seconds = Column(Integer, nullable=True)
+        expires_at = Column(DateTime(timezone=True), nullable=True)
+
     class CacheStatsMixin:
         """Column definitions shared by all cache_stats tables."""
 
@@ -210,6 +214,12 @@ try:
                 desc("created_at"),
                 sqlite_where=text("metadata_dict IS NOT NULL"),
             ),
+            Index(
+                "idx_expires_at",
+                "expires_at",
+                sqlite_where=text("expires_at IS NOT NULL"),
+            ),
+            Index("idx_access_count", "access_count", "accessed_at"),
         )
 
     class CacheStats(CacheStatsMixin, Base):
@@ -264,6 +274,16 @@ try:
                         f"idx_{namespace_id}_metadata_notnull",
                         desc("created_at"),
                         sqlite_where=text("metadata_dict IS NOT NULL"),
+                    ),
+                    Index(
+                        f"idx_{namespace_id}_expires_at",
+                        "expires_at",
+                        sqlite_where=text("expires_at IS NOT NULL"),
+                    ),
+                    Index(
+                        f"idx_{namespace_id}_access_count",
+                        "access_count",
+                        "accessed_at",
                     ),
                 ),
             },
@@ -1162,8 +1182,25 @@ class JsonBackend(MetadataBackend):
                 "created_at": entry_data.get("created_at", now),
                 "accessed_at": entry_data.get("accessed_at", now),
                 "file_size": entry_data.get("file_size", 0),
+                "access_count": entry_data.get("access_count", 0),
                 "metadata": metadata,  # Include all metadata as nested structure
             }
+
+            # Store per-entry TTL and pre-computed expires_at if provided
+            ttl_val = entry_data.get("ttl_seconds")
+            if ttl_val is not None:
+                entry["ttl_seconds"] = ttl_val
+                # Compute expires_at from created_at + ttl_seconds
+                created = entry["created_at"]
+                if isinstance(created, str):
+                    created_dt = datetime.fromisoformat(created)
+                else:
+                    created_dt = created
+                if created_dt.tzinfo is None:
+                    created_dt = created_dt.replace(tzinfo=timezone.utc)
+                entry["expires_at"] = (
+                    created_dt + timedelta(seconds=float(ttl_val))
+                ).isoformat()
 
             # Store complete entry - simple and efficient
             self._metadata["entries"][cache_key] = entry
@@ -1244,7 +1281,13 @@ class JsonBackend(MetadataBackend):
                     "created_at": entry.get("created_at"),
                     "accessed_at": entry.get("accessed_at"),
                     "file_size": entry.get("file_size", 0),
+                    "access_count": entry.get("access_count", 0),
                 }
+                # Include TTL/expiry fields if present
+                if "ttl_seconds" in entry:
+                    flat["ttl_seconds"] = entry["ttl_seconds"]
+                if "expires_at" in entry:
+                    flat["expires_at"] = entry["expires_at"]
                 # Merge technical metadata fields flat
                 for k, v in entry.get("metadata", {}).items():
                     if k not in flat:
@@ -1341,13 +1384,16 @@ class JsonBackend(MetadataBackend):
             }
 
     def update_access_time(self, cache_key: str):
-        """Update last access time for cache entry (simple entries structure)."""
+        """Update last access time and increment access count for cache entry."""
         with self._lock:
             entries = self._metadata.get("entries", {})
             if cache_key in entries:
                 entries[cache_key]["accessed_at"] = datetime.now(
                     timezone.utc
                 ).isoformat()
+                entries[cache_key]["access_count"] = (
+                    entries[cache_key].get("access_count", 0) + 1
+                )
                 self._save_to_disk()
 
     def increment_hits(self):
@@ -1766,6 +1812,75 @@ def _sqlite_migrate_v1_to_v2(backend: "SqliteBackend", namespace_id: str) -> Non
     logger.info("SQLite v1→v2: created partial index %r on %r", idx_name, table)
 
 
+def _sqlite_migrate_v2_to_v3(backend: "SqliteBackend", namespace_id: str) -> None:
+    """v2 → v3: add ``access_count``, ``ttl_seconds``, ``expires_at`` columns.
+
+    Adds three new columns for per-entry access counting, per-entry TTL
+    storage, and pre-computed expiry timestamps.  Also creates two indexes:
+
+    * ``idx_expires_at`` — partial index on ``expires_at`` WHERE NOT NULL,
+      for efficient TTL-based cleanup queries.
+    * ``idx_access_count`` — composite (access_count, accessed_at) for
+      LFU/hybrid eviction strategies.
+
+    All columns are nullable (or DEFAULT 0) so existing rows are unaffected.
+    Uses ``IF NOT EXISTS`` for full idempotency.
+    """
+    if namespace_id == DEFAULT_NAMESPACE:
+        table = "cache_entries"
+        idx_expires = "idx_expires_at"
+        idx_access = "idx_access_count"
+    else:
+        table = f"cache_entries_{namespace_id}"
+        idx_expires = f"idx_{namespace_id}_expires_at"
+        idx_access = f"idx_{namespace_id}_access_count"
+
+    with backend.SessionLocal() as session:
+        # Add new columns (SQLite ignores ADD COLUMN if column already exists
+        # when wrapped in try/except — but we use a pragma check to be safe)
+        existing_cols = {
+            row[1]
+            for row in session.execute(text(f'PRAGMA table_info("{table}")')).fetchall()
+        }
+
+        if "access_count" not in existing_cols:
+            session.execute(
+                text(
+                    f'ALTER TABLE "{table}" ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0'
+                )
+            )
+        if "ttl_seconds" not in existing_cols:
+            session.execute(
+                text(f'ALTER TABLE "{table}" ADD COLUMN ttl_seconds INTEGER')
+            )
+        if "expires_at" not in existing_cols:
+            session.execute(
+                text(f'ALTER TABLE "{table}" ADD COLUMN expires_at DATETIME')
+            )
+
+        # Create indexes
+        session.execute(
+            text(
+                f'CREATE INDEX IF NOT EXISTS "{idx_expires}" '
+                f'ON "{table}" (expires_at) '
+                f"WHERE expires_at IS NOT NULL"
+            )
+        )
+        session.execute(
+            text(
+                f'CREATE INDEX IF NOT EXISTS "{idx_access}" '
+                f'ON "{table}" (access_count, accessed_at)'
+            )
+        )
+        session.commit()
+
+    logger.info(
+        "SQLite v2→v3: added access_count/ttl_seconds/expires_at columns "
+        "and indexes on %r",
+        table,
+    )
+
+
 class SqliteBackend(MetadataBackend):
     """SQLite database-based metadata backend using SQLAlchemy ORM."""
 
@@ -1929,6 +2044,7 @@ class SqliteBackend(MetadataBackend):
         """
         return [
             (1, 2, _sqlite_migrate_v1_to_v2),
+            (2, 3, _sqlite_migrate_v2_to_v3),
         ]
 
     # --- Namespace registry overrides ---
@@ -1978,7 +2094,10 @@ class SqliteBackend(MetadataBackend):
                     compression_codec VARCHAR(20),
                     actual_path     VARCHAR(500),
                     cache_key_params TEXT,
-                    metadata_dict   TEXT
+                    metadata_dict   TEXT,
+                    access_count    INTEGER NOT NULL DEFAULT 0,
+                    ttl_seconds     INTEGER,
+                    expires_at      DATETIME
                 )
             """)
             )
@@ -2020,13 +2139,26 @@ class SqliteBackend(MetadataBackend):
                     f"WHERE metadata_dict IS NOT NULL"
                 )
             )
+            session.execute(
+                text(
+                    f'CREATE INDEX IF NOT EXISTS "idx_{namespace_id}_expires_at" '
+                    f'ON "{entries_table}" (expires_at) '
+                    f"WHERE expires_at IS NOT NULL"
+                )
+            )
+            session.execute(
+                text(
+                    f'CREATE INDEX IF NOT EXISTS "idx_{namespace_id}_access_count" '
+                    f'ON "{entries_table}" (access_count, accessed_at)'
+                )
+            )
 
             # Register in the namespace registry
             now = datetime.now(timezone.utc)
             ns = CacheNamespace(
                 namespace_id=namespace_id,
                 display_name=display_name,
-                schema_version=2,
+                schema_version=3,
                 created_at=now,
             )
             session.add(ns)
@@ -2192,6 +2324,9 @@ class SqliteBackend(MetadataBackend):
                     CE.entry_signature,
                     CE.s3_etag,
                     CE.cache_key_params,
+                    CE.access_count,
+                    CE.ttl_seconds,
+                    CE.expires_at,
                 ).where(CE.cache_key == cache_key)
             ).one_or_none()
 
@@ -2246,6 +2381,13 @@ class SqliteBackend(MetadataBackend):
                 "created_at": created_at_utc.isoformat(),
                 "accessed_at": accessed_at_utc.isoformat(),
                 "file_size": row.file_size,
+                "access_count": row.access_count or 0,
+                "ttl_seconds": row.ttl_seconds,
+                "expires_at": (
+                    row.expires_at.astimezone(timezone.utc).isoformat()
+                    if row.expires_at and hasattr(row.expires_at, "astimezone")
+                    else row.expires_at
+                ),
                 "metadata": metadata,
             }
 
@@ -2302,6 +2444,20 @@ class SqliteBackend(MetadataBackend):
             elif accessed_at is None:
                 accessed_at = datetime.now(timezone.utc)
 
+            # Handle TTL fields
+            ttl_seconds_val = entry_data.get("ttl_seconds")
+            expires_at = entry_data.get("expires_at")
+            if expires_at is None and ttl_seconds_val is not None:
+                # Compute expires_at from created_at + ttl_seconds
+                created_dt = created_at
+                if isinstance(created_dt, str):
+                    created_dt = datetime.fromisoformat(created_dt)
+                if created_dt.tzinfo is None:
+                    created_dt = created_dt.replace(tzinfo=timezone.utc)
+                expires_at = created_dt + timedelta(seconds=float(ttl_seconds_val))
+            elif isinstance(expires_at, str):
+                expires_at = datetime.fromisoformat(expires_at)
+
             # Use efficient INSERT OR REPLACE with dedicated columns - zero JSON overhead
             from sqlalchemy import text
 
@@ -2312,11 +2468,11 @@ class SqliteBackend(MetadataBackend):
                     (cache_key, description, data_type, file_size, 
                      file_hash, entry_signature, s3_etag, cache_key_params, metadata_dict,
                      object_type, storage_format, serializer, compression_codec, actual_path,
-                     created_at, accessed_at)
+                     created_at, accessed_at, access_count, ttl_seconds, expires_at)
                     VALUES (:cache_key, :description, :data_type, :file_size, 
                            :file_hash, :entry_signature, :s3_etag, :cache_key_params, :metadata_dict,
                            :object_type, :storage_format, :serializer, :compression_codec, :actual_path,
-                           :created_at, :accessed_at)
+                           :created_at, :accessed_at, :access_count, :ttl_seconds, :expires_at)
                 """),
                 {
                     "cache_key": cache_key,
@@ -2335,6 +2491,9 @@ class SqliteBackend(MetadataBackend):
                     "actual_path": actual_path,
                     "created_at": created_at,
                     "accessed_at": accessed_at,
+                    "access_count": entry_data.get("access_count", 0),
+                    "ttl_seconds": ttl_seconds_val,
+                    "expires_at": expires_at,
                 },
             )
             session.commit()
@@ -2412,7 +2571,7 @@ class SqliteBackend(MetadataBackend):
                     f"       object_type, storage_format, serializer, "
                     f"       compression_codec, actual_path, "
                     f"       file_hash, entry_signature, metadata_dict, "
-                    f"       s3_etag "
+                    f"       s3_etag, access_count, ttl_seconds, expires_at "
                     f'FROM "{tbl}"'
                 )
             ).fetchall()
@@ -2445,6 +2604,12 @@ class SqliteBackend(MetadataBackend):
                     flat["metadata_dict"] = row[13]
                 if row[14] is not None:
                     flat["s3_etag"] = row[14]
+                # Phase 1 columns
+                flat["access_count"] = row[15] or 0
+                if row[16] is not None:
+                    flat["ttl_seconds"] = row[16]
+                if row[17] is not None:
+                    flat["expires_at"] = row[17]
                 result.append(flat)
             return result
 
@@ -2566,12 +2731,15 @@ class SqliteBackend(MetadataBackend):
             }
 
     def update_access_time(self, cache_key: str):
-        """Update last access time for cache entry."""
+        """Update last access time and increment access count for cache entry."""
         with self._lock, self.SessionLocal() as session:
             session.execute(
                 update(self._CacheEntry)
                 .where(self._CacheEntry.cache_key == cache_key)
-                .values(accessed_at=datetime.now(timezone.utc))
+                .values(
+                    accessed_at=datetime.now(timezone.utc),
+                    access_count=self._CacheEntry.access_count + 1,
+                )
             )
             session.commit()
 
