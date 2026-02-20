@@ -126,6 +126,7 @@ try:
         Integer,
         DateTime,
         Text,
+        LargeBinary,
         Index,
         select,
         update,
@@ -182,6 +183,9 @@ try:
         access_count = Column(Integer, default=0, nullable=False, server_default="0")
         ttl_seconds = Column(Integer, nullable=True)
         expires_at = Column(DateTime(timezone=True), nullable=True)
+        blob_data = Column(LargeBinary, nullable=True)
+        is_inline = Column(Integer, default=0, nullable=False, server_default="0")
+        inline_ext = Column(String(20), nullable=True)
 
     class CacheStatsMixin:
         """Column definitions shared by all cache_stats tables."""
@@ -1183,8 +1187,11 @@ class JsonBackend(MetadataBackend):
                 "accessed_at": entry_data.get("accessed_at", now),
                 "file_size": entry_data.get("file_size", 0),
                 "access_count": entry_data.get("access_count", 0),
+                "is_inline": entry_data.get("is_inline", 0),
                 "metadata": metadata,  # Include all metadata as nested structure
             }
+            # Note: blob_data (bytes) is intentionally NOT stored in JSON backend —
+            # inline blobs are only supported by SQLite/PG backends with binary columns.
 
             # Store per-entry TTL and pre-computed expires_at if provided
             ttl_val = entry_data.get("ttl_seconds")
@@ -1813,15 +1820,20 @@ def _sqlite_migrate_v1_to_v2(backend: "SqliteBackend", namespace_id: str) -> Non
 
 
 def _sqlite_migrate_v2_to_v3(backend: "SqliteBackend", namespace_id: str) -> None:
-    """v2 → v3: add ``access_count``, ``ttl_seconds``, ``expires_at`` columns.
+    """v2 → v3: add access_count, ttl_seconds, expires_at, blob_data, is_inline columns.
 
-    Adds three new columns for per-entry access counting, per-entry TTL
-    storage, and pre-computed expiry timestamps.  Also creates two indexes:
+    Adds five new columns:
 
-    * ``idx_expires_at`` — partial index on ``expires_at`` WHERE NOT NULL,
-      for efficient TTL-based cleanup queries.
-    * ``idx_access_count`` — composite (access_count, accessed_at) for
-      LFU/hybrid eviction strategies.
+    * ``access_count`` — per-entry access counter (INTEGER NOT NULL DEFAULT 0)
+    * ``ttl_seconds`` — per-entry TTL storage (INTEGER nullable)
+    * ``expires_at`` — pre-computed expiry timestamp (DATETIME nullable)
+    * ``blob_data`` — inline blob content (BLOB nullable)
+    * ``is_inline`` — flag: 1 if blob stored inline, 0 otherwise (INTEGER NOT NULL DEFAULT 0)
+
+    Also creates two indexes:
+
+    * ``idx_expires_at`` — partial index on ``expires_at`` WHERE NOT NULL.
+    * ``idx_access_count`` — composite (access_count, accessed_at).
 
     All columns are nullable (or DEFAULT 0) so existing rows are unaffected.
     Uses ``IF NOT EXISTS`` for full idempotency.
@@ -1857,6 +1869,16 @@ def _sqlite_migrate_v2_to_v3(backend: "SqliteBackend", namespace_id: str) -> Non
             session.execute(
                 text(f'ALTER TABLE "{table}" ADD COLUMN expires_at DATETIME')
             )
+        if "blob_data" not in existing_cols:
+            session.execute(text(f'ALTER TABLE "{table}" ADD COLUMN blob_data BLOB'))
+        if "is_inline" not in existing_cols:
+            session.execute(
+                text(
+                    f'ALTER TABLE "{table}" ADD COLUMN is_inline INTEGER NOT NULL DEFAULT 0'
+                )
+            )
+        if "inline_ext" not in existing_cols:
+            session.execute(text(f'ALTER TABLE "{table}" ADD COLUMN inline_ext TEXT'))
 
         # Create indexes
         session.execute(
@@ -1875,8 +1897,8 @@ def _sqlite_migrate_v2_to_v3(backend: "SqliteBackend", namespace_id: str) -> Non
         session.commit()
 
     logger.info(
-        "SQLite v2→v3: added access_count/ttl_seconds/expires_at columns "
-        "and indexes on %r",
+        "SQLite v2→v3: added access_count/ttl_seconds/expires_at/blob_data/is_inline "
+        "columns and indexes on %r",
         table,
     )
 
@@ -2097,7 +2119,10 @@ class SqliteBackend(MetadataBackend):
                     metadata_dict   TEXT,
                     access_count    INTEGER NOT NULL DEFAULT 0,
                     ttl_seconds     INTEGER,
-                    expires_at      DATETIME
+                    expires_at      DATETIME,
+                    blob_data       BLOB,
+                    is_inline       INTEGER NOT NULL DEFAULT 0,
+                    inline_ext      TEXT
                 )
             """)
             )
@@ -2327,6 +2352,9 @@ class SqliteBackend(MetadataBackend):
                     CE.access_count,
                     CE.ttl_seconds,
                     CE.expires_at,
+                    CE.blob_data,
+                    CE.is_inline,
+                    CE.inline_ext,
                 ).where(CE.cache_key == cache_key)
             ).one_or_none()
 
@@ -2355,6 +2383,8 @@ class SqliteBackend(MetadataBackend):
                 metadata["entry_signature"] = row.entry_signature
             if row.s3_etag is not None:
                 metadata["s3_etag"] = row.s3_etag
+            if row.inline_ext is not None:
+                metadata["inline_ext"] = row.inline_ext
 
             # Only parse cache_key_params JSON if it exists (disabled by default)
             if row.cache_key_params is not None:
@@ -2388,6 +2418,8 @@ class SqliteBackend(MetadataBackend):
                     if row.expires_at and hasattr(row.expires_at, "astimezone")
                     else row.expires_at
                 ),
+                "is_inline": row.is_inline or 0,
+                "blob_data": row.blob_data,
                 "metadata": metadata,
             }
 
@@ -2427,6 +2459,7 @@ class SqliteBackend(MetadataBackend):
             metadata_dict_value = metadata.pop(
                 "metadata_dict", None
             )  # User metadata for querying
+            inline_ext = metadata.pop("inline_ext", None)
 
             # Remove redundant fields that are already stored as columns
             metadata.pop("data_type", None)  # Already stored in data_type column
@@ -2468,11 +2501,13 @@ class SqliteBackend(MetadataBackend):
                     (cache_key, description, data_type, file_size, 
                      file_hash, entry_signature, s3_etag, cache_key_params, metadata_dict,
                      object_type, storage_format, serializer, compression_codec, actual_path,
-                     created_at, accessed_at, access_count, ttl_seconds, expires_at)
+                     created_at, accessed_at, access_count, ttl_seconds, expires_at,
+                     blob_data, is_inline, inline_ext)
                     VALUES (:cache_key, :description, :data_type, :file_size, 
                            :file_hash, :entry_signature, :s3_etag, :cache_key_params, :metadata_dict,
                            :object_type, :storage_format, :serializer, :compression_codec, :actual_path,
-                           :created_at, :accessed_at, :access_count, :ttl_seconds, :expires_at)
+                           :created_at, :accessed_at, :access_count, :ttl_seconds, :expires_at,
+                           :blob_data, :is_inline, :inline_ext)
                 """),
                 {
                     "cache_key": cache_key,
@@ -2494,6 +2529,9 @@ class SqliteBackend(MetadataBackend):
                     "access_count": entry_data.get("access_count", 0),
                     "ttl_seconds": ttl_seconds_val,
                     "expires_at": expires_at,
+                    "blob_data": entry_data.get("blob_data"),
+                    "is_inline": entry_data.get("is_inline", 0),
+                    "inline_ext": inline_ext,
                 },
             )
             session.commit()
@@ -2543,7 +2581,8 @@ class SqliteBackend(MetadataBackend):
             elif "content_hash" in updates:
                 entry.file_hash = updates["content_hash"]
             if "actual_path" in updates:
-                entry.actual_path = str(updates["actual_path"])
+                ap = updates["actual_path"]
+                entry.actual_path = str(ap) if ap is not None else None
             if "data_type" in updates:
                 entry.data_type = updates["data_type"]
             if "storage_format" in updates:
@@ -2554,6 +2593,12 @@ class SqliteBackend(MetadataBackend):
                 entry.compression_codec = updates["compression_codec"]
             if "object_type" in updates:
                 entry.object_type = updates["object_type"]
+            if "blob_data" in updates:
+                entry.blob_data = updates["blob_data"]
+            if "is_inline" in updates:
+                entry.is_inline = updates["is_inline"]
+            if "inline_ext" in updates:
+                entry.inline_ext = updates["inline_ext"]
 
             session.commit()
             return True
@@ -2571,7 +2616,8 @@ class SqliteBackend(MetadataBackend):
                     f"       object_type, storage_format, serializer, "
                     f"       compression_codec, actual_path, "
                     f"       file_hash, entry_signature, metadata_dict, "
-                    f"       s3_etag, access_count, ttl_seconds, expires_at "
+                    f"       s3_etag, access_count, ttl_seconds, expires_at, "
+                    f"       is_inline "
                     f'FROM "{tbl}"'
                 )
             ).fetchall()
@@ -2610,6 +2656,8 @@ class SqliteBackend(MetadataBackend):
                     flat["ttl_seconds"] = row[16]
                 if row[17] is not None:
                     flat["expires_at"] = row[17]
+                # Phase 2 inline blob flag
+                flat["is_inline"] = row[18] or 0
                 result.append(flat)
             return result
 

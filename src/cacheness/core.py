@@ -1319,7 +1319,13 @@ class UnifiedCache:
         if self.config.metadata.verify_cache_integrity:
             stored_hash = metadata.get("file_hash")
             if stored_hash is not None:
-                current_hash = self._blob_store._calculate_file_hash(file_path)
+                # For inline entries, compute hash from blob_data in memory
+                if entry.get("is_inline") and entry.get("blob_data") is not None:
+                    import xxhash
+
+                    current_hash = xxhash.xxh3_64(entry["blob_data"]).hexdigest()
+                else:
+                    current_hash = self._blob_store._calculate_file_hash(file_path)
                 if current_hash != stored_hash:
                     detail = f"stored hash {stored_hash} != current hash {current_hash}"
                     self._invoke_hook(
@@ -1417,6 +1423,103 @@ class UnifiedCache:
     # ── Shared put helpers ────────────────────────────────────────────
     # Extracted from _storage_mode_put() and put() to eliminate duplicated
     # metadata construction, signing, and stale-blob cleanup logic.
+
+    def _try_inline_blob(
+        self,
+        result: HandlerResult,
+        file_hash: Optional[str],
+        cleanup: "_PutCleanup",
+    ) -> Optional[Dict[str, Any]]:
+        """Try to inline a small blob into the metadata row.
+
+        If the blob is small enough (≤ ``max_inline_size`` from config),
+        reads the file bytes, computes an xxhash from the bytes, and
+        returns a dict with ``blob_data``, ``is_inline=1``, and
+        ``file_hash``.  The blob file is deleted and the cleanup guard
+        is disarmed so rollback won't try to delete it again.
+
+        Returns ``None`` when inlining is disabled or the blob is too large.
+        """
+        max_inline = self.config.blob.max_inline_size
+        if max_inline <= 0:
+            return None
+        if result.file_size > max_inline:
+            return None
+
+        # Resolve the blob path written by _write_blob
+        actual_path_str = result.actual_path
+        if "://" in actual_path_str:
+            # Remote blobs (S3, etc.) are not inlined
+            return None
+
+        blob_path = self._resolve_actual_path(actual_path_str)
+        if not isinstance(blob_path, Path) or not blob_path.exists():
+            return None
+
+        blob_bytes = blob_path.read_bytes()
+
+        # Compute hash from the raw bytes (matches file-based hashing)
+        computed_hash = file_hash
+        if computed_hash is None and self.config.metadata.verify_cache_integrity:
+            import xxhash
+
+            computed_hash = xxhash.xxh3_64(blob_bytes).hexdigest()
+
+        # Preserve the original file suffix so _read_inline_blob can
+        # recreate a temp file that the handler recognises (handlers
+        # derive the expected path from the suffix, e.g. .pkl.zstd).
+        # Extract all suffixes after the hash portion of the filename.
+        inline_ext = "".join(blob_path.suffixes) or ".bin"
+
+        # Delete the blob file — data now lives in metadata
+        try:
+            blob_path.unlink()
+        except OSError as exc:
+            logger.warning(f"Failed to remove inlined blob file {blob_path}: {exc}")
+
+        # Disarm the cleanup guard so rollback doesn't try to delete
+        cleanup.blob_path = None
+
+        return {
+            "blob_data": blob_bytes,
+            "is_inline": 1,
+            "file_hash": computed_hash,
+            "inline_ext": inline_ext,
+        }
+
+    def _read_inline_blob(
+        self,
+        entry: Dict[str, Any],
+        data_type: str,
+        metadata: Dict[str, Any],
+    ) -> Any:
+        """Deserialize an inline blob without touching the blob backend.
+
+        Writes the raw bytes to a temporary file whose name matches the
+        original blob extension (handlers derive expected paths from the
+        suffix, e.g. ``.pkl.zstd``), delegates to the handler, then cleans
+        up the temp file.
+        """
+        import tempfile
+
+        blob_bytes: bytes = entry["blob_data"]
+
+        # Use the stored inline_ext from the write path (preserves exact suffix)
+        suffix = metadata.get("inline_ext", ".bin")
+
+        # Create a temp file whose name ends with the expected suffix
+        # so that the handler's path-resolution logic finds it correctly.
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            tmp.write(blob_bytes)
+            tmp_path = Path(tmp.name)
+
+        try:
+            return self._blob_store._read_blob(tmp_path, data_type, metadata)
+        finally:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
 
     def _build_metadata_dict(
         self, result: HandlerResult, file_hash: Optional[str]
@@ -1537,6 +1640,16 @@ class UnifiedCache:
                 "metadata": metadata_dict,
             }
 
+            # Inline small blobs into metadata row if enabled
+            inline = self._try_inline_blob(result, file_hash, cleanup)
+            if inline is not None:
+                entry_data["blob_data"] = inline["blob_data"]
+                entry_data["is_inline"] = 1
+                metadata_dict["actual_path"] = None
+                metadata_dict["inline_ext"] = inline["inline_ext"]
+                if inline["file_hash"] is not None:
+                    metadata_dict["file_hash"] = inline["file_hash"]
+
             self._sign_entry_if_enabled(cache_key, entry_data, metadata_dict)
             self.metadata_backend.put_entry(cache_key, entry_data)
             self._cleanup_stale_blob(cache_key, old_blob_path, result.actual_path)
@@ -1585,7 +1698,10 @@ class UnifiedCache:
             return None
 
         try:
-            data = self._blob_store._read_blob(file_path, data_type, metadata)
+            if entry.get("is_inline") and entry.get("blob_data") is not None:
+                data = self._read_inline_blob(entry, data_type, metadata)
+            else:
+                data = self._blob_store._read_blob(file_path, data_type, metadata)
             self.metadata_backend.update_access_time(cache_key)
             return data
         except Exception as e:
@@ -1624,7 +1740,10 @@ class UnifiedCache:
             return None
 
         try:
-            data = self._blob_store._read_blob(file_path, data_type, metadata)
+            if entry.get("is_inline") and entry.get("blob_data") is not None:
+                data = self._read_inline_blob(entry, data_type, metadata)
+            else:
+                data = self._blob_store._read_blob(file_path, data_type, metadata)
             self.metadata_backend.update_access_time(cache_key)
             entry["cache_key"] = cache_key
             return (data, entry)
@@ -1746,6 +1865,16 @@ class UnifiedCache:
                     "metadata": metadata_dict,
                 }
 
+                # Inline small blobs into metadata row if enabled
+                inline = self._try_inline_blob(result, file_hash, cleanup)
+                if inline is not None:
+                    entry_data["blob_data"] = inline["blob_data"]
+                    entry_data["is_inline"] = 1
+                    metadata_dict["actual_path"] = None
+                    metadata_dict["inline_ext"] = inline["inline_ext"]
+                    if inline["file_hash"] is not None:
+                        metadata_dict["file_hash"] = inline["file_hash"]
+
                 # Populate per-entry TTL from config default (if set)
                 default_ttl = self.config.metadata.default_ttl_seconds
                 if default_ttl is not None:
@@ -1851,7 +1980,10 @@ class UnifiedCache:
                     return None
 
                 # Delegate blob read to BlobStore
-                data = self._blob_store._read_blob(file_path, data_type, metadata)
+                if entry.get("is_inline") and entry.get("blob_data") is not None:
+                    data = self._read_inline_blob(entry, data_type, metadata)
+                else:
+                    data = self._blob_store._read_blob(file_path, data_type, metadata)
 
                 # Update access time
                 self.metadata_backend.update_access_time(cache_key)
@@ -1986,7 +2118,10 @@ class UnifiedCache:
                     return None
 
                 # Delegate blob read to BlobStore
-                data = self._blob_store._read_blob(file_path, data_type, metadata)
+                if entry.get("is_inline") and entry.get("blob_data") is not None:
+                    data = self._read_inline_blob(entry, data_type, metadata)
+                else:
+                    data = self._blob_store._read_blob(file_path, data_type, metadata)
 
                 # Update access time
                 self.metadata_backend.update_access_time(cache_key)
@@ -2223,6 +2358,21 @@ class UnifiedCache:
                     updates["object_type"] = result.object_type
                 if result.extra.get("s3_etag"):
                     updates["s3_etag"] = result.extra["s3_etag"]
+
+                # Inline small blobs into metadata row if enabled
+                inline = self._try_inline_blob(result, None, cleanup)
+                if inline is not None:
+                    updates["blob_data"] = inline["blob_data"]
+                    updates["is_inline"] = 1
+                    updates["actual_path"] = None
+                    updates["inline_ext"] = inline["inline_ext"]
+                    if inline["file_hash"] is not None:
+                        updates["file_hash"] = inline["file_hash"]
+                else:
+                    # Ensure previous inline data is cleared if blob is now external
+                    updates["blob_data"] = None
+                    updates["is_inline"] = 0
+                    updates["inline_ext"] = None
 
                 # Delegate metadata-only update to backend (no I/O in metadata layer)
                 self.metadata_backend.update_entry_metadata(

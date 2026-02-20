@@ -53,6 +53,7 @@ try:
         Integer,
         String,
         DateTime,
+        LargeBinary,
         Index,
         select,
         update,
@@ -171,6 +172,9 @@ if SQLALCHEMY_AVAILABLE:
         access_count = Column(Integer, default=0, nullable=False, server_default="0")
         ttl_seconds = Column(Integer, nullable=True)
         expires_at = Column(DateTime(timezone=True), nullable=True)
+        blob_data = Column(LargeBinary, nullable=True)
+        is_inline = Column(Integer, default=0, nullable=False, server_default="0")
+        inline_ext = Column(String(20), nullable=True)
 
     class PgCacheStatsMixin:
         """Column definitions shared by all PG cache_stats tables."""
@@ -352,11 +356,15 @@ def _pg_migrate_v1_to_v2(backend: "PostgresBackend", namespace_id: str) -> None:
 
 
 def _pg_migrate_v2_to_v3(backend: "PostgresBackend", namespace_id: str) -> None:
-    """Migrate v2 → v3: add access_count, ttl_seconds, expires_at columns.
+    """Migrate v2 → v3: add access_count, ttl_seconds, expires_at, blob_data, is_inline columns.
 
-    Adds three new columns for per-entry access counting, per-entry TTL
-    storage, and pre-computed expiry timestamps.  Also creates indexes:
+    Adds five new columns plus two indexes:
 
+    * ``access_count`` — per-entry access counter
+    * ``ttl_seconds`` — per-entry TTL storage
+    * ``expires_at`` — pre-computed expiry timestamp
+    * ``blob_data`` — inline blob content (BYTEA)
+    * ``is_inline`` — flag: 1 if blob stored inline, 0 otherwise
     * ``idx_pg_expires_at`` — partial index on ``expires_at`` WHERE NOT NULL.
     * ``idx_pg_access_count`` — composite (access_count, accessed_at).
 
@@ -386,6 +394,18 @@ def _pg_migrate_v2_to_v3(backend: "PostgresBackend", namespace_id: str) -> None:
                 f"ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP WITH TIME ZONE"
             )
         )
+        session.execute(
+            text(f'ALTER TABLE "{table}" ADD COLUMN IF NOT EXISTS blob_data BYTEA')
+        )
+        session.execute(
+            text(
+                f'ALTER TABLE "{table}" '
+                f"ADD COLUMN IF NOT EXISTS is_inline INTEGER NOT NULL DEFAULT 0"
+            )
+        )
+        session.execute(
+            text(f'ALTER TABLE "{table}" ADD COLUMN IF NOT EXISTS inline_ext TEXT')
+        )
 
         # Create indexes
         session.execute(
@@ -404,7 +424,8 @@ def _pg_migrate_v2_to_v3(backend: "PostgresBackend", namespace_id: str) -> None:
         session.commit()
 
     logger.info(
-        "PG v2→v3: added access_count/ttl_seconds/expires_at columns and indexes on %r",
+        "PG v2→v3: added access_count/ttl_seconds/expires_at/blob_data/is_inline "
+        "columns and indexes on %r",
         table,
     )
 
@@ -634,7 +655,10 @@ class PostgresBackend(MetadataBackend):
                         metadata_dict JSONB,
                         access_count    INTEGER NOT NULL DEFAULT 0,
                         ttl_seconds     INTEGER,
-                        expires_at      TIMESTAMP WITH TIME ZONE
+                        expires_at      TIMESTAMP WITH TIME ZONE,
+                        blob_data       BYTEA,
+                        is_inline       INTEGER NOT NULL DEFAULT 0,
+                        inline_ext      TEXT
                     )
                 """)
                 )
@@ -896,6 +920,7 @@ class PostgresBackend(MetadataBackend):
         s3_etag = metadata.pop("s3_etag", None)  # S3 ETag if using S3 backend
         cache_key_params = metadata.pop("cache_key_params", None)
         metadata_dict_value = metadata.pop("metadata_dict", None)
+        inline_ext = metadata.pop("inline_ext", None)
 
         # Handle timestamps - always use UTC
         created_at = entry_data.get("created_at")
@@ -981,6 +1006,9 @@ class PostgresBackend(MetadataBackend):
                     access_count=access_count_val,
                     ttl_seconds=ttl_seconds_val,
                     expires_at=expires_at,
+                    blob_data=entry_data.get("blob_data"),
+                    is_inline=entry_data.get("is_inline", 0),
+                    inline_ext=inline_ext,
                 )
             )
         else:
@@ -1005,6 +1033,9 @@ class PostgresBackend(MetadataBackend):
                 access_count=access_count_val,
                 ttl_seconds=ttl_seconds_val,
                 expires_at=expires_at,
+                blob_data=entry_data.get("blob_data"),
+                is_inline=entry_data.get("is_inline", 0),
+                inline_ext=inline_ext,
             )
             session.add(entry)
 
@@ -1028,6 +1059,8 @@ class PostgresBackend(MetadataBackend):
                 if getattr(entry, "expires_at", None)
                 else None
             ),
+            "is_inline": getattr(entry, "is_inline", 0) or 0,
+            "blob_data": getattr(entry, "blob_data", None),
         }
 
         # Build nested metadata
@@ -1048,6 +1081,8 @@ class PostgresBackend(MetadataBackend):
             metadata["entry_signature"] = entry.entry_signature
         if entry.s3_etag:
             metadata["s3_etag"] = entry.s3_etag
+        if getattr(entry, "inline_ext", None):
+            metadata["inline_ext"] = entry.inline_ext
 
         if metadata:
             result["metadata"] = metadata
@@ -1125,7 +1160,8 @@ class PostgresBackend(MetadataBackend):
                     elif "content_hash" in updates:
                         entry.file_hash = updates["content_hash"]
                     if "actual_path" in updates:
-                        entry.actual_path = str(updates["actual_path"])
+                        ap = updates["actual_path"]
+                        entry.actual_path = str(ap) if ap is not None else None
                     if "data_type" in updates:
                         entry.data_type = updates["data_type"]
                     if "storage_format" in updates:
@@ -1142,6 +1178,12 @@ class PostgresBackend(MetadataBackend):
                         entry.metadata_dict = _ensure_jsonb_value(
                             updates["metadata_dict"]
                         )
+                    if "blob_data" in updates:
+                        entry.blob_data = updates["blob_data"]
+                    if "is_inline" in updates:
+                        entry.is_inline = updates["is_inline"]
+                    if "inline_ext" in updates:
+                        entry.inline_ext = updates["inline_ext"]
 
                     session.commit()
                     return True
@@ -1161,7 +1203,8 @@ class PostgresBackend(MetadataBackend):
                     f"       object_type, storage_format, serializer, "
                     f"       compression_codec, actual_path, "
                     f"       file_hash, entry_signature, metadata_dict, "
-                    f"       s3_etag, access_count, ttl_seconds, expires_at "
+                    f"       s3_etag, access_count, ttl_seconds, expires_at, "
+                    f"       is_inline "
                     f'FROM "{tbl}"'
                 )
             ).fetchall()
@@ -1199,6 +1242,8 @@ class PostgresBackend(MetadataBackend):
                     flat["ttl_seconds"] = row[16]
                 if row[17] is not None:
                     flat["expires_at"] = row[17]
+                # Phase 2 inline blob flag
+                flat["is_inline"] = row[18] or 0
                 result.append(flat)
             return result
 

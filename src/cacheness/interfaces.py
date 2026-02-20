@@ -75,6 +75,8 @@ class EntrySummary(TypedDict, total=False):
     access_count: int
     ttl_seconds: int
     expires_at: Any  # raw timestamp — str or datetime depending on backend
+    is_inline: int  # 1 if blob data is stored inline in metadata, 0 otherwise
+    blob_data: bytes  # raw inline blob bytes (only present when is_inline=1)
 
 
 class BlobReadContext(TypedDict, total=False):
@@ -138,6 +140,8 @@ class EntryData(TypedDict, total=False):
     access_count: int  # per-entry access counter (0 if never read)
     ttl_seconds: int  # per-entry TTL in seconds (None = use config default)
     expires_at: Any  # expiry timestamp (None = no TTL)
+    is_inline: int  # 1 if blob data is stored inline in metadata, 0 otherwise
+    blob_data: bytes  # raw inline blob bytes (only present when is_inline=1)
 
 
 @dataclass

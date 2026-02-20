@@ -214,6 +214,11 @@ class CacheBlobConfig:
         2  # Number of leading chars for directory sharding (0 to disable)
     )
 
+    # Inline blob storage — store small blobs directly in metadata DB
+    # instead of as separate files.  0 = disabled (default).
+    # Recommended: 4000 for SQLite (page-size sweet spot), 2000 for PostgreSQL (TOAST threshold).
+    max_inline_size: int = 0
+
     # Streaming options
     stream_threshold_bytes: int = (
         10 * 1024 * 1024
@@ -225,6 +230,9 @@ class CacheBlobConfig:
         if self.blob_backend_options is not None:
             if not isinstance(self.blob_backend_options, dict):
                 raise ValueError("blob_backend_options must be a dictionary")
+
+        if self.max_inline_size < 0:
+            raise ValueError("max_inline_size must be non-negative")
 
         if self.stream_threshold_bytes < 0:
             raise ValueError("stream_threshold_bytes must be non-negative")
@@ -477,6 +485,7 @@ class CacheConfig:
         # Blob backend parameters
         blob_backend: Optional[str] = None,
         blob_backend_options: Optional[dict] = None,
+        max_inline_size: Optional[int] = None,
         # Handler enable/disable flags
         enable_pandas_dataframes: Optional[bool] = None,
         enable_polars_dataframes: Optional[bool] = None,
@@ -589,6 +598,8 @@ class CacheConfig:
             self.blob.blob_backend = blob_backend
         if blob_backend_options is not None:
             self.blob.blob_backend_options = blob_backend_options
+        if max_inline_size is not None:
+            self.blob.max_inline_size = max_inline_size
 
         # Map handler enable/disable flags
         if enable_pandas_dataframes is not None:
