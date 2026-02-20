@@ -582,6 +582,91 @@ optimized_metadata = optimize_metadata_size(large_metadata)
 cache.put(data, key="example", metadata=optimized_metadata)
 ```
 
+### SQLite query_meta() Optimization
+
+Cacheness automatically creates a **partial B-tree index** on
+`(created_at DESC) WHERE metadata_dict IS NOT NULL` for every SQLite
+cache table.  Because `query_meta()` always filters out rows that have
+no custom metadata, this index lets SQLite:
+
+1. **Skip** rows without metadata entirely (no table scan).
+2. **Return** results pre-sorted by `created_at DESC` (no temp B-tree).
+
+The index is created automatically on new databases and added via a
+schema migration (v1 → v2) when opening older databases.
+
+#### Advanced: Generated Columns for Hot Keys
+
+If a single metadata key is queried very frequently (e.g., `model_type`),
+you can extract it into a **generated column** with its own index.  This
+avoids the per-row `JSON_EXTRACT` call at query time — SQLite maintains
+the generated value automatically.
+
+```sql
+-- 1. Add a virtual generated column that extracts a JSON key
+ALTER TABLE cache_entries
+ADD COLUMN model_type TEXT
+GENERATED ALWAYS AS (JSON_EXTRACT(metadata_dict, '$.model_type')) VIRTUAL;
+
+-- 2. Create a regular index on the generated column
+CREATE INDEX idx_model_type ON cache_entries (model_type);
+
+-- Now queries against model_type use a standard B-tree lookup:
+SELECT cache_key, metadata_dict
+  FROM cache_entries
+ WHERE model_type = 'xgboost'
+ ORDER BY created_at DESC;
+```
+
+> **When to use:** Only when a specific key is queried so often that the
+> `JSON_EXTRACT` overhead is measurable.  For most workloads the
+> built-in partial-index path is sufficient.
+
+> **Caveats:**
+> - Virtual generated columns occupy no disk space (computed on read).
+> - STORED generated columns occupy disk space but avoid recomputation.
+> - `ALTER TABLE … ADD COLUMN … GENERATED ALWAYS` requires **SQLite ≥ 3.31.0**
+>   (Python 3.12+ bundles ≥ 3.39).
+> - Generated columns are **read-only** — SQLite maintains them
+>   automatically when `metadata_dict` changes.
+
+#### Advanced: json_each() for Array Metadata
+
+If metadata values contain **arrays** (e.g., tags or feature lists),
+`JSON_EXTRACT` alone cannot test "contains element X".  Use SQLite's
+`json_each()` table-valued function to unnest the array:
+
+```sql
+-- Find entries where the "tags" array contains 'production'
+SELECT ce.cache_key, ce.metadata_dict
+  FROM cache_entries AS ce,
+       json_each(ce.metadata_dict, '$.tags') AS t
+ WHERE t.value = 'production';
+```
+
+In Python (via raw SQLAlchemy `text()`):
+
+```python
+from sqlalchemy import text
+
+table = cache.metadata_backend._entries_table
+
+with cache.metadata_backend.SessionLocal() as session:
+    rows = session.execute(
+        text(f"""
+            SELECT ce.cache_key, ce.metadata_dict
+              FROM {table} AS ce,
+                   json_each(ce.metadata_dict, '$.tags') AS t
+             WHERE t.value = :tag
+        """),
+        {"tag": "production"},
+    ).all()
+```
+
+> **Performance tip:** `json_each()` performs a table scan + per-row
+> JSON parse.  For large tables with frequent array searches, consider
+> a separate **junction table** (cache_key → tag) with a regular index.
+
 ## PostgreSQL Backend Compatibility
 
 Custom metadata works seamlessly with both SQLite and PostgreSQL metadata backends. This enables you to use structured custom metadata with production-grade PostgreSQL deployments.

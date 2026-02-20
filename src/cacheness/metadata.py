@@ -205,6 +205,11 @@ try:
             Index("idx_cleanup", "created_at"),
             Index("idx_size_mgmt", "file_size", "created_at"),
             Index("idx_data_type", "data_type"),
+            Index(
+                "idx_metadata_notnull",
+                desc("created_at"),
+                sqlite_where=text("metadata_dict IS NOT NULL"),
+            ),
         )
 
     class CacheStats(CacheStatsMixin, Base):
@@ -255,6 +260,11 @@ try:
                     Index(f"idx_{namespace_id}_cleanup", "created_at"),
                     Index(f"idx_{namespace_id}_size_mgmt", "file_size", "created_at"),
                     Index(f"idx_{namespace_id}_data_type", "data_type"),
+                    Index(
+                        f"idx_{namespace_id}_metadata_notnull",
+                        desc("created_at"),
+                        sqlite_where=text("metadata_dict IS NOT NULL"),
+                    ),
                 ),
             },
         )
@@ -1726,6 +1736,36 @@ class JsonBackend(MetadataBackend):
             self._save_to_disk()
 
 
+def _sqlite_migrate_v1_to_v2(backend: "SqliteBackend", namespace_id: str) -> None:
+    """v1 → v2: add partial index on ``metadata_dict IS NOT NULL``.
+
+    The ``query_meta()`` fast path always filters
+    ``WHERE metadata_dict IS NOT NULL``.  A partial B-tree index on
+    ``created_at DESC`` (filtered to non-NULL rows) lets SQLite skip
+    entries that have no custom metadata and return results pre-sorted.
+
+    Uses ``CREATE INDEX IF NOT EXISTS`` to be fully idempotent.
+    """
+    if namespace_id == DEFAULT_NAMESPACE:
+        table = "cache_entries"
+        idx_name = "idx_metadata_notnull"
+    else:
+        table = f"cache_entries_{namespace_id}"
+        idx_name = f"idx_{namespace_id}_metadata_notnull"
+
+    with backend.SessionLocal() as session:
+        session.execute(
+            text(
+                f'CREATE INDEX IF NOT EXISTS "{idx_name}" '
+                f'ON "{table}" (created_at DESC) '
+                f"WHERE metadata_dict IS NOT NULL"
+            )
+        )
+        session.commit()
+
+    logger.info("SQLite v1→v2: created partial index %r on %r", idx_name, table)
+
+
 class SqliteBackend(MetadataBackend):
     """SQLite database-based metadata backend using SQLAlchemy ORM."""
 
@@ -1883,10 +1923,13 @@ class SqliteBackend(MetadataBackend):
     def get_migrations(self) -> list:
         """Return SQLite-specific schema migrations.
 
-        Schema baseline is v1 (current).  No legacy migrations exist.
-        Future migrations (v1 → v2, etc.) will be added here.
+        Schema v1: baseline (namespace registry).
+        Schema v2: partial index on ``metadata_dict IS NOT NULL``
+                   for ``query_meta()`` performance.
         """
-        return []
+        return [
+            (1, 2, _sqlite_migrate_v1_to_v2),
+        ]
 
     # --- Namespace registry overrides ---
 
@@ -1970,13 +2013,20 @@ class SqliteBackend(MetadataBackend):
                     f'ON "{entries_table}" (file_size, created_at)'
                 )
             )
+            session.execute(
+                text(
+                    f'CREATE INDEX IF NOT EXISTS "idx_{namespace_id}_metadata_notnull" '
+                    f'ON "{entries_table}" (created_at DESC) '
+                    f"WHERE metadata_dict IS NOT NULL"
+                )
+            )
 
             # Register in the namespace registry
             now = datetime.now(timezone.utc)
             ns = CacheNamespace(
                 namespace_id=namespace_id,
                 display_name=display_name,
-                schema_version=1,
+                schema_version=2,
                 created_at=now,
             )
             session.add(ns)

@@ -57,8 +57,8 @@ class TestSqliteSchemaVersioning:
     def test_migrations_run_on_fresh_db(self, sqlite_backend):
         """Fresh database should have all migrations applied."""
         version = sqlite_backend.get_schema_version(DEFAULT_NAMESPACE)
-        # v0→v1 is the only migration currently
-        assert version == 1
+        # v1 baseline + v1→v2 partial index migration
+        assert version == 2
 
     def test_migrations_idempotent(self, sqlite_backend_path):
         """Opening the same database twice should not fail or re-run migrations."""
@@ -100,7 +100,7 @@ class TestSqliteNamespaceRegistry:
         ns = sqlite_backend.create_namespace("project_alpha", "Project Alpha")
         assert ns.namespace_id == "project_alpha"
         assert ns.display_name == "Project Alpha"
-        assert ns.schema_version == 1
+        assert ns.schema_version == 2
 
         # Verify tables were created
         from sqlalchemy import inspect
@@ -359,3 +359,170 @@ class TestSqliteBackwardCompatibility:
         assert stats["cache_hits"] == 10
 
         backend.close()
+
+
+class TestSqlitePartialIndex:
+    """Test the v2 partial index on metadata_dict IS NOT NULL."""
+
+    def test_schema_version_is_v2(self, sqlite_backend):
+        """Fresh database should be at schema version 2."""
+        version = sqlite_backend.get_schema_version(DEFAULT_NAMESPACE)
+        assert version == 2
+
+    def test_partial_index_exists_default_table(self, sqlite_backend):
+        """Default table should have idx_metadata_notnull partial index."""
+        from sqlalchemy import inspect
+
+        inspector = inspect(sqlite_backend.engine)
+        indexes = inspector.get_indexes("cache_entries")
+        index_names = [idx["name"] for idx in indexes]
+        assert "idx_metadata_notnull" in index_names
+
+    def test_partial_index_has_correct_columns(self, sqlite_backend):
+        """The partial index should be on created_at."""
+        from sqlalchemy import inspect
+
+        inspector = inspect(sqlite_backend.engine)
+        indexes = inspector.get_indexes("cache_entries")
+        meta_idx = next(idx for idx in indexes if idx["name"] == "idx_metadata_notnull")
+        assert "created_at" in meta_idx["column_names"]
+
+    def test_partial_index_exists_on_namespace_table(self, sqlite_backend):
+        """Namespace tables should also have the partial index."""
+        sqlite_backend.create_namespace("idx_test_ns")
+
+        from sqlalchemy import inspect
+
+        inspector = inspect(sqlite_backend.engine)
+        indexes = inspector.get_indexes("cache_entries_idx_test_ns")
+        index_names = [idx["name"] for idx in indexes]
+        assert "idx_idx_test_ns_metadata_notnull" in index_names
+
+    def test_migration_creates_index_on_legacy_db(self, tmp_path):
+        """Opening a v1 database should auto-migrate to v2 and add the index."""
+        from sqlalchemy import create_engine, text, inspect
+        from sqlalchemy.orm import sessionmaker
+
+        db_file = str(tmp_path / "legacy_v1.db")
+
+        # Create a v1 database manually (tables but NO partial index)
+        engine = create_engine(f"sqlite:///{db_file}")
+        Session = sessionmaker(bind=engine)
+
+        with Session() as session:
+            session.execute(
+                text("""
+                CREATE TABLE cacheness_namespaces (
+                    namespace_id VARCHAR(100) PRIMARY KEY,
+                    display_name VARCHAR(200) NOT NULL DEFAULT '',
+                    schema_version INTEGER NOT NULL DEFAULT 1,
+                    created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+                    signature VARCHAR(200)
+                )
+            """)
+            )
+            session.execute(
+                text("""
+                INSERT INTO cacheness_namespaces
+                    (namespace_id, display_name, schema_version, created_at)
+                VALUES ('default', 'Default', 1, datetime('now'))
+            """)
+            )
+            session.execute(
+                text("""
+                CREATE TABLE cache_entries (
+                    cache_key VARCHAR(16) PRIMARY KEY,
+                    description VARCHAR(500) NOT NULL DEFAULT '',
+                    data_type VARCHAR(20) NOT NULL,
+                    created_at DATETIME NOT NULL,
+                    accessed_at DATETIME NOT NULL,
+                    file_size INTEGER NOT NULL DEFAULT 0,
+                    file_hash VARCHAR(16),
+                    entry_signature VARCHAR(100),
+                    s3_etag VARCHAR(100),
+                    object_type VARCHAR(100),
+                    storage_format VARCHAR(20),
+                    serializer VARCHAR(20),
+                    compression_codec VARCHAR(20),
+                    actual_path VARCHAR(500),
+                    cache_key_params TEXT,
+                    metadata_dict TEXT
+                )
+            """)
+            )
+            session.execute(
+                text("""
+                CREATE TABLE cache_stats (
+                    id INTEGER PRIMARY KEY DEFAULT 1,
+                    cache_hits INTEGER NOT NULL DEFAULT 0,
+                    cache_misses INTEGER NOT NULL DEFAULT 0,
+                    last_updated DATETIME NOT NULL
+                )
+            """)
+            )
+            # Create v1 indexes (no partial index)
+            session.execute(
+                text("CREATE INDEX idx_list_entries ON cache_entries (created_at DESC)")
+            )
+            session.execute(
+                text("CREATE INDEX idx_cleanup ON cache_entries (created_at)")
+            )
+            session.execute(
+                text(
+                    "CREATE INDEX idx_size_mgmt ON cache_entries (file_size, created_at)"
+                )
+            )
+            session.execute(
+                text("CREATE INDEX idx_data_type ON cache_entries (data_type)")
+            )
+            session.commit()
+        engine.dispose()
+
+        # Verify NO partial index before opening with SqliteBackend
+        engine2 = create_engine(f"sqlite:///{db_file}")
+        inspector = inspect(engine2)
+        index_names = [idx["name"] for idx in inspector.get_indexes("cache_entries")]
+        assert "idx_metadata_notnull" not in index_names
+        engine2.dispose()
+
+        # Open with SqliteBackend — should auto-migrate v1→v2
+        backend = SqliteBackend(db_file)
+
+        # Schema should now be v2
+        assert backend.get_schema_version(DEFAULT_NAMESPACE) == 2
+
+        # Partial index should exist
+        inspector = inspect(backend.engine)
+        index_names = [idx["name"] for idx in inspector.get_indexes("cache_entries")]
+        assert "idx_metadata_notnull" in index_names
+
+        backend.close()
+
+    def test_migration_is_idempotent(self, sqlite_backend_path):
+        """Opening the same database twice should not fail on duplicate index."""
+        backend1 = SqliteBackend(sqlite_backend_path)
+        v1 = backend1.get_schema_version(DEFAULT_NAMESPACE)
+        backend1.close()
+
+        backend2 = SqliteBackend(sqlite_backend_path)
+        v2 = backend2.get_schema_version(DEFAULT_NAMESPACE)
+        backend2.close()
+
+        assert v1 == v2 == 2
+
+    def test_query_plan_uses_partial_index(self, sqlite_backend):
+        """EXPLAIN QUERY PLAN should reference the partial index."""
+        from sqlalchemy import text
+
+        with sqlite_backend.SessionLocal() as session:
+            plan = session.execute(
+                text(
+                    "EXPLAIN QUERY PLAN "
+                    "SELECT cache_key, metadata_dict FROM cache_entries "
+                    "WHERE metadata_dict IS NOT NULL "
+                    "ORDER BY created_at DESC"
+                )
+            ).all()
+            plan_text = " ".join(str(row) for row in plan)
+            # SQLite should mention the partial index in the plan
+            assert "idx_metadata_notnull" in plan_text
