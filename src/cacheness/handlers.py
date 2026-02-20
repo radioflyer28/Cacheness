@@ -846,6 +846,85 @@ class TensorFlowTensorHandler(CacheHandler):
         return "tensorflow_tensor"
 
 
+class BytesHandler(CacheHandler):
+    """Handler for raw bytes, bytearray, and memoryview objects.
+
+    Stores binary data as-is without any serialization or transformation.
+    This is the preferred handler when the caller has **pre-serialized**
+    data (protobuf, msgpack, custom binary formats) or opaque payloads
+    that should be written verbatim.
+
+    The handler sits just before :class:`ObjectHandler` in the default
+    priority chain so that ``bytes`` objects are stored as raw ``.bin``
+    files rather than being unnecessarily pickled.
+    """
+
+    def can_handle(self, data: Any, config: Any = None) -> bool:
+        """Accept ``bytes``, ``bytearray``, and ``memoryview``."""
+        return isinstance(data, (bytes, bytearray, memoryview))
+
+    def put(self, data: Any, file_path: Path, config: Any) -> HandlerResult:
+        """Write raw bytes to disk.
+
+        Args:
+            data: A ``bytes``, ``bytearray``, or ``memoryview`` object.
+            file_path: Base file path (extension will be replaced with ``.bin``).
+            config: Cache configuration (unused — data is written verbatim).
+
+        Returns:
+            HandlerResult with ``storage_format="raw_bytes"``.
+        """
+        with cache_operation_context("store_bytes", size=len(data)):
+            try:
+                bin_path = file_path.with_suffix("").with_suffix(".bin")
+                raw = bytes(data) if not isinstance(data, bytes) else data
+
+                bin_path.write_bytes(raw)
+                file_size = bin_path.stat().st_size
+
+                logger.debug("Wrote %d raw bytes to %s", file_size, bin_path)
+
+                return HandlerResult(
+                    storage_format="raw_bytes",
+                    file_size=file_size,
+                    actual_path=str(bin_path),
+                )
+            except Exception as e:
+                raise CacheWriteError(f"Failed to write bytes data: {e}") from e
+
+    def get(self, file_path: Path, metadata: BlobReadContext) -> bytes:
+        """Read raw bytes from disk.
+
+        Args:
+            file_path: Path to the ``.bin`` file.
+            metadata: Handler metadata (unused).
+
+        Returns:
+            The bytes exactly as they were stored.
+        """
+        try:
+            path = Path(file_path)
+            if not path.exists():
+                raise CacheReadError(f"Bytes file not found: {file_path}")
+
+            data = path.read_bytes()
+            logger.debug("Read %d raw bytes from %s", len(data), path)
+            return data
+        except CacheReadError:
+            raise
+        except Exception as e:
+            raise CacheReadError(f"Failed to read bytes data: {e}") from e
+
+    def get_file_extension(self, config: Any) -> str:
+        """Return the file extension for raw bytes files."""
+        return ".bin"
+
+    @property
+    def data_type(self) -> str:
+        """Return the data type identifier."""
+        return "bytes"
+
+
 class ObjectHandler(CacheHandler):
     """Handler for general Python objects using compressed pickle."""
 
@@ -854,10 +933,15 @@ class ObjectHandler(CacheHandler):
 
         ObjectHandler is always last in the registry's priority list.  By the
         time this method runs every specialised handler (DataFrame, Series,
-        TensorFlow) has already declined, so we don't need to re-test their
-        logic.  The only types we must still skip are ``np.ndarray`` and
-        dict-of-arrays, because :class:`ArrayHandler` never rejects those.
+        TensorFlow, Bytes) has already declined, so we don't need to re-test
+        their logic.  The only types we must still skip are ``np.ndarray``,
+        dict-of-arrays, and buffer types (``bytes``/``bytearray``/
+        ``memoryview``), because their respective handlers never reject those.
         """
+        # BytesHandler always accepts these — don't claim them
+        if isinstance(data, (bytes, bytearray, memoryview)):
+            return False
+
         # ArrayHandler always accepts these — don't claim them
         if isinstance(data, np.ndarray):
             return False
@@ -1171,6 +1255,9 @@ class HandlerRegistry:
         if self._should_enable_handler("numpy_arrays", config):
             self.handlers.append(ArrayHandler())
 
+        if self._should_enable_handler("bytes", config):
+            self.handlers.append(BytesHandler())
+
         if self._should_enable_handler("object_pickle", config):
             self.handlers.append(ObjectHandler())  # Keep as fallback
 
@@ -1194,6 +1281,7 @@ class HandlerRegistry:
             # if _lazy_import_tensorflow()[1] and BLOSC2_AVAILABLE
             # else None,
             "numpy_arrays": lambda: ArrayHandler(),
+            "bytes": lambda: BytesHandler(),
             "object_pickle": lambda: ObjectHandler(),
         }
 
@@ -1230,6 +1318,7 @@ class HandlerRegistry:
             "pandas_dataframes": "enable_pandas_dataframes",
             "tensorflow_tensors": "enable_tensorflow_tensors",
             "numpy_arrays": "enable_numpy_arrays",
+            "bytes": "enable_bytes_handler",
             "object_pickle": "enable_object_pickle",
         }
 

@@ -345,6 +345,7 @@ class HandlerConfig:
     enable_numpy_arrays: bool = True
     enable_object_pickle: bool = True
     enable_tensorflow_tensors: bool = False  # Disabled by default due to import issues
+    enable_bytes_handler: bool = True
 
     # Advanced serialization options
     enable_dill_fallback: bool = True  # Use dill for objects that pickle can't handle
@@ -361,6 +362,7 @@ class HandlerConfig:
                 "pandas_series",
                 "polars_series",
                 "tensorflow_tensors",
+                "bytes",
             }
 
             invalid_handlers = set(self.handler_priority) - valid_handlers

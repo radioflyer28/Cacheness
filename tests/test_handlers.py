@@ -14,12 +14,14 @@ from cacheness.handlers import (
     HandlerRegistry,
     ObjectHandler,
     ArrayHandler,
+    BytesHandler,
     PolarsDataFrameHandler,
     PandasDataFrameHandler,
     PandasSeriesHandler,
     PolarsSeriesHandler,
 )
 from cacheness.core import CacheConfig
+from cacheness.config import HandlerConfig
 
 
 def _has_dataframe_library():
@@ -591,3 +593,185 @@ class TestFallbackMechanisms:
             loaded_data = handler.get(Path(metadata["actual_path"]), metadata)
 
             assert loaded_data == test_data
+
+
+class TestBytesHandler:
+    """Test the bytes cache handler for raw binary storage."""
+
+    @pytest.fixture
+    def handler(self):
+        """Create a bytes handler for testing."""
+        return BytesHandler()
+
+    @pytest.fixture
+    def config(self):
+        """Create a test config."""
+        return CacheConfig()
+
+    @pytest.fixture
+    def temp_dir(self):
+        """Create a temporary directory for testing."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            yield Path(temp_dir)
+
+    def test_can_handle_bytes(self, handler):
+        """BytesHandler should accept bytes objects."""
+        assert handler.can_handle(b"hello world")
+        assert handler.can_handle(b"")
+        assert handler.can_handle(b"\x00\xff\x80")
+
+    def test_can_handle_bytearray(self, handler):
+        """BytesHandler should accept bytearray objects."""
+        assert handler.can_handle(bytearray(b"hello"))
+        assert handler.can_handle(bytearray(10))
+
+    def test_can_handle_memoryview(self, handler):
+        """BytesHandler should accept memoryview objects."""
+        assert handler.can_handle(memoryview(b"data"))
+
+    def test_rejects_non_bytes(self, handler):
+        """BytesHandler should reject non-bytes types."""
+        assert not handler.can_handle("string")
+        assert not handler.can_handle(42)
+        assert not handler.can_handle([1, 2, 3])
+        assert not handler.can_handle({"key": "value"})
+        assert not handler.can_handle(None)
+
+    def test_put_and_get_bytes(self, handler, config, temp_dir):
+        """Test round-trip for bytes objects."""
+        data = b"protobuf-or-msgpack-payload\x00\xff"
+        file_path = temp_dir / "test"
+
+        result = handler.put(data, file_path, config)
+        assert Path(result["actual_path"]).exists()
+        assert result["storage_format"] == "raw_bytes"
+        assert result["file_size"] == len(data)
+
+        loaded = handler.get(Path(result["actual_path"]), result)
+        assert loaded == data
+
+    def test_put_and_get_bytearray(self, handler, config, temp_dir):
+        """Test round-trip for bytearray objects."""
+        data = bytearray(b"\x01\x02\x03\x04")
+        file_path = temp_dir / "test"
+
+        result = handler.put(data, file_path, config)
+        loaded = handler.get(Path(result["actual_path"]), result)
+        assert loaded == bytes(data)
+
+    def test_put_and_get_memoryview(self, handler, config, temp_dir):
+        """Test round-trip for memoryview objects."""
+        original = b"memoryview-data"
+        data = memoryview(original)
+        file_path = temp_dir / "test"
+
+        result = handler.put(data, file_path, config)
+        loaded = handler.get(Path(result["actual_path"]), result)
+        assert loaded == original
+
+    def test_put_and_get_empty_bytes(self, handler, config, temp_dir):
+        """Test round-trip for empty bytes."""
+        data = b""
+        file_path = temp_dir / "test"
+
+        result = handler.put(data, file_path, config)
+        assert result["file_size"] == 0
+
+        loaded = handler.get(Path(result["actual_path"]), result)
+        assert loaded == b""
+
+    def test_put_large_blob(self, handler, config, temp_dir):
+        """Test storage of a large binary blob."""
+        data = bytes(range(256)) * 1000  # 256KB
+        file_path = temp_dir / "test"
+
+        result = handler.put(data, file_path, config)
+        assert result["file_size"] == len(data)
+
+        loaded = handler.get(Path(result["actual_path"]), result)
+        assert loaded == data
+
+    def test_file_extension(self, handler, config):
+        """Test that file extension is .bin."""
+        assert handler.get_file_extension(config) == ".bin"
+
+    def test_data_type(self, handler):
+        """Test data type identifier."""
+        assert handler.data_type == "bytes"
+
+    def test_get_missing_file_raises(self, handler, temp_dir):
+        """Reading a nonexistent file should raise CacheReadError."""
+        from cacheness.interfaces import CacheReadError
+
+        with pytest.raises(CacheReadError, match="not found"):
+            handler.get(temp_dir / "nonexistent.bin", {})
+
+    def test_actual_path_has_bin_extension(self, handler, config, temp_dir):
+        """Stored file should have .bin extension."""
+        result = handler.put(b"data", temp_dir / "test", config)
+        assert result["actual_path"].endswith(".bin")
+
+
+class TestBytesHandlerRegistry:
+    """Test BytesHandler integration with HandlerRegistry."""
+
+    def test_bytes_handler_in_default_registry(self):
+        """BytesHandler should be in the default handler list."""
+        registry = HandlerRegistry()
+        handler_types = [type(h).__name__ for h in registry.handlers]
+        assert "BytesHandler" in handler_types
+
+    def test_bytes_before_object(self):
+        """BytesHandler should come before ObjectHandler in priority."""
+        registry = HandlerRegistry()
+        handler_types = [type(h).__name__ for h in registry.handlers]
+        bytes_idx = handler_types.index("BytesHandler")
+        object_idx = handler_types.index("ObjectHandler")
+        assert bytes_idx < object_idx
+
+    def test_bytes_selected_for_bytes_data(self):
+        """HandlerRegistry should select BytesHandler for bytes input."""
+        registry = HandlerRegistry()
+        handler = registry.get_handler(b"some data")
+        assert isinstance(handler, BytesHandler)
+
+    def test_bytes_selected_for_bytearray(self):
+        """HandlerRegistry should select BytesHandler for bytearray input."""
+        registry = HandlerRegistry()
+        handler = registry.get_handler(bytearray(b"data"))
+        assert isinstance(handler, BytesHandler)
+
+    def test_bytes_selected_for_memoryview(self):
+        """HandlerRegistry should select BytesHandler for memoryview input."""
+        registry = HandlerRegistry()
+        handler = registry.get_handler(memoryview(b"data"))
+        assert isinstance(handler, BytesHandler)
+
+    def test_object_handler_skips_bytes(self):
+        """ObjectHandler.can_handle should return False for bytes types."""
+        handler = ObjectHandler()
+        assert not handler.can_handle(b"data")
+        assert not handler.can_handle(bytearray(b"data"))
+        assert not handler.can_handle(memoryview(b"data"))
+
+    def test_get_handler_by_type(self):
+        """get_handler_by_type('bytes') should return BytesHandler."""
+        registry = HandlerRegistry()
+        handler = registry.get_handler_by_type("bytes")
+        assert isinstance(handler, BytesHandler)
+
+    def test_disable_bytes_handler(self):
+        """Setting enable_bytes_handler=False should exclude it."""
+        config = CacheConfig(handlers=HandlerConfig(enable_bytes_handler=False))
+        registry = HandlerRegistry(config)
+        handler_types = [type(h).__name__ for h in registry.handlers]
+        assert "BytesHandler" not in handler_types
+
+    def test_bytes_in_handler_priority_config(self):
+        """'bytes' should be accepted in handler_priority list."""
+        config = CacheConfig(
+            handlers=HandlerConfig(handler_priority=["bytes", "object_pickle"])
+        )
+        registry = HandlerRegistry(config)
+        handler_types = [type(h).__name__ for h in registry.handlers]
+        assert handler_types[0] == "BytesHandler"
