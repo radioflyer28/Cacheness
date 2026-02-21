@@ -2355,6 +2355,7 @@ class SqliteBackend(MetadataBackend):
                     CE.blob_data,
                     CE.is_inline,
                     CE.inline_ext,
+                    CE.metadata_dict,
                 ).where(CE.cache_key == cache_key)
             ).one_or_none()
 
@@ -2385,6 +2386,10 @@ class SqliteBackend(MetadataBackend):
                 metadata["s3_etag"] = row.s3_etag
             if row.inline_ext is not None:
                 metadata["inline_ext"] = row.inline_ext
+
+            # Include metadata_dict (user-facing kwargs) if stored
+            if row.metadata_dict is not None:
+                metadata["metadata_dict"] = row.metadata_dict
 
             # Only parse cache_key_params JSON if it exists (disabled by default)
             if row.cache_key_params is not None:
