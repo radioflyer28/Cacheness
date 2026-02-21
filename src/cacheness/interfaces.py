@@ -333,6 +333,32 @@ class CacheWriter(ABC):
         """
         pass
 
+    def put_bytes(self, data: Any, config: Any) -> tuple[bytes, HandlerResult]:
+        """Serialize *data* to bytes in-memory (zero disk I/O).
+
+        This is an optional fast-path used by the inline-blob machinery in
+        :pyclass:`UnifiedCache` to avoid a write→read round-trip when the
+        blob is small enough to embed in the metadata row.
+
+        The returned :class:`HandlerResult` carries the same metadata fields
+        as :meth:`put` (``storage_format``, ``compression_codec``, etc.)
+        but ``actual_path`` is set to ``""`` because no file was written.
+
+        Args:
+            data: The data to serialize.
+            config: Cache configuration.
+
+        Returns:
+            ``(blob_bytes, result)`` — the raw serialized bytes and a
+            :class:`HandlerResult` describing the serialization.
+
+        Raises:
+            NotImplementedError: Handler does not support in-memory
+                serialization (caller should fall back to :meth:`put`
+                followed by a file read-back).
+        """
+        raise NotImplementedError
+
 
 class CacheReader(ABC):
     """Interface for reading data from cache."""
@@ -354,6 +380,29 @@ class CacheReader(ABC):
             CacheReadError: If data cannot be read
         """
         pass
+
+    def get_bytes(self, blob: bytes, metadata: "BlobReadContext") -> Any:
+        """Deserialize *blob* bytes in-memory (zero disk I/O).
+
+        This is the read-side counterpart of :meth:`CacheWriter.put_bytes`.
+        Used by the inline-blob machinery to reconstruct the original object
+        directly from the bytes stored in the metadata row, without writing
+        a temporary file on disk.
+
+        Args:
+            blob: Raw serialized bytes (as produced by :meth:`put_bytes`).
+            metadata: Handler metadata from when data was cached.
+                See :class:`BlobReadContext` for available keys.
+
+        Returns:
+            The deserialized data.
+
+        Raises:
+            NotImplementedError: Handler does not support in-memory
+                deserialization (caller should fall back to the temp-file
+                path via :meth:`get`).
+        """
+        raise NotImplementedError
 
 
 class FormatProvider(ABC):

@@ -697,6 +697,84 @@ class ArrayHandler(CacheHandler):
     def data_type(self) -> str:
         return "array"
 
+    # -- Zero-disk inline fast-paths ----------------------------------
+
+    def put_bytes(self, data: Any, config: Any) -> tuple[bytes, HandlerResult]:
+        """Serialize a NumPy array to bytes in-memory (no disk I/O).
+
+        Only supports single ``np.ndarray`` with blosc2 available and enabled.
+        Dict-of-arrays and NPZ-only configurations fall back to the disk path.
+        """
+        if not isinstance(data, np.ndarray):
+            raise NotImplementedError("put_bytes only supports single np.ndarray")
+        if not (config.compression.use_blosc2_arrays and BLOSC2_AVAILABLE):
+            raise NotImplementedError("put_bytes requires blosc2 for arrays")
+
+        # Same binary format as _write_blosc2_array: shape|dtype|compressed
+        compressed_data = blosc2.compress2(
+            data,
+            cparams={
+                "typesize": data.dtype.itemsize,
+                "clevel": config.compression.blosc2_array_clevel,
+                "codec": getattr(
+                    blosc2.Codec,
+                    config.compression.blosc2_array_codec.upper(),
+                    blosc2.Codec.LZ4,
+                ),
+            },
+        )
+        shape_bytes = str(data.shape).encode("utf-8")
+        dtype_bytes = str(data.dtype).encode("utf-8")
+
+        parts = [
+            len(shape_bytes).to_bytes(4, "little"),
+            shape_bytes,
+            len(dtype_bytes).to_bytes(4, "little"),
+            dtype_bytes,
+            compressed_data,
+        ]
+        blob = b"".join(parts)
+
+        result = HandlerResult(
+            storage_format="blosc2_array",
+            file_size=len(blob),
+            actual_path="",
+            compression_codec=config.compression.blosc2_array_codec,
+            extra={
+                "shape": data.shape,
+                "dtype": str(data.dtype),
+            },
+        )
+        return blob, result
+
+    def get_bytes(self, blob: bytes, metadata: BlobReadContext) -> Any:
+        """Deserialize a NumPy array from bytes in-memory (no disk I/O).
+
+        Expects the binary format produced by :meth:`put_bytes`
+        (shape|dtype|blosc2-compressed data).
+        """
+        storage_format = metadata.get("storage_format", "npz")
+        if storage_format not in ("blosc2_array", "blosc2"):
+            raise NotImplementedError(
+                f"get_bytes does not support format {storage_format!r}"
+            )
+
+        offset = 0
+        shape_len = int.from_bytes(blob[offset : offset + 4], "little")
+        offset += 4
+        shape_str = blob[offset : offset + shape_len].decode("utf-8")
+        offset += shape_len
+        dtype_len = int.from_bytes(blob[offset : offset + 4], "little")
+        offset += 4
+        dtype_str = blob[offset : offset + dtype_len].decode("utf-8")
+        offset += dtype_len
+        compressed_data = blob[offset:]
+
+        decompressed = blosc2.decompress2(compressed_data)
+        shape = ast.literal_eval(shape_str)
+        dtype = np.dtype(dtype_str)
+        return np.frombuffer(decompressed, dtype=dtype).reshape(shape)
+
 
 class TensorFlowTensorHandler(CacheHandler):
     """Handler for TensorFlow tensors using blosc2.save_tensor/load_tensor."""
@@ -914,6 +992,22 @@ class BytesHandler(CacheHandler):
             raise
         except Exception as e:
             raise CacheReadError(f"Failed to read bytes data: {e}") from e
+
+    # -- Zero-disk inline fast-paths ----------------------------------
+
+    def put_bytes(self, data: Any, config: Any) -> tuple[bytes, HandlerResult]:
+        """Serialize raw bytes in-memory (passthrough — no transformation)."""
+        raw = bytes(data) if not isinstance(data, bytes) else data
+        result = HandlerResult(
+            storage_format="raw_bytes",
+            file_size=len(raw),
+            actual_path="",
+        )
+        return raw, result
+
+    def get_bytes(self, blob: bytes, metadata: BlobReadContext) -> bytes:
+        """Deserialize raw bytes in-memory (passthrough)."""
+        return blob
 
     def get_file_extension(self, config: Any) -> str:
         """Return the file extension for raw bytes files."""
@@ -1175,6 +1269,118 @@ class ObjectHandler(CacheHandler):
                 return self._read_compressed_dill(pickle_path)
             else:
                 return read_compressed_pickle(pickle_path, nparray=False)
+
+    # -- Zero-disk inline fast-paths ----------------------------------
+
+    def put_bytes(self, data: Any, config: Any) -> tuple[bytes, HandlerResult]:
+        """Serialize a Python object to bytes in-memory (no disk I/O).
+
+        Mirrors the logic in :meth:`put` but performs all serialization and
+        optional blosc compression entirely in memory.
+        """
+        import pickle as _pickle
+
+        # Determine serializer — same logic as put()
+        use_pickle = is_pickleable(data)
+        use_dill = False
+        serializer_name = "pickle"
+
+        if not use_pickle:
+            if (
+                config
+                and hasattr(config, "handlers")
+                and config.handlers.enable_dill_fallback
+            ):
+                use_dill = is_dill_serializable(data)
+                if use_dill:
+                    serializer_name = "dill"
+            if not use_dill:
+                raise NotImplementedError("Object cannot be serialized in-memory")
+
+        # Serialize to bytes
+        if use_dill and DILL_AVAILABLE and dill is not None:
+            raw = dill.dumps(data, protocol=dill.HIGHEST_PROTOCOL)
+        else:
+            raw = _pickle.dumps(data, protocol=_pickle.HIGHEST_PROTOCOL)
+
+        # Optionally compress with blosc
+        should_compress = (
+            BLOSC_AVAILABLE
+            and config.compression.pickle_compression_codec != "none"
+            and len(raw) >= config.compression.compression_threshold_bytes
+        )
+        if should_compress:
+            compression_params = optimize_compression_params(
+                data,
+                codec=config.compression.pickle_compression_codec,
+                base_clevel=config.compression.pickle_compression_level,
+                enable_multithreading=getattr(
+                    config.compression, "enable_multithreading", True
+                ),
+                auto_optimize_threads=getattr(
+                    config.compression, "auto_optimize_threads", True
+                ),
+            )
+            from .compress_pickle import blosc as _blosc
+
+            valid_blosc_params: Dict[str, Any] = {"typesize": 1}
+            for key, value in compression_params.items():
+                if key in ["clevel", "filter"]:
+                    valid_blosc_params[key] = value
+                elif key == "codec" and isinstance(value, str):
+                    # Convert string codec to blosc2.Codec enum
+                    codec_map = {
+                        "lz4": _blosc.Codec.LZ4,
+                        "lz4hc": _blosc.Codec.LZ4HC,
+                        "zstd": _blosc.Codec.ZSTD,
+                        "zlib": _blosc.Codec.ZLIB,
+                        "blosclz": _blosc.Codec.BLOSCLZ,
+                    }
+                    valid_blosc_params["codec"] = codec_map.get(
+                        value.lower(), _blosc.Codec.LZ4
+                    )
+                elif key == "codec":
+                    valid_blosc_params["codec"] = value
+            blob = _blosc.compress(raw, **valid_blosc_params)
+            storage_format = f"compressed_{serializer_name}"
+        else:
+            blob = raw
+            storage_format = serializer_name
+
+        result = HandlerResult(
+            storage_format=storage_format,
+            file_size=len(blob),
+            actual_path="",
+            compression_codec=config.compression.pickle_compression_codec
+            if BLOSC_AVAILABLE
+            else None,
+            serializer=serializer_name,
+            object_type=str(type(data)),
+        )
+        return blob, result
+
+    def get_bytes(self, blob: bytes, metadata: BlobReadContext) -> Any:
+        """Deserialize a Python object from bytes in-memory (no disk I/O).
+
+        Mirrors the logic in :meth:`get` but reads entirely from the
+        provided bytes buffer.
+        """
+        import pickle as _pickle
+
+        storage_format = metadata.get("storage_format", "compressed_pickle")
+        serializer = metadata.get("serializer", "pickle")
+
+        is_compressed = storage_format.startswith("compressed") and BLOSC_AVAILABLE
+        if is_compressed:
+            from .compress_pickle import blosc as _blosc
+
+            raw = _blosc.decompress(blob)
+        else:
+            raw = blob
+
+        if serializer == "dill" and DILL_AVAILABLE and dill is not None:
+            return dill.loads(raw)
+        return _pickle.loads(raw)
 
     def get_file_extension(self, config: Any) -> str:
         """Get file extension for objects."""

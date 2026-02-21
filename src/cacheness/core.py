@@ -1487,6 +1487,70 @@ class UnifiedCache:
             "inline_ext": inline_ext,
         }
 
+    def _try_direct_inline(
+        self,
+        data: Any,
+        handler: Any,
+    ) -> Optional[Dict[str, Any]]:
+        """Try zero-disk in-memory serialization for inline blob storage.
+
+        Invokes ``handler.put_bytes()`` to serialize *data* entirely in
+        memory.  If the handler supports it and the serialized blob fits
+        within ``max_inline_size``, returns a dict ready for embedding in
+        the metadata row — **no file is ever written to disk**.
+
+        Returns ``None`` when:
+        * Inlining is disabled (``max_inline_size ≤ 0``).
+        * The handler raises :class:`NotImplementedError`.
+        * The serialized blob exceeds ``max_inline_size``.
+
+        The returned dict contains:
+
+        * ``blob_data`` – the raw bytes to store in the metadata row.
+        * ``file_hash`` – xxhash digest (or ``None`` when integrity
+          checking is disabled).
+        * ``inline_ext`` – file extension hint for ``get_bytes``/fallback.
+        * ``result`` – :class:`HandlerResult` with serialization metadata
+          (``storage_format``, ``compression_codec``, etc.).
+        * ``handler`` – the handler instance (for ``data_type``).
+        """
+        max_inline = self.config.blob.max_inline_size
+        if max_inline <= 0:
+            return None
+
+        try:
+            blob_bytes, result = handler.put_bytes(data, self.config)
+        except (NotImplementedError, Exception) as exc:
+            # NotImplementedError → handler doesn't support in-memory path.
+            # Any other exception → safer to fall back to disk path.
+            if not isinstance(exc, NotImplementedError):
+                logger.debug(
+                    "put_bytes failed for %s, falling back to disk: %s",
+                    handler.data_type,
+                    exc,
+                )
+            return None
+
+        if len(blob_bytes) > max_inline:
+            return None
+
+        # Compute hash from raw bytes
+        computed_hash: Optional[str] = None
+        if self.config.metadata.verify_cache_integrity:
+            import xxhash
+
+            computed_hash = xxhash.xxh3_64(blob_bytes).hexdigest()
+
+        inline_ext = handler.get_file_extension(self.config)
+
+        return {
+            "blob_data": blob_bytes,
+            "file_hash": computed_hash,
+            "inline_ext": inline_ext,
+            "result": result,
+            "handler": handler,
+        }
+
     def _read_inline_blob(
         self,
         entry: Dict[str, Any],
@@ -1495,20 +1559,29 @@ class UnifiedCache:
     ) -> Any:
         """Deserialize an inline blob without touching the blob backend.
 
-        Writes the raw bytes to a temporary file whose name matches the
-        original blob extension (handlers derive expected paths from the
-        suffix, e.g. ``.pkl.zstd``), delegates to the handler, then cleans
-        up the temp file.
+        Tries the handler's ``get_bytes()`` first for zero-disk
+        deserialization.  Falls back to writing the raw bytes to a
+        temporary file and delegating to the handler's ``get()`` method.
         """
-        import tempfile
-
         blob_bytes: bytes = entry["blob_data"]
 
-        # Use the stored inline_ext from the write path (preserves exact suffix)
-        suffix = metadata.get("inline_ext", ".bin")
+        # Fast path — zero-disk deserialization via get_bytes()
+        try:
+            handler = self._blob_store.handlers.get_handler_by_type(data_type)
+            return handler.get_bytes(blob_bytes, metadata)
+        except NotImplementedError:
+            pass  # Fall through to temp-file path
+        except Exception as exc:
+            logger.debug(
+                "get_bytes failed for %s, falling back to temp file: %s",
+                data_type,
+                exc,
+            )
 
-        # Create a temp file whose name ends with the expected suffix
-        # so that the handler's path-resolution logic finds it correctly.
+        # Slow path — write to temp file, delegate to handler.get()
+        import tempfile
+
+        suffix = metadata.get("inline_ext", ".bin")
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
             tmp.write(blob_bytes)
             tmp_path = Path(tmp.name)
@@ -1623,32 +1696,56 @@ class UnifiedCache:
             old_blob_path = old_meta.get("actual_path")
 
         try:
-            wb = self._blob_store._write_blob(data, base_file_path, compute_hash=True)
-            handler, result, file_hash = wb.handler, wb.result, wb.file_hash
+            # Try zero-disk inline serialization (no file I/O at all)
+            handler = self._blob_store.handlers.get_handler(data)
+            direct = self._try_direct_inline(data, handler)
 
-            actual_path_str = result.actual_path
-            if "://" not in actual_path_str:
-                cleanup.blob_path = self._resolve_actual_path(actual_path_str)
-            if "://" in actual_path_str:
-                cleanup.set_remote(self._blob_store.blob_backend, actual_path_str)
-
-            metadata_dict = self._build_metadata_dict(result, file_hash)
-            entry_data = {
-                "data_type": handler.data_type,
-                "description": description,
-                "file_size": result.file_size,
-                "metadata": metadata_dict,
-            }
-
-            # Inline small blobs into metadata row if enabled
-            inline = self._try_inline_blob(result, file_hash, cleanup)
-            if inline is not None:
-                entry_data["blob_data"] = inline["blob_data"]
-                entry_data["is_inline"] = 1
+            if direct is not None:
+                result = direct["result"]
+                file_hash = direct["file_hash"]
+                metadata_dict = self._build_metadata_dict(result, file_hash)
                 metadata_dict["actual_path"] = None
-                metadata_dict["inline_ext"] = inline["inline_ext"]
-                if inline["file_hash"] is not None:
-                    metadata_dict["file_hash"] = inline["file_hash"]
+                metadata_dict["inline_ext"] = direct["inline_ext"]
+                if file_hash is not None:
+                    metadata_dict["file_hash"] = file_hash
+
+                entry_data = {
+                    "data_type": handler.data_type,
+                    "description": description,
+                    "file_size": result.file_size,
+                    "metadata": metadata_dict,
+                    "blob_data": direct["blob_data"],
+                    "is_inline": 1,
+                }
+            else:
+                wb = self._blob_store._write_blob(
+                    data, base_file_path, compute_hash=True
+                )
+                handler, result, file_hash = wb.handler, wb.result, wb.file_hash
+
+                actual_path_str = result.actual_path
+                if "://" not in actual_path_str:
+                    cleanup.blob_path = self._resolve_actual_path(actual_path_str)
+                if "://" in actual_path_str:
+                    cleanup.set_remote(self._blob_store.blob_backend, actual_path_str)
+
+                metadata_dict = self._build_metadata_dict(result, file_hash)
+                entry_data = {
+                    "data_type": handler.data_type,
+                    "description": description,
+                    "file_size": result.file_size,
+                    "metadata": metadata_dict,
+                }
+
+                # Try disk-based inline (read back from file)
+                inline = self._try_inline_blob(result, file_hash, cleanup)
+                if inline is not None:
+                    entry_data["blob_data"] = inline["blob_data"]
+                    entry_data["is_inline"] = 1
+                    metadata_dict["actual_path"] = None
+                    metadata_dict["inline_ext"] = inline["inline_ext"]
+                    if inline["file_hash"] is not None:
+                        metadata_dict["file_hash"] = inline["file_hash"]
 
             self._sign_entry_if_enabled(cache_key, entry_data, metadata_dict)
             self.metadata_backend.put_entry(cache_key, entry_data)
@@ -1812,26 +1909,41 @@ class UnifiedCache:
                 old_blob_path = old_meta.get("actual_path")
 
             try:
-                # Delegate file I/O + handler dispatch to BlobStore
-                wb = self._blob_store._write_blob(
-                    data,
-                    base_file_path,
-                    compute_hash=self.config.metadata.verify_cache_integrity,
-                )
-                handler, result, file_hash = wb.handler, wb.result, wb.file_hash
+                # Try zero-disk inline serialization (no file I/O at all)
+                handler = self._blob_store.handlers.get_handler(data)
+                direct = self._try_direct_inline(data, handler)
 
-                # Track the blob path so we can clean up on failure
-                actual_path_str = result.actual_path
-                if "://" not in actual_path_str:
-                    cleanup.blob_path = self._resolve_actual_path(actual_path_str)
+                if direct is not None:
+                    result = direct["result"]
+                    file_hash = direct["file_hash"]
+                    metadata_dict = self._build_metadata_dict(result, file_hash)
+                    metadata_dict["actual_path"] = None
+                    metadata_dict["inline_ext"] = direct["inline_ext"]
+                    if file_hash is not None:
+                        metadata_dict["file_hash"] = file_hash
+                else:
+                    # Delegate file I/O + handler dispatch to BlobStore
+                    wb = self._blob_store._write_blob(
+                        data,
+                        base_file_path,
+                        compute_hash=self.config.metadata.verify_cache_integrity,
+                    )
+                    handler, result, file_hash = wb.handler, wb.result, wb.file_hash
 
-                # If the blob was uploaded to a remote backend (e.g. S3),
-                # track it for rollback in case metadata write fails.
-                if "://" in actual_path_str:
-                    cleanup.set_remote(self._blob_store.blob_backend, actual_path_str)
+                    # Track the blob path so we can clean up on failure
+                    actual_path_str = result.actual_path
+                    if "://" not in actual_path_str:
+                        cleanup.blob_path = self._resolve_actual_path(actual_path_str)
 
-                # Update metadata
-                metadata_dict = self._build_metadata_dict(result, file_hash)
+                    # If the blob was uploaded to a remote backend (e.g. S3),
+                    # track it for rollback in case metadata write fails.
+                    if "://" in actual_path_str:
+                        cleanup.set_remote(
+                            self._blob_store.blob_backend, actual_path_str
+                        )
+
+                    # Update metadata
+                    metadata_dict = self._build_metadata_dict(result, file_hash)
 
                 # Store complete cache key parameters as JSON for debugging/querying (if enabled)
                 # This captures the original kwargs used to derive the cache key
@@ -1865,15 +1977,20 @@ class UnifiedCache:
                     "metadata": metadata_dict,
                 }
 
-                # Inline small blobs into metadata row if enabled
-                inline = self._try_inline_blob(result, file_hash, cleanup)
-                if inline is not None:
-                    entry_data["blob_data"] = inline["blob_data"]
+                if direct is not None:
+                    # Direct inline — data already in memory, no disk file
+                    entry_data["blob_data"] = direct["blob_data"]
                     entry_data["is_inline"] = 1
-                    metadata_dict["actual_path"] = None
-                    metadata_dict["inline_ext"] = inline["inline_ext"]
-                    if inline["file_hash"] is not None:
-                        metadata_dict["file_hash"] = inline["file_hash"]
+                else:
+                    # Try disk-based inline (read back from file)
+                    inline = self._try_inline_blob(result, file_hash, cleanup)
+                    if inline is not None:
+                        entry_data["blob_data"] = inline["blob_data"]
+                        entry_data["is_inline"] = 1
+                        metadata_dict["actual_path"] = None
+                        metadata_dict["inline_ext"] = inline["inline_ext"]
+                        if inline["file_hash"] is not None:
+                            metadata_dict["file_hash"] = inline["file_hash"]
 
                 # Populate per-entry TTL from config default (if set)
                 default_ttl = self.config.metadata.default_ttl_seconds
@@ -2326,53 +2443,80 @@ class UnifiedCache:
             cleanup = _PutCleanup()
 
             try:
-                # Write new blob to staging path (different blob_id)
-                wb = self._blob_store._write_blob(
-                    data, staging_base, compute_hash=False
-                )
-                handler, result = wb.handler, wb.result
+                # Try zero-disk inline serialization first
+                handler = self._blob_store.handlers.get_handler(data)
+                direct = self._try_direct_inline(data, handler)
 
-                actual_path_str = result.actual_path
-                if "://" not in actual_path_str:
-                    cleanup.blob_path = self._resolve_actual_path(actual_path_str)
-
-                # Track remote blob for rollback on S3
-                if "://" in actual_path_str:
-                    cleanup.set_remote(self._blob_store.blob_backend, actual_path_str)
-
-                # Build metadata updates dict from handler result
-                updates = {
-                    "file_size": result.file_size,
-                    "content_hash": result.extra.get("content_hash"),
-                    "file_hash": result.extra.get("file_hash"),
-                    "actual_path": actual_path_str,
-                    "storage_format": result.storage_format,
-                }
-                if hasattr(handler, "data_type"):
-                    updates["data_type"] = handler.data_type
-                if result.serializer:
-                    updates["serializer"] = result.serializer
-                if result.compression_codec:
-                    updates["compression_codec"] = result.compression_codec
-                if result.object_type:
-                    updates["object_type"] = result.object_type
-                if result.extra.get("s3_etag"):
-                    updates["s3_etag"] = result.extra["s3_etag"]
-
-                # Inline small blobs into metadata row if enabled
-                inline = self._try_inline_blob(result, None, cleanup)
-                if inline is not None:
-                    updates["blob_data"] = inline["blob_data"]
-                    updates["is_inline"] = 1
-                    updates["actual_path"] = None
-                    updates["inline_ext"] = inline["inline_ext"]
-                    if inline["file_hash"] is not None:
-                        updates["file_hash"] = inline["file_hash"]
+                if direct is not None:
+                    result = direct["result"]
+                    updates = {
+                        "file_size": result.file_size,
+                        "content_hash": result.extra.get("content_hash"),
+                        "file_hash": direct["file_hash"],
+                        "actual_path": None,
+                        "storage_format": result.storage_format,
+                        "blob_data": direct["blob_data"],
+                        "is_inline": 1,
+                        "inline_ext": direct["inline_ext"],
+                    }
+                    if hasattr(handler, "data_type"):
+                        updates["data_type"] = handler.data_type
+                    if result.serializer:
+                        updates["serializer"] = result.serializer
+                    if result.compression_codec:
+                        updates["compression_codec"] = result.compression_codec
+                    if result.object_type:
+                        updates["object_type"] = result.object_type
                 else:
-                    # Ensure previous inline data is cleared if blob is now external
-                    updates["blob_data"] = None
-                    updates["is_inline"] = 0
-                    updates["inline_ext"] = None
+                    # Write new blob to staging path (different blob_id)
+                    wb = self._blob_store._write_blob(
+                        data, staging_base, compute_hash=False
+                    )
+                    handler, result = wb.handler, wb.result
+
+                    actual_path_str = result.actual_path
+                    if "://" not in actual_path_str:
+                        cleanup.blob_path = self._resolve_actual_path(actual_path_str)
+
+                    # Track remote blob for rollback on S3
+                    if "://" in actual_path_str:
+                        cleanup.set_remote(
+                            self._blob_store.blob_backend, actual_path_str
+                        )
+
+                    # Build metadata updates dict from handler result
+                    updates = {
+                        "file_size": result.file_size,
+                        "content_hash": result.extra.get("content_hash"),
+                        "file_hash": result.extra.get("file_hash"),
+                        "actual_path": actual_path_str,
+                        "storage_format": result.storage_format,
+                    }
+                    if hasattr(handler, "data_type"):
+                        updates["data_type"] = handler.data_type
+                    if result.serializer:
+                        updates["serializer"] = result.serializer
+                    if result.compression_codec:
+                        updates["compression_codec"] = result.compression_codec
+                    if result.object_type:
+                        updates["object_type"] = result.object_type
+                    if result.extra.get("s3_etag"):
+                        updates["s3_etag"] = result.extra["s3_etag"]
+
+                    # Try disk-based inline (read back from file)
+                    inline = self._try_inline_blob(result, None, cleanup)
+                    if inline is not None:
+                        updates["blob_data"] = inline["blob_data"]
+                        updates["is_inline"] = 1
+                        updates["actual_path"] = None
+                        updates["inline_ext"] = inline["inline_ext"]
+                        if inline["file_hash"] is not None:
+                            updates["file_hash"] = inline["file_hash"]
+                    else:
+                        # Ensure previous inline data is cleared if blob is now external
+                        updates["blob_data"] = None
+                        updates["is_inline"] = 0
+                        updates["inline_ext"] = None
 
                 # Delegate metadata-only update to backend (no I/O in metadata layer)
                 self.metadata_backend.update_entry_metadata(
