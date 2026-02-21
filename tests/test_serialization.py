@@ -5,7 +5,7 @@ Tests for unified serialization system.
 import numpy as np
 from pathlib import Path
 from cacheness.serialization import serialize_for_cache_key, create_unified_cache_key
-from cacheness import cacheness, cached
+from cacheness import cacheness, cached, CacheConfig
 
 
 class TestUnifiedSerialization:
@@ -143,7 +143,7 @@ class TestUnifiedSerialization:
 class TestcachenessIntegration:
     """Test integration of unified serialization with cache system."""
 
-    def test_cache_consistency(self):
+    def test_cache_consistency(self, tmp_path):
         """Test that cacheness and decorators use consistent serialization."""
 
         class TestObj:
@@ -157,15 +157,16 @@ class TestcachenessIntegration:
                 return isinstance(other, TestObj) and self.value == other.value
 
         test_obj = TestObj(42)
+        config = CacheConfig(cache_dir=tmp_path)
 
         # Test with cacheness
-        cache = cacheness()
+        cache = cacheness(config)
         cache.put("result1", test_param=test_obj, other_param="test")
         result1 = cache.get(test_param=test_obj, other_param="test")
         assert result1 == "result1"
 
         # Test with decorator
-        @cached()
+        @cached(cache_instance=cacheness(config))
         def test_function(test_param, other_param):
             return f"result2_{test_param.value}_{other_param}"
 
@@ -175,7 +176,7 @@ class TestcachenessIntegration:
         assert result2 == result3
         assert "result2_42_test" == result2
 
-    def test_complex_object_caching(self):
+    def test_complex_object_caching(self, tmp_path):
         """Test caching with complex objects."""
 
         complex_data = {
@@ -183,8 +184,9 @@ class TestcachenessIntegration:
             "nested_dict": {"level1": {"level2": [1, 2, 3]}},
             "tuple_data": (1, "two", 3.0, np.array([4, 5])),
         }
+        config = CacheConfig(cache_dir=tmp_path)
 
-        @cached()
+        @cached(cache_instance=cacheness(config))
         def process_complex_data(**kwargs):
             return f"processed_{len(kwargs)}_items"
 
@@ -194,7 +196,7 @@ class TestcachenessIntegration:
         assert result1 == result2
         assert "processed_3_items" == result1
 
-    def test_path_object_handling(self):
+    def test_path_object_handling(self, tmp_path):
         """Test that Path objects work with unified serialization."""
         import tempfile
 
@@ -203,7 +205,7 @@ class TestcachenessIntegration:
             test_path = Path(f.name)
 
         try:
-            cache = cacheness()
+            cache = cacheness(CacheConfig(cache_dir=tmp_path))
             cache.put("path_result", file_path=test_path)
             result = cache.get(file_path=test_path)
             assert result == "path_result"

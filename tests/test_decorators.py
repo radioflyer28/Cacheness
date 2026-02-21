@@ -314,12 +314,13 @@ class TestCacheFunctionInterface:
 class TestMemoizeDecorator:
     """Test the memoize decorator."""
 
-    def test_memoize_basic(self):
+    def test_memoize_basic(self, tmp_path):
         """Test basic memoization."""
 
         call_count = 0
+        cache_inst = cacheness(CacheConfig(cache_dir=tmp_path))
 
-        @memoize
+        @cached(ttl_seconds=None, cache_instance=cache_inst)
         def fibonacci(n):
             nonlocal call_count
             call_count += 1
@@ -334,10 +335,11 @@ class TestMemoizeDecorator:
         # Call count should be much less than 2^5 due to memoization
         assert call_count <= 6  # Should only calculate each unique n once
 
-    def test_memoize_permanent_cache(self):
+    def test_memoize_permanent_cache(self, tmp_path):
         """Test that memoize creates permanent cache (no TTL)."""
+        cache_inst = cacheness(CacheConfig(cache_dir=tmp_path))
 
-        @memoize
+        @cached(ttl_seconds=None, cache_instance=cache_inst)
         def permanent_func(x):
             return f"permanent_{x}"
 
