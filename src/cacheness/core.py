@@ -2329,7 +2329,14 @@ class UnifiedCache:
 
     # ── Convenience helpers: auto-populate metadata from cache key params ──
 
-    def put_with_meta(self, data: Any, *, description: str = "", **kwargs) -> str:
+    def put_with_meta(
+        self,
+        data: Any,
+        *,
+        on: Optional[Dict] = None,
+        description: str = "",
+        **kwargs,
+    ) -> str:
         """Store data using kwargs as both the cache key and metadata_dict.
 
         Every keyword argument is used to derive a deterministic cache key
@@ -2341,6 +2348,10 @@ class UnifiedCache:
 
         Args:
             data: Data to cache.
+            on: Optional extra key-only parameters that participate in cache
+                key derivation but are **not** stored in ``metadata_dict``.
+                Use this to create distinct cache entries that share the
+                same metadata (e.g. ``on={"epoch": 5}``).
             description: Human-readable description (not part of the cache key).
             **kwargs: Key-value pairs that become *both* cache key params and
                 ``metadata_dict`` entries.
@@ -2349,12 +2360,15 @@ class UnifiedCache:
             The 16-character hex cache key.
 
         Raises:
-            ValueError: If no kwargs are provided or ``store_full_metadata``
-                is disabled.
+            ValueError: If no kwargs are provided, ``store_full_metadata``
+                is disabled, or *on* keys overlap with kwargs.
 
         Example:
             cache.put_with_meta(df, experiment="exp_001", model="xgboost",
                                 accuracy=0.95)
+            # With key discriminator:
+            cache.put_with_meta(df, on={"epoch": 5},
+                                model="xgboost", lr=0.01)
         """
         if not kwargs:
             raise ValueError(
@@ -2366,11 +2380,17 @@ class UnifiedCache:
                 "put_with_meta() requires store_full_metadata=True in "
                 "CacheConfig so that kwargs are persisted as metadata_dict."
             )
-        return self.put(data, description=description, **kwargs)
+        key_params = self._merge_on_and_kwargs(on, kwargs)
+        cache_key = self._create_cache_key(key_params)
+        # Pass cache_key (pre-computed) so _resolve_cache_key won't
+        # conflict with **kwargs.  kwargs still flow to put() for
+        # metadata_dict storage via store_full_metadata.
+        return self.put(data, cache_key=cache_key, description=description, **kwargs)
 
     def get_with_meta(
         self,
         *,
+        on: Optional[Dict] = None,
         ttl: Optional[str] = None,
         ttl_seconds: Optional[float] = None,
         **kwargs,
@@ -2378,10 +2398,14 @@ class UnifiedCache:
         """Retrieve data and its metadata_dict by exact key derived from kwargs.
 
         This is the read counterpart of :meth:`put_with_meta`.  All kwargs
-        are used to derive the same deterministic cache key; on a hit the
-        stored ``metadata_dict`` is returned alongside the data.
+        (and any *on* discriminators) are used to derive the same
+        deterministic cache key; on a hit the stored ``metadata_dict``
+        is returned alongside the data.
 
         Args:
+            on: Optional extra key-only parameters that were used as
+                discriminators during :meth:`put_with_meta`.  Must match
+                the same *on* dict used at store time.
             ttl: TTL as a human-readable duration string (e.g. ``"6h"``).
             ttl_seconds: TTL in seconds.  Mutually exclusive with *ttl*.
             **kwargs: The same key-value pairs used when the entry was stored
@@ -2400,7 +2424,8 @@ class UnifiedCache:
         """
         if not kwargs:
             raise ValueError("get_with_meta() requires at least one keyword argument.")
-        cache_key = self._create_cache_key(kwargs)
+        key_params = self._merge_on_and_kwargs(on, kwargs)
+        cache_key = self._create_cache_key(key_params)
         data = self.get(cache_key=cache_key, ttl=ttl, ttl_seconds=ttl_seconds)
         if data is None:
             return None
@@ -2414,6 +2439,7 @@ class UnifiedCache:
         data: Any,
         model_class: type,
         *,
+        on: Optional[Dict] = None,
         description: str = "",
         **kwargs,
     ) -> str:
@@ -2428,6 +2454,10 @@ class UnifiedCache:
             model_class: A custom metadata model class decorated with
                 ``@register_custom_metadata``.  Must accept all *kwargs*
                 as column keyword arguments.
+            on: Optional extra key-only parameters that participate in cache
+                key derivation but are **not** stored in ORM columns.
+                Use this to create distinct cache entries that share the
+                same ORM metadata values.
             description: Human-readable description (not part of the cache key).
             **kwargs: Values passed to ``model_class(...)`` *and* used
                 for cache key derivation.
@@ -2436,13 +2466,18 @@ class UnifiedCache:
             The 16-character hex cache key.
 
         Raises:
-            ValueError: If no kwargs are provided or custom metadata is
-                not supported by the current backend.
+            ValueError: If no kwargs are provided, custom metadata is
+                not supported, or *on* keys overlap with kwargs.
             TypeError: If *model_class* cannot be instantiated with the
                 given kwargs.
 
         Example:
             cache.put_with_model(df, ExperimentMetadata,
+                                 experiment_id="exp_001",
+                                 model_type="xgboost", accuracy=0.95)
+            # With key discriminator:
+            cache.put_with_model(df, ExperimentMetadata,
+                                 on={"run_id": "run_42"},
                                  experiment_id="exp_001",
                                  model_type="xgboost", accuracy=0.95)
         """
@@ -2456,27 +2491,32 @@ class UnifiedCache:
                 "put_with_model() requires a SQLite or PostgreSQL metadata "
                 "backend for custom metadata support."
             )
+        key_params = self._merge_on_and_kwargs(on, kwargs)
         instance = model_class(**kwargs)
         return self.put(
-            data, on=kwargs, description=description, custom_metadata=instance
+            data, on=key_params, description=description, custom_metadata=instance
         )
 
     def get_with_model(
         self,
         model_class: type,
         *,
+        on: Optional[Dict] = None,
         ttl: Optional[str] = None,
         ttl_seconds: Optional[float] = None,
         **kwargs,
     ) -> Optional[tuple[Any, Any]]:
         """Retrieve data and its ORM metadata instance by exact key.
 
-        The read counterpart of :meth:`put_with_model`.  All kwargs derive
-        the cache key; on a hit the matching ORM instance is fetched from
-        the custom metadata table.
+        The read counterpart of :meth:`put_with_model`.  All kwargs (and
+        any *on* discriminators) derive the cache key; on a hit the
+        matching ORM instance is fetched from the custom metadata table.
 
         Args:
             model_class: The same model class used when the entry was stored.
+            on: Optional extra key-only parameters that were used as
+                discriminators during :meth:`put_with_model`.  Must match
+                the same *on* dict used at store time.
             ttl: TTL as a human-readable duration string.
             ttl_seconds: TTL in seconds.  Mutually exclusive with *ttl*.
             **kwargs: The same key-value pairs used in :meth:`put_with_model`.
@@ -2495,7 +2535,8 @@ class UnifiedCache:
         """
         if not kwargs:
             raise ValueError("get_with_model() requires at least one keyword argument.")
-        cache_key = self._create_cache_key(kwargs)
+        key_params = self._merge_on_and_kwargs(on, kwargs)
+        cache_key = self._create_cache_key(key_params)
         data = self.get(cache_key=cache_key, ttl=ttl, ttl_seconds=ttl_seconds)
         if data is None:
             return None
@@ -2615,6 +2656,27 @@ class UnifiedCache:
                 yield (data, instance)
 
     # ── Private helpers for convenience methods ─────────────────────
+
+    @staticmethod
+    def _merge_on_and_kwargs(
+        on: Optional[Dict], kwargs: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Merge *on* discriminators with *kwargs* for cache key derivation.
+
+        Raises :class:`ValueError` if *on* contains keys that also appear
+        in *kwargs* (ambiguous key sources are a bug).
+
+        Returns a merged dict suitable for :meth:`_create_cache_key`.
+        """
+        if not on:
+            return dict(kwargs)
+        overlap = set(on) & set(kwargs)
+        if overlap:
+            raise ValueError(
+                f"'on' keys overlap with kwargs: {sorted(overlap)}. "
+                "Each parameter must appear in either 'on' or kwargs, not both."
+            )
+        return {**on, **kwargs}
 
     @staticmethod
     def _extract_metadata_dict(entry: Dict[str, Any]) -> Dict[str, Any]:

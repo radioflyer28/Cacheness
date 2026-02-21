@@ -419,3 +419,169 @@ class TestInterop:
         results = meta_cache.query_meta(flavor="vanilla")
         assert results is not None and len(results) == 1
         assert results[0]["metadata_dict"]["flavor"] == "vanilla"
+
+
+# ── on= key discriminator (CACHE-a2t) ──────────────────────────────
+
+
+class TestOnParamPutWithMeta:
+    """put_with_meta with on= extra key discriminator."""
+
+    def test_on_changes_cache_key(self, meta_cache):
+        """Same kwargs, different on= → different cache keys."""
+        k1 = meta_cache.put_with_meta("v1", on={"epoch": 1}, model="xgb", lr=0.01)
+        k2 = meta_cache.put_with_meta("v2", on={"epoch": 2}, model="xgb", lr=0.01)
+        assert k1 != k2
+
+    def test_on_not_in_metadata_dict(self, meta_cache):
+        """on= params should NOT appear in stored metadata_dict."""
+        meta_cache.put_with_meta("v1", on={"epoch": 5}, model="xgb", lr=0.01)
+        result = meta_cache.get_with_meta(on={"epoch": 5}, model="xgb", lr=0.01)
+        assert result is not None
+        _, meta = result
+        assert "epoch" not in meta  # on= key is NOT stored
+        assert meta["model"] == "xgb"
+        assert meta["lr"] == 0.01
+
+    def test_on_round_trip(self, meta_cache):
+        """Data stored with on= can be retrieved with matching on=."""
+        meta_cache.put_with_meta(42, on={"run": "A"}, tag="x")
+        result = meta_cache.get_with_meta(on={"run": "A"}, tag="x")
+        assert result is not None
+        assert result[0] == 42
+
+    def test_on_miss_without_on(self, meta_cache):
+        """Stored with on=, retrieved without on= → miss (different key)."""
+        meta_cache.put_with_meta(42, on={"run": "A"}, tag="x")
+        result = meta_cache.get_with_meta(tag="x")
+        # Key without on= doesn't match key with on=
+        assert result is None or result[0] != 42
+
+    def test_on_none_is_default(self, meta_cache):
+        """on=None is the same as not passing on= at all."""
+        k1 = meta_cache.put_with_meta("a", on=None, tag="x")
+        k2 = meta_cache.put_with_meta("b", tag="x")
+        assert k1 == k2
+
+    def test_overlap_raises(self, meta_cache):
+        """on= keys overlapping with kwargs raises ValueError."""
+        with pytest.raises(ValueError, match="overlap"):
+            meta_cache.put_with_meta("data", on={"tag": "x"}, tag="y")
+
+    def test_empty_on_dict_is_noop(self, meta_cache):
+        """on={} is the same as not passing on= at all."""
+        k1 = meta_cache.put_with_meta("a", on={}, tag="x")
+        k2 = meta_cache.put_with_meta("b", tag="x")
+        assert k1 == k2
+
+    def test_multiple_on_keys(self, meta_cache):
+        """Multiple on= keys all participate in key derivation."""
+        k1 = meta_cache.put_with_meta("a", on={"epoch": 1, "fold": 0}, model="xgb")
+        k2 = meta_cache.put_with_meta("b", on={"epoch": 1, "fold": 1}, model="xgb")
+        k3 = meta_cache.put_with_meta("c", on={"epoch": 2, "fold": 0}, model="xgb")
+        assert len({k1, k2, k3}) == 3  # all distinct
+
+    def test_query_with_meta_still_works_after_on(self, meta_cache):
+        """Entries stored with on= are still queryable by metadata kwargs."""
+        meta_cache.put_with_meta("v1", on={"epoch": 1}, model="xgb")
+        meta_cache.put_with_meta("v2", on={"epoch": 2}, model="xgb")
+        meta_cache.put_with_meta("v3", on={"epoch": 1}, model="rf")
+
+        results = list(meta_cache.query_with_meta(model="xgb"))
+        assert len(results) == 2
+        values = {r[0] for r in results}
+        assert values == {"v1", "v2"}
+
+
+class TestOnParamGetWithMeta:
+    """get_with_meta with on= extra key discriminator."""
+
+    def test_overlap_raises(self, meta_cache):
+        with pytest.raises(ValueError, match="overlap"):
+            meta_cache.get_with_meta(on={"tag": "x"}, tag="y")
+
+    def test_miss_with_wrong_on(self, meta_cache):
+        """Wrong on= value → cache miss."""
+        meta_cache.put_with_meta(99, on={"run": "A"}, tag="t")
+        result = meta_cache.get_with_meta(on={"run": "B"}, tag="t")
+        assert result is None
+
+
+class TestOnParamPutWithModel:
+    """put_with_model with on= extra key discriminator."""
+
+    def test_on_changes_cache_key(self, meta_cache):
+        Model, _ = _make_model()
+        k1 = meta_cache.put_with_model(
+            "v1", Model, on={"run": "A"}, experiment_id="e1", model_type="xgb"
+        )
+        k2 = meta_cache.put_with_model(
+            "v2", Model, on={"run": "B"}, experiment_id="e1", model_type="xgb"
+        )
+        assert k1 != k2
+
+    def test_on_not_in_orm_columns(self, meta_cache):
+        """on= params should not be passed to the ORM constructor."""
+        Model, _ = _make_model()
+        meta_cache.put_with_model(
+            "v1",
+            Model,
+            on={"run_id": "r1"},
+            experiment_id="e1",
+            model_type="xgb",
+            accuracy=0.9,
+        )
+        result = meta_cache.get_with_model(
+            Model,
+            on={"run_id": "r1"},
+            experiment_id="e1",
+            model_type="xgb",
+            accuracy=0.9,
+        )
+        assert result is not None
+        _, inst = result
+        assert inst.experiment_id == "e1"
+        assert not hasattr(inst, "run_id")  # on= key not in ORM
+
+    def test_overlap_raises(self, meta_cache):
+        Model, _ = _make_model()
+        with pytest.raises(ValueError, match="overlap"):
+            meta_cache.put_with_model(
+                "data",
+                Model,
+                on={"experiment_id": "e1"},
+                experiment_id="e2",
+                model_type="x",
+            )
+
+    def test_on_round_trip(self, meta_cache):
+        Model, _ = _make_model()
+        meta_cache.put_with_model(
+            "data", Model, on={"fold": 3}, experiment_id="e1", model_type="xgb"
+        )
+        result = meta_cache.get_with_model(
+            Model, on={"fold": 3}, experiment_id="e1", model_type="xgb"
+        )
+        assert result is not None
+        assert result[0] == "data"
+
+
+class TestOnParamGetWithModel:
+    """get_with_model with on= extra key discriminator."""
+
+    def test_overlap_raises(self, meta_cache):
+        Model, _ = _make_model()
+        with pytest.raises(ValueError, match="overlap"):
+            meta_cache.get_with_model(
+                Model, on={"experiment_id": "e1"}, experiment_id="e2", model_type="x"
+            )
+
+    def test_miss_with_wrong_on(self, meta_cache):
+        Model, _ = _make_model()
+        meta_cache.put_with_model(
+            "v1", Model, on={"fold": 1}, experiment_id="e1", model_type="xgb"
+        )
+        result = meta_cache.get_with_model(
+            Model, on={"fold": 999}, experiment_id="e1", model_type="xgb"
+        )
+        assert result is None
