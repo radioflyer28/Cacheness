@@ -461,3 +461,206 @@ class TestPutFileCustomMetadata:
                 assert rows[0].project == "beta"
         finally:
             cache.close()
+
+
+# ── Move semantics ──────────────────────────────────────────────────
+
+
+class TestPutFileMoveUnifiedCache:
+    def test_move_deletes_source(self, cache, sample_file):
+        """put_file(move=True) deletes source after store."""
+        original_bytes = sample_file.read_bytes()
+        key = cache.put_file(sample_file, move=True)
+
+        # Source should be gone
+        assert not sample_file.exists()
+        # Data should be in cache
+        assert cache.get_file(cache_key=key) == original_bytes
+
+    def test_copy_preserves_source(self, cache, sample_file):
+        """put_file(move=False) preserves source (default)."""
+        cache.put_file(sample_file)
+        assert sample_file.exists()
+
+    def test_move_with_on(self, cache, sample_file):
+        """move=True works with on= key derivation."""
+        original_bytes = sample_file.read_bytes()
+        key = cache.put_file(sample_file, on={"job": "m1"}, move=True)
+        assert not sample_file.exists()
+        assert cache.get_file(on={"job": "m1"}) == original_bytes
+
+    def test_move_with_explicit_key(self, cache, sample_file):
+        """move=True works with explicit cache_key."""
+        cache.put_file(sample_file, cache_key="movein123456abcd", move=True)
+        assert not sample_file.exists()
+        assert cache.get_file(cache_key="movein123456abcd") is not None
+
+
+class TestGetFileMoveUnifiedCache:
+    def test_move_writes_and_deletes_entry(self, cache, sample_file, temp_dir):
+        """get_file(move=True) writes to dest and deletes cache entry."""
+        original_bytes = sample_file.read_bytes()
+        key = cache.put_file(sample_file)
+
+        dest = temp_dir / "moved_out.txt"
+        result = cache.get_file(cache_key=key, dest=dest, move=True)
+
+        assert result == dest
+        assert dest.read_bytes() == original_bytes
+        # Cache entry should be gone
+        assert cache.get_file(cache_key=key) is None
+
+    def test_move_without_dest_raises(self, cache, sample_file):
+        """get_file(move=True) without dest raises ValueError."""
+        key = cache.put_file(sample_file)
+        with pytest.raises(ValueError, match="move=True requires dest"):
+            cache.get_file(cache_key=key, move=True)
+
+    def test_copy_out_preserves_entry(self, cache, sample_file, temp_dir):
+        """get_file(move=False) preserves cache entry (default)."""
+        key = cache.put_file(sample_file)
+        dest = temp_dir / "copy_out.txt"
+        cache.get_file(cache_key=key, dest=dest)
+        # Entry still in cache
+        assert cache.get_file(cache_key=key) is not None
+
+    def test_move_with_on(self, cache, sample_file, temp_dir):
+        """get_file(move=True) works with on= key lookup."""
+        original_bytes = sample_file.read_bytes()
+        cache.put_file(sample_file, on={"run": "r1"})
+        dest = temp_dir / "moved.txt"
+        result = cache.get_file(on={"run": "r1"}, dest=dest, move=True)
+        assert result == dest
+        assert dest.read_bytes() == original_bytes
+        assert cache.get_file(on={"run": "r1"}) is None
+
+    def test_move_miss_returns_none(self, cache, temp_dir):
+        """get_file(move=True) on miss returns None without error."""
+        dest = temp_dir / "nowhere.txt"
+        assert (
+            cache.get_file(cache_key="0000000000000000", dest=dest, move=True) is None
+        )
+        assert not dest.exists()
+
+    def test_move_to_dest_dir(self, cache, sample_file, temp_dir):
+        """get_file(move=True, dest=dir) resolves filename and deletes entry."""
+        key = cache.put_file(sample_file)
+        dest_dir = temp_dir / "move_dir"
+        dest_dir.mkdir()
+        result = cache.get_file(cache_key=key, dest=dest_dir, move=True)
+        assert result.name == "sample.txt"
+        assert result.exists()
+        assert cache.get_file(cache_key=key) is None
+
+
+class TestGetFileOverwriteUnifiedCache:
+    def test_overwrite_true_default(self, cache, sample_file, temp_dir):
+        """Default overwrite=True silently overwrites existing dest."""
+        key = cache.put_file(sample_file)
+        dest = temp_dir / "existing.txt"
+        dest.write_text("old content")
+
+        result = cache.get_file(cache_key=key, dest=dest)
+        assert result == dest
+        assert dest.read_bytes() == sample_file.read_bytes()
+
+    def test_overwrite_false_on_existing(self, cache, sample_file, temp_dir):
+        """overwrite=False raises FileExistsError if dest exists."""
+        key = cache.put_file(sample_file)
+        dest = temp_dir / "existing2.txt"
+        dest.write_text("old content")
+
+        with pytest.raises(FileExistsError, match="Destination already exists"):
+            cache.get_file(cache_key=key, dest=dest, overwrite=False)
+        # Original content unchanged
+        assert dest.read_text() == "old content"
+
+    def test_overwrite_false_on_new_file(self, cache, sample_file, temp_dir):
+        """overwrite=False succeeds when dest doesn't exist."""
+        key = cache.put_file(sample_file)
+        dest = temp_dir / "new_file.txt"
+
+        result = cache.get_file(cache_key=key, dest=dest, overwrite=False)
+        assert result == dest
+        assert dest.read_bytes() == sample_file.read_bytes()
+
+    def test_overwrite_false_with_dir_dest(self, cache, sample_file, temp_dir):
+        """overwrite=False with dir dest raises when resolved file exists."""
+        key = cache.put_file(sample_file)
+        dest_dir = temp_dir / "ow_dir"
+        dest_dir.mkdir()
+        # Pre-create the file that would be resolved
+        (dest_dir / "sample.txt").write_text("old")
+
+        with pytest.raises(FileExistsError):
+            cache.get_file(cache_key=key, dest=dest_dir, overwrite=False)
+
+
+# ── BlobStore: move + overwrite ─────────────────────────────────────
+
+
+class TestBlobStorePutFileMove:
+    def test_move_deletes_source(self, blob_store, sample_file):
+        """put_file(move=True) deletes source."""
+        original_bytes = sample_file.read_bytes()
+        key = blob_store.put_file(sample_file, move=True)
+        assert not sample_file.exists()
+        assert blob_store.get_file(key) == original_bytes
+
+    def test_copy_preserves_source(self, blob_store, sample_file):
+        """put_file(move=False) preserves source (default)."""
+        blob_store.put_file(sample_file)
+        assert sample_file.exists()
+
+
+class TestBlobStoreGetFileMove:
+    def test_move_writes_and_deletes_entry(self, blob_store, sample_file, temp_dir):
+        """get_file(move=True) writes to dest and deletes blob."""
+        original_bytes = sample_file.read_bytes()
+        key = blob_store.put_file(sample_file)
+
+        dest = temp_dir / "blob_moved.txt"
+        result = blob_store.get_file(key, dest=dest, move=True)
+
+        assert result == dest
+        assert dest.read_bytes() == original_bytes
+        assert blob_store.get_file(key) is None
+
+    def test_move_without_dest_raises(self, blob_store, sample_file):
+        """get_file(move=True) without dest raises ValueError."""
+        key = blob_store.put_file(sample_file)
+        with pytest.raises(ValueError, match="move=True requires dest"):
+            blob_store.get_file(key, move=True)
+
+    def test_move_miss_returns_none(self, blob_store, temp_dir):
+        """get_file(move=True) on miss returns None."""
+        dest = temp_dir / "nowhere.txt"
+        assert blob_store.get_file("nonexistent", dest=dest, move=True) is None
+
+
+class TestBlobStoreGetFileOverwrite:
+    def test_overwrite_true_default(self, blob_store, sample_file, temp_dir):
+        """Default overwrite=True overwrites existing dest."""
+        key = blob_store.put_file(sample_file)
+        dest = temp_dir / "existing.txt"
+        dest.write_text("old")
+
+        result = blob_store.get_file(key, dest=dest)
+        assert dest.read_bytes() == sample_file.read_bytes()
+
+    def test_overwrite_false_raises(self, blob_store, sample_file, temp_dir):
+        """overwrite=False raises FileExistsError on existing dest."""
+        key = blob_store.put_file(sample_file)
+        dest = temp_dir / "existing2.txt"
+        dest.write_text("old")
+
+        with pytest.raises(FileExistsError, match="Destination already exists"):
+            blob_store.get_file(key, dest=dest, overwrite=False)
+
+    def test_overwrite_false_succeeds_on_new(self, blob_store, sample_file, temp_dir):
+        """overwrite=False succeeds when dest doesn't exist."""
+        key = blob_store.put_file(sample_file)
+        dest = temp_dir / "new.txt"
+        result = blob_store.get_file(key, dest=dest, overwrite=False)
+        assert result == dest
+        assert dest.read_bytes() == sample_file.read_bytes()

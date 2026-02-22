@@ -84,13 +84,14 @@ model_keys = store.list(prefix="model_")
 v1_models = store.list(metadata_filter={"version": "1.0"})
 ```
 
-##### `put_file(file_path, *, key=None, metadata=None) -> str`
+##### `put_file(file_path, *, key=None, metadata=None, move=False) -> str`
 Store an arbitrary file as a blob. Reads the file into bytes and delegates to `put()`. File metadata (original filename, MIME type, original size) is automatically merged into the metadata dict.
 
 **Parameters:**
 - `file_path` (str|Path): Path to the source file
 - `key` (Optional[str]): Explicit blob key (auto-generated if None)
 - `metadata` (Optional[Dict]): Custom metadata to merge with file metadata
+- `move` (bool): If `True`, delete the source file after a successful store (move-in semantics). Defaults to `False` (copy-in).
 
 **Returns:**
 - `str`: The blob key
@@ -98,32 +99,45 @@ Store an arbitrary file as a blob. Reads the file into bytes and delegates to `p
 **Example:**
 ```python
 store = BlobStore(cache_dir="./artifacts")
+
+# Copy file into store (default)
 key = store.put_file("models/xgboost.onnx", key="model-v2")
-key = store.put_file("data/output.csv", metadata={"project": "alpha"})
+
+# Move file into store (source deleted after store)
+key = store.put_file("data/output.csv", metadata={"project": "alpha"}, move=True)
 ```
 
-##### `get_file(key, *, dest=None) -> bytes | Path | None`
+##### `get_file(key, *, dest=None, move=False, overwrite=True) -> bytes | Path | None`
 Retrieve a cached file blob, optionally writing it to disk.
 
 **Parameters:**
 - `key` (str): The blob key
 - `dest` (Optional[str|Path]): Destination path. If a directory, the original filename from metadata is used (falls back to `<key>.bin`). Parent directories are created automatically.
+- `move` (bool): If `True`, delete the cache entry after a successful write to `dest` (move-out semantics). Requires `dest` to be set. Defaults to `False` (copy-out).
+- `overwrite` (bool): If `False`, raise `FileExistsError` when `dest` already exists on disk. Defaults to `True` (silently overwrite).
 
 **Returns:**
 - `bytes` when `dest` is `None` and entry exists
 - `Path` when `dest` is given and entry exists
 - `None` on miss
 
+**Raises:**
+- `ValueError`: If `move` is `True` but `dest` is `None`
+- `FileExistsError`: If `overwrite` is `False` and `dest` already exists
+
 **Example:**
 ```python
 # Get raw bytes
 data = store.get_file("model-v2")
 
-# Write to a specific path
+# Copy out to a specific path
 path = store.get_file("model-v2", dest="./restored/model.onnx")
 
-# Write to a directory (uses original filename)
-path = store.get_file("model-v2", dest="./restored/")  # → ./restored/xgboost.onnx
+# Move out (write + delete entry)
+path = store.get_file("model-v2", dest="./restored/model.onnx", move=True)
+
+# Safe write (no overwrite)
+path = store.get_file("model-v2", dest="./restored/model.onnx", overwrite=False)
 ```
 
 ##### `verify_integrity(key: str) -> Dict`
@@ -564,7 +578,7 @@ deleted = cache.delete_batch([
 print(f"Removed {deleted} entries")
 ```
 
-##### `put_file(file_path, *, cache_key=None, on=None, description="", custom_metadata=None, **kwargs) -> str`
+##### `put_file(file_path, *, cache_key=None, on=None, description="", custom_metadata=None, move=False, **kwargs) -> str`
 Store an arbitrary file in the cache. Reads the file into bytes and delegates to `put()`. File metadata (original filename, MIME type, file size) is automatically recorded in `metadata_dict` when `store_full_metadata=True`.
 
 File metadata does **not** participate in cache key derivation — only `on` and `**kwargs` determine the key.
@@ -575,6 +589,7 @@ File metadata does **not** participate in cache key derivation — only `on` and
 - `on` (Optional[Dict]): Dictionary of key parameters for cache key derivation
 - `description` (str): Human-readable description
 - `custom_metadata`: Custom metadata for the cache entry. Supports single ORM objects, lists/tuples of ORM objects, or dicts. Passed through to `put()` unchanged.
+- `move` (bool): If `True`, delete the source file after a successful store (move-in semantics). Defaults to `False` (copy-in).
 - `**kwargs`: Extra key-value pairs for key derivation and/or `metadata_dict`
 
 **Returns:**
@@ -582,11 +597,11 @@ File metadata does **not** participate in cache key derivation — only `on` and
 
 **Example:**
 ```python
-# Store a file with auto-generated key
+# Copy file into cache (default)
 key = cache.put_file("data/model.onnx", description="ONNX model v2")
 
-# Store using on= for key derivation
-key = cache.put_file("output.csv", on={"run": "exp_01"})
+# Move file into cache (source deleted after store)
+key = cache.put_file("output.csv", on={"run": "exp_01"}, move=True)
 
 # Store with explicit key
 key = cache.put_file("report.pdf", cache_key="monthly_report_jan")
@@ -595,7 +610,7 @@ key = cache.put_file("report.pdf", cache_key="monthly_report_jan")
 results = cache.query_meta(mime_type="application/pdf")
 ```
 
-##### `get_file(cache_key=None, *, dest=None, on=None, ttl=None, ttl_seconds=None, **kwargs) -> bytes | Path | None`
+##### `get_file(cache_key=None, *, dest=None, on=None, ttl=None, ttl_seconds=None, move=False, overwrite=True, **kwargs) -> bytes | Path | None`
 Retrieve cached file data, optionally writing it to disk. Read counterpart of `put_file()`.
 
 **Parameters:**
@@ -604,6 +619,8 @@ Retrieve cached file data, optionally writing it to disk. Read counterpart of `p
 - `on` (Optional[Dict]): Dictionary of key parameters for key lookup
 - `ttl` (Optional[str]): TTL as duration string (e.g. `"6h"`)
 - `ttl_seconds` (Optional[float]): TTL in seconds
+- `move` (bool): If `True`, delete the cache entry after a successful write to `dest` (move-out semantics). Requires `dest` to be set. Defaults to `False` (copy-out).
+- `overwrite` (bool): If `False`, raise `FileExistsError` when `dest` already exists on disk. Defaults to `True` (silently overwrite).
 - `**kwargs`: Key parameters for key lookup (must match `put_file()` call)
 
 **Returns:**
@@ -613,18 +630,22 @@ Retrieve cached file data, optionally writing it to disk. Read counterpart of `p
 
 **Raises:**
 - `TypeError`: If the cached entry is not bytes (e.g. stored via `put()` with a dict)
+- `ValueError`: If `move` is `True` but `dest` is `None`
+- `FileExistsError`: If `overwrite` is `False` and `dest` already exists
 
 **Example:**
 ```python
 # Get raw bytes
 data = cache.get_file(cache_key=key)
 
-# Write to a specific file
+# Copy out to a specific file
 path = cache.get_file(cache_key=key, dest="output/model.onnx")
 
-# Write to a directory (resolves original filename from metadata)
-path = cache.get_file(cache_key=key, dest="output/")
-# → Path("output/model.onnx")
+# Move out (write + delete cache entry)
+path = cache.get_file(cache_key=key, dest="output/model.onnx", move=True)
+
+# Safe write (no overwrite)
+path = cache.get_file(cache_key=key, dest="output/", overwrite=False)
 
 # Retrieve using on= key params
 data = cache.get_file(on={"run": "exp_01"})

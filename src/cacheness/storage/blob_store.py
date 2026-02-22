@@ -460,6 +460,7 @@ class BlobStore:
         *,
         key: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        move: bool = False,
     ) -> str:
         """Store an arbitrary file as a blob.
 
@@ -471,6 +472,8 @@ class BlobStore:
             file_path: Path to the source file.
             key: Optional explicit blob key.
             metadata: Optional metadata dict (file metadata is merged in).
+            move: If ``True``, delete the source file after a successful
+                store (move-in semantics).  Defaults to ``False`` (copy-in).
 
         Returns:
             The blob key.
@@ -496,13 +499,20 @@ class BlobStore:
             "original_size": len(data),
         }
         merged = {**file_meta, **(metadata or {})}  # user metadata wins
-        return self.put(data, key=key, metadata=merged)
+        blob_key = self.put(data, key=key, metadata=merged)
+
+        if move:
+            src.unlink()
+
+        return blob_key
 
     def get_file(
         self,
         key: str,
         *,
         dest: str | Path | None = None,
+        move: bool = False,
+        overwrite: bool = True,
     ) -> Optional[bytes | Path]:
         """Retrieve a cached file blob, optionally writing it to disk.
 
@@ -512,12 +522,30 @@ class BlobStore:
                 created automatically.  If *dest* is a directory, the
                 original filename from metadata is used (falls back to
                 ``<key>.bin``).
+            move: If ``True``, delete the cache entry after a successful
+                write to *dest* (move-out semantics).  Requires *dest*
+                to be set — raises ``ValueError`` otherwise.  Defaults
+                to ``False`` (copy-out).
+            overwrite: If ``False``, raise ``FileExistsError`` when
+                *dest* already exists on disk.  Defaults to ``True``
+                (silently overwrite).
 
         Returns:
             * ``bytes`` when *dest* is ``None`` and entry exists.
             * ``pathlib.Path`` when *dest* is given and entry exists.
             * ``None`` on miss.
+
+        Raises:
+            ValueError: If *move* is ``True`` but *dest* is ``None``.
+            FileExistsError: If *overwrite* is ``False`` and *dest*
+                already exists.
         """
+        if move and dest is None:
+            raise ValueError(
+                "move=True requires dest to be set. "
+                "Without a destination path, use get() + delete() instead."
+            )
+
         data = self.get(key)
         if data is None:
             return None
@@ -541,8 +569,18 @@ class BlobStore:
                 name = nested.get("original_filename")
             dest_path = dest_path / (name or f"{key}.bin")
 
+        if not overwrite and dest_path.exists():
+            raise FileExistsError(
+                f"Destination already exists: {dest_path}. "
+                "Pass overwrite=True to overwrite."
+            )
+
         dest_path.parent.mkdir(parents=True, exist_ok=True)
         dest_path.write_bytes(raw)
+
+        if move:
+            self.delete(key)
+
         return dest_path
 
     def delete(self, key: str) -> bool:

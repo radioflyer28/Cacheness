@@ -2665,6 +2665,7 @@ class UnifiedCache:
         on: Optional[Dict] = None,
         description: str = "",
         custom_metadata=None,
+        move: bool = False,
         **kwargs,
     ) -> str:
         """Store an arbitrary file in the cache.
@@ -2683,6 +2684,8 @@ class UnifiedCache:
             custom_metadata: Custom metadata for the cache entry.  Supports
                 single ORM objects, lists/tuples of ORM objects, or dicts.
                 Passed through to :meth:`put` unchanged.
+            move: If ``True``, delete the source file after a successful
+                store (move-in semantics).  Defaults to ``False`` (copy-in).
             **kwargs: Extra key-value pairs for key derivation and/or
                 ``metadata_dict`` (when ``store_full_metadata=True``).
 
@@ -2723,13 +2726,18 @@ class UnifiedCache:
         if cache_key is None:
             cache_key = self._resolve_cache_key(None, on, kwargs)
 
-        return self.put(
+        result_key = self.put(
             data,
             cache_key=cache_key,
             description=description,
             custom_metadata=custom_metadata,
             **merged_kwargs,
         )
+
+        if move:
+            src.unlink()
+
+        return result_key
 
     def get_file(
         self,
@@ -2739,6 +2747,8 @@ class UnifiedCache:
         on: Optional[Dict] = None,
         ttl: Optional[str] = None,
         ttl_seconds: Optional[float] = None,
+        move: bool = False,
+        overwrite: bool = True,
         **kwargs,
     ) -> Optional[bytes | Path]:
         """Retrieve cached file data, optionally writing it to disk.
@@ -2758,6 +2768,13 @@ class UnifiedCache:
             on: Dictionary of key parameters for key lookup.
             ttl: TTL as a human-readable duration string (e.g. ``"6h"``).
             ttl_seconds: TTL in seconds.  Mutually exclusive with *ttl*.
+            move: If ``True``, delete the cache entry after a successful
+                write to *dest* (move-out semantics).  Requires *dest*
+                to be set — raises ``ValueError`` otherwise.  Defaults
+                to ``False`` (copy-out).
+            overwrite: If ``False``, raise ``FileExistsError`` when
+                *dest* already exists on disk.  Defaults to ``True``
+                (silently overwrite).
             **kwargs: Key-value pairs for key derivation (must match what
                 was passed to :meth:`put_file`).
 
@@ -2766,11 +2783,22 @@ class UnifiedCache:
             * ``pathlib.Path`` — when *dest* is given and entry exists.
             * ``None`` — on a cache miss.
 
+        Raises:
+            ValueError: If *move* is ``True`` but *dest* is ``None``.
+            FileExistsError: If *overwrite* is ``False`` and *dest*
+                already exists.
+
         Example:
             raw = cache.get_file("abc123def4567890")
             path = cache.get_file("abc123def4567890",
                                    dest="output/model.onnx")
         """
+        if move and dest is None:
+            raise ValueError(
+                "move=True requires dest to be set. "
+                "Without a destination path, use get() + invalidate() instead."
+            )
+
         data = self.get(
             cache_key=cache_key,
             on=on,
@@ -2803,8 +2831,23 @@ class UnifiedCache:
             filename = self._resolve_original_filename(resolved_key)
             dest_path = dest_path / filename
 
+        if not overwrite and dest_path.exists():
+            raise FileExistsError(
+                f"Destination already exists: {dest_path}. "
+                "Pass overwrite=True to overwrite."
+            )
+
         dest_path.parent.mkdir(parents=True, exist_ok=True)
         dest_path.write_bytes(raw)
+
+        if move:
+            resolved_key = (
+                cache_key
+                if cache_key is not None
+                else self._resolve_cache_key(None, on, kwargs)
+            )
+            self.invalidate(cache_key=resolved_key)
+
         return dest_path
 
     def _resolve_original_filename(self, cache_key: str) -> str:
