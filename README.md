@@ -4,6 +4,7 @@ Fast Python disk cache with key-value store hashing and a "cachetools-like" deco
 
 **Key Features:**
 - **Function decorators** for automatic caching with `@cached`
+- **File storage** — `put_file()`/`get_file()` for arbitrary files with automatic metadata (filename, MIME type, size)
 - **Multi-format storage** automated, optimized storage format handling (parquet for pandas/polars, blosc/npz for numpy arrays)
 - **Key-based caching** using xxhash (XXH3_64) for fast, deterministic cache keys
 - **Advanced compression** using Blosc2 (LZ4) and zstd for fast compression
@@ -309,6 +310,25 @@ print(cached_tensor.shape)  # (2, 2)
 - **Multi-format Storage**: Optimized formats for different data types (NPZ, Parquet, compressed pickle)
 - **Intelligent Compression**: Automatic codec selection and parallel processing for large datasets
 
+### File Storage
+
+Store and retrieve arbitrary files with automatic metadata tracking:
+
+```python
+# Store a file — metadata (filename, MIME type, size) recorded automatically
+key = cache.put_file("data/model.onnx", description="ONNX model v2")
+
+# Retrieve as raw bytes
+data = cache.get_file(cache_key=key)
+
+# Or write directly to disk (resolves original filename from metadata)
+path = cache.get_file(cache_key=key, dest="./output/")
+# → Path("./output/model.onnx")
+
+# Query stored files by auto-populated metadata
+results = cache.query_meta(mime_type="application/pdf")
+```
+
 ### Low-Level Storage API
 
 For direct storage access without caching semantics (TTL, eviction), use the `BlobStore` API:
@@ -325,6 +345,10 @@ key = store.put(
     key="xgboost_v1", 
     metadata={"accuracy": 0.95, "author": "ml_team"}
 )
+
+# Store and retrieve arbitrary files
+key = store.put_file("data/report.csv", metadata={"project": "alpha"})
+path = store.get_file(key, dest="./restored/")  # → ./restored/report.csv
 
 # Retrieve by key
 model = store.get("xgboost_v1")

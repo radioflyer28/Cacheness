@@ -454,6 +454,97 @@ class BlobStore:
             self.backend.put_entry(key, updated)
             return True
 
+    def put_file(
+        self,
+        file_path: str | Path,
+        *,
+        key: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Store an arbitrary file as a blob.
+
+        Reads the file into memory as raw bytes and delegates to
+        :meth:`put`.  File metadata (original filename, MIME type,
+        original size) is merged into the *metadata* dict automatically.
+
+        Args:
+            file_path: Path to the source file.
+            key: Optional explicit blob key.
+            metadata: Optional metadata dict (file metadata is merged in).
+
+        Returns:
+            The blob key.
+
+        Raises:
+            FileNotFoundError: If *file_path* does not exist.
+            IsADirectoryError: If *file_path* is a directory.
+        """
+        import mimetypes
+
+        src = Path(file_path)
+        if not src.exists():
+            raise FileNotFoundError(f"Source file does not exist: {src}")
+        if src.is_dir():
+            raise IsADirectoryError(f"Expected a file, got a directory: {src}")
+
+        data = src.read_bytes()
+        mime_type, _ = mimetypes.guess_type(str(src))
+
+        file_meta: Dict[str, Any] = {
+            "original_filename": src.name,
+            "mime_type": mime_type or "application/octet-stream",
+            "original_size": len(data),
+        }
+        merged = {**file_meta, **(metadata or {})}  # user metadata wins
+        return self.put(data, key=key, metadata=merged)
+
+    def get_file(
+        self,
+        key: str,
+        *,
+        dest: str | Path | None = None,
+    ) -> Optional[bytes | Path]:
+        """Retrieve a cached file blob, optionally writing it to disk.
+
+        Args:
+            key: The blob key.
+            dest: Optional destination path.  Parent directories are
+                created automatically.  If *dest* is a directory, the
+                original filename from metadata is used (falls back to
+                ``<key>.bin``).
+
+        Returns:
+            * ``bytes`` when *dest* is ``None`` and entry exists.
+            * ``pathlib.Path`` when *dest* is given and entry exists.
+            * ``None`` on miss.
+        """
+        data = self.get(key)
+        if data is None:
+            return None
+
+        if not isinstance(data, (bytes, bytearray, memoryview)):
+            raise TypeError(
+                f"Expected bytes from blob store, got {type(data).__name__}. "
+                "get_file() should only be used with blobs stored via put_file()."
+            )
+        raw = bytes(data) if not isinstance(data, bytes) else data
+
+        if dest is None:
+            return raw
+
+        dest_path = Path(dest)
+        if dest_path.is_dir():
+            entry = self.backend.get_entry(key)
+            name = None
+            if entry:
+                nested = entry.get("metadata", {})
+                name = nested.get("original_filename")
+            dest_path = dest_path / (name or f"{key}.bin")
+
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        dest_path.write_bytes(raw)
+        return dest_path
+
     def delete(self, key: str) -> bool:
         """
         Delete a blob and its metadata.

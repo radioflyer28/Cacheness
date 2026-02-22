@@ -221,6 +221,49 @@ count = store.clear()
 print(f"Removed {count} blobs")
 ```
 
+#### `put_file(file_path, *, key=None, metadata=None) -> str`
+
+Store an arbitrary file as a blob. Reads the file into bytes and delegates to `put()`. File metadata (original filename, MIME type, original size) is automatically merged into the `metadata` dict.
+
+```python
+# Store a file with auto-generated key
+key = store.put_file("models/xgboost.onnx")
+
+# Store with explicit key and extra metadata
+key = store.put_file(
+    "data/output.csv",
+    key="report-jan",
+    metadata={"project": "alpha", "author": "alice"}
+)
+
+# Metadata is auto-populated:
+meta = store.get_metadata(key)
+print(meta["metadata"]["original_filename"])  # "output.csv"
+print(meta["metadata"]["mime_type"])           # "text/csv"
+print(meta["metadata"]["original_size"])       # 1234
+print(meta["metadata"]["project"])             # "alpha"
+```
+
+#### `get_file(key, *, dest=None) -> bytes | Path | None`
+
+Retrieve a cached file blob, optionally writing it to disk.
+
+```python
+# Get raw bytes
+data = store.get_file("report-jan")
+
+# Write to a specific file
+path = store.get_file("report-jan", dest="./restored/report.csv")
+
+# Write to a directory (uses original filename from metadata)
+path = store.get_file("report-jan", dest="./restored/")
+# → Path("./restored/output.csv")
+```
+
+If `dest` is a directory, the original filename from metadata is used. Falls back to `<key>.bin` when metadata is unavailable. Parent directories are created automatically.
+
+Raises `TypeError` if the stored data is not bytes (i.e. not stored via `put_file()`).
+
 #### `close()`
 
 Close the store and release resources.

@@ -84,6 +84,48 @@ model_keys = store.list(prefix="model_")
 v1_models = store.list(metadata_filter={"version": "1.0"})
 ```
 
+##### `put_file(file_path, *, key=None, metadata=None) -> str`
+Store an arbitrary file as a blob. Reads the file into bytes and delegates to `put()`. File metadata (original filename, MIME type, original size) is automatically merged into the metadata dict.
+
+**Parameters:**
+- `file_path` (str|Path): Path to the source file
+- `key` (Optional[str]): Explicit blob key (auto-generated if None)
+- `metadata` (Optional[Dict]): Custom metadata to merge with file metadata
+
+**Returns:**
+- `str`: The blob key
+
+**Example:**
+```python
+store = BlobStore(cache_dir="./artifacts")
+key = store.put_file("models/xgboost.onnx", key="model-v2")
+key = store.put_file("data/output.csv", metadata={"project": "alpha"})
+```
+
+##### `get_file(key, *, dest=None) -> bytes | Path | None`
+Retrieve a cached file blob, optionally writing it to disk.
+
+**Parameters:**
+- `key` (str): The blob key
+- `dest` (Optional[str|Path]): Destination path. If a directory, the original filename from metadata is used (falls back to `<key>.bin`). Parent directories are created automatically.
+
+**Returns:**
+- `bytes` when `dest` is `None` and entry exists
+- `Path` when `dest` is given and entry exists
+- `None` on miss
+
+**Example:**
+```python
+# Get raw bytes
+data = store.get_file("model-v2")
+
+# Write to a specific path
+path = store.get_file("model-v2", dest="./restored/model.onnx")
+
+# Write to a directory (uses original filename)
+path = store.get_file("model-v2", dest="./restored/")  # → ./restored/xgboost.onnx
+```
+
 ##### `verify_integrity(key: str) -> Dict`
 Verify blob integrity by checking file hash against stored metadata.
 
@@ -520,6 +562,72 @@ deleted = cache.delete_batch([
     {"experiment": "exp_002"},
 ])
 print(f"Removed {deleted} entries")
+```
+
+##### `put_file(file_path, *, cache_key=None, on=None, description="", custom_metadata=None, **kwargs) -> str`
+Store an arbitrary file in the cache. Reads the file into bytes and delegates to `put()`. File metadata (original filename, MIME type, file size) is automatically recorded in `metadata_dict` when `store_full_metadata=True`.
+
+File metadata does **not** participate in cache key derivation — only `on` and `**kwargs` determine the key.
+
+**Parameters:**
+- `file_path` (str|Path): Path to the source file
+- `cache_key` (Optional[str]): Explicit cache key (if provided, `on` and `**kwargs` are ignored for key derivation)
+- `on` (Optional[Dict]): Dictionary of key parameters for cache key derivation
+- `description` (str): Human-readable description
+- `custom_metadata`: Custom metadata for the cache entry. Supports single ORM objects, lists/tuples of ORM objects, or dicts. Passed through to `put()` unchanged.
+- `**kwargs`: Extra key-value pairs for key derivation and/or `metadata_dict`
+
+**Returns:**
+- `str`: 16-character hex cache key
+
+**Example:**
+```python
+# Store a file with auto-generated key
+key = cache.put_file("data/model.onnx", description="ONNX model v2")
+
+# Store using on= for key derivation
+key = cache.put_file("output.csv", on={"run": "exp_01"})
+
+# Store with explicit key
+key = cache.put_file("report.pdf", cache_key="monthly_report_jan")
+
+# Query by auto-populated metadata
+results = cache.query_meta(mime_type="application/pdf")
+```
+
+##### `get_file(cache_key=None, *, dest=None, on=None, ttl=None, ttl_seconds=None, **kwargs) -> bytes | Path | None`
+Retrieve cached file data, optionally writing it to disk. Read counterpart of `put_file()`.
+
+**Parameters:**
+- `cache_key` (Optional[str]): Explicit cache key
+- `dest` (Optional[str|Path]): Destination path. If a directory, the original filename from metadata is used (falls back to `<cache_key>.bin`). Parent directories are created automatically.
+- `on` (Optional[Dict]): Dictionary of key parameters for key lookup
+- `ttl` (Optional[str]): TTL as duration string (e.g. `"6h"`)
+- `ttl_seconds` (Optional[float]): TTL in seconds
+- `**kwargs`: Key parameters for key lookup (must match `put_file()` call)
+
+**Returns:**
+- `bytes` when `dest` is `None` and entry exists
+- `Path` when `dest` is given and entry exists
+- `None` on cache miss
+
+**Raises:**
+- `TypeError`: If the cached entry is not bytes (e.g. stored via `put()` with a dict)
+
+**Example:**
+```python
+# Get raw bytes
+data = cache.get_file(cache_key=key)
+
+# Write to a specific file
+path = cache.get_file(cache_key=key, dest="output/model.onnx")
+
+# Write to a directory (resolves original filename from metadata)
+path = cache.get_file(cache_key=key, dest="output/")
+# → Path("output/model.onnx")
+
+# Retrieve using on= key params
+data = cache.get_file(on={"run": "exp_01"})
 ```
 
 ##### `touch_batch(**filter_kwargs) -> int`
