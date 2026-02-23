@@ -30,9 +30,6 @@ These constraints apply to EVERY task. Violating any of them is a bug.
 - `from cacheness import UnifiedCache` does NOT work — it's exported as `cacheness`. Use `from cacheness.core import UnifiedCache` in tests.
 - `# noqa: E402` on the closing paren of a multi-line import does NOT suppress the error. Collapse to a single-line import instead.
 
-**Windows (beads):**
-- Start daemon once per session: `uv run bd daemon start` (required after reboot/logout)
-
 **Work tracking:**
 - File a beads issue for ANY work, even small fixes
 - Every code change goes through the Mandatory Workflow below
