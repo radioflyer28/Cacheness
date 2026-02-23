@@ -21,6 +21,7 @@ Welcome to the Cacheness documentation! This high-performance caching library pr
 
 - **[Performance Guide](PERFORMANCE.md)** - Optimization strategies and benchmarks
 - **[Custom Metadata](CUSTOM_METADATA.md)** - Working with SQLite backend and custom fields
+- **[API Reference — Typed Contracts](API_REFERENCE.md#typed-contracts)** - `HandlerResult`, `EntryList`, `WriteBlobResult`, `IntegrityReport`
 
 ## Specialized Handlers
 
@@ -31,6 +32,7 @@ Welcome to the Cacheness documentation! This high-performance caching library pr
 ## Architecture & Storage Layer
 
 - **[Architecture Guide](ARCHITECTURE.md)** - Component responsibilities, data flow, and anti-patterns
+- **[Transaction Guarantees](TRANSACTION_GUARANTEES.md)** - ACID analysis, crash scenarios, and recovery mechanisms
 - **[BlobStore Guide](BLOB_STORE.md)** - Low-level storage API for non-caching use cases
 
 `BlobStore` provides direct key-value storage without caching semantics (no TTL, no eviction). Useful for ML model versioning, artifact storage, and data pipeline checkpoints.

@@ -1,69 +1,41 @@
 #!/usr/bin/env python3
 """
-Simple API Caching Example
-==========================
+API Response Caching
+====================
 
-Shows how to cache API responses with minimal boilerplate.
-Perfect for new users to understand core concepts.
+Use @cached.for_api() to cache HTTP responses.
+It adds automatic error handling on top of normal caching.
 
 Usage:
-    python simple_api_caching.py
+    uv run python examples/simple_api_caching.py
 """
 
-import requests
 from cacheness import cached
 
 
-# Method 1: API-optimized decorator (easiest)
-@cached.for_api(ttl_seconds=21600)  # 6 hours
+@cached.for_api(ttl="6h")
 def get_weather(city):
-    """Get weather with automatic caching."""
-    print(f"Fetching weather for {city}...")  # Only shows on cache miss
-    response = requests.get(f"https://api.weather.gov/weather/{city}")
-    return response.json()
+    """Fetch weather data (simulated)."""
+    print(f"  Calling weather API for {city}...")
+    return {"city": city, "temp_f": 72, "conditions": "sunny"}
 
 
-@cached.for_api(ttl_seconds=86400)  # 24 hours
-def get_news(category="technology"):
-    """Get news with daily caching."""
-    print(f"Fetching {category} news...")
-    response = requests.get(f"https://api.news.com/{category}")
-    return response.json()
-
-
-# Method 2: Regular decorator (also works)
-@cached(ttl_seconds=14400)  # 4 hours
+@cached(ttl="4h")
 def get_stock_price(symbol):
-    """Get stock price with standard caching."""
-    print(f"Fetching stock price for {symbol}...")
-    response = requests.get(f"https://api.stocks.com/{symbol}")
-    return response.json()
-
-
-def main():
-    """Demonstrate simple API caching."""
-
-    print("=== Simple API Caching Demo ===\n")
-
-    # First call - makes API request
-    weather1 = get_weather("seattle")
-    print(f"✅ Weather: {weather1.get('temperature', 'N/A')}")
-
-    # Second call - uses cache (no API request)
-    weather2 = get_weather("seattle")
-    print(f"✅ Cached weather: {weather2.get('temperature', 'N/A')}")
-
-    # Different parameter - new cache entry
-    weather3 = get_weather("portland")
-    print(f"✅ Portland weather: {weather3.get('temperature', 'N/A')}\n")
-
-    # Using standard decorator
-    stock1 = get_stock_price("AAPL")
-    print(f"✅ AAPL price: ${stock1.get('price', 'N/A')}")
-
-    stock2 = get_stock_price("AAPL")  # Cached
-    print(f"✅ AAPL cached: ${stock2.get('price', 'N/A')}")
+    """Fetch stock price (simulated)."""
+    print(f"  Calling stock API for {symbol}...")
+    return {"symbol": symbol, "price": 150.25}
 
 
 if __name__ == "__main__":
-    main()
+    weather = get_weather("seattle")
+    print(f"Weather: {weather}")
+
+    weather = get_weather("seattle")  # cached
+    print(f"Cached:  {weather}\n")
+
+    stock = get_stock_price("AAPL")
+    print(f"Stock: {stock}")
+
+    stock = get_stock_price("AAPL")  # cached
+    print(f"Cached: {stock}")

@@ -5,10 +5,22 @@
 
 echo "Running pre-commit quality checks..."
 
-# Phase 1: Auto-fix (never fails — || true guards)
+# Collect staged .py files (Added, Copied, Modified, Renamed)
+STAGED_PY=$(git diff --cached --name-only --diff-filter=ACMR -- '*.py')
+
+if [ -z "$STAGED_PY" ]; then
+    echo "No staged .py files — skipping quality checks."
+    exit 0
+fi
+
+# Phase 1: Auto-fix staged files, then re-stage so the commit
+# captures the formatted versions (never fails — || true guards)
 echo "Phase 1: Auto-fixing code..."
-uv run ruff format . 2>&1 || true
-uv run ruff check --fix . 2>&1 || true
+echo "$STAGED_PY" | xargs uv run ruff format 2>&1 || true
+echo "$STAGED_PY" | xargs uv run ruff check --fix 2>&1 || true
+
+# Re-stage any files that Phase 1 modified
+echo "$STAGED_PY" | xargs git add
 
 # Phase 2: Validation (logs errors but doesn't block)
 echo "Phase 2: Validating code..."
@@ -18,15 +30,15 @@ LOG_FILE=".quality-errors.log"
 > "$LOG_FILE"
 
 {
-    echo "=== Quality Check Errors ($(date)) ===" 
+    echo "=== Quality Check Errors ($(date)) ==="
     echo ""
-    
+
     echo "--- Ruff Linting ---"
-    uv run ruff check . 2>&1 || true
+    echo "$STAGED_PY" | xargs uv run ruff check 2>&1 || true
     echo ""
-    
+
     echo "--- Type Checking ---"
-    uv run ty check 2>&1 || true
+    echo "$STAGED_PY" | xargs uv run ty check 2>&1 || true
     echo ""
 } > "$LOG_FILE" 2>&1
 

@@ -7,6 +7,7 @@ Each handler implements focused interfaces following the Interface Segregation P
 
 Available handlers:
 - ArrayHandler: NumPy arrays with blosc2 compression
+- BytesHandler: Raw bytes/bytearray/memoryview (no serialization)
 - DataFrameHandler: Pandas/Polars DataFrames in Parquet format
 - ObjectHandler: Generic Python objects via pickle/dill
 - SeriesHandler: Pandas Series
@@ -29,6 +30,7 @@ Usage:
 from cacheness.handlers import (
     # Handler classes
     ArrayHandler,
+    BytesHandler,
     ObjectHandler,
     HandlerRegistry,
 )
@@ -86,6 +88,7 @@ __all__ = [
     "CacheFormatError",
     # Core handlers
     "ArrayHandler",
+    "BytesHandler",
     "ObjectHandler",
     "HandlerRegistry",
 ]

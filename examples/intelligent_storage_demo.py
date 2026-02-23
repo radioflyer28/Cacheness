@@ -1,107 +1,78 @@
 #!/usr/bin/env python3
 """
-Intelligent Storage Demo
-=======================
+Intelligent Storage
+===================
 
-Demonstrates how UnifiedCache automatically chooses optimal storage
-formats based on data types.
+Cacheness automatically picks the best serialisation format
+for each data type:
+
+  DataFrames  → Parquet (columnar, fast)
+  NumPy arrays → Blosc  (numerical compression)
+  JSON / dicts → LZ4    (fast text compression)
+  Everything else → Pickle
 
 Usage:
-    python intelligent_storage_demo.py
+    uv run python examples/intelligent_storage_demo.py
 """
 
-from cacheness import cached
-import pandas as pd
-import numpy as np
 from dataclasses import dataclass
-from datetime import datetime
 
-# ===== UnifiedCache: Intelligent Storage Examples =====
+import numpy as np
+import pandas as pd
+
+from cacheness import cached
 
 
 @dataclass
 class UserProfile:
     user_id: int
     name: str
-    email: str
-    preferences: dict
+    prefs: dict
 
 
-@cached(ttl_seconds=43200)  # 12 hours - Stores as pickle - perfect for custom objects
-def get_user_profile(user_id):
-    """Custom object - cached with pickle."""
-    print(f"🔍 Loading user profile: {user_id}")
-    return UserProfile(
-        user_id=user_id,
-        name=f"User {user_id}",
-        email=f"user{user_id}@example.com",
-        preferences={"theme": "dark", "notifications": True},
-    )
+@cached(ttl="12h")
+def load_profile(user_id):
+    """Custom object → pickle."""
+    print("  Building profile...")
+    return UserProfile(user_id, f"User {user_id}", {"theme": "dark"})
 
 
-@cached(ttl_seconds=86400)  # 24 hours - Stores as Parquet - optimized for DataFrames
-def generate_analytics_data(department):
-    """DataFrame - cached with Parquet format."""
-    print(f"📊 Generating analytics for {department}")
+@cached(ttl="1d")
+def make_report(department):
+    """DataFrame → parquet."""
+    print("  Generating report...")
     return pd.DataFrame(
         {
-            "employee_id": range(100),
-            "department": [department] * 100,
-            "performance": np.random.normal(85, 10, 100),
-            "salary": np.random.normal(75000, 15000, 100),
+            "employee": range(100),
+            "dept": [department] * 100,
+            "score": np.random.normal(85, 10, 100),
         }
     )
 
 
-@cached(ttl_seconds=21600)  # 6 hours - Stores with Blosc - optimized for NumPy
+@cached(ttl="6h")
 def compute_matrix(size):
-    """NumPy array - cached with Blosc compression."""
-    print(f"🧮 Computing {size}x{size} matrix")
+    """NumPy array → blosc."""
+    print("  Computing matrix...")
     return np.random.random((size, size))
 
 
-@cached.for_api(ttl_seconds=14400)  # 4 hours - Stores with LZ4 - fast for JSON
-def fetch_api_data(endpoint):
-    """API response - cached with fast LZ4 compression."""
-    print(f"🌐 Fetching data from {endpoint}")
-    return {
-        "status": "success",
-        "data": [{"id": i, "value": f"item_{i}"} for i in range(50)],
-        "timestamp": str(datetime.now()),
-    }
-
-
-def main():
-    """Demonstrate intelligent storage format optimization."""
-
-    print("=== Intelligent Storage Demo ===\n")
-
-    # UnifiedCache automatically chooses optimal storage
-    print("🧠 UNIFIEDCACHE: Automatic Storage Optimization")
-
-    # Custom objects → Pickle
-    profile = get_user_profile(123)
-    print(f"✅ Custom object (pickle): {profile.name}")
-
-    # DataFrames → Parquet
-    df = generate_analytics_data("Engineering")
-    print(f"✅ DataFrame (parquet): {len(df)} rows")
-
-    # NumPy arrays → Blosc
-    matrix = compute_matrix(100)
-    print(f"✅ NumPy array (blosc): {matrix.shape}")
-
-    # API responses → LZ4
-    api_data = fetch_api_data("users")
-    print(f"✅ API response (lz4): {len(api_data['data'])} items\n")
-
-    print("🎯 Key Benefits:")
-    print("   • Automatic format optimization")
-    print("     - DataFrames → Parquet (columnar)")
-    print("     - NumPy → Blosc (numerical compression)")
-    print("     - Objects → Pickle (serialization)")
-    print("     - JSON → LZ4 (fast text compression)")
+@cached.for_api(ttl="4h")
+def fetch_items(endpoint):
+    """Dict/JSON → LZ4."""
+    print("  Fetching items...")
+    return {"status": "ok", "items": list(range(50))}
 
 
 if __name__ == "__main__":
-    main()
+    profile = load_profile(1)
+    print(f"Profile (pickle):   {profile}")
+
+    df = make_report("Engineering")
+    print(f"Report  (parquet):  {len(df)} rows")
+
+    mat = compute_matrix(100)
+    print(f"Matrix  (blosc):    {mat.shape}")
+
+    data = fetch_items("users")
+    print(f"Items   (lz4):      {len(data['items'])} items")

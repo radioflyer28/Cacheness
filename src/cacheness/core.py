@@ -16,9 +16,12 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List, Callable, Tuple
 
 from .config import CacheConfig, _DEFAULT_TTL, create_cache_config
+from .entry_list import EntryList
 from .handlers import HandlerRegistry
+from .interfaces import HandlerResult, IntegrityReport, SignableFields
 from .metadata import DEFAULT_NAMESPACE
 from .serialization import create_unified_cache_key
+from .size_utils import format_size, resolve_ttl
 from .storage.paths import resolve_actual_path
 
 logger = logging.getLogger(__name__)
@@ -172,6 +175,9 @@ class UnifiedCache:
         # Initialize entry signer for metadata integrity
         self._init_entry_signer()
 
+        # Sign / verify the current namespace registry row
+        self._sign_current_namespace()
+
         # Initialize internal BlobStore for storage delegation
         # Shares metadata_backend, handlers, lock, signer, and config
         self._init_blob_store()
@@ -205,57 +211,58 @@ class UnifiedCache:
                 f"Install with: uv add sqlalchemy"
             )
 
-        if requested == "json":
-            self.metadata_backend = create_metadata_backend(
-                "json",
-                metadata_file=self.cache_dir / "cache_metadata.json",
-                config=self.config.metadata,
-                namespace=self.namespace,
-            )
-            self.actual_backend = "json"
+        # Build kwargs for the factory based on backend type
+        kwargs = self._build_backend_kwargs(requested)
 
-        elif requested == "sqlite":
-            self.metadata_backend = create_metadata_backend(
-                "sqlite",
-                db_file=str(self.cache_dir / self.config.metadata.sqlite_db_file),
-                config=self.config.metadata,
-                namespace=self.namespace,
-            )
-            self.actual_backend = "sqlite"
+        if requested == "auto":
+            self._init_auto_backend(create_metadata_backend, SQLALCHEMY_AVAILABLE)
+        else:
+            self.metadata_backend = create_metadata_backend(requested, **kwargs)
+            self.actual_backend = requested
+            if requested == "sqlite_memory":
+                logger.info("⚡ Using in-memory SQLite backend (no persistence)")
+
+    def _build_backend_kwargs(self, requested: str) -> Dict[str, Any]:
+        """Build keyword arguments for ``create_metadata_backend``.
+
+        Centralises the per-backend kwargs construction that was previously
+        duplicated across five ``if/elif`` branches.
+        """
+        base: Dict[str, Any] = {
+            "config": self.config.metadata,
+            "namespace": self.namespace,
+        }
+
+        if requested == "json":
+            base["metadata_file"] = self.cache_dir / "cache_metadata.json"
+
+        elif requested in ("sqlite", "auto"):
+            base["db_file"] = str(self.cache_dir / self.config.metadata.sqlite_db_file)
 
         elif requested == "sqlite_memory":
-            self.metadata_backend = create_metadata_backend(
-                "sqlite_memory",
-                config=self.config.metadata,
-                namespace=self.namespace,
-            )
-            self.actual_backend = "sqlite_memory"
-            logger.info("⚡ Using in-memory SQLite backend (no persistence)")
+            pass  # no extra kwargs needed
 
         elif requested == "postgresql":
             opts = self.config.metadata.metadata_backend_options or {}
             connection_url = opts.get("connection_url")
             if not connection_url:
                 raise ValueError(
-                    "PostgreSQL backend requires 'connection_url' in metadata_backend_options"
+                    "PostgreSQL backend requires 'connection_url' in "
+                    "metadata_backend_options"
                 )
-            self.metadata_backend = create_metadata_backend(
-                "postgresql",
-                connection_url=connection_url,
-                pool_size=opts.get("pool_size", 10),
-                max_overflow=opts.get("max_overflow", 20),
-                pool_pre_ping=opts.get("pool_pre_ping", True),
-                pool_recycle=opts.get("pool_recycle", 3600),
-                echo=opts.get("echo", False),
-                table_prefix=opts.get("table_prefix", ""),
-                config=self.config.metadata,
-                namespace=self.namespace,
+            base.update(
+                {
+                    "connection_url": connection_url,
+                    "pool_size": opts.get("pool_size", 10),
+                    "max_overflow": opts.get("max_overflow", 20),
+                    "pool_pre_ping": opts.get("pool_pre_ping", True),
+                    "pool_recycle": opts.get("pool_recycle", 3600),
+                    "echo": opts.get("echo", False),
+                    "table_prefix": opts.get("table_prefix", ""),
+                }
             )
-            self.actual_backend = "postgresql"
 
-        else:
-            # Auto mode: prefer SQLite if available, fallback to JSON
-            self._init_auto_backend(create_metadata_backend, SQLALCHEMY_AVAILABLE)
+        return base
 
     def _init_auto_backend(self, create_metadata_backend, sqlalchemy_available: bool):
         """Auto-select the best available metadata backend."""
@@ -365,6 +372,47 @@ class UnifiedCache:
         except Exception as e:
             logger.warning(f"Failed to initialize entry signer: {e}")
             self.signer = None
+
+    def _sign_current_namespace(self):
+        """Sign or verify the current namespace registry row.
+
+        Called once during ``__init__`` after the signer is available.
+        - If the namespace has no signature yet, compute one and store it.
+        - If a signature already exists, verify it and warn on mismatch
+          (non-fatal — a key rotation or schema change may invalidate it).
+        """
+        if not self.signer:
+            return
+
+        try:
+            ns_info = self.metadata_backend.get_namespace(self.namespace)
+            if ns_info is None:
+                return
+
+            ns_data = {
+                "namespace_id": ns_info.namespace_id,
+                "display_name": ns_info.display_name,
+                "created_at": ns_info.created_at,
+            }
+
+            if ns_info.signature is None:
+                # First time — sign and persist
+                sig = self.signer.sign_namespace(ns_data)
+                self.metadata_backend.set_namespace_signature(ns_info.namespace_id, sig)
+                logger.info(f"🔏 Signed namespace {ns_info.namespace_id!r}")
+            else:
+                # Verify existing signature
+                if not self.signer.verify_namespace(ns_data, ns_info.signature):
+                    logger.warning(
+                        f"⚠️  Namespace {ns_info.namespace_id!r} signature "
+                        f"verification failed (key rotation or tampering?)"
+                    )
+                else:
+                    logger.debug(
+                        f"Namespace {ns_info.namespace_id!r} signature verified"
+                    )
+        except Exception as e:
+            logger.warning(f"Namespace signing/verification failed: {e}")
 
     def _init_blob_store(self):
         """Initialize internal BlobStore for storage delegation.
@@ -693,9 +741,11 @@ class UnifiedCache:
 
         Works with **all** backends.  When the SQLite backend is active and
         ``store_full_metadata=True``, a fast SQL path using ``JSON_EXTRACT``
-        is used.  For every other backend (JSON, PostgreSQL, custom) a
-        Python-side fallback iterates stored entries and matches against
-        the ``metadata_dict`` field.
+        is used.  When the PostgreSQL backend is active, a fast JSONB path
+        using the ``@>`` containment operator (with GIN index) is used.
+        For every other backend (JSON, custom) a Python-side fallback
+        iterates stored entries and matches against the ``metadata_dict``
+        field.
 
         Args:
             **filters: Key-value pairs to filter cache entries.
@@ -704,10 +754,10 @@ class UnifiedCache:
                        comparison for int/float, string equality otherwise).
 
         Returns:
-            List of dicts (one per matching entry) with keys
+            EntryList of dicts (one per matching entry) with keys
             ``cache_key``, ``description``, ``data_type``, ``created_at``,
             ``accessed_at``, ``file_size``, ``metadata_dict``.
-            Returns an empty list when no entries match.
+            Returns an empty EntryList when no entries match.
             Returns ``None`` only on unexpected errors.
 
         Example:
@@ -732,12 +782,18 @@ class UnifiedCache:
         ):
             return self._query_meta_sqlite(**filters)
 
+        # ── PostgreSQL fast path: JSONB @> containment ───────────
+        if self.actual_backend == "postgresql" and hasattr(
+            self.metadata_backend, "SessionLocal"
+        ):
+            return self._query_meta_postgres(**filters)
+
         # ── Generic fallback: Python-side filtering ─────────────────
         return self._query_meta_generic(**filters)
 
     # ── Private helpers ─────────────────────────────────────────────
 
-    def _query_meta_generic(self, **filters) -> list | None:
+    def _query_meta_generic(self, **filters) -> EntryList | None:
         """Python-side ``query_meta`` that works with any backend."""
         try:
             from .json_utils import loads as json_loads
@@ -748,7 +804,7 @@ class UnifiedCache:
 
         try:
             summaries = self.metadata_backend.iter_entry_summaries()
-            entries: list[dict] = []
+            entries: EntryList = EntryList()
 
             for summary in summaries:
                 # metadata_dict may be a JSON string or already a dict
@@ -790,7 +846,77 @@ class UnifiedCache:
             logger.error(f"Failed to query metadata (generic): {e}")
             return None
 
-    def _query_meta_sqlite(self, **filters) -> list | None:
+    def _query_meta_postgres(self, **filters) -> EntryList | None:
+        """PostgreSQL fast path using JSONB ``@>`` containment for ``query_meta``.
+
+        Leverages the GIN ``jsonb_path_ops`` index on ``metadata_dict``
+        for sub-millisecond filtered lookups instead of pulling all rows
+        into Python.
+        """
+        try:
+            from sqlalchemy import text
+
+            table = self.metadata_backend._entries_table
+
+            with self.metadata_backend.SessionLocal() as session:
+                if filters:
+                    # JSONB @> operator — leverages GIN index
+                    from .json_utils import dumps as json_dumps
+
+                    filter_json = json_dumps(filters)
+                    query = (
+                        f"SELECT cache_key, description, data_type, "
+                        f"       created_at, accessed_at, file_size, "
+                        f"       metadata_dict "
+                        f'FROM "{table}" '
+                        f"WHERE metadata_dict @> CAST(:filter_json AS jsonb) "
+                        f"ORDER BY created_at DESC"
+                    )
+                    result = session.execute(text(query), {"filter_json": filter_json})
+                else:
+                    query = (
+                        f"SELECT cache_key, description, data_type, "
+                        f"       created_at, accessed_at, file_size, "
+                        f"       metadata_dict "
+                        f'FROM "{table}" '
+                        f"WHERE metadata_dict IS NOT NULL "
+                        f"ORDER BY created_at DESC"
+                    )
+                    result = session.execute(text(query))
+
+                entries = EntryList()
+                for row in result:
+                    # JSONB may return dict (psycopg3) or str (psycopg2)
+                    meta_raw = row.metadata_dict
+                    if isinstance(meta_raw, str):
+                        try:
+                            from .json_utils import loads as json_loads
+
+                            meta_raw = json_loads(meta_raw)
+                        except Exception:
+                            meta_raw = {}
+                    elif not isinstance(meta_raw, dict):
+                        meta_raw = {}
+
+                    entries.append(
+                        {
+                            "cache_key": row.cache_key,
+                            "description": row.description or "",
+                            "data_type": row.data_type or "unknown",
+                            "created_at": self._fmt_timestamp(row.created_at),
+                            "accessed_at": self._fmt_timestamp(row.accessed_at),
+                            "file_size": row.file_size or 0,
+                            "metadata_dict": meta_raw,
+                        }
+                    )
+
+                return entries
+
+        except Exception as e:
+            logger.error(f"Failed to query metadata (postgres): {e}")
+            return None
+
+    def _query_meta_sqlite(self, **filters) -> EntryList | None:
         """SQLite fast path using JSON_EXTRACT for ``query_meta``."""
         try:
             from sqlalchemy import text
@@ -834,7 +960,7 @@ class UnifiedCache:
 
                 result = session.execute(text(query), params)
 
-                entries = []
+                entries = EntryList()
                 for row in result:
                     entry = {
                         "cache_key": row.cache_key,
@@ -1037,7 +1163,7 @@ class UnifiedCache:
 
         Args:
             cache_key: The cache key to check
-            ttl_seconds: TTL in seconds. None means never expire.
+            ttl_seconds: TTL in seconds (numeric). None means never expire.
                 Use _DEFAULT_TTL sentinel to fall back to config default.
         """
         entry = self.metadata_backend.get_entry(cache_key)
@@ -1053,6 +1179,11 @@ class UnifiedCache:
                 return False  # Config says never expire
 
         # Type guard to ensure ttl is numeric
+        if isinstance(ttl_seconds, str):
+            raise TypeError(
+                f'ttl_seconds must be numeric, got string "{ttl_seconds}". '
+                f'Use ttl="{ttl_seconds}" for duration strings.'
+            )
         assert isinstance(ttl_seconds, (int, float)), (
             f"TTL must be numeric, got {type(ttl_seconds)}"
         )
@@ -1079,7 +1210,7 @@ class UnifiedCache:
         cache_key: str,
         entry_data: Dict[str, Any],
         metadata: Dict[str, Any],
-    ) -> Dict[str, Any]:
+    ) -> SignableFields:
         """
         Extract fields for signing/verification in a consistent manner.
 
@@ -1094,7 +1225,7 @@ class UnifiedCache:
             metadata: The metadata dictionary from handler result
 
         Returns:
-            Dictionary containing all fields that may be signed
+            SignableFields containing all fields that may be signed
         """
         # Normalize created_at to ISO format string without timezone
         # This ensures consistent signatures regardless of database format
@@ -1113,14 +1244,13 @@ class UnifiedCache:
 
         # Build complete entry data with all potentially-signable fields.
         # The signer's version-based field list determines which are actually used.
-        signable_data = {
+        signable_data: SignableFields = {
             "cache_key": cache_key,
             "data_type": entry_data.get("data_type"),
             "file_size": entry_data.get("file_size", 0),
             "created_at": created_at,
             "actual_path": metadata.get("actual_path", ""),
             "file_hash": metadata.get("file_hash"),
-            # Include handler-specific metadata fields
             "object_type": metadata.get("object_type"),
             "storage_format": metadata.get("storage_format"),
             "serializer": metadata.get("serializer"),
@@ -1137,6 +1267,19 @@ class UnifiedCache:
         """
         return self._blob_store._calculate_file_hash(file_path)
 
+    # ── Lifecycle hook helpers ────────────────────────────────────────
+
+    def _invoke_hook(self, hook_name: str, *args: object) -> None:
+        """Safely invoke a HooksConfig callback (never raises)."""
+        hook = getattr(self.config.hooks, hook_name, None)
+        if hook is not None:
+            try:
+                hook(*args)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    f"Hook {hook_name} raised an exception (swallowed): {exc}"
+                )
+
     def _record_hit(self):
         """Record a cache hit if stats tracking is enabled."""
         if self.config.metadata.enable_cache_stats:
@@ -1147,6 +1290,126 @@ class UnifiedCache:
         if self.config.metadata.enable_cache_stats:
             self.metadata_backend.increment_misses()
 
+    def _verify_entry(
+        self,
+        cache_key: str,
+        entry: Dict[str, Any],
+        metadata: Dict[str, Any],
+        file_path: Path,
+        *,
+        storage_mode: bool = False,
+    ) -> bool:
+        """Verify entry integrity (hash) and signature before loading.
+
+        Returns ``True`` when loading should proceed, ``False`` when the
+        entry must be rejected (caller should return ``None``).
+
+        Side effects handled internally:
+
+        * Logs warnings on all failures.
+        * When *storage_mode* is ``False``, deletes corrupted or tampered
+          entries according to ``config.metadata.delete_on_error`` and
+          ``config.security.delete_invalid_signatures``.
+        * When *storage_mode* is ``True``, entries are **never** deleted.
+
+        The caller is responsible for recording hits/misses and returning
+        ``None`` when this method returns ``False``.
+        """
+        # ── Integrity verification (file hash) ─────────────────────
+        if self.config.metadata.verify_cache_integrity:
+            stored_hash = metadata.get("file_hash")
+            if stored_hash is not None:
+                # For inline entries, compute hash from blob_data in memory
+                if entry.get("is_inline") and entry.get("blob_data") is not None:
+                    import xxhash
+
+                    current_hash = xxhash.xxh3_64(entry["blob_data"]).hexdigest()
+                else:
+                    current_hash = self._blob_store._calculate_file_hash(file_path)
+                if current_hash != stored_hash:
+                    detail = f"stored hash {stored_hash} != current hash {current_hash}"
+                    self._invoke_hook(
+                        "on_integrity_failure",
+                        cache_key,
+                        "hash_mismatch",
+                        detail,
+                    )
+                    if storage_mode:
+                        logger.warning(
+                            f"Cache integrity verification failed for {cache_key}: "
+                            f"{detail}. Entry preserved (storage mode)."
+                        )
+                    elif self.config.metadata.delete_on_error:
+                        logger.warning(
+                            f"Cache integrity verification failed for {cache_key}: "
+                            f"{detail}. Removing corrupted cache entry."
+                        )
+                        self._blob_store.delete(cache_key)
+                    else:
+                        logger.warning(
+                            f"Cache integrity verification failed for {cache_key}: "
+                            f"{detail}. Entry retained due to delete_on_error=False."
+                        )
+                    return False
+
+        # ── Signature verification ──────────────────────────────────
+        if self.signer and self.config.security.enable_entry_signing:
+            stored_signature = metadata.get("entry_signature")
+            if stored_signature is not None:
+                verify_data = self._extract_signable_fields(
+                    cache_key=cache_key,
+                    entry_data=entry,
+                    metadata=metadata,
+                )
+                if not self.signer.verify_entry(verify_data, stored_signature):
+                    self._invoke_hook(
+                        "on_integrity_failure",
+                        cache_key,
+                        "signature_invalid",
+                        "HMAC signature verification failed",
+                    )
+                    if storage_mode:
+                        logger.warning(
+                            f"Entry signature verification failed for {cache_key}. "
+                            f"Entry preserved (storage mode)."
+                        )
+                        return False
+                    elif self.config.security.delete_invalid_signatures:
+                        logger.warning(
+                            f"Entry signature verification failed for {cache_key}. "
+                            f"Removing potentially tampered cache entry."
+                        )
+                        self._blob_store.delete(cache_key)
+                        return False
+                    else:
+                        logger.warning(
+                            f"Entry signature verification failed for {cache_key}. "
+                            f"Entry retained due to delete_invalid_signatures=False."
+                        )
+                        # Continue loading despite invalid signature
+
+            elif not self.config.security.allow_unsigned_entries:
+                self._invoke_hook(
+                    "on_integrity_failure",
+                    cache_key,
+                    "unsigned_rejected",
+                    "Entry has no signature and unsigned entries are not allowed",
+                )
+                if storage_mode:
+                    logger.warning(
+                        f"Entry {cache_key} has no signature but unsigned entries "
+                        f"are not allowed. Entry preserved (storage mode)."
+                    )
+                else:
+                    logger.warning(
+                        f"Entry {cache_key} has no signature but unsigned entries "
+                        f"are not allowed. Removing entry."
+                    )
+                    self._blob_store.delete(cache_key)
+                return False
+
+        return True
+
     def _cleanup_expired(self):
         """Remove expired cache entries."""
         ttl_seconds = self.config.metadata.default_ttl_seconds
@@ -1156,6 +1419,259 @@ class UnifiedCache:
 
         if removed_count > 0:
             logger.info(f"Cleaned up {removed_count} expired cache entries")
+
+    # ── Shared put helpers ────────────────────────────────────────────
+    # Extracted from _storage_mode_put() and put() to eliminate duplicated
+    # metadata construction, signing, and stale-blob cleanup logic.
+
+    def _try_inline_blob(
+        self,
+        result: HandlerResult,
+        file_hash: Optional[str],
+        cleanup: "_PutCleanup",
+    ) -> Optional[Dict[str, Any]]:
+        """Try to inline a small blob into the metadata row.
+
+        If the blob is small enough (≤ ``max_inline_size`` from config),
+        reads the file bytes, computes an xxhash from the bytes, and
+        returns a dict with ``blob_data``, ``is_inline=1``, and
+        ``file_hash``.  The blob file is deleted and the cleanup guard
+        is disarmed so rollback won't try to delete it again.
+
+        Returns ``None`` when inlining is disabled or the blob is too large.
+        """
+        max_inline = self.config.blob.max_inline_size
+        if max_inline <= 0:
+            return None
+        if result.file_size > max_inline:
+            return None
+
+        # Resolve the blob path written by _write_blob
+        actual_path_str = result.actual_path
+        if "://" in actual_path_str:
+            # Remote blobs (S3, etc.) are not inlined
+            return None
+
+        blob_path = self._resolve_actual_path(actual_path_str)
+        if not isinstance(blob_path, Path) or not blob_path.exists():
+            return None
+
+        blob_bytes = blob_path.read_bytes()
+
+        # Compute hash from the raw bytes (matches file-based hashing)
+        computed_hash = file_hash
+        if computed_hash is None and self.config.metadata.verify_cache_integrity:
+            import xxhash
+
+            computed_hash = xxhash.xxh3_64(blob_bytes).hexdigest()
+
+        # Preserve the original file suffix so _read_inline_blob can
+        # recreate a temp file that the handler recognises (handlers
+        # derive the expected path from the suffix, e.g. .pkl.zstd).
+        # Extract all suffixes after the hash portion of the filename.
+        inline_ext = "".join(blob_path.suffixes) or ".bin"
+
+        # Delete the blob file — data now lives in metadata
+        try:
+            blob_path.unlink()
+        except OSError as exc:
+            logger.warning(f"Failed to remove inlined blob file {blob_path}: {exc}")
+
+        # Disarm the cleanup guard so rollback doesn't try to delete
+        cleanup.blob_path = None
+
+        return {
+            "blob_data": blob_bytes,
+            "is_inline": 1,
+            "file_hash": computed_hash,
+            "inline_ext": inline_ext,
+        }
+
+    def _try_direct_inline(
+        self,
+        data: Any,
+        handler: Any,
+    ) -> Optional[Dict[str, Any]]:
+        """Try zero-disk in-memory serialization for inline blob storage.
+
+        Invokes ``handler.put_bytes()`` to serialize *data* entirely in
+        memory.  If the handler supports it and the serialized blob fits
+        within ``max_inline_size``, returns a dict ready for embedding in
+        the metadata row — **no file is ever written to disk**.
+
+        Returns ``None`` when:
+        * Inlining is disabled (``max_inline_size ≤ 0``).
+        * The handler raises :class:`NotImplementedError`.
+        * The serialized blob exceeds ``max_inline_size``.
+
+        The returned dict contains:
+
+        * ``blob_data`` – the raw bytes to store in the metadata row.
+        * ``file_hash`` – xxhash digest (or ``None`` when integrity
+          checking is disabled).
+        * ``inline_ext`` – file extension hint for ``get_bytes``/fallback.
+        * ``result`` – :class:`HandlerResult` with serialization metadata
+          (``storage_format``, ``compression_codec``, etc.).
+        * ``handler`` – the handler instance (for ``data_type``).
+        """
+        max_inline = self.config.blob.max_inline_size
+        if max_inline <= 0:
+            return None
+
+        try:
+            blob_bytes, result = handler.put_bytes(data, self.config)
+        except (NotImplementedError, Exception) as exc:
+            # NotImplementedError → handler doesn't support in-memory path.
+            # Any other exception → safer to fall back to disk path.
+            if not isinstance(exc, NotImplementedError):
+                logger.debug(
+                    "put_bytes failed for %s, falling back to disk: %s",
+                    handler.data_type,
+                    exc,
+                )
+            return None
+
+        if len(blob_bytes) > max_inline:
+            return None
+
+        # Compute hash from raw bytes
+        computed_hash: Optional[str] = None
+        if self.config.metadata.verify_cache_integrity:
+            import xxhash
+
+            computed_hash = xxhash.xxh3_64(blob_bytes).hexdigest()
+
+        inline_ext = handler.get_file_extension(self.config)
+
+        return {
+            "blob_data": blob_bytes,
+            "file_hash": computed_hash,
+            "inline_ext": inline_ext,
+            "result": result,
+            "handler": handler,
+        }
+
+    def _read_inline_blob(
+        self,
+        entry: Dict[str, Any],
+        data_type: str,
+        metadata: Dict[str, Any],
+    ) -> Any:
+        """Deserialize an inline blob without touching the blob backend.
+
+        Tries the handler's ``get_bytes()`` first for zero-disk
+        deserialization.  Falls back to writing the raw bytes to a
+        temporary file and delegating to the handler's ``get()`` method.
+        """
+        blob_bytes: bytes = entry["blob_data"]
+
+        # Fast path — zero-disk deserialization via get_bytes()
+        try:
+            handler = self._blob_store.handlers.get_handler_by_type(data_type)
+            return handler.get_bytes(blob_bytes, metadata)
+        except NotImplementedError:
+            pass  # Fall through to temp-file path
+        except Exception as exc:
+            logger.debug(
+                "get_bytes failed for %s, falling back to temp file: %s",
+                data_type,
+                exc,
+            )
+
+        # Slow path — write to temp file, delegate to handler.get()
+        import tempfile
+
+        suffix = metadata.get("inline_ext", ".bin")
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            tmp.write(blob_bytes)
+            tmp_path = Path(tmp.name)
+
+        try:
+            return self._blob_store._read_blob(tmp_path, data_type, metadata)
+        finally:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+
+    def _build_metadata_dict(
+        self, result: HandlerResult, file_hash: Optional[str]
+    ) -> Dict[str, Any]:
+        """Build the metadata dict from a :class:`HandlerResult`.
+
+        Merges handler ``extra`` fields with top-level columns
+        (``actual_path``, ``file_hash``, ``storage_format``, etc.)
+        so the backend can extract them to dedicated columns.
+        """
+        metadata_dict: Dict[str, Any] = {
+            **result.extra,
+            "actual_path": result.actual_path,
+            "file_hash": file_hash,
+            "storage_format": result.storage_format,
+        }
+        if result.serializer:
+            metadata_dict["serializer"] = result.serializer
+        if result.compression_codec:
+            metadata_dict["compression_codec"] = result.compression_codec
+        if result.object_type:
+            metadata_dict["object_type"] = result.object_type
+        return metadata_dict
+
+    def _sign_entry_if_enabled(
+        self,
+        cache_key: str,
+        entry_data: Dict[str, Any],
+        metadata_dict: Dict[str, Any],
+    ) -> None:
+        """Sign *entry_data* in-place if a signer is configured.
+
+        Sets ``entry_data["created_at"]`` and
+        ``metadata_dict["entry_signature"]`` on success.
+        Logs a warning and continues without a signature on failure.
+        """
+        if not self.signer:
+            return
+        try:
+            creation_timestamp = datetime.now(timezone.utc)
+            entry_data["created_at"] = creation_timestamp.isoformat()
+            complete_entry_data = self._extract_signable_fields(
+                cache_key=cache_key,
+                entry_data=entry_data,
+                metadata=metadata_dict,
+            )
+            signature = self.signer.sign_entry(complete_entry_data)
+            metadata_dict["entry_signature"] = signature
+            logger.debug(f"Created signature for entry {cache_key}")
+        except Exception as e:
+            logger.warning(f"Failed to sign entry {cache_key}: {e}")
+
+    def _cleanup_stale_blob(
+        self,
+        cache_key: str,
+        old_blob_path: Optional[str],
+        new_actual_path: str,
+    ) -> None:
+        """Remove old blob file when the actual path changed.
+
+        This happens when a data type change causes a different file
+        extension (e.g. ``.parquet`` → ``.pkl.lz4``).  Best-effort:
+        failure just logs a warning and leaves an orphan for
+        ``verify_integrity`` to clean up later.
+        """
+        if not old_blob_path or old_blob_path == new_actual_path:
+            return
+        try:
+            if "://" in old_blob_path:
+                self._blob_store.blob_backend.delete_blob(old_blob_path)
+            else:
+                old_resolved = self._resolve_actual_path(old_blob_path)
+                if isinstance(old_resolved, Path) and old_resolved.exists():
+                    old_resolved.unlink()
+            logger.debug(f"Cleaned up old blob for {cache_key}: {old_blob_path}")
+        except Exception as exc:
+            logger.warning(
+                f"Failed to clean up old blob for {cache_key} at {old_blob_path}: {exc}"
+            )
 
     # ── Storage-mode passthrough methods ──────────────────────────────
     # When storage_mode=True these bypass cache concerns (TTL, eviction,
@@ -1171,51 +1687,69 @@ class UnifiedCache:
         base_file_path = self._get_cache_file_path(cache_key)
         cleanup = _PutCleanup()
 
+        # Save old blob path before overwriting — if the data type changes,
+        # the new blob may use a different file extension, orphaning the old one
+        old_blob_path: Optional[str] = None
+        existing = self.metadata_backend.get_entry(cache_key)
+        if existing:
+            old_meta = existing.get("metadata", {})
+            old_blob_path = old_meta.get("actual_path")
+
         try:
-            handler, result, file_hash = self._blob_store._write_blob(
-                data, base_file_path, compute_hash=True
-            )
+            # Try zero-disk inline serialization (no file I/O at all)
+            handler = self._blob_store.handlers.get_handler(data)
+            direct = self._try_direct_inline(data, handler)
 
-            actual_path_str = result.get("actual_path", str(base_file_path))
-            if "://" not in actual_path_str:
-                cleanup.blob_path = self._resolve_actual_path(actual_path_str)
+            if direct is not None:
+                result = direct["result"]
+                file_hash = direct["file_hash"]
+                metadata_dict = self._build_metadata_dict(result, file_hash)
+                metadata_dict["actual_path"] = None
+                metadata_dict["inline_ext"] = direct["inline_ext"]
+                if file_hash is not None:
+                    metadata_dict["file_hash"] = file_hash
 
-            if "://" in actual_path_str:
-                cleanup.set_remote(self._blob_store.blob_backend, actual_path_str)
+                entry_data = {
+                    "data_type": handler.data_type,
+                    "description": description,
+                    "file_size": result.file_size,
+                    "metadata": metadata_dict,
+                    "blob_data": direct["blob_data"],
+                    "is_inline": 1,
+                }
+            else:
+                wb = self._blob_store._write_blob(
+                    data, base_file_path, compute_hash=True
+                )
+                handler, result, file_hash = wb.handler, wb.result, wb.file_hash
 
-            metadata_dict = {
-                **result["metadata"],
-                "actual_path": actual_path_str,
-                "file_hash": file_hash,
-            }
+                actual_path_str = result.actual_path
+                if "://" not in actual_path_str:
+                    cleanup.blob_path = self._resolve_actual_path(actual_path_str)
+                if "://" in actual_path_str:
+                    cleanup.set_remote(self._blob_store.blob_backend, actual_path_str)
 
-            entry_data = {
-                "data_type": handler.data_type,
-                "description": description,
-                "file_size": result["file_size"],
-                "metadata": metadata_dict,
-            }
+                metadata_dict = self._build_metadata_dict(result, file_hash)
+                entry_data = {
+                    "data_type": handler.data_type,
+                    "description": description,
+                    "file_size": result.file_size,
+                    "metadata": metadata_dict,
+                }
 
-            # Sign the entry if signing is enabled (same as normal put path)
-            if self.signer:
-                try:
-                    creation_timestamp = datetime.now(timezone.utc)
-                    entry_data["created_at"] = creation_timestamp.isoformat()
+                # Try disk-based inline (read back from file)
+                inline = self._try_inline_blob(result, file_hash, cleanup)
+                if inline is not None:
+                    entry_data["blob_data"] = inline["blob_data"]
+                    entry_data["is_inline"] = 1
+                    metadata_dict["actual_path"] = None
+                    metadata_dict["inline_ext"] = inline["inline_ext"]
+                    if inline["file_hash"] is not None:
+                        metadata_dict["file_hash"] = inline["file_hash"]
 
-                    complete_entry_data = self._extract_signable_fields(
-                        cache_key=cache_key,
-                        entry_data=entry_data,
-                        metadata=metadata_dict,
-                    )
-
-                    signature = self.signer.sign_entry(complete_entry_data)
-                    metadata_dict["entry_signature"] = signature
-
-                    logger.debug(f"Created signature for entry {cache_key}")
-                except Exception as e:
-                    logger.warning(f"Failed to sign entry {cache_key}: {e}")
-
+            self._sign_entry_if_enabled(cache_key, entry_data, metadata_dict)
             self.metadata_backend.put_entry(cache_key, entry_data)
+            self._cleanup_stale_blob(cache_key, old_blob_path, result.actual_path)
 
             logger.debug(f"Stored {handler.data_type} {cache_key} (storage mode)")
             cleanup.commit()
@@ -1254,43 +1788,17 @@ class UnifiedCache:
             else self._get_cache_file_path(cache_key)
         )
 
-        # Integrity verification — return None without deleting
-        if self.config.metadata.verify_cache_integrity:
-            stored_hash = metadata.get("file_hash")
-            if stored_hash is not None:
-                current_hash = self._blob_store._calculate_file_hash(file_path)
-                if current_hash != stored_hash:
-                    logger.warning(
-                        f"Cache integrity verification failed for {cache_key}: "
-                        f"stored hash {stored_hash} != current hash {current_hash}. "
-                        f"Entry preserved (storage mode)."
-                    )
-                    return None
-
-        # Signature verification — return None without deleting
-        if self.signer and self.config.security.enable_entry_signing:
-            stored_signature = metadata.get("entry_signature")
-            if stored_signature is not None:
-                verify_data = self._extract_signable_fields(
-                    cache_key=cache_key,
-                    entry_data=entry,
-                    metadata=metadata,
-                )
-                if not self.signer.verify_entry(verify_data, stored_signature):
-                    logger.warning(
-                        f"Entry signature verification failed for {cache_key}. "
-                        f"Entry preserved (storage mode)."
-                    )
-                    return None
-            elif not self.config.security.allow_unsigned_entries:
-                logger.warning(
-                    f"Entry {cache_key} has no signature but unsigned entries "
-                    f"are not allowed. Entry preserved (storage mode)."
-                )
-                return None
+        # Integrity + signature verification — never deletes in storage mode
+        if not self._verify_entry(
+            cache_key, entry, metadata, file_path, storage_mode=True
+        ):
+            return None
 
         try:
-            data = self._blob_store._read_blob(file_path, data_type, metadata)
+            if entry.get("is_inline") and entry.get("blob_data") is not None:
+                data = self._read_inline_blob(entry, data_type, metadata)
+            else:
+                data = self._blob_store._read_blob(file_path, data_type, metadata)
             self.metadata_backend.update_access_time(cache_key)
             return data
         except Exception as e:
@@ -1322,42 +1830,17 @@ class UnifiedCache:
             else self._get_cache_file_path(cache_key)
         )
 
-        # Integrity verification — return None without deleting
-        if self.config.metadata.verify_cache_integrity:
-            stored_hash = metadata.get("file_hash")
-            if stored_hash is not None:
-                current_hash = self._blob_store._calculate_file_hash(file_path)
-                if current_hash != stored_hash:
-                    logger.warning(
-                        f"Cache integrity verification failed for {cache_key}. "
-                        f"Entry preserved (storage mode)."
-                    )
-                    return None
-
-        # Signature verification — return None without deleting
-        if self.signer and self.config.security.enable_entry_signing:
-            stored_signature = metadata.get("entry_signature")
-            if stored_signature is not None:
-                verify_data = self._extract_signable_fields(
-                    cache_key=cache_key,
-                    entry_data=entry,
-                    metadata=metadata,
-                )
-                if not self.signer.verify_entry(verify_data, stored_signature):
-                    logger.warning(
-                        f"Entry signature verification failed for {cache_key}. "
-                        f"Entry preserved (storage mode)."
-                    )
-                    return None
-            elif not self.config.security.allow_unsigned_entries:
-                logger.warning(
-                    f"Entry {cache_key} unsigned, not allowed. "
-                    f"Entry preserved (storage mode)."
-                )
-                return None
+        # Integrity + signature verification — never deletes in storage mode
+        if not self._verify_entry(
+            cache_key, entry, metadata, file_path, storage_mode=True
+        ):
+            return None
 
         try:
-            data = self._blob_store._read_blob(file_path, data_type, metadata)
+            if entry.get("is_inline") and entry.get("blob_data") is not None:
+                data = self._read_inline_blob(entry, data_type, metadata)
+            else:
+                data = self._blob_store._read_blob(file_path, data_type, metadata)
             self.metadata_backend.update_access_time(cache_key)
             entry["cache_key"] = cache_key
             return (data, entry)
@@ -1417,30 +1900,50 @@ class UnifiedCache:
             base_file_path = self._get_cache_file_path(cache_key)
             cleanup = _PutCleanup()
 
+            # Save old blob path before overwriting — if the data type changes,
+            # the new blob may use a different file extension, orphaning the old one
+            old_blob_path: Optional[str] = None
+            existing = self.metadata_backend.get_entry(cache_key)
+            if existing:
+                old_meta = existing.get("metadata", {})
+                old_blob_path = old_meta.get("actual_path")
+
             try:
-                # Delegate file I/O + handler dispatch to BlobStore
-                handler, result, file_hash = self._blob_store._write_blob(
-                    data,
-                    base_file_path,
-                    compute_hash=self.config.metadata.verify_cache_integrity,
-                )
+                # Try zero-disk inline serialization (no file I/O at all)
+                handler = self._blob_store.handlers.get_handler(data)
+                direct = self._try_direct_inline(data, handler)
 
-                # Track the blob path so we can clean up on failure
-                actual_path_str = result.get("actual_path", str(base_file_path))
-                if "://" not in actual_path_str:
-                    cleanup.blob_path = self._resolve_actual_path(actual_path_str)
+                if direct is not None:
+                    result = direct["result"]
+                    file_hash = direct["file_hash"]
+                    metadata_dict = self._build_metadata_dict(result, file_hash)
+                    metadata_dict["actual_path"] = None
+                    metadata_dict["inline_ext"] = direct["inline_ext"]
+                    if file_hash is not None:
+                        metadata_dict["file_hash"] = file_hash
+                else:
+                    # Delegate file I/O + handler dispatch to BlobStore
+                    wb = self._blob_store._write_blob(
+                        data,
+                        base_file_path,
+                        compute_hash=self.config.metadata.verify_cache_integrity,
+                    )
+                    handler, result, file_hash = wb.handler, wb.result, wb.file_hash
 
-                # If the blob was uploaded to a remote backend (e.g. S3),
-                # track it for rollback in case metadata write fails.
-                if "://" in actual_path_str:
-                    cleanup.set_remote(self._blob_store.blob_backend, actual_path_str)
+                    # Track the blob path so we can clean up on failure
+                    actual_path_str = result.actual_path
+                    if "://" not in actual_path_str:
+                        cleanup.blob_path = self._resolve_actual_path(actual_path_str)
 
-                # Update metadata
-                metadata_dict = {
-                    **result["metadata"],
-                    "actual_path": result.get("actual_path", str(base_file_path)),
-                    "file_hash": file_hash,  # Store file hash for verification
-                }
+                    # If the blob was uploaded to a remote backend (e.g. S3),
+                    # track it for rollback in case metadata write fails.
+                    if "://" in actual_path_str:
+                        cleanup.set_remote(
+                            self._blob_store.blob_backend, actual_path_str
+                        )
+
+                    # Update metadata
+                    metadata_dict = self._build_metadata_dict(result, file_hash)
 
                 # Store complete cache key parameters as JSON for debugging/querying (if enabled)
                 # This captures the original kwargs used to derive the cache key
@@ -1470,37 +1973,38 @@ class UnifiedCache:
                 entry_data = {
                     "data_type": handler.data_type,
                     "description": description,
-                    "file_size": result["file_size"],
+                    "file_size": result.file_size,
                     "metadata": metadata_dict,
                 }
 
+                if direct is not None:
+                    # Direct inline — data already in memory, no disk file
+                    entry_data["blob_data"] = direct["blob_data"]
+                    entry_data["is_inline"] = 1
+                else:
+                    # Try disk-based inline (read back from file)
+                    inline = self._try_inline_blob(result, file_hash, cleanup)
+                    if inline is not None:
+                        entry_data["blob_data"] = inline["blob_data"]
+                        entry_data["is_inline"] = 1
+                        metadata_dict["actual_path"] = None
+                        metadata_dict["inline_ext"] = inline["inline_ext"]
+                        if inline["file_hash"] is not None:
+                            metadata_dict["file_hash"] = inline["file_hash"]
+
+                # Populate per-entry TTL from config default (if set)
+                default_ttl = self.config.metadata.default_ttl_seconds
+                if default_ttl is not None:
+                    entry_data["ttl_seconds"] = int(default_ttl)
+                    # expires_at is computed by the backend from created_at + ttl_seconds
+
                 # Sign the entry if signing is enabled
-                if self.signer:
-                    try:
-                        # Use consistent timestamp for both storage and signing (always UTC)
-                        creation_timestamp = datetime.now(timezone.utc)
-                        # Store as UTC ISO format with timezone info
-                        creation_timestamp_str = creation_timestamp.isoformat()
-
-                        # Store the creation timestamp in entry_data for the database
-                        entry_data["created_at"] = creation_timestamp_str
-
-                        complete_entry_data = self._extract_signable_fields(
-                            cache_key=cache_key,
-                            entry_data=entry_data,
-                            metadata=metadata_dict,
-                        )
-
-                        signature = self.signer.sign_entry(complete_entry_data)
-                        metadata_dict["entry_signature"] = signature
-
-                        logger.debug(f"Created signature for entry {cache_key}")
-
-                    except Exception as e:
-                        logger.warning(f"Failed to sign entry {cache_key}: {e}")
-                        # Continue without signature for backward compatibility
+                self._sign_entry_if_enabled(cache_key, entry_data, metadata_dict)
 
                 self.metadata_backend.put_entry(cache_key, entry_data)
+
+                # Clean up old blob if the path changed
+                self._cleanup_stale_blob(cache_key, old_blob_path, result.actual_path)
 
                 # Handle custom metadata if provided
                 if custom_metadata and self._supports_custom_metadata():
@@ -1508,10 +2012,10 @@ class UnifiedCache:
 
                 self._enforce_size_limit()
 
-                file_size_mb = result["file_size"] / (1024 * 1024)
-                format_info = f"({result['storage_format']} format)"
+                file_size_display = format_size(result.file_size)
+                format_info = f"({result.storage_format} format)"
                 logger.info(
-                    f"Cached {handler.data_type} {cache_key} ({file_size_mb:.3f}MB) {format_info}: {description}"
+                    f"Cached {handler.data_type} {cache_key} ({file_size_display}) {format_info}: {description}"
                 )
 
                 cleanup.commit()
@@ -1532,6 +2036,7 @@ class UnifiedCache:
         self,
         cache_key: Optional[str] = None,
         on: Optional[Dict] = None,
+        ttl: Optional[str] = None,
         ttl_seconds: Optional[float] = None,
         hash_key: Optional[str] = None,
         **kwargs,
@@ -1544,14 +2049,20 @@ class UnifiedCache:
             hash_key: Alias for cache_key (storage-oriented name).
             on: Dictionary of key parameters for cache key derivation.
                 Use this to avoid namespace collisions with cache control
-                parameters like ttl_seconds, etc.
-            ttl_seconds: Custom TTL in seconds (overrides default). None = never expire.
+                parameters like ttl, ttl_seconds, etc.
+            ttl: TTL as a human-readable duration string (e.g. "6h", "2d").
+                Overrides default. Mutually exclusive with ``ttl_seconds``.
+            ttl_seconds: TTL in seconds (numeric only). Overrides default.
+                Mutually exclusive with ``ttl``. None = never expire.
             **kwargs: Parameters identifying the cached data (legacy, use 'on' instead)
 
         Returns:
             Cached data or None if not found/expired
         """
         with self._lock:
+            resolved_ttl = resolve_ttl(
+                ttl, ttl_seconds, _param_owner="UnifiedCache.get"
+            )
             cache_key = self._resolve_hash_key_alias(cache_key, hash_key)
             cache_key = self._resolve_cache_key(cache_key, on, kwargs)
 
@@ -1560,7 +2071,7 @@ class UnifiedCache:
 
             # Check if entry exists and is not expired
             entry = self.metadata_backend.get_entry(cache_key)
-            if not entry or self._is_expired(cache_key, ttl_seconds):
+            if not entry or self._is_expired(cache_key, resolved_ttl):
                 self._record_miss()
                 return None
 
@@ -1580,61 +2091,16 @@ class UnifiedCache:
                 else:
                     file_path = base_file_path
 
-                # Verify cache file integrity if enabled and hash is available
-                if self.config.metadata.verify_cache_integrity:
-                    stored_hash = metadata.get("file_hash")
-                    if stored_hash is not None:
-                        current_hash = self._blob_store._calculate_file_hash(file_path)
-                        if current_hash != stored_hash:
-                            logger.warning(
-                                f"Cache integrity verification failed for {cache_key}: "
-                                f"stored hash {stored_hash} != current hash {current_hash}. "
-                                f"Removing corrupted cache entry."
-                            )
-                            self.metadata_backend.remove_entry(cache_key)
-                            self._record_miss()
-                            return None
-
-                # Verify entry signature if signing is enabled
-                if self.signer and self.config.security.enable_entry_signing:
-                    stored_signature = metadata.get("entry_signature")
-
-                    if stored_signature is not None:
-                        verify_entry_data = self._extract_signable_fields(
-                            cache_key=cache_key,
-                            entry_data=entry,
-                            metadata=metadata,
-                        )
-
-                        if not self.signer.verify_entry(
-                            verify_entry_data, stored_signature
-                        ):
-                            if self.config.security.delete_invalid_signatures:
-                                logger.warning(
-                                    f"Entry signature verification failed for {cache_key}. "
-                                    f"Removing potentially tampered cache entry."
-                                )
-                                self.metadata_backend.remove_entry(cache_key)
-                                self._record_miss()
-                                return None
-                            else:
-                                logger.warning(
-                                    f"Entry signature verification failed for {cache_key}. "
-                                    f"Entry retained due to delete_invalid_signatures=False."
-                                )
-                                # Continue with loading despite invalid signature
-
-                    elif not self.config.security.allow_unsigned_entries:
-                        logger.warning(
-                            f"Entry {cache_key} has no signature but unsigned entries are not allowed. "
-                            f"Removing entry."
-                        )
-                        self.metadata_backend.remove_entry(cache_key)
-                        self._record_miss()
-                        return None
+                # Integrity + signature verification
+                if not self._verify_entry(cache_key, entry, metadata, file_path):
+                    self._record_miss()
+                    return None
 
                 # Delegate blob read to BlobStore
-                data = self._blob_store._read_blob(file_path, data_type, metadata)
+                if entry.get("is_inline") and entry.get("blob_data") is not None:
+                    data = self._read_inline_blob(entry, data_type, metadata)
+                else:
+                    data = self._blob_store._read_blob(file_path, data_type, metadata)
 
                 # Update access time
                 self.metadata_backend.update_access_time(cache_key)
@@ -1644,7 +2110,8 @@ class UnifiedCache:
                 return data
 
             except FileNotFoundError as e:
-                # Cache file was deleted externally — permanent, clean up metadata
+                # Cache file was deleted externally — blob already gone,
+                # just clean up metadata (no blob to delete)
                 logger.warning(f"Cache file missing for {cache_key}: {e}")
                 self.metadata_backend.remove_entry(cache_key)
                 self._record_miss()
@@ -1657,11 +2124,17 @@ class UnifiedCache:
                 return None
             except Exception as e:
                 # Unexpected errors (deserialization failures, corruption, etc.)
-                # These are likely permanent — clean up the metadata entry
-                logger.warning(
-                    f"Failed to load cached {data_type} {cache_key}: {type(e).__name__}: {e}"
-                )
-                self.metadata_backend.remove_entry(cache_key)
+                if self.config.metadata.delete_on_error:
+                    logger.warning(
+                        f"Failed to load cached {data_type} {cache_key}: {type(e).__name__}: {e}. "
+                        f"Removing corrupted cache entry."
+                    )
+                    self._blob_store.delete(cache_key)
+                else:
+                    logger.warning(
+                        f"Failed to load cached {data_type} {cache_key}: {type(e).__name__}: {e}. "
+                        f"Entry retained due to delete_on_error=False."
+                    )
                 self._record_miss()
                 return None
 
@@ -1756,61 +2229,16 @@ class UnifiedCache:
                 else:
                     file_path = base_file_path
 
-                # Verify cache file integrity if enabled and hash is available
-                if self.config.metadata.verify_cache_integrity:
-                    stored_hash = metadata.get("file_hash")
-                    if stored_hash is not None:
-                        current_hash = self._blob_store._calculate_file_hash(file_path)
-                        if current_hash != stored_hash:
-                            logger.warning(
-                                f"Cache integrity verification failed for {cache_key}: "
-                                f"stored hash {stored_hash} != current hash {current_hash}. "
-                                f"Removing corrupted cache entry."
-                            )
-                            self.metadata_backend.remove_entry(cache_key)
-                            self._record_miss()
-                            return None
-
-                # Verify entry signature if signing is enabled
-                if self.signer and self.config.security.enable_entry_signing:
-                    stored_signature = metadata.get("entry_signature")
-
-                    if stored_signature is not None:
-                        verify_entry_data = self._extract_signable_fields(
-                            cache_key=cache_key,
-                            entry_data=entry,
-                            metadata=metadata,
-                        )
-
-                        if not self.signer.verify_entry(
-                            verify_entry_data, stored_signature
-                        ):
-                            if self.config.security.delete_invalid_signatures:
-                                logger.warning(
-                                    f"Entry signature verification failed for {cache_key}. "
-                                    f"Removing potentially tampered cache entry."
-                                )
-                                self.metadata_backend.remove_entry(cache_key)
-                                self._record_miss()
-                                return None
-                            else:
-                                logger.warning(
-                                    f"Entry signature verification failed for {cache_key}. "
-                                    f"Entry retained due to delete_invalid_signatures=False."
-                                )
-                                # Continue with loading despite invalid signature
-
-                    elif not self.config.security.allow_unsigned_entries:
-                        logger.warning(
-                            f"Entry {cache_key} has no signature but unsigned entries are not allowed. "
-                            f"Removing entry."
-                        )
-                        self.metadata_backend.remove_entry(cache_key)
-                        self._record_miss()
-                        return None
+                # Integrity + signature verification
+                if not self._verify_entry(cache_key, entry, metadata, file_path):
+                    self._record_miss()
+                    return None
 
                 # Delegate blob read to BlobStore
-                data = self._blob_store._read_blob(file_path, data_type, metadata)
+                if entry.get("is_inline") and entry.get("blob_data") is not None:
+                    data = self._read_inline_blob(entry, data_type, metadata)
+                else:
+                    data = self._blob_store._read_blob(file_path, data_type, metadata)
 
                 # Update access time
                 self.metadata_backend.update_access_time(cache_key)
@@ -1823,7 +2251,8 @@ class UnifiedCache:
                 return (data, entry)
 
             except FileNotFoundError as e:
-                # Cache file was deleted externally — permanent, clean up metadata
+                # Cache file was deleted externally — blob already gone,
+                # just clean up metadata (no blob to delete)
                 logger.warning(f"Cache file missing for {cache_key}: {e}")
                 self.metadata_backend.remove_entry(cache_key)
                 self._record_miss()
@@ -1836,11 +2265,17 @@ class UnifiedCache:
                 return None
             except Exception as e:
                 # Unexpected errors (deserialization failures, corruption, etc.)
-                # These are likely permanent — clean up the metadata entry
-                logger.warning(
-                    f"Failed to load cached {data_type} {cache_key}: {type(e).__name__}: {e}"
-                )
-                self.metadata_backend.remove_entry(cache_key)
+                if self.config.metadata.delete_on_error:
+                    logger.warning(
+                        f"Failed to load cached {data_type} {cache_key}: {type(e).__name__}: {e}. "
+                        f"Removing corrupted cache entry."
+                    )
+                    self._blob_store.delete(cache_key)
+                else:
+                    logger.warning(
+                        f"Failed to load cached {data_type} {cache_key}: {type(e).__name__}: {e}. "
+                        f"Entry retained due to delete_on_error=False."
+                    )
                 self._record_miss()
                 return None
 
@@ -1891,6 +2326,585 @@ class UnifiedCache:
             entry["cache_key"] = cache_key
 
             return entry
+
+    # ── Convenience helpers: auto-populate metadata from cache key params ──
+
+    def put_with_meta(
+        self,
+        data: Any,
+        *,
+        on: Optional[Dict] = None,
+        description: str = "",
+        **kwargs,
+    ) -> str:
+        """Store data using kwargs as both the cache key and metadata_dict.
+
+        Every keyword argument is used to derive a deterministic cache key
+        **and** stored as a queryable ``metadata_dict`` entry.  This avoids
+        the common pattern of passing the same values twice (once for key
+        derivation and once for metadata).
+
+        Requires ``store_full_metadata=True`` in :class:`CacheConfig`.
+
+        Args:
+            data: Data to cache.
+            on: Optional extra key-only parameters that participate in cache
+                key derivation but are **not** stored in ``metadata_dict``.
+                Use this to create distinct cache entries that share the
+                same metadata (e.g. ``on={"epoch": 5}``).
+            description: Human-readable description (not part of the cache key).
+            **kwargs: Key-value pairs that become *both* cache key params and
+                ``metadata_dict`` entries.
+
+        Returns:
+            The 16-character hex cache key.
+
+        Raises:
+            ValueError: If no kwargs are provided, ``store_full_metadata``
+                is disabled, or *on* keys overlap with kwargs.
+
+        Example:
+            cache.put_with_meta(df, experiment="exp_001", model="xgboost",
+                                accuracy=0.95)
+            # With key discriminator:
+            cache.put_with_meta(df, on={"epoch": 5},
+                                model="xgboost", lr=0.01)
+        """
+        if not kwargs:
+            raise ValueError(
+                "put_with_meta() requires at least one keyword argument "
+                "to derive the cache key and populate metadata."
+            )
+        if not self.config.metadata.store_full_metadata:
+            raise ValueError(
+                "put_with_meta() requires store_full_metadata=True in "
+                "CacheConfig so that kwargs are persisted as metadata_dict."
+            )
+        key_params = self._merge_on_and_kwargs(on, kwargs)
+        cache_key = self._create_cache_key(key_params)
+        # Pass cache_key (pre-computed) so _resolve_cache_key won't
+        # conflict with **kwargs.  kwargs still flow to put() for
+        # metadata_dict storage via store_full_metadata.
+        return self.put(data, cache_key=cache_key, description=description, **kwargs)
+
+    def get_with_meta(
+        self,
+        *,
+        on: Optional[Dict] = None,
+        ttl: Optional[str] = None,
+        ttl_seconds: Optional[float] = None,
+        **kwargs,
+    ) -> Optional[tuple[Any, Dict[str, Any]]]:
+        """Retrieve data and its metadata_dict by exact key derived from kwargs.
+
+        This is the read counterpart of :meth:`put_with_meta`.  All kwargs
+        (and any *on* discriminators) are used to derive the same
+        deterministic cache key; on a hit the stored ``metadata_dict``
+        is returned alongside the data.
+
+        Args:
+            on: Optional extra key-only parameters that were used as
+                discriminators during :meth:`put_with_meta`.  Must match
+                the same *on* dict used at store time.
+            ttl: TTL as a human-readable duration string (e.g. ``"6h"``).
+            ttl_seconds: TTL in seconds.  Mutually exclusive with *ttl*.
+            **kwargs: The same key-value pairs used when the entry was stored
+                via :meth:`put_with_meta`.
+
+        Returns:
+            ``(data, metadata_dict)`` on a cache hit, ``None`` on a miss.
+            ``metadata_dict`` is a plain ``dict`` of the originally stored
+            kwargs (not the raw entry envelope).
+
+        Example:
+            result = cache.get_with_meta(experiment="exp_001", model="xgboost")
+            if result:
+                data, meta = result
+                print(meta["accuracy"])
+        """
+        if not kwargs:
+            raise ValueError("get_with_meta() requires at least one keyword argument.")
+        key_params = self._merge_on_and_kwargs(on, kwargs)
+        cache_key = self._create_cache_key(key_params)
+        data = self.get(cache_key=cache_key, ttl=ttl, ttl_seconds=ttl_seconds)
+        if data is None:
+            return None
+        entry = self.metadata_backend.get_entry(cache_key)
+        if entry is None:
+            return None
+        return (data, self._extract_metadata_dict(entry))
+
+    def put_with_model(
+        self,
+        data: Any,
+        model_class: type,
+        *,
+        on: Optional[Dict] = None,
+        description: str = "",
+        **kwargs,
+    ) -> str:
+        """Store data with kwargs as both cache key and ORM custom metadata.
+
+        A convenience wrapper that constructs an ORM instance from *kwargs*,
+        derives the cache key from the same values, and stores everything in
+        a single call.  Requires a SQLite or PostgreSQL metadata backend.
+
+        Args:
+            data: Data to cache.
+            model_class: A custom metadata model class decorated with
+                ``@register_custom_metadata``.  Must accept all *kwargs*
+                as column keyword arguments.
+            on: Optional extra key-only parameters that participate in cache
+                key derivation but are **not** stored in ORM columns.
+                Use this to create distinct cache entries that share the
+                same ORM metadata values.
+            description: Human-readable description (not part of the cache key).
+            **kwargs: Values passed to ``model_class(...)`` *and* used
+                for cache key derivation.
+
+        Returns:
+            The 16-character hex cache key.
+
+        Raises:
+            ValueError: If no kwargs are provided, custom metadata is
+                not supported, or *on* keys overlap with kwargs.
+            TypeError: If *model_class* cannot be instantiated with the
+                given kwargs.
+
+        Example:
+            cache.put_with_model(df, ExperimentMetadata,
+                                 experiment_id="exp_001",
+                                 model_type="xgboost", accuracy=0.95)
+            # With key discriminator:
+            cache.put_with_model(df, ExperimentMetadata,
+                                 on={"run_id": "run_42"},
+                                 experiment_id="exp_001",
+                                 model_type="xgboost", accuracy=0.95)
+        """
+        if not kwargs:
+            raise ValueError(
+                "put_with_model() requires at least one keyword argument "
+                "to derive the cache key and populate ORM columns."
+            )
+        if not self._supports_custom_metadata():
+            raise ValueError(
+                "put_with_model() requires a SQLite or PostgreSQL metadata "
+                "backend for custom metadata support."
+            )
+        key_params = self._merge_on_and_kwargs(on, kwargs)
+        instance = model_class(**kwargs)
+        return self.put(
+            data, on=key_params, description=description, custom_metadata=instance
+        )
+
+    def get_with_model(
+        self,
+        model_class: type,
+        *,
+        on: Optional[Dict] = None,
+        ttl: Optional[str] = None,
+        ttl_seconds: Optional[float] = None,
+        **kwargs,
+    ) -> Optional[tuple[Any, Any]]:
+        """Retrieve data and its ORM metadata instance by exact key.
+
+        The read counterpart of :meth:`put_with_model`.  All kwargs (and
+        any *on* discriminators) derive the cache key; on a hit the
+        matching ORM instance is fetched from the custom metadata table.
+
+        Args:
+            model_class: The same model class used when the entry was stored.
+            on: Optional extra key-only parameters that were used as
+                discriminators during :meth:`put_with_model`.  Must match
+                the same *on* dict used at store time.
+            ttl: TTL as a human-readable duration string.
+            ttl_seconds: TTL in seconds.  Mutually exclusive with *ttl*.
+            **kwargs: The same key-value pairs used in :meth:`put_with_model`.
+
+        Returns:
+            ``(data, orm_instance)`` on a cache hit, ``None`` on a miss or
+            if no ORM row exists for the entry.
+
+        Example:
+            result = cache.get_with_model(ExperimentMetadata,
+                                          experiment_id="exp_001",
+                                          model_type="xgboost")
+            if result:
+                data, exp = result
+                print(exp.accuracy)
+        """
+        if not kwargs:
+            raise ValueError("get_with_model() requires at least one keyword argument.")
+        key_params = self._merge_on_and_kwargs(on, kwargs)
+        cache_key = self._create_cache_key(key_params)
+        data = self.get(cache_key=cache_key, ttl=ttl, ttl_seconds=ttl_seconds)
+        if data is None:
+            return None
+
+        from .custom_metadata import get_schema_name_for_model
+
+        schema_name = get_schema_name_for_model(model_class)
+        if schema_name is None:
+            logger.warning(
+                f"Model class {model_class.__name__} is not registered "
+                f"with @register_custom_metadata"
+            )
+            return None
+        custom = self._get_custom_metadata(cache_key)
+        instance = custom.get(schema_name)
+        if instance is None:
+            return None
+        return (data, instance)
+
+    def query_with_meta(self, **kwargs):
+        """Generate ``(data, metadata_dict)`` tuples for entries matching filters.
+
+        Uses :meth:`query_meta` internally to find entries whose
+        ``metadata_dict`` contains all the given key-value pairs, then
+        lazily loads the blob data for each match.
+
+        Args:
+            **kwargs: Metadata filters (all must match).
+
+        Yields:
+            ``(data, metadata_dict)`` for each matching entry whose data
+            can be loaded successfully.
+
+        Example:
+            for data, meta in cache.query_with_meta(model="xgboost"):
+                print(meta["accuracy"])
+        """
+        matches = self.query_meta(**kwargs)
+        if not matches:
+            return
+        for entry in matches:
+            cache_key = entry.get("cache_key")
+            if cache_key is None:
+                continue
+            data = self.get(cache_key=cache_key)
+            if data is not None:
+                yield (data, entry.get("metadata_dict", {}))
+
+    def query_with_model(self, model_class: type, **kwargs):
+        """Generate ``(data, orm_instance)`` tuples for entries matching ORM filters.
+
+        Queries the custom metadata table for *model_class* using *kwargs*
+        as column equality filters, then lazily loads the blob data for
+        each match.
+
+        Args:
+            model_class: A registered custom metadata model class.
+            **kwargs: Column equality filters (all must match).
+
+        Yields:
+            ``(data, orm_instance)`` for each matching row whose cache
+            entry can be loaded successfully.
+
+        Raises:
+            ValueError: If custom metadata is not supported or the model
+                class is not registered.
+
+        Example:
+            for data, exp in cache.query_with_model(ExperimentMetadata,
+                                                     model_type="xgboost"):
+                print(exp.accuracy)
+        """
+        if not self._supports_custom_metadata():
+            raise ValueError(
+                "query_with_model() requires a SQLite or PostgreSQL metadata backend."
+            )
+
+        from .custom_metadata import (
+            get_schema_name_for_model,
+            get_namespace_custom_model,
+        )
+
+        schema_name = get_schema_name_for_model(model_class)
+        if schema_name is None:
+            raise ValueError(
+                f"Model class {model_class.__name__} is not registered "
+                f"with @register_custom_metadata."
+            )
+
+        ns_model = get_namespace_custom_model(schema_name, self.namespace)
+        if ns_model is None:
+            raise ValueError(f"No namespace model found for schema '{schema_name}'.")
+
+        if not hasattr(self.metadata_backend, "SessionLocal"):
+            raise ValueError("SQLAlchemy session not available.")
+
+        # Eagerly load all matching ORM instances and detach them from the
+        # session so the caller can use them freely after the session closes.
+        with self.metadata_backend.SessionLocal() as session:
+            query = session.query(ns_model)
+            for field, value in kwargs.items():
+                if not hasattr(ns_model, field):
+                    raise ValueError(
+                        f"Unknown column '{field}' on model '{model_class.__name__}'."
+                    )
+                query = query.filter(getattr(ns_model, field) == value)
+
+            instances = query.all()
+            for inst in instances:
+                session.expunge(inst)
+
+        # Yield (data, orm_instance) lazily — data loading may be expensive.
+        for instance in instances:
+            cache_key = instance.cache_key
+            data = self.get(cache_key=cache_key)
+            if data is not None:
+                yield (data, instance)
+
+    # ── File convenience helpers ────────────────────────────────────
+
+    def put_file(
+        self,
+        file_path: str | Path,
+        *,
+        cache_key: Optional[str] = None,
+        on: Optional[Dict] = None,
+        description: str = "",
+        custom_metadata=None,
+        move: bool = False,
+        **kwargs,
+    ) -> str:
+        """Store an arbitrary file in the cache.
+
+        Reads the file into memory as raw bytes and delegates to
+        :meth:`put`.  File metadata (original filename, MIME type,
+        file size) is automatically recorded in ``metadata_dict``
+        when ``store_full_metadata=True``.
+
+        Args:
+            file_path: Path to the source file (``str`` or ``pathlib.Path``).
+            cache_key: Explicit cache key.  When provided, *on* and
+                ``**kwargs`` are ignored for key derivation.
+            on: Dictionary of key parameters for cache key derivation.
+            description: Human-readable description.
+            custom_metadata: Custom metadata for the cache entry.  Supports
+                single ORM objects, lists/tuples of ORM objects, or dicts.
+                Passed through to :meth:`put` unchanged.
+            move: If ``True``, delete the source file after a successful
+                store (move-in semantics).  Defaults to ``False`` (copy-in).
+            **kwargs: Extra key-value pairs for key derivation and/or
+                ``metadata_dict`` (when ``store_full_metadata=True``).
+
+        Returns:
+            The 16-character hex cache key.
+
+        Raises:
+            FileNotFoundError: If *file_path* does not exist.
+            IsADirectoryError: If *file_path* is a directory.
+
+        Example:
+            key = cache.put_file("data/model.onnx",
+                                  description="ONNX model v2")
+            key = cache.put_file("output.csv", on={"run": "exp_01"})
+        """
+        import mimetypes
+
+        src = Path(file_path)
+        if not src.exists():
+            raise FileNotFoundError(f"Source file does not exist: {src}")
+        if src.is_dir():
+            raise IsADirectoryError(f"Expected a file, got a directory: {src}")
+
+        data = src.read_bytes()
+        mime_type, _ = mimetypes.guess_type(str(src))
+
+        # File metadata must NOT participate in cache key derivation.
+        # Resolve the key from user-supplied params first, then pass
+        # everything (file meta + user kwargs) with an explicit cache_key
+        # so that _resolve_cache_key returns immediately.
+        file_meta = {
+            "original_filename": src.name,
+            "mime_type": mime_type or "application/octet-stream",
+            "original_size": len(data),
+        }
+        merged_kwargs = {**file_meta, **kwargs}  # user kwargs win on conflict
+
+        if cache_key is None:
+            cache_key = self._resolve_cache_key(None, on, kwargs)
+
+        result_key = self.put(
+            data,
+            cache_key=cache_key,
+            description=description,
+            custom_metadata=custom_metadata,
+            **merged_kwargs,
+        )
+
+        if move:
+            src.unlink()
+
+        return result_key
+
+    def get_file(
+        self,
+        cache_key: Optional[str] = None,
+        *,
+        dest: str | Path | None = None,
+        on: Optional[Dict] = None,
+        ttl: Optional[str] = None,
+        ttl_seconds: Optional[float] = None,
+        move: bool = False,
+        overwrite: bool = True,
+        **kwargs,
+    ) -> Optional[bytes | Path]:
+        """Retrieve cached file data, optionally writing it to disk.
+
+        This is the read counterpart of :meth:`put_file`.  When *dest*
+        is provided the raw bytes are written to that path and a
+        ``pathlib.Path`` is returned.  Otherwise the raw ``bytes`` are
+        returned directly.
+
+        Args:
+            cache_key: Explicit cache key.  When provided, *on* and
+                ``**kwargs`` are ignored.
+            dest: Optional destination path.  Parent directories are
+                created automatically.  If *dest* is a directory, the
+                original filename from metadata is used (falls back to
+                ``<cache_key>.bin`` when unavailable).
+            on: Dictionary of key parameters for key lookup.
+            ttl: TTL as a human-readable duration string (e.g. ``"6h"``).
+            ttl_seconds: TTL in seconds.  Mutually exclusive with *ttl*.
+            move: If ``True``, delete the cache entry after a successful
+                write to *dest* (move-out semantics).  Requires *dest*
+                to be set — raises ``ValueError`` otherwise.  Defaults
+                to ``False`` (copy-out).
+            overwrite: If ``False``, raise ``FileExistsError`` when
+                *dest* already exists on disk.  Defaults to ``True``
+                (silently overwrite).
+            **kwargs: Key-value pairs for key derivation (must match what
+                was passed to :meth:`put_file`).
+
+        Returns:
+            * ``bytes`` — when *dest* is ``None`` and entry exists.
+            * ``pathlib.Path`` — when *dest* is given and entry exists.
+            * ``None`` — on a cache miss.
+
+        Raises:
+            ValueError: If *move* is ``True`` but *dest* is ``None``.
+            FileExistsError: If *overwrite* is ``False`` and *dest*
+                already exists.
+
+        Example:
+            raw = cache.get_file("abc123def4567890")
+            path = cache.get_file("abc123def4567890",
+                                   dest="output/model.onnx")
+        """
+        if move and dest is None:
+            raise ValueError(
+                "move=True requires dest to be set. "
+                "Without a destination path, use get() + invalidate() instead."
+            )
+
+        data = self.get(
+            cache_key=cache_key,
+            on=on,
+            ttl=ttl,
+            ttl_seconds=ttl_seconds,
+            **kwargs,
+        )
+        if data is None:
+            return None
+
+        # Ensure we have bytes (in case the entry was stored without put_file)
+        if not isinstance(data, (bytes, bytearray, memoryview)):
+            raise TypeError(
+                f"Expected bytes from cache, got {type(data).__name__}. "
+                "get_file() should only be used with entries stored via put_file()."
+            )
+        raw = bytes(data) if not isinstance(data, bytes) else data
+
+        if dest is None:
+            return raw
+
+        dest_path = Path(dest)
+        if dest_path.is_dir():
+            # Resolve filename from metadata
+            resolved_key = (
+                cache_key
+                if cache_key is not None
+                else self._resolve_cache_key(None, on, kwargs)
+            )
+            filename = self._resolve_original_filename(resolved_key)
+            dest_path = dest_path / filename
+
+        if not overwrite and dest_path.exists():
+            raise FileExistsError(
+                f"Destination already exists: {dest_path}. "
+                "Pass overwrite=True to overwrite."
+            )
+
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        dest_path.write_bytes(raw)
+
+        if move:
+            resolved_key = (
+                cache_key
+                if cache_key is not None
+                else self._resolve_cache_key(None, on, kwargs)
+            )
+            self.invalidate(cache_key=resolved_key)
+
+        return dest_path
+
+    def _resolve_original_filename(self, cache_key: str) -> str:
+        """Look up the original filename from metadata, with fallback."""
+        entry = self.metadata_backend.get_entry(cache_key)
+        if entry:
+            meta = self._extract_metadata_dict(entry)
+            name = meta.get("original_filename")
+            if name:
+                return name
+        return f"{cache_key}.bin"
+
+    # ── Private helpers for convenience methods ─────────────────────
+
+    @staticmethod
+    def _merge_on_and_kwargs(
+        on: Optional[Dict], kwargs: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Merge *on* discriminators with *kwargs* for cache key derivation.
+
+        Raises :class:`ValueError` if *on* contains keys that also appear
+        in *kwargs* (ambiguous key sources are a bug).
+
+        Returns a merged dict suitable for :meth:`_create_cache_key`.
+        """
+        if not on:
+            return dict(kwargs)
+        overlap = set(on) & set(kwargs)
+        if overlap:
+            raise ValueError(
+                f"'on' keys overlap with kwargs: {sorted(overlap)}. "
+                "Each parameter must appear in either 'on' or kwargs, not both."
+            )
+        return {**on, **kwargs}
+
+    @staticmethod
+    def _extract_metadata_dict(entry: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract the user-facing ``metadata_dict`` from a raw entry.
+
+        The stored value may be a JSON string (SQLite/PG) or already a
+        ``dict`` (in-memory / JSON backend).  Returns an empty dict when
+        the field is absent or unparseable.
+        """
+        meta = entry.get("metadata", {})
+        raw = meta.get("metadata_dict")
+        if raw is None:
+            raw = entry.get("metadata_dict")
+        if isinstance(raw, str):
+            try:
+                from .json_utils import loads as json_loads
+
+                return json_loads(raw)
+            except Exception:
+                return {}
+        if isinstance(raw, dict):
+            return raw
+        return {}
 
     def exists(
         self,
@@ -2008,37 +3022,80 @@ class UnifiedCache:
             cleanup = _PutCleanup()
 
             try:
-                # Write new blob to staging path (different blob_id)
-                handler, result, _ = self._blob_store._write_blob(
-                    data, staging_base, compute_hash=False
-                )
+                # Try zero-disk inline serialization first
+                handler = self._blob_store.handlers.get_handler(data)
+                direct = self._try_direct_inline(data, handler)
 
-                actual_path_str = str(result.get("actual_path", staging_base))
-                if "://" not in actual_path_str:
-                    cleanup.blob_path = self._resolve_actual_path(actual_path_str)
+                if direct is not None:
+                    result = direct["result"]
+                    updates = {
+                        "file_size": result.file_size,
+                        "content_hash": result.extra.get("content_hash"),
+                        "file_hash": direct["file_hash"],
+                        "actual_path": None,
+                        "storage_format": result.storage_format,
+                        "blob_data": direct["blob_data"],
+                        "is_inline": 1,
+                        "inline_ext": direct["inline_ext"],
+                    }
+                    if hasattr(handler, "data_type"):
+                        updates["data_type"] = handler.data_type
+                    if result.serializer:
+                        updates["serializer"] = result.serializer
+                    if result.compression_codec:
+                        updates["compression_codec"] = result.compression_codec
+                    if result.object_type:
+                        updates["object_type"] = result.object_type
+                else:
+                    # Write new blob to staging path (different blob_id)
+                    wb = self._blob_store._write_blob(
+                        data, staging_base, compute_hash=False
+                    )
+                    handler, result = wb.handler, wb.result
 
-                # Track remote blob for rollback on S3
-                if "://" in actual_path_str:
-                    cleanup.set_remote(self._blob_store.blob_backend, actual_path_str)
+                    actual_path_str = result.actual_path
+                    if "://" not in actual_path_str:
+                        cleanup.blob_path = self._resolve_actual_path(actual_path_str)
 
-                # Build metadata updates dict from handler result
-                updates = {
-                    "file_size": result.get("file_size", 0),
-                    "content_hash": result.get("content_hash"),
-                    "file_hash": result.get("file_hash"),
-                    "actual_path": actual_path_str,
-                    "storage_format": result.get("storage_format"),
-                }
-                if hasattr(handler, "data_type"):
-                    updates["data_type"] = handler.data_type
-                if hasattr(handler, "serializer"):
-                    updates["serializer"] = handler.serializer
-                if result.get("compression_codec"):
-                    updates["compression_codec"] = result["compression_codec"]
-                if result.get("object_type"):
-                    updates["object_type"] = result["object_type"]
-                if result.get("s3_etag"):
-                    updates["s3_etag"] = result["s3_etag"]
+                    # Track remote blob for rollback on S3
+                    if "://" in actual_path_str:
+                        cleanup.set_remote(
+                            self._blob_store.blob_backend, actual_path_str
+                        )
+
+                    # Build metadata updates dict from handler result
+                    updates = {
+                        "file_size": result.file_size,
+                        "content_hash": result.extra.get("content_hash"),
+                        "file_hash": result.extra.get("file_hash"),
+                        "actual_path": actual_path_str,
+                        "storage_format": result.storage_format,
+                    }
+                    if hasattr(handler, "data_type"):
+                        updates["data_type"] = handler.data_type
+                    if result.serializer:
+                        updates["serializer"] = result.serializer
+                    if result.compression_codec:
+                        updates["compression_codec"] = result.compression_codec
+                    if result.object_type:
+                        updates["object_type"] = result.object_type
+                    if result.extra.get("s3_etag"):
+                        updates["s3_etag"] = result.extra["s3_etag"]
+
+                    # Try disk-based inline (read back from file)
+                    inline = self._try_inline_blob(result, None, cleanup)
+                    if inline is not None:
+                        updates["blob_data"] = inline["blob_data"]
+                        updates["is_inline"] = 1
+                        updates["actual_path"] = None
+                        updates["inline_ext"] = inline["inline_ext"]
+                        if inline["file_hash"] is not None:
+                            updates["file_hash"] = inline["file_hash"]
+                    else:
+                        # Ensure previous inline data is cleared if blob is now external
+                        updates["blob_data"] = None
+                        updates["is_inline"] = 0
+                        updates["inline_ext"] = None
 
                 # Delegate metadata-only update to backend (no I/O in metadata layer)
                 self.metadata_backend.update_entry_metadata(
@@ -2426,28 +3483,29 @@ class UnifiedCache:
 
     def _enforce_size_limit(self):
         """Enforce cache size limits using LRU eviction."""
-        if self.config.storage.max_cache_size_mb is None:
+        max_size_bytes = self.config.storage.max_cache_size_bytes
+        if max_size_bytes is None:
             return  # No size limit configured
 
         # Get current total size from metadata backend
         stats = self.metadata_backend.get_stats()
-        total_size_mb = stats.get("total_size_mb", 0)
+        total_size_bytes = stats.get("total_size_bytes", 0)
 
-        if total_size_mb <= self.config.storage.max_cache_size_mb:
+        if total_size_bytes <= max_size_bytes:
             return
 
-        # Use metadata backend's cleanup functionality
-        target_size = (
-            self.config.storage.max_cache_size_mb * 0.8
-        )  # Clean to 80% of limit
+        # Use metadata backend's cleanup functionality — clean to 80% of limit
+        target_size_bytes = int(max_size_bytes * 0.8)
 
-        result = self.metadata_backend.cleanup_by_size(target_size)
+        result = self.metadata_backend.cleanup_by_size(target_size_bytes)
         removed_count = result.get("count", 0)
         removed_entries = result.get("removed_entries", [])
 
         # Delete blob files for removed entries
         blobs_deleted = 0
         for entry in removed_entries:
+            entry_key = entry.get("cache_key", "unknown")
+            self._invoke_hook("on_evict", entry_key, "size_limit")
             actual_path = entry.get("actual_path")
             if actual_path and "://" not in actual_path:
                 blob_file = self._resolve_actual_path(actual_path)
@@ -2496,7 +3554,7 @@ class UnifiedCache:
 
     def verify_integrity(
         self, repair: bool = False, verify_hashes: bool = False
-    ) -> Dict[str, Any]:
+    ) -> IntegrityReport:
         """
         Verify cache integrity by cross-checking blob files and metadata entries.
 
@@ -2511,8 +3569,9 @@ class UnifiedCache:
             verify_hashes: If True, also verify file hashes (slower but catches corruption).
 
         Returns:
-            Dict with keys: orphaned_blobs, dangling_entries, size_mismatches,
+            IntegrityReport with orphaned_blobs, dangling_entries, size_mismatches,
             hash_mismatches (if verify_hashes), repaired (if repair).
+            Supports dict-style access for backward compatibility.
         """
         return self._blob_store.verify_integrity(
             repair=repair, verify_hashes=verify_hashes
@@ -2639,6 +3698,8 @@ class UnifiedCache:
             # Delete blob files for expired entries
             blobs_deleted = 0
             for entry in expired_entries:
+                entry_key = entry.get("cache_key", "unknown")
+                self._invoke_hook("on_evict", entry_key, "expired")
                 actual_path = entry.get("actual_path")
                 if actual_path and "://" not in actual_path:
                     blob_file = self._resolve_actual_path(actual_path)
@@ -2670,7 +3731,8 @@ class UnifiedCache:
         stats.update(
             {
                 "cache_dir": str(self.cache_dir),
-                "max_size_mb": self.config.storage.max_cache_size_mb,
+                "max_size_bytes": self.config.storage.max_cache_size_bytes,
+                "max_size_mb": self.config.storage.max_cache_size_mb,  # Backward compat
                 "default_ttl_seconds": self.config.metadata.default_ttl_seconds,
                 "backend_type": self.actual_backend,  # Report actual backend used
             }
@@ -2678,21 +3740,81 @@ class UnifiedCache:
 
         return stats
 
-    def list_entries(self) -> List[Dict[str, Any]]:
-        """List all cache entries with metadata."""
+    def list_entries(self) -> EntryList:
+        """List all cache entries with metadata.
+
+        Returns:
+            EntryList of entry dicts.  Extends ``list`` so existing
+            iteration/indexing code is unaffected.  Adds convenience
+            methods: ``.to_dataframe()``, ``.to_json()``, ``.keys()``,
+            ``.sort_by()``, ``.filter()``, ``.first()``/``.last()``.
+        """
         entries = self.metadata_backend.list_entries()
 
         # Add expiration status for each entry
         for entry in entries:
             entry["expired"] = self._is_expired(entry["cache_key"])
 
-        return entries
+        return EntryList(entries)
 
     def close(self):
         """Close all resources (database connections, etc.)."""
         if hasattr(self, "metadata_backend") and self.metadata_backend:
             if hasattr(self.metadata_backend, "close"):
                 self.metadata_backend.close()
+
+    def __len__(self) -> int:
+        """Return the number of cache entries.
+
+        Enables ``len(cache)`` to check how many entries exist.
+        This is a lightweight metadata-only operation.
+
+        Returns:
+            int: Total number of cache entries.
+
+        Example:
+            cache = UnifiedCache(cache_dir="/tmp/cache")
+            cache.put("value", on={"key": "a"})
+            assert len(cache) == 1
+        """
+        with self._lock:
+            stats = self.metadata_backend.get_stats()
+            return stats.get("total_entries", 0)
+
+    def __contains__(self, cache_key: str) -> bool:
+        """Check if a cache key exists (metadata-only, respects TTL).
+
+        Enables ``"my_key" in cache`` syntax.  Delegates to :meth:`exists`
+        so expired entries are treated as absent.
+
+        Args:
+            cache_key: The cache key to look up.
+
+        Returns:
+            bool: True if the entry exists and has not expired.
+
+        Example:
+            if "my_key" in cache:
+                data = cache.get(cache_key="my_key")
+        """
+        return self.exists(cache_key=cache_key)
+
+    def __iter__(self):
+        """Iterate over entry summaries.
+
+        Enables ``for entry in cache`` to loop over all cached entries.
+        Each yielded item is a lightweight summary dict produced by
+        :meth:`metadata_backend.iter_entry_summaries`.
+
+        Yields:
+            dict: Entry summary dictionaries.
+
+        Example:
+            for entry in cache:
+                print(entry["cache_key"])
+        """
+        with self._lock:
+            yield from self.metadata_backend.iter_entry_summaries()
 
     def __del__(self):
         """Ensure resources are cleaned up when the cache is garbage collected."""
@@ -2715,7 +3837,8 @@ class UnifiedCache:
     def for_api(
         cls,
         cache_dir: Optional[str] = None,
-        ttl_seconds: float = 21600,  # 6 hours
+        ttl: Optional[str] = None,
+        ttl_seconds: Optional[float] = None,
         ignore_errors: bool = True,
         **kwargs,
     ) -> "UnifiedCache":
@@ -2729,13 +3852,18 @@ class UnifiedCache:
 
         Args:
             cache_dir: Cache directory (default: ./cache)
-            ttl_seconds: Time-to-live in seconds (default: 21600 = 6 hours)
+            ttl: TTL as a human-readable duration string (e.g. "6h").
+                Mutually exclusive with ``ttl_seconds``.
+            ttl_seconds: TTL in seconds (numeric only). Default: 21600 = 6 hours.
+                Mutually exclusive with ``ttl``.
             ignore_errors: Continue on cache errors
             **kwargs: Additional config options
         """
+        resolved = resolve_ttl(ttl, ttl_seconds, _param_owner="UnifiedCache.for_api")
+        ttl_value = resolved if resolved is not None else 21600
         config = create_cache_config(
             cache_dir=cache_dir or "./cache",
-            default_ttl_seconds=ttl_seconds,
+            default_ttl_seconds=ttl_value,
             pickle_compression_codec="zstd",  # Fast for JSON/text
             pickle_compression_level=3,
             **kwargs,

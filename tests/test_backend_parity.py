@@ -263,10 +263,10 @@ class TestBackendParity:
         time.sleep(0.01)
         sqlite_backend.get_entry("recent_large")  # Accessed third (most recent)
 
-        # Total size: 6 MB, target: 2 MB
+        # Total size: 6 MB, target: 2 MB (in bytes)
         # Should remove oldest entries (old_large: 3MB, then mid_large: 2MB)
         # Leaving only recent_large (1MB)
-        result = sqlite_backend.cleanup_by_size(target_size_mb=2.0)
+        result = sqlite_backend.cleanup_by_size(target_size_bytes=2 * 1024 * 1024)
 
         # Verify result structure
         assert "count" in result
@@ -346,7 +346,7 @@ class TestBackendParity:
             "metadata": {
                 "actual_path": "/very/long/path/to/file" * 10,
                 "object_type": "<class 'numpy.ndarray'>",
-                "storage_format": "blosc2",
+                "storage_format": "blosc2_array",
                 "serializer": "pickle",
                 "compression_codec": "zstd",
                 "file_hash": "a" * 16,
@@ -361,7 +361,7 @@ class TestBackendParity:
         # All technical fields should be preserved
         assert retrieved["metadata"]["actual_path"] == "/very/long/path/to/file" * 10
         assert retrieved["metadata"]["object_type"] == "<class 'numpy.ndarray'>"
-        assert retrieved["metadata"]["storage_format"] == "blosc2"
+        assert retrieved["metadata"]["storage_format"] == "blosc2_array"
         assert retrieved["metadata"]["file_hash"] == "a" * 16
         assert retrieved["metadata"]["s3_etag"] == "b" * 32
 

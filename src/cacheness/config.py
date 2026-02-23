@@ -8,10 +8,11 @@ Configuration is split into focused sub-configurations for better maintainabilit
 
 import logging
 from dataclasses import dataclass, field
-from typing import Optional, List, Union
+from typing import Any, Callable, Optional, List, Union
 from pathlib import Path
 
 from .metadata import validate_namespace_id, DEFAULT_NAMESPACE
+from .size_utils import parse_size, format_size, parse_duration
 
 logger = logging.getLogger(__name__)
 
@@ -21,10 +22,22 @@ _DEFAULT_TTL = object()
 
 @dataclass
 class CacheStorageConfig:
-    """Configuration for cache storage and directory management."""
+    """Configuration for cache storage and directory management.
+
+    Size limits can be specified via either field:
+
+    - ``max_cache_size`` — human-readable string (``"2GB"``, ``"500MB"``)
+      or raw bytes (``int``).  **Preferred.**
+    - ``max_cache_size_mb`` — legacy, size in megabytes (``int``).
+      Still works but ``max_cache_size`` takes precedence when both are set.
+
+    Internally all size arithmetic uses bytes (``int``) via
+    :attr:`max_cache_size_bytes`.
+    """
 
     cache_dir: str = "./cache"
-    max_cache_size_mb: Optional[int] = 2000  # Match test expectation
+    max_cache_size: Optional[Union[str, int]] = None  # "2GB", "500MB", or bytes int
+    max_cache_size_mb: Optional[int] = 2000  # Legacy — still works
     cleanup_on_init: bool = True  # Match test expectation
     verify_cache_integrity: bool = True
     create_cache_dir: bool = (
@@ -34,9 +47,28 @@ class CacheStorageConfig:
         None  # Temporary directory for atomic writes (None = use cache_dir/tmp)
     )
 
+    @property
+    def max_cache_size_bytes(self) -> Optional[int]:
+        """Canonical size limit in bytes (``int``).
+
+        Resolves ``max_cache_size`` (preferred) or ``max_cache_size_mb``
+        (legacy) into a single bytes value.  Returns ``None`` when no
+        limit is configured.
+        """
+        if self.max_cache_size is not None:
+            return parse_size(self.max_cache_size)
+        if self.max_cache_size_mb is not None:
+            return int(self.max_cache_size_mb * 1024 * 1024)
+        return None
+
     def __post_init__(self):
         """Validate storage configuration."""
-        if self.max_cache_size_mb is not None and self.max_cache_size_mb <= 0:
+        if self.max_cache_size is not None:
+            # Eagerly validate so typos like "2 Gigglebytes" fail fast
+            parsed = parse_size(self.max_cache_size)
+            if parsed <= 0:
+                raise ValueError("max_cache_size must be positive")
+        elif self.max_cache_size_mb is not None and self.max_cache_size_mb <= 0:
             raise ValueError("max_cache_size_mb must be positive")
 
         # Convert relative path to absolute to avoid directory confusion, but preserve "./cache" and "./yaml_cache" as is for backwards compatibility
@@ -46,8 +78,13 @@ class CacheStorageConfig:
         ):
             self.cache_dir = str(Path.cwd() / self.cache_dir)
 
+        limit_display = (
+            format_size(self.max_cache_size_bytes)
+            if self.max_cache_size_bytes
+            else "unlimited"
+        )
         logger.debug(
-            f"Storage configured: dir={self.cache_dir}, max_size={self.max_cache_size_mb}MB"
+            f"Storage configured: dir={self.cache_dir}, max_size={limit_display}"
         )
 
 
@@ -66,11 +103,15 @@ class CacheMetadataConfig:
 
     # TTL configuration (standardized on seconds for consistency)
     default_ttl_seconds: float = 86400  # Cache TTL in seconds (default: 24 hours)
+    default_ttl: Optional[Union[str, int, float]] = (
+        None  # Human-readable TTL (e.g. "24h", "30m"). Overrides default_ttl_seconds.
+    )
 
     verify_cache_integrity: bool = True
     store_full_metadata: bool = False  # Store complete cache key parameters (kwargs) as JSON for debugging/querying - DISABLED by default for performance
     enable_cache_stats: bool = True  # Track cache hit/miss statistics
     auto_cleanup_expired: bool = True  # Automatically clean up expired entries
+    delete_on_error: bool = True  # Auto-delete cache entries on deserialization/corruption errors. Set False to preserve entries and return None instead.
 
     # Memory cache layer (sits between application and disk-persistent backends)
     enable_memory_cache: bool = (
@@ -81,12 +122,25 @@ class CacheMetadataConfig:
         1000  # Maximum number of metadata entries to cache in memory
     )
     memory_cache_ttl_seconds: float = 300  # 5 minutes TTL for memory-cached entries
+    memory_cache_ttl: Optional[Union[str, int, float]] = (
+        None  # Human-readable TTL (e.g. "5m"). Overrides memory_cache_ttl_seconds.
+    )
     memory_cache_stats: bool = (
         False  # Enable cache hit/miss statistics for memory cache layer
     )
 
+    def resolve_duration_fields(self):
+        """Resolve human-readable duration fields to their canonical seconds fields."""
+        if self.default_ttl is not None:
+            self.default_ttl_seconds = parse_duration(self.default_ttl)
+        if self.memory_cache_ttl is not None:
+            self.memory_cache_ttl_seconds = parse_duration(self.memory_cache_ttl)
+
     def __post_init__(self):
         """Validate metadata backend configuration."""
+        # Resolve human-readable duration strings before validation
+        self.resolve_duration_fields()
+
         # Note: Custom backends are validated when get_metadata_backend() is called
 
         # Validate TTL (None means infinite / no expiration)
@@ -160,6 +214,11 @@ class CacheBlobConfig:
         2  # Number of leading chars for directory sharding (0 to disable)
     )
 
+    # Inline blob storage — store small blobs directly in metadata DB
+    # instead of as separate files.  0 = disabled (default).
+    # Recommended: 4000 for SQLite (page-size sweet spot), 2000 for PostgreSQL (TOAST threshold).
+    max_inline_size: int = 0
+
     # Streaming options
     stream_threshold_bytes: int = (
         10 * 1024 * 1024
@@ -171,6 +230,9 @@ class CacheBlobConfig:
         if self.blob_backend_options is not None:
             if not isinstance(self.blob_backend_options, dict):
                 raise ValueError("blob_backend_options must be a dictionary")
+
+        if self.max_inline_size < 0:
+            raise ValueError("max_inline_size must be non-negative")
 
         if self.stream_threshold_bytes < 0:
             raise ValueError("stream_threshold_bytes must be non-negative")
@@ -291,6 +353,7 @@ class HandlerConfig:
     enable_numpy_arrays: bool = True
     enable_object_pickle: bool = True
     enable_tensorflow_tensors: bool = False  # Disabled by default due to import issues
+    enable_bytes_handler: bool = True
 
     # Advanced serialization options
     enable_dill_fallback: bool = True  # Use dill for objects that pickle can't handle
@@ -307,6 +370,7 @@ class HandlerConfig:
                 "pandas_series",
                 "polars_series",
                 "tensorflow_tensors",
+                "bytes",
             }
 
             invalid_handlers = set(self.handler_priority) - valid_handlers
@@ -349,6 +413,30 @@ class SecurityConfig:
         )
 
 
+@dataclass
+class HooksConfig:
+    """Optional lifecycle callbacks for cache events.
+
+    All callbacks default to ``None`` (no-op).  When set, the cache invokes
+    them **synchronously** during the relevant operation.  Callbacks MUST
+    NOT raise — any exception is logged and swallowed so it never breaks
+    the cache operation itself.
+
+    Attributes:
+        on_evict: Called when an entry is removed by size-limit enforcement
+            or TTL cleanup.  Signature: ``(cache_key: str, reason: str) -> None``
+            where *reason* is ``"size_limit"`` or ``"expired"``.
+        on_integrity_failure: Called when an entry fails hash or signature
+            verification.  Signature:
+            ``(cache_key: str, failure_type: str, detail: str) -> None``
+            where *failure_type* is ``"hash_mismatch"``, ``"signature_invalid"``,
+            or ``"unsigned_rejected"``.
+    """
+
+    on_evict: Optional[Callable[..., Any]] = None
+    on_integrity_failure: Optional[Callable[..., Any]] = None
+
+
 class CacheConfig:
     """Main configuration class that combines all sub-configurations."""
 
@@ -359,6 +447,7 @@ class CacheConfig:
     serialization: SerializationConfig = field(default_factory=SerializationConfig)
     handlers: HandlerConfig = field(default_factory=HandlerConfig)
     security: SecurityConfig = field(default_factory=SecurityConfig)
+    hooks: HooksConfig = field(default_factory=HooksConfig)
     namespace: str = DEFAULT_NAMESPACE
     storage_mode: bool = False  # When True, disables TTL, eviction, stats, auto-delete
 
@@ -371,10 +460,12 @@ class CacheConfig:
         serialization: Optional[SerializationConfig] = None,
         handlers: Optional[HandlerConfig] = None,
         security: Optional[SecurityConfig] = None,
+        hooks: Optional[HooksConfig] = None,
         # Namespace isolation (immutable after init)
         namespace: str = DEFAULT_NAMESPACE,
         # Backwards compatibility parameters
         cache_dir: Optional[str] = None,
+        default_ttl: Optional[Union[str, int, float]] = None,
         default_ttl_seconds: Optional[float] = None,
         verify_cache_integrity: Optional[bool] = None,
         hash_path_content: Optional[bool] = None,
@@ -387,12 +478,14 @@ class CacheConfig:
         metadata_backend_options: Optional[dict] = None,
         enable_metadata: Optional[bool] = None,
         max_cache_size_mb: Optional[int] = None,
+        max_cache_size: Optional[Union[str, int]] = None,
         cleanup_on_init: Optional[bool] = None,
         store_cache_key_params: Optional[bool] = None,
         store_full_metadata: Optional[bool] = None,
         # Blob backend parameters
         blob_backend: Optional[str] = None,
         blob_backend_options: Optional[dict] = None,
+        max_inline_size: Optional[int] = None,
         # Handler enable/disable flags
         enable_pandas_dataframes: Optional[bool] = None,
         enable_polars_dataframes: Optional[bool] = None,
@@ -410,10 +503,16 @@ class CacheConfig:
         # Security parameters
         delete_invalid_signatures: Optional[bool] = None,
         use_in_memory_key: Optional[bool] = None,
+        # Error handling
+        delete_on_error: Optional[bool] = None,
+        # Lifecycle hooks (flat convenience — prefer HooksConfig object)
+        on_evict: Optional[Callable[..., Any]] = None,
+        on_integrity_failure: Optional[Callable[..., Any]] = None,
         # Memory cache layer parameters (sits between application and disk backends)
         enable_memory_cache: Optional[bool] = None,
         memory_cache_type: Optional[str] = None,
         memory_cache_maxsize: Optional[int] = None,
+        memory_cache_ttl: Optional[Union[str, int, float]] = None,
         memory_cache_ttl_seconds: Optional[float] = None,
         memory_cache_stats: Optional[bool] = None,
         # Storage mode
@@ -433,12 +532,21 @@ class CacheConfig:
         self.serialization = serialization or SerializationConfig()
         self.handlers = handlers or HandlerConfig()
         self.security = security or SecurityConfig()
+        self.hooks = hooks or HooksConfig()
+
+        # Map flat hook kwargs into HooksConfig
+        if on_evict is not None:
+            self.hooks.on_evict = on_evict
+        if on_integrity_failure is not None:
+            self.hooks.on_integrity_failure = on_integrity_failure
 
         # Apply backwards compatibility mappings
         if cache_dir is not None:
             self.storage.cache_dir = cache_dir
 
-        # Map TTL parameter
+        # Map TTL parameters (default_ttl takes priority over default_ttl_seconds)
+        if default_ttl is not None:
+            self.metadata.default_ttl = default_ttl
         if default_ttl_seconds is not None:
             self.metadata.default_ttl_seconds = default_ttl_seconds
 
@@ -464,6 +572,8 @@ class CacheConfig:
             self.metadata.enable_metadata = enable_metadata
         if max_cache_size_mb is not None:
             self.storage.max_cache_size_mb = max_cache_size_mb
+        if max_cache_size is not None:
+            self.storage.max_cache_size = max_cache_size
         if cleanup_on_init is not None:
             self.storage.cleanup_on_init = cleanup_on_init
 
@@ -488,6 +598,8 @@ class CacheConfig:
             self.blob.blob_backend = blob_backend
         if blob_backend_options is not None:
             self.blob.blob_backend_options = blob_backend_options
+        if max_inline_size is not None:
+            self.blob.max_inline_size = max_inline_size
 
         # Map handler enable/disable flags
         if enable_pandas_dataframes is not None:
@@ -523,6 +635,10 @@ class CacheConfig:
         if use_in_memory_key is not None:
             self.security.use_in_memory_key = use_in_memory_key
 
+        # Map error handling configuration parameters
+        if delete_on_error is not None:
+            self.metadata.delete_on_error = delete_on_error
+
         # Map memory cache layer configuration parameters
         if enable_memory_cache is not None:
             self.metadata.enable_memory_cache = enable_memory_cache
@@ -530,6 +646,8 @@ class CacheConfig:
             self.metadata.memory_cache_type = memory_cache_type
         if memory_cache_maxsize is not None:
             self.metadata.memory_cache_maxsize = memory_cache_maxsize
+        if memory_cache_ttl is not None:
+            self.metadata.memory_cache_ttl = memory_cache_ttl
         if memory_cache_ttl_seconds is not None:
             self.metadata.memory_cache_ttl_seconds = memory_cache_ttl_seconds
         if memory_cache_stats is not None:
@@ -578,10 +696,15 @@ class CacheConfig:
                     f"Unknown configuration parameter ignored: {key}={value}"
                 )
 
+        # Re-resolve human-readable duration fields after kwargs override
+        self.metadata.resolve_duration_fields()
+
         # Storage mode: disable cache-specific behaviors for pure storage use
         self.storage_mode = storage_mode
         if self.storage_mode:
             self.metadata.default_ttl_seconds = None
+            self.metadata.default_ttl = None
+            self.storage.max_cache_size = None
             self.storage.max_cache_size_mb = None
             self.storage.cleanup_on_init = False
             self.metadata.enable_cache_stats = False
@@ -639,6 +762,10 @@ class CacheConfig:
     @property
     def verify_cache_integrity(self) -> bool:
         return self.metadata.verify_cache_integrity
+
+    @property
+    def delete_on_error(self) -> bool:
+        return self.metadata.delete_on_error
 
     @property
     def hash_path_content(self) -> bool:
@@ -814,7 +941,27 @@ def validate_config(config: CacheConfig) -> List["ConfigValidationError"]:
             )
         )
 
-    if config.storage.max_cache_size_mb is not None:
+    # Validate size limit (prefer max_cache_size, fall back to legacy max_cache_size_mb)
+    if config.storage.max_cache_size is not None:
+        try:
+            parsed = parse_size(config.storage.max_cache_size)
+            if parsed <= 0:
+                errors.append(
+                    ConfigValidationError(
+                        "storage.max_cache_size",
+                        "must be positive",
+                        config.storage.max_cache_size,
+                    )
+                )
+        except (ValueError, TypeError):
+            errors.append(
+                ConfigValidationError(
+                    "storage.max_cache_size",
+                    'must be a size string (e.g. "2GB") or int bytes',
+                    config.storage.max_cache_size,
+                )
+            )
+    elif config.storage.max_cache_size_mb is not None:
         if not isinstance(config.storage.max_cache_size_mb, (int, float)):
             errors.append(
                 ConfigValidationError(

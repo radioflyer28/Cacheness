@@ -221,6 +221,54 @@ count = store.clear()
 print(f"Removed {count} blobs")
 ```
 
+#### `put_file(file_path, *, key=None, metadata=None, move=False) -> str`
+
+Store an arbitrary file as a blob. Reads the file into bytes and delegates to `put()`. File metadata (original filename, MIME type, original size) is automatically merged into the `metadata` dict.
+
+```python
+# Copy file into store (default)
+key = store.put_file("models/xgboost.onnx")
+
+# Move file into store (source deleted after store)
+key = store.put_file("data/output.csv", key="report-jan", move=True)
+
+# With extra metadata
+key = store.put_file(
+    "data/output.csv",
+    key="report-jan",
+    metadata={"project": "alpha", "author": "alice"}
+)
+
+# Metadata is auto-populated:
+meta = store.get_metadata(key)
+print(meta["metadata"]["original_filename"])  # "output.csv"
+print(meta["metadata"]["mime_type"])           # "text/csv"
+print(meta["metadata"]["original_size"])       # 1234
+print(meta["metadata"]["project"])             # "alpha"
+```
+
+#### `get_file(key, *, dest=None, move=False, overwrite=True) -> bytes | Path | None`
+
+Retrieve a cached file blob, optionally writing it to disk.
+
+```python
+# Get raw bytes
+data = store.get_file("report-jan")
+
+# Copy out to a specific file
+path = store.get_file("report-jan", dest="./restored/report.csv")
+
+# Move out (write + delete entry)
+path = store.get_file("report-jan", dest="./restored/report.csv", move=True)
+
+# Safe write (no overwrite)
+path = store.get_file("report-jan", dest="./restored/", overwrite=False)
+```
+
+If `dest` is a directory, the original filename from metadata is used. Falls back to `<key>.bin` when metadata is unavailable. Parent directories are created automatically.
+
+Raises `TypeError` if the stored data is not bytes (i.e. not stored via `put_file()`). Raises `ValueError` if `move=True` without `dest`. Raises `FileExistsError` if `overwrite=False` and `dest` already exists.
+
 #### `close()`
 
 Close the store and release resources.

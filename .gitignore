@@ -39,13 +39,16 @@ config/my_*.json
 docker-compose.override.yml
 .env
 
+# Git worktrees (parallel development)
 # Worktree-specific metadata (not committed)
 WORKTREE.md
-
-# Git worktrees (parallel development)
 /worktrees/
+
+# Beads
+/.beads/dolt
 
 # Quality check error logs
 .quality-errors.log
 cache_metadata.json
 team_data_metadata.json
+examples/cache/cache_signing_key.bin

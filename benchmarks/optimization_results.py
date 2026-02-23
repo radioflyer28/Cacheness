@@ -43,7 +43,7 @@ def test_schema_optimization_performance():
             config = CacheConfig(
                 cache_dir=cache_dir,
                 metadata_backend=backend_type,
-                max_cache_size_mb=1000,
+                max_cache_size="1GB",
             )
             cache = cacheness(config)
 
@@ -112,7 +112,7 @@ def test_memory_cache_layer_benefit():
             cache_dir = os.path.join(temp_dir, "memory_test")
 
             config = CacheConfig(
-                cache_dir=cache_dir, metadata_backend="sqlite", max_cache_size_mb=1000
+                cache_dir=cache_dir, metadata_backend="sqlite", max_cache_size="1GB"
             )
             cache = cacheness(config)
 
@@ -174,7 +174,7 @@ def compare_backends_optimized():
             config = CacheConfig(
                 cache_dir=cache_dir,
                 metadata_backend=backend_type,
-                max_cache_size_mb=1000,
+                max_cache_size="1GB",
             )
             cache = cacheness(config)
 

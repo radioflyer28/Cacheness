@@ -181,8 +181,8 @@ from cacheness import CacheConfig
 dev_config = CacheConfig(
     cache_dir="./dev_cache",
     metadata_backend="json",       # Fast for small caches
-    max_cache_size_mb=100,         # Keep it small
-    default_ttl_seconds=3600       # Short TTL for rapid iteration (1 hour)
+    max_cache_size="100mb",
+    default_ttl="1h"
 )
 ```
 
@@ -195,8 +195,8 @@ from cacheness import CacheConfig
 prod_config = CacheConfig(
     cache_dir="/var/cache/myapp",
     metadata_backend="sqlite",     # Production-ready
-    max_cache_size_mb=10000,      # Large cache
-    default_ttl_seconds=86400,    # Longer TTL (24 hours)
+    max_cache_size="10gb",
+    default_ttl="24h",
     verify_cache_integrity=True   # Extra safety
 )
 ```
@@ -211,8 +211,8 @@ import tempfile
 perf_config = CacheConfig(
     cache_dir=tempfile.mkdtemp(),
     metadata_backend="sqlite_memory",    # In-memory SQLite (no persistence)
-    max_cache_size_mb=5000,              # Large cache
-    default_ttl_seconds=21600            # Medium TTL (6 hours)
+    max_cache_size="5gb",
+    default_ttl="6h"
 )
 ```
 
@@ -225,8 +225,8 @@ from cacheness import CacheConfig
 web_config = CacheConfig(
     cache_dir="/shared/cache",
     metadata_backend="sqlite",     # Concurrency-safe
-    max_cache_size_mb=2000,
-    default_ttl_seconds=43200,  # 12 hours
+    max_cache_size="2gb",
+    default_ttl="12h",
     verify_cache_integrity=True   # Important for web apps
 )
 
@@ -437,7 +437,7 @@ Recent schema improvements provide significant performance benefits:
 
 config = CacheConfig(
     metadata_backend="memory",        # Fastest option
-    max_cache_size_mb=10000,         # Set based on available memory
+    max_cache_size="10gb",         # Set based on available memory
     cache_dir="./temp_cache"         # Only used for data files
 )
 ```
@@ -470,7 +470,7 @@ config = CacheConfig(
 
 config = CacheConfig(
     metadata_backend="json",
-    max_cache_size_mb=1000,          # Keep cache smaller for JSON
+    max_cache_size="1gb",          # Keep cache smaller for JSON
     verify_cache_integrity=False     # Skip hash verification for speed
 )
 ```
@@ -482,14 +482,14 @@ config = CacheConfig(
 config = CacheConfig(
     cache_dir="/nvme_ssd/cache",      # NVMe SSD storage
     metadata_backend="sqlite",        # Production backend
-    max_cache_size_mb=20000          # Large cache on fast storage
+    max_cache_size="20gb"          # Large cache on fast storage
 )
 
 # For network storage (slower), prefer smaller frequent writes
 config = CacheConfig(
     cache_dir="/network_storage/cache",
     metadata_backend="json",          # Fewer write operations
-    max_cache_size_mb=1000           # Smaller cache
+    max_cache_size="1gb"           # Smaller cache
 )
 ```
 

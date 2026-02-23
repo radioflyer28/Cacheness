@@ -155,6 +155,30 @@ class TestCachedDecorator:
         result2 = time_sensitive_function(10)
         assert result2 == "result_10"
 
+    def test_decorator_with_ttl_duration_string(self):
+        """Test decorator with ttl= duration string."""
+
+        @cached(ttl="1h")
+        def time_sensitive_function(x):
+            return f"result_{x}"
+
+        result = time_sensitive_function(10)
+        assert result == "result_10"
+
+        # Should hit cache
+        result2 = time_sensitive_function(10)
+        assert result2 == "result_10"
+
+    def test_decorator_ttl_seconds_rejects_string(self):
+        """Test that ttl_seconds= rejects string values."""
+        with pytest.raises(TypeError, match="ttl_seconds.*must be numeric"):
+            cached(ttl_seconds="1h")
+
+    def test_decorator_ttl_and_ttl_seconds_mutually_exclusive(self):
+        """Test that ttl and ttl_seconds cannot both be specified."""
+        with pytest.raises(ValueError, match="Cannot specify both"):
+            cached(ttl="1h", ttl_seconds=3600)
+
     def test_decorator_with_key_prefix(self):
         """Test decorator with custom key prefix."""
 
@@ -290,12 +314,13 @@ class TestCacheFunctionInterface:
 class TestMemoizeDecorator:
     """Test the memoize decorator."""
 
-    def test_memoize_basic(self):
+    def test_memoize_basic(self, tmp_path):
         """Test basic memoization."""
 
         call_count = 0
+        cache_inst = cacheness(CacheConfig(cache_dir=tmp_path))
 
-        @memoize
+        @cached(ttl_seconds=None, cache_instance=cache_inst)
         def fibonacci(n):
             nonlocal call_count
             call_count += 1
@@ -310,10 +335,11 @@ class TestMemoizeDecorator:
         # Call count should be much less than 2^5 due to memoization
         assert call_count <= 6  # Should only calculate each unique n once
 
-    def test_memoize_permanent_cache(self):
+    def test_memoize_permanent_cache(self, tmp_path):
         """Test that memoize creates permanent cache (no TTL)."""
+        cache_inst = cacheness(CacheConfig(cache_dir=tmp_path))
 
-        @memoize
+        @cached(ttl_seconds=None, cache_instance=cache_inst)
         def permanent_func(x):
             return f"permanent_{x}"
 

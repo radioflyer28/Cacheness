@@ -20,20 +20,20 @@ These constraints apply to EVERY task. Violating any of them is a bug.
 
 **Testing:**
 - **Full suite:** `uv run pytest tests/ -x -q --ignore=tests/test_tensorflow_handler.py`
+- **Sequential run:** `uv run pytest tests/ -x -q --ignore=tests/test_tensorflow_handler.py -p no:xdist` (disables parallel execution)
 - **Windows:** Always add `--ignore=tests/test_tensorflow_handler.py` — TF tests hang
-- **Baseline:** 1202 passed, 65 skipped, 0 failures
+- **Baseline:** 1427 passed, 102 skipped, 0 failures (~48s parallel, ~237s sequential)
+- **Parallel execution:** Enabled by default via `pytest-xdist` (`-n auto --dist loadgroup`). Tests sharing external resources (Docker PostgreSQL/S3) are grouped via `@pytest.mark.xdist_group("docker")`.
 - **Incremental testing:** During development, run only targeted tests (see [Test Suite](#test-suite) for details). Full suite runs only once — right before push.
 
 **Imports:**
 - `from cacheness import UnifiedCache` does NOT work — it's exported as `cacheness`. Use `from cacheness.core import UnifiedCache` in tests.
 - `# noqa: E402` on the closing paren of a multi-line import does NOT suppress the error. Collapse to a single-line import instead.
 
-**Windows (beads):**
-- Start daemon once per session: `uv run bd daemon start` (required after reboot/logout)
-
 **Work tracking:**
 - File a beads issue for ANY work, even small fixes
 - Every code change goes through the Mandatory Workflow below
+- **PROHIBITED:** Do NOT use `manage_todo_list`, TodoWrite, TaskCreate, or markdown files for task tracking — use beads exclusively (`bd create`, `bd ready`, `bd close`)
 - **Critical issues** discovered during work (not related to the current issue) → file immediately (don't lose context)
 - **Non-critical issues** discovered during work → note them, propose them when closing out the current issue
 
@@ -47,6 +47,7 @@ These constraints apply to EVERY task. Violating any of them is a bug.
 ```bash
 git worktree list          # Check for orphaned worktrees from prior sessions
 git worktree prune         # Clean up stale references
+uv run bd prime            # Re-orient after compaction or new session
 ```
 
 ### Workflow A: Feature/Fix Work (uses worktree)
@@ -89,7 +90,11 @@ Use this for any code change, test addition, or issue-tracked work.
 7. **Full test suite** (once, right before push):
    `uv run pytest tests/ -x -q --ignore=tests/test_tensorflow_handler.py`
 8. **Update docs** if changing public API
-9. **Push feature branch:** `git push -u origin beads-<hash>-<desc>`
+9. **Sync beads & push feature branch:**
+   ```bash
+   uv run bd sync             # Commit beads changes before git operations
+   git push -u origin beads-<hash>-<desc>
+   ```
 10. **Integrate to dev:**
    ```bash
    cd ../..                                          # Back to Cacheness/
@@ -97,6 +102,7 @@ Use this for any code change, test addition, or issue-tracked work.
    git pull origin dev && git merge beads-<hash>-<desc>
    # If fast-forward: skip tests (already passed in worktree)
    # If real merge: uv run pytest tests/ -x -q --ignore=tests/test_tensorflow_handler.py
+   uv run bd sync             # Sync again after merge
    git push origin dev
    ```
 11. **Cleanup:**
@@ -105,7 +111,7 @@ Use this for any code change, test addition, or issue-tracked work.
    git branch -d beads-<hash>-<desc>
    git push origin --delete beads-<hash>-<desc>
    ```
-   - Close issue: beads MCP `close`, or CLI `uv run bd close <id> --force` (needed for child issues of epics)
+   - Close issue: beads MCP `close`, or CLI `uv run bd close <id1> <id2>` (can close multiple at once; use `--force` for child issues of epics)
 12. **Verify** — `git status` confirms "up to date with origin"
 
 ### Workflow B: Direct-to-dev (no worktree)
@@ -116,9 +122,19 @@ Use this for docs-only changes, config tweaks, or trivial fixes that don't need 
 2. Make changes, commit directly
 3. `git push origin dev`
 
-### Completion
+### Completion / Session Close Protocol
 
-- **CRITICAL:** Work is NOT complete until `git push` succeeds (both feature branch AND dev branch). NEVER stop before pushing. If push fails, resolve and retry until it succeeds.
+**CRITICAL** — before saying "done" or "complete", run this checklist in order:
+```
+[ ] git status              (check what changed)
+[ ] git add <files>         (stage code changes)
+[ ] bd sync                 (commit beads changes first)
+[ ] git commit -m "..."     (commit code)
+[ ] bd sync                 (catch any post-commit beads changes)
+[ ] git push                (push to remote)
+```
+
+- Work is NOT complete until `git push` succeeds (both feature branch AND dev branch).
 - **Non-critical issues** discovered during work → note them, propose them when closing out the current issue
 - **Handoff:** when handing off at session end, provide context for the next session.
 
@@ -161,20 +177,21 @@ uv run ruff format . && uv run ruff check --fix .  # Phase 1
 uv run ruff check . && uv run ty check             # Phase 2
 ```
 
-**Pre-commit hook:** Auto-runs Phase 1 on every commit, logs Phase 2 errors to `.quality-errors.log`.
+**Pre-commit hook:** Auto-runs Phase 1 on every commit, logs Phase 2 errors to `.quality-errors.log`. Also installs bd hooks (pre-push, post-merge, etc.) via `--chain` so the quality check runs first.
 
-**Install pre-commit hook:**
+**Install all hooks (quality + bd):**
 ```bash
 .\scripts\install-hooks.ps1   # Windows
 ./scripts/install-hooks.sh    # Unix/Linux/Mac
 ```
+Chain order: `pre-commit.old` (quality checks) → `pre-commit` (bd JSONL flush) → `pre-push` (bd stale guard)
 
 **Config:** Ruff settings in `pyproject.toml`, Python 3.12+, line length 88.
 
 
 ## Test Suite
 
-**Baseline:** 1202 passed, 65 skipped, 0 failures
+**Baseline:** 1427 passed, 102 skipped, 0 failures
 **Full command:** `uv run pytest tests/ -x -q --ignore=tests/test_tensorflow_handler.py`
 
 ### Incremental Testing Strategy
@@ -184,8 +201,8 @@ During development, use **tiered testing** to minimize feedback time:
 | Tier | When | What to run | Time |
 |------|------|-------------|------|
 | **Tier 1** | After each code change | Tests that directly exercise modified code | ~5-15s |
-| **Tier 2** | After Tier 1 passes | Add tests for likely regression areas | ~30-60s |
-| **Full suite** | Once before push | All tests | ~5 min |
+| **Tier 2** | After all planned changes for rapid debug before full suite | Add tests for likely regression areas | ~30-60s |
+| **Full suite** | Once before push | All tests | ~33s parallel |
 
 **Selecting Tier 1 tests:** Match changed source files to their primary test files:
 
@@ -197,6 +214,7 @@ During development, use **tiered testing** to minimize feedback time:
 | `s3_backend.py` | `test_s3_blob_backend.py` |
 | `handlers/*.py` | `test_handlers.py` |
 | `metadata.py` / backends | `test_metadata.py`, `test_sqlite_schema_versioning.py` |
+| `size_utils.py` / `config.py` | `test_size_utils.py`, `test_core.py` |
 | `security.py` | `test_security.py` |
 | Path/namespace logic | `test_directory_sharding.py`, `test_namespace_config.py` |
 
@@ -220,14 +238,27 @@ uv run pytest tests/ -x -q --ignore=tests/test_tensorflow_handler.py
 
 ## MCP Tools Reference
 
-**beads** — Issue tracking: `ready`, `show`, `create`, `update`, `close` (prefer MCP; failover to CLI for `--claim`, `--force` close, etc.)
+**beads** — Issue tracking: `ready`, `show`, `create`, `update`, `close` (prefer MCP; failover to CLI where needed)
 **GitKraken** — Git ops: `status`, `add_or_commit`, `push`, `log_or_diff` (or use git CLI at discretion)
-**memory** — Knowledge graph: `create_entities`, `create_relations`, `add_observations`, `search_nodes`, `read_graph`
 **language-server** — LSP navigation: `definition`, `references`, `hover`, `diagnostics`, `rename_symbol`, `edit_file`
-**memalot** — Memory leak detection: `list_reports`, `get_report` (requires instrumenting code)
-**code-checker** — Quality tools: `run_pytest_check`, `run_pylint_check`, `run_mypy_check` (prefer `ruff`/`ty` directly)
 
 **Git Operations:** Use git CLI or GitKraken MCP at discretion, whichever is more convenient/robust/safe for the task.
+
+### beads CLI Quick Reference
+
+| Command | Notes |
+|---------|-------|
+| `bd prime` | Run after compaction or new session to re-orient |
+| `bd ready` | Show issues with no blockers |
+| `bd create --title="..." --priority=2` | Priority: **0-4 or P0-P4** (0=critical, 2=medium, 4=backlog). **NOT** "high"/"medium"/"low" |
+| `bd update <id> --status=in_progress` | Claim work |
+| `bd close <id1> <id2>` | Close multiple issues at once (more efficient) |
+| `bd close <id> --force` | Needed for child issues of epics |
+| `bd sync` | Sync beads with git remote — run at session end |
+| `bd dep add <issue> <blocks>` | Add dependency |
+| **`bd edit`** | ⚠️ **DO NOT USE** — opens \$EDITOR (vim/nano), blocks agents |
+
+**Tip:** When creating multiple issues, use parallel subagents for efficiency.
 
 
 ## Coding Gotchas

@@ -39,7 +39,9 @@ from typing import Dict, Any, Optional, List, Tuple, Callable
 
 import logging
 
+from .interfaces import EntrySummary
 from .json_utils import dumps as json_dumps, loads as json_loads
+from .size_utils import bytes_to_mb_display
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +126,7 @@ try:
         Integer,
         DateTime,
         Text,
+        LargeBinary,
         Index,
         select,
         update,
@@ -177,6 +180,13 @@ try:
         cache_key_params = Column(Text, nullable=True)
         metadata_dict = Column(Text, nullable=True)
 
+        access_count = Column(Integer, default=0, nullable=False, server_default="0")
+        ttl_seconds = Column(Integer, nullable=True)
+        expires_at = Column(DateTime(timezone=True), nullable=True)
+        blob_data = Column(LargeBinary, nullable=True)
+        is_inline = Column(Integer, default=0, nullable=False, server_default="0")
+        inline_ext = Column(String(20), nullable=True)
+
     class CacheStatsMixin:
         """Column definitions shared by all cache_stats tables."""
 
@@ -203,6 +213,17 @@ try:
             Index("idx_cleanup", "created_at"),
             Index("idx_size_mgmt", "file_size", "created_at"),
             Index("idx_data_type", "data_type"),
+            Index(
+                "idx_metadata_notnull",
+                desc("created_at"),
+                sqlite_where=text("metadata_dict IS NOT NULL"),
+            ),
+            Index(
+                "idx_expires_at",
+                "expires_at",
+                sqlite_where=text("expires_at IS NOT NULL"),
+            ),
+            Index("idx_access_count", "access_count", "accessed_at"),
         )
 
     class CacheStats(CacheStatsMixin, Base):
@@ -253,6 +274,21 @@ try:
                     Index(f"idx_{namespace_id}_cleanup", "created_at"),
                     Index(f"idx_{namespace_id}_size_mgmt", "file_size", "created_at"),
                     Index(f"idx_{namespace_id}_data_type", "data_type"),
+                    Index(
+                        f"idx_{namespace_id}_metadata_notnull",
+                        desc("created_at"),
+                        sqlite_where=text("metadata_dict IS NOT NULL"),
+                    ),
+                    Index(
+                        f"idx_{namespace_id}_expires_at",
+                        "expires_at",
+                        sqlite_where=text("expires_at IS NOT NULL"),
+                    ),
+                    Index(
+                        f"idx_{namespace_id}_access_count",
+                        "access_count",
+                        "accessed_at",
+                    ),
                 ),
             },
         )
@@ -289,7 +325,7 @@ try:
             nullable=False,
         )
         # HMAC signature for integrity verification (optional)
-        signature = Column(String(64), nullable=True)
+        signature = Column(String(100), nullable=True)
 
     # ------------------------------------------------------------------
     # Core table registry — only these are created by SqliteBackend.__init__.
@@ -367,7 +403,9 @@ class MetadataBackend(ABC):
     def get_entry(self, cache_key: str) -> Optional[Dict[str, Any]]:
         """Get specific cache entry metadata (internal storage format).
 
-        Returns a dict with internal field names:
+        The returned dict conforms to the :class:`~cacheness.interfaces.EntryData`
+        TypedDict contract::
+
             description, data_type, created_at, accessed_at,
             file_size (bytes), metadata (nested dict)
 
@@ -377,7 +415,11 @@ class MetadataBackend(ABC):
 
     @abstractmethod
     def put_entry(self, cache_key: str, entry_data: Dict[str, Any]):
-        """Store cache entry metadata."""
+        """Store cache entry metadata.
+
+        *entry_data* should conform to the
+        :class:`~cacheness.interfaces.EntryData` contract.
+        """
         pass
 
     @abstractmethod
@@ -457,11 +499,11 @@ class MetadataBackend(ABC):
         pass
 
     @abstractmethod
-    def cleanup_by_size(self, target_size_mb: float) -> Dict[str, Any]:
+    def cleanup_by_size(self, target_size_bytes: int) -> Dict[str, Any]:
         """Remove least-recently-accessed entries until cache size drops to or below target.
 
         Args:
-            target_size_mb: Target cache size in megabytes
+            target_size_bytes: Target cache size in bytes
 
         Returns:
             Dict with 'count' (int) and 'removed_entries' (list of dicts with 'cache_key' and 'actual_path')
@@ -473,7 +515,7 @@ class MetadataBackend(ABC):
         """Remove all cache entries and return count removed."""
         pass
 
-    def iter_entry_summaries(self) -> List[Dict[str, Any]]:
+    def iter_entry_summaries(self) -> List[EntrySummary]:
         """Return lightweight entry summaries for internal filtering.
 
         Each dict contains flat, unprocessed column values:
@@ -497,11 +539,11 @@ class MetadataBackend(ABC):
         backends that haven't overridden this method.
         """
         # Fallback: flatten list_entries() output for custom backends
-        result = []
+        result: List[EntrySummary] = []
         for entry in self.list_entries():
-            flat = {k: v for k, v in entry.items() if k != "metadata"}
+            flat: Dict[str, Any] = {k: v for k, v in entry.items() if k != "metadata"}
             flat.update(entry.get("metadata", {}))
-            result.append(flat)
+            result.append(flat)  # type: ignore[arg-type]
         return result
 
     # --- Schema versioning ---
@@ -668,6 +710,18 @@ class MetadataBackend(ABC):
             if ns.namespace_id == namespace_id:
                 return ns
         return None
+
+    def set_namespace_signature(self, namespace_id: str, signature: str) -> None:
+        """Store a cryptographic signature for a namespace registry row.
+
+        Subclasses that support namespaces should override this.  The
+        default implementation is a no-op (signature column stays NULL).
+
+        Args:
+            namespace_id: The namespace to update.
+            signature: The HMAC signature string to store.
+        """
+        pass  # default no-op for backends without namespace tables
 
     def namespace_exists(self, namespace_id: str) -> bool:
         """Check whether a namespace is registered.
@@ -925,7 +979,7 @@ class CachedMetadataBackend(MetadataBackend):
     def list_entries(self) -> List[Dict[str, Any]]:
         return self.backend.list_entries()
 
-    def iter_entry_summaries(self) -> List[Dict[str, Any]]:
+    def iter_entry_summaries(self) -> List[EntrySummary]:
         return self.backend.iter_entry_summaries()
 
     def get_stats(self) -> Dict[str, Any]:
@@ -966,9 +1020,9 @@ class CachedMetadataBackend(MetadataBackend):
 
         return count
 
-    def cleanup_by_size(self, target_size_mb: float) -> Dict[str, Any]:
+    def cleanup_by_size(self, target_size_bytes: int) -> Dict[str, Any]:
         """Delegate cleanup_by_size to wrapped backend and clear memory cache."""
-        result = self.backend.cleanup_by_size(target_size_mb)
+        result = self.backend.cleanup_by_size(target_size_bytes)
 
         # Clear entire memory cache after cleanup (entries might be stale)
         removed_count = result.get("count", 0)
@@ -1006,6 +1060,9 @@ class CachedMetadataBackend(MetadataBackend):
 
     def get_namespace(self, namespace_id: str):
         return self.backend.get_namespace(namespace_id)
+
+    def set_namespace_signature(self, namespace_id: str, signature: str) -> None:
+        return self.backend.set_namespace_signature(namespace_id, signature)
 
     def get_schema_version(self, namespace_id: str = DEFAULT_NAMESPACE) -> int:
         return self.backend.get_schema_version(namespace_id)
@@ -1129,8 +1186,28 @@ class JsonBackend(MetadataBackend):
                 "created_at": entry_data.get("created_at", now),
                 "accessed_at": entry_data.get("accessed_at", now),
                 "file_size": entry_data.get("file_size", 0),
+                "access_count": entry_data.get("access_count", 0),
+                "is_inline": entry_data.get("is_inline", 0),
                 "metadata": metadata,  # Include all metadata as nested structure
             }
+            # Note: blob_data (bytes) is intentionally NOT stored in JSON backend —
+            # inline blobs are only supported by SQLite/PG backends with binary columns.
+
+            # Store per-entry TTL and pre-computed expires_at if provided
+            ttl_val = entry_data.get("ttl_seconds")
+            if ttl_val is not None:
+                entry["ttl_seconds"] = ttl_val
+                # Compute expires_at from created_at + ttl_seconds
+                created = entry["created_at"]
+                if isinstance(created, str):
+                    created_dt = datetime.fromisoformat(created)
+                else:
+                    created_dt = created
+                if created_dt.tzinfo is None:
+                    created_dt = created_dt.replace(tzinfo=timezone.utc)
+                entry["expires_at"] = (
+                    created_dt + timedelta(seconds=float(ttl_val))
+                ).isoformat()
 
             # Store complete entry - simple and efficient
             self._metadata["entries"][cache_key] = entry
@@ -1199,24 +1276,30 @@ class JsonBackend(MetadataBackend):
             self._save_to_disk()
             return True
 
-    def iter_entry_summaries(self) -> List[Dict[str, Any]]:
+    def iter_entry_summaries(self) -> List[EntrySummary]:
         """Return lightweight flat entry dicts for internal filtering."""
         with self._lock:
-            result = []
+            result: List[EntrySummary] = []
             for cache_key, entry in self._metadata.get("entries", {}).items():
-                flat = {
+                flat: Dict[str, Any] = {
                     "cache_key": cache_key,
                     "data_type": entry.get("data_type", "unknown"),
                     "description": entry.get("description", ""),
                     "created_at": entry.get("created_at"),
                     "accessed_at": entry.get("accessed_at"),
                     "file_size": entry.get("file_size", 0),
+                    "access_count": entry.get("access_count", 0),
                 }
+                # Include TTL/expiry fields if present
+                if "ttl_seconds" in entry:
+                    flat["ttl_seconds"] = entry["ttl_seconds"]
+                if "expires_at" in entry:
+                    flat["expires_at"] = entry["expires_at"]
                 # Merge technical metadata fields flat
                 for k, v in entry.get("metadata", {}).items():
                     if k not in flat:
                         flat[k] = v
-                result.append(flat)
+                result.append(flat)  # type: ignore[arg-type]
             return result
 
     def list_entries(self) -> List[Dict[str, Any]]:
@@ -1260,7 +1343,7 @@ class JsonBackend(MetadataBackend):
                     "metadata": entry.get("metadata", {}),
                     "created": creation_time,
                     "last_accessed": access_time,
-                    "size_mb": round(entry.get("file_size", 0) / (1024 * 1024), 3),
+                    "size_mb": bytes_to_mb_display(entry.get("file_size", 0)),
                 }
 
                 entries.append(list_entry)
@@ -1277,10 +1360,11 @@ class JsonBackend(MetadataBackend):
             # Count total entries
             total_entries = len(entries)
 
-            # Calculate total size
-            total_size_mb = sum(
+            # Calculate total size in bytes (canonical)
+            total_size_bytes = sum(
                 entry.get("file_size", 0) for entry in entries.values()
-            ) / (1024 * 1024)
+            )
+            total_size_mb = total_size_bytes / (1024 * 1024)
 
             # Count by data type
             dataframe_count = sum(
@@ -1299,20 +1383,24 @@ class JsonBackend(MetadataBackend):
                 "total_entries": total_entries,
                 "dataframe_entries": dataframe_count,
                 "array_entries": array_count,
-                "total_size_mb": total_size_mb,  # Don't round - precise size needed for cleanup calculations
+                "total_size_bytes": total_size_bytes,
+                "total_size_mb": total_size_mb,  # Backward compat — prefer total_size_bytes
                 "cache_hits": hits,
                 "cache_misses": misses,
                 "hit_rate": round(hit_rate, 3),
             }
 
     def update_access_time(self, cache_key: str):
-        """Update last access time for cache entry (simple entries structure)."""
+        """Update last access time and increment access count for cache entry."""
         with self._lock:
             entries = self._metadata.get("entries", {})
             if cache_key in entries:
                 entries[cache_key]["accessed_at"] = datetime.now(
                     timezone.utc
                 ).isoformat()
+                entries[cache_key]["access_count"] = (
+                    entries[cache_key].get("access_count", 0) + 1
+                )
                 self._save_to_disk()
 
     def increment_hits(self):
@@ -1355,18 +1443,18 @@ class JsonBackend(MetadataBackend):
 
             return len(expired_keys)
 
-    def cleanup_by_size(self, target_size_mb: float) -> Dict[str, Any]:
+    def cleanup_by_size(self, target_size_bytes: int) -> Dict[str, Any]:
         """Remove least-recently-accessed entries until cache size drops to or below target."""
         with self._lock:
-            # Get current total size
+            # Get current total size in bytes
             stats = self.get_stats()
-            total_size_mb = stats.get("total_size_mb", 0)
+            current_size_bytes = stats.get("total_size_bytes", 0)
 
             logger.debug(
-                f"cleanup_by_size: current size {total_size_mb:.6f}MB, target {target_size_mb:.6f}MB"
+                f"cleanup_by_size: current size {current_size_bytes} bytes, target {target_size_bytes} bytes"
             )
 
-            if total_size_mb <= target_size_mb:
+            if current_size_bytes <= target_size_bytes:
                 return {"count": 0, "removed_entries": []}  # Already at or below target
 
             entries = self._metadata.get("entries", {})
@@ -1381,8 +1469,6 @@ class JsonBackend(MetadataBackend):
             )
 
             # Calculate how many bytes we need to remove
-            target_size_bytes = target_size_mb * 1024 * 1024
-            current_size_bytes = total_size_mb * 1024 * 1024
             bytes_to_remove = current_size_bytes - target_size_bytes
 
             logger.debug(f"cleanup_by_size: need to remove {bytes_to_remove:.0f} bytes")
@@ -1687,11 +1773,134 @@ class JsonBackend(MetadataBackend):
                 signature=ns_data.get("signature"),
             )
 
+    def set_namespace_signature(self, namespace_id: str, signature: str) -> None:
+        """Store namespace signature in the JSON registry."""
+        with self._lock:
+            registry = self._load_registry()
+            ns_data = registry["namespaces"].get(namespace_id)
+            if ns_data is not None:
+                ns_data["signature"] = signature
+                self._save_registry(registry)
+
     def close(self):
         """Close and clean up resources (JSON backend saves any pending changes)."""
         with self._lock:
             # Ensure any pending changes are saved to disk
             self._save_to_disk()
+
+
+def _sqlite_migrate_v1_to_v2(backend: "SqliteBackend", namespace_id: str) -> None:
+    """v1 → v2: add partial index on ``metadata_dict IS NOT NULL``.
+
+    The ``query_meta()`` fast path always filters
+    ``WHERE metadata_dict IS NOT NULL``.  A partial B-tree index on
+    ``created_at DESC`` (filtered to non-NULL rows) lets SQLite skip
+    entries that have no custom metadata and return results pre-sorted.
+
+    Uses ``CREATE INDEX IF NOT EXISTS`` to be fully idempotent.
+    """
+    if namespace_id == DEFAULT_NAMESPACE:
+        table = "cache_entries"
+        idx_name = "idx_metadata_notnull"
+    else:
+        table = f"cache_entries_{namespace_id}"
+        idx_name = f"idx_{namespace_id}_metadata_notnull"
+
+    with backend.SessionLocal() as session:
+        session.execute(
+            text(
+                f'CREATE INDEX IF NOT EXISTS "{idx_name}" '
+                f'ON "{table}" (created_at DESC) '
+                f"WHERE metadata_dict IS NOT NULL"
+            )
+        )
+        session.commit()
+
+    logger.info("SQLite v1→v2: created partial index %r on %r", idx_name, table)
+
+
+def _sqlite_migrate_v2_to_v3(backend: "SqliteBackend", namespace_id: str) -> None:
+    """v2 → v3: add access_count, ttl_seconds, expires_at, blob_data, is_inline columns.
+
+    Adds five new columns:
+
+    * ``access_count`` — per-entry access counter (INTEGER NOT NULL DEFAULT 0)
+    * ``ttl_seconds`` — per-entry TTL storage (INTEGER nullable)
+    * ``expires_at`` — pre-computed expiry timestamp (DATETIME nullable)
+    * ``blob_data`` — inline blob content (BLOB nullable)
+    * ``is_inline`` — flag: 1 if blob stored inline, 0 otherwise (INTEGER NOT NULL DEFAULT 0)
+
+    Also creates two indexes:
+
+    * ``idx_expires_at`` — partial index on ``expires_at`` WHERE NOT NULL.
+    * ``idx_access_count`` — composite (access_count, accessed_at).
+
+    All columns are nullable (or DEFAULT 0) so existing rows are unaffected.
+    Uses ``IF NOT EXISTS`` for full idempotency.
+    """
+    if namespace_id == DEFAULT_NAMESPACE:
+        table = "cache_entries"
+        idx_expires = "idx_expires_at"
+        idx_access = "idx_access_count"
+    else:
+        table = f"cache_entries_{namespace_id}"
+        idx_expires = f"idx_{namespace_id}_expires_at"
+        idx_access = f"idx_{namespace_id}_access_count"
+
+    with backend.SessionLocal() as session:
+        # Add new columns (SQLite ignores ADD COLUMN if column already exists
+        # when wrapped in try/except — but we use a pragma check to be safe)
+        existing_cols = {
+            row[1]
+            for row in session.execute(text(f'PRAGMA table_info("{table}")')).fetchall()
+        }
+
+        if "access_count" not in existing_cols:
+            session.execute(
+                text(
+                    f'ALTER TABLE "{table}" ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0'
+                )
+            )
+        if "ttl_seconds" not in existing_cols:
+            session.execute(
+                text(f'ALTER TABLE "{table}" ADD COLUMN ttl_seconds INTEGER')
+            )
+        if "expires_at" not in existing_cols:
+            session.execute(
+                text(f'ALTER TABLE "{table}" ADD COLUMN expires_at DATETIME')
+            )
+        if "blob_data" not in existing_cols:
+            session.execute(text(f'ALTER TABLE "{table}" ADD COLUMN blob_data BLOB'))
+        if "is_inline" not in existing_cols:
+            session.execute(
+                text(
+                    f'ALTER TABLE "{table}" ADD COLUMN is_inline INTEGER NOT NULL DEFAULT 0'
+                )
+            )
+        if "inline_ext" not in existing_cols:
+            session.execute(text(f'ALTER TABLE "{table}" ADD COLUMN inline_ext TEXT'))
+
+        # Create indexes
+        session.execute(
+            text(
+                f'CREATE INDEX IF NOT EXISTS "{idx_expires}" '
+                f'ON "{table}" (expires_at) '
+                f"WHERE expires_at IS NOT NULL"
+            )
+        )
+        session.execute(
+            text(
+                f'CREATE INDEX IF NOT EXISTS "{idx_access}" '
+                f'ON "{table}" (access_count, accessed_at)'
+            )
+        )
+        session.commit()
+
+    logger.info(
+        "SQLite v2→v3: added access_count/ttl_seconds/expires_at/blob_data/is_inline "
+        "columns and indexes on %r",
+        table,
+    )
 
 
 class SqliteBackend(MetadataBackend):
@@ -1851,10 +2060,14 @@ class SqliteBackend(MetadataBackend):
     def get_migrations(self) -> list:
         """Return SQLite-specific schema migrations.
 
-        Schema baseline is v1 (current).  No legacy migrations exist.
-        Future migrations (v1 → v2, etc.) will be added here.
+        Schema v1: baseline (namespace registry).
+        Schema v2: partial index on ``metadata_dict IS NOT NULL``
+                   for ``query_meta()`` performance.
         """
-        return []
+        return [
+            (1, 2, _sqlite_migrate_v1_to_v2),
+            (2, 3, _sqlite_migrate_v2_to_v3),
+        ]
 
     # --- Namespace registry overrides ---
 
@@ -1903,7 +2116,13 @@ class SqliteBackend(MetadataBackend):
                     compression_codec VARCHAR(20),
                     actual_path     VARCHAR(500),
                     cache_key_params TEXT,
-                    metadata_dict   TEXT
+                    metadata_dict   TEXT,
+                    access_count    INTEGER NOT NULL DEFAULT 0,
+                    ttl_seconds     INTEGER,
+                    expires_at      DATETIME,
+                    blob_data       BLOB,
+                    is_inline       INTEGER NOT NULL DEFAULT 0,
+                    inline_ext      TEXT
                 )
             """)
             )
@@ -1938,13 +2157,33 @@ class SqliteBackend(MetadataBackend):
                     f'ON "{entries_table}" (file_size, created_at)'
                 )
             )
+            session.execute(
+                text(
+                    f'CREATE INDEX IF NOT EXISTS "idx_{namespace_id}_metadata_notnull" '
+                    f'ON "{entries_table}" (created_at DESC) '
+                    f"WHERE metadata_dict IS NOT NULL"
+                )
+            )
+            session.execute(
+                text(
+                    f'CREATE INDEX IF NOT EXISTS "idx_{namespace_id}_expires_at" '
+                    f'ON "{entries_table}" (expires_at) '
+                    f"WHERE expires_at IS NOT NULL"
+                )
+            )
+            session.execute(
+                text(
+                    f'CREATE INDEX IF NOT EXISTS "idx_{namespace_id}_access_count" '
+                    f'ON "{entries_table}" (access_count, accessed_at)'
+                )
+            )
 
             # Register in the namespace registry
             now = datetime.now(timezone.utc)
             ns = CacheNamespace(
                 namespace_id=namespace_id,
                 display_name=display_name,
-                schema_version=1,
+                schema_version=3,
                 created_at=now,
             )
             session.add(ns)
@@ -2046,6 +2285,16 @@ class SqliteBackend(MetadataBackend):
                 signature=row.signature,
             )
 
+    def set_namespace_signature(self, namespace_id: str, signature: str) -> None:
+        """Store namespace signature in the SQLite registry."""
+        with self.SessionLocal() as session:
+            session.execute(
+                update(CacheNamespace)
+                .where(CacheNamespace.namespace_id == namespace_id)
+                .values(signature=signature)
+            )
+            session.commit()
+
     def _run_migrations(self):
         """Legacy migration method — delegates to formal schema versioning.
 
@@ -2080,64 +2329,102 @@ class SqliteBackend(MetadataBackend):
         return stats
 
     def get_entry(self, cache_key: str) -> Optional[Dict[str, Any]]:
-        """Get specific cache entry metadata using columns directly - zero JSON parsing."""
+        """Get specific cache entry metadata — Core column select, no ORM hydration."""
         with self.SessionLocal() as session:
-            # Single optimized query - get entry using columns only
-            entry = session.execute(
-                select(self._CacheEntry).where(self._CacheEntry.cache_key == cache_key)
-            ).scalar_one_or_none()
+            CE = self._CacheEntry
+            # Core column select — avoids ORM identity-map overhead
+            row = session.execute(
+                select(
+                    CE.description,
+                    CE.data_type,
+                    CE.created_at,
+                    CE.accessed_at,
+                    CE.file_size,
+                    CE.object_type,
+                    CE.storage_format,
+                    CE.serializer,
+                    CE.compression_codec,
+                    CE.actual_path,
+                    CE.file_hash,
+                    CE.entry_signature,
+                    CE.s3_etag,
+                    CE.cache_key_params,
+                    CE.access_count,
+                    CE.ttl_seconds,
+                    CE.expires_at,
+                    CE.blob_data,
+                    CE.is_inline,
+                    CE.inline_ext,
+                    CE.metadata_dict,
+                ).where(CE.cache_key == cache_key)
+            ).one_or_none()
 
-            if not entry:
+            if row is None:
                 return None
 
-            # Build metadata from columns directly - zero JSON parsing for backend data
-            metadata = {}
+            # Build metadata dict from Row tuple — no ORM attribute overhead
+            metadata: Dict[str, Any] = {}
 
-            # Add backend technical metadata from dedicated columns (not JSON)
-            if entry.object_type is not None:
-                metadata["object_type"] = entry.object_type
-            if entry.storage_format is not None:
-                metadata["storage_format"] = entry.storage_format
-            if entry.serializer is not None:
-                metadata["serializer"] = entry.serializer
-            if entry.compression_codec is not None:
-                metadata["compression_codec"] = entry.compression_codec
-            if entry.actual_path is not None:
-                metadata["actual_path"] = entry.actual_path
+            # Backend technical metadata from dedicated columns (not JSON)
+            if row.object_type is not None:
+                metadata["object_type"] = row.object_type
+            if row.storage_format is not None:
+                metadata["storage_format"] = row.storage_format
+            if row.serializer is not None:
+                metadata["serializer"] = row.serializer
+            if row.compression_codec is not None:
+                metadata["compression_codec"] = row.compression_codec
+            if row.actual_path is not None:
+                metadata["actual_path"] = row.actual_path
 
-            # Add optional security fields from columns (not JSON)
-            if entry.file_hash is not None:
-                metadata["file_hash"] = entry.file_hash
-            if entry.entry_signature is not None:
-                metadata["entry_signature"] = entry.entry_signature
-            if entry.s3_etag is not None:
-                metadata["s3_etag"] = entry.s3_etag
+            # Optional security fields
+            if row.file_hash is not None:
+                metadata["file_hash"] = row.file_hash
+            if row.entry_signature is not None:
+                metadata["entry_signature"] = row.entry_signature
+            if row.s3_etag is not None:
+                metadata["s3_etag"] = row.s3_etag
+            if row.inline_ext is not None:
+                metadata["inline_ext"] = row.inline_ext
 
-            # Only parse cache_key_params JSON if it exists (should be disabled by default)
-            if entry.cache_key_params is not None:
+            # Include metadata_dict (user-facing kwargs) if stored
+            if row.metadata_dict is not None:
+                metadata["metadata_dict"] = row.metadata_dict
+
+            # Only parse cache_key_params JSON if it exists (disabled by default)
+            if row.cache_key_params is not None:
                 try:
-                    metadata["cache_key_params"] = json_loads(entry.cache_key_params)
+                    metadata["cache_key_params"] = json_loads(row.cache_key_params)
                 except (ValueError, TypeError):
                     pass  # Skip malformed cache_key_params
 
             # Ensure timestamps are always in UTC for consistency
             created_at_utc = (
-                entry.created_at.astimezone(timezone.utc)
-                if entry.created_at.tzinfo
-                else entry.created_at.replace(tzinfo=timezone.utc)
+                row.created_at.astimezone(timezone.utc)
+                if row.created_at.tzinfo
+                else row.created_at.replace(tzinfo=timezone.utc)
             )
             accessed_at_utc = (
-                entry.accessed_at.astimezone(timezone.utc)
-                if entry.accessed_at.tzinfo
-                else entry.accessed_at.replace(tzinfo=timezone.utc)
+                row.accessed_at.astimezone(timezone.utc)
+                if row.accessed_at.tzinfo
+                else row.accessed_at.replace(tzinfo=timezone.utc)
             )
 
             return {
-                "description": entry.description,
-                "data_type": entry.data_type,
+                "description": row.description,
+                "data_type": row.data_type,
                 "created_at": created_at_utc.isoformat(),
                 "accessed_at": accessed_at_utc.isoformat(),
-                "file_size": entry.file_size,
+                "file_size": row.file_size,
+                "access_count": row.access_count or 0,
+                "ttl_seconds": row.ttl_seconds,
+                "expires_at": (
+                    row.expires_at.astimezone(timezone.utc).isoformat()
+                    if row.expires_at and hasattr(row.expires_at, "astimezone")
+                    else row.expires_at
+                ),
+                "is_inline": row.is_inline or 0,
+                "blob_data": row.blob_data,
                 "metadata": metadata,
             }
 
@@ -2177,6 +2464,7 @@ class SqliteBackend(MetadataBackend):
             metadata_dict_value = metadata.pop(
                 "metadata_dict", None
             )  # User metadata for querying
+            inline_ext = metadata.pop("inline_ext", None)
 
             # Remove redundant fields that are already stored as columns
             metadata.pop("data_type", None)  # Already stored in data_type column
@@ -2194,6 +2482,20 @@ class SqliteBackend(MetadataBackend):
             elif accessed_at is None:
                 accessed_at = datetime.now(timezone.utc)
 
+            # Handle TTL fields
+            ttl_seconds_val = entry_data.get("ttl_seconds")
+            expires_at = entry_data.get("expires_at")
+            if expires_at is None and ttl_seconds_val is not None:
+                # Compute expires_at from created_at + ttl_seconds
+                created_dt = created_at
+                if isinstance(created_dt, str):
+                    created_dt = datetime.fromisoformat(created_dt)
+                if created_dt.tzinfo is None:
+                    created_dt = created_dt.replace(tzinfo=timezone.utc)
+                expires_at = created_dt + timedelta(seconds=float(ttl_seconds_val))
+            elif isinstance(expires_at, str):
+                expires_at = datetime.fromisoformat(expires_at)
+
             # Use efficient INSERT OR REPLACE with dedicated columns - zero JSON overhead
             from sqlalchemy import text
 
@@ -2204,11 +2506,13 @@ class SqliteBackend(MetadataBackend):
                     (cache_key, description, data_type, file_size, 
                      file_hash, entry_signature, s3_etag, cache_key_params, metadata_dict,
                      object_type, storage_format, serializer, compression_codec, actual_path,
-                     created_at, accessed_at)
+                     created_at, accessed_at, access_count, ttl_seconds, expires_at,
+                     blob_data, is_inline, inline_ext)
                     VALUES (:cache_key, :description, :data_type, :file_size, 
                            :file_hash, :entry_signature, :s3_etag, :cache_key_params, :metadata_dict,
                            :object_type, :storage_format, :serializer, :compression_codec, :actual_path,
-                           :created_at, :accessed_at)
+                           :created_at, :accessed_at, :access_count, :ttl_seconds, :expires_at,
+                           :blob_data, :is_inline, :inline_ext)
                 """),
                 {
                     "cache_key": cache_key,
@@ -2227,6 +2531,12 @@ class SqliteBackend(MetadataBackend):
                     "actual_path": actual_path,
                     "created_at": created_at,
                     "accessed_at": accessed_at,
+                    "access_count": entry_data.get("access_count", 0),
+                    "ttl_seconds": ttl_seconds_val,
+                    "expires_at": expires_at,
+                    "blob_data": entry_data.get("blob_data"),
+                    "is_inline": entry_data.get("is_inline", 0),
+                    "inline_ext": inline_ext,
                 },
             )
             session.commit()
@@ -2276,7 +2586,8 @@ class SqliteBackend(MetadataBackend):
             elif "content_hash" in updates:
                 entry.file_hash = updates["content_hash"]
             if "actual_path" in updates:
-                entry.actual_path = str(updates["actual_path"])
+                ap = updates["actual_path"]
+                entry.actual_path = str(ap) if ap is not None else None
             if "data_type" in updates:
                 entry.data_type = updates["data_type"]
             if "storage_format" in updates:
@@ -2287,11 +2598,17 @@ class SqliteBackend(MetadataBackend):
                 entry.compression_codec = updates["compression_codec"]
             if "object_type" in updates:
                 entry.object_type = updates["object_type"]
+            if "blob_data" in updates:
+                entry.blob_data = updates["blob_data"]
+            if "is_inline" in updates:
+                entry.is_inline = updates["is_inline"]
+            if "inline_ext" in updates:
+                entry.inline_ext = updates["inline_ext"]
 
             session.commit()
             return True
 
-    def iter_entry_summaries(self) -> List[Dict[str, Any]]:
+    def iter_entry_summaries(self) -> List[EntrySummary]:
         """Return lightweight flat entry dicts — raw SQL, no ORM hydration."""
         from sqlalchemy import text
 
@@ -2304,13 +2621,14 @@ class SqliteBackend(MetadataBackend):
                     f"       object_type, storage_format, serializer, "
                     f"       compression_codec, actual_path, "
                     f"       file_hash, entry_signature, metadata_dict, "
-                    f"       s3_etag "
+                    f"       s3_etag, access_count, ttl_seconds, expires_at, "
+                    f"       is_inline "
                     f'FROM "{tbl}"'
                 )
             ).fetchall()
-            result = []
+            result: List[EntrySummary] = []
             for row in rows:
-                flat = {
+                flat: EntrySummary = {
                     "cache_key": row[0],
                     "data_type": row[1],
                     "description": row[2] or "",
@@ -2337,64 +2655,85 @@ class SqliteBackend(MetadataBackend):
                     flat["metadata_dict"] = row[13]
                 if row[14] is not None:
                     flat["s3_etag"] = row[14]
+                # Phase 1 columns
+                flat["access_count"] = row[15] or 0
+                if row[16] is not None:
+                    flat["ttl_seconds"] = row[16]
+                if row[17] is not None:
+                    flat["expires_at"] = row[17]
+                # Phase 2 inline blob flag
+                flat["is_inline"] = row[18] or 0
                 result.append(flat)
             return result
 
     def list_entries(self) -> List[Dict[str, Any]]:
-        """List all cache entries using columns directly - zero JSON parsing overhead for backend data."""
+        """List all cache entries — Core column select, no ORM hydration."""
         with self.SessionLocal() as session:
-            # Use a single optimized query to get all data at once
-            entries = (
-                session.execute(
-                    select(self._CacheEntry).order_by(desc(self._CacheEntry.created_at))
-                )
-                .scalars()
-                .all()
-            )
+            CE = self._CacheEntry
+            # Core column select — avoids SQLAlchemy ORM identity-map overhead
+            rows = session.execute(
+                select(
+                    CE.cache_key,
+                    CE.data_type,
+                    CE.description,
+                    CE.created_at,
+                    CE.accessed_at,
+                    CE.file_size,
+                    CE.object_type,
+                    CE.storage_format,
+                    CE.serializer,
+                    CE.compression_codec,
+                    CE.actual_path,
+                    CE.file_hash,
+                    CE.entry_signature,
+                    CE.s3_etag,
+                    CE.cache_key_params,
+                ).order_by(desc(CE.created_at))
+            ).fetchall()
 
             result = []
-            for entry in entries:
-                # Build metadata from columns directly - zero JSON parsing for backend data
-                entry_metadata = {}
+            for row in rows:
+                # Build metadata dict from Row tuple — no ORM attribute overhead
+                entry_metadata: Dict[str, Any] = {}
 
-                # Add backend technical metadata from dedicated columns (not JSON)
-                if entry.object_type is not None:
-                    entry_metadata["object_type"] = entry.object_type
-                if entry.storage_format is not None:
-                    entry_metadata["storage_format"] = entry.storage_format
-                if entry.serializer is not None:
-                    entry_metadata["serializer"] = entry.serializer
-                if entry.compression_codec is not None:
-                    entry_metadata["compression_codec"] = entry.compression_codec
-                if entry.actual_path is not None:
-                    entry_metadata["actual_path"] = entry.actual_path
+                # Backend technical metadata from dedicated columns (not JSON)
+                if row.object_type is not None:
+                    entry_metadata["object_type"] = row.object_type
+                if row.storage_format is not None:
+                    entry_metadata["storage_format"] = row.storage_format
+                if row.serializer is not None:
+                    entry_metadata["serializer"] = row.serializer
+                if row.compression_codec is not None:
+                    entry_metadata["compression_codec"] = row.compression_codec
+                if row.actual_path is not None:
+                    entry_metadata["actual_path"] = row.actual_path
 
-                # Add optional security fields from columns (not JSON)
-                if entry.file_hash is not None:
-                    entry_metadata["file_hash"] = entry.file_hash
-                if entry.entry_signature is not None:
-                    entry_metadata["entry_signature"] = entry.entry_signature
-                if entry.s3_etag is not None:
-                    entry_metadata["s3_etag"] = entry.s3_etag
+                # Optional security fields
+                if row.file_hash is not None:
+                    entry_metadata["file_hash"] = row.file_hash
+                if row.entry_signature is not None:
+                    entry_metadata["entry_signature"] = row.entry_signature
+                if row.s3_etag is not None:
+                    entry_metadata["s3_etag"] = row.s3_etag
 
-                # Only parse cache_key_params JSON if it exists (should be disabled by default)
-                if entry.cache_key_params is not None:
+                # Only parse cache_key_params JSON if it exists (disabled by default)
+                if row.cache_key_params is not None:
                     try:
                         entry_metadata["cache_key_params"] = json_loads(
-                            entry.cache_key_params
+                            row.cache_key_params
                         )
                     except (ValueError, TypeError):
                         pass  # Skip malformed cache_key_params
 
                 result.append(
                     {
-                        "cache_key": entry.cache_key,
-                        "data_type": entry.data_type,
-                        "description": entry.description,
+                        "cache_key": row.cache_key,
+                        "data_type": row.data_type,
+                        "description": row.description,
                         "metadata": entry_metadata,
-                        "created": entry.created_at.isoformat(),
-                        "last_accessed": entry.accessed_at.isoformat(),
-                        "size_mb": round(entry.file_size / (1024 * 1024), 3),
+                        "created": row.created_at.isoformat(),
+                        "last_accessed": row.accessed_at.isoformat(),
+                        "size_mb": bytes_to_mb_display(row.file_size),
                     }
                 )
 
@@ -2422,7 +2761,8 @@ class SqliteBackend(MetadataBackend):
                 )
             ).one()
 
-            total_size_mb = row.total_size / (1024 * 1024)
+            total_size_bytes = row.total_size
+            total_size_mb = total_size_bytes / (1024 * 1024)
 
             # Get hit/miss stats
             stats = self._get_stats_row(session)
@@ -2436,19 +2776,23 @@ class SqliteBackend(MetadataBackend):
                 "total_entries": row.total,
                 "dataframe_entries": row.dataframe_count,
                 "array_entries": row.array_count,
-                "total_size_mb": round(total_size_mb, 2),
+                "total_size_bytes": total_size_bytes,
+                "total_size_mb": total_size_mb,  # Backward compat — prefer total_size_bytes
                 "cache_hits": stats.cache_hits,
                 "cache_misses": stats.cache_misses,
                 "hit_rate": round(hit_rate, 3),
             }
 
     def update_access_time(self, cache_key: str):
-        """Update last access time for cache entry."""
+        """Update last access time and increment access count for cache entry."""
         with self._lock, self.SessionLocal() as session:
             session.execute(
                 update(self._CacheEntry)
                 .where(self._CacheEntry.cache_key == cache_key)
-                .values(accessed_at=datetime.now(timezone.utc))
+                .values(
+                    accessed_at=datetime.now(timezone.utc),
+                    access_count=self._CacheEntry.access_count + 1,
+                )
             )
             session.commit()
 
@@ -2494,20 +2838,18 @@ class SqliteBackend(MetadataBackend):
             session.commit()
             return deleted_count
 
-    def cleanup_by_size(self, target_size_mb: float) -> Dict[str, Any]:
+    def cleanup_by_size(self, target_size_bytes: int) -> Dict[str, Any]:
         """Remove least-recently-accessed entries until cache size drops to or below target."""
         with self._lock, self.SessionLocal() as session:
-            # Get current total size
+            # Get current total size in bytes
             CE = self._CacheEntry
             result = session.execute(select(func.sum(CE.file_size)).select_from(CE))
-            total_size_bytes = result.scalar() or 0
-            total_size_mb = total_size_bytes / (1024 * 1024)
+            current_size_bytes = result.scalar() or 0
 
-            if total_size_mb <= target_size_mb:
+            if current_size_bytes <= target_size_bytes:
                 return {"count": 0, "removed_entries": []}  # Already at or below target
 
-            target_size_bytes = target_size_mb * 1024 * 1024
-            bytes_to_remove = total_size_bytes - target_size_bytes
+            bytes_to_remove = current_size_bytes - target_size_bytes
 
             # Get entries sorted by accessed_at (oldest first) with actual_path
             entries_to_delete = session.execute(

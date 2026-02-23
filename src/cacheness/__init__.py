@@ -39,7 +39,17 @@ from .metadata import (
     validate_namespace_id,  # noqa: F401
     DEFAULT_NAMESPACE,  # noqa: F401
 )
-from .interfaces import CacheHandler  # Export interface for custom handlers
+from .interfaces import (
+    BlobReadContext,
+    CacheHandler,
+    EntryData,
+    EntrySummary,
+    HandlerResult,
+    IntegrityReport,
+    SignableFields,
+    WriteBlobResult,
+)  # Export interface for custom handlers
+from .entry_list import EntryList  # noqa: F401
 
 # Import config validation and file loading (Phase 2.4)
 from .config import (
@@ -49,6 +59,7 @@ from .config import (
     CompressionConfig,
     SerializationConfig,
     HandlerConfig,
+    HooksConfig,
     SecurityConfig,
     ConfigValidationError,
     validate_config,
@@ -79,7 +90,7 @@ try:
 except ImportError:
     _has_metadata_backends = False
 
-__version__ = "0.5.1"
+__version__ = "0.6.0"
 __author__ = "radioflyer28"
 __email__ = "akgithub.2drwc@aleeas.com"
 
@@ -216,6 +227,7 @@ __all__ = [
     "SerializationConfig",
     "HandlerConfig",
     "SecurityConfig",
+    "HooksConfig",  # Lifecycle callback configuration
     # Configuration validation (Phase 2.4)
     "ConfigValidationError",
     "validate_config",
@@ -229,6 +241,14 @@ __all__ = [
     "ObjectHandler",
     "ArrayHandler",
     "CacheHandler",  # Interface for custom handlers
+    "HandlerResult",  # Typed return contract for handler put()
+    "WriteBlobResult",  # Typed return contract for _write_blob()
+    "IntegrityReport",  # Typed return contract for verify_integrity()
+    "SignableFields",  # Typed contract for signable entry fields
+    "EntrySummary",  # Typed contract for iter_entry_summaries()
+    "BlobReadContext",  # Typed contract for handler.get() metadata
+    "EntryData",  # Typed contract for get_entry()/put_entry()
+    "EntryList",  # Rich result wrapper for list_entries/query
     # Handler registration API
     "register_handler",
     "unregister_handler",

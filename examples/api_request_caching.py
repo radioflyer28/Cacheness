@@ -1,119 +1,84 @@
+#!/usr/bin/env python3
 """
-API Request Caching Example
+API Request Caching (Advanced)
+==============================
 
-This example demonstrates how to use cacheness to cache expensive API requests
-with intelligent TTL management and ETag-based validation.
+A class-based pattern for caching HTTP calls with per-endpoint TTLs
+and a shared SQLite-backed cache instance.
+
+Usage:
+    uv run python examples/api_request_caching.py
+
+Requires:
+    uv add requests
 """
 
 import requests
+
 from cacheness import cached, cacheness, CacheConfig
 
-
-# Initialize cache for API responses
-config = CacheConfig(
+# -- Shared cache for all API responses ---------------------------------------
+api_config = CacheConfig(
     cache_dir="./api_cache",
-    default_ttl_seconds=86400,  # 24 hours - Cache API responses
+    default_ttl="1d",
     metadata_backend="sqlite",
 )
-api_cache = cacheness(config)
+api_cache = cacheness(api_config)
 
 
-class WeatherAPI:
-    """Example API client with intelligent caching."""
+class WeatherClient:
+    """Weather API wrapper with layered TTLs."""
 
-    def __init__(self, api_key):
+    def __init__(self, api_key: str):
         self.api_key = api_key
-        self.base_url = "https://api.weatherapi.com/v1"
+        self.base = "https://api.weatherapi.com/v1"
 
-    @cached(
-        cache_instance=api_cache, ttl_seconds=21600, key_prefix="weather"
-    )  # 6 hours
-    def get_current_weather(self, city, units="metric"):
-        """Get current weather with 6-hour caching."""
-        url = f"{self.base_url}/current.json"
-        params = {"key": self.api_key, "q": city, "units": units}
+    @cached(cache_instance=api_cache, ttl="6h", key_prefix="weather")
+    def current(self, city: str, units: str = "metric"):
+        """Current conditions — refreshed every 6 hours."""
+        print(f"  Fetching current weather for {city}...")
+        r = requests.get(
+            f"{self.base}/current.json",
+            params={"key": self.api_key, "q": city, "units": units},
+        )
+        r.raise_for_status()
+        return r.json()
 
-        print(f"Making API request for {city}...")  # Only prints on cache miss
-        response = requests.get(url, params=params)
-        response.raise_for_status()
-        return response.json()
+    @cached(cache_instance=api_cache, ttl="1w", key_prefix="forecast")
+    def forecast(self, city: str, days: int = 7):
+        """Weekly forecast — refreshed once a week."""
+        print(f"  Fetching {days}-day forecast for {city}...")
+        r = requests.get(
+            f"{self.base}/forecast.json",
+            params={"key": self.api_key, "q": city, "days": days},
+        )
+        r.raise_for_status()
+        return r.json()
 
-    @cached(
-        cache_instance=api_cache, ttl_seconds=604800, key_prefix="forecast"
-    )  # 168 hours - 1 week
-    def get_7_day_forecast(self, city, include_hourly=False):
-        """Get 7-day forecast with weekly caching."""
-        url = f"{self.base_url}/forecast.json"
-        params = {
-            "key": self.api_key,
-            "q": city,
-            "days": 7,
-            "hourly": 1 if include_hourly else 0,
-        }
-
-        print(f"Making forecast API request for {city}...")
-        response = requests.get(url, params=params)
-        response.raise_for_status()
-        return response.json()
-
-    @cached(
-        cache_instance=api_cache, ttl_seconds=31536000, key_prefix="historical"
-    )  # 8760 hours - 1 year
-    def get_historical_weather(self, city, date):
-        """Get historical weather data with long-term caching."""
-        url = f"{self.base_url}/history.json"
-        params = {
-            "key": self.api_key,
-            "q": city,
-            "dt": date,  # YYYY-MM-DD format
-        }
-
-        print(f"Making historical API request for {city} on {date}...")
-        response = requests.get(url, params=params)
-        response.raise_for_status()
-        return response.json()
-
-
-def main():
-    """Demonstrate API caching functionality."""
-
-    # Initialize weather client (replace with your API key)
-    weather_client = WeatherAPI("your_api_key_here")
-
-    print("=== Weather API Caching Demo ===\n")
-
-    # Current weather - first call makes API request
-    print("1. Getting current weather for London (first time):")
-    current = weather_client.get_current_weather("London", units="imperial")
-    print(f"   Temperature: {current['current']['temp_f']}°F")
-
-    # Second call uses cache (no API request)
-    print("\n2. Getting current weather for London (cached):")
-    current_cached = weather_client.get_current_weather("London", units="imperial")
-    print(f"   Temperature: {current_cached['current']['temp_f']}°F")
-
-    # Different parameters = different cache entry
-    print("\n3. Getting current weather for London in Celsius (new cache entry):")
-    current_metric = weather_client.get_current_weather("London", units="metric")
-    print(f"   Temperature: {current_metric['current']['temp_c']}°C")
-
-    # Long-term forecast caching
-    print("\n4. Getting 7-day forecast (cached for 1 week):")
-    forecast = weather_client.get_7_day_forecast("London", include_hourly=True)
-    print(f"   Forecast days: {len(forecast['forecast']['forecastday'])}")
-
-    # Historical data cached for a full year
-    print("\n5. Getting historical data (cached for 1 year):")
-    historical = weather_client.get_historical_weather("London", "2023-12-25")
-    print(f"   Historical date: {historical['forecast']['forecastday'][0]['date']}")
-
-    # Cache statistics
-    print("\n=== Cache Statistics ===")
-    stats = api_cache.get_stats()
-    print(f"Total entries: {stats['total_entries']}")
-    print(f"Cache size: {stats['total_size_mb']:.2f} MB")
-    print(f"Hit rate: {stats.get('hit_rate', 0):.1%}")
+    @cached(cache_instance=api_cache, ttl="1y", key_prefix="history")
+    def historical(self, city: str, date: str):
+        """Historical data — essentially immutable."""
+        print(f"  Fetching historical data for {city} on {date}...")
+        r = requests.get(
+            f"{self.base}/history.json",
+            params={"key": self.api_key, "q": city, "dt": date},
+        )
+        r.raise_for_status()
+        return r.json()
 
 
 if __name__ == "__main__":
-    main()
+    client = WeatherClient("YOUR_API_KEY")
+
+    # First call — hits the API
+    data = client.current("London")
+    print(f"Temp: {data['current']['temp_c']}°C")
+
+    # Second call — served from cache
+    data = client.current("London")
+    print(f"Cached: {data['current']['temp_c']}°C\n")
+
+    stats = api_cache.get_stats()
+    print(
+        f"Entries: {stats['total_entries']}, Size: {stats['total_size_bytes']:,} bytes"
+    )

@@ -14,9 +14,11 @@ import logging
 
 # Import focused interfaces
 from .interfaces import (
+    BlobReadContext,
     CacheHandler,
     CacheWriteError,
     CacheReadError,
+    HandlerResult,
 )
 from .error_handling import cache_operation_context
 
@@ -139,7 +141,7 @@ class PolarsDataFrameHandler(CacheHandler):
             logger.debug(f"Polars DataFrame validation failed: {e}")
             return False
 
-    def put(self, data: Any, file_path: Path, config: Any) -> Dict[str, Any]:
+    def put(self, data: Any, file_path: Path, config: Any) -> HandlerResult:
         """Store Polars DataFrame as Parquet with proper error handling."""
         with cache_operation_context(
             "store_polars_dataframe", shape=data.shape, columns=len(data.columns)
@@ -158,18 +160,18 @@ class PolarsDataFrameHandler(CacheHandler):
                     f"Polars DataFrame written successfully: {file_size} bytes"
                 )
 
-                return {
-                    "storage_format": "parquet",
-                    "file_size": file_size,
-                    "actual_path": str(parquet_path),
-                    "metadata": {
+                return HandlerResult(
+                    storage_format="parquet",
+                    file_size=file_size,
+                    actual_path=str(parquet_path),
+                    compression_codec=compression,
+                    extra={
                         "shape": data.shape,
                         "columns": data.columns,
                         "dtypes": [str(dtype) for dtype in data.dtypes],
-                        "compression": compression,
                         "backend": "polars",
                     },
-                }
+                )
 
             except Exception as e:
                 raise CacheWriteError(
@@ -178,7 +180,7 @@ class PolarsDataFrameHandler(CacheHandler):
                     data_type=type(data).__name__,
                 ) from e
 
-    def get(self, file_path: Path, metadata: Dict[str, Any]) -> Any:
+    def get(self, file_path: Path, metadata: BlobReadContext) -> Any:
         """Load Polars DataFrame from Parquet with proper error handling."""
         with cache_operation_context("load_polars_dataframe", file_path=str(file_path)):
             try:
@@ -235,47 +237,74 @@ class PandasSeriesHandler(CacheHandler):
             # This Series has mixed types that can't be handled by Parquet
             return False
 
-    def put(self, data: Any, file_path: Path, config: Any) -> Dict[str, Any]:
-        """Store Pandas Series as Parquet."""
-        # Convert Series to DataFrame for Parquet storage
-        df = data.to_frame()
+    def put(self, data: Any, file_path: Path, config: Any) -> HandlerResult:
+        """Store Pandas Series as Parquet with proper error handling."""
+        with cache_operation_context(
+            "store_pandas_series", shape=data.shape, name=data.name
+        ):
+            try:
+                # Convert Series to DataFrame for Parquet storage
+                df = data.to_frame()
 
-        # Use the same Parquet storage logic as DataFrame handler
-        parquet_path = file_path.with_suffix("").with_suffix(".parquet")
-        df.to_parquet(
-            parquet_path,
-            compression=config.compression.parquet_compression,
-            # Keep index=True for Series to preserve index data
-        )
+                # Use the same Parquet storage logic as DataFrame handler
+                parquet_path = file_path.with_suffix("").with_suffix(".parquet")
+                df.to_parquet(
+                    parquet_path,
+                    compression=config.compression.parquet_compression,
+                    # Keep index=True for Series to preserve index data
+                )
 
-        file_size = parquet_path.stat().st_size
-        return {
-            "file_size": file_size,
-            "actual_path": str(parquet_path),
-            "storage_format": "parquet",
-            "metadata": {
-                "shape": list(df.shape),
-                "columns": list(df.columns),
-                "dtypes": [str(dtype) for dtype in df.dtypes],
-                "compression": config.compression.parquet_compression,
-                "backend": "pandas",
-                "is_series": True,
-                "series_name": data.name,
-            },
-        }
+                file_size = parquet_path.stat().st_size
+                return HandlerResult(
+                    storage_format="parquet",
+                    file_size=file_size,
+                    actual_path=str(parquet_path),
+                    compression_codec=config.compression.parquet_compression,
+                    extra={
+                        "shape": list(df.shape),
+                        "columns": list(df.columns),
+                        "dtypes": [str(dtype) for dtype in df.dtypes],
+                        "backend": "pandas",
+                        "is_series": True,
+                        "series_name": data.name,
+                    },
+                )
 
-    def get(self, file_path: Path, metadata: Dict[str, Any]) -> Any:
-        """Load Pandas Series from Parquet."""
-        df = pd.read_parquet(file_path)
+            except Exception as e:
+                raise CacheWriteError(
+                    f"Failed to write Pandas Series to Parquet: {e}",
+                    handler_type="pandas_series",
+                    data_type=type(data).__name__,
+                ) from e
 
-        # Convert back to Series - since we preserved the index, use it
-        series = df.iloc[:, 0]  # Get the first (and only) column
+    def get(self, file_path: Path, metadata: BlobReadContext) -> Any:
+        """Load Pandas Series from Parquet with proper error handling."""
+        with cache_operation_context("load_pandas_series", file_path=str(file_path)):
+            try:
+                if not PANDAS_AVAILABLE or pd is None:
+                    raise CacheReadError(
+                        "Pandas not available for loading Series",
+                        handler_type="pandas_series",
+                    )
 
-        # Restore the original Series name
-        if metadata.get("is_series") and "series_name" in metadata:
-            series.name = metadata["series_name"]
+                df = pd.read_parquet(file_path)
 
-        return series
+                # Convert back to Series - since we preserved the index, use it
+                series = df.iloc[:, 0]  # Get the first (and only) column
+
+                # Restore the original Series name
+                if metadata.get("is_series") and "series_name" in metadata:
+                    series.name = metadata["series_name"]
+
+                return series
+
+            except Exception as e:
+                if isinstance(e, CacheReadError):
+                    raise
+                raise CacheReadError(
+                    f"Failed to read Pandas Series from Parquet: {e}",
+                    handler_type="pandas_series",
+                ) from e
 
     def get_file_extension(self, config: Any) -> str:
         """Get file extension for Series (Parquet)."""
@@ -312,45 +341,73 @@ class PolarsSeriesHandler(CacheHandler):
             # This Series has mixed types that can't be handled by Parquet
             return False
 
-    def put(self, data: Any, file_path: Path, config: Any) -> Dict[str, Any]:
-        """Store Polars Series as Parquet."""
-        # Convert Series to DataFrame for Parquet storage
-        df = data.to_frame()
+    def put(self, data: Any, file_path: Path, config: Any) -> HandlerResult:
+        """Store Polars Series as Parquet with proper error handling."""
+        with cache_operation_context(
+            "store_polars_series", shape=data.shape, name=data.name
+        ):
+            try:
+                # Convert Series to DataFrame for Parquet storage
+                df = data.to_frame()
 
-        # Use the same Parquet storage logic as DataFrame handler
-        parquet_path = file_path.with_suffix("").with_suffix(".parquet")
-        df.write_parquet(
-            parquet_path, compression=config.compression.parquet_compression
-        )
+                # Use the same Parquet storage logic as DataFrame handler
+                parquet_path = file_path.with_suffix("").with_suffix(".parquet")
+                df.write_parquet(
+                    parquet_path,
+                    compression=config.compression.parquet_compression,
+                )
 
-        file_size = parquet_path.stat().st_size
-        return {
-            "file_size": file_size,
-            "actual_path": str(parquet_path),
-            "storage_format": "parquet",
-            "metadata": {
-                "shape": list(df.shape),
-                "columns": list(df.columns),
-                "dtypes": [str(dtype) for dtype in df.dtypes],
-                "compression": config.compression.parquet_compression,
-                "backend": "polars",
-                "is_series": True,
-                "series_name": data.name,
-            },
-        }
+                file_size = parquet_path.stat().st_size
+                return HandlerResult(
+                    storage_format="parquet",
+                    file_size=file_size,
+                    actual_path=str(parquet_path),
+                    compression_codec=config.compression.parquet_compression,
+                    extra={
+                        "shape": list(df.shape),
+                        "columns": list(df.columns),
+                        "dtypes": [str(dtype) for dtype in df.dtypes],
+                        "backend": "polars",
+                        "is_series": True,
+                        "series_name": data.name,
+                    },
+                )
 
-    def get(self, file_path: Path, metadata: Dict[str, Any]) -> Any:
-        """Load Polars Series from Parquet."""
-        df = pl.read_parquet(file_path)
+            except Exception as e:
+                raise CacheWriteError(
+                    f"Failed to write Polars Series to Parquet: {e}",
+                    handler_type="polars_series",
+                    data_type=type(data).__name__,
+                ) from e
 
-        # Convert back to Series
-        series = df.to_series(0)  # Get the first (and only) column
+    def get(self, file_path: Path, metadata: BlobReadContext) -> Any:
+        """Load Polars Series from Parquet with proper error handling."""
+        with cache_operation_context("load_polars_series", file_path=str(file_path)):
+            try:
+                if not POLARS_AVAILABLE or pl is None:
+                    raise CacheReadError(
+                        "Polars not available for loading Series",
+                        handler_type="polars_series",
+                    )
 
-        # Restore the original Series name
-        if metadata.get("is_series") and "series_name" in metadata:
-            series = series.alias(metadata["series_name"])
+                df = pl.read_parquet(file_path)
 
-        return series
+                # Convert back to Series
+                series = df.to_series(0)  # Get the first (and only) column
+
+                # Restore the original Series name
+                if metadata.get("is_series") and "series_name" in metadata:
+                    series = series.alias(metadata["series_name"])
+
+                return series
+
+            except Exception as e:
+                if isinstance(e, CacheReadError):
+                    raise
+                raise CacheReadError(
+                    f"Failed to read Polars Series from Parquet: {e}",
+                    handler_type="polars_series",
+                ) from e
 
     def get_file_extension(self, config: Any) -> str:
         """Get file extension for Series (Parquet)."""
@@ -386,34 +443,63 @@ class PandasDataFrameHandler(CacheHandler):
             # DataFrame has types that can't be written to Parquet, let ObjectHandler handle it
             return False
 
-    def put(self, data: Any, file_path: Path, config: Any) -> Dict[str, Any]:
-        """Store Pandas DataFrame as Parquet."""
-        parquet_path = file_path.with_suffix("").with_suffix(".parquet")
-        data.to_parquet(
-            parquet_path,
-            compression=config.compression.parquet_compression,
-            # Keep index=True by default to preserve DataFrame index
-        )
+    def put(self, data: Any, file_path: Path, config: Any) -> HandlerResult:
+        """Store Pandas DataFrame as Parquet with proper error handling."""
+        with cache_operation_context(
+            "store_pandas_dataframe",
+            shape=data.shape,
+            columns=len(data.columns),
+        ):
+            try:
+                parquet_path = file_path.with_suffix("").with_suffix(".parquet")
+                compression = config.compression.parquet_compression
 
-        return {
-            "storage_format": "parquet",
-            "file_size": parquet_path.stat().st_size,
-            "actual_path": str(parquet_path),
-            "metadata": {
-                "shape": data.shape,
-                "columns": data.columns.tolist(),
-                "dtypes": [str(dtype) for dtype in data.dtypes],
-                "compression": config.compression.parquet_compression,
-                "backend": "pandas",
-            },
-        }
+                data.to_parquet(
+                    parquet_path,
+                    compression=compression,
+                    # Keep index=True by default to preserve DataFrame index
+                )
 
-    def get(self, file_path: Path, metadata: Dict[str, Any]) -> Any:
-        """Load Pandas DataFrame from Parquet."""
-        if not PANDAS_AVAILABLE or pd is None:
-            raise ImportError("Pandas not available for loading DataFrame")
+                file_size = parquet_path.stat().st_size
+                return HandlerResult(
+                    storage_format="parquet",
+                    file_size=file_size,
+                    actual_path=str(parquet_path),
+                    compression_codec=compression,
+                    extra={
+                        "shape": data.shape,
+                        "columns": data.columns.tolist(),
+                        "dtypes": [str(dtype) for dtype in data.dtypes],
+                        "backend": "pandas",
+                    },
+                )
 
-        return pd.read_parquet(file_path)
+            except Exception as e:
+                raise CacheWriteError(
+                    f"Failed to write Pandas DataFrame to Parquet: {e}",
+                    handler_type="pandas_dataframe",
+                    data_type=type(data).__name__,
+                ) from e
+
+    def get(self, file_path: Path, metadata: BlobReadContext) -> Any:
+        """Load Pandas DataFrame from Parquet with proper error handling."""
+        with cache_operation_context("load_pandas_dataframe", file_path=str(file_path)):
+            try:
+                if not PANDAS_AVAILABLE or pd is None:
+                    raise CacheReadError(
+                        "Pandas not available for loading DataFrame",
+                        handler_type="pandas_dataframe",
+                    )
+
+                return pd.read_parquet(file_path)
+
+            except Exception as e:
+                if isinstance(e, CacheReadError):
+                    raise
+                raise CacheReadError(
+                    f"Failed to read Pandas DataFrame from Parquet: {e}",
+                    handler_type="pandas_dataframe",
+                ) from e
 
     def get_file_extension(self, config: Any) -> str:
         """Get file extension for Pandas DataFrames and Series."""
@@ -435,7 +521,7 @@ class ArrayHandler(CacheHandler):
             return all(isinstance(v, np.ndarray) for v in data.values())
         return False
 
-    def put(self, data: Any, file_path: Path, config: Any) -> Dict[str, Any]:
+    def put(self, data: Any, file_path: Path, config: Any) -> HandlerResult:
         """Store array(s) using optimal format."""
         if isinstance(data, np.ndarray):
             return self._put_single_array(data, file_path, config)
@@ -448,7 +534,7 @@ class ArrayHandler(CacheHandler):
 
     def _put_single_array(
         self, data: np.ndarray, file_path: Path, config: Any
-    ) -> Dict[str, Any]:
+    ) -> HandlerResult:
         """Store a single numpy array, trying blosc2 first, then NPZ fallback."""
         # Try blosc2 compression first if enabled
         if config.compression.use_blosc2_arrays and BLOSC2_AVAILABLE:
@@ -457,17 +543,16 @@ class ArrayHandler(CacheHandler):
                 blosc2_path = file_path.with_suffix("").with_suffix(".b2nd")
                 self._write_blosc2_array(data, blosc2_path, config)
 
-                return {
-                    "storage_format": "blosc2",
-                    "file_size": blosc2_path.stat().st_size,
-                    "actual_path": str(blosc2_path),
-                    "metadata": {
+                return HandlerResult(
+                    storage_format="blosc2_array",
+                    file_size=blosc2_path.stat().st_size,
+                    actual_path=str(blosc2_path),
+                    compression_codec=config.compression.blosc2_array_codec,
+                    extra={
                         "shape": data.shape,
                         "dtype": str(data.dtype),
-                        "storage_format": "blosc2",
-                        "compression": config.compression.blosc2_array_codec,
                     },
-                }
+                )
             except Exception as e:
                 logger.warning(f"blosc2 compression failed, falling back to NPZ: {e}")
 
@@ -478,21 +563,20 @@ class ArrayHandler(CacheHandler):
         else:
             np.savez(npz_path, data=data)
 
-        return {
-            "storage_format": "npz",
-            "file_size": npz_path.stat().st_size,
-            "actual_path": str(npz_path),
-            "metadata": {
+        return HandlerResult(
+            storage_format="npz",
+            file_size=npz_path.stat().st_size,
+            actual_path=str(npz_path),
+            compression_codec="zlib" if config.compression.npz_compression else "none",
+            extra={
                 "shape": data.shape,
                 "dtype": str(data.dtype),
-                "storage_format": "npz",
-                "compression": "zlib" if config.compression.npz_compression else "none",
             },
-        }
+        )
 
     def _put_array_dict(
         self, data: Dict[str, np.ndarray], file_path: Path, config: Any
-    ) -> Dict[str, Any]:
+    ) -> HandlerResult:
         """Store a dictionary of arrays using NPZ format."""
         # Filter to only numpy arrays
         array_data = {k: v for k, v in data.items() if isinstance(v, np.ndarray)}
@@ -503,19 +587,18 @@ class ArrayHandler(CacheHandler):
         else:
             np.savez(npz_path, **array_data)
 
-        return {
-            "storage_format": "npz",
-            "file_size": npz_path.stat().st_size,
-            "actual_path": str(npz_path),
-            "metadata": {
+        return HandlerResult(
+            storage_format="npz",
+            file_size=npz_path.stat().st_size,
+            actual_path=str(npz_path),
+            compression_codec="zlib" if config.compression.npz_compression else "none",
+            extra={
                 "arrays": {
                     key: {"shape": arr.shape, "dtype": str(arr.dtype)}
                     for key, arr in array_data.items()
                 },
-                "storage_format": "npz",
-                "compression": "zlib" if config.compression.npz_compression else "none",
             },
-        }
+        )
 
     def _write_blosc2_array(
         self, data: np.ndarray, file_path: Path, config: Any
@@ -577,12 +660,12 @@ class ArrayHandler(CacheHandler):
             dtype = np.dtype(dtype_str)
             return np.frombuffer(decompressed, dtype=dtype).reshape(shape)
 
-    def get(self, file_path: Path, metadata: Dict[str, Any]) -> Any:
+    def get(self, file_path: Path, metadata: BlobReadContext) -> Any:
         """Load array(s) from file with format detection."""
         storage_format = metadata.get("storage_format", "npz")
 
-        # Try the expected format first
-        if storage_format == "blosc2":
+        # Try the expected format first (accept legacy "blosc2" for backward compat)
+        if storage_format in ("blosc2_array", "blosc2"):
             try:
                 # Try blosc2 format
                 blosc2_path = file_path.with_suffix("").with_suffix(".b2nd")
@@ -614,6 +697,84 @@ class ArrayHandler(CacheHandler):
     def data_type(self) -> str:
         return "array"
 
+    # -- Zero-disk inline fast-paths ----------------------------------
+
+    def put_bytes(self, data: Any, config: Any) -> tuple[bytes, HandlerResult]:
+        """Serialize a NumPy array to bytes in-memory (no disk I/O).
+
+        Only supports single ``np.ndarray`` with blosc2 available and enabled.
+        Dict-of-arrays and NPZ-only configurations fall back to the disk path.
+        """
+        if not isinstance(data, np.ndarray):
+            raise NotImplementedError("put_bytes only supports single np.ndarray")
+        if not (config.compression.use_blosc2_arrays and BLOSC2_AVAILABLE):
+            raise NotImplementedError("put_bytes requires blosc2 for arrays")
+
+        # Same binary format as _write_blosc2_array: shape|dtype|compressed
+        compressed_data = blosc2.compress2(
+            data,
+            cparams={
+                "typesize": data.dtype.itemsize,
+                "clevel": config.compression.blosc2_array_clevel,
+                "codec": getattr(
+                    blosc2.Codec,
+                    config.compression.blosc2_array_codec.upper(),
+                    blosc2.Codec.LZ4,
+                ),
+            },
+        )
+        shape_bytes = str(data.shape).encode("utf-8")
+        dtype_bytes = str(data.dtype).encode("utf-8")
+
+        parts = [
+            len(shape_bytes).to_bytes(4, "little"),
+            shape_bytes,
+            len(dtype_bytes).to_bytes(4, "little"),
+            dtype_bytes,
+            compressed_data,
+        ]
+        blob = b"".join(parts)
+
+        result = HandlerResult(
+            storage_format="blosc2_array",
+            file_size=len(blob),
+            actual_path="",
+            compression_codec=config.compression.blosc2_array_codec,
+            extra={
+                "shape": data.shape,
+                "dtype": str(data.dtype),
+            },
+        )
+        return blob, result
+
+    def get_bytes(self, blob: bytes, metadata: BlobReadContext) -> Any:
+        """Deserialize a NumPy array from bytes in-memory (no disk I/O).
+
+        Expects the binary format produced by :meth:`put_bytes`
+        (shape|dtype|blosc2-compressed data).
+        """
+        storage_format = metadata.get("storage_format", "npz")
+        if storage_format not in ("blosc2_array", "blosc2"):
+            raise NotImplementedError(
+                f"get_bytes does not support format {storage_format!r}"
+            )
+
+        offset = 0
+        shape_len = int.from_bytes(blob[offset : offset + 4], "little")
+        offset += 4
+        shape_str = blob[offset : offset + shape_len].decode("utf-8")
+        offset += shape_len
+        dtype_len = int.from_bytes(blob[offset : offset + 4], "little")
+        offset += 4
+        dtype_str = blob[offset : offset + dtype_len].decode("utf-8")
+        offset += dtype_len
+        compressed_data = blob[offset:]
+
+        decompressed = blosc2.decompress2(compressed_data)
+        shape = ast.literal_eval(shape_str)
+        dtype = np.dtype(dtype_str)
+        return np.frombuffer(decompressed, dtype=dtype).reshape(shape)
+
 
 class TensorFlowTensorHandler(CacheHandler):
     """Handler for TensorFlow tensors using blosc2.save_tensor/load_tensor."""
@@ -642,7 +803,7 @@ class TensorFlowTensorHandler(CacheHandler):
         except Exception:
             return False
 
-    def put(self, data: Any, file_path: Path, config: Any) -> Dict[str, Any]:
+    def put(self, data: Any, file_path: Path, config: Any) -> HandlerResult:
         """Store TensorFlow tensor using blosc2.save_tensor with proper error handling."""
         tf_module, tf_available = _lazy_import_tensorflow()
         if not tf_available or tf_module is None:
@@ -691,20 +852,19 @@ class TensorFlowTensorHandler(CacheHandler):
                     f"TensorFlow tensor written successfully: {file_size} bytes"
                 )
 
-                return {
-                    "storage_format": "blosc2_tensor",
-                    "file_size": file_size,
-                    "actual_path": str(b2tr_path),
-                    "metadata": {
+                return HandlerResult(
+                    storage_format="blosc2_tensor",
+                    file_size=file_size,
+                    actual_path=str(b2tr_path),
+                    compression_codec=config.compression.blosc2_array_codec,
+                    extra={
                         "shape": tensor_data.shape.as_list()
                         if hasattr(tensor_data.shape, "as_list")
                         else list(tensor_data.shape),
                         "dtype": str(tensor_data.dtype),
-                        "storage_format": "blosc2_tensor",
-                        "compression": config.compression.blosc2_array_codec,
                         "was_variable": isinstance(data, tf_module.Variable),
                     },
-                }
+                )
 
             except Exception as e:
                 raise CacheWriteError(
@@ -713,7 +873,7 @@ class TensorFlowTensorHandler(CacheHandler):
                     data_type=type(data).__name__,
                 ) from e
 
-    def get(self, file_path: Path, metadata: Dict[str, Any]) -> Any:
+    def get(self, file_path: Path, metadata: BlobReadContext) -> Any:
         """Load TensorFlow tensor from blosc2 tensor file with proper error handling."""
         tf_module, tf_available = _lazy_import_tensorflow()
 
@@ -764,108 +924,132 @@ class TensorFlowTensorHandler(CacheHandler):
         return "tensorflow_tensor"
 
 
+class BytesHandler(CacheHandler):
+    """Handler for raw bytes, bytearray, and memoryview objects.
+
+    Stores binary data as-is without any serialization or transformation.
+    This is the preferred handler when the caller has **pre-serialized**
+    data (protobuf, msgpack, custom binary formats) or opaque payloads
+    that should be written verbatim.
+
+    The handler sits just before :class:`ObjectHandler` in the default
+    priority chain so that ``bytes`` objects are stored as raw ``.bin``
+    files rather than being unnecessarily pickled.
+    """
+
+    def can_handle(self, data: Any, config: Any = None) -> bool:
+        """Accept ``bytes``, ``bytearray``, and ``memoryview``."""
+        return isinstance(data, (bytes, bytearray, memoryview))
+
+    def put(self, data: Any, file_path: Path, config: Any) -> HandlerResult:
+        """Write raw bytes to disk.
+
+        Args:
+            data: A ``bytes``, ``bytearray``, or ``memoryview`` object.
+            file_path: Base file path (extension will be replaced with ``.bin``).
+            config: Cache configuration (unused — data is written verbatim).
+
+        Returns:
+            HandlerResult with ``storage_format="raw_bytes"``.
+        """
+        with cache_operation_context("store_bytes", size=len(data)):
+            try:
+                bin_path = file_path.with_suffix("").with_suffix(".bin")
+                raw = bytes(data) if not isinstance(data, bytes) else data
+
+                bin_path.write_bytes(raw)
+                file_size = bin_path.stat().st_size
+
+                logger.debug("Wrote %d raw bytes to %s", file_size, bin_path)
+
+                return HandlerResult(
+                    storage_format="raw_bytes",
+                    file_size=file_size,
+                    actual_path=str(bin_path),
+                )
+            except Exception as e:
+                raise CacheWriteError(f"Failed to write bytes data: {e}") from e
+
+    def get(self, file_path: Path, metadata: BlobReadContext) -> bytes:
+        """Read raw bytes from disk.
+
+        Args:
+            file_path: Path to the ``.bin`` file.
+            metadata: Handler metadata (unused).
+
+        Returns:
+            The bytes exactly as they were stored.
+        """
+        try:
+            path = Path(file_path)
+            if not path.exists():
+                raise CacheReadError(f"Bytes file not found: {file_path}")
+
+            data = path.read_bytes()
+            logger.debug("Read %d raw bytes from %s", len(data), path)
+            return data
+        except CacheReadError:
+            raise
+        except Exception as e:
+            raise CacheReadError(f"Failed to read bytes data: {e}") from e
+
+    # -- Zero-disk inline fast-paths ----------------------------------
+
+    def put_bytes(self, data: Any, config: Any) -> tuple[bytes, HandlerResult]:
+        """Serialize raw bytes in-memory (passthrough — no transformation)."""
+        raw = bytes(data) if not isinstance(data, bytes) else data
+        result = HandlerResult(
+            storage_format="raw_bytes",
+            file_size=len(raw),
+            actual_path="",
+        )
+        return raw, result
+
+    def get_bytes(self, blob: bytes, metadata: BlobReadContext) -> bytes:
+        """Deserialize raw bytes in-memory (passthrough)."""
+        return blob
+
+    def get_file_extension(self, config: Any) -> str:
+        """Return the file extension for raw bytes files."""
+        return ".bin"
+
+    @property
+    def data_type(self) -> str:
+        """Return the data type identifier."""
+        return "bytes"
+
+
 class ObjectHandler(CacheHandler):
     """Handler for general Python objects using compressed pickle."""
 
     def can_handle(self, data: Any, config: Any = None) -> bool:
-        """Check if data can be pickled or dill-serialized (and isn't handled by other handlers)."""
-        # Don't handle DataFrames if specialized handlers can handle them
-        if POLARS_AVAILABLE and pl is not None and isinstance(data, pl.DataFrame):
-            # Check if PolarsDataFrameHandler would reject this (Object types, etc.)
-            try:
-                import io
+        """Check if data can be pickled or dill-serialized.
 
-                data.write_parquet(io.BytesIO())
-                return False  # Specialized handler can handle it
-            except Exception:
-                # Try pickle first
-                if is_pickleable(data):
-                    return True
-                # Then try dill as fallback if enabled
-                if (
-                    config
-                    and hasattr(config, "handlers")
-                    and config.handlers.enable_dill_fallback
-                ):
-                    return is_dill_serializable(data)
-                return False
+        ObjectHandler is always last in the registry's priority list.  By the
+        time this method runs every specialised handler (DataFrame, Series,
+        TensorFlow, Bytes) has already declined, so we don't need to re-test
+        their logic.  The only types we must still skip are ``np.ndarray``,
+        dict-of-arrays, and buffer types (``bytes``/``bytearray``/
+        ``memoryview``), because their respective handlers never reject those.
+        """
+        # BytesHandler always accepts these — don't claim them
+        if isinstance(data, (bytes, bytearray, memoryview)):
+            return False
 
-        if PANDAS_AVAILABLE and pd is not None and isinstance(data, pd.DataFrame):
-            # Check if PandasDataFrameHandler would reject this (complex objects, etc.)
-            try:
-                import io
-
-                data.to_parquet(io.BytesIO())
-                return False  # Specialized handler can handle it
-            except Exception:
-                # Try pickle first
-                if is_pickleable(data):
-                    return True
-                # Then try dill as fallback if enabled
-                if (
-                    config
-                    and hasattr(config, "handlers")
-                    and config.handlers.enable_dill_fallback
-                ):
-                    return is_dill_serializable(data)
-                return False
-
-        # For Series, only handle if specialized handlers can't (i.e., mixed-type Series)
-        if POLARS_AVAILABLE and pl is not None and isinstance(data, pl.Series):
-            # Check if PolarsSeriesHandler would reject this (mixed types)
-            try:
-                temp_df = data.to_frame()
-                import io
-
-                temp_df.write_parquet(io.BytesIO())
-                return False  # Specialized handler can handle it
-            except Exception:
-                # Try pickle first
-                if is_pickleable(data):
-                    return True
-                # Then try dill as fallback if enabled
-                if (
-                    config
-                    and hasattr(config, "handlers")
-                    and config.handlers.enable_dill_fallback
-                ):
-                    return is_dill_serializable(data)
-                return False
-
-        if PANDAS_AVAILABLE and pd is not None and isinstance(data, pd.Series):
-            # Check if PandasSeriesHandler would reject this (mixed types)
-            try:
-                temp_df = data.to_frame()
-                import io
-
-                temp_df.to_parquet(
-                    io.BytesIO()
-                )  # Keep index for proper compatibility check
-                return False  # Specialized handler can handle it
-            except Exception:
-                # Try pickle first
-                if is_pickleable(data):
-                    return True
-                # Then try dill as fallback if enabled
-                if (
-                    config
-                    and hasattr(config, "handlers")
-                    and config.handlers.enable_dill_fallback
-                ):
-                    return is_dill_serializable(data)
-                return False
-
-        # Don't handle arrays - let ArrayHandler do that
+        # ArrayHandler always accepts these — don't claim them
         if isinstance(data, np.ndarray):
             return False
-        if isinstance(data, dict) and all(
-            isinstance(v, np.ndarray) for v in data.values()
+        if (
+            isinstance(data, dict)
+            and data
+            and all(isinstance(v, np.ndarray) for v in data.values())
         ):
             return False
 
         # Try pickle first
         if is_pickleable(data):
             return True
+
         # Then try dill as fallback if enabled
         if (
             config
@@ -873,9 +1057,10 @@ class ObjectHandler(CacheHandler):
             and config.handlers.enable_dill_fallback
         ):
             return is_dill_serializable(data)
+
         return False
 
-    def put(self, data: Any, file_path: Path, config: Any) -> Dict[str, Any]:
+    def put(self, data: Any, file_path: Path, config: Any) -> HandlerResult:
         """Store object using compressed pickle with dill fallback."""
         # Determine serialization method: try pickle first, then dill if enabled
         use_pickle = is_pickleable(data)
@@ -977,21 +1162,16 @@ class ObjectHandler(CacheHandler):
                     pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
             storage_format = serializer_name
 
-        metadata = {
-            "object_type": str(type(data)),
-            "storage_format": storage_format,
-            "serializer": serializer_name,
-            "compression_codec": config.compression.pickle_compression_codec
+        return HandlerResult(
+            storage_format=storage_format,
+            file_size=pickle_path.stat().st_size,
+            actual_path=str(pickle_path),
+            compression_codec=config.compression.pickle_compression_codec
             if BLOSC_AVAILABLE
             else None,
-        }
-
-        return {
-            "storage_format": storage_format,
-            "file_size": pickle_path.stat().st_size,
-            "actual_path": str(pickle_path),
-            "metadata": metadata,
-        }
+            serializer=serializer_name,
+            object_type=str(type(data)),
+        )
 
     def _write_compressed_dill(
         self, data: Any, file_path: Path, compression_params: Dict[str, Any]
@@ -1045,7 +1225,7 @@ class ObjectHandler(CacheHandler):
         # Deserialize with dill
         return dill.loads(decompressed_data)
 
-    def get(self, file_path: Path, metadata: Dict[str, Any]) -> Any:
+    def get(self, file_path: Path, metadata: BlobReadContext) -> Any:
         """Load object using compressed pickle/dill or standard pickle/dill."""
         storage_format = metadata.get("storage_format", "compressed_pickle")
         serializer = metadata.get("serializer", "pickle")
@@ -1089,6 +1269,118 @@ class ObjectHandler(CacheHandler):
                 return self._read_compressed_dill(pickle_path)
             else:
                 return read_compressed_pickle(pickle_path, nparray=False)
+
+    # -- Zero-disk inline fast-paths ----------------------------------
+
+    def put_bytes(self, data: Any, config: Any) -> tuple[bytes, HandlerResult]:
+        """Serialize a Python object to bytes in-memory (no disk I/O).
+
+        Mirrors the logic in :meth:`put` but performs all serialization and
+        optional blosc compression entirely in memory.
+        """
+        import pickle as _pickle
+
+        # Determine serializer — same logic as put()
+        use_pickle = is_pickleable(data)
+        use_dill = False
+        serializer_name = "pickle"
+
+        if not use_pickle:
+            if (
+                config
+                and hasattr(config, "handlers")
+                and config.handlers.enable_dill_fallback
+            ):
+                use_dill = is_dill_serializable(data)
+                if use_dill:
+                    serializer_name = "dill"
+            if not use_dill:
+                raise NotImplementedError("Object cannot be serialized in-memory")
+
+        # Serialize to bytes
+        if use_dill and DILL_AVAILABLE and dill is not None:
+            raw = dill.dumps(data, protocol=dill.HIGHEST_PROTOCOL)
+        else:
+            raw = _pickle.dumps(data, protocol=_pickle.HIGHEST_PROTOCOL)
+
+        # Optionally compress with blosc
+        should_compress = (
+            BLOSC_AVAILABLE
+            and config.compression.pickle_compression_codec != "none"
+            and len(raw) >= config.compression.compression_threshold_bytes
+        )
+        if should_compress:
+            compression_params = optimize_compression_params(
+                data,
+                codec=config.compression.pickle_compression_codec,
+                base_clevel=config.compression.pickle_compression_level,
+                enable_multithreading=getattr(
+                    config.compression, "enable_multithreading", True
+                ),
+                auto_optimize_threads=getattr(
+                    config.compression, "auto_optimize_threads", True
+                ),
+            )
+            from .compress_pickle import blosc as _blosc
+
+            valid_blosc_params: Dict[str, Any] = {"typesize": 1}
+            for key, value in compression_params.items():
+                if key in ["clevel", "filter"]:
+                    valid_blosc_params[key] = value
+                elif key == "codec" and isinstance(value, str):
+                    # Convert string codec to blosc2.Codec enum
+                    codec_map = {
+                        "lz4": _blosc.Codec.LZ4,
+                        "lz4hc": _blosc.Codec.LZ4HC,
+                        "zstd": _blosc.Codec.ZSTD,
+                        "zlib": _blosc.Codec.ZLIB,
+                        "blosclz": _blosc.Codec.BLOSCLZ,
+                    }
+                    valid_blosc_params["codec"] = codec_map.get(
+                        value.lower(), _blosc.Codec.LZ4
+                    )
+                elif key == "codec":
+                    valid_blosc_params["codec"] = value
+            blob = _blosc.compress(raw, **valid_blosc_params)
+            storage_format = f"compressed_{serializer_name}"
+        else:
+            blob = raw
+            storage_format = serializer_name
+
+        result = HandlerResult(
+            storage_format=storage_format,
+            file_size=len(blob),
+            actual_path="",
+            compression_codec=config.compression.pickle_compression_codec
+            if BLOSC_AVAILABLE
+            else None,
+            serializer=serializer_name,
+            object_type=str(type(data)),
+        )
+        return blob, result
+
+    def get_bytes(self, blob: bytes, metadata: BlobReadContext) -> Any:
+        """Deserialize a Python object from bytes in-memory (no disk I/O).
+
+        Mirrors the logic in :meth:`get` but reads entirely from the
+        provided bytes buffer.
+        """
+        import pickle as _pickle
+
+        storage_format = metadata.get("storage_format", "compressed_pickle")
+        serializer = metadata.get("serializer", "pickle")
+
+        is_compressed = storage_format.startswith("compressed") and BLOSC_AVAILABLE
+        if is_compressed:
+            from .compress_pickle import blosc as _blosc
+
+            raw = _blosc.decompress(blob)
+        else:
+            raw = blob
+
+        if serializer == "dill" and DILL_AVAILABLE and dill is not None:
+            return dill.loads(raw)
+        return _pickle.loads(raw)
 
     def get_file_extension(self, config: Any) -> str:
         """Get file extension for objects."""
@@ -1169,6 +1461,9 @@ class HandlerRegistry:
         if self._should_enable_handler("numpy_arrays", config):
             self.handlers.append(ArrayHandler())
 
+        if self._should_enable_handler("bytes", config):
+            self.handlers.append(BytesHandler())
+
         if self._should_enable_handler("object_pickle", config):
             self.handlers.append(ObjectHandler())  # Keep as fallback
 
@@ -1192,6 +1487,7 @@ class HandlerRegistry:
             # if _lazy_import_tensorflow()[1] and BLOSC2_AVAILABLE
             # else None,
             "numpy_arrays": lambda: ArrayHandler(),
+            "bytes": lambda: BytesHandler(),
             "object_pickle": lambda: ObjectHandler(),
         }
 
@@ -1228,6 +1524,7 @@ class HandlerRegistry:
             "pandas_dataframes": "enable_pandas_dataframes",
             "tensorflow_tensors": "enable_tensorflow_tensors",
             "numpy_arrays": "enable_numpy_arrays",
+            "bytes": "enable_bytes_handler",
             "object_pickle": "enable_object_pickle",
         }
 

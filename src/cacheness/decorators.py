@@ -14,6 +14,7 @@ from typing import Any, Callable, Optional, Union, Dict, Tuple, Set, cast
 
 from .core import UnifiedCache, CacheConfig, _normalize_function_args
 from .serialization import create_unified_cache_key
+from .size_utils import resolve_ttl
 
 # Track decorator-created cache instances for cleanup
 _decorator_cache_instances: list[weakref.ref[UnifiedCache]] = []
@@ -87,9 +88,14 @@ class cached:
         def expensive_function(x, y):
             return x * y
 
-        # With TTL
-        @cached(ttl_seconds=21600)
+        # With TTL (duration string)
+        @cached(ttl="6h")
         def fetch_data():
+            return requests.get("https://api.example.com").json()
+
+        # With TTL (numeric seconds)
+        @cached(ttl_seconds=21600)
+        def fetch_data_v2():
             return requests.get("https://api.example.com").json()
 
         # With custom key prefix
@@ -112,6 +118,7 @@ class cached:
 
     def __init__(
         self,
+        ttl: Optional[str] = None,
         ttl_seconds: Optional[float] = None,
         key_prefix: Optional[str] = None,
         cache_instance: Optional[UnifiedCache] = None,
@@ -122,14 +129,16 @@ class cached:
         Initialize the caching decorator.
 
         Args:
-            ttl_seconds: Time-to-live in seconds (uses cache default if None).
-                Pass None explicitly to never expire.
+            ttl: Time-to-live as a human-readable duration string
+                (e.g. "6h", "30m", "2d"). Uses cache default if None.
+            ttl_seconds: Time-to-live in seconds (numeric only).
+                Mutually exclusive with ``ttl``.
             key_prefix: Prefix for cache keys (useful for versioning)
             cache_instance: Specific cache instance to use (creates default if None)
             key_func: Custom function for generating cache keys
             ignore_errors: If True, cache errors don't prevent function execution
         """
-        self.ttl_seconds = ttl_seconds
+        self.ttl_seconds = resolve_ttl(ttl, ttl_seconds, _param_owner="@cached")
 
         self.key_prefix = key_prefix
         self.cache_instance = cache_instance
@@ -300,7 +309,13 @@ class cached:
                 pass  # Ignore errors during cleanup
 
     @classmethod
-    def for_api(cls, ttl_seconds: float = 21600, ignore_errors: bool = True, **kwargs):
+    def for_api(
+        cls,
+        ttl: Optional[str] = None,
+        ttl_seconds: Optional[float] = None,
+        ignore_errors: bool = True,
+        **kwargs,
+    ):
         """
         Decorator optimized for API requests.
 
@@ -310,13 +325,15 @@ class cached:
         - Fast compression for JSON/text data
 
         Example:
-            @cached.for_api(ttl_seconds=14400)  # 4 hours
+            @cached.for_api(ttl="4h")
             def fetch_weather(city):
                 return requests.get(f"api.weather.com/{city}").json()
         """
         from .core import UnifiedCache
 
-        cache_instance = UnifiedCache.for_api(ttl_seconds=ttl_seconds, **kwargs)
+        resolved = resolve_ttl(ttl, ttl_seconds, _param_owner="cached.for_api")
+        effective_ttl = resolved if resolved is not None else 21600
+        cache_instance = UnifiedCache.for_api(ttl_seconds=effective_ttl, **kwargs)
         # Track for cleanup using weak reference
         _decorator_cache_instances.append(weakref.ref(cache_instance))
         decorator = cls(cache_instance=cache_instance, ignore_errors=ignore_errors)
@@ -342,7 +359,7 @@ class cache_if:
         # Only cache successful API responses
         @cache_if(
             condition=lambda result: result.get("status") == "success",
-            ttl_seconds=3600
+            ttl="1h",
         )
         def api_call(endpoint):
             return requests.get(endpoint).json()
@@ -356,6 +373,7 @@ class cache_if:
     def __init__(
         self,
         condition: Callable[[Any], bool],
+        ttl: Optional[str] = None,
         ttl_seconds: Optional[float] = None,
         key_prefix: Optional[str] = None,
         cache_instance: Optional[UnifiedCache] = None,
@@ -368,15 +386,17 @@ class cache_if:
         Args:
             condition: Function that receives the result and returns True if it
                 should be cached. Signature: condition(result) -> bool
-            ttl_seconds: Time-to-live in seconds (uses cache default if None).
-                Pass None explicitly to never expire.
+            ttl: Time-to-live as a human-readable duration string
+                (e.g. "6h", "30m", "2d"). Uses cache default if None.
+            ttl_seconds: Time-to-live in seconds (numeric only).
+                Mutually exclusive with ``ttl``.
             key_prefix: Prefix for cache keys (useful for versioning)
             cache_instance: Specific cache instance to use (creates default if None)
             key_func: Custom function for generating cache keys
             ignore_errors: If True, cache errors don't prevent function execution
         """
         self.condition = condition
-        self.ttl_seconds = ttl_seconds
+        self.ttl_seconds = resolve_ttl(ttl, ttl_seconds, _param_owner="@cache_if")
         self.key_prefix = key_prefix
         self.cache_instance = cache_instance
         self.key_func = key_func
@@ -571,16 +591,16 @@ def cache_function(
             return expensive_computation()
 
         # As decorator with arguments
-        @cache_function(ttl_seconds=43200)  # 12 hours
+        @cache_function(ttl="12h")
         def my_func():
             return expensive_computation()
 
         # Wrapping function calls
-        cached_func = cache_function(expensive_function, ttl_seconds=21600)  # 6 hours
+        cached_func = cache_function(expensive_function, ttl="6h")
         result = cached_func(arg1, arg2)
     """
     if func is None:
-        # Called with arguments: @cache_function(ttl_seconds=21600)
+        # Called with arguments: @cache_function(ttl="6h")
         return cached(**kwargs)
     else:
         # Called without arguments: @cache_function
@@ -610,7 +630,7 @@ class CacheContext:
     Useful for testing or temporary cache behavior changes.
 
     Example:
-        with CacheContext(ttl_seconds=3600, key_prefix="test") as cache:
+        with CacheContext(default_ttl="1h", key_prefix="test") as cache:
             @cache.cached()
             def temp_function():
                 return "temporary result"

@@ -68,6 +68,7 @@ from .paths import resolve_actual_path, to_relative_path
 
 # Import CacheConfig for proper handler configuration
 from ..config import CacheConfig, CompressionConfig
+from ..interfaces import BlobReadContext, WriteBlobResult, IntegrityReport
 
 logger = logging.getLogger(__name__)
 
@@ -279,15 +280,14 @@ class BlobStore:
             result = handler.put(data, base_path, self.config)
 
             # Persist through blob_backend (may rename, upload, etc.)
-            handler_path = Path(str(result.get("actual_path", base_path)))
+            handler_path = Path(result.actual_path)
             final_path = self.blob_backend.write_blob_from_path(
                 str(handler_path), handler_path.name
             )
             # Capture any backend-specific write metadata (e.g. s3_etag)
             write_meta = self.blob_backend.get_write_metadata()
             if write_meta:
-                result.setdefault("metadata", {})
-                result["metadata"].update(write_meta)
+                result.extra.update(write_meta)
 
             actual_path = Path(final_path) if "://" not in final_path else None
 
@@ -303,7 +303,7 @@ class BlobStore:
             # JsonBackend preserves them (it only keeps specific top-level fields).
             custom_metadata = metadata or {}
             custom_metadata["actual_path"] = self._to_relative_path(final_path)
-            custom_metadata["storage_format"] = result.get("storage_format", "pickle")
+            custom_metadata["storage_format"] = result.storage_format
             custom_metadata["compression_codec"] = self.compression
             if file_hash:
                 custom_metadata["file_hash"] = file_hash
@@ -311,7 +311,7 @@ class BlobStore:
             entry_data = {
                 "cache_key": blob_key,
                 "data_type": handler.data_type,
-                "file_size": result.get("file_size", 0),
+                "file_size": result.file_size,
                 "file_hash": file_hash,
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "metadata": custom_metadata,
@@ -454,9 +454,143 @@ class BlobStore:
             self.backend.put_entry(key, updated)
             return True
 
+    def put_file(
+        self,
+        file_path: str | Path,
+        *,
+        key: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        move: bool = False,
+    ) -> str:
+        """Store an arbitrary file as a blob.
+
+        Reads the file into memory as raw bytes and delegates to
+        :meth:`put`.  File metadata (original filename, MIME type,
+        original size) is merged into the *metadata* dict automatically.
+
+        Args:
+            file_path: Path to the source file.
+            key: Optional explicit blob key.
+            metadata: Optional metadata dict (file metadata is merged in).
+            move: If ``True``, delete the source file after a successful
+                store (move-in semantics).  Defaults to ``False`` (copy-in).
+
+        Returns:
+            The blob key.
+
+        Raises:
+            FileNotFoundError: If *file_path* does not exist.
+            IsADirectoryError: If *file_path* is a directory.
+        """
+        import mimetypes
+
+        src = Path(file_path)
+        if not src.exists():
+            raise FileNotFoundError(f"Source file does not exist: {src}")
+        if src.is_dir():
+            raise IsADirectoryError(f"Expected a file, got a directory: {src}")
+
+        data = src.read_bytes()
+        mime_type, _ = mimetypes.guess_type(str(src))
+
+        file_meta: Dict[str, Any] = {
+            "original_filename": src.name,
+            "mime_type": mime_type or "application/octet-stream",
+            "original_size": len(data),
+        }
+        merged = {**file_meta, **(metadata or {})}  # user metadata wins
+        blob_key = self.put(data, key=key, metadata=merged)
+
+        if move:
+            src.unlink()
+
+        return blob_key
+
+    def get_file(
+        self,
+        key: str,
+        *,
+        dest: str | Path | None = None,
+        move: bool = False,
+        overwrite: bool = True,
+    ) -> Optional[bytes | Path]:
+        """Retrieve a cached file blob, optionally writing it to disk.
+
+        Args:
+            key: The blob key.
+            dest: Optional destination path.  Parent directories are
+                created automatically.  If *dest* is a directory, the
+                original filename from metadata is used (falls back to
+                ``<key>.bin``).
+            move: If ``True``, delete the cache entry after a successful
+                write to *dest* (move-out semantics).  Requires *dest*
+                to be set — raises ``ValueError`` otherwise.  Defaults
+                to ``False`` (copy-out).
+            overwrite: If ``False``, raise ``FileExistsError`` when
+                *dest* already exists on disk.  Defaults to ``True``
+                (silently overwrite).
+
+        Returns:
+            * ``bytes`` when *dest* is ``None`` and entry exists.
+            * ``pathlib.Path`` when *dest* is given and entry exists.
+            * ``None`` on miss.
+
+        Raises:
+            ValueError: If *move* is ``True`` but *dest* is ``None``.
+            FileExistsError: If *overwrite* is ``False`` and *dest*
+                already exists.
+        """
+        if move and dest is None:
+            raise ValueError(
+                "move=True requires dest to be set. "
+                "Without a destination path, use get() + delete() instead."
+            )
+
+        data = self.get(key)
+        if data is None:
+            return None
+
+        if not isinstance(data, (bytes, bytearray, memoryview)):
+            raise TypeError(
+                f"Expected bytes from blob store, got {type(data).__name__}. "
+                "get_file() should only be used with blobs stored via put_file()."
+            )
+        raw = bytes(data) if not isinstance(data, bytes) else data
+
+        if dest is None:
+            return raw
+
+        dest_path = Path(dest)
+        if dest_path.is_dir():
+            entry = self.backend.get_entry(key)
+            name = None
+            if entry:
+                nested = entry.get("metadata", {})
+                name = nested.get("original_filename")
+            dest_path = dest_path / (name or f"{key}.bin")
+
+        if not overwrite and dest_path.exists():
+            raise FileExistsError(
+                f"Destination already exists: {dest_path}. "
+                "Pass overwrite=True to overwrite."
+            )
+
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        dest_path.write_bytes(raw)
+
+        if move:
+            self.delete(key)
+
+        return dest_path
+
     def delete(self, key: str) -> bool:
         """
         Delete a blob and its metadata.
+
+        Uses metadata-first ordering: removes the metadata entry before
+        deleting the blob file.  This ensures a crash between the two steps
+        leaves an orphaned blob (harmless) rather than a dangling metadata
+        pointer (dangerous).
 
         Args:
             key: The blob key
@@ -469,7 +603,7 @@ class BlobStore:
             if entry is None:
                 return False
 
-            # Delete the file via blob backend
+            # Resolve blob path BEFORE removing metadata (need entry data)
             nested_meta = entry.get("metadata", {})
             actual_path_str = entry.get("actual_path") or nested_meta.get("actual_path")
             resolved = (
@@ -477,10 +611,19 @@ class BlobStore:
                 if actual_path_str
                 else str(self.cache_dir / key)
             )
-            self.blob_backend.delete_blob(resolved)
 
-            # Remove metadata
+            # Remove metadata first — crash here leaves entry intact (safe)
             self.backend.remove_entry(key)
+
+            # Delete blob second — crash here leaves orphaned blob (harmless,
+            # cleaned by verify_integrity)
+            try:
+                self.blob_backend.delete_blob(resolved)
+            except Exception as exc:
+                logger.warning(
+                    f"Failed to delete blob file for {key} at {resolved}: {exc}. "
+                    f"Orphaned blob will be cleaned by verify_integrity."
+                )
 
             logger.debug(f"Deleted blob: {key}")
             return True
@@ -582,7 +725,7 @@ class BlobStore:
 
     def verify_integrity(
         self, repair: bool = False, verify_hashes: bool = False
-    ) -> Dict[str, Any]:
+    ) -> IntegrityReport:
         """
         Verify blob store integrity by cross-checking blob files and metadata.
 
@@ -735,15 +878,13 @@ class BlobStore:
                             f"Failed to remove dangling entry {entry['cache_key']}: {e}"
                         )
 
-            report: Dict[str, Any] = {
-                "orphaned_blobs": orphaned_blobs,
-                "dangling_entries": dangling_entries,
-                "size_mismatches": size_mismatches,
-            }
-            if verify_hashes:
-                report["hash_mismatches"] = hash_mismatches
-            if repair:
-                report["repaired"] = repaired
+            report = IntegrityReport(
+                orphaned_blobs=orphaned_blobs,
+                dangling_entries=dangling_entries,
+                size_mismatches=size_mismatches,
+                hash_mismatches=hash_mismatches if verify_hashes else None,
+                repaired=repaired if repair else None,
+            )
 
             total_issues = (
                 len(orphaned_blobs)
@@ -778,7 +919,7 @@ class BlobStore:
         base_path: Path,
         config: Optional["CacheConfig"] = None,
         compute_hash: bool = True,
-    ) -> tuple:
+    ) -> WriteBlobResult:
         """
         Low-level: serialize data to disk via handler, then persist
         through the blob backend.
@@ -798,13 +939,13 @@ class BlobStore:
             compute_hash: Whether to compute xxhash file hash
 
         Returns:
-            Tuple of (handler, result_dict, file_hash_or_None)
+            WriteBlobResult with handler, result, and optional file hash.
         """
         handler = self.handlers.get_handler(data)
         result = handler.put(data, base_path, config or self.config)
 
         # Persist through blob_backend (rename, upload, etc.)
-        handler_path = Path(str(result.get("actual_path", base_path)))
+        handler_path = Path(result.actual_path)
         final_path = self.blob_backend.write_blob_from_path(
             str(handler_path), handler_path.name
         )
@@ -812,11 +953,10 @@ class BlobStore:
         # Inject backend write metadata (e.g. s3_etag)
         write_meta = self.blob_backend.get_write_metadata()
         if write_meta:
-            result.setdefault("metadata", {})
-            result["metadata"].update(write_meta)
+            result.extra.update(write_meta)
 
         # Update actual_path to the final storage location (relative)
-        result["actual_path"] = self._to_relative_path(final_path)
+        result.actual_path = self._to_relative_path(final_path)
 
         # Compute file hash from final location
         file_hash = None
@@ -826,13 +966,13 @@ class BlobStore:
             else:
                 file_hash = self._calculate_blob_hash(final_path)
 
-        return handler, result, file_hash
+        return WriteBlobResult(handler=handler, result=result, file_hash=file_hash)
 
     def _read_blob(
         self,
         path: Path,
         data_type: str,
-        handler_metadata: Dict[str, Any],
+        handler_metadata: BlobReadContext,
     ) -> Any:
         """
         Low-level: deserialize data from disk via handler.

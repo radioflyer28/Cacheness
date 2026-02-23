@@ -87,6 +87,28 @@ JSON backend has O(n²) scaling - re-serializes entire metadata file on each wri
 - Use SQLite backend for production deployments
 - Monitor cache size and switch before performance degrades
 
+## Handler Error Types Changed (v0.5.2+)
+
+**Symptoms:**
+- Code that previously caught `ImportError` or bare `Exception` from Parquet handler `get()`/`put()` now receives `CacheReadError` or `CacheWriteError`
+- Applies to `PandasDataFrameHandler`, `PandasSeriesHandler`, `PolarsSeriesHandler` (in addition to `PolarsDataFrameHandler` which already had this behavior)
+
+**Cause:**
+As of v0.5.2, all four Parquet handlers consistently wrap errors in `CacheWriteError`/`CacheReadError` with `cache_operation_context`. Previously, only `PolarsDataFrameHandler` did this.
+
+**Solution:**
+Update exception handlers to catch the Cacheness error types:
+```python
+from cacheness.interfaces import CacheReadError, CacheWriteError
+
+try:
+    data = cache.get(cache_key="my_key")
+except CacheReadError as e:
+    print(f"Handler: {e.handler_type}, Message: {e}")
+```
+
+> **Note:** If you were catching bare `Exception`, no change is needed — `CacheReadError`/`CacheWriteError` are subclasses of `Exception`.
+
 ## Import Errors After Adding Dependencies
 
 **Symptoms:**
@@ -155,7 +177,7 @@ Cache key generation doesn't properly distinguish between different argument com
 
 **Symptoms:**
 - Previously passing tests now failing
-- Test count different from baseline (787 passed, 70 skipped)
+- Test count different from baseline (1424 passed, 65 skipped)
 - Intermittent test failures
 
 **Common Causes & Fixes:**
@@ -181,6 +203,30 @@ Cache key generation doesn't properly distinguish between different argument com
    .\scripts\quality-check.ps1
    cat .quality-errors.log
    ```
+
+## Cache Entries Disappearing on Get Errors
+
+**Symptoms:**
+- Cached entries vanish after deserialization failures
+- `get()` returns `None` and the entry no longer exists
+
+**Cause:** By default, `get()` auto-deletes entries that fail to load (corrupted files, handler mismatch, etc.). This is the `delete_on_error=True` behaviour.
+
+**Solution — preserve entries for debugging:**
+
+```python
+from cacheness import cacheness, CacheConfig, CacheMetadataConfig
+
+config = CacheConfig(
+    metadata=CacheMetadataConfig(delete_on_error=False)
+)
+cache = cacheness(config)
+
+# Now get() returns None on errors but keeps the entry intact
+data = cache.get(experiment="broken")  # None, but entry still in metadata
+```
+
+> **Note:** In storage mode (`storage_mode=True`), entries are *never* deleted on errors regardless of this setting.
 
 ## Thread Safety Issues
 

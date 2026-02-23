@@ -27,6 +27,8 @@ from pathlib import Path
 from typing import Dict, Any, List
 from datetime import datetime
 
+from .interfaces import SignableFields
+
 logger = logging.getLogger(__name__)
 
 
@@ -155,7 +157,7 @@ class CacheEntrySigner:
             return key
 
     def _create_signature_payload(
-        self, entry_data: Dict[str, Any], version: int
+        self, entry_data: SignableFields, version: int
     ) -> str:
         """
         Create deterministic payload string from entry data.
@@ -199,7 +201,7 @@ class CacheEntrySigner:
         )
         return payload
 
-    def sign_entry(self, entry_data: Dict[str, Any]) -> str:
+    def sign_entry(self, entry_data: SignableFields) -> str:
         """
         Create HMAC signature for cache entry using the current version.
 
@@ -253,7 +255,7 @@ class CacheEntrySigner:
 
     def verify_entry(
         self,
-        entry_data: Dict[str, Any],
+        entry_data: SignableFields,
         stored_signature: str,
     ) -> bool:
         """
@@ -293,6 +295,97 @@ class CacheEntrySigner:
 
         except Exception as e:
             logger.error(f"Failed to verify signature: {e}")
+            return False
+
+    # ------------------------------------------------------------------
+    # Namespace signing
+    # ------------------------------------------------------------------
+    # Namespace rows are signed on immutable fields only (namespace_id,
+    # display_name, created_at).  schema_version is excluded because it
+    # changes during migrations.
+    # ------------------------------------------------------------------
+
+    NAMESPACE_SIGNED_FIELDS: List[str] = [
+        "created_at",
+        "display_name",
+        "namespace_id",
+    ]
+
+    def _create_namespace_payload(self, namespace_data: Dict[str, Any]) -> str:
+        """Create deterministic payload string from namespace fields."""
+        values = []
+        for field in self.NAMESPACE_SIGNED_FIELDS:  # already sorted
+            value = namespace_data.get(field)
+            if value is None:
+                value = ""
+            elif isinstance(value, datetime):
+                value = value.isoformat()
+            else:
+                value = str(value)
+            values.append(f"{field}:{value}")
+        return "|".join(values)
+
+    def sign_namespace(self, namespace_data: Dict[str, Any]) -> str:
+        """Create HMAC signature for a namespace registry row.
+
+        Only immutable fields are signed (``namespace_id``, ``display_name``,
+        ``created_at``).  ``schema_version`` is deliberately excluded because
+        it changes during migrations.
+
+        Args:
+            namespace_data: Dict with at least the keys in
+                :attr:`NAMESPACE_SIGNED_FIELDS`.
+
+        Returns:
+            Versioned signature string (``ns1:{hex}``).
+        """
+        try:
+            payload = self._create_namespace_payload(namespace_data)
+            hex_sig = hmac.new(
+                self.secret_key, payload.encode("utf-8"), hashlib.sha256
+            ).hexdigest()
+            versioned = f"ns1:{hex_sig}"
+            logger.debug(f"Signed namespace {namespace_data.get('namespace_id', '?')}")
+            return versioned
+        except Exception as e:
+            logger.error(f"Failed to sign namespace: {e}")
+            raise
+
+    def verify_namespace(
+        self, namespace_data: Dict[str, Any], stored_signature: str
+    ) -> bool:
+        """Verify HMAC signature for a namespace registry row.
+
+        Args:
+            namespace_data: Dict with namespace fields.
+            stored_signature: Previously stored signature (``ns1:{hex}``).
+
+        Returns:
+            True if the signature is valid.
+        """
+        if not stored_signature:
+            return False
+        # Parse — expect "ns1:<hex>"
+        prefix, _, hex_sig = stored_signature.partition(":")
+        if not prefix.startswith("ns") or not hex_sig:
+            logger.warning(
+                f"Unrecognised namespace signature format: {stored_signature[:20]}"
+            )
+            return False
+        try:
+            payload = self._create_namespace_payload(namespace_data)
+            expected = hmac.new(
+                self.secret_key, payload.encode("utf-8"), hashlib.sha256
+            ).hexdigest()
+            is_valid = hmac.compare_digest(expected, hex_sig)
+            if not is_valid:
+                logger.warning(
+                    f"Namespace signature verification failed for "
+                    f"{namespace_data.get('namespace_id', '?')}"
+                )
+            return is_valid
+        except Exception as e:
+            logger.error(f"Failed to verify namespace signature: {e}")
             return False
 
     def get_field_info(self) -> Dict[str, Any]:

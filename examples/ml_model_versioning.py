@@ -13,15 +13,15 @@ Features demonstrated:
 
 Usage:
     uv run python examples/ml_model_versioning.py
+
+Requires:
+    uv add numpy
 """
 
 import sys
-from pathlib import Path
 import tempfile
 from datetime import datetime
-
-# Add source directory to path
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+from pathlib import Path
 
 from cacheness.storage import BlobStore
 import numpy as np

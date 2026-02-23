@@ -8,6 +8,8 @@ for integration testing with PostgreSQL and S3/Garage.
 import pytest
 from cacheness import cached
 
+pytestmark = pytest.mark.xdist_group("docker")
+
 
 # ==================== Tests Using Config Fixtures ====================
 

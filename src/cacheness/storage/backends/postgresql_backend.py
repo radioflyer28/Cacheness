@@ -37,8 +37,11 @@ Requirements:
 
 import logging
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
+
+from ...interfaces import EntrySummary
+from ...size_utils import format_size
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +53,7 @@ try:
         Integer,
         String,
         DateTime,
-        Text,
+        LargeBinary,
         Index,
         select,
         update,
@@ -59,6 +62,7 @@ try:
         func,
         text,
     )
+    from sqlalchemy.dialects.postgresql import JSONB
     from sqlalchemy.orm import sessionmaker, declarative_base
     from sqlalchemy.pool import QueuePool
 
@@ -105,6 +109,25 @@ except ImportError:
         return json.loads(s)
 
 
+def _ensure_jsonb_value(value):
+    """Convert a JSON-encoded string to a Python dict for JSONB storage.
+
+    JSONB columns require a Python dict (or None), not a JSON string.
+    Handles: None → None, dict → dict (pass-through), str → parsed dict.
+    """
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json_loads(value)
+            return parsed if isinstance(parsed, dict) else None
+        except Exception:
+            return None
+    return None
+
+
 if SQLALCHEMY_AVAILABLE:
     # Create a separate base for PostgreSQL to avoid conflicts with SQLite models
     PostgresBase = declarative_base()
@@ -143,8 +166,15 @@ if SQLALCHEMY_AVAILABLE:
         compression_codec = Column(String(20), nullable=True)
         actual_path = Column(String(500), nullable=True)
 
-        cache_key_params = Column(Text, nullable=True)
-        metadata_dict = Column(Text, nullable=True)
+        cache_key_params = Column(JSONB, nullable=True)
+        metadata_dict = Column(JSONB, nullable=True)
+
+        access_count = Column(Integer, default=0, nullable=False, server_default="0")
+        ttl_seconds = Column(Integer, nullable=True)
+        expires_at = Column(DateTime(timezone=True), nullable=True)
+        blob_data = Column(LargeBinary, nullable=True)
+        is_inline = Column(Integer, default=0, nullable=False, server_default="0")
+        inline_ext = Column(String(20), nullable=True)
 
     class PgCacheStatsMixin:
         """Column definitions shared by all PG cache_stats tables."""
@@ -170,6 +200,18 @@ if SQLALCHEMY_AVAILABLE:
             Index("idx_pg_cleanup", "created_at"),
             Index("idx_pg_size_mgmt", "file_size", "created_at"),
             Index("idx_pg_data_type", "data_type"),
+            Index(
+                "idx_pg_metadata_gin",
+                "metadata_dict",
+                postgresql_using="gin",
+                postgresql_ops={"metadata_dict": "jsonb_path_ops"},
+            ),
+            Index(
+                "idx_pg_expires_at",
+                "expires_at",
+                postgresql_where=text("expires_at IS NOT NULL"),
+            ),
+            Index("idx_pg_access_count", "access_count", "accessed_at"),
         )
 
     class PgCacheStats(PgCacheStatsMixin, PostgresBase):
@@ -216,6 +258,22 @@ if SQLALCHEMY_AVAILABLE:
                         f"idx_pg_{namespace_id}_size_mgmt", "file_size", "created_at"
                     ),
                     Index(f"idx_pg_{namespace_id}_data_type", "data_type"),
+                    Index(
+                        f"idx_pg_{namespace_id}_metadata_gin",
+                        "metadata_dict",
+                        postgresql_using="gin",
+                        postgresql_ops={"metadata_dict": "jsonb_path_ops"},
+                    ),
+                    Index(
+                        f"idx_pg_{namespace_id}_expires_at",
+                        "expires_at",
+                        postgresql_where=text("expires_at IS NOT NULL"),
+                    ),
+                    Index(
+                        f"idx_pg_{namespace_id}_access_count",
+                        "access_count",
+                        "accessed_at",
+                    ),
                 ),
             },
         )
@@ -254,21 +312,122 @@ if SQLALCHEMY_AVAILABLE:
 
 
 def _pg_migrate_v1_to_v2(backend: "PostgresBackend", namespace_id: str) -> None:
-    """Placeholder for future v1 → v2 schema migration.
+    """Migrate v1 → v2: metadata_dict and cache_key_params Text → JSONB.
 
-    This function is wired but not yet referenced in ``get_migrations()``
-    because v2 does not exist yet.  When a v2 schema change is needed,
-    add the DDL here and register ``(1, 2, _pg_migrate_v1_to_v2)`` in
-    the migration list.
+    Converts the columns from Text to JSONB using ``::jsonb`` cast and
+    creates a GIN index on ``metadata_dict`` for fast ``@>`` containment
+    queries.
     """
-    # Example structure for when v2 is defined:
-    #
-    # table = "cache_entries" if namespace_id == DEFAULT_NAMESPACE \
-    #     else f"cache_entries_{namespace_id}"
-    # with backend.SessionLocal() as session:
-    #     session.execute(text(f'ALTER TABLE "{table}" ...'))
-    #     session.commit()
-    pass
+    table = (
+        "cache_entries"
+        if namespace_id == DEFAULT_NAMESPACE
+        else f"cache_entries_{namespace_id}"
+    )
+    with backend.SessionLocal() as session:
+        # Convert metadata_dict Text → JSONB
+        session.execute(
+            text(
+                f'ALTER TABLE "{table}" '
+                f"ALTER COLUMN metadata_dict TYPE JSONB "
+                f"USING metadata_dict::jsonb"
+            )
+        )
+        # Convert cache_key_params Text → JSONB
+        session.execute(
+            text(
+                f'ALTER TABLE "{table}" '
+                f"ALTER COLUMN cache_key_params TYPE JSONB "
+                f"USING cache_key_params::jsonb"
+            )
+        )
+        # Create GIN index for fast JSONB containment queries
+        idx_name = (
+            "idx_pg_metadata_gin"
+            if namespace_id == DEFAULT_NAMESPACE
+            else f"idx_pg_{namespace_id}_metadata_gin"
+        )
+        session.execute(
+            text(
+                f'CREATE INDEX IF NOT EXISTS "{idx_name}" '
+                f'ON "{table}" USING GIN (metadata_dict jsonb_path_ops)'
+            )
+        )
+        session.commit()
+
+
+def _pg_migrate_v2_to_v3(backend: "PostgresBackend", namespace_id: str) -> None:
+    """Migrate v2 → v3: add access_count, ttl_seconds, expires_at, blob_data, is_inline columns.
+
+    Adds five new columns plus two indexes:
+
+    * ``access_count`` — per-entry access counter
+    * ``ttl_seconds`` — per-entry TTL storage
+    * ``expires_at`` — pre-computed expiry timestamp
+    * ``blob_data`` — inline blob content (BYTEA)
+    * ``is_inline`` — flag: 1 if blob stored inline, 0 otherwise
+    * ``idx_pg_expires_at`` — partial index on ``expires_at`` WHERE NOT NULL.
+    * ``idx_pg_access_count`` — composite (access_count, accessed_at).
+
+    All ALTER TABLE ADD COLUMN uses ``IF NOT EXISTS`` (PG 9.6+) for idempotency.
+    """
+    table = (
+        "cache_entries"
+        if namespace_id == DEFAULT_NAMESPACE
+        else f"cache_entries_{namespace_id}"
+    )
+    prefix = "idx_pg" if namespace_id == DEFAULT_NAMESPACE else f"idx_pg_{namespace_id}"
+
+    with backend.SessionLocal() as session:
+        # Add new columns (PG supports IF NOT EXISTS on ADD COLUMN since 9.6)
+        session.execute(
+            text(
+                f'ALTER TABLE "{table}" '
+                f"ADD COLUMN IF NOT EXISTS access_count INTEGER NOT NULL DEFAULT 0"
+            )
+        )
+        session.execute(
+            text(f'ALTER TABLE "{table}" ADD COLUMN IF NOT EXISTS ttl_seconds INTEGER')
+        )
+        session.execute(
+            text(
+                f'ALTER TABLE "{table}" '
+                f"ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP WITH TIME ZONE"
+            )
+        )
+        session.execute(
+            text(f'ALTER TABLE "{table}" ADD COLUMN IF NOT EXISTS blob_data BYTEA')
+        )
+        session.execute(
+            text(
+                f'ALTER TABLE "{table}" '
+                f"ADD COLUMN IF NOT EXISTS is_inline INTEGER NOT NULL DEFAULT 0"
+            )
+        )
+        session.execute(
+            text(f'ALTER TABLE "{table}" ADD COLUMN IF NOT EXISTS inline_ext TEXT')
+        )
+
+        # Create indexes
+        session.execute(
+            text(
+                f'CREATE INDEX IF NOT EXISTS "{prefix}_expires_at" '
+                f'ON "{table}" (expires_at) '
+                f"WHERE expires_at IS NOT NULL"
+            )
+        )
+        session.execute(
+            text(
+                f'CREATE INDEX IF NOT EXISTS "{prefix}_access_count" '
+                f'ON "{table}" (access_count, accessed_at)'
+            )
+        )
+        session.commit()
+
+    logger.info(
+        "PG v2→v3: added access_count/ttl_seconds/expires_at/blob_data/is_inline "
+        "columns and indexes on %r",
+        table,
+    )
 
 
 class PostgresBackend(MetadataBackend):
@@ -441,7 +600,8 @@ class PostgresBackend(MetadataBackend):
                   change is defined.
         """
         return [
-            # (1, 2, _pg_migrate_v1_to_v2),  # uncomment when v2 is defined
+            (1, 2, _pg_migrate_v1_to_v2),
+            (2, 3, _pg_migrate_v2_to_v3),
         ]
 
     # --- Namespace registry overrides ---
@@ -491,8 +651,14 @@ class PostgresBackend(MetadataBackend):
                         serializer      VARCHAR(20),
                         compression_codec VARCHAR(20),
                         actual_path     VARCHAR(500),
-                        cache_key_params TEXT,
-                        metadata_dict TEXT
+                        cache_key_params JSONB,
+                        metadata_dict JSONB,
+                        access_count    INTEGER NOT NULL DEFAULT 0,
+                        ttl_seconds     INTEGER,
+                        expires_at      TIMESTAMP WITH TIME ZONE,
+                        blob_data       BYTEA,
+                        is_inline       INTEGER NOT NULL DEFAULT 0,
+                        inline_ext      TEXT
                     )
                 """)
                 )
@@ -529,13 +695,32 @@ class PostgresBackend(MetadataBackend):
                         f'ON "{entries_table}" (file_size, created_at)'
                     )
                 )
+                session.execute(
+                    text(
+                        f'CREATE INDEX IF NOT EXISTS "idx_{namespace_id}_metadata_gin" '
+                        f'ON "{entries_table}" USING GIN (metadata_dict jsonb_path_ops)'
+                    )
+                )
+                session.execute(
+                    text(
+                        f'CREATE INDEX IF NOT EXISTS "idx_pg_{namespace_id}_expires_at" '
+                        f'ON "{entries_table}" (expires_at) '
+                        f"WHERE expires_at IS NOT NULL"
+                    )
+                )
+                session.execute(
+                    text(
+                        f'CREATE INDEX IF NOT EXISTS "idx_pg_{namespace_id}_access_count" '
+                        f'ON "{entries_table}" (access_count, accessed_at)'
+                    )
+                )
 
                 # Register in the namespace registry
                 now = datetime.now(timezone.utc)
                 ns = PgCacheNamespace(
                     namespace_id=namespace_id,
                     display_name=display_name,
-                    schema_version=1,
+                    schema_version=3,
                     created_at=now,
                 )
                 session.add(ns)
@@ -639,6 +824,16 @@ class PostgresBackend(MetadataBackend):
                 signature=row.signature,
             )
 
+    def set_namespace_signature(self, namespace_id: str, signature: str) -> None:
+        """Store namespace signature in the PostgreSQL registry."""
+        with self.SessionLocal() as session:
+            session.execute(
+                update(PgCacheNamespace)
+                .where(PgCacheNamespace.namespace_id == namespace_id)
+                .values(signature=signature)
+            )
+            session.commit()
+
     def _init_stats(self):
         """Initialize cache statistics if not exists."""
         with self.SessionLocal() as session:
@@ -725,6 +920,7 @@ class PostgresBackend(MetadataBackend):
         s3_etag = metadata.pop("s3_etag", None)  # S3 ETag if using S3 backend
         cache_key_params = metadata.pop("cache_key_params", None)
         metadata_dict_value = metadata.pop("metadata_dict", None)
+        inline_ext = metadata.pop("inline_ext", None)
 
         # Handle timestamps - always use UTC
         created_at = entry_data.get("created_at")
@@ -762,13 +958,24 @@ class PostgresBackend(MetadataBackend):
             else:
                 accessed_at = accessed_at.astimezone(timezone.utc)
 
-        # Serialize cache_key_params if present
-        serialized_params = None
-        if cache_key_params is not None:
-            try:
-                serialized_params = json_dumps(cache_key_params)
-            except Exception:
-                pass
+        # Convert to JSONB-compatible dicts (handles JSON strings from core.py)
+        jsonb_params = _ensure_jsonb_value(cache_key_params)
+        jsonb_metadata = _ensure_jsonb_value(metadata_dict_value)
+
+        # Handle TTL fields
+        ttl_seconds_val = entry_data.get("ttl_seconds")
+        expires_at = entry_data.get("expires_at")
+        if expires_at is None and ttl_seconds_val is not None:
+            # Compute expires_at from created_at + ttl_seconds
+            expires_at = created_at + timedelta(seconds=float(ttl_seconds_val))
+        elif isinstance(expires_at, str):
+            expires_at = datetime.fromisoformat(expires_at)
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            else:
+                expires_at = expires_at.astimezone(timezone.utc)
+
+        access_count_val = entry_data.get("access_count", 0)
 
         # Check if entry exists
         existing = session.execute(
@@ -794,8 +1001,14 @@ class PostgresBackend(MetadataBackend):
                     serializer=serializer,
                     compression_codec=compression_codec,
                     actual_path=actual_path,
-                    cache_key_params=serialized_params,
-                    metadata_dict=metadata_dict_value,
+                    cache_key_params=jsonb_params,
+                    metadata_dict=jsonb_metadata,
+                    access_count=access_count_val,
+                    ttl_seconds=ttl_seconds_val,
+                    expires_at=expires_at,
+                    blob_data=entry_data.get("blob_data"),
+                    is_inline=entry_data.get("is_inline", 0),
+                    inline_ext=inline_ext,
                 )
             )
         else:
@@ -815,8 +1028,14 @@ class PostgresBackend(MetadataBackend):
                 serializer=serializer,
                 compression_codec=compression_codec,
                 actual_path=actual_path,
-                cache_key_params=serialized_params,
-                metadata_dict=metadata_dict_value,
+                cache_key_params=jsonb_params,
+                metadata_dict=jsonb_metadata,
+                access_count=access_count_val,
+                ttl_seconds=ttl_seconds_val,
+                expires_at=expires_at,
+                blob_data=entry_data.get("blob_data"),
+                is_inline=entry_data.get("is_inline", 0),
+                inline_ext=inline_ext,
             )
             session.add(entry)
 
@@ -833,6 +1052,15 @@ class PostgresBackend(MetadataBackend):
             if entry.accessed_at
             else None,
             "file_size": entry.file_size or 0,
+            "access_count": getattr(entry, "access_count", 0) or 0,
+            "ttl_seconds": getattr(entry, "ttl_seconds", None),
+            "expires_at": (
+                entry.expires_at.astimezone(timezone.utc).isoformat()
+                if getattr(entry, "expires_at", None)
+                else None
+            ),
+            "is_inline": getattr(entry, "is_inline", 0) or 0,
+            "blob_data": getattr(entry, "blob_data", None),
         }
 
         # Build nested metadata
@@ -853,18 +1081,21 @@ class PostgresBackend(MetadataBackend):
             metadata["entry_signature"] = entry.entry_signature
         if entry.s3_etag:
             metadata["s3_etag"] = entry.s3_etag
+        if getattr(entry, "inline_ext", None):
+            metadata["inline_ext"] = entry.inline_ext
 
         if metadata:
             result["metadata"] = metadata
 
-        # Parse cache_key_params if present
+        # Parse cache_key_params if present (JSONB returns dict natively)
         if entry.cache_key_params:
             try:
                 if "metadata" not in result:
                     result["metadata"] = {}
-                result["metadata"]["cache_key_params"] = json_loads(
-                    entry.cache_key_params
-                )
+                ckp = entry.cache_key_params
+                if isinstance(ckp, str):
+                    ckp = json_loads(ckp)
+                result["metadata"]["cache_key_params"] = ckp
             except Exception:
                 pass
 
@@ -929,7 +1160,8 @@ class PostgresBackend(MetadataBackend):
                     elif "content_hash" in updates:
                         entry.file_hash = updates["content_hash"]
                     if "actual_path" in updates:
-                        entry.actual_path = str(updates["actual_path"])
+                        ap = updates["actual_path"]
+                        entry.actual_path = str(ap) if ap is not None else None
                     if "data_type" in updates:
                         entry.data_type = updates["data_type"]
                     if "storage_format" in updates:
@@ -943,7 +1175,15 @@ class PostgresBackend(MetadataBackend):
                     if "s3_etag" in updates:
                         entry.s3_etag = updates["s3_etag"]
                     if "metadata_dict" in updates:
-                        entry.metadata_dict = updates["metadata_dict"]
+                        entry.metadata_dict = _ensure_jsonb_value(
+                            updates["metadata_dict"]
+                        )
+                    if "blob_data" in updates:
+                        entry.blob_data = updates["blob_data"]
+                    if "is_inline" in updates:
+                        entry.is_inline = updates["is_inline"]
+                    if "inline_ext" in updates:
+                        entry.inline_ext = updates["inline_ext"]
 
                     session.commit()
                     return True
@@ -952,7 +1192,7 @@ class PostgresBackend(MetadataBackend):
                     logger.error(f"Failed to update entry {cache_key}: {e}")
                     raise
 
-    def iter_entry_summaries(self) -> List[Dict[str, Any]]:
+    def iter_entry_summaries(self) -> List[EntrySummary]:
         """Return lightweight flat entry dicts — raw SQL, no ORM hydration."""
         with self.SessionLocal() as session:
             tbl = self._entries_table
@@ -962,13 +1202,15 @@ class PostgresBackend(MetadataBackend):
                     f"       file_size, created_at, accessed_at, "
                     f"       object_type, storage_format, serializer, "
                     f"       compression_codec, actual_path, "
-                    f"       file_hash, entry_signature, metadata_dict "
+                    f"       file_hash, entry_signature, metadata_dict, "
+                    f"       s3_etag, access_count, ttl_seconds, expires_at, "
+                    f"       is_inline "
                     f'FROM "{tbl}"'
                 )
             ).fetchall()
-            result = []
+            result: List[EntrySummary] = []
             for row in rows:
-                flat = {
+                flat: EntrySummary = {
                     "cache_key": row[0],
                     "data_type": row[1],
                     "description": row[2] or "",
@@ -992,6 +1234,16 @@ class PostgresBackend(MetadataBackend):
                     flat["entry_signature"] = row[12]
                 if row[13] is not None:
                     flat["metadata_dict"] = row[13]
+                if row[14] is not None:
+                    flat["s3_etag"] = row[14]
+                # Phase 1 columns
+                flat["access_count"] = row[15] or 0
+                if row[16] is not None:
+                    flat["ttl_seconds"] = row[16]
+                if row[17] is not None:
+                    flat["expires_at"] = row[17]
+                # Phase 2 inline blob flag
+                flat["is_inline"] = row[18] or 0
                 result.append(flat)
             return result
 
@@ -1030,19 +1282,24 @@ class PostgresBackend(MetadataBackend):
                 "misses": stats.cache_misses,
                 "total_entries": stats.total_entries,
                 "total_size_bytes": stats.total_size_bytes,
+                "total_size_mb": stats.total_size_bytes
+                / (1024 * 1024),  # Backward compat
                 "last_cleanup_at": (
                     stats.last_cleanup_at.isoformat() if stats.last_cleanup_at else None
                 ),
             }
 
     def update_access_time(self, cache_key: str):
-        """Update last access time for cache entry."""
+        """Update last access time and increment access count for cache entry."""
         with self.SessionLocal() as session:
             try:
                 session.execute(
                     update(self._PgCacheEntry)
                     .where(self._PgCacheEntry.cache_key == cache_key)
-                    .values(accessed_at=datetime.now(timezone.utc))
+                    .values(
+                        accessed_at=datetime.now(timezone.utc),
+                        access_count=self._PgCacheEntry.access_count + 1,
+                    )
                 )
                 session.commit()
             except Exception as e:
@@ -1125,27 +1382,25 @@ class PostgresBackend(MetadataBackend):
                     logger.error(f"Cleanup failed: {e}")
                     return 0
 
-    def cleanup_by_size(self, target_size_mb: float) -> Dict[str, Any]:
+    def cleanup_by_size(self, target_size_bytes: int) -> Dict[str, Any]:
         """Remove least-recently-accessed entries until cache size drops to or below target."""
         with self._lock:
             with self.SessionLocal() as session:
                 try:
-                    # Get current total size
+                    # Get current total size in bytes
                     CE = self._PgCacheEntry
                     result = session.execute(
                         select(func.sum(CE.file_size)).select_from(CE)
                     )
-                    total_size_bytes = result.scalar() or 0
-                    total_size_mb = total_size_bytes / (1024 * 1024)
+                    current_size_bytes = result.scalar() or 0
 
-                    if total_size_mb <= target_size_mb:
+                    if current_size_bytes <= target_size_bytes:
                         return {
                             "count": 0,
                             "removed_entries": [],
                         }  # Already at or below target
 
-                    target_size_bytes = target_size_mb * 1024 * 1024
-                    bytes_to_remove = total_size_bytes - target_size_bytes
+                    bytes_to_remove = current_size_bytes - target_size_bytes
 
                     # Get entries sorted by accessed_at (oldest first) with actual_path
                     entries_to_delete = session.execute(
@@ -1186,7 +1441,7 @@ class PostgresBackend(MetadataBackend):
 
                         session.commit()
                         logger.info(
-                            f"LRU cleanup: removed {len(removed_entries)} entries to reach {target_size_mb:.2f}MB"
+                            f"LRU cleanup: removed {len(removed_entries)} entries to reach {format_size(target_size_bytes)}"
                         )
 
                     return {

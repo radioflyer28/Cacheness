@@ -179,7 +179,7 @@ def create_production_safe_cache():
         cache_dir="/secure/cache/path",
         metadata_backend="sqlite",
         verify_cache_integrity=True,
-        max_cache_size_mb=1000  # Limit cache size
+        max_cache_size="1gb"
     )
     
     return cacheness(production_config)
@@ -468,7 +468,7 @@ result = cached_multiply(7)  # Returns 70
 from cacheness import cached
 
 # Cache function generators
-@cached(ttl_seconds=86400)  # 24 hours
+@cached(ttl="24h")
 def create_data_processor(mean=0, std=1):
     """Creates a data processing function with specific parameters."""
     import numpy as np
@@ -715,7 +715,7 @@ def create_processor_bad():
 
 ```python
 # For critical cached functions, validate after retrieval
-@cached(ttl_seconds=172800)  # 48 hours
+@cached(ttl="2d")
 def create_model_predictor(model_params):
     # Complex model creation
     return trained_model.predict
@@ -778,7 +778,7 @@ def create_prod_cache():
         cache_dir="/secure/app/cache",
         metadata_backend="sqlite",
         verify_cache_integrity=True,
-        max_cache_size_mb=2000
+        max_cache_size="2gb"
     )
     
     return cacheness(config)

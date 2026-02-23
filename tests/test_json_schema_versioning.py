@@ -341,3 +341,102 @@ class TestJsonBackwardCompatibility:
         assert backend.namespace_exists(DEFAULT_NAMESPACE)
         assert backend.get_schema_version(DEFAULT_NAMESPACE) == 1
         backend.close()
+
+
+class TestJsonV3Columns:
+    """Test v3 schema fields in JSON backend: access_count, ttl_seconds, expires_at."""
+
+    @pytest.fixture
+    def json_backend(self, tmp_path):
+        metadata_file = tmp_path / "metadata.json"
+        backend = JsonBackend(metadata_file)
+        yield backend
+        backend.close()
+
+    def test_access_count_starts_at_zero(self, json_backend):
+        """New entries should have access_count = 0."""
+        json_backend.put_entry(
+            "ac_json_001",
+            {
+                "data_type": "pickle",
+                "description": "test access count",
+                "file_size": 100,
+                "metadata": {},
+            },
+        )
+        entry = json_backend.get_entry("ac_json_001")
+        assert entry is not None
+        assert entry["access_count"] == 0
+
+    def test_access_count_incremented_on_access(self, json_backend):
+        """update_access_time should increment access_count."""
+        json_backend.put_entry(
+            "ac_json_002",
+            {
+                "data_type": "pickle",
+                "description": "test increment",
+                "file_size": 100,
+                "metadata": {},
+            },
+        )
+
+        json_backend.update_access_time("ac_json_002")
+        entry = json_backend.get_entry("ac_json_002")
+        assert entry["access_count"] == 1
+
+        json_backend.update_access_time("ac_json_002")
+        entry = json_backend.get_entry("ac_json_002")
+        assert entry["access_count"] == 2
+
+    def test_ttl_seconds_stored_on_put(self, json_backend):
+        """put_entry with ttl_seconds should store it and compute expires_at."""
+        json_backend.put_entry(
+            "ttl_json_001",
+            {
+                "data_type": "pickle",
+                "description": "test ttl",
+                "file_size": 100,
+                "ttl_seconds": 3600,
+                "metadata": {},
+            },
+        )
+        entry = json_backend.get_entry("ttl_json_001")
+        assert entry is not None
+        assert entry["ttl_seconds"] == 3600
+        assert entry["expires_at"] is not None
+
+    def test_ttl_null_when_not_provided(self, json_backend):
+        """put_entry without ttl_seconds should leave ttl/expires_at as None."""
+        json_backend.put_entry(
+            "ttl_json_002",
+            {
+                "data_type": "pickle",
+                "description": "no ttl",
+                "file_size": 100,
+                "metadata": {},
+            },
+        )
+        entry = json_backend.get_entry("ttl_json_002")
+        assert entry is not None
+        assert entry.get("ttl_seconds") is None
+        assert entry.get("expires_at") is None
+
+    def test_iter_entry_summaries_includes_v3_fields(self, json_backend):
+        """iter_entry_summaries should include access_count and TTL fields."""
+        json_backend.put_entry(
+            "sum_json_001",
+            {
+                "data_type": "pickle",
+                "description": "summary test",
+                "file_size": 100,
+                "ttl_seconds": 7200,
+                "metadata": {},
+            },
+        )
+        json_backend.update_access_time("sum_json_001")
+
+        summaries = list(json_backend.iter_entry_summaries())
+        entry = next(s for s in summaries if s["cache_key"] == "sum_json_001")
+        assert entry["access_count"] == 1
+        assert entry["ttl_seconds"] == 7200
+        assert "expires_at" in entry

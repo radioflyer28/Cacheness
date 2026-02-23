@@ -84,6 +84,62 @@ model_keys = store.list(prefix="model_")
 v1_models = store.list(metadata_filter={"version": "1.0"})
 ```
 
+##### `put_file(file_path, *, key=None, metadata=None, move=False) -> str`
+Store an arbitrary file as a blob. Reads the file into bytes and delegates to `put()`. File metadata (original filename, MIME type, original size) is automatically merged into the metadata dict.
+
+**Parameters:**
+- `file_path` (str|Path): Path to the source file
+- `key` (Optional[str]): Explicit blob key (auto-generated if None)
+- `metadata` (Optional[Dict]): Custom metadata to merge with file metadata
+- `move` (bool): If `True`, delete the source file after a successful store (move-in semantics). Defaults to `False` (copy-in).
+
+**Returns:**
+- `str`: The blob key
+
+**Example:**
+```python
+store = BlobStore(cache_dir="./artifacts")
+
+# Copy file into store (default)
+key = store.put_file("models/xgboost.onnx", key="model-v2")
+
+# Move file into store (source deleted after store)
+key = store.put_file("data/output.csv", metadata={"project": "alpha"}, move=True)
+```
+
+##### `get_file(key, *, dest=None, move=False, overwrite=True) -> bytes | Path | None`
+Retrieve a cached file blob, optionally writing it to disk.
+
+**Parameters:**
+- `key` (str): The blob key
+- `dest` (Optional[str|Path]): Destination path. If a directory, the original filename from metadata is used (falls back to `<key>.bin`). Parent directories are created automatically.
+- `move` (bool): If `True`, delete the cache entry after a successful write to `dest` (move-out semantics). Requires `dest` to be set. Defaults to `False` (copy-out).
+- `overwrite` (bool): If `False`, raise `FileExistsError` when `dest` already exists on disk. Defaults to `True` (silently overwrite).
+
+**Returns:**
+- `bytes` when `dest` is `None` and entry exists
+- `Path` when `dest` is given and entry exists
+- `None` on miss
+
+**Raises:**
+- `ValueError`: If `move` is `True` but `dest` is `None`
+- `FileExistsError`: If `overwrite` is `False` and `dest` already exists
+
+**Example:**
+```python
+# Get raw bytes
+data = store.get_file("model-v2")
+
+# Copy out to a specific path
+path = store.get_file("model-v2", dest="./restored/model.onnx")
+
+# Move out (write + delete entry)
+path = store.get_file("model-v2", dest="./restored/model.onnx", move=True)
+
+# Safe write (no overwrite)
+path = store.get_file("model-v2", dest="./restored/model.onnx", overwrite=False)
+```
+
 ##### `verify_integrity(key: str) -> Dict`
 Verify blob integrity by checking file hash against stored metadata.
 
@@ -125,6 +181,9 @@ Store data in the cache with optional metadata.
 - `data` (Any): The data to cache
 - `**cache_key_params`: Key-value pairs used to generate the cache key
 - `metadata` (Optional[dict]): Custom metadata to store with the entry
+- `ttl` (Optional[str|int|float]): Per-entry TTL — duration string (`"1h"`, `"7d"`) or seconds. Overrides `default_ttl` for this entry.
+- `ttl_seconds` (Optional[float]): Legacy alias for `ttl`
+- `description` (Optional[str]): Human-readable description for the entry
 
 **Returns:**
 - `str`: The generated cache key
@@ -200,20 +259,34 @@ Remove an entry by its cache key.
 **Returns:**
 - `bool`: True if the entry was found and removed
 
-##### `list_entries(include_metadata: bool = False) -> List[dict]`
+##### `list_entries(include_metadata: bool = False) -> EntryList`
 List all cache entries.
 
 **Parameters:**
 - `include_metadata` (bool): Whether to include custom metadata in results
 
 **Returns:**
-- List of dictionaries containing entry information
+- `EntryList` — a `list` subclass with convenience methods:
+  - `.keys()` — list of cache keys
+  - `.first()` / `.last()` — first/last entry (or `None`)
+  - `.sort_by(field, reverse=False)` — return sorted `EntryList`
+  - `.filter(predicate)` — return filtered `EntryList`
+  - `.to_json(path=None)` — serialize to JSON string or file
+  - `.to_dataframe()` — convert to pandas DataFrame (requires pandas)
 
 **Example:**
 ```python
 entries = cache.list_entries(include_metadata=True)
-for entry in entries:
-    print(f"Key: {entry['cache_key']}, Size: {entry['size_mb']:.2f} MB")
+
+# EntryList convenience methods
+keys = entries.keys()              # ["key1", "key2", ...]
+first = entries.first()            # First entry dict or None
+sorted_ = entries.sort_by("file_size", reverse=True)
+recent = entries.filter(lambda e: e.get("data_type") == "dataframe")
+
+# Serialization
+entries.to_json("entries.json")     # Save to file
+df = entries.to_dataframe()         # pandas DataFrame
 ```
 
 ##### `get_stats() -> dict`
@@ -261,6 +334,37 @@ with cache.query_custom_session("ml_experiments") as query:
 ##### `close()`
 Close the cache and release resources. Called automatically if using context manager.
 
+##### `verify_integrity(repair=False, verify_hashes=False) -> IntegrityReport`
+Verify cache integrity by cross-checking blob files and metadata entries.
+
+**Parameters:**
+- `repair` (bool): If `True`, delete orphaned blobs and remove dangling metadata entries
+- `verify_hashes` (bool): If `True`, verify file hashes (slower but catches corruption). For S3 blobs, uses cheap HEAD/ETag check.
+
+**Returns:**
+- `IntegrityReport` with attributes:
+  - `.orphaned_blobs` — blob files with no metadata entry
+  - `.dangling_entries` — metadata entries pointing to missing blobs
+  - `.size_mismatches` — entries where `file_size` != actual size
+  - `.hash_mismatches` — entries where `file_hash` != actual hash (only when `verify_hashes=True`)
+  - `.repaired` — dict with `orphans_deleted` and `dangling_removed` counts (only when `repair=True`)
+
+Supports dict-style access for backward compatibility: `report["orphaned_blobs"]`.
+
+**Example:**
+```python
+# Detect issues
+report = cache.verify_integrity()
+print(f"Orphaned: {len(report.orphaned_blobs)}, Dangling: {len(report.dangling_entries)}")
+
+# Detect and repair
+report = cache.verify_integrity(repair=True)
+print(f"Cleaned {report.repaired['orphans_deleted']} orphans")
+
+# Full check including hash verification
+report = cache.verify_integrity(repair=True, verify_hashes=True)
+```
+
 **Example:**
 ```python
 # Manual close
@@ -277,12 +381,13 @@ with cacheness() as cache:
 
 #### Factory Methods
 
-##### `cacheness.for_api(cache_dir=None, ttl_seconds=21600, **kwargs)`
+##### `cacheness.for_api(cache_dir=None, ttl="6h", **kwargs)`
 Create a cache instance optimized for API requests.
 
 **Parameters:**
 - `cache_dir` (Optional[str]): Cache directory (default: "./cache")
-- `ttl_seconds` (int): Default TTL in seconds (default: 21600 = 6 hours)
+- `ttl` (Optional[str]): TTL as a duration string (e.g., `"6h"`, `"30m"`) — default: `"6h"`
+- `ttl_seconds` (Optional[float]): TTL in seconds (mutually exclusive with `ttl`)
 - `**kwargs`: Additional configuration options
 
 **Returns:**
@@ -290,7 +395,7 @@ Create a cache instance optimized for API requests.
 
 **Example:**
 ```python
-api_cache = cacheness.for_api(cache_dir="./api_cache", ttl_seconds=14400)  # 4 hours
+api_cache = cacheness.for_api(cache_dir="./api_cache", ttl="4h")
 api_cache.put({"users": [...]}, endpoint="users", version="v1")
 ```
 
@@ -473,6 +578,79 @@ deleted = cache.delete_batch([
 print(f"Removed {deleted} entries")
 ```
 
+##### `put_file(file_path, *, cache_key=None, on=None, description="", custom_metadata=None, move=False, **kwargs) -> str`
+Store an arbitrary file in the cache. Reads the file into bytes and delegates to `put()`. File metadata (original filename, MIME type, file size) is automatically recorded in `metadata_dict` when `store_full_metadata=True`.
+
+File metadata does **not** participate in cache key derivation — only `on` and `**kwargs` determine the key.
+
+**Parameters:**
+- `file_path` (str|Path): Path to the source file
+- `cache_key` (Optional[str]): Explicit cache key (if provided, `on` and `**kwargs` are ignored for key derivation)
+- `on` (Optional[Dict]): Dictionary of key parameters for cache key derivation
+- `description` (str): Human-readable description
+- `custom_metadata`: Custom metadata for the cache entry. Supports single ORM objects, lists/tuples of ORM objects, or dicts. Passed through to `put()` unchanged.
+- `move` (bool): If `True`, delete the source file after a successful store (move-in semantics). Defaults to `False` (copy-in).
+- `**kwargs`: Extra key-value pairs for key derivation and/or `metadata_dict`
+
+**Returns:**
+- `str`: 16-character hex cache key
+
+**Example:**
+```python
+# Copy file into cache (default)
+key = cache.put_file("data/model.onnx", description="ONNX model v2")
+
+# Move file into cache (source deleted after store)
+key = cache.put_file("output.csv", on={"run": "exp_01"}, move=True)
+
+# Store with explicit key
+key = cache.put_file("report.pdf", cache_key="monthly_report_jan")
+
+# Query by auto-populated metadata
+results = cache.query_meta(mime_type="application/pdf")
+```
+
+##### `get_file(cache_key=None, *, dest=None, on=None, ttl=None, ttl_seconds=None, move=False, overwrite=True, **kwargs) -> bytes | Path | None`
+Retrieve cached file data, optionally writing it to disk. Read counterpart of `put_file()`.
+
+**Parameters:**
+- `cache_key` (Optional[str]): Explicit cache key
+- `dest` (Optional[str|Path]): Destination path. If a directory, the original filename from metadata is used (falls back to `<cache_key>.bin`). Parent directories are created automatically.
+- `on` (Optional[Dict]): Dictionary of key parameters for key lookup
+- `ttl` (Optional[str]): TTL as duration string (e.g. `"6h"`)
+- `ttl_seconds` (Optional[float]): TTL in seconds
+- `move` (bool): If `True`, delete the cache entry after a successful write to `dest` (move-out semantics). Requires `dest` to be set. Defaults to `False` (copy-out).
+- `overwrite` (bool): If `False`, raise `FileExistsError` when `dest` already exists on disk. Defaults to `True` (silently overwrite).
+- `**kwargs`: Key parameters for key lookup (must match `put_file()` call)
+
+**Returns:**
+- `bytes` when `dest` is `None` and entry exists
+- `Path` when `dest` is given and entry exists
+- `None` on cache miss
+
+**Raises:**
+- `TypeError`: If the cached entry is not bytes (e.g. stored via `put()` with a dict)
+- `ValueError`: If `move` is `True` but `dest` is `None`
+- `FileExistsError`: If `overwrite` is `False` and `dest` already exists
+
+**Example:**
+```python
+# Get raw bytes
+data = cache.get_file(cache_key=key)
+
+# Copy out to a specific file
+path = cache.get_file(cache_key=key, dest="output/model.onnx")
+
+# Move out (write + delete cache entry)
+path = cache.get_file(cache_key=key, dest="output/model.onnx", move=True)
+
+# Safe write (no overwrite)
+path = cache.get_file(cache_key=key, dest="output/", overwrite=False)
+
+# Retrieve using on= key params
+data = cache.get_file(on={"run": "exp_01"})
+```
+
 ##### `touch_batch(**filter_kwargs) -> int`
 Touch (refresh TTL of) all cache entries whose metadata matches the given key/value pairs.
 
@@ -487,6 +665,236 @@ Touch (refresh TTL of) all cache entries whose metadata matches the given key/va
 # Extend TTL for all entries in a project
 touched = cache.touch_batch(project="ml_models")
 ```
+
+#### Convenience Metadata Helpers
+
+These helpers eliminate the common pattern of passing the same values twice — once for key derivation and once for metadata storage. All accept an optional `on=` keyword for key-only discriminators that participate in cache key derivation but are **not** stored as metadata.
+
+> **Requirement:** `put_with_meta` and `get_with_meta` require `store_full_metadata=True` in `CacheConfig`.  `put_with_model` and `get_with_model` require a SQLite or PostgreSQL metadata backend.
+
+##### `put_with_meta(data, *, on=None, description="", **kwargs) -> str`
+Store data using `**kwargs` as both the cache key **and** `metadata_dict`.
+
+**Parameters:**
+- `data`: Data to cache.
+- `on`: Extra key-only parameters that affect the cache key but are not stored in metadata.
+- `description`: Human-readable description (not part of the cache key).
+- `**kwargs`: Key-value pairs used for both key derivation and `metadata_dict` storage.
+
+**Returns:** 16-character hex cache key.
+
+**Example:**
+```python
+cache.put_with_meta(df, experiment="exp_001", model="xgboost", accuracy=0.95)
+
+# on= creates distinct entries with identical metadata
+cache.put_with_meta(df, on={"epoch": 5}, model="xgboost", lr=0.01)
+```
+
+##### `get_with_meta(*, on=None, ttl=None, ttl_seconds=None, **kwargs) -> Optional[tuple[Any, dict]]`
+Retrieve data and its `metadata_dict` by the same kwargs used at store time.
+
+**Returns:** `(data, metadata_dict)` on a hit, `None` on a miss. `metadata_dict` is the plain dict of the originally stored kwargs.
+
+**Example:**
+```python
+result = cache.get_with_meta(experiment="exp_001", model="xgboost")
+if result:
+    data, meta = result
+    print(meta["accuracy"])  # 0.95
+```
+
+##### `put_with_model(data, model_class, *, on=None, description="", **kwargs) -> str`
+Store data using `**kwargs` as both cache key and ORM custom metadata instance.
+
+**Parameters:**
+- `data`: Data to cache.
+- `model_class`: A custom metadata model class decorated with `@custom_metadata_model`.
+- `on`: Extra key-only discriminator parameters.
+- `**kwargs`: Values passed to `model_class(...)` and used for cache key derivation.
+
+**Example:**
+```python
+cache.put_with_model(df, ExperimentMetadata,
+                     experiment_id="exp_001",
+                     model_type="xgboost",
+                     accuracy=0.95)
+
+# With key discriminator for distinct entries sharing the same ORM metadata:
+cache.put_with_model(df, ExperimentMetadata,
+                     on={"run_id": "run_42"},
+                     experiment_id="exp_001",
+                     model_type="xgboost",
+                     accuracy=0.95)
+```
+
+##### `get_with_model(model_class, *, on=None, ttl=None, ttl_seconds=None, **kwargs) -> Optional[tuple[Any, Any]]`
+Retrieve data and its ORM metadata instance.
+
+**Returns:** `(data, orm_instance)` on a hit, `None` on a miss or if no ORM row exists.
+
+**Example:**
+```python
+result = cache.get_with_model(ExperimentMetadata,
+                               experiment_id="exp_001",
+                               model_type="xgboost")
+if result:
+    data, exp = result
+    print(exp.accuracy)
+```
+
+##### `query_with_meta(**kwargs) -> Iterator[tuple[Any, dict]]`
+Lazily yield `(data, metadata_dict)` tuples for all entries whose `metadata_dict` matches the given filters.
+
+**Example:**
+```python
+for data, meta in cache.query_with_meta(model="xgboost"):
+    print(meta["experiment_id"], data.shape)
+```
+
+---
+
+#### Dunder Methods
+
+`UnifiedCache` supports Python dunder methods for idiomatic cache interaction.
+
+##### `len(cache)` — `__len__`
+Return the number of entries in the cache.
+
+```python
+cache = cacheness()
+cache.put("a", key="x")
+cache.put("b", key="y")
+print(len(cache))  # 2
+```
+
+##### `key in cache` — `__contains__`
+Check whether a cache key exists (not expired).
+
+```python
+if "my_key" in cache:
+    data = cache.get(cache_key="my_key")
+```
+
+##### `list(cache)` / `for key in cache` — `__iter__`
+Iterate over all non-expired cache keys.
+
+```python
+for key in cache:
+    print(key)
+
+all_keys = list(cache)  # ["key1", "key2", ...]
+```
+
+---
+
+## Typed Contracts
+
+Cacheness uses typed dataclasses for return values across internal and public APIs. These provide IDE autocompletion, named field access, and dict-compatible accessors for backward compatibility.
+
+### `HandlerResult`
+
+Returned by handler `put()` methods. Replaces the legacy untyped `Dict[str, Any]`.
+
+```python
+from cacheness import HandlerResult
+
+@dataclass
+class HandlerResult:
+    storage_format: str              # e.g. "parquet", "blosc2", "pickle"
+    file_size: int                   # Size in bytes
+    actual_path: str                 # Relative path to the blob file
+    compression_codec: Optional[str] # e.g. "lz4", "zstd"
+    serializer: Optional[str]       # e.g. "pickle", "dill"
+    object_type: Optional[str]      # e.g. "pandas.DataFrame"
+    extra: Dict[str, Any]           # Handler-specific metadata (shape, dtypes, etc.)
+```
+
+Provides dict-compatible accessors (`result["storage_format"]`, `"actual_path" in result`) for transitional use.
+
+### `EntryList`
+
+Returned by `list_entries()` and `query_meta()`. A `list` subclass with convenience methods.
+
+```python
+from cacheness import EntryList
+
+entries: EntryList = cache.list_entries()
+entries.keys()                          # ["key1", "key2", ...]
+entries.sort_by("file_size", reverse=True)  # Sorted EntryList
+entries.filter(lambda e: e["data_type"] == "dataframe")  # Filtered EntryList
+entries.to_dataframe()                  # pandas DataFrame
+entries.to_json("entries.json")         # Save to file
+entries.first()                         # First entry or None
+```
+
+### `IntegrityReport`
+
+Returned by `verify_integrity()`. See [verify_integrity](#verify_integrityrepairfalse-verify_hashesfalse---integrityreport) above.
+
+```python
+from cacheness import IntegrityReport
+
+report: IntegrityReport = cache.verify_integrity(repair=True, verify_hashes=True)
+report.orphaned_blobs      # List[str]
+report.dangling_entries     # List[Dict]
+report.size_mismatches      # List[Dict]
+report.hash_mismatches      # Optional[List[Dict]] (when verify_hashes=True)
+report.repaired             # Optional[Dict] (when repair=True)
+```
+
+### `EntryData` (TypedDict)
+
+Canonical shape for the dict returned by `MetadataBackend.get_entry()` and accepted by `put_entry()`. All metadata backends (JSON, SQLite, PostgreSQL) produce and consume dicts conforming to this contract.
+
+```python
+from cacheness import EntryData
+
+class EntryData(TypedDict, total=False):
+    # Always present from all backends
+    description: str
+    data_type: str
+    created_at: Any       # ISO str or float timestamp depending on backend
+    accessed_at: Any
+    file_size: int
+    metadata: Dict[str, Any]  # Nested handler/storage metadata
+
+    # Present in some backends
+    cache_key: str        # PostgreSQL includes this; JSON/SQLite do not
+```
+
+The nested `metadata` dict contains handler-written fields (`actual_path`, `storage_format`, `file_hash`, `entry_signature`, handler extras). Exact keys vary by handler type.
+
+Primarily relevant for custom metadata backend authors implementing `get_entry()`/`put_entry()`.
+
+### `HooksConfig` (dataclass)
+
+Lifecycle callback configuration for cache events. See [Configuration Guide — Hooks](CONFIGURATION.md#hooks-configuration-hooksconfig) for full details.
+
+```python
+from cacheness import HooksConfig
+
+@dataclass
+class HooksConfig:
+    on_evict: Optional[Callable] = None
+    on_integrity_failure: Optional[Callable] = None
+```
+
+### `WriteBlobResult`
+
+Internal typed contract returned by `BlobStore._write_blob()`. Replaces the unnamed `tuple[handler, result, file_hash]`.
+
+```python
+from cacheness import WriteBlobResult
+
+@dataclass
+class WriteBlobResult:
+    handler: CacheHandler        # The handler that serialized the data
+    result: HandlerResult        # Serialization metadata
+    file_hash: Optional[str]     # xxhash of the blob file (if computed)
+```
+
+Primarily relevant for plugin/handler developers and internal composition.
 
 ---
 
@@ -792,6 +1200,7 @@ Decorator for caching function results with intelligent TTL management.
 ```python
 def cached(
     cache_instance: Optional[cacheness] = None,
+    ttl: Optional[str] = None,
     ttl_seconds: Optional[float] = None,
     cache_key_prefix: Optional[str] = None,
     include_defaults: bool = True,
@@ -801,14 +1210,15 @@ def cached(
 
 **Parameters:**
 - `cache_instance` (Optional[cacheness]): Cache instance to use (uses global if None)
-- `ttl_seconds` (Optional[float]): Time-to-live in seconds
+- `ttl` (Optional[str]): TTL as a duration string (e.g., `"24h"`, `"30m"`)
+- `ttl_seconds` (Optional[float]): TTL in seconds (mutually exclusive with `ttl`)
 - `cache_key_prefix` (Optional[str]): Prefix for cache keys
 - `include_defaults` (bool): Whether to include default parameter values in cache key
 - `metadata` (Optional[dict]): Custom metadata to store with cached results
 
 **Example:**
 ```python
-@cached(ttl_seconds=86400, cache_key_prefix="weather")  # 24 hours
+@cached(ttl="24h", cache_key_prefix="weather")
 def get_weather(city: str, units: str = "metric"):
     return fetch_weather_api(city, units)
 
@@ -824,14 +1234,15 @@ weather = get_weather("London")  # Cache hit - returns cached result
 Decorator optimized for API requests with error handling.
 
 ```python
-@cached.for_api(ttl_seconds=21600, ignore_errors=True)  # 6 hours
+@cached.for_api(ttl="6h", ignore_errors=True)
 def fetch_user_data(user_id):
     response = requests.get(f"/api/users/{user_id}")
     return response.json()
 ```
 
 **Parameters:**
-- `ttl_seconds` (int): Time-to-live in seconds (default: 21600 = 6 hours)
+- `ttl` (Optional[str]): TTL as a duration string (e.g., `"6h"`) — default: `"6h"`
+- `ttl_seconds` (Optional[float]): TTL in seconds (mutually exclusive with `ttl`; default: 21600)
 - `ignore_errors` (bool): Continue on cache errors (default: True)
 - Uses LZ4 compression optimized for JSON/text data
 
@@ -843,6 +1254,7 @@ Conditional caching decorator that only caches when a condition is met.
 def cache_if(
     condition: Callable[[Any], bool],
     cache_instance: Optional[cacheness] = None,
+    ttl: Optional[str] = None,
     ttl_seconds: Optional[float] = None,
     **kwargs
 ) -> Callable
@@ -854,7 +1266,7 @@ def cache_if(
 
 **Example:**
 ```python
-@cache_if(lambda result: result['status'] == 'success', ttl_seconds=3600)  # 1 hour
+@cache_if(lambda result: result['status'] == 'success', ttl="1h")
 def api_call(endpoint):
     response = requests.get(endpoint)
     return response.json()
@@ -866,7 +1278,7 @@ Async version of the cached decorator.
 
 **Example:**
 ```python
-@cache_async(ttl_seconds=7200)  # 2 hours
+@cache_async(ttl="2h")
 async def fetch_data(url: str):
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as response:
@@ -884,10 +1296,12 @@ Main configuration class for cacheness.
 class CacheConfig:
     storage: CacheStorageConfig = field(default_factory=CacheStorageConfig)
     metadata: CacheMetadataConfig = field(default_factory=CacheMetadataConfig)
+    blob: CacheBlobConfig = field(default_factory=CacheBlobConfig)
     compression: CompressionConfig = field(default_factory=CompressionConfig)
     serialization: SerializationConfig = field(default_factory=SerializationConfig)
     handlers: HandlerConfig = field(default_factory=HandlerConfig)
-    default_ttl_seconds: Optional[float] = None
+    default_ttl: Optional[Union[str, int, float]] = None  # "24h", "2d", or seconds
+    default_ttl_seconds: Optional[float] = None  # Legacy — use default_ttl instead
 ```
 
 ### `CacheStorageConfig`
@@ -898,14 +1312,42 @@ Configuration for cache storage options.
 @dataclass
 class CacheStorageConfig:
     cache_dir: str = "./cache"
-    max_cache_size_mb: int = 10000
+    max_cache_size: Optional[Union[str, int]] = None  # "2gb", "500mb"
+    max_cache_size_mb: Optional[int] = 2000  # Legacy — use max_cache_size instead
     cleanup_on_init: bool = False
 ```
 
 **Fields:**
 - `cache_dir` (str): Directory for cache files
-- `max_cache_size_mb` (int): Maximum cache size in MB
+- `max_cache_size` (str|int): Size string (`"2gb"`) or bytes int. Overrides `max_cache_size_mb`
+- `max_cache_size_mb` (int): Legacy: Maximum cache size in MB (use `max_cache_size` instead)
 - `cleanup_on_init` (bool): Whether to clean expired entries on initialization
+
+### `CacheBlobConfig`
+
+Configuration for the blob storage layer, including optional inline blob storage.
+
+```python
+@dataclass
+class CacheBlobConfig:
+    backend: str = "filesystem"
+    max_inline_size: int = 0  # 0 = disabled
+```
+
+**Fields:**
+- `backend` (str): Blob backend to use (`"filesystem"`, `"s3"`, `"memory"`)
+- `max_inline_size` (int): Maximum blob size in bytes to store inline in the metadata row instead of writing a separate file. `0` disables inline storage (default). Recommended values: `512`–`8192` bytes for small objects like short strings, scalars, or tiny dicts.
+
+**Example:**
+```python
+from cacheness import cacheness, CacheConfig
+from cacheness.config import CacheBlobConfig
+
+# Inline blobs up to 4 KB avoids blob file I/O for small cache entries
+cache = cacheness(CacheConfig(
+    blob=CacheBlobConfig(max_inline_size=4096)
+))
+```
 
 ### `CacheMetadataConfig`
 
@@ -916,7 +1358,7 @@ Configuration for metadata storage backend and memory cache layer.
 class CacheMetadataConfig:
     backend: Literal["json", "sqlite"] = "sqlite"
     database_url: Optional[str] = None
-    store_cache_key_params: bool = True
+    store_full_metadata: bool = False  # Preferred (replaces store_cache_key_params)
     verify_cache_integrity: bool = True
     # Memory cache layer for disk-persistent backends
     enable_memory_cache: bool = False
@@ -929,7 +1371,7 @@ class CacheMetadataConfig:
 **Core Fields:**
 - `backend` (str): Metadata backend ("json" or "sqlite")
 - `database_url` (Optional[str]): SQLite database path (auto-generated if None)
-- `store_cache_key_params` (bool): Whether to store cache key parameters
+- `store_full_metadata` (bool): Whether to store cache key parameters (replaces `store_cache_key_params`)
 - `verify_cache_integrity` (bool): Whether to verify file integrity
 
 **Memory Cache Layer Fields:**
@@ -1070,13 +1512,13 @@ from cacheness import set_default_cache, CacheConfig
 # Configure default cache for all @cached decorators
 config = CacheConfig(
     storage=CacheStorageConfig(cache_dir="./project_cache"),
-    default_ttl_seconds=86400  # 24 hours
+    default_ttl="24h"
 )
 
 set_default_cache(cacheness(config))
 
 # Now all @cached decorators use this configuration
-@cached(ttl_seconds=7200)  # 2 hours
+@cached(ttl="2h")
 def my_function():
     return expensive_computation()
 ```

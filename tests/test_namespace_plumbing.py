@@ -207,7 +207,7 @@ class TestMetadataBackendABCProperty:
             def cleanup_expired(self, ttl_seconds):
                 return 0
 
-            def cleanup_by_size(self, target_size_mb):
+            def cleanup_by_size(self, target_size_bytes):
                 return {}
 
             def clear_all(self):
@@ -262,7 +262,7 @@ class TestMetadataBackendABCProperty:
             def cleanup_expired(self, ttl_seconds):
                 return 0
 
-            def cleanup_by_size(self, target_size_mb):
+            def cleanup_by_size(self, target_size_bytes):
                 return {}
 
             def clear_all(self):

@@ -84,7 +84,7 @@ class TestPgSchemaVersioning:
         pg_backend.set_schema_version(DEFAULT_NAMESPACE, 99)
         assert pg_backend.get_schema_version(DEFAULT_NAMESPACE) == 99
         # Restore
-        pg_backend.set_schema_version(DEFAULT_NAMESPACE, 1)
+        pg_backend.set_schema_version(DEFAULT_NAMESPACE, 3)
 
     def test_get_schema_version_unknown_namespace(self, pg_backend):
         """Unknown namespace returns 0."""
@@ -93,7 +93,7 @@ class TestPgSchemaVersioning:
     def test_migrations_run_on_fresh_db(self, pg_backend):
         """Fresh database should have all migrations applied."""
         version = pg_backend.get_schema_version(DEFAULT_NAMESPACE)
-        assert version == 1
+        assert version == 3
 
     def test_migrations_idempotent(self):
         """Opening the same database twice should not fail or re-run migrations."""
@@ -139,7 +139,7 @@ class TestPgNamespaceRegistry:
         ns = pg_backend.create_namespace("project_alpha", "Project Alpha")
         assert ns.namespace_id == "project_alpha"
         assert ns.display_name == "Project Alpha"
-        assert ns.schema_version == 1
+        assert ns.schema_version == 3
 
         # Per-namespace tables should exist
         from sqlalchemy import inspect
@@ -205,7 +205,7 @@ class TestPgNamespaceRegistry:
         assert ns is not None
         assert ns.namespace_id == "lookup_ns"
         assert ns.display_name == "Lookup Test"
-        assert ns.schema_version == 1
+        assert ns.schema_version == 3
 
         assert pg_backend.get_namespace("nonexistent") is None
 
@@ -239,6 +239,7 @@ class TestPgNamespaceRegistry:
         assert "idx_idx_test_list_entries" in idx_names
         assert "idx_idx_test_cleanup" in idx_names
         assert "idx_idx_test_size_mgmt" in idx_names
+        assert "idx_idx_test_metadata_gin" in idx_names
 
     def test_drop_namespace_then_recreate(self, pg_backend):
         """Can drop and re-create the same namespace."""
@@ -253,7 +254,7 @@ class TestPgNamespaceRegistry:
     def test_set_schema_version_on_created_namespace(self, pg_backend):
         """Schema version can be set on namespaces created via create_namespace."""
         pg_backend.create_namespace("versioned_ns")
-        assert pg_backend.get_schema_version("versioned_ns") == 1
+        assert pg_backend.get_schema_version("versioned_ns") == 3
 
         pg_backend.set_schema_version("versioned_ns", 5)
         assert pg_backend.get_schema_version("versioned_ns") == 5
@@ -308,3 +309,187 @@ class TestPgBackwardCompatibility:
         count = pg_backend.clear_all()
         assert count >= 1
         assert pg_backend.get_entry("pg_test_003") is None
+
+
+# ── JSONB schema and storage ──────────────────────────────────────────
+
+
+@requires_postgres
+class TestPgJsonbSchema:
+    """Test JSONB column types, GIN index, and migration."""
+
+    def test_schema_version_is_v3(self, pg_backend):
+        """After init, default namespace should be at schema v3."""
+        assert pg_backend.get_schema_version(DEFAULT_NAMESPACE) == 3
+
+    def test_metadata_dict_column_is_jsonb(self, pg_backend):
+        """metadata_dict column should be JSONB type."""
+        from sqlalchemy import inspect
+
+        inspector = inspect(pg_backend.engine)
+        cols = {c["name"]: c for c in inspector.get_columns("cache_entries")}
+        assert str(cols["metadata_dict"]["type"]).upper() == "JSONB"
+
+    def test_cache_key_params_column_is_jsonb(self, pg_backend):
+        """cache_key_params column should be JSONB type."""
+        from sqlalchemy import inspect
+
+        inspector = inspect(pg_backend.engine)
+        cols = {c["name"]: c for c in inspector.get_columns("cache_entries")}
+        assert str(cols["cache_key_params"]["type"]).upper() == "JSONB"
+
+    def test_gin_index_on_default_table(self, pg_backend):
+        """Default cache_entries should have a GIN index on metadata_dict."""
+        from sqlalchemy import inspect
+
+        inspector = inspect(pg_backend.engine)
+        indexes = inspector.get_indexes("cache_entries")
+        idx_names = {idx["name"] for idx in indexes}
+        assert "idx_pg_metadata_gin" in idx_names
+
+    def test_gin_index_on_namespace_table(self, pg_backend):
+        """Per-namespace tables should have a GIN index on metadata_dict."""
+        pg_backend.create_namespace("gin_ns")
+        from sqlalchemy import inspect
+
+        inspector = inspect(pg_backend.engine)
+        indexes = inspector.get_indexes("cache_entries_gin_ns")
+        idx_names = {idx["name"] for idx in indexes}
+        assert "idx_gin_ns_metadata_gin" in idx_names
+
+    def test_migration_idempotent(self):
+        """Opening the same database twice should result in same v2 schema."""
+        url = _get_pg_url()
+        b1 = PostgresBackend(connection_url=url)
+        v1 = b1.get_schema_version(DEFAULT_NAMESPACE)
+        b1.close()
+
+        b2 = PostgresBackend(connection_url=url)
+        v2 = b2.get_schema_version(DEFAULT_NAMESPACE)
+        b2.close()
+
+        assert v1 == v2 == 3
+
+
+@requires_postgres
+class TestPgJsonbStorage:
+    """Test JSONB round-trip storage and _ensure_jsonb_value helper."""
+
+    def test_ensure_jsonb_value_helper(self, pg_backend):
+        """_ensure_jsonb_value handles all input forms correctly."""
+        from cacheness.storage.backends.postgresql_backend import _ensure_jsonb_value
+
+        assert _ensure_jsonb_value(None) is None
+        assert _ensure_jsonb_value({"k": "v"}) == {"k": "v"}
+        assert _ensure_jsonb_value('{"k": "v"}') == {"k": "v"}
+        assert _ensure_jsonb_value("not json") is None
+        assert _ensure_jsonb_value(42) is None
+
+    def test_metadata_dict_round_trip(self, pg_backend):
+        """metadata_dict stored as JSONB returns a dict, not a string."""
+        import json
+
+        pg_backend.put_entry(
+            "jb_rt_001",
+            {
+                "data_type": "pickle",
+                "metadata": {
+                    "metadata_dict": json.dumps({"model": "xgboost", "accuracy": 0.95}),
+                },
+            },
+        )
+
+        summaries = pg_backend.iter_entry_summaries()
+        entry = next((s for s in summaries if s["cache_key"] == "jb_rt_001"), None)
+        assert entry is not None
+        md = entry.get("metadata_dict")
+        # JSONB should return native dict (or str with psycopg2 — both OK)
+        if isinstance(md, str):
+            md = json.loads(md)
+        assert isinstance(md, dict)
+        assert md["model"] == "xgboost"
+        assert md["accuracy"] == 0.95
+
+        pg_backend.remove_entry("jb_rt_001")
+
+    def test_null_metadata_dict_stored(self, pg_backend):
+        """Entries without metadata_dict should store NULL."""
+        pg_backend.put_entry(
+            "jb_null_001",
+            {"data_type": "pickle", "metadata": {}},
+        )
+
+        summaries = pg_backend.iter_entry_summaries()
+        entry = next((s for s in summaries if s["cache_key"] == "jb_null_001"), None)
+        assert entry is not None
+        assert entry.get("metadata_dict") is None
+
+        pg_backend.remove_entry("jb_null_001")
+
+    def test_jsonb_containment_query_raw_sql(self, pg_backend):
+        """JSONB @> containment operator works at the SQL level."""
+        import json
+
+        from sqlalchemy import text
+
+        # Store entries with JSONB metadata
+        for i, (model, acc) in enumerate(
+            [("xgboost", 0.95), ("cnn", 0.88), ("xgboost", 0.92)]
+        ):
+            pg_backend.put_entry(
+                f"jb_cq_{i}",
+                {
+                    "data_type": "pickle",
+                    "metadata": {
+                        "metadata_dict": json.dumps({"model": model, "accuracy": acc}),
+                    },
+                },
+            )
+
+        with pg_backend.SessionLocal() as session:
+            result = session.execute(
+                text(
+                    'SELECT cache_key FROM "cache_entries" '
+                    "WHERE metadata_dict @> CAST(:filter AS jsonb) "
+                    "ORDER BY cache_key"
+                ),
+                {"filter": json.dumps({"model": "xgboost"})},
+            ).fetchall()
+            keys = [r[0] for r in result]
+            assert "jb_cq_0" in keys
+            assert "jb_cq_2" in keys
+            assert "jb_cq_1" not in keys
+
+        for i in range(3):
+            pg_backend.remove_entry(f"jb_cq_{i}")
+
+    def test_update_entry_metadata_jsonb(self, pg_backend):
+        """update_entry_metadata should handle JSONB metadata_dict."""
+        import json
+
+        pg_backend.put_entry(
+            "jb_upd_001",
+            {
+                "data_type": "pickle",
+                "metadata": {
+                    "metadata_dict": json.dumps({"version": 1}),
+                },
+            },
+        )
+
+        # Update with a JSON string — should be parsed to dict by _ensure_jsonb_value
+        pg_backend.update_entry_metadata(
+            "jb_upd_001",
+            {"metadata_dict": json.dumps({"version": 2, "note": "updated"})},
+        )
+
+        summaries = pg_backend.iter_entry_summaries()
+        entry = next((s for s in summaries if s["cache_key"] == "jb_upd_001"), None)
+        assert entry is not None
+        md = entry.get("metadata_dict")
+        if isinstance(md, str):
+            md = json.loads(md)
+        assert md["version"] == 2
+        assert md["note"] == "updated"
+
+        pg_backend.remove_entry("jb_upd_001")

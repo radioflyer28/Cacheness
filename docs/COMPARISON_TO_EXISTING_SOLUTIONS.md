@@ -418,10 +418,10 @@ pip install cacheness
 ```
 
 ```python
-from cacheness import UnifiedCache
+from cacheness import cacheness
 
 # Works immediately, no setup
-cache = UnifiedCache()  # Uses SQLite + filesystem by default
+cache = cacheness()  # Uses SQLite + filesystem by default
 ```
 
 **Compare to alternatives:**
