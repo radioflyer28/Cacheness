@@ -24,7 +24,8 @@ cache = cacheness(config)
 
 ```python
 from cacheness.config import (
-    CacheStorageConfig, 
+    CacheStorageConfig,
+    CacheBlobConfig,
     CacheMetadataConfig, 
     CompressionConfig,
     SerializationConfig,
@@ -81,6 +82,37 @@ cache = cacheness(config)
 | `max_cache_size` | str/int | `None` | Size string (`"2gb"`) or bytes int. Overrides `max_cache_size_mb` |
 | `max_cache_size_mb` | int | `2000` | Legacy: max size in MB (use `max_cache_size` instead) |
 | `cleanup_on_init` | bool | `True` | Clean expired entries on initialization |
+
+### Blob Storage Configuration (`CacheBlobConfig`)
+
+Controls how cache entries are stored — on disk as individual files or inlined directly into the metadata database.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `max_inline_size` | int | `0` | Entries ≤ this many bytes are stored inline in the metadata database instead of as separate blob files. `0` disables inlining (all entries stored as files). |
+
+**Inlining small entries** eliminates filesystem overhead (open/read/write syscalls) for tiny cached values — useful when most cached objects are small strings, ints, or short dicts.
+
+```python
+from cacheness import cacheness, CacheConfig
+from cacheness.config import CacheBlobConfig
+
+config = CacheConfig(
+    cache_dir="./my_cache",
+    # Inline entries ≤ 4 KB; larger entries still go to disk
+    blob=CacheBlobConfig(max_inline_size=4096),
+)
+cache = cacheness(config)
+```
+
+**Flat-kwargs shortcut** — `max_inline_size` is also accepted directly on `CacheConfig`:
+
+```python
+config = CacheConfig(
+    cache_dir="./my_cache",
+    max_inline_size=4096,   # equivalent to blob=CacheBlobConfig(max_inline_size=4096)
+)
+```
 
 ### Metadata Configuration (`CacheMetadataConfig`)
 

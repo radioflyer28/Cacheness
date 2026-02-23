@@ -666,6 +666,94 @@ Touch (refresh TTL of) all cache entries whose metadata matches the given key/va
 touched = cache.touch_batch(project="ml_models")
 ```
 
+#### Convenience Metadata Helpers
+
+These helpers eliminate the common pattern of passing the same values twice — once for key derivation and once for metadata storage. All accept an optional `on=` keyword for key-only discriminators that participate in cache key derivation but are **not** stored as metadata.
+
+> **Requirement:** `put_with_meta` and `get_with_meta` require `store_full_metadata=True` in `CacheConfig`.  `put_with_model` and `get_with_model` require a SQLite or PostgreSQL metadata backend.
+
+##### `put_with_meta(data, *, on=None, description="", **kwargs) -> str`
+Store data using `**kwargs` as both the cache key **and** `metadata_dict`.
+
+**Parameters:**
+- `data`: Data to cache.
+- `on`: Extra key-only parameters that affect the cache key but are not stored in metadata.
+- `description`: Human-readable description (not part of the cache key).
+- `**kwargs`: Key-value pairs used for both key derivation and `metadata_dict` storage.
+
+**Returns:** 16-character hex cache key.
+
+**Example:**
+```python
+cache.put_with_meta(df, experiment="exp_001", model="xgboost", accuracy=0.95)
+
+# on= creates distinct entries with identical metadata
+cache.put_with_meta(df, on={"epoch": 5}, model="xgboost", lr=0.01)
+```
+
+##### `get_with_meta(*, on=None, ttl=None, ttl_seconds=None, **kwargs) -> Optional[tuple[Any, dict]]`
+Retrieve data and its `metadata_dict` by the same kwargs used at store time.
+
+**Returns:** `(data, metadata_dict)` on a hit, `None` on a miss. `metadata_dict` is the plain dict of the originally stored kwargs.
+
+**Example:**
+```python
+result = cache.get_with_meta(experiment="exp_001", model="xgboost")
+if result:
+    data, meta = result
+    print(meta["accuracy"])  # 0.95
+```
+
+##### `put_with_model(data, model_class, *, on=None, description="", **kwargs) -> str`
+Store data using `**kwargs` as both cache key and ORM custom metadata instance.
+
+**Parameters:**
+- `data`: Data to cache.
+- `model_class`: A custom metadata model class decorated with `@custom_metadata_model`.
+- `on`: Extra key-only discriminator parameters.
+- `**kwargs`: Values passed to `model_class(...)` and used for cache key derivation.
+
+**Example:**
+```python
+cache.put_with_model(df, ExperimentMetadata,
+                     experiment_id="exp_001",
+                     model_type="xgboost",
+                     accuracy=0.95)
+
+# With key discriminator for distinct entries sharing the same ORM metadata:
+cache.put_with_model(df, ExperimentMetadata,
+                     on={"run_id": "run_42"},
+                     experiment_id="exp_001",
+                     model_type="xgboost",
+                     accuracy=0.95)
+```
+
+##### `get_with_model(model_class, *, on=None, ttl=None, ttl_seconds=None, **kwargs) -> Optional[tuple[Any, Any]]`
+Retrieve data and its ORM metadata instance.
+
+**Returns:** `(data, orm_instance)` on a hit, `None` on a miss or if no ORM row exists.
+
+**Example:**
+```python
+result = cache.get_with_model(ExperimentMetadata,
+                               experiment_id="exp_001",
+                               model_type="xgboost")
+if result:
+    data, exp = result
+    print(exp.accuracy)
+```
+
+##### `query_with_meta(**kwargs) -> Iterator[tuple[Any, dict]]`
+Lazily yield `(data, metadata_dict)` tuples for all entries whose `metadata_dict` matches the given filters.
+
+**Example:**
+```python
+for data, meta in cache.query_with_meta(model="xgboost"):
+    print(meta["experiment_id"], data.shape)
+```
+
+---
+
 #### Dunder Methods
 
 `UnifiedCache` supports Python dunder methods for idiomatic cache interaction.
@@ -1208,6 +1296,7 @@ Main configuration class for cacheness.
 class CacheConfig:
     storage: CacheStorageConfig = field(default_factory=CacheStorageConfig)
     metadata: CacheMetadataConfig = field(default_factory=CacheMetadataConfig)
+    blob: CacheBlobConfig = field(default_factory=CacheBlobConfig)
     compression: CompressionConfig = field(default_factory=CompressionConfig)
     serialization: SerializationConfig = field(default_factory=SerializationConfig)
     handlers: HandlerConfig = field(default_factory=HandlerConfig)
@@ -1233,6 +1322,32 @@ class CacheStorageConfig:
 - `max_cache_size` (str|int): Size string (`"2gb"`) or bytes int. Overrides `max_cache_size_mb`
 - `max_cache_size_mb` (int): Legacy: Maximum cache size in MB (use `max_cache_size` instead)
 - `cleanup_on_init` (bool): Whether to clean expired entries on initialization
+
+### `CacheBlobConfig`
+
+Configuration for the blob storage layer, including optional inline blob storage.
+
+```python
+@dataclass
+class CacheBlobConfig:
+    backend: str = "filesystem"
+    max_inline_size: int = 0  # 0 = disabled
+```
+
+**Fields:**
+- `backend` (str): Blob backend to use (`"filesystem"`, `"s3"`, `"memory"`)
+- `max_inline_size` (int): Maximum blob size in bytes to store inline in the metadata row instead of writing a separate file. `0` disables inline storage (default). Recommended values: `512`–`8192` bytes for small objects like short strings, scalars, or tiny dicts.
+
+**Example:**
+```python
+from cacheness import cacheness, CacheConfig
+from cacheness.config import CacheBlobConfig
+
+# Inline blobs up to 4 KB avoids blob file I/O for small cache entries
+cache = cacheness(CacheConfig(
+    blob=CacheBlobConfig(max_inline_size=4096)
+))
+```
 
 ### `CacheMetadataConfig`
 

@@ -19,6 +19,7 @@ uv run python examples/<file>.py
 | [`simple_object_caching.py`](simple_object_caching.py) | Caching dataclasses, dicts, nested structures |
 | [`simple_config_demo.py`](simple_config_demo.py) | Custom dirs, TTL strategies, `CacheConfig` |
 | [`intelligent_storage_demo.py`](intelligent_storage_demo.py) | Auto-optimised formats (Parquet / Blosc / LZ4 / Pickle) |
+| [`file_operations_demo.py`](file_operations_demo.py) | `put_file`/`get_file` — copy-in, move-in, copy-out, move-out, overwrite guard |
 
 ## Intermediate
 
@@ -28,6 +29,7 @@ uv run python examples/<file>.py
 | [`management_operations_demo.py`](management_operations_demo.py) | `get_metadata`, `update_data`, `touch`, batch ops, dunder methods |
 | [`custom_metadata_demo.py`](custom_metadata_demo.py) | SQLAlchemy-backed queryable metadata on cache entries |
 | [`api_request_caching.py`](api_request_caching.py) | Class-based API client with per-endpoint TTLs |
+| [`convenience_metadata_helpers.py`](convenience_metadata_helpers.py) | `put_with_meta`/`get_with_meta`, `on=` discriminator, ORM model helpers |
 
 ## Advanced
 
@@ -71,12 +73,27 @@ config = CacheConfig(
     metadata_backend="sqlite",
     default_ttl="1d",
     max_cache_size="500mb",
+    store_full_metadata=True,   # required for put_with_meta / get_with_meta
 )
 cache = cacheness(config)
 
 @cached(cache_instance=cache, ttl_seconds="12h")
 def with_instance(x):
     ...
+
+# Convenience metadata helpers
+cache.put_with_meta(value, experiment="run1", epoch=10, accuracy=0.94)
+result = cache.get_with_meta(experiment="run1", epoch=10, accuracy=0.94)
+
+# on= discriminator — store multiple values under the same kwargs key
+cache.put_with_meta(value_v1, on="v1", model="resnet")
+cache.put_with_meta(value_v2, on="v2", model="resnet")
+
+# File storage (copy-in / copy-out / move-in / move-out)
+cache.put_file("./report.pdf", name="report", version=1)
+cache.get_file(name="report", version=1, dest="./output/report.pdf")
+cache.put_file("./data.csv", name="data", move=True)    # move-in (deletes source)
+cache.get_file(name="data", dest="./out/", move=True)   # move-out (removes from cache)
 
 # Duration strings: "30s", "5m", "1h", "2d", "1w", "1mo", "1y"
 # Size strings:     "100kb", "50mb", "2gb"

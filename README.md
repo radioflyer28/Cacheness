@@ -4,8 +4,9 @@ Fast Python disk cache with key-value store hashing and a "cachetools-like" deco
 
 **Key Features:**
 - **Function decorators** for automatic caching with `@cached`
-- **File storage** — `put_file()`/`get_file()` for arbitrary files with automatic metadata (filename, MIME type, size)
-- **Multi-format storage** automated, optimized storage format handling (parquet for pandas/polars, blosc/npz for numpy arrays)
+- **File storage** — `put_file()`/`get_file()` with copy and move semantics, automatic metadata (filename, MIME type, size)
+- **Metadata helpers** — `put_with_meta`/`get_with_meta` eliminate redundant key+metadata passing; `put_with_model`/`get_with_model` for ORM-backed metadata
+- **Multi-format storage** automated, optimized storage format handling (parquet for pandas/polars, blosc/npz for numpy arrays, inline for small blobs)
 - **Key-based caching** using xxhash (XXH3_64) for fast, deterministic cache keys
 - **Advanced compression** using Blosc2 (LZ4) and zstd for fast compression
 - **Multiple backends** with SQLite, Postgres, and JSON metadata support. Local filesystem or S3 for blob/file storage.
@@ -87,6 +88,32 @@ def fetch_user_data(user_id):
     return requests.get(f"/api/users/{user_id}").json()
 ```
 
+## Convenience Metadata Helpers
+
+`put_with_meta` / `get_with_meta` eliminate the boilerplate of passing the same values twice for key derivation and metadata storage:
+
+```python
+from cacheness import cacheness, CacheConfig
+
+cache = cacheness(CacheConfig(store_full_metadata=True))
+
+# Store — kwargs become both the cache key AND the metadata_dict
+cache.put_with_meta(results_df, experiment="exp_001", model="xgboost", accuracy=0.94)
+
+# Retrieve data + metadata in one call
+result = cache.get_with_meta(experiment="exp_001", model="xgboost")
+if result:
+    data, meta = result
+    print(meta["accuracy"])  # 0.94
+
+# Use on= to create distinct entries with identical metadata
+# (e.g. multiple epochs for the same experiment)
+cache.put_with_meta(epoch5_df, on={"epoch": 5}, experiment="exp_001", model="xgboost")
+cache.put_with_meta(epoch10_df, on={"epoch": 10}, experiment="exp_001", model="xgboost")
+```
+
+For ORM-backed workflows, `put_with_model` / `get_with_model` do the same but store a SQLAlchemy model instance alongside the data. See [Custom Metadata Guide](docs/CUSTOM_METADATA.md) for details.
+
 ## Core Concepts
 
 ### Key-Based Caching System
@@ -111,6 +138,7 @@ cache.put(data3, model="xgboost", dataset="test")   # Key: ghi789...
 | NumPy arrays | NPZ or Blosc2 | LZ4/ZSTD | 60-80% size reduction, 4x faster I/O |
 | DataFrames & Series | Parquet | LZ4 | 40-60% size reduction, columnar efficiency |
 | TensorFlow tensors* | Blosc2 | LZ4/ZSTD | Native tensor format, GPU memory efficient |
+| Raw bytes/bytearray | Bytes (inline) | None | Zero-serialization, no file I/O |
 | Python objects | Pickle + Blosc | LZ4 | 30-50% size reduction, universal compatibility |
 | Complex objects** | Dill + Blosc | LZ4 | Functions, lambdas, advanced serialization |
 
@@ -302,6 +330,8 @@ print(cached_tensor.shape)  # (2, 2)
 
 ## Advanced Features
 
+- **Convenience Metadata Helpers**: `put_with_meta(data, **kwargs)` / `get_with_meta(**kwargs)` — kwargs serve as both cache key and `metadata_dict`, eliminating duplicated parameters. `put_with_model` / `get_with_model` for ORM-backed custom metadata. All accept `on=dict` for key-only discriminators.
+- **Inline Blob Storage**: entries ≤ `max_inline_size` bytes stored directly in the metadata row — eliminates blob file I/O for small values. Enable with `CacheConfig(blob=CacheBlobConfig(max_inline_size=4096))`.
 - **Cache Entry Signing**: HMAC-SHA256 signatures for metadata integrity protection, including namespace registry signing
 - **Typed Contracts**: `HandlerResult`, `EntryList`, `WriteBlobResult`, `IntegrityReport` — structured return types instead of raw dicts
 - **Non-destructive get**: `delete_on_error=False` preserves cache entries on deserialization errors
@@ -312,18 +342,27 @@ print(cached_tensor.shape)  # (2, 2)
 
 ### File Storage
 
-Store and retrieve arbitrary files with automatic metadata tracking:
+Store and retrieve arbitrary files with automatic metadata tracking (filename, MIME type, size):
 
 ```python
-# Store a file — metadata (filename, MIME type, size) recorded automatically
+# Copy-in: store a file, keep the original
 key = cache.put_file("data/model.onnx", description="ONNX model v2")
+
+# Move-in: store and delete the source
+key = cache.put_file("output/temp_report.csv", move=True)
 
 # Retrieve as raw bytes
 data = cache.get_file(cache_key=key)
 
-# Or write directly to disk (resolves original filename from metadata)
+# Copy-out: write to disk (resolves original filename from metadata)
 path = cache.get_file(cache_key=key, dest="./output/")
 # → Path("./output/model.onnx")
+
+# Move-out: write to disk and delete from cache
+path = cache.get_file(cache_key=key, dest="./restored/", move=True)
+
+# Safe write: raise FileExistsError if destination already exists
+path = cache.get_file(cache_key=key, dest="./output/model.onnx", overwrite=False)
 
 # Query stored files by auto-populated metadata
 results = cache.query_meta(mime_type="application/pdf")

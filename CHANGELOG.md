@@ -5,6 +5,50 @@ All notable changes to Cacheness will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-02-22
+
+### Added
+
+- **File storage API**: `put_file()`/`get_file()` on both `UnifiedCache` and `BlobStore` with automatic metadata (filename, MIME type, size) (CACHE-zsw)
+  - `put_file(move=True)`: move-in semantics — deletes source file after caching (CACHE-2fb)
+  - `get_file(dest=..., move=True)`: move-out semantics — deletes cache entry after writing to disk (CACHE-2fb)
+  - `get_file(overwrite=False)`: raises `FileExistsError` if destination already exists (CACHE-2fb)
+- **Convenience metadata helpers** on `UnifiedCache` — eliminates the common pattern of passing the same values twice for key derivation and metadata storage (CACHE-dmr, CACHE-a2t):
+  - `put_with_meta(data, **kwargs)` — stores kwargs as both cache key and `metadata_dict`
+  - `get_with_meta(**kwargs)` → `(data, metadata_dict)` — retrieves data + stored kwargs
+  - `put_with_model(data, ModelClass, **kwargs)` — stores kwargs as both cache key and ORM instance
+  - `get_with_model(ModelClass, **kwargs)` → `(data, orm_instance)` — retrieves data + ORM row
+  - `query_with_meta(**filters)` — lazily yields `(data, metadata_dict)` for all matching entries
+  - All helpers accept `on=dict` — extra key-only parameters that affect the cache key but are not stored in metadata (creates distinct entries with identical metadata)
+- **Inline blob storage**: small entries stored directly in the metadata row, eliminating a round-trip to the blob backend (CACHE-gf0)
+  - Configurable via `CacheConfig(blob=CacheBlobConfig(max_inline_size=4096))` — disabled (`0`) by default
+  - `put_bytes`/`get_bytes` protocol on the handler ABC — allows handlers to skip disk I/O entirely for inline blobs, with temp-file as universal fallback for handlers that don't implement it (CACHE-728)
+- **`BytesHandler`**: stores raw `bytes`, `bytearray`, and `memoryview` values natively without file I/O (CACHE-slh)
+- **Schema Phase 1**: new columns on all metadata backends (CACHE-cq5):
+  - `access_count` — incremented read counter per entry
+  - `ttl_seconds` — TTL stored at write time for introspection
+  - `expires_at` — pre-computed expiration timestamp with partial index for fast cleanup scans
+
+### Performance
+
+- **PostgreSQL**: `metadata_dict` and `cache_key_params` columns upgraded from `Text` (JSON string) to native `JSONB`, enabling server-side containment queries and GIN indexing (CACHE-jcm)
+- **SQLite**: partial index on `metadata_dict IS NOT NULL` — speeds up `query_meta()` scans when most entries carry no metadata dict (CACHE-aei)
+
+### Internal
+
+- **Tier 1–3 refactors** (CACHE-8yw, CACHE-22z, CACHE-aqq): major extraction pass on `core.py` — helper methods like `_resolve_cache_key()`, `_verify_entry()`, `_sign_entry_if_enabled()`, `_cleanup_stale_blob()`, `BlobReadContext`, `EntryData` TypedDict, normalized Parquet handler error handling, and `HooksConfig` lifecycle callbacks
+- `core.py` reduced from ~3100 to ~2940 lines across all three tiers
+
+### Fixed
+
+- Flaky parallel tests: `test_memoize_basic`, `test_path_object_handling`, `test_cache_consistency` migrated from shared `cache/default/` directory to `tmp_path` isolation (CACHE-aa0)
+
+### Tests
+
+- Test suite: 1603 passed, 102 skipped, 0 failures (~50s parallel)
+
+---
+
 ## [0.5.2] - 2026-02-19
 
 ### Added

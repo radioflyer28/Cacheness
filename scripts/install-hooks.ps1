@@ -43,6 +43,6 @@ Write-Host ""
 Write-Host "✅ All hooks installed successfully!" -ForegroundColor Green
 Write-Host ""
 Write-Host "Hook chain on commit:" -ForegroundColor Yellow
-Write-Host "  1. pre-commit.old  → Cacheness quality checks (ruff + ty)"
-Write-Host "  2. pre-commit      → bd JSONL flush"
-Write-Host "  3. pre-push        → bd stale-JSONL guard"
+Write-Host "  1. pre-commit.old  -> Cacheness quality checks (ruff + ty)"
+Write-Host "  2. pre-commit      -> bd JSONL flush"
+Write-Host "  3. pre-push        -> bd stale-JSONL guard"
