@@ -25,13 +25,22 @@ esac
 HOOKS_DIR="$GIT_DIR/hooks"
 mkdir -p "$HOOKS_DIR"
 
-# Copy pre-commit hook
+# Step 1: Install our quality check as the pre-commit hook
 cp "$SCRIPT_DIR/hooks/pre-commit" "$HOOKS_DIR/pre-commit"
 chmod +x "$HOOKS_DIR/pre-commit"
+echo "  ✓ Quality check hook written"
 
-echo "✅ Pre-commit hook installed successfully!"
+# Step 2: Layer bd hooks on top with --chain.
+# bd will rename our pre-commit to pre-commit.old and call it first,
+# then flush JSONL. All other bd hooks (pre-push, post-merge, etc.) are
+# also installed here.
+echo "Installing bd (beads) hooks with --chain..."
+uv run bd hooks install --chain
+
 echo ""
-echo "The hook will:"
-echo "  - Auto-fix code formatting and safe lint issues (Phase 1)"
-echo "  - Log validation errors to .quality-errors.log (Phase 2)"
-echo "  - Allow commits to proceed (warnings only)"
+echo "✅ All hooks installed successfully!"
+echo ""
+echo "Hook chain on commit:"
+echo "  1. pre-commit.old  → Cacheness quality checks (ruff + ty)"
+echo "  2. pre-commit      → bd JSONL flush"
+echo "  3. pre-push        → bd stale-JSONL guard"

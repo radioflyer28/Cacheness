@@ -163,13 +163,14 @@ uv run ruff format . && uv run ruff check --fix .  # Phase 1
 uv run ruff check . && uv run ty check             # Phase 2
 ```
 
-**Pre-commit hook:** Auto-runs Phase 1 on every commit, logs Phase 2 errors to `.quality-errors.log`.
+**Pre-commit hook:** Auto-runs Phase 1 on every commit, logs Phase 2 errors to `.quality-errors.log`. Also installs bd hooks (pre-push, post-merge, etc.) via `--chain` so the quality check runs first.
 
-**Install pre-commit hook:**
+**Install all hooks (quality + bd):**
 ```bash
 .\scripts\install-hooks.ps1   # Windows
 ./scripts/install-hooks.sh    # Unix/Linux/Mac
 ```
+Chain order: `pre-commit.old` (quality checks) → `pre-commit` (bd JSONL flush) → `pre-push` (bd stale guard)
 
 **Config:** Ruff settings in `pyproject.toml`, Python 3.12+, line length 88.
 
@@ -225,10 +226,7 @@ uv run pytest tests/ -x -q --ignore=tests/test_tensorflow_handler.py
 
 **beads** — Issue tracking: `ready`, `show`, `create`, `update`, `close` (prefer MCP; failover to CLI for `--claim`, `--force` close, etc.)
 **GitKraken** — Git ops: `status`, `add_or_commit`, `push`, `log_or_diff` (or use git CLI at discretion)
-**memory** — Knowledge graph: `create_entities`, `create_relations`, `add_observations`, `search_nodes`, `read_graph`
 **language-server** — LSP navigation: `definition`, `references`, `hover`, `diagnostics`, `rename_symbol`, `edit_file`
-**memalot** — Memory leak detection: `list_reports`, `get_report` (requires instrumenting code)
-**code-checker** — Quality tools: `run_pytest_check`, `run_pylint_check`, `run_mypy_check` (prefer `ruff`/`ty` directly)
 
 **Git Operations:** Use git CLI or GitKraken MCP at discretion, whichever is more convenient/robust/safe for the task.
 
