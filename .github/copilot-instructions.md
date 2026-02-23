@@ -33,6 +33,7 @@ These constraints apply to EVERY task. Violating any of them is a bug.
 **Work tracking:**
 - File a beads issue for ANY work, even small fixes
 - Every code change goes through the Mandatory Workflow below
+- **PROHIBITED:** Do NOT use `manage_todo_list`, TodoWrite, TaskCreate, or markdown files for task tracking — use beads exclusively (`bd create`, `bd ready`, `bd close`)
 - **Critical issues** discovered during work (not related to the current issue) → file immediately (don't lose context)
 - **Non-critical issues** discovered during work → note them, propose them when closing out the current issue
 
@@ -46,6 +47,7 @@ These constraints apply to EVERY task. Violating any of them is a bug.
 ```bash
 git worktree list          # Check for orphaned worktrees from prior sessions
 git worktree prune         # Clean up stale references
+uv run bd prime            # Re-orient after compaction or new session
 ```
 
 ### Workflow A: Feature/Fix Work (uses worktree)
@@ -88,7 +90,11 @@ Use this for any code change, test addition, or issue-tracked work.
 7. **Full test suite** (once, right before push):
    `uv run pytest tests/ -x -q --ignore=tests/test_tensorflow_handler.py`
 8. **Update docs** if changing public API
-9. **Push feature branch:** `git push -u origin beads-<hash>-<desc>`
+9. **Sync beads & push feature branch:**
+   ```bash
+   uv run bd sync             # Commit beads changes before git operations
+   git push -u origin beads-<hash>-<desc>
+   ```
 10. **Integrate to dev:**
    ```bash
    cd ../..                                          # Back to Cacheness/
@@ -96,6 +102,7 @@ Use this for any code change, test addition, or issue-tracked work.
    git pull origin dev && git merge beads-<hash>-<desc>
    # If fast-forward: skip tests (already passed in worktree)
    # If real merge: uv run pytest tests/ -x -q --ignore=tests/test_tensorflow_handler.py
+   uv run bd sync             # Sync again after merge
    git push origin dev
    ```
 11. **Cleanup:**
@@ -104,7 +111,7 @@ Use this for any code change, test addition, or issue-tracked work.
    git branch -d beads-<hash>-<desc>
    git push origin --delete beads-<hash>-<desc>
    ```
-   - Close issue: beads MCP `close`, or CLI `uv run bd close <id> --force` (needed for child issues of epics)
+   - Close issue: beads MCP `close`, or CLI `uv run bd close <id1> <id2>` (can close multiple at once; use `--force` for child issues of epics)
 12. **Verify** — `git status` confirms "up to date with origin"
 
 ### Workflow B: Direct-to-dev (no worktree)
@@ -115,9 +122,19 @@ Use this for docs-only changes, config tweaks, or trivial fixes that don't need 
 2. Make changes, commit directly
 3. `git push origin dev`
 
-### Completion
+### Completion / Session Close Protocol
 
-- **CRITICAL:** Work is NOT complete until `git push` succeeds (both feature branch AND dev branch). NEVER stop before pushing. If push fails, resolve and retry until it succeeds.
+**CRITICAL** — before saying "done" or "complete", run this checklist in order:
+```
+[ ] git status              (check what changed)
+[ ] git add <files>         (stage code changes)
+[ ] bd sync                 (commit beads changes first)
+[ ] git commit -m "..."     (commit code)
+[ ] bd sync                 (catch any post-commit beads changes)
+[ ] git push                (push to remote)
+```
+
+- Work is NOT complete until `git push` succeeds (both feature branch AND dev branch).
 - **Non-critical issues** discovered during work → note them, propose them when closing out the current issue
 - **Handoff:** when handing off at session end, provide context for the next session.
 
@@ -221,11 +238,27 @@ uv run pytest tests/ -x -q --ignore=tests/test_tensorflow_handler.py
 
 ## MCP Tools Reference
 
-**beads** — Issue tracking: `ready`, `show`, `create`, `update`, `close` (prefer MCP; failover to CLI for `--claim`, `--force` close, etc.)
+**beads** — Issue tracking: `ready`, `show`, `create`, `update`, `close` (prefer MCP; failover to CLI where needed)
 **GitKraken** — Git ops: `status`, `add_or_commit`, `push`, `log_or_diff` (or use git CLI at discretion)
 **language-server** — LSP navigation: `definition`, `references`, `hover`, `diagnostics`, `rename_symbol`, `edit_file`
 
 **Git Operations:** Use git CLI or GitKraken MCP at discretion, whichever is more convenient/robust/safe for the task.
+
+### beads CLI Quick Reference
+
+| Command | Notes |
+|---------|-------|
+| `bd prime` | Run after compaction or new session to re-orient |
+| `bd ready` | Show issues with no blockers |
+| `bd create --title="..." --priority=2` | Priority: **0-4 or P0-P4** (0=critical, 2=medium, 4=backlog). **NOT** "high"/"medium"/"low" |
+| `bd update <id> --status=in_progress` | Claim work |
+| `bd close <id1> <id2>` | Close multiple issues at once (more efficient) |
+| `bd close <id> --force` | Needed for child issues of epics |
+| `bd sync` | Sync beads with git remote — run at session end |
+| `bd dep add <issue> <blocks>` | Add dependency |
+| **`bd edit`** | ⚠️ **DO NOT USE** — opens \$EDITOR (vim/nano), blocks agents |
+
+**Tip:** When creating multiple issues, use parallel subagents for efficiency.
 
 
 ## Coding Gotchas
