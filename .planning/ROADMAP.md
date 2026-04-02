@@ -14,7 +14,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Handler Package Split** - Split handlers.py into a handlers/ package with one file per handler ✅
 - [x] **Phase 2: Metadata Package Split** - Split metadata.py into a metadata/ package with one file per backend ✅
-- [ ] **Phase 3: Core Mixin Decomposition** - Decompose core.py into focused mixins preserving UnifiedCache API
+- [x] **Phase 3: Core Mixin Decomposition** - Decompose core.py into focused mixins preserving UnifiedCache API ✅
 - [ ] **Phase 4: Exception Handling** - Extend exception hierarchy and narrow broad catches to specific types
 - [ ] **Phase 5: Security Hardening** - Enable blob content hashing by default and make key fallback configurable
 - [ ] **Phase 6: Test Gaps & Handler Robustness** - Add thread safety tests, key rotation tests, and handler ordering guardrails
@@ -57,6 +57,8 @@ Plans:
   4. All existing import paths across handlers, metadata, and core continue working (DECO-04 complete validation)
   5. All 1,427+ existing tests pass without modification to test files
 **Plans**: TBD
+Plans:
+- [x] 03-01-PLAN.md — Extract 4 focused mixins from core.py
 
 ### Phase 4: Exception Handling
 **Goal**: Exception handling is narrowed from broad catches to specific types, making failures visible and debuggable
