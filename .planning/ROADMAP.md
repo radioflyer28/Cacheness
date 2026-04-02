@@ -36,7 +36,9 @@
   1. `SqliteBackend` uses `threading.RLock` — a re-entrant call path (e.g., `put()` calling metadata methods that re-acquire the lock) completes without deadlock
   2. Existing thread-safety tests pass unchanged with the RLock swap
   3. A new stress test exercises re-entrant lock acquisition (nested backend calls from a single thread) and completes without hanging
-**Plans**: TBD
+**Plans:** 1 plan
+Plans:
+- [ ] 07-01-PLAN.md — Lock→RLock swap, lock consistency audit, re-entrancy tests
 
 ### Phase 8: Crash-Safe Write Intent Logging
 **Goal**: Incomplete writes are automatically detected and cleaned up — no orphaned blobs accumulate silently after crashes
