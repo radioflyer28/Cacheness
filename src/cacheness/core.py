@@ -18,11 +18,15 @@ from typing import Optional, Dict, Any, List, Callable, Tuple
 from .config import CacheConfig, _DEFAULT_TTL, create_cache_config
 from .entry_list import EntryList
 from .handlers import HandlerRegistry
-from .interfaces import HandlerResult, IntegrityReport, SignableFields
+from .interfaces import HandlerResult
 from .metadata import DEFAULT_NAMESPACE
 from .serialization import create_unified_cache_key
 from .size_utils import format_size, resolve_ttl
 from .storage.paths import resolve_actual_path
+from ._verification_mixin import VerificationMixin
+from ._stats_mixin import StatsMixin
+from ._custom_metadata_mixin import CustomMetadataMixin
+from ._storage_mode_mixin import StorageModeMixin
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +134,12 @@ class _PutCleanup:
         self._committed = True  # prevent double-rollback
 
 
-class UnifiedCache:
+class UnifiedCache(
+    VerificationMixin,
+    StatsMixin,
+    CustomMetadataMixin,
+    StorageModeMixin,
+):
     """
     Simplified unified caching system using the Strategy pattern.
 
@@ -292,47 +301,6 @@ class UnifiedCache:
         )
         self.actual_backend = "json"
 
-    def _supports_custom_metadata(self) -> bool:
-        """Check if custom metadata is supported (requires SQLite or PostgreSQL backend with SQLAlchemy)."""
-        return (
-            self.actual_backend in ("sqlite", "postgresql")
-            and hasattr(self, "_custom_metadata_enabled")
-            and self._custom_metadata_enabled
-        )
-
-    def _normalize_custom_metadata(self, custom_metadata):
-        """
-        Normalize custom_metadata input to a list of metadata objects.
-
-        Supports:
-        - Single metadata object: custom_metadata=experiment_metadata
-        - List of objects: custom_metadata=[experiment_metadata, performance_metadata]
-        - Tuple of objects: custom_metadata=(experiment_metadata, performance_metadata)
-        - Dictionary (legacy): custom_metadata={"experiments": experiment_metadata}
-        """
-        if custom_metadata is None:
-            return []
-
-        # Check if it's a single metadata object (has _schema_name attribute)
-        if hasattr(custom_metadata, "_schema_name") or hasattr(
-            type(custom_metadata), "_schema_name"
-        ):
-            return [custom_metadata]
-
-        # Check if it's a list or tuple of metadata objects
-        if isinstance(custom_metadata, (list, tuple)):
-            return list(custom_metadata)
-
-        # Check if it's a dictionary (legacy format)
-        if isinstance(custom_metadata, dict):
-            return list(custom_metadata.values())
-
-        # Invalid format
-        raise ValueError(
-            f"Invalid custom_metadata format. Expected metadata object, list/tuple of objects, "
-            f"or dictionary, got {type(custom_metadata)}"
-        )
-
     def _init_custom_metadata_support(self):
         """Initialize custom metadata support if SQLite or PostgreSQL backend is available."""
         try:
@@ -437,303 +405,6 @@ class UnifiedCache:
         self._blob_store._lock = self._lock  # same reentrant lock
         self._blob_store.handlers = self.handlers  # same handler registry
         self._blob_store.signer = self.signer  # same signer (may be None)
-
-    def _store_custom_metadata(self, cache_key: str, custom_metadata):
-        """Store custom metadata using link table architecture."""
-        if not self._supports_custom_metadata():
-            logger.warning(
-                "Custom metadata not supported - requires SQLite or PostgreSQL backend"
-            )
-            return
-
-        try:
-            from .custom_metadata import (
-                get_custom_metadata_model,
-                get_namespace_custom_model,
-                convert_to_namespace_instance,
-            )
-            from .metadata import Base
-
-            # Normalize custom_metadata to iterable of metadata objects
-            metadata_objects = self._normalize_custom_metadata(custom_metadata)
-            if not metadata_objects:
-                return
-
-            # Get SQLAlchemy session from the metadata backend
-            if hasattr(self.metadata_backend, "SessionLocal"):
-                with self.metadata_backend.SessionLocal() as session:
-                    # Resolve namespace-specific model classes and ensure
-                    # their tables exist.  For non-default namespaces the
-                    # model (and therefore the table) is created dynamically.
-                    tables_to_create = set()
-                    for metadata_instance in metadata_objects:
-                        schema_name = getattr(
-                            type(metadata_instance), "_schema_name", None
-                        )
-                        if schema_name:
-                            ns_model = get_namespace_custom_model(
-                                schema_name, self.namespace
-                            )
-                            if ns_model is not None:
-                                tbl = getattr(ns_model, "__table__", None)
-                                if tbl is not None:
-                                    tables_to_create.add(tbl)
-                    if tables_to_create:
-                        # Create tables individually so that a stale index
-                        # or duplicate definition on one table doesn't block
-                        # the others (mirrors migrate_custom_metadata_tables).
-                        for tbl in tables_to_create:
-                            try:
-                                Base.metadata.create_all(
-                                    self.metadata_backend.engine,
-                                    tables=[tbl],
-                                )
-                            except Exception:
-                                pass  # table already exists — fine
-
-                    for metadata_instance in metadata_objects:
-                        # Get schema name from the metadata object's class
-                        schema_name = getattr(
-                            type(metadata_instance), "_schema_name", None
-                        )
-                        if not schema_name:
-                            logger.warning(
-                                f"Metadata object {type(metadata_instance).__name__} is not properly registered"
-                            )
-                            continue
-
-                        template_class = get_custom_metadata_model(schema_name)
-                        if not template_class:
-                            logger.warning(
-                                f"Unknown custom metadata schema: {schema_name}"
-                            )
-                            continue
-
-                        # Ensure metadata instance is of the correct template type
-                        if not isinstance(metadata_instance, template_class):
-                            logger.warning(
-                                f"Invalid metadata type for schema {schema_name}"
-                            )
-                            continue
-
-                        # Resolve the namespace-specific model
-                        ns_model = get_namespace_custom_model(
-                            schema_name, self.namespace
-                        )
-                        if ns_model is None:
-                            continue
-
-                        # For non-default namespaces, convert the template
-                        # instance to the namespace-specific model class.
-                        if ns_model is not type(metadata_instance):
-                            metadata_instance = convert_to_namespace_instance(
-                                metadata_instance, ns_model
-                            )
-
-                        # Set the cache_key on the metadata instance (direct FK)
-                        metadata_instance.cache_key = cache_key
-
-                        # Delete any existing custom metadata for this
-                        # cache_key + schema before inserting.  This ensures
-                        # overwriting a cache entry replaces its custom
-                        # metadata rather than accumulating duplicate rows.
-                        session.query(ns_model).filter(
-                            ns_model.cache_key == cache_key
-                        ).delete()
-
-                        # Save the metadata instance
-                        session.add(metadata_instance)
-
-                    session.commit()
-                    logger.debug(f"Stored custom metadata for cache key {cache_key}")
-        except Exception as e:
-            logger.error(f"Failed to store custom metadata: {e}")
-
-    def _get_custom_metadata(self, cache_key: str) -> Dict[str, Any]:
-        """Retrieve custom metadata for a cache key in the current namespace."""
-        if not self._supports_custom_metadata():
-            return {}
-
-        try:
-            if hasattr(self.metadata_backend, "SessionLocal"):
-                with self.metadata_backend.SessionLocal() as session:
-                    from sqlalchemy import select
-                    from sqlalchemy.exc import OperationalError as SAOperationalError
-                    from .custom_metadata import get_namespace_custom_model
-
-                    result = {}
-                    # Query each registered schema's namespace-specific
-                    # table for metadata with this cache_key.  Skip schemas
-                    # whose tables don't exist in this database (the global
-                    # registry may contain models from other sessions/tests
-                    # — CACHE-qg3).
-                    for schema_name in self._get_registered_schemas():
-                        ns_model = get_namespace_custom_model(
-                            schema_name, self.namespace
-                        )
-                        if ns_model is None:
-                            continue
-                        try:
-                            metadata_instance = session.execute(
-                                select(ns_model).where(ns_model.cache_key == cache_key)
-                            ).scalar_one_or_none()
-
-                            if metadata_instance:
-                                result[schema_name] = metadata_instance
-                        except SAOperationalError:
-                            # Table doesn't exist in this database — skip
-                            session.rollback()
-
-                    return result
-        except Exception as e:
-            logger.error(f"Failed to retrieve custom metadata: {e}")
-            return {}
-
-    def _get_registered_schemas(self) -> Dict[str, Any]:
-        """Get all registered custom metadata schemas."""
-        try:
-            from .custom_metadata import get_all_custom_metadata_models
-
-            return get_all_custom_metadata_models()
-        except ImportError:
-            return {}
-
-    def query_custom(
-        self, schema_name: str, filters: Optional[Dict[str, Any]] = None
-    ) -> List[Any]:
-        """
-        Query custom metadata for a specific schema with automatic session cleanup.
-
-        This method provides safe querying with proper session lifecycle management.
-        For advanced queries requiring the SQLAlchemy query object directly, use
-        the query_custom_session() context manager instead.
-
-        Args:
-            schema_name: Name of the custom metadata schema to query
-            filters: Optional dict of field_name -> value for equality filtering
-
-        Returns:
-            List of results (empty list if not supported or on error)
-
-        Example:
-            # Get all entries
-            results = cache.query_custom("ml_experiments")
-
-            # Filter by field values
-            results = cache.query_custom("ml_experiments", {"model_type": "xgboost"})
-
-            # For advanced filtering, use the context manager:
-            with cache.query_custom_session("ml_experiments") as query:
-                high_accuracy = query.filter(MLExperimentMetadata.accuracy >= 0.9).all()
-        """
-        if not self._supports_custom_metadata():
-            logger.warning(
-                "Custom metadata querying not supported - requires SQLite or PostgreSQL backend"
-            )
-            return []
-
-        try:
-            from .custom_metadata import get_namespace_custom_model
-
-            ns_model = get_namespace_custom_model(schema_name, self.namespace)
-            if not ns_model:
-                logger.warning(f"Unknown custom metadata schema: {schema_name}")
-                return []
-
-            if hasattr(self.metadata_backend, "SessionLocal"):
-                # Use context manager to ensure proper session cleanup
-                with self.metadata_backend.SessionLocal() as session:
-                    query = session.query(ns_model)
-
-                    # Apply optional filters
-                    if filters:
-                        for field_name, value in filters.items():
-                            if hasattr(ns_model, field_name):
-                                query = query.filter(
-                                    getattr(ns_model, field_name) == value
-                                )
-                            else:
-                                logger.warning(
-                                    f"Unknown filter field '{field_name}' for schema '{schema_name}'"
-                                )
-
-                    return query.all()
-            else:
-                logger.warning("SQLAlchemy session not available")
-                return []
-        except Exception as e:
-            logger.error(f"Failed to query schema {schema_name}: {e}")
-            return []
-
-    def query_custom_session(self, schema_name: str):
-        """
-        Context manager for custom metadata queries with proper session cleanup.
-
-        Use this for advanced queries that need direct access to the SQLAlchemy
-        query object for complex filtering, ordering, or joining.
-
-        Args:
-            schema_name: Name of the custom metadata schema to query
-
-        Yields:
-            SQLAlchemy query object for advanced querying
-
-        Raises:
-            ValueError: If schema not found or custom metadata not supported
-
-        Example:
-            with cache.query_custom_session("ml_experiments") as query:
-                # Complex filtering
-                high_accuracy = query.filter(
-                    MLExperimentMetadata.accuracy >= 0.9,
-                    MLExperimentMetadata.model_type == "xgboost"
-                ).order_by(MLExperimentMetadata.accuracy.desc()).limit(10).all()
-        """
-        from contextlib import contextmanager
-
-        @contextmanager
-        def _session_context():
-            if not self._supports_custom_metadata():
-                raise ValueError(
-                    "Custom metadata querying not supported - requires SQLite or PostgreSQL backend"
-                )
-
-            from .custom_metadata import get_namespace_custom_model
-
-            ns_model = get_namespace_custom_model(schema_name, self.namespace)
-            if not ns_model:
-                raise ValueError(f"Unknown custom metadata schema: {schema_name}")
-
-            if not hasattr(self.metadata_backend, "SessionLocal"):
-                raise ValueError("SQLAlchemy session not available")
-
-            session = self.metadata_backend.SessionLocal()
-            try:
-                yield session.query(ns_model)
-            finally:
-                session.close()
-
-        return _session_context()
-
-    def query_custom_metadata(
-        self, schema_name: str, filters: Optional[Dict[str, Any]] = None
-    ) -> List[Any]:
-        """
-        Query custom metadata for a specific schema.
-
-        **Deprecated:** Use query_custom() instead for shorter syntax.
-
-        Args:
-            schema_name: Name of the custom metadata schema to query
-            filters: Optional dict of field_name -> value for equality filtering
-
-        Returns:
-            List of results (empty list if not supported or on error)
-        """
-        logger.warning(
-            "query_custom_metadata() is deprecated, use query_custom() instead"
-        )
-        return self.query_custom(schema_name, filters)
 
     def query_meta(self, **filters):
         """
@@ -1012,30 +683,6 @@ class UnifiedCache:
             return ts.isoformat()
         return str(ts)
 
-    def get_custom_metadata_for_entry(
-        self,
-        cache_key: Optional[str] = None,
-        on: Optional[Dict] = None,
-        hash_key: Optional[str] = None,
-        **kwargs,
-    ) -> Dict[str, Any]:
-        """
-        Get custom metadata for a specific cache entry.
-
-        Args:
-            cache_key: Direct cache key (if provided, on and **kwargs are ignored)
-            on: Dictionary of key parameters for cache key derivation.
-                Use this to avoid namespace collisions with cache control parameters.
-            **kwargs: Parameters identifying the cached data (legacy, use 'on' instead)
-
-        Returns:
-            Dictionary mapping schema names to metadata instances
-        """
-        cache_key = self._resolve_hash_key_alias(cache_key, hash_key)
-        cache_key = self._resolve_cache_key(cache_key, on, kwargs)
-
-        return self._get_custom_metadata(cache_key)
-
     def _create_cache_key(self, params: Dict) -> str:
         """
         Create cache key using unified serialization approach.
@@ -1205,68 +852,6 @@ class UnifiedCache:
 
         return current_time > expiry_time
 
-    def _extract_signable_fields(
-        self,
-        cache_key: str,
-        entry_data: Dict[str, Any],
-        metadata: Dict[str, Any],
-    ) -> SignableFields:
-        """
-        Extract fields for signing/verification in a consistent manner.
-
-        This ensures that the same fields are used during both put() and get()
-        to prevent signature mismatches.  The signer selects which fields to
-        include based on the signature version; this method provides the
-        superset of all potentially-signable fields.
-
-        Args:
-            cache_key: The cache key
-            entry_data: The entry data dictionary (data_type, etc.)
-            metadata: The metadata dictionary from handler result
-
-        Returns:
-            SignableFields containing all fields that may be signed
-        """
-        # Normalize created_at to ISO format string without timezone
-        # This ensures consistent signatures regardless of database format
-        created_at = entry_data.get("created_at")
-        if isinstance(created_at, datetime):
-            # Convert datetime to ISO string, removing timezone info for consistency
-            created_at = created_at.replace(tzinfo=None).isoformat()
-        elif isinstance(created_at, str):
-            # Parse and re-format to ensure consistency
-            try:
-                dt = datetime.fromisoformat(created_at)
-                created_at = dt.replace(tzinfo=None).isoformat()
-            except (ValueError, TypeError):
-                # If parsing fails, use as-is
-                pass
-
-        # Build complete entry data with all potentially-signable fields.
-        # The signer's version-based field list determines which are actually used.
-        signable_data: SignableFields = {
-            "cache_key": cache_key,
-            "data_type": entry_data.get("data_type"),
-            "file_size": entry_data.get("file_size", 0),
-            "created_at": created_at,
-            "actual_path": metadata.get("actual_path", ""),
-            "file_hash": metadata.get("file_hash"),
-            "object_type": metadata.get("object_type"),
-            "storage_format": metadata.get("storage_format"),
-            "serializer": metadata.get("serializer"),
-            "compression_codec": metadata.get("compression_codec"),
-        }
-
-        return signable_data
-
-    def _calculate_file_hash(self, file_path: Path) -> Optional[str]:
-        """Calculate XXH3_64 hash of a cache file.
-
-        Delegates to BlobStore._calculate_file_hash().
-        Kept for backward compatibility.
-        """
-        return self._blob_store._calculate_file_hash(file_path)
-
     # ── Lifecycle hook helpers ────────────────────────────────────────
 
     def _invoke_hook(self, hook_name: str, *args: object) -> None:
@@ -1279,136 +864,6 @@ class UnifiedCache:
                 logger.warning(
                     f"Hook {hook_name} raised an exception (swallowed): {exc}"
                 )
-
-    def _record_hit(self):
-        """Record a cache hit if stats tracking is enabled."""
-        if self.config.metadata.enable_cache_stats:
-            self.metadata_backend.increment_hits()
-
-    def _record_miss(self):
-        """Record a cache miss if stats tracking is enabled."""
-        if self.config.metadata.enable_cache_stats:
-            self.metadata_backend.increment_misses()
-
-    def _verify_entry(
-        self,
-        cache_key: str,
-        entry: Dict[str, Any],
-        metadata: Dict[str, Any],
-        file_path: Path,
-        *,
-        storage_mode: bool = False,
-    ) -> bool:
-        """Verify entry integrity (hash) and signature before loading.
-
-        Returns ``True`` when loading should proceed, ``False`` when the
-        entry must be rejected (caller should return ``None``).
-
-        Side effects handled internally:
-
-        * Logs warnings on all failures.
-        * When *storage_mode* is ``False``, deletes corrupted or tampered
-          entries according to ``config.metadata.delete_on_error`` and
-          ``config.security.delete_invalid_signatures``.
-        * When *storage_mode* is ``True``, entries are **never** deleted.
-
-        The caller is responsible for recording hits/misses and returning
-        ``None`` when this method returns ``False``.
-        """
-        # ── Integrity verification (file hash) ─────────────────────
-        if self.config.metadata.verify_cache_integrity:
-            stored_hash = metadata.get("file_hash")
-            if stored_hash is not None:
-                # For inline entries, compute hash from blob_data in memory
-                if entry.get("is_inline") and entry.get("blob_data") is not None:
-                    import xxhash
-
-                    current_hash = xxhash.xxh3_64(entry["blob_data"]).hexdigest()
-                else:
-                    current_hash = self._blob_store._calculate_file_hash(file_path)
-                if current_hash != stored_hash:
-                    detail = f"stored hash {stored_hash} != current hash {current_hash}"
-                    self._invoke_hook(
-                        "on_integrity_failure",
-                        cache_key,
-                        "hash_mismatch",
-                        detail,
-                    )
-                    if storage_mode:
-                        logger.warning(
-                            f"Cache integrity verification failed for {cache_key}: "
-                            f"{detail}. Entry preserved (storage mode)."
-                        )
-                    elif self.config.metadata.delete_on_error:
-                        logger.warning(
-                            f"Cache integrity verification failed for {cache_key}: "
-                            f"{detail}. Removing corrupted cache entry."
-                        )
-                        self._blob_store.delete(cache_key)
-                    else:
-                        logger.warning(
-                            f"Cache integrity verification failed for {cache_key}: "
-                            f"{detail}. Entry retained due to delete_on_error=False."
-                        )
-                    return False
-
-        # ── Signature verification ──────────────────────────────────
-        if self.signer and self.config.security.enable_entry_signing:
-            stored_signature = metadata.get("entry_signature")
-            if stored_signature is not None:
-                verify_data = self._extract_signable_fields(
-                    cache_key=cache_key,
-                    entry_data=entry,
-                    metadata=metadata,
-                )
-                if not self.signer.verify_entry(verify_data, stored_signature):
-                    self._invoke_hook(
-                        "on_integrity_failure",
-                        cache_key,
-                        "signature_invalid",
-                        "HMAC signature verification failed",
-                    )
-                    if storage_mode:
-                        logger.warning(
-                            f"Entry signature verification failed for {cache_key}. "
-                            f"Entry preserved (storage mode)."
-                        )
-                        return False
-                    elif self.config.security.delete_invalid_signatures:
-                        logger.warning(
-                            f"Entry signature verification failed for {cache_key}. "
-                            f"Removing potentially tampered cache entry."
-                        )
-                        self._blob_store.delete(cache_key)
-                        return False
-                    else:
-                        logger.warning(
-                            f"Entry signature verification failed for {cache_key}. "
-                            f"Entry retained due to delete_invalid_signatures=False."
-                        )
-                        # Continue loading despite invalid signature
-
-            elif not self.config.security.allow_unsigned_entries:
-                self._invoke_hook(
-                    "on_integrity_failure",
-                    cache_key,
-                    "unsigned_rejected",
-                    "Entry has no signature and unsigned entries are not allowed",
-                )
-                if storage_mode:
-                    logger.warning(
-                        f"Entry {cache_key} has no signature but unsigned entries "
-                        f"are not allowed. Entry preserved (storage mode)."
-                    )
-                else:
-                    logger.warning(
-                        f"Entry {cache_key} has no signature but unsigned entries "
-                        f"are not allowed. Removing entry."
-                    )
-                    self._blob_store.delete(cache_key)
-                return False
-
-        return True
 
     def _cleanup_expired(self):
         """Remove expired cache entries."""
@@ -1617,34 +1072,6 @@ class UnifiedCache:
             metadata_dict["object_type"] = result.object_type
         return metadata_dict
 
-    def _sign_entry_if_enabled(
-        self,
-        cache_key: str,
-        entry_data: Dict[str, Any],
-        metadata_dict: Dict[str, Any],
-    ) -> None:
-        """Sign *entry_data* in-place if a signer is configured.
-
-        Sets ``entry_data["created_at"]`` and
-        ``metadata_dict["entry_signature"]`` on success.
-        Logs a warning and continues without a signature on failure.
-        """
-        if not self.signer:
-            return
-        try:
-            creation_timestamp = datetime.now(timezone.utc)
-            entry_data["created_at"] = creation_timestamp.isoformat()
-            complete_entry_data = self._extract_signable_fields(
-                cache_key=cache_key,
-                entry_data=entry_data,
-                metadata=metadata_dict,
-            )
-            signature = self.signer.sign_entry(complete_entry_data)
-            metadata_dict["entry_signature"] = signature
-            logger.debug(f"Created signature for entry {cache_key}")
-        except Exception as e:
-            logger.warning(f"Failed to sign entry {cache_key}: {e}")
-
     def _cleanup_stale_blob(
         self,
         cache_key: str,
@@ -1672,184 +1099,6 @@ class UnifiedCache:
             logger.warning(
                 f"Failed to clean up old blob for {cache_key} at {old_blob_path}: {exc}"
             )
-
-    # ── Storage-mode passthrough methods ──────────────────────────────
-    # When storage_mode=True these bypass cache concerns (TTL, eviction,
-    # stats, auto-delete on errors) and delegate directly to BlobStore.
-
-    def _storage_mode_put(
-        self,
-        data: Any,
-        cache_key: str,
-        description: str,
-    ) -> str:
-        """BlobStore passthrough for put() — no eviction or stats."""
-        base_file_path = self._get_cache_file_path(cache_key)
-        cleanup = _PutCleanup()
-
-        # Save old blob path before overwriting — if the data type changes,
-        # the new blob may use a different file extension, orphaning the old one
-        old_blob_path: Optional[str] = None
-        existing = self.metadata_backend.get_entry(cache_key)
-        if existing:
-            old_meta = existing.get("metadata", {})
-            old_blob_path = old_meta.get("actual_path")
-
-        try:
-            # Try zero-disk inline serialization (no file I/O at all)
-            handler = self._blob_store.handlers.get_handler(data)
-            direct = self._try_direct_inline(data, handler)
-
-            if direct is not None:
-                result = direct["result"]
-                file_hash = direct["file_hash"]
-                metadata_dict = self._build_metadata_dict(result, file_hash)
-                metadata_dict["actual_path"] = None
-                metadata_dict["inline_ext"] = direct["inline_ext"]
-                if file_hash is not None:
-                    metadata_dict["file_hash"] = file_hash
-
-                entry_data = {
-                    "data_type": handler.data_type,
-                    "description": description,
-                    "file_size": result.file_size,
-                    "metadata": metadata_dict,
-                    "blob_data": direct["blob_data"],
-                    "is_inline": 1,
-                }
-            else:
-                wb = self._blob_store._write_blob(
-                    data, base_file_path, compute_hash=True
-                )
-                handler, result, file_hash = wb.handler, wb.result, wb.file_hash
-
-                actual_path_str = result.actual_path
-                if "://" not in actual_path_str:
-                    cleanup.blob_path = self._resolve_actual_path(actual_path_str)
-                if "://" in actual_path_str:
-                    cleanup.set_remote(self._blob_store.blob_backend, actual_path_str)
-
-                metadata_dict = self._build_metadata_dict(result, file_hash)
-                entry_data = {
-                    "data_type": handler.data_type,
-                    "description": description,
-                    "file_size": result.file_size,
-                    "metadata": metadata_dict,
-                }
-
-                # Try disk-based inline (read back from file)
-                inline = self._try_inline_blob(result, file_hash, cleanup)
-                if inline is not None:
-                    entry_data["blob_data"] = inline["blob_data"]
-                    entry_data["is_inline"] = 1
-                    metadata_dict["actual_path"] = None
-                    metadata_dict["inline_ext"] = inline["inline_ext"]
-                    if inline["file_hash"] is not None:
-                        metadata_dict["file_hash"] = inline["file_hash"]
-
-            self._sign_entry_if_enabled(cache_key, entry_data, metadata_dict)
-            self.metadata_backend.put_entry(cache_key, entry_data)
-            self._cleanup_stale_blob(cache_key, old_blob_path, result.actual_path)
-
-            logger.debug(f"Stored {handler.data_type} {cache_key} (storage mode)")
-            cleanup.commit()
-            return cache_key
-
-        except Exception as e:
-            cleanup.rollback()
-            data_type = handler.data_type if "handler" in locals() else "unknown"
-            logger.error(
-                f"Failed to store {data_type} (storage mode): {type(e).__name__}: {e}"
-            )
-            raise
-
-    def _storage_mode_get(
-        self,
-        cache_key: str,
-    ) -> Optional[Any]:
-        """BlobStore passthrough for get() — no TTL, stats, or auto-delete.
-
-        Integrity and signature verification are still performed if enabled,
-        but entries are never deleted on failure (storage-mode guarantee).
-        """
-        entry = self.metadata_backend.get_entry(cache_key)
-        if entry is None:
-            return None
-
-        data_type = entry.get("data_type")
-        if not data_type:
-            return None
-
-        metadata = entry.get("metadata", {})
-        actual_path = metadata.get("actual_path")
-        file_path = (
-            self._resolve_actual_path(actual_path)
-            if actual_path
-            else self._get_cache_file_path(cache_key)
-        )
-
-        # Integrity + signature verification — never deletes in storage mode
-        if not self._verify_entry(
-            cache_key, entry, metadata, file_path, storage_mode=True
-        ):
-            return None
-
-        try:
-            if entry.get("is_inline") and entry.get("blob_data") is not None:
-                data = self._read_inline_blob(entry, data_type, metadata)
-            else:
-                data = self._blob_store._read_blob(file_path, data_type, metadata)
-            self.metadata_backend.update_access_time(cache_key)
-            return data
-        except Exception as e:
-            # Never delete metadata in storage mode
-            logger.warning(
-                f"Failed to load {data_type} {cache_key}: "
-                f"{type(e).__name__}: {e} (entry preserved, storage mode)"
-            )
-            return None
-
-    def _storage_mode_get_with_metadata(
-        self,
-        cache_key: str,
-    ) -> Optional[tuple[Any, Dict[str, Any]]]:
-        """BlobStore passthrough for get_with_metadata() — no TTL, stats, or auto-delete."""
-        entry = self.metadata_backend.get_entry(cache_key)
-        if entry is None:
-            return None
-
-        data_type = entry.get("data_type")
-        if not data_type:
-            return None
-
-        metadata = entry.get("metadata", {})
-        actual_path = metadata.get("actual_path")
-        file_path = (
-            self._resolve_actual_path(actual_path)
-            if actual_path
-            else self._get_cache_file_path(cache_key)
-        )
-
-        # Integrity + signature verification — never deletes in storage mode
-        if not self._verify_entry(
-            cache_key, entry, metadata, file_path, storage_mode=True
-        ):
-            return None
-
-        try:
-            if entry.get("is_inline") and entry.get("blob_data") is not None:
-                data = self._read_inline_blob(entry, data_type, metadata)
-            else:
-                data = self._blob_store._read_blob(file_path, data_type, metadata)
-            self.metadata_backend.update_access_time(cache_key)
-            entry["cache_key"] = cache_key
-            return (data, entry)
-        except Exception as e:
-            logger.warning(
-                f"Failed to load {data_type} {cache_key}: "
-                f"{type(e).__name__}: {e} (entry preserved, storage mode)"
-            )
-            return None
 
     def put(
         self,
@@ -3552,31 +2801,6 @@ class UnifiedCache:
             else:
                 logger.debug(f"Cache entry {cache_key} not found for invalidation")
 
-    def verify_integrity(
-        self, repair: bool = False, verify_hashes: bool = False
-    ) -> IntegrityReport:
-        """
-        Verify cache integrity by cross-checking blob files and metadata entries.
-
-        Delegates to the internal BlobStore which performs:
-        - Orphaned blobs: files in cache_dir with no metadata entry
-        - Dangling metadata: entries pointing to missing blob files
-        - Size mismatches: metadata file_size != actual file size on disk
-        - Hash mismatches: metadata file_hash != actual file hash (if verify_hashes=True)
-
-        Args:
-            repair: If True, delete orphaned blobs and remove dangling metadata entries.
-            verify_hashes: If True, also verify file hashes (slower but catches corruption).
-
-        Returns:
-            IntegrityReport with orphaned_blobs, dangling_entries, size_mismatches,
-            hash_mismatches (if verify_hashes), repaired (if repair).
-            Supports dict-style access for backward compatibility.
-        """
-        return self._blob_store.verify_integrity(
-            repair=repair, verify_hashes=verify_hashes
-        )
-
     def clear_all(self):
         """Clear all cache entries and remove cache files.
 
@@ -3722,23 +2946,6 @@ class UnifiedCache:
                 )
 
             return removed_count
-
-    def get_stats(self) -> Dict[str, Any]:
-        """Get comprehensive cache statistics."""
-        stats = self.metadata_backend.get_stats()
-
-        # Add cache-specific information
-        stats.update(
-            {
-                "cache_dir": str(self.cache_dir),
-                "max_size_bytes": self.config.storage.max_cache_size_bytes,
-                "max_size_mb": self.config.storage.max_cache_size_mb,  # Backward compat
-                "default_ttl_seconds": self.config.metadata.default_ttl_seconds,
-                "backend_type": self.actual_backend,  # Report actual backend used
-            }
-        )
-
-        return stats
 
     def list_entries(self) -> EntryList:
         """List all cache entries with metadata.
