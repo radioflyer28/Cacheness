@@ -10,6 +10,16 @@ Cacheness is a Python disk caching library with pluggable metadata backends (JSO
 
 The codebase has been decomposed from monolithic files into well-structured packages and mixins, exception handling has been narrowed to specific types, security defaults hardened, and test coverage expanded with thread safety and key rotation tests.
 
+## Current Milestone: v0.8.0 API & Robustness
+
+**Goal:** Add missing management operations, improve concurrency safety, and harden data integrity — addressing remaining concerns from the codebase audit.
+
+**Target features:**
+- Missing management APIs: `update_blob_data()`, `delete_by_prefix()`, `touch()`, `get_metadata()`, batch operations
+- Concurrency safety: optional thread-safe mode for `put()`/`get()` or clearer documented boundaries
+- Blob HMAC signing: extend HMAC-SHA256 signing to cover blob content (not just metadata)
+- Orphaned blob prevention: improve crash-recovery beyond manual `verify_integrity(repair=True)`
+
 ## Core Value
 
 Improve reliability, security, and maintainability of Cacheness without changing its public API semantics — make the library safer, more debuggable, and easier to evolve.
@@ -44,7 +54,10 @@ Improve reliability, security, and maintainability of Cacheness without changing
 
 ### Active
 
-(No active requirements — next milestone not yet scoped)
+- [ ] Management APIs: `update_blob_data()`, `delete_by_prefix()`, `touch()`, `get_metadata()`, batch operations
+- [ ] Concurrency safety for `put()`/`get()` paths
+- [ ] Blob HMAC signing (extend signing to blob content)
+- [ ] Orphaned blob prevention/cleanup improvements
 
 ### Out of Scope
 
@@ -147,4 +160,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-02 after v0.7.0 milestone*
+*Last updated: 2026-04-02 after v0.8.0 milestone started*

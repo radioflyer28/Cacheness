@@ -1,17 +1,17 @@
 ---
 gsd_state_version: 1.0
-milestone: v0.7.0
-milestone_name: Cleanup & Hardening
-status: shipped
-stopped_at: Milestone archived
+milestone: v0.8.0
+milestone_name: API & Robustness
+status: defining
+stopped_at: Defining requirements
 last_updated: "2026-04-02"
-last_activity: 2026-04-02 -- v0.7.0 milestone shipped
+last_activity: 2026-04-02 -- Milestone v0.8.0 started
 progress:
-  total_phases: 6
-  completed_phases: 6
-  total_plans: 6
-  completed_plans: 6
-  percent: 100
+  total_phases: 0
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
 ---
 
 # Project State
@@ -20,30 +20,14 @@ progress:
 
 See: .planning/PROJECT.md (updated 2026-04-02)
 
-**Core value:** Improve reliability, security, and maintainability without changing public API semantics
-**Current focus:** Planning next milestone
+**Core value:** Add missing management operations, improve concurrency safety, and harden data integrity
+**Current focus:** Defining requirements for v0.8.0
 
 ## Current Position
 
-Milestone v0.7.0 shipped. No active milestone.
-Last activity: 2026-04-02 -- v0.7.0 archived
+Phase: Not started (defining requirements)
+Plan: —
+Status: Defining requirements
+Last activity: 2026-04-02 — Milestone v0.8.0 started
 
-Progress: [██████████] 100%
-
-## Performance Metrics
-
-**Velocity:**
-
-- Total plans completed: 6 (3 formal + 3 inline)
-- Total execution time: ~1 day
-
-**By Phase:**
-
-| Phase | Plans | Status | Completed |
-|-------|-------|--------|-----------|
-| 01-handler-package-split | 1 | Complete | 2026-04-02 |
-| 02-metadata-package-split | 1 | Complete | 2026-04-02 |
-| 03-core-mixin-decomposition | 1 | Complete | 2026-04-02 |
-| 04-exception-handling | inline | Complete | 2026-04-02 |
-| 05-security-hardening | inline | Complete | 2026-04-02 |
-| 06-test-gaps-handler-robustness | inline | Complete | 2026-04-02 |
+Progress: [░░░░░░░░░░] 0%
