@@ -29,7 +29,9 @@ Decimal phases appear between their surrounding integers in numeric order.
   1. Each handler class (DataFrame, NumPy, Polars, Series, Object, Bytes, Dill) lives in its own file under `src/cacheness/handlers/`
   2. `handlers/__init__.py` re-exports all public names — `from cacheness.handlers import HandlerRegistry, get_handler` works unchanged
   3. All 1,427+ existing tests pass without modification to test files
-**Plans**: TBD
+**Plans:** 1 plan
+Plans:
+- [ ] 01-01-PLAN.md — Create handlers package, split all handler classes into individual files, re-export via __init__.py
 
 ### Phase 2: Metadata Package Split
 **Goal**: metadata.py becomes a metadata/ package with one file per backend and a shared base module
