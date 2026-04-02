@@ -13,7 +13,7 @@ This milestone transforms Cacheness from a well-tested but structurally monolith
 Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Handler Package Split** - Split handlers.py into a handlers/ package with one file per handler ✅
-- [ ] **Phase 2: Metadata Package Split** - Split metadata.py into a metadata/ package with one file per backend
+- [x] **Phase 2: Metadata Package Split** - Split metadata.py into a metadata/ package with one file per backend ✅
 - [ ] **Phase 3: Core Mixin Decomposition** - Decompose core.py into focused mixins preserving UnifiedCache API
 - [ ] **Phase 4: Exception Handling** - Extend exception hierarchy and narrow broad catches to specific types
 - [ ] **Phase 5: Security Hardening** - Enable blob content hashing by default and make key fallback configurable
@@ -44,7 +44,7 @@ Plans:
   4. All 1,427+ existing tests pass without modification to test files
 **Plans:** 1 plan
 Plans:
-- [ ] 02-01-PLAN.md — Create metadata/ package, split backends into individual files, re-export via __init__.py
+- [x] 02-01-PLAN.md — Create metadata/ package, split backends into individual files, re-export via __init__.py
 
 ### Phase 3: Core Mixin Decomposition
 **Goal**: core.py decomposes into focused mixins while preserving the single UnifiedCache class API and all import paths
