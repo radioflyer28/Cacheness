@@ -1,6 +1,6 @@
-# Research Synthesis — v1.0 Cleanup & Hardening
+# Research Synthesis — v0.7.0 Cleanup & Hardening
 
-**Milestone:** v1.0 Cleanup & Hardening
+**Milestone:** v0.7.0 Cleanup & Hardening
 **Synthesized:** 2026-04-02
 **Sources:** STACK.md, FEATURES.md, ARCHITECTURE.md, PITFALLS.md
 **Overall Confidence:** HIGH
@@ -9,7 +9,7 @@
 
 ## 1. Executive Summary
 
-The v1.0 Cleanup & Hardening milestone is a zero-dependency structural refactoring and security improvement pass on an already-stable codebase (1,427 tests, 16,613 LOC). Every planned capability — HKDF key derivation, blob integrity verification, exception narrowing, Windows file permissions, concurrent testing — is achievable using Python's stdlib and existing runtime dependencies. No new packages are needed.
+The v0.7.0 Cleanup & Hardening milestone is a zero-dependency structural refactoring and security improvement pass on an already-stable codebase (1,427 tests, 16,613 LOC). Every planned capability — HKDF key derivation, blob integrity verification, exception narrowing, Windows file permissions, concurrent testing — is achievable using Python's stdlib and existing runtime dependencies. No new packages are needed.
 
 The work decomposes into two categories: **structural refactors** (splitting three monolithic files into packages/mixins) and **behavioral changes** (security hardening, exception narrowing). Research unanimously recommends completing all structural work first, then applying behavioral changes to the decomposed codebase. This avoids the two-variable debugging problem (is a test failing because code moved, or because behavior changed?) and keeps git history useful.
 
@@ -83,7 +83,7 @@ Top 5 risks synthesized from PITFALLS.md, ranked by severity and likelihood:
 
 ## 5. Table Stakes vs Nice-to-Have
 
-### Table Stakes (Must-Do for v1.0)
+### Table Stakes (Must-Do for v0.7.0)
 
 | Item | Category | Why |
 |------|----------|-----|
@@ -102,7 +102,7 @@ Top 5 risks synthesized from PITFALLS.md, ranked by severity and likelihood:
 | Item | Category | Complexity | Notes |
 |------|----------|------------|-------|
 | Per-namespace key derivation (HKDF) | Security | Medium | Migration path for existing entries is the complexity |
-| Windows key file ACLs via `icacls` | Security | Medium | Consider document-only for v1.0 (P9) |
+| Windows key file ACLs via `icacls` | Security | Medium | Consider document-only for v0.7.0 (P9) |
 | Explicit numeric priority on handlers | Robustness | Medium | Currently implicit registration order works |
 | Handler conflict detection warnings | Robustness | Medium | Useful but not urgent |
 | Structured error context on `CacheError` raises | Error handling | Low-Medium | Many sites to update, can be incremental |
@@ -130,7 +130,7 @@ These need design decisions before or during implementation:
 | Mixins vs delegates for core.py? | Both decompose the monolith. Mixins share `self`, delegates use explicit injection. | A) Mixins (simpler, less refactoring) B) Delegates (more testable, more refactoring) | **Mixins** — lower risk for a hardening milestone. Delegates are a future consideration. |
 | Package (`core/`) vs sibling files (`_core_*.py`) for mixins? | Package requires import chain update. Sibling files avoid it. | A) `core/` package B) `_core_*.py` sibling files | **Decide during phase 3 planning.** Sibling files are lower risk but messier at package root. |
 | Mixin type safety approach? | Mixins lack type info about attributes from other mixins. | A) Bare `self` access B) `Protocol`-based contracts C) `TYPE_CHECKING` imports | **Start with bare `self` access**, add Protocol only if `ty check` complains. |
-| Windows ACLs: implement or document? | `icacls` works but is fragile. `pywin32` is heavy. Documentation is honest. | A) `icacls` B) Document as known limitation | **Document for v1.0**, stretch goal to implement `icacls`. |
+| Windows ACLs: implement or document? | `icacls` works but is fragile. `pywin32` is heavy. Documentation is honest. | A) `icacls` B) Document as known limitation | **Document for v0.7.0**, stretch goal to implement `icacls`. |
 | Default namespace key derivation? | Should default namespace use master key directly (backward compat) or derived key? | A) Master key for default B) Derived key for all | **Master key for default** — backward compatibility, zero migration for common case. |
 | `compress_pickle.py` exception narrowing? | ~10 broad catches, not analyzed in detail. | A) Include in phase 4 B) Defer | **Include if time permits**, defer if not — low churn file. |
 

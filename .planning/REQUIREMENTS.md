@@ -1,9 +1,9 @@
-# Requirements: Cacheness v1.0 Cleanup & Hardening
+# Requirements: Cacheness v0.7.0 Cleanup & Hardening
 
 **Defined:** 2026-04-02
 **Core Value:** Improve reliability, security, and maintainability without changing public API semantics
 
-## v1.0 Requirements
+## v0.7.0 Requirements
 
 Requirements for the cleanup & hardening milestone. Each maps to roadmap phases.
 
@@ -56,23 +56,23 @@ Deferred to subsequent milestones:
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| DECO-01 | Pending | Pending |
-| DECO-02 | Pending | Pending |
-| DECO-03 | Pending | Pending |
-| DECO-04 | Pending | Pending |
-| SECU-01 | Pending | Pending |
-| SECU-02 | Pending | Pending |
-| ERRH-01 | Pending | Pending |
-| ERRH-02 | Pending | Pending |
-| TEST-01 | Pending | Pending |
-| TEST-02 | Pending | Pending |
-| TEST-03 | Pending | Pending |
+| DECO-01 | Phase 1: Handler Package Split | Pending |
+| DECO-02 | Phase 2: Metadata Package Split | Pending |
+| DECO-03 | Phase 3: Core Mixin Decomposition | Pending |
+| DECO-04 | Phase 3: Core Mixin Decomposition | Pending |
+| ERRH-01 | Phase 4: Exception Handling | Pending |
+| ERRH-02 | Phase 4: Exception Handling | Pending |
+| SECU-01 | Phase 5: Security Hardening | Pending |
+| SECU-02 | Phase 5: Security Hardening | Pending |
+| TEST-01 | Phase 6: Test Gaps & Handler Robustness | Pending |
+| TEST-02 | Phase 6: Test Gaps & Handler Robustness | Pending |
+| TEST-03 | Phase 6: Test Gaps & Handler Robustness | Pending |
 
 **Coverage:**
-- v1.0 requirements: 11 total
-- Mapped to phases: 0
-- Unmapped: 11 ⚠️
+- v0.7.0 requirements: 11 total
+- Mapped to phases: 11 ✓
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-04-02*
-*Last updated: 2026-04-02 after milestone v1.0 scoping*
+*Last updated: 2026-04-02 after milestone v0.7.0 scoping*

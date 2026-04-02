@@ -4,7 +4,7 @@
 
 Cacheness is a Python disk caching library with pluggable metadata backends (JSON/SQLite/PostgreSQL) and handler-based type-aware serialization (DataFrames, NumPy arrays, TensorFlow tensors, etc.). It also serves as a standalone persistent key-value store via storage mode. This milestone addresses technical debt, security gaps, error handling inconsistencies, test coverage gaps, and code structure issues identified by the codebase audit.
 
-## Current Milestone: v1.0 Cleanup & Hardening
+## Current Milestone: v0.7.0 Cleanup & Hardening
 
 **Goal:** Improve reliability, security, and maintainability without changing public API semantics.
 
@@ -148,4 +148,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-02 after milestone v1.0 started*
+*Last updated: 2026-04-02 after milestone v0.7.0 started*
