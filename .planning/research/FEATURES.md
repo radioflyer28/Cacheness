@@ -1,286 +1,135 @@
 # Feature Landscape
 
-**Domain:** Python disk caching library — cleanup & hardening milestone
+**Domain:** Disk caching / persistent key-value store library (Python)
+**Milestone:** v0.8.0 API & Robustness
 **Researched:** 2026-04-02
-**Overall confidence:** HIGH (based on direct codebase analysis + established Python ecosystem practices)
 
-This document maps the feature space for improving reliability, security, and maintainability of an existing, well-tested Python caching library (1,427 tests, 16,613 LOC). All items below are scoped to the **Cleanup & Hardening** milestone — no new public API features.
+## Table Stakes
 
----
+Features users expect in a production-quality disk caching / key-value store library. Missing = product feels incomplete for real workloads.
 
-## 1. Code Decomposition — Monolithic File Splitting
-
-**Context:** `core.py` (3,307 lines), `metadata.py` (2,562 lines), `handlers.py` (1,425 lines) = 7,294 lines in three files, nearly half the codebase.
-
-### Table Stakes (Must-Do)
+### Management APIs
 
 | Feature | Why Expected | Complexity | Notes |
 |---------|--------------|------------|-------|
-| Split `handlers.py` into `handlers/` package with one file per handler | Independent handlers sharing a file is pure organizational debt. Lowest-risk decomposition because handlers are stateless and self-contained. | **Low** | Keep `HandlerRegistry` in `handlers/__init__.py`, re-export all handler classes. 8 handlers → 8 files + `__init__.py` + `base.py`. |
-| Split `metadata.py` into `metadata/` package with per-backend modules | Three full backend implementations (JSON 500L, SQLite 800L, PostgreSQL 700L) in one file. Each backend is already independent behind the ABC. | **Low-Medium** | `metadata/base.py` (ABC + shared utilities), `metadata/json_backend.py`, `metadata/sqlite_backend.py`, `metadata/pg_backend.py`, `metadata/__init__.py` (re-exports). Must preserve all existing import paths via `__init__.py`. |
-| Preserve all existing imports from `cacheness.handlers` and `cacheness.metadata` | Any decomposition that breaks `from cacheness.metadata import SqliteBackend` is a regression. | **Low** | Re-export from `__init__.py`. Test with `import cacheness; dir(cacheness.metadata)`. |
+| `get_metadata()` — retrieve entry metadata without deserializing blob | Every key-value store exposes metadata inspection. diskcache has `.peek()`, Redis has `TYPE`/`OBJECT`, shelve has `keys()`. Users need to inspect entries without loading multi-GB blobs into memory. | **Low** | Backend methods already exist (`get_entry()`, `BlobStore.get_metadata()`). This is a thin wrapper in `UnifiedCache` that resolves cache key and returns the metadata dict. |
+| `touch()` — reset TTL without reloading data | Redis `EXPIRE`/`PERSIST`, diskcache `Cache.touch()`, memcached `touch`. Standard in every cache system with TTL. Without it, keeping hot entries alive requires a full `get()` + `put()` round-trip — wasteful for multi-GB blobs. | **Low** | Needs `update_entry_timestamp()` on all metadata backends. JSON: rewrite entry timestamp. SQLite: single `UPDATE` statement. PostgreSQL: single `UPDATE`. No blob I/O. |
+| `delete_by_prefix()` — bulk delete entries matching a key prefix | Redis `SCAN` + `DEL` pattern, diskcache `Cache.evict()` with tag, S3 `DeleteObjects` with prefix. Essential for namespace cleanup (delete all `exp_v1/*` entries). Without it, users loop `list_entries()` + `invalidate()` — O(n) metadata rewrites on JSON backend. | **Medium** | SQLite/PG can use `LIKE 'prefix%'` for single-query delete. JSON must iterate. Should return count of deleted entries. Must delete blobs too (not just metadata). |
+| `update_blob_data()` — replace blob at existing key | Every mutable store supports in-place update. Redis `SET` overwrites, diskcache `Cache.__setitem__` overwrites, shelve `__setitem__` overwrites. Without it, users must `invalidate()` + `put()` — a race window where the key doesn't exist. | **Medium** | Already designed in MISSING_MANAGEMENT_API.md and partially implemented as `update_data()` (exists in `core.py` with staging path pattern). Needs to re-sign the entry, update file_size/file_hash/created_at, handle old blob cleanup. |
+| Batch `get_batch()` / `delete_batch()` | Redis `MGET`/`DEL` (variadic), diskcache doesn't have batch (users iterate). Expected when working with experiment sets — "load all runs for experiment X". | **Medium** | SQLite/PG can batch metadata lookups in one query (`WHERE cache_key IN (...)`). JSON must iterate. Blob reads are inherently per-file — no shortcut. Main benefit is reduced metadata round-trips and transactional deletes. |
 
-### Differentiators (Nice-to-Have)
-
-| Feature | Value Proposition | Complexity | Notes |
-|---------|-------------------|------------|-------|
-| Decompose `core.py` via mixin classes | Reduces the 3,307-line monolith to ~1,500-line coordinator + focused mixins (`_VerificationMixin`, `_StatisticsMixin`, `_StorageModeMixin`, `_CustomMetadataMixin`). | **Medium-High** | Mixin-based decomposition preserves the single `UnifiedCache` class API. Risk: mixin interactions (shared state via `self`) require careful method boundary design. Python's MRO is well-defined but debuggability suffers with deep mixin chains. **Limit to 4-5 mixins max.** |
-| Extract delegate classes instead of mixins for `core.py` | Delegates (`self._verifier = CacheVerifier(self)`) give explicit dependency injection and cleaner testing. | **Medium-High** | More testable than mixins (can unit-test delegates independently) but requires passing `self` or specific attributes to delegates. More refactoring than mixins. |
-
-### Anti-Features (Avoid)
-
-| Anti-Feature | Why Avoid | What to Do Instead |
-|--------------|-----------|-------------------|
-| Deep inheritance hierarchy for `UnifiedCache` | Multiple inheritance levels create fragile base class problems. `super()` chains become undebuggable. | Prefer flat mixins (one level) or composition via delegates. |
-| Splitting `core.py` into separate public classes | Breaking `UnifiedCache` into `CacheReader`, `CacheWriter`, `CacheManager` changes the public API. | Keep `UnifiedCache` as the single entry point. Internal decomposition only. |
-| Moving files without re-export aliases | Breaks downstream imports. Even internal test imports break. | Always re-export from `__init__.py` with explicit `__all__`. |
-| Decomposing `compress_pickle.py` in this milestone | 888 lines but low churn, stable, and not causing maintenance pain. | Leave for a future milestone unless a bug forces touching it. |
-
-### Complexity Assessment
-
-- **handlers.py split:** Low risk, mechanical file moves. ~2-4 hours.
-- **metadata.py split:** Low-medium risk, slightly more cross-file references. ~4-6 hours.
-- **core.py decomposition:** Highest risk item in the milestone. Mixin boundaries must be drawn carefully to avoid circular attribute access. ~1-2 days.
-
-### Dependencies
-
-- `handlers.py` split and `metadata.py` split are **independent** — can be done in parallel.
-- `core.py` decomposition should happen **after** handlers and metadata splits (fewer merge conflicts, cleaner base to work from).
-- All three must maintain backward-compatible imports.
-
----
-
-## 2. Security Hardening
-
-**Context:** HMAC-SHA256 metadata signing exists but has gaps: blob content not signed by default, Windows key permissions are a no-op, all namespaces share one signing key, in-memory key fallback is silent.
-
-### Table Stakes (Must-Do)
+### Concurrency Safety
 
 | Feature | Why Expected | Complexity | Notes |
 |---------|--------------|------------|-------|
-| Default-on blob content hashing | Current signing covers metadata fields but NOT the actual serialized blob file. An attacker with filesystem access can replace a blob while keeping the metadata signature intact. The `file_hash` field already exists in `EntrySummary` and is computed during `put()` — but verification on `get()` is optional and off by default. | **Low-Medium** | Wire `file_hash` verification into `get()` path by default. Must handle missing hashes for pre-existing entries gracefully (skip verification, log warning). Add `verify_blob_hash` config option (default `True`) for opt-out. |
-| Make in-memory key fallback configurable | `security.py` lines 155-160: disk write failure silently falls back to in-memory key. Entries become unverifiable after restart. | **Low** | Add `signing_key_fallback` config: `"memory"` (current default), `"error"` (raise `CacheSecurityError`). Set `"memory"` as default for backward compat, document `"error"` as recommended for production. |
+| Thread-safe `put()`/`get()` | joblib.Memory is process-safe via filesystem atomicity. diskcache is fully thread/process-safe via SQLite transactions. shelve is explicitly NOT thread-safe (documented). Users expect either safety or a clear documented boundary. Cacheness has an `_lock` that is acquired in `put()`/`get()` but backend-level safety varies. | **Low** | `put()` and `get()` already acquire `self._lock` (RLock). SQLite backend uses WAL mode. The real gap is documentation clarity and testing under concurrent load. JSON backend is fundamentally single-writer — this must be documented as a limitation, not "fixed". |
 
-### Differentiators (Nice-to-Have)
-
-| Feature | Value Proposition | Complexity | Notes |
-|---------|-------------------|------------|-------|
-| Per-namespace key derivation (HKDF) | Cryptographic isolation between namespaces sharing a `cache_dir`. Currently one key signs everything — a compromised namespace key compromises all namespaces. | **Medium** | Use `hashlib`-based HKDF (stdlib, no new deps): derive `namespace_key = HKDF(master_key, info=namespace_id)`. Must handle key migration for existing entries (old entries use master key directly). The Python `hmac` module is sufficient — no need for `cryptography` package. |
-| Windows key file ACLs | `chmod(0o600)` is a no-op on Windows. Key file may be world-readable. | **Medium** | Two options: (a) Use `icacls` subprocess call — no new dependency but fragile. (b) Use `pywin32` (`win32security`) — robust but adds optional dependency. (c) Document as known limitation with manual `icacls` command. **Recommend option (c) for this milestone** — actual ACL implementation is complex and low-impact (local attacker with file access has bigger problems). |
-
-### Anti-Features (Avoid)
-
-| Anti-Feature | Why Avoid | What to Do Instead |
-|--------------|-----------|-------------------|
-| Encrypting blob content at rest | Encryption is a feature addition, not hardening. Adds complexity (key management, performance overhead, recovery). Signing detects tampering; encryption prevents reading. Different threat models. | Document as future feature. Signing + integrity verification is sufficient for the "detect tampering" use case. |
-| Adding `cryptography` package dependency | Heavy C extension dependency for HKDF when `hashlib` can do the same thing via `hmac.new()` with a derived key. | Use stdlib `hashlib`/`hmac` for key derivation. Python 3.12+ `hashlib` has everything needed. |
-| Automatic key rotation | Complex distributed systems problem (re-sign all entries, handle mixed-version entries during rotation window). | Document manual key rotation procedure. Test that old-key entries degrade gracefully (warning, not crash). |
-
-### Complexity Assessment
-
-- **Blob hash verification default-on:** Low-medium. The hash is already computed; this is wiring it into the read path.
-- **Configurable key fallback:** Low. Config option + conditional raise.
-- **HKDF namespace keys:** Medium. Key derivation is simple; migration path for existing entries is the complexity.
-- **Windows ACLs:** Medium if implemented, low if documented-only.
-
-### Dependencies
-
-- Blob hash verification is **independent** — can proceed without other security work.
-- Key fallback configuration depends on the `CacheConfig` dataclass — coordinate with any config refactoring.
-- HKDF namespace keys depend on having the security module stabilized first.
-- Windows ACLs are **independent** of all other security work.
-
----
-
-## 3. Exception Handling Cleanup
-
-**Context:** 30+ `except Exception` catches across `core.py` (30+), `handlers.py` (20+), `decorators.py` (12), `custom_metadata.py` (6), `compress_pickle.py` (10+). An exception hierarchy already exists in `error_handling.py` (`CacheError` → `CacheConfigurationError`, `CacheStorageError`, `CacheSerializationError`, `CacheHandlerError`, `CacheIntegrityError`, `CacheMetadataError`) but is underutilized.
-
-### Table Stakes (Must-Do)
+### Orphaned Blob Prevention
 
 | Feature | Why Expected | Complexity | Notes |
 |---------|--------------|------------|-------|
-| Narrow `except Exception` catches in `core.py` to specific types | 30+ broad catches mask bugs. Example: `_init_auto_backend()` catches all exceptions when trying SQLite and silently falls back to JSON — a permissions error looks identical to a missing module. | **Medium** | Audit each catch site. Categories: (1) **Narrow to specific** — `OSError`, `PermissionError`, `ValueError`, `KeyError`, `TypeError`, `sqlite3.Error`, `json.JSONDecodeError`. (2) **Keep broad but re-raise critical** — catch `Exception`, re-raise `KeyboardInterrupt`, `SystemExit`, `MemoryError`. (3) **Intentionally broad** — top-level decorator safety nets that must never crash user code. Document each decision. |
-| Narrow `except Exception` catches in `handlers.py` | 20+ broad catches in handler `put()`/`get()` methods. Deserialization errors masked as generic failures. | **Medium** | Most should be `OSError | pickle.UnpicklingError | blosc2.Error | ValueError`. Some TensorFlow catches are intentionally broad (TF raises surprising exception types). |
-| Ensure all swallowed exceptions log at WARNING or higher | Several catches use `logger.debug()` for errors that affect correctness (e.g., metadata write failures). | **Low** | Audit logging levels. Rule: if the catch changes behavior (fallback, skip, delete), log at WARNING minimum. If it's a harmless retry, DEBUG is fine. |
+| Crash-safe two-phase writes with automatic recovery | LevelDB uses a write-ahead log. SQLite uses WAL + rollback journal. S3 has multi-part upload with abort. Users storing important data expect that a power failure or `kill -9` doesn't leave the cache in an inconsistent state that requires manual intervention. | **Medium** | Current `_PutCleanup` handles in-process exceptions but not process kills. `verify_integrity(repair=True)` catches orphans but must be called manually. The gap is detectable: a startup check or periodic background scan. |
 
-### Differentiators (Nice-to-Have)
+## Differentiators
 
-| Feature | Value Proposition | Complexity | Notes |
-|---------|-------------------|------------|-------|
-| Add missing exception types to hierarchy | Current hierarchy lacks `CacheSecurityError` (for signing/verification failures), `CacheBackendError` (for backend-specific failures), and `CacheKeyError` (for cache key computation failures). | **Low** | Add 2-3 new exception classes to `error_handling.py`. Subclass from `CacheError`. |
-| Structured error context on all `CacheError` raises | `CacheError` already accepts a `context` dict — but most raise sites don't pass it. Adding `context={"cache_key": key, "backend": "sqlite"}` aids debugging. | **Low-Medium** | Low per-site change, but many sites to update. Can be done incrementally. |
-| Use `cache_operation_context()` context manager consistently | `error_handling.py` already defines `cache_operation_context()` for standardized try/except/log — but it's used in only a few places. | **Medium** | Replacing raw try/except with the context manager across 30+ sites is mechanical but touches many lines. Good for consistency but not urgent. |
+Features that set Cacheness apart. Not baseline-expected, but valuable — especially for the ML/data science audience.
 
-### Anti-Features (Avoid)
-
-| Anti-Feature | Why Avoid | What to Do Instead |
-|--------------|-----------|-------------------|
-| Catching and wrapping every stdlib exception in `CacheError` | Overly aggressive wrapping hides the original traceback and makes debugging harder. `OSError` should propagate as `OSError` when it's meaningful. | Only wrap when the exception crosses a significant abstraction boundary (handler → cache, backend → cache). Let specific exceptions propagate naturally within a layer. |
-| Adding retry logic to exception handling | Retry is a feature, not error handling. Retries mask transient failures and add latency. | If retry is needed, build it as a separate decorator/wrapper, not inline in catch blocks. |
-| Making all cache operations return `Result[T, Error]` instead of raising | Functional error handling would change the entire public API. Pythonic convention is exceptions. | Keep exceptions. Consider `Result` types only if a future async milestone warrants it. |
-
-### Complexity Assessment
-
-- **Narrowing `except Exception` in core.py:** Medium. Each of the 30+ sites needs individual analysis to determine the right exception type. Risk of changing behavior if a previously-caught exception type is no longer caught.
-- **Narrowing in handlers.py:** Medium. Same analysis needed, but handlers are more isolated (lower blast radius per change).
-- **Adding exception types:** Low. Simple class definitions.
-- **Logging level audit:** Low. Mechanical find-and-replace.
-
-### Dependencies
-
-- Exception hierarchy additions should happen **before** narrowing catches (so the new types are available).
-- Narrowing catches in `core.py` should happen **after** `core.py` decomposition (fewer merge conflicts, smaller files to audit).
-- Narrowing in `handlers.py` and `decorators.py` is **independent** — can proceed in parallel.
-
----
-
-## 4. Concurrent Testing Strategies
-
-**Context:** `UnifiedCache._lock` (RLock) is used in ~18 management methods but NOT in `put()`/`get()`. Thread safety is documented as limited. No concurrency tests exist despite the library supporting multi-process access via SQLite WAL mode.
-
-### Table Stakes (Must-Do)
-
-| Feature | Why Expected | Complexity | Notes |
-|---------|--------------|------------|-------|
-| Thread-safety smoke tests for concurrent `put()`/`get()` | No tests verify behavior under concurrent access. Users may assume thread safety because a lock exists. Need to establish the behavioral contract: what works, what doesn't, what corrupts. | **Medium** | Use `concurrent.futures.ThreadPoolExecutor` with 4-8 workers. Test scenarios: concurrent puts to different keys, concurrent gets of same key, concurrent put+get of same key, concurrent put+evict. Assert no crashes, no data corruption. Don't assert ordering — that's not the contract. |
-| Document actual thread-safety guarantees per backend | JSON backend: has `threading.Lock()` internally but `UnifiedCache` doesn't acquire `_lock` for `put()`/`get()`. SQLite backend: WAL mode provides concurrent reads + serialized writes. PostgreSQL: inherently concurrent. | **Low** | Write explicit thread-safety docs per backend. Tests should match the documented guarantees, not aspirational ones. |
-
-### Differentiators (Nice-to-Have)
+### HMAC Blob Signing
 
 | Feature | Value Proposition | Complexity | Notes |
 |---------|-------------------|------------|-------|
-| Stress tests with high contention | 50+ concurrent operations testing for deadlocks, resource exhaustion, file handle leaks. | **Medium** | Use `pytest-timeout` to catch deadlocks. Parameterize across backends. On Windows, be careful with file handle limits. |
-| Multi-process safety tests | Fork `multiprocessing.Process` workers against the same `cache_dir`. Critical for SQLite WAL correctness. | **Medium-High** | `multiprocessing` + `pytest` interaction is tricky (fixture sharing, temp dir cleanup). Use `tmp_path_factory` at session scope. Skip on Windows if `fork()` not available (use `spawn` instead). |
-| Key rotation scenario tests | Delete key file, restart cache, verify old entries produce warnings (not crashes) on verification. | **Low-Medium** | Straightforward test: create cache, sign entries, delete key file, re-instantiate, `get()` should return data with warning (not error). |
+| HMAC-SHA256 over blob content (not just metadata) | **Tamper detection for stored blobs.** Current signing covers metadata fields only — an attacker with filesystem access can replace blob bytes while metadata signatures remain valid. Docker Content Trust signs image layers. S3 uses `Content-MD5` for upload integrity. AWS SSE signs objects at rest. Extending HMAC to blob content closes the "blob swap" attack vector, which the CONCERNS.md audit flagged as a security gap. | **Medium** | Blob content hash (`file_hash` via xxh3_64) already exists and is verified on `get()`. The differentiator is adding an HMAC *signature* over the hash — so the hash itself can't be tampered with in metadata. Implementation: include `file_hash` in HMAC signed fields (already in v1/v2 field lists!). The real work is ensuring `file_hash` is always populated (currently optional) and the signature covers it reliably. May already be partially working via signature v2 field list including `file_hash`. |
+| Signature coverage of inline blob data | Inline blobs store `blob_data` directly in metadata. The HMAC should cover a hash of this data to prevent metadata-level tampering of inline entries. | **Low** | Compute xxh3_64 of `blob_data`, store as `file_hash` in metadata (may already happen), ensure it's in the signed field set. |
 
-### Anti-Features (Avoid)
-
-| Anti-Feature | Why Avoid | What to Do Instead |
-|--------------|-----------|-------------------|
-| Adding full thread safety to `put()`/`get()` | Acquiring `_lock` in `put()`/`get()` would serialize all operations, destroying performance for the common case (single-threaded use). Backend-level locking is more granular. | Document that thread safety is provided at the backend level. `UnifiedCache`-level lock is for management operations only. |
-| Using `asyncio`-based concurrency tests | Cacheness is synchronous. Testing with `asyncio` would require `loop.run_in_executor()` wrapping, adding complexity without testing real concurrency. | Use `threading`/`multiprocessing` for concurrency tests. Async tests belong in a future async milestone. |
-| Benchmarking under concurrency | Performance benchmarking is a separate concern from correctness testing. | Keep concurrency tests focused on correctness (no corruption, no crashes). Benchmarks go in `benchmarks/`. |
-
-### Complexity Assessment
-
-- **Thread-safety smoke tests:** Medium. Test design is straightforward; flaky test prevention (race conditions in assertions) is the challenge.
-- **Documentation:** Low. Synthesize existing knowledge from `TROUBLESHOOTING.md` and code comments.
-- **Stress tests:** Medium. More test infrastructure than logic.
-- **Multi-process tests:** Medium-high. Cross-platform process management is tricky.
-- **Key rotation tests:** Low-medium. Linear test scenario.
-
-### Dependencies
-
-- Thread-safety tests are **independent** of code changes — they test existing behavior.
-- Key rotation tests depend on understanding the security module — coordinate with security hardening.
-- Multi-process tests require SQLite WAL mode — depends on SQLite backend being available (it is, by default).
-- Concurrency tests should be written **before** any `core.py` decomposition (establish baseline behavior, then verify it's preserved after refactoring).
-
----
-
-## 5. Handler/Plugin Ordering Robustness
-
-**Context:** `HandlerRegistry` iterates handlers in registration order, using the first `can_handle()` match. Adding a handler that matches broadly (e.g., anything with `.dtype`) can shadow existing handlers. Priority is implicit (registration order) with optional explicit ordering via `config.handlers.handler_priority`. The TensorFlow handler uses elaborate early-return checks to avoid matching NumPy arrays.
-
-### Table Stakes (Must-Do)
-
-| Feature | Why Expected | Complexity | Notes |
-|---------|--------------|------------|-------|
-| Document handler ordering constraints | Current ordering relies on implicit knowledge: Series before DataFrame (subtype match), DataFrame before Array (both have `.dtype`), Array before Object (fallback). This is documented only in code comments, not in user-facing docs. | **Low** | Add a "Handler Priority" section to `docs/PLUGIN_DEVELOPMENT.md` or create `docs/HANDLER_ORDERING.md`. Include the full default priority chain with rationale. |
-| Add handler conflict detection warnings | When `register_handler()` is called, check if the new handler's `can_handle()` overlaps with existing handlers by testing against a standard set of probe values. Log a warning if overlap detected. | **Medium** | Probe set: `np.array([1])`, `pd.DataFrame()`, `pd.Series()`, `pl.DataFrame()`, `pl.Series()`, `b"bytes"`, `"string"`, `42`, `{"dict": 1}`. Run each through old and new handler — if both match, warn. **Don't block registration** — just warn. |
-| Guard ObjectHandler as always-last | `ObjectHandler.can_handle()` accepts anything pickleable — it MUST be last. Currently enforced by registration order convention. Add an explicit check in `register_handler()` that prevents registering after ObjectHandler unless `force=True`. | **Low** | Check `self.handlers[-1].__class__.__name__ == "ObjectHandler"` and insert before it. Or tag ObjectHandler with `is_fallback = True` attribute. |
-
-### Differentiators (Nice-to-Have)
+### Management APIs (Advanced)
 
 | Feature | Value Proposition | Complexity | Notes |
 |---------|-------------------|------------|-------|
-| Explicit numeric priority on handlers | Replace implicit ordering with explicit `priority: int` attribute on each handler class. `HandlerRegistry` sorts by priority. Lower number = higher priority. | **Medium** | Already partially supported via `config.handlers.handler_priority` (name-based ordering). Adding numeric priority to the handler class itself would be more robust. Risk: existing custom handlers don't have a `priority` attribute — need a default. |
-| Handler capability introspection | Add `handler.supported_types() -> list[type]` method for explicit type declarations instead of relying solely on `can_handle()` runtime checks. | **Medium** | Would allow static analysis of handler overlap without needing probe values. But some handlers (ObjectHandler) genuinely accept "anything," making this less useful. |
-| `can_handle()` type narrowing for Series/DataFrame | Currently `PolarsSeriesHandler.can_handle()` must run before `PolarsDataFrameHandler.can_handle()` because `pl.Series` is a valid DataFrame-like. Add explicit negative checks: `DataFrameHandler.can_handle()` returns `False` for `Series` types. | **Low-Medium** | Makes ordering less fragile. Each handler explicitly rejects types it shouldn't handle, rather than relying on registration order. |
+| `update_batch()` — bulk update blob data | Batch checkpoint replacement for ML pipelines. Not offered by diskcache or joblib. Reduces per-entry overhead (single metadata transaction for N updates). | **High** | Each blob requires separate serialization + file write. Metadata updates can be batched in SQLite/PG. Complex error handling: partial batch failure semantics (all-or-nothing vs best-effort). |
+| `touch_batch()` — bulk TTL refresh | Keep a working set alive in one call. Redis supports `EXPIRE` pipelining. Useful for "refresh all entries for active experiment". | **Low** | Single `UPDATE ... WHERE cache_key IN (...)` on SQLite/PG. JSON iterates. No blob I/O. |
+| `get_metadata_batch()` — bulk metadata retrieval | Inspect many entries without loading blobs. Useful for dashboards, monitoring, experiment comparison. | **Low** | Single metadata query, no blob I/O. Natural extension of `get_metadata()`. |
 
-### Anti-Features (Avoid)
+### Orphaned Blob Prevention (Advanced)
+
+| Feature | Value Proposition | Complexity | Notes |
+|---------|-------------------|------------|-------|
+| Write-ahead intent log for crash recovery | Before writing a blob, record the intended operation (cache_key, target_path) in a lightweight journal. On startup or periodic check, replay incomplete operations (delete orphaned blobs from incomplete puts). This is how LevelDB, InnoDB, and PostgreSQL handle crash recovery. Transforms `verify_integrity` from a full-scan O(n) operation into a targeted O(pending) check. | **Medium-High** | Requires a new file/table for the intent log. Must be atomic itself (single `fsync`'d append or SQLite `INSERT`). Adds write overhead (one extra write per `put()`). Worth it for large caches where `verify_integrity` full-scan is expensive. |
+| Startup orphan detection | Automatically detect and warn about (or repair) orphans when a cache is opened, rather than requiring explicit `verify_integrity()` calls. | **Low-Medium** | Could scan for files in cache_dir not referenced by metadata. For large caches, this is slow at startup — should be optional (`auto_repair_on_open=True`). For small caches (<1000 entries), the cost is negligible. |
+
+## Anti-Features
+
+Features to explicitly NOT build in v0.8.0.
 
 | Anti-Feature | Why Avoid | What to Do Instead |
 |--------------|-----------|-------------------|
-| Full plugin discovery system (entry points, stevedore) | Over-engineering for 8 built-in handlers. Entry point discovery adds import-time overhead and a dependency. | Keep `register_handler()` API. Users explicitly register custom handlers. |
-| Handler chain-of-responsibility with `next_handler` | GoF pattern that adds complexity. Current linear scan is simple and fast for 8 handlers. | Keep linear `for handler in self.handlers` scan. O(n) with n=8 is not a problem. |
-| Automatic handler ordering via topological sort on type dependencies | Complex to implement, hard to debug, brittle when type hierarchies change. | Use explicit numeric priority. Manual ordering by humans is fine for <20 handlers. |
+| File-level locking (flock/lockf) for multi-process safety | Adds platform-specific complexity (Windows vs Unix locking semantics), doesn't work on NFS/network filesystems, and the primary concurrency model is already handled by SQLite WAL for the recommended production backend. diskcache uses SQLite-level locking, not file locks. | Document that multi-process safety requires SQLite or PostgreSQL backend. JSON backend is single-process only. Thread safety is provided by `_lock`. |
+| Async `put()`/`get()` (`asyncio` support) | Large feature that deserves its own milestone. Requires async blob I/O, async metadata queries, async handler serialization. Would need `AsyncUnifiedCache` class or wrapper. | Defer to separate milestone. Document as a future improvement. |
+| Global distributed locking (e.g., Redis-based locks for PostgreSQL backend) | Over-engineering for the current user base. PostgreSQL's MVCC already handles concurrent access. Adding distributed locks adds a Redis dependency and operational complexity. | PostgreSQL backend already provides row-level isolation via MVCC. Document that concurrent writers to the same key will last-write-win. |
+| Automatic background eviction / GC thread | Daemon threads complicate shutdown, make testing fragile, and surprise users. diskcache avoids background threads. | Keep eviction synchronous (on `put()` via `_enforce_size_limit()`). Provide `verify_integrity(repair=True)` for manual cleanup. Users who want periodic cleanup can use `schedule` or `APScheduler`. |
+| Transaction rollback across blob + metadata layers | Would require a WAL or undo log spanning both layers, fundamentally changing the architecture. The current "orphaned blobs are harmless" invariant is simpler and proven. | Keep the current two-phase write ordering (blob-first, metadata-second). Improve crash detection with intent logging rather than trying to make cross-layer writes transactional. |
+| `copy()`/`move()` entry operations | Low priority convenience features that compose from existing CRUD primitives. Adding them increases API surface and test burden for operations users rarely need. | Document the `get()` + `put()` pattern for copying. Defer to a future milestone if demand materializes. |
+| Encryption at rest for blob content | Feature addition, not hardening. Requires key management, performance impact assessment, migration path for existing caches. | Defer to a separate milestone. Document as a security enhancement opportunity. |
 
-### Complexity Assessment
-
-- **Documentation:** Low. Write it down.
-- **Conflict detection warnings:** Medium. Needs a good probe set and must not break existing `register_handler()` call sites.
-- **ObjectHandler guard:** Low. Small check in `register_handler()`.
-- **Numeric priority:** Medium. Refactor internal representation; maintain backward compat.
-- **Type narrowing in `can_handle()`:** Low-medium per handler, but touches all handlers.
-
-### Dependencies
-
-- Documentation is **independent** — can be done anytime.
-- Conflict detection depends on having the handler types and probe values available — **independent** of other handler changes.
-- ObjectHandler guard is **independent**.
-- Numeric priority refactor should happen **after** `handlers.py` split into package (easier to modify individual handler files).
-- Type narrowing in `can_handle()` should happen **after** `handlers.py` split.
-
----
-
-## Feature Dependencies (Cross-Cutting)
+## Feature Dependencies
 
 ```
-handlers.py split ──┐
-                    ├──→ core.py decomposition ──→ exception narrowing (core.py)
-metadata.py split ──┘
+get_metadata() → (standalone, no dependencies)
+touch() → needs update_entry_timestamp() on all metadata backends
+delete_by_prefix() → needs prefix-aware delete on all metadata backends + blob cleanup
+update_blob_data() → needs _PutCleanup, blob signing, file_hash computation
+                    → improved by HMAC blob signing (sign new blob on update)
 
-exception hierarchy additions ──→ exception narrowing (all files)
+get_batch() → needs get_metadata() pattern (batch key resolution)
+delete_batch() → needs delete_by_prefix() pattern (batch metadata + blob cleanup)
+touch_batch() → needs touch() (batch timestamp update)
+update_batch() → needs update_blob_data() (batch version)
 
-concurrency tests ──→ (baseline established) ──→ core.py decomposition ──→ concurrency tests (re-run)
+HMAC blob signing → depends on file_hash always being populated
+                  → should be done BEFORE update_blob_data (so updates produce signed blobs)
 
-security: blob hash default-on ─── (independent)
-security: key fallback config ─── (independent)
-security: HKDF namespace keys ──→ key rotation tests
+Orphan intent log → standalone, can be added before or after management APIs
+                  → improves update_blob_data() crash recovery
 
-handler ordering docs ─── (independent)
-handler conflict detection ──→ after handlers.py split
-handler ObjectHandler guard ─── (independent)
+Thread safety documentation → standalone, should be done early (informs API design)
+
+Concurrency testing → depends on thread safety documentation (tests verify documented guarantees)
 ```
 
-### Recommended Phase Ordering
+**Recommended ordering by dependency chain:**
 
-Based on dependencies and risk:
+1. Thread safety documentation + concurrency tests (foundation — clarifies guarantees)
+2. `get_metadata()` + `touch()` (simple, no dependencies)
+3. HMAC blob signing (make `file_hash` always-on, verify it's in signed fields)
+4. `delete_by_prefix()` + `delete_batch()` (bulk cleanup)
+5. `update_blob_data()` (complex, benefits from HMAC signing being in place)
+6. `get_batch()` + `touch_batch()` + `get_metadata_batch()` (batch versions of already-working singles)
+7. Orphan prevention improvements (intent log or startup detection)
 
-1. **Phase 1: Low-risk structural splits** — `handlers.py` → package, `metadata.py` → package (parallel, independent)
-2. **Phase 2: Testing baseline** — Concurrency tests, key rotation tests (parallel, test existing behavior before changing it)
-3. **Phase 3: Exception hierarchy + narrowing** — Add missing exception types, then narrow catches in `handlers.py`, `decorators.py`, `custom_metadata.py` (lower-risk files first)
-4. **Phase 4: Security hardening** — Blob hash default-on, key fallback config, HKDF namespace keys
-5. **Phase 5: core.py decomposition** — Highest-risk change, done last with full test baseline in place
-6. **Phase 6: Exception narrowing in core.py** — After decomposition, narrower files to audit
-7. **Phase 7: Handler ordering robustness** — After handlers.py split, add conflict detection and ObjectHandler guard
+## MVP Recommendation
 
-### MVP Recommendation
+Prioritize:
 
-Prioritize for maximum reliability impact with minimum risk:
+1. **`get_metadata()`** — trivial to implement, high daily-use value, zero risk
+2. **`touch()`** — essential cache operation, low complexity, no blob I/O
+3. **`delete_by_prefix()`** — most-requested cleanup operation, medium complexity
+4. **HMAC blob signing verification** — security gap flagged in audit, may already be partially working (file_hash is in v2 signed fields), needs validation and testing
+5. **Concurrency safety documentation + tests** — `put()`/`get()` already acquire the lock; document and test the actual guarantees rather than adding new mechanisms
+6. **`update_blob_data()`** — completes CRUD operations, staging-path pattern already designed
 
-1. **handlers.py split** — Low risk, immediate maintainability win
-2. **metadata.py split** — Low risk, immediate maintainability win
-3. **Exception hierarchy additions** — Low effort, enables later narrowing
-4. **Blob hash verification default-on** — Direct security improvement, low complexity
-5. **Concurrency smoke tests** — Establishes behavioral baseline
-6. **core.py decomposition** — Highest impact but highest risk — do last with full safety net
-
-**Defer if time-constrained:**
-- Windows ACL implementation (document limitation instead)
-- Multi-process safety tests (complex infrastructure)
-- Numeric handler priority (current implicit ordering works)
-- Structured error context on all raise sites (incremental, no deadline)
-
----
+Defer: `update_batch()` (highest complexity, lowest frequency), intent-log orphan prevention (medium-high complexity, current `verify_integrity` is adequate for most users), `copy()`/`move()` (convenience, composable from CRUD).
 
 ## Sources
 
-- Direct codebase analysis: `src/cacheness/core.py`, `handlers.py`, `metadata.py`, `security.py`, `error_handling.py`, `interfaces.py`
-- Project audit: `.planning/codebase/CONCERNS.md` (2026-04-02)
-- Project definition: `.planning/PROJECT.md`
-- Python standard library documentation for `hmac`, `hashlib`, `threading`, `concurrent.futures` — HIGH confidence
-- Python mixin patterns: community consensus from Real Python, Python docs, PyCon talks — HIGH confidence (well-established pattern)
-- OWASP guidance on caching security: blob integrity verification is standard practice — MEDIUM confidence (general guidance applied to specific context)
+- [MISSING_MANAGEMENT_API.md](../../docs/MISSING_MANAGEMENT_API.md) — existing API design proposals with layer analysis (HIGH confidence)
+- [TRANSACTION_GUARANTEES.md](../../docs/TRANSACTION_GUARANTEES.md) — current crash recovery and concurrency model (HIGH confidence)
+- [COMPARISON_TO_EXISTING_SOLUTIONS.md](../../docs/COMPARISON_TO_EXISTING_SOLUTIONS.md) — landscape analysis vs diskcache, joblib, shelve (HIGH confidence)
+- [CONCERNS.md](../codebase/CONCERNS.md) — codebase audit: security gaps, missing features (HIGH confidence)
+- [SECURITY.md](../../docs/SECURITY.md) — current HMAC signing architecture (HIGH confidence)
+- Source: `core.py` (put/get with _lock, _PutCleanup), `security.py` (CacheEntrySigner, signed field lists), `_verification_mixin.py` (file_hash verification, verify_integrity), `blob_store.py` (orphan detection, metadata-first delete ordering)
+- diskcache — HIGH confidence: SQLite-based, fully thread/process-safe via SQLite locking, `Cache.touch()` for TTL refresh, `Cache.evict()` for tag-based cleanup, no batch API
+- joblib.Memory — HIGH confidence: filesystem-based, process-safe via atomic file operations, no thread safety guarantees, no TTL, no management APIs beyond `clear()`
+- shelve — HIGH confidence: dbm-based, explicitly NOT thread-safe (Python docs), no TTL, no management APIs beyond `keys()`/`del`
+- Redis — HIGH confidence: thread-safe, full management API (`MGET`, `EXPIRE`, `SCAN`+`DEL`)
+- LevelDB/RocksDB — MEDIUM confidence: write-ahead log for crash recovery, `WriteBatch` for atomic batch operations
+- Docker Content Trust — MEDIUM confidence: signs image layers (analogous to blob content signing), uses Notary/TUF for key management
+- S3 Content-MD5 — HIGH confidence: upload-time integrity verification, ETag for subsequent verification

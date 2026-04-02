@@ -1,179 +1,205 @@
-# Research Synthesis — v0.7.0 Cleanup & Hardening
+# Project Research Summary
 
-**Milestone:** v0.7.0 Cleanup & Hardening
-**Synthesized:** 2026-04-02
-**Sources:** STACK.md, FEATURES.md, ARCHITECTURE.md, PITFALLS.md
-**Overall Confidence:** HIGH
+**Project:** Cacheness v0.8.0 "API & Robustness"
+**Domain:** Python disk caching library — management APIs, concurrency, signing, crash safety
+**Researched:** 2026-04-02
+**Confidence:** HIGH
 
----
+## Executive Summary
 
-## 1. Executive Summary
+Cacheness v0.8.0 is a **hardening milestone**: no new dependencies, no architectural refactors, no public API revolutions. All four features — management APIs, concurrency safety, HMAC blob signing, and orphaned blob prevention — are behavioral additions to a well-decomposed codebase that emerged from v0.7.0's structural cleanup. The entire milestone runs on Python stdlib (`hmac`, `hashlib`, `threading`, `pathlib`) plus already-vendored dependencies (`xxhash`, `SQLAlchemy`). This is the ideal outcome for a robustness-focused release.
 
-The v0.7.0 Cleanup & Hardening milestone is a zero-dependency structural refactoring and security improvement pass on an already-stable codebase (1,427 tests, 16,613 LOC). Every planned capability — HKDF key derivation, blob integrity verification, exception narrowing, Windows file permissions, concurrent testing — is achievable using Python's stdlib and existing runtime dependencies. No new packages are needed.
+The most important finding from cross-referencing all four research files is that **the existing codebase is closer to v0.8.0's goals than the original requirements assumed.** Architecture research revealed that `put()`/`get()` already acquire the RLock, `update_data()` and `touch()` already exist, `get_metadata()` is implemented, and `delete_where`/`delete_batch`/`touch_batch` are already in core.py. The true gaps are narrower: `delete_by_prefix()`, `put_batch()`/`get_batch()`, blob HMAC signing, and crash-safe orphan prevention. Concurrency work is primarily documentation and testing, not new locking infrastructure.
 
-The work decomposes into two categories: **structural refactors** (splitting three monolithic files into packages/mixins) and **behavioral changes** (security hardening, exception narrowing). Research unanimously recommends completing all structural work first, then applying behavioral changes to the decomposed codebase. This avoids the two-variable debugging problem (is a test failing because code moved, or because behavior changed?) and keeps git history useful.
+The key risk is **scope creep** — the temptation to over-engineer each feature (ReadWriteLock, file-based WAL, full blob HMAC on every read) when simpler solutions suffice. The pitfalls research identified 14 specific traps, with 4 rated critical. The build order is clear: fix the SQLite Lock→RLock mismatch first (P10 — potential deadlock in batch ops), then orphan prevention and concurrency docs in parallel, then HMAC signing, then management APIs last since they depend on all three.
 
-The highest-risk item is the `core.py` mixin decomposition (3,900 lines, 85+ methods, tight state coupling). The lowest-risk items are the `handlers.py` split (stateless, self-contained handlers) and test additions (purely additive).
+## Key Findings
 
----
+### Recommended Stack
 
-## 2. Stack Decisions
+No new dependencies. All four features use Python stdlib or existing project dependencies. (See [STACK.md](STACK.md))
 
-**Zero new runtime dependencies.** This is the defining constraint and ideal outcome for a hardening milestone.
+**Core technologies (all existing):**
+- `threading.RLock` — already in core.py; extend usage documentation, not mechanism
+- `hmac` + `hashlib` (stdlib) — extend existing `CacheEntrySigner` for blob content HMAC
+- `xxhash` (existing dep) — fast non-crypto blob integrity; HMAC adds crypto authentication on top
+- `SQLAlchemy` (existing dep) — SQL `LIKE`/`IN` for backend-level bulk operations
+- `pathlib` + `json` (stdlib) — write-ahead intent journal for orphan prevention
 
-| Capability | How | Source |
-|------------|-----|--------|
-| HKDF key derivation | `hmac` + `hashlib` (stdlib, ~15 lines) | Already used in `security.py` |
-| Blob content hashing | `xxhash` (existing core dep) + `file_hashing.py` | Already computed on `put()` |
-| Windows key permissions | `icacls` via `subprocess` (stdlib) | One-time call at key generation |
-| Exception narrowing | Existing exception hierarchy in `error_handling.py` | Extend with 2-3 new types |
-| Concurrent testing | `concurrent.futures`, `threading` (stdlib) | Already used in existing tests |
-| Code decomposition | Standard Python packages + `__init__.py` re-exports | Pattern proven in `storage/` |
+### Expected Features
 
-**Explicitly rejected:** `cryptography` (C-extension bloat for simple HKDF), `pywin32` (30MB for one chmod equivalent), `pytest-asyncio` (no async code), `pytest-timeout` (use deterministic synchronization instead).
+(See [FEATURES.md](FEATURES.md))
 
----
+**Already implemented (narrowing scope):**
+- `update_data()` — exists at core.py:2219
+- `touch()` — exists at core.py:2435
+- `get_metadata()` — exists at core.py:1545
+- `delete_where()` / `delete_matching()` / `delete_batch()` / `touch_batch()` — all exist
+- Thread locking on `put()`/`get()` — already acquired via `self._lock`
 
-## 3. Recommended Phase Order
+**Must have (truly missing — table stakes):**
+- `delete_by_prefix()` — bulk cleanup by key prefix, needs backend-level SQL fast path
+- `get_batch()` / `put_batch()` — batch CRUD for reduced metadata round-trips
+- Concurrency documentation — clear thread-safe vs process-safe boundary definitions
+- Orphan prevention — crash recovery beyond `verify_integrity(repair=True)`
 
-Research from ARCHITECTURE.md and PITFALLS.md converges on this ordering. The key insight: structural changes are low-risk individually but create merge conflict compounding as a group, while behavioral changes are easier to audit on smaller files.
+**Should have (differentiators):**
+- HMAC-SHA256 blob signing — cryptographic tamper detection for stored blobs
+- `verify_integrity()` grace period (`min_age_seconds`) to avoid deleting in-progress blobs
+- `get_metadata_batch()` / `touch_batch()` refinements
 
-| Phase | Scope | Risk | Effort | Rationale |
-|-------|-------|------|--------|-----------|
-| **1. handlers.py → handlers/ package** | 1,676 lines → 8 files + init | LOW | ~1 day | Smallest scope, validates the package-split pattern. Handlers are stateless and self-contained. |
-| **2. metadata.py → metadata/ package** | 2,562 lines → 4 files + init | MEDIUM | ~1-2 days | Shared base class (SQLAlchemy models) adds coordination. Validates pattern for complex cases. |
-| **3. core.py → mixin decomposition** | 3,900 lines → 8 mixins + core | HIGH | ~2-3 days | Largest, highest coupling. Benefits from experience in phases 1-2. All 1,427 tests must pass. |
-| **4. Exception narrowing** | ~50 `except Exception` sites | MEDIUM | ~1-2 days | Behavioral change — must happen after code is in final locations (P16). |
-| **5. Security hardening** | Blob hashing, HKDF, key fallback, Windows ACLs | MEDIUM | ~2 days | Behavioral + new features. Applied to stable, decomposed codebase (P17). |
-| **6. Test gap coverage** | Thread safety, key rotation tests | LOW | ~1 day | Additive. Can run in parallel with phases 1-3. Key rotation tests land with/after phase 5. |
+**Defer (v2+):**
+- Async `put()`/`get()` — separate milestone
+- ReadWriteLock — premature optimization; profile first
+- File-level cross-process locking — SQLite WAL already handles this
+- Encryption at rest — separate feature, not hardening
+- `copy()`/`move()` entry operations — compose from existing CRUD
 
-**Critical ordering constraints (from pitfall analysis):**
-- Decomposition before exception narrowing (P16: isolate structural vs behavioral failures)
-- Decomposition before security hardening (P17: avoid merge conflicts in moving+changing code)
-- Handler split before handler ordering guardrails (P18: split first, then add guardrails)
-- Exception hierarchy design before narrowing catches (P13: have target types ready)
+### Architecture Approach
 
----
+(See [ARCHITECTURE.md](ARCHITECTURE.md))
 
-## 4. Key Risks
+These are **behavioral additions, not structural changes.** No new classes beyond `WriteJournal`. All management APIs go directly on `UnifiedCache` (not a new mixin — too coupled to put/get internals). Blob HMAC extends `CacheEntrySigner` with ~30 lines. Orphan prevention adds a single new file (`write_journal.py`).
 
-Top 5 risks synthesized from PITFALLS.md, ranked by severity and likelihood:
+**Modified components (10 files, ~200 lines total):**
+1. `core.py` — management API methods, journal integration in `_PutCleanup`
+2. `security.py` — `compute_blob_hmac()`, `verify_blob_hmac()`, signature v3
+3. `_verification_mixin.py` — blob HMAC verification step
+4. `storage/blob_store.py` — HMAC computation at write time
+5. `config.py` — `verify_blob_hmac`, `enable_write_journal` flags
+6. `interfaces.py` — `blob_hmac` in `SignableFields`
+7. `metadata/base.py` — `delete_by_prefix()` in ABC
+8. `metadata/sqlite_backend.py` — SQL fast path for prefix delete
+9. `metadata/json_backend.py` — Python fallback for prefix delete
 
-### Risk 1: Mixin MRO & State Coupling (P1)
-**Impact:** `AttributeError` at runtime, invisible until specific code paths execute.
-**Mitigation:** No `__init__` in mixins. All initialization stays in `UnifiedCache.__init__()`. Add MRO assertion test. Extract one mixin at a time with full test runs between each.
+**New component (1 file):**
+- `write_journal.py` — append-only intent journal for crash recovery
 
-### Risk 2: Import Path Breakage (P2, P3)
-**Impact:** `ImportError` in tests and downstream consumers. 50+ import sites across tests reference internal module paths.
-**Mitigation:** Catalog all imports before splitting (`grep -rn "from cacheness\.\(core\|metadata\|handlers\) import"`). Every old path must resolve via `__init__.py` re-exports. Add import compatibility test.
+### Critical Pitfalls
 
-### Risk 3: Blob Hashing Default-On Breaks Existing Caches (P4)
-**Impact:** `verify_cache_integrity()` reports 100% corruption on pre-existing entries. `get()` with `delete_on_error=True` silently purges caches on upgrade.
-**Mitigation:** "Hash if present" verification — verify only when stored hash exists. Write-path only for new entries. Never make `get()` fail on missing hashes.
+(See [PITFALLS.md](PITFALLS.md))
 
-### Risk 4: Exception Narrowing Exposes Swallowed Failures (P5)
-**Impact:** Previously-silent errors propagate to callers. "Cacheness used to handle this, now it crashes."
-**Mitigation:** Audit each catch individually with logging before narrowing. Preserve intentional safety nets (`_init_auto_backend`, `__del__`, hook invocations) with explicit `# intentionally broad` comments. Don't narrow catches inside `get()`.
+1. **P1 (CRITICAL): HMAC TOCTOU gap** — Compute HMAC from persisted blob bytes, not in-memory serialization output. A truncated write would pass HMAC if signed from memory. Sign *after* `_write_blob()` succeeds.
+2. **P2 (CRITICAL): JSON backend globally unsafe under concurrent writers** — Do NOT fix it. Document as single-process only. Adding file locks creates cross-platform pain for a backend already documented as "NOT safe for concurrency."
+3. **P10 (HIGH): SQLite Lock vs RLock mismatch** — `SqliteBackend` uses non-reentrant `threading.Lock()` while `UnifiedCache` uses `RLock`. Batch management APIs that compose multiple backend calls will deadlock. Fix: change to `RLock` before implementing batch ops.
+4. **P8 (HIGH): `verify_integrity(repair=True)` races with active writes** — Add `min_age_seconds=60` parameter. Only consider blobs orphaned if older than the threshold.
+5. **P9 (HIGH): Signature version migration trap** — Keep `blob_hmac` as a separate field, not part of signature versioning. Avoids O(n × blob_size) migration for existing caches.
 
-### Risk 5: Per-Namespace Key Derivation Invalidates Signatures (P8)
-**Impact:** All entries in non-default namespaces fail verification after upgrade.
-**Mitigation:** Fallback verification (try derived key → fall back to master key → re-sign with derived key on next write). Version the signing scheme in metadata.
+## Cross-Researcher Consensus
 
----
+All four research files agree on these points:
 
-## 5. Table Stakes vs Nice-to-Have
+| Topic | Consensus |
+|-------|-----------|
+| New dependencies | Zero — stdlib + existing deps are sufficient |
+| JSON concurrency | Document as unsupported, don't fix |
+| Lock type | Keep RLock for v0.8.0, defer ReadWriteLock |
+| Blob HMAC | Use `hmac` + `hashlib` stdlib, not `cryptography` package |
+| Management APIs | Add to `core.py` directly, not a new mixin |
+| Backend fast paths | SQL `LIKE`/`IN` for SQLite/PG, Python iteration for JSON |
+| Build order | Foundational safety first, then signing, then APIs last |
 
-### Table Stakes (Must-Do for v0.7.0)
+## Cross-Researcher Conflicts
 
-| Item | Category | Why |
-|------|----------|-----|
-| Split `handlers.py` into per-handler files | Decomposition | Organizational debt, lowest-risk decomposition |
-| Split `metadata.py` into per-backend files | Decomposition | Three independent backends sharing a file |
-| Decompose `core.py` via mixins | Decomposition | 3,900-line monolith is the primary maintenance burden |
-| Preserve all existing import paths | Decomposition | Non-negotiable backward compatibility |
-| Default-on blob content hashing | Security | Metadata signing without blob verification has a gap |
-| Configurable in-memory key fallback | Security | Silent fallback is a security-relevant default |
-| Narrow `except Exception` in core.py | Error handling | 30+ broad catches mask bugs |
-| Narrow `except Exception` in handlers.py | Error handling | 20+ broad catches mask deserialization failures |
-| Thread-safety smoke tests | Testing | No tests verify concurrent behavior despite lock existence |
+| Topic | Conflict | Resolution |
+|-------|----------|------------|
+| **Orphan prevention mechanism** | STACK/ARCHITECTURE recommend file-based intent journal. PITFALLS (P3) warns about Windows file locking and startup latency, suggests metadata "pending" flag instead. | **Use intent journal.** The "pending" flag reverses write order (metadata-first) which creates dangling metadata — arguably worse than orphaned blobs. The journal is append-only with no fsync requirement (best-effort), avoiding the Windows complexity PITFALLS warns about. |
+| **Blob HMAC in signature versioning** | ARCHITECTURE proposes adding `blob_hmac` to signature v3 field list. PITFALLS (P9) explicitly warns this forces O(n × blob_size) migration and recommends keeping it separate. | **Keep `blob_hmac` separate from `entry_signature`.** Store it alongside the signature, verify independently. New entries get it automatically; old entries treat `None` as "skip verification." No migration needed. |
+| **Is blob HMAC even necessary?** | PITFALLS (P6) raises that if metadata HMAC already covers `file_hash`, tampering with the blob changes the hash which invalidates the metadata signature. STACK/ARCHITECTURE assume it's needed. | **Decision needed.** If `file_hash` (xxhash) is in the signed metadata fields AND `verify_hashes=True` compares the actual blob hash to stored `file_hash`, then blob HMAC is redundant for integrity. HMAC adds *authentication* (proves who wrote it) but the signing key is on the same filesystem. Recommend: validate existing coverage first, then decide if the additional HMAC layer is worth the performance cost. |
+| **Concurrency safety scope** | STACK proposes a `thread_safe=True` config flag. ARCHITECTURE found `put()`/`get()` already hold the lock unconditionally (no config needed). | **No new config flag.** The lock is already always-on. The v0.8.0 scope is documentation + testing, not new locking infrastructure. |
 
-### Nice-to-Have (Differentiators)
+## Decisions Needed Before Implementation
 
-| Item | Category | Complexity | Notes |
-|------|----------|------------|-------|
-| Per-namespace key derivation (HKDF) | Security | Medium | Migration path for existing entries is the complexity |
-| Windows key file ACLs via `icacls` | Security | Medium | Consider document-only for v0.7.0 (P9) |
-| Explicit numeric priority on handlers | Robustness | Medium | Currently implicit registration order works |
-| Handler conflict detection warnings | Robustness | Medium | Useful but not urgent |
-| Structured error context on `CacheError` raises | Error handling | Low-Medium | Many sites to update, can be incremental |
-| Multi-process safety tests | Testing | Medium-High | Cross-platform process management is tricky |
-| Stress tests with high contention | Testing | Medium | Diminishing returns beyond smoke tests |
+1. **Blob HMAC: build or skip?** Validate whether the existing `file_hash` (in signed metadata v2) + `verify_hashes=True` already provides sufficient integrity. If yes, HMAC is redundant and the phase can focus on ensuring `file_hash` is *always* populated and verified. If no (because xxhash is non-cryptographic), add `blob_hmac` as a separate field.
 
-### Anti-Features (Explicitly Avoid)
+2. **Intent journal: when to recover?** Options: (a) always on `__init__`, (b) only when `cleanup_on_init=True`, (c) separate explicit method. Recommendation: (b) — piggyback on existing cleanup behavior.
 
-- Encrypting blob content at rest (feature addition, not hardening)
-- Adding `cryptography` package (C-extension bloat)
-- Automatic key rotation (distributed systems problem)
-- Full thread safety on `put()`/`get()` (serializes all operations)
-- Deep inheritance hierarchy for `UnifiedCache`
-- Splitting `compress_pickle.py` (stable, low churn)
-- Result/Either types replacing exceptions (API change)
+3. **`delete_by_prefix()`: return type?** Return count of deleted entries (int) or list of deleted keys (List[str])? Count is cheaper; key list is more debuggable. Recommendation: return count for consistency with `delete_batch()`.
 
----
+## Implications for Roadmap
 
-## 6. Open Questions
+Based on combined research, suggested phase structure:
 
-These need design decisions before or during implementation:
+### Phase 1: Concurrency Foundation
+**Rationale:** Fix the SQLite Lock→RLock mismatch (P10) before any batch operations. Document threading model. This is a prerequisite for safe batch management APIs.
+**Delivers:** RLock fix in SQLite backend, concurrency documentation, thread-safety stress tests.
+**Addresses:** Concurrency safety (table stakes), P10 deadlock prevention, P2/P5 documentation.
+**Avoids:** P10 deadlock in batch operations, P5 thread-vs-process confusion.
+**Estimated scope:** ~50 lines code + docs + tests.
 
-| Question | Context | Options | Recommendation |
-|----------|---------|---------|----------------|
-| Mixins vs delegates for core.py? | Both decompose the monolith. Mixins share `self`, delegates use explicit injection. | A) Mixins (simpler, less refactoring) B) Delegates (more testable, more refactoring) | **Mixins** — lower risk for a hardening milestone. Delegates are a future consideration. |
-| Package (`core/`) vs sibling files (`_core_*.py`) for mixins? | Package requires import chain update. Sibling files avoid it. | A) `core/` package B) `_core_*.py` sibling files | **Decide during phase 3 planning.** Sibling files are lower risk but messier at package root. |
-| Mixin type safety approach? | Mixins lack type info about attributes from other mixins. | A) Bare `self` access B) `Protocol`-based contracts C) `TYPE_CHECKING` imports | **Start with bare `self` access**, add Protocol only if `ty check` complains. |
-| Windows ACLs: implement or document? | `icacls` works but is fragile. `pywin32` is heavy. Documentation is honest. | A) `icacls` B) Document as known limitation | **Document for v0.7.0**, stretch goal to implement `icacls`. |
-| Default namespace key derivation? | Should default namespace use master key directly (backward compat) or derived key? | A) Master key for default B) Derived key for all | **Master key for default** — backward compatibility, zero migration for common case. |
-| `compress_pickle.py` exception narrowing? | ~10 broad catches, not analyzed in detail. | A) Include in phase 4 B) Defer | **Include if time permits**, defer if not — low churn file. |
+### Phase 2: Orphaned Blob Prevention
+**Rationale:** Independent of other features. Adds crash safety to `put()`. The write journal is a new file with clear boundaries — low integration risk.
+**Delivers:** `WriteJournal` class, `_PutCleanup` journal awareness, startup recovery, `min_age_seconds` in `verify_integrity()`.
+**Addresses:** Orphan prevention (table stakes), P8 grace period for active writes.
+**Avoids:** P3 Windows complexity (append-only, no fsync), P8 in-progress blob deletion.
+**Estimated scope:** ~150 lines new code + tests.
 
----
+### Phase 3: HMAC Blob Signing
+**Rationale:** Depends on decision from "Decisions Needed" #1. If blob HMAC is needed, it must be in place before `update_blob_data()` so updates produce signed blobs. If file_hash coverage is sufficient, this phase shrinks to "ensure file_hash is always populated + add verification tests."
+**Delivers:** `blob_hmac` field (if needed), streaming HMAC computation, backward-compatible verification.
+**Addresses:** HMAC blob signing (differentiator), P1 TOCTOU prevention, P9 migration safety.
+**Avoids:** P1 signing in-memory bytes, P6 performance regression (streaming HMAC), P9 forced migration.
+**Estimated scope:** ~80 lines if full HMAC, ~30 lines if file_hash validation only.
 
-## 7. Cross-Cutting Concerns
+### Phase 4: Management APIs
+**Rationale:** Last because it depends on all three preceding phases — needs safe concurrency (Phase 1), crash-safe writes (Phase 2), and blob signing aware updates (Phase 3).
+**Delivers:** `delete_by_prefix()`, `put_batch()`, `get_batch()`, `get_metadata_batch()`, possibly `update_blob_data()` alias.
+**Addresses:** Management APIs (table stakes + differentiators), P4 O(n) re-signing prevention, P7 backend bulk operations.
+**Avoids:** P4 re-sign trap (backend-level ops), P7 O(n²) JSON penalty (batch `_save_to_disk`), P12 `get_metadata` blob_data leak.
+**Estimated scope:** ~150 lines code + backend extensions + tests.
 
-Themes that appeared across multiple research areas:
+### Phase Ordering Rationale
 
-### Backward Compatibility is the Primary Constraint
-Every research area identified import path preservation as critical. The `storage/` re-export layer, test imports, and public API all depend on stable paths. The pattern: always re-export from `__init__.py`, never remove an importable name, test the import chain explicitly.
+- **Phase 1 first** because P10 (SQLite deadlock) will bite immediately when batch operations are tested. It's also the smallest phase (~50 lines).
+- **Phases 1-2 could run in parallel** since orphan prevention doesn't touch locking code.
+- **Phase 3 before Phase 4** because `update_blob_data()` and `put_batch()` should produce signed blobs from day one. Bolting on signing after management APIs are shipped means re-testing everything.
+- **Phase 4 last** because it composes all preceding guarantees (lock safety, crash recovery, signing) into user-facing convenience methods.
 
-### "Move Code, Then Change Behavior" Ordering
-ARCHITECTURE.md, PITFALLS.md, and FEATURES.md all converge on the same conclusion: structural refactoring (moving code between files) must complete before behavioral changes (narrowing exceptions, changing defaults). P16 and P17 formalize why — two-variable debugging is error-prone and destroys git blame utility.
+### Research Flags
 
-### Migration Paths for Every Default Change
-Blob hashing default-on (P4), per-namespace key derivation (P8), and key fallback behavior (P15) all share a pattern: changing a default breaks existing data. The universal mitigation is "new behavior on write, graceful degradation on read" — verify hashes only if present, try new key then old key, warn but don't crash.
+Phases likely needing deeper research during planning:
+- **Phase 2 (Orphan Prevention):** Intent journal design needs careful thought about S3 backend interaction and recovery semantics. The journal format, staleness threshold, and cleanup strategy affect all blob backends.
+- **Phase 3 (HMAC Signing):** Requires a concrete decision on whether blob HMAC is needed given existing file_hash coverage. Run a threat model analysis before planning.
 
-### The Test Suite is Both Asset and Constraint
-1,427 tests provide excellent regression detection but also create ~70+ potential breakpoints during refactoring (tests that reference internal paths, mock private methods, or assert internal state). The test suite must be treated as a backward-compatibility contract, not just a verification tool.
-
-### Security Hardening is Incremental, Not Transformational
-No single security change is large. Blob hashing is a config default flip. Key fallback is a conditional + config field. HKDF is ~15 lines. Windows ACLs are documentation or a subprocess call. The risk comes from interactions (signing scheme migration), not individual changes.
-
----
+Phases with standard patterns (skip research-phase):
+- **Phase 1 (Concurrency Foundation):** Lock→RLock swap is mechanical. Documentation follows existing patterns in `docs/SECURITY.md`.
+- **Phase 4 (Management APIs):** Follows established backend-fast-path + generic-fallback pattern already used by `query_meta()`.
 
 ## Confidence Assessment
 
 | Area | Confidence | Notes |
 |------|------------|-------|
-| Stack decisions | **HIGH** | Zero new deps confirmed across all research areas |
-| Phase ordering | **HIGH** | Architecture and pitfalls research independently converge on same order |
-| Decomposition patterns | **HIGH** (handlers, metadata) / **MEDIUM** (core) | Handlers and metadata have clean boundaries; core mixin extraction has state coupling edge cases |
-| Exception narrowing | **MEDIUM** | 50 sites identified but each needs per-site analysis during implementation |
-| Security hardening | **HIGH** | Integration points clear, existing infrastructure supports changes |
-| Test coverage | **HIGH** | Straightforward additive work with known patterns |
+| Stack | **HIGH** | Zero new deps — all stdlib or existing. Verified against codebase imports. |
+| Features | **HIGH** | Feature research identified many APIs already exist, narrowing true scope. Cross-referenced with actual core.py line numbers. |
+| Architecture | **HIGH** | All analysis from direct codebase inspection post-v0.7.0. Integration points are specific and verified. |
+| Pitfalls | **HIGH** | 14 pitfalls derived from actual code paths. Critical pitfalls (P1, P2, P10) confirmed via source inspection. |
 
-**Gaps remaining:**
-- Per-site exception narrowing analysis (deferred to implementation)
-- `compress_pickle.py` exception audit (not deeply analyzed)
-- core.py mixin boundary edge cases (will surface during extraction)
-- PostgreSQL backend location decision (future milestone concern)
+**Overall confidence:** HIGH
+
+### Gaps to Address
+
+- **Blob HMAC necessity:** Needs threat model validation. If file_hash in signed metadata already prevents blob swaps, HMAC is redundant overhead. Validate during Phase 3 planning.
+- **Intent journal + S3 interaction:** The journal records local intent but S3 uploads are eventually consistent (for compatible stores). Recovery logic needs S3-specific handling (HEAD request to verify existence).
+- **PostgreSQL `delete_by_prefix()`:** Not analyzed in detail — assumed to follow SQLite's SQL `LIKE` pattern, but PG-specific optimizations (e.g., `text_pattern_ops` index) may be needed for large-scale use.
+- **Batch operation error semantics:** Not decided — all-or-nothing (transactional) vs best-effort (partial success). Recommendation: best-effort with error list return, matching `delete_batch()` existing behavior.
+
+## Sources
+
+### Primary (HIGH confidence)
+- Codebase inspection: `core.py`, `security.py`, `blob_store.py`, `config.py`, `metadata/*.py` — verified line numbers and existing implementations
+- `docs/MISSING_MANAGEMENT_API.md` — existing API design proposals
+- `docs/TRANSACTION_GUARANTEES.md` — crash recovery and concurrency model
+- `docs/SECURITY.md` — HMAC signing architecture
+- `.planning/codebase/CONCERNS.md` — v0.7.0 security and feature gap audit
+
+### Secondary (MEDIUM confidence)
+- diskcache, joblib.Memory, shelve, Redis — competitive analysis for feature expectations
+- LevelDB/RocksDB — WAL and write-ahead log patterns for crash recovery
+
+### Tertiary (LOW confidence)
+- S3-compatible store consistency guarantees — varies by implementation (MinIO vs Ceph vs Garage)
+- ReadWriteLock performance impact — theoretical; needs profiling under real workloads
 
 ---
-
-*Research synthesis complete. Ready for requirements definition and roadmap creation.*
+*Research completed: 2026-04-02*
+*Ready for roadmap: yes*
