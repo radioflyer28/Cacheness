@@ -89,7 +89,7 @@ class StorageModeMixin:
             cleanup.commit()
             return cache_key
 
-        except Exception as e:
+        except Exception as e:  # intentionally broad — re-raises after cleanup
             cleanup.rollback()
             data_type = handler.data_type if "handler" in locals() else "unknown"
             logger.error(
@@ -135,7 +135,7 @@ class StorageModeMixin:
                 data = self._blob_store._read_blob(file_path, data_type, metadata)
             self.metadata_backend.update_access_time(cache_key)
             return data
-        except Exception as e:
+        except Exception as e:  # intentionally broad — deserialization may fail any way
             # Never delete metadata in storage mode
             logger.warning(
                 f"Failed to load {data_type} {cache_key}: "
@@ -178,7 +178,7 @@ class StorageModeMixin:
             self.metadata_backend.update_access_time(cache_key)
             entry["cache_key"] = cache_key
             return (data, entry)
-        except Exception as e:
+        except Exception as e:  # intentionally broad — deserialization may fail any way
             logger.warning(
                 f"Failed to load {data_type} {cache_key}: "
                 f"{type(e).__name__}: {e} (entry preserved, storage mode)"

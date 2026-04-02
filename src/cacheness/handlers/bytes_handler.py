@@ -57,7 +57,7 @@ class BytesHandler(CacheHandler):
                     file_size=file_size,
                     actual_path=str(bin_path),
                 )
-            except Exception as e:
+            except Exception as e:  # intentionally broad — re-raises as CacheWriteError
                 raise CacheWriteError(f"Failed to write bytes data: {e}") from e
 
     def get(self, file_path: Path, metadata: BlobReadContext) -> bytes:
@@ -80,7 +80,7 @@ class BytesHandler(CacheHandler):
             return data
         except CacheReadError:
             raise
-        except Exception as e:
+        except Exception as e:  # intentionally broad — re-raises as CacheReadError
             raise CacheReadError(f"Failed to read bytes data: {e}") from e
 
     # -- Zero-disk inline fast-paths ----------------------------------

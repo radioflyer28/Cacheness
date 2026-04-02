@@ -32,7 +32,7 @@ class PolarsSeriesHandler(CacheHandler):
 
             temp_df.write_parquet(io.BytesIO())
             return True
-        except Exception:
+        except Exception:  # intentionally broad — parquet compatibility check
             # This Series has mixed types that can't be handled by Parquet
             return False
 
@@ -68,7 +68,7 @@ class PolarsSeriesHandler(CacheHandler):
                     },
                 )
 
-            except Exception as e:
+            except Exception as e:  # intentionally broad — re-raises as CacheWriteError
                 raise CacheWriteError(
                     f"Failed to write Polars Series to Parquet: {e}",
                     handler_type="polars_series",
@@ -96,7 +96,7 @@ class PolarsSeriesHandler(CacheHandler):
 
                 return series
 
-            except Exception as e:
+            except Exception as e:  # intentionally broad — re-raises as CacheReadError
                 if isinstance(e, CacheReadError):
                     raise
                 raise CacheReadError(

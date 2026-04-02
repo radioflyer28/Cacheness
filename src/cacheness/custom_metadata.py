@@ -529,7 +529,7 @@ def migrate_custom_metadata_tables(engine=None):
                 else:
                     logger.warning("No SQLAlchemy engine available for migration")
                     return
-            except Exception:
+            except Exception:  # intentionally broad — engine access is best-effort
                 logger.warning("Could not access cache engine for migration")
                 return
 
@@ -543,7 +543,9 @@ def migrate_custom_metadata_tables(engine=None):
             if hasattr(model_class, "__table__") and model_class.__table__ is not None:
                 try:
                     Base.metadata.create_all(engine, tables=[model_class.__table__])
-                except Exception as table_err:
+                except (
+                    Exception
+                ) as table_err:  # intentionally broad — table may already exist
                     logger.debug(
                         f"Skipping table for schema '{schema_name}': {table_err}"
                     )
@@ -560,7 +562,7 @@ def migrate_custom_metadata_tables(engine=None):
                     f"Schema '{schema_name}' validation issues: {', '.join(issues)}"
                 )
 
-    except Exception as e:
+    except Exception as e:  # intentionally broad — migration is best-effort
         logger.error(f"Failed to migrate custom metadata tables: {e}")
 
 
@@ -602,7 +604,7 @@ def cleanup_orphaned_metadata(
                 else:
                     logger.warning("No SQLAlchemy engine available for cleanup")
                     return 0
-            except Exception:
+            except Exception:  # intentionally broad — engine access is best-effort
                 logger.warning("Could not access cache engine for cleanup")
                 return 0
 
@@ -636,7 +638,7 @@ def cleanup_orphaned_metadata(
             session.commit()
             return total_cleaned
 
-    except Exception as e:
+    except Exception as e:  # intentionally broad — cleanup is best-effort
         logger.error(f"Failed to cleanup orphaned metadata: {e}")
         return 0
 
@@ -691,6 +693,6 @@ def export_custom_metadata_schema(
         else:
             return full_ddl
 
-    except Exception as e:
+    except Exception as e:  # intentionally broad — schema export is best-effort
         logger.error(f"Failed to export schema {schema_name}: {e}")
         return None

@@ -55,7 +55,7 @@ def _serialize_path_object(obj: Any, config: Optional[Any] = None) -> Optional[s
         else:
             # Generic path-like object
             return f"path_like:{str(obj)}"
-    except Exception:
+    except Exception:  # intentionally broad — path handling may fail any way
         # Fall back to string representation if path handling fails
         return f"path_error:{str(obj)}"
 
@@ -79,11 +79,11 @@ def _serialize_dataframe(obj: Any) -> Optional[str]:
             ).hexdigest()[:16]
             cols_hash = xxhash.xxh3_64(",".join(obj.columns).encode()).hexdigest()[:8]
             return f"polars_df:{obj.shape}:{cols_hash}:{values_hash}"
-    except Exception:
+    except Exception:  # intentionally broad — DataFrame hashing may fail any way
         # Fall back to basic info if DataFrame hashing fails
         try:
             return f"dataframe:{obj.shape}:{type(obj).__name__}"
-        except Exception:
+        except Exception:  # intentionally broad — shape access may also fail
             pass
     return None
 
@@ -101,11 +101,11 @@ def _serialize_series(obj: Any) -> Optional[str]:
                 str(obj.to_pandas().values).encode()
             ).hexdigest()[:16]
             return f"polars_series:{len(obj)}:{obj.dtype}:{values_hash}"
-    except Exception:
+    except Exception:  # intentionally broad — Series hashing may fail any way
         # Fall back to basic info
         try:
             return f"series:{len(obj)}:{type(obj).__name__}"
-        except Exception:
+        except Exception:  # intentionally broad — len/type access may also fail
             pass
     return None
 
@@ -115,7 +115,7 @@ def _serialize_numpy_array(obj: Any) -> Optional[str]:
     try:
         content_hash = xxhash.xxh3_64(obj.tobytes()).hexdigest()[:16]
         return f"array:{obj.shape}:{obj.dtype}:{content_hash}"
-    except Exception:
+    except Exception:  # intentionally broad — array hashing may fail any way
         pass  # Fall through to other methods
     return None
 

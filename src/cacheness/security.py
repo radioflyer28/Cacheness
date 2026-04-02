@@ -118,7 +118,7 @@ class CacheEntrySigner:
                 return key
             else:
                 return self._generate_new_key()
-        except Exception as e:
+        except (OSError, ValueError) as e:
             logger.warning(f"Failed to load signing key: {e}, generating new key")
             return self._generate_new_key()
 
@@ -142,7 +142,7 @@ class CacheEntrySigner:
             # Set restrictive file permissions (owner read/write only)
             try:
                 self.key_file_path.chmod(0o600)
-            except Exception as e:
+            except OSError as e:
                 logger.warning(
                     f"Failed to set restrictive permissions on key file: {e}"
                 )
@@ -150,7 +150,7 @@ class CacheEntrySigner:
             logger.info(f"Generated new signing key: {self.key_file_path}")
             return key
 
-        except Exception as e:
+        except OSError as e:
             logger.error(f"Failed to generate signing key: {e}")
             # Fallback to in-memory key (not persistent)
             logger.warning("Using in-memory signing key (not persistent)")
@@ -231,7 +231,7 @@ class CacheEntrySigner:
             )
             return versioned
 
-        except Exception as e:
+        except (ValueError, TypeError) as e:
             logger.error(f"Failed to create signature: {e}")
             raise
 
@@ -293,7 +293,7 @@ class CacheEntrySigner:
 
             return is_valid
 
-        except Exception as e:
+        except (ValueError, TypeError) as e:
             logger.error(f"Failed to verify signature: {e}")
             return False
 
@@ -347,7 +347,7 @@ class CacheEntrySigner:
             versioned = f"ns1:{hex_sig}"
             logger.debug(f"Signed namespace {namespace_data.get('namespace_id', '?')}")
             return versioned
-        except Exception as e:
+        except (ValueError, TypeError) as e:
             logger.error(f"Failed to sign namespace: {e}")
             raise
 
@@ -384,7 +384,7 @@ class CacheEntrySigner:
                     f"{namespace_data.get('namespace_id', '?')}"
                 )
             return is_valid
-        except Exception as e:
+        except (ValueError, TypeError) as e:
             logger.error(f"Failed to verify namespace signature: {e}")
             return False
 

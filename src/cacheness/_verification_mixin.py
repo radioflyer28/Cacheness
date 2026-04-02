@@ -220,7 +220,7 @@ class VerificationMixin:
             signature = self.signer.sign_entry(complete_entry_data)
             metadata_dict["entry_signature"] = signature
             logger.debug(f"Created signature for entry {cache_key}")
-        except Exception as e:
+        except Exception as e:  # intentionally broad — signing failure is non-fatal
             logger.warning(f"Failed to sign entry {cache_key}: {e}")
 
     def verify_integrity(

@@ -238,7 +238,7 @@ class BlobStore:
                 f"Entry signing enabled (v{info['signature_version']}, "
                 f"{len(info['signed_fields'])} fields)"
             )
-        except Exception as e:
+        except Exception as e:  # intentionally broad — signer init failure is non-fatal
             logger.warning(f"Failed to initialize entry signer: {e}")
             self.signer = None
 
@@ -619,7 +619,7 @@ class BlobStore:
             # cleaned by verify_integrity)
             try:
                 self.blob_backend.delete_blob(resolved)
-            except Exception as exc:
+            except Exception as exc:  # intentionally broad — orphan cleanup
                 logger.warning(
                     f"Failed to delete blob file for {key} at {resolved}: {exc}. "
                     f"Orphaned blob will be cleaned by verify_integrity."
@@ -873,7 +873,9 @@ class BlobStore:
                     try:
                         self.backend.remove_entry(entry["cache_key"])
                         repaired["dangling_removed"] += 1
-                    except Exception as e:
+                    except (
+                        Exception
+                    ) as e:  # intentionally broad — repair failure is non-fatal
                         logger.warning(
                             f"Failed to remove dangling entry {entry['cache_key']}: {e}"
                         )
@@ -1043,7 +1045,7 @@ class BlobStore:
                 for chunk in iter(lambda: f.read(8192), b""):
                     hasher.update(chunk)
             return hasher.hexdigest()
-        except Exception as e:
+        except Exception as e:  # intentionally broad — hash failure returns None
             logger.warning(f"Failed to calculate hash for {file_path}: {e}")
             return None
 
@@ -1065,7 +1067,7 @@ class BlobStore:
             for chunk in iter(lambda: stream.read(8192), b""):
                 hasher.update(chunk)
             return hasher.hexdigest()
-        except Exception as e:
+        except Exception as e:  # intentionally broad — hash failure returns None
             logger.warning(f"Failed to calculate hash for {blob_path}: {e}")
             return None
 
@@ -1075,7 +1077,7 @@ class BlobStore:
 
         try:
             serialized = pickle.dumps(data)
-        except Exception:
+        except Exception:  # intentionally broad — pickle fallback for non-pickleable
             # Fall back to repr for non-pickleable objects
             serialized = repr(data).encode()
         return xxhash.xxh3_64(serialized).hexdigest()[:16]

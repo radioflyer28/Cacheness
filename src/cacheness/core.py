@@ -54,7 +54,7 @@ def _normalize_function_args(
         bound = sig.bind(*args, **kwargs)
         bound.apply_defaults()
         return bound.arguments
-    except Exception:
+    except (ValueError, TypeError):  # intentionally broad
         # Fallback: convert to consistent dict format if signature inspection fails
         param_dict = {}
 
@@ -81,7 +81,7 @@ class _PutCleanup:
             cleanup.set_remote(blob_backend, blob_uri)
             # ... write metadata ...
             cleanup.commit()   # disarm — nothing will be rolled back
-        except Exception:
+        except Exception:  # intentionally broad — docstring example
             cleanup.rollback()
             raise
 
@@ -126,7 +126,7 @@ class _PutCleanup:
             try:
                 self._blob_backend.delete_blob(self._blob_uri)
                 logger.debug(f"Cleaned up orphaned remote blob: {self._blob_uri}")
-            except Exception:
+            except Exception:  # intentionally broad — cleanup must not raise
                 logger.warning(
                     f"Failed to clean up orphaned remote blob: {self._blob_uri}"
                 )
@@ -288,7 +288,7 @@ class UnifiedCache(
                     "🗄️  Using SQLite backend (auto-selected for better performance)"
                 )
                 return
-            except Exception as e:
+            except (ImportError, OSError, ValueError) as e:
                 logger.warning(f"SQLite backend failed, falling back to JSON: {e}")
         else:
             logger.info("📝 SQLModel not available, using JSON backend")
@@ -337,7 +337,7 @@ class UnifiedCache(
             else:
                 self.signer = None
                 logger.debug("Entry signing disabled")
-        except Exception as e:
+        except (OSError, ValueError) as e:
             logger.warning(f"Failed to initialize entry signer: {e}")
             self.signer = None
 
@@ -379,7 +379,7 @@ class UnifiedCache(
                     logger.debug(
                         f"Namespace {ns_info.namespace_id!r} signature verified"
                     )
-        except Exception as e:
+        except (ValueError, TypeError, OSError) as e:
             logger.warning(f"Namespace signing/verification failed: {e}")
 
     def _init_blob_store(self):
@@ -486,7 +486,10 @@ class UnifiedCache(
                 if isinstance(raw, str):
                     try:
                         meta = json_loads(raw)
-                    except Exception:
+                    except (
+                        ValueError,
+                        KeyError,
+                    ):  # intentionally broad — malformed JSON
                         continue
                 elif isinstance(raw, dict):
                     meta = raw
@@ -513,7 +516,7 @@ class UnifiedCache(
 
             return entries
 
-        except Exception as e:
+        except Exception as e:  # intentionally broad — backend query may fail any way
             logger.error(f"Failed to query metadata (generic): {e}")
             return None
 
@@ -564,7 +567,10 @@ class UnifiedCache(
                             from .json_utils import loads as json_loads
 
                             meta_raw = json_loads(meta_raw)
-                        except Exception:
+                        except (
+                            ValueError,
+                            KeyError,
+                        ):  # intentionally broad — malformed JSONB
                             meta_raw = {}
                     elif not isinstance(meta_raw, dict):
                         meta_raw = {}
@@ -583,7 +589,7 @@ class UnifiedCache(
 
                 return entries
 
-        except Exception as e:
+        except Exception as e:  # intentionally broad — backend query may fail any way
             logger.error(f"Failed to query metadata (postgres): {e}")
             return None
 
@@ -647,14 +653,17 @@ class UnifiedCache(
                             from .json_utils import loads as json_loads
 
                             entry["metadata_dict"] = json_loads(row.metadata_dict)
-                        except Exception:
+                        except (
+                            ValueError,
+                            KeyError,
+                        ):  # intentionally broad — malformed JSON
                             entry["metadata_dict"] = {}
 
                     entries.append(entry)
 
                 return entries
 
-        except Exception as e:
+        except Exception as e:  # intentionally broad — backend query may fail any way
             logger.error(f"Failed to query metadata (sqlite): {e}")
             return None
 
@@ -744,7 +753,7 @@ class UnifiedCache(
 
         try:
             serialized = pickle.dumps(data)
-        except Exception:
+        except (TypeError, pickle.PicklingError):
             serialized = repr(data).encode()
         return hashlib.sha256(serialized).hexdigest()[:16]
 
@@ -860,7 +869,7 @@ class UnifiedCache(
         if hook is not None:
             try:
                 hook(*args)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:  # intentionally broad — hooks must not crash the caller  # noqa: BLE001
                 logger.warning(
                     f"Hook {hook_name} raised an exception (swallowed): {exc}"
                 )
@@ -1026,7 +1035,7 @@ class UnifiedCache(
             return handler.get_bytes(blob_bytes, metadata)
         except NotImplementedError:
             pass  # Fall through to temp-file path
-        except Exception as exc:
+        except Exception as exc:  # intentionally broad — handler may raise anything
             logger.debug(
                 "get_bytes failed for %s, falling back to temp file: %s",
                 data_type,
@@ -1095,7 +1104,7 @@ class UnifiedCache(
                 if isinstance(old_resolved, Path) and old_resolved.exists():
                     old_resolved.unlink()
             logger.debug(f"Cleaned up old blob for {cache_key}: {old_blob_path}")
-        except Exception as exc:
+        except (OSError, IOError) as exc:
             logger.warning(
                 f"Failed to clean up old blob for {cache_key} at {old_blob_path}: {exc}"
             )
@@ -1215,7 +1224,7 @@ class UnifiedCache(
                         # Also store kwargs as metadata_dict (raw values for easy querying)
                         # Pre-serialize to JSON string - backend just stores strings
                         metadata_dict["metadata_dict"] = json_dumps(kwargs.copy())
-                    except Exception as e:
+                    except (TypeError, ValueError) as e:
                         # If serialization fails, skip cache_key_params
                         logger.warning(f"Failed to serialize cache_key_params: {e}")
 
@@ -1275,7 +1284,7 @@ class UnifiedCache(
                 data_type = handler.data_type if "handler" in locals() else "unknown"
                 logger.error(f"Failed to cache {data_type} (I/O error): {e}")
                 raise
-            except Exception as e:
+            except Exception as e:  # intentionally broad — re-raises after cleanup
                 cleanup.rollback()
                 data_type = handler.data_type if "handler" in locals() else "unknown"
                 logger.error(f"Failed to cache {data_type}: {type(e).__name__}: {e}")
@@ -1371,7 +1380,9 @@ class UnifiedCache(
                 logger.warning(f"I/O error loading cached {data_type} {cache_key}: {e}")
                 self._record_miss()
                 return None
-            except Exception as e:
+            except (
+                Exception
+            ) as e:  # intentionally broad — deserialization may fail any way
                 # Unexpected errors (deserialization failures, corruption, etc.)
                 if self.config.metadata.delete_on_error:
                     logger.warning(
@@ -1512,7 +1523,9 @@ class UnifiedCache(
                 logger.warning(f"I/O error loading cached {data_type} {cache_key}: {e}")
                 self._record_miss()
                 return None
-            except Exception as e:
+            except (
+                Exception
+            ) as e:  # intentionally broad — deserialization may fail any way
                 # Unexpected errors (deserialization failures, corruption, etc.)
                 if self.config.metadata.delete_on_error:
                     logger.warning(
@@ -2149,7 +2162,7 @@ class UnifiedCache(
                 from .json_utils import loads as json_loads
 
                 return json_loads(raw)
-            except Exception:
+            except (ValueError, KeyError):  # intentionally broad — malformed JSON
                 return {}
         if isinstance(raw, dict):
             return raw
@@ -2385,7 +2398,7 @@ class UnifiedCache(
                             self.metadata_backend.put_entry(cache_key, updated_entry)
 
                             logger.debug(f"Re-signed updated entry {cache_key}")
-                    except Exception as e:
+                    except (ValueError, TypeError) as e:
                         logger.warning(
                             f"Failed to re-sign updated entry {cache_key}: {e}"
                         )
@@ -2401,7 +2414,7 @@ class UnifiedCache(
                         logger.debug(
                             f"Deleted old blob after update: {old_actual_path}"
                         )
-                    except Exception:
+                    except (OSError, IOError):  # intentionally broad — orphan cleanup
                         logger.warning(
                             f"Failed to delete old blob after update: {old_actual_path}"
                         )
@@ -2410,7 +2423,7 @@ class UnifiedCache(
                 cleanup.commit()
                 return True
 
-            except Exception as e:
+            except Exception as e:  # intentionally broad — re-raises after cleanup
                 cleanup.rollback()
                 logger.error(
                     f"Failed to update cache entry {cache_key[:16]}...: "
@@ -2492,7 +2505,7 @@ class UnifiedCache(
                     entry["metadata"] = metadata
 
                     logger.debug(f"Re-signed touched entry {cache_key}")
-                except Exception as e:
+                except (ValueError, TypeError) as e:
                     logger.warning(f"Failed to re-sign touched entry {cache_key}: {e}")
                     # Continue - touch succeeded, just missing signature
 
@@ -2558,7 +2571,7 @@ class UnifiedCache(
                         if cache_key:
                             self.invalidate(cache_key=cache_key)
                             deleted += 1
-                except Exception as exc:
+                except Exception as exc:  # intentionally broad — user callback may fail
                     logger.warning(
                         f"filter_fn raised for entry {entry.get('cache_key', '?')}: {exc}"
                     )
@@ -3027,7 +3040,7 @@ class UnifiedCache(
         """Ensure resources are cleaned up when the cache is garbage collected."""
         try:
             self.close()
-        except Exception:
+        except Exception:  # intentionally broad — cleanup must not raise
             pass  # Ignore errors during cleanup
 
     def __enter__(self):
@@ -3099,6 +3112,6 @@ def reset_cache(config: Optional[CacheConfig] = None, metadata_backend=None):
     if _global_cache is not None:
         try:
             _global_cache.close()
-        except Exception:
+        except Exception:  # intentionally broad — cleanup must not raise
             pass  # Ignore errors during cleanup
     _global_cache = UnifiedCache(config, metadata_backend)

@@ -205,7 +205,7 @@ class BlobBackend(ABC):
         try:
             data = self.read_blob(blob_path)
             return len(data)
-        except Exception:
+        except Exception:  # intentionally broad — size fallback
             return -1
 
     @abstractmethod
@@ -293,7 +293,7 @@ class FilesystemBlobBackend(BlobBackend):
         try:
             temp_path.write_bytes(data)
             temp_path.replace(blob_path)
-        except Exception:
+        except Exception:  # intentionally broad — cleanup temp file on any failure
             if temp_path.exists():
                 temp_path.unlink()
             raise
@@ -356,7 +356,7 @@ class FilesystemBlobBackend(BlobBackend):
                         break
                     f.write(chunk)
             temp_path.replace(blob_path)
-        except Exception:
+        except Exception:  # intentionally broad — cleanup temp file on any failure
             if temp_path.exists():
                 temp_path.unlink()
             raise

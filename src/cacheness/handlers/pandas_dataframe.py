@@ -31,7 +31,7 @@ class PandasDataFrameHandler(CacheHandler):
 
             data.to_parquet(io.BytesIO())
             return True
-        except Exception:
+        except Exception:  # intentionally broad — parquet compatibility check
             # DataFrame has types that can't be written to Parquet, let ObjectHandler handle it
             return False
 
@@ -66,7 +66,7 @@ class PandasDataFrameHandler(CacheHandler):
                     },
                 )
 
-            except Exception as e:
+            except Exception as e:  # intentionally broad — re-raises as CacheWriteError
                 raise CacheWriteError(
                     f"Failed to write Pandas DataFrame to Parquet: {e}",
                     handler_type="pandas_dataframe",
@@ -85,7 +85,7 @@ class PandasDataFrameHandler(CacheHandler):
 
                 return pd.read_parquet(file_path)
 
-            except Exception as e:
+            except Exception as e:  # intentionally broad — re-raises as CacheReadError
                 if isinstance(e, CacheReadError):
                     raise
                 raise CacheReadError(

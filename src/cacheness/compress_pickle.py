@@ -167,7 +167,7 @@ def is_pickleable(obj) -> bool:
     try:
         pickle.dumps(obj)
         return True
-    except Exception:
+    except Exception:  # intentionally broad — pickle may raise anything
         return False
 
 
@@ -208,7 +208,7 @@ def verify_pickleable(obj, raise_on_error: bool = True):
         else:
             return True, ""
 
-    except Exception as e:
+    except Exception as e:  # intentionally broad — pickle may raise anything
         error_msg = f"Object cannot be pickled: {type(e).__name__}: {str(e)}"
 
         if raise_on_error:
@@ -240,7 +240,7 @@ def is_dill_serializable(obj) -> bool:
     try:
         dill.dumps(obj)
         return True
-    except Exception:
+    except Exception:  # intentionally broad — dill may raise anything
         return False
 
 
@@ -288,7 +288,7 @@ def verify_dill_serializable(obj, raise_on_error: bool = True):
         else:
             return True, ""
 
-    except Exception as e:
+    except Exception as e:  # intentionally broad — dill may raise anything
         error_msg = (
             f"Object cannot be serialized with dill: {type(e).__name__}: {str(e)}"
         )
@@ -384,7 +384,7 @@ def optimize_compression_params(
         else:
             # Rough estimate for other objects
             data_size = sys.getsizeof(data)
-    except Exception:
+    except Exception:  # intentionally broad — data size estimation may fail
         data_size = 1024  # Default fallback
 
     # Optimize for ZSTD specifically
@@ -423,7 +423,7 @@ def optimize_compression_params(
                 # Note: We don't set threads here as it's global state
                 # Instead, we'll document the recommended thread count
                 params["_recommended_threads"] = optimal_threads
-        except Exception:
+        except Exception:  # intentionally broad — thread detection is optional
             pass  # Fallback to current settings
 
     return params
@@ -486,7 +486,7 @@ def list_available_codecs():
             "openhtj2k",
             "grok",
         ]
-    except Exception:
+    except Exception:  # intentionally broad — blosc2 codec enumeration may fail
         return ["lz4", "lz4hc", "zstd", "zlib", "blosclz"]
 
 
@@ -564,7 +564,9 @@ def benchmark_codecs(data, codecs=None, temp_dir=None):
             # Clean up temp file
             filepath.unlink(missing_ok=True)
 
-        except Exception as e:
+        except (
+            Exception
+        ) as e:  # intentionally broad — benchmark failure for one codec is expected
             results[codec] = {"error": str(e)}
 
     return results
@@ -794,7 +796,7 @@ def write_file(obj, filepath, *, nparray=True, **kwargs):
                             f"Unexpected compression result type: {type(carr)}"
                         )
                     start = end
-    except Exception as e:
+    except Exception as e:  # intentionally broad — re-raises as CompressionError
         raise CompressionError(f"Failed to compress data: {e}") from e
 
 
@@ -845,7 +847,9 @@ def read_file(filepath, *, nparray=True):
                 yield bytes(decompressed)
             else:
                 yield b""
-        except Exception:
+        except (
+            Exception
+        ):  # intentionally broad — decompress fallback to chunked reading
             # If single decompress fails, fall back to chunked reading
             # for files with multiple concatenated blosc frames
             f.seek(0)
@@ -881,7 +885,7 @@ def read_file(filepath, *, nparray=True):
                     # Try to unpack as array first
                     try:
                         return blosc.unpack_array(f.read())
-                    except Exception:
+                    except Exception:  # intentionally broad — array unpack fallback
                         # Fall back to regular decompression
                         f.seek(0)
                         decompressed_chunks = list(decomp_byte_arr(f))
@@ -889,7 +893,7 @@ def read_file(filepath, *, nparray=True):
             else:
                 decompressed_chunks = list(decomp_byte_arr(f))
                 return pickle.loads(b"".join(decompressed_chunks))
-    except Exception as e:
+    except Exception as e:  # intentionally broad — re-raises as CompressionError
         if isinstance(e, (CompressionError, FileNotFoundError)):
             raise
         raise CompressionError(f"Failed to decompress file {filepath}: {e}") from e

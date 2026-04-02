@@ -80,7 +80,7 @@ def _lazy_import_tensorflow():
         tf = None
         TENSORFLOW_AVAILABLE = False
         logger.debug("TensorFlow not available (ImportError)")
-    except Exception as e:
+    except Exception as e:  # intentionally broad — TF import may fail any way
         tf = None
         TENSORFLOW_AVAILABLE = False
         logger.warning(f"TensorFlow import failed with unexpected error: {e}")

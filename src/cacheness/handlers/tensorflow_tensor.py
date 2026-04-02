@@ -42,7 +42,7 @@ class TensorFlowTensorHandler(CacheHandler):
         # Check if it's a TensorFlow tensor (EagerTensor, Variable, etc.)
         try:
             return isinstance(data, (tf_module.Tensor, tf_module.Variable))
-        except Exception:
+        except Exception:  # intentionally broad — TF isinstance may fail
             return False
 
     def put(self, data: Any, file_path: Path, config: Any) -> HandlerResult:
@@ -108,7 +108,7 @@ class TensorFlowTensorHandler(CacheHandler):
                     },
                 )
 
-            except Exception as e:
+            except Exception as e:  # intentionally broad — re-raises as CacheWriteError
                 raise CacheWriteError(
                     f"Failed to write TensorFlow tensor with blosc2: {e}",
                     handler_type="tensorflow_tensor",
@@ -150,7 +150,7 @@ class TensorFlowTensorHandler(CacheHandler):
                 logger.debug(f"Loaded TensorFlow tensor with shape {tensor.shape}")
                 return tensor
 
-            except Exception as e:
+            except Exception as e:  # intentionally broad — re-raises as CacheReadError
                 raise CacheReadError(
                     f"Failed to load TensorFlow tensor from {file_path}: {e}",
                     handler_type="tensorflow_tensor",

@@ -100,7 +100,9 @@ class CustomMetadataMixin:
                                     self.metadata_backend.engine,
                                     tables=[tbl],
                                 )
-                            except Exception:
+                            except (
+                                Exception
+                            ):  # intentionally broad — table may already exist
                                 pass  # table already exists — fine
 
                     for metadata_instance in metadata_objects:
@@ -158,7 +160,7 @@ class CustomMetadataMixin:
 
                     session.commit()
                     logger.debug(f"Stored custom metadata for cache key {cache_key}")
-        except Exception as e:
+        except Exception as e:  # intentionally broad — custom metadata is best-effort
             logger.error(f"Failed to store custom metadata: {e}")
 
     def _get_custom_metadata(self, cache_key: str) -> Dict[str, Any]:
@@ -197,7 +199,9 @@ class CustomMetadataMixin:
                             session.rollback()
 
                     return result
-        except Exception as e:
+        except (
+            Exception
+        ) as e:  # intentionally broad — custom metadata retrieval is best-effort
             logger.error(f"Failed to retrieve custom metadata: {e}")
             return {}
 
@@ -273,7 +277,9 @@ class CustomMetadataMixin:
             else:
                 logger.warning("SQLAlchemy session not available")
                 return []
-        except Exception as e:
+        except (
+            Exception
+        ) as e:  # intentionally broad — custom metadata query is best-effort
             logger.error(f"Failed to query schema {schema_name}: {e}")
             return []
 

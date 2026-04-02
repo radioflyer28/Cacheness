@@ -117,7 +117,9 @@ def hash_directory_parallel(
                 try:
                     rel_path, content_hash = future.result()
                     file_hashes.append((rel_path, content_hash))
-                except Exception as e:
+                except (
+                    Exception
+                ) as e:  # intentionally broad — individual file hash failure
                     file_info = future_to_file[future]
                     logger.warning(f"Failed to hash file {file_info[0]}: {e}")
                     # Add a fallback hash for failed files
@@ -138,7 +140,7 @@ def hash_directory_parallel(
         )
         return final_hasher.hexdigest()
 
-    except Exception as e:
+    except Exception as e:  # intentionally broad — parallel fallback to sequential
         logger.warning(
             f"Parallel directory hashing failed for {directory_path}: {e}, falling back to sequential"
         )

@@ -59,7 +59,7 @@ class ArrayHandler(CacheHandler):
                         "dtype": str(data.dtype),
                     },
                 )
-            except Exception as e:
+            except Exception as e:  # intentionally broad — blosc2 fallback to NPZ
                 logger.warning(f"blosc2 compression failed, falling back to NPZ: {e}")
 
         # Fallback to NPZ format
@@ -177,7 +177,7 @@ class ArrayHandler(CacheHandler):
                 blosc2_path = file_path.with_suffix("").with_suffix(".b2nd")
                 if blosc2_path.exists():
                     return self._read_blosc2_array(blosc2_path)
-            except Exception as e:
+            except Exception as e:  # intentionally broad — blosc2 read fallback to NPZ
                 logger.debug(f"Failed to read blosc2 file: {e}")
 
         # Try NPZ format (fallback or primary)

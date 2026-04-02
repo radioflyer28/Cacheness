@@ -28,7 +28,7 @@ def _cleanup_decorator_caches():
         if instance is not None:
             try:
                 instance.close()
-            except Exception:
+            except Exception:  # intentionally broad — atexit cleanup
                 pass  # Ignore errors during cleanup
     _decorator_cache_instances.clear()
 
@@ -175,7 +175,9 @@ class cached:
                     cache_key = _generate_cache_key(
                         func, args, kwargs, self.key_prefix, cache_instance.config
                     )
-            except Exception as e:
+            except (
+                Exception
+            ) as e:  # intentionally broad — user key_func may raise anything
                 if self.ignore_errors:
                     # If key generation fails, just call the function
                     return func(*args, **kwargs)
@@ -194,7 +196,9 @@ class cached:
                     with self._lock:
                         self._hits += 1
                     return cached_result
-            except Exception as e:
+            except (
+                Exception
+            ) as e:  # intentionally broad — cache retrieval may fail any way
                 if not self.ignore_errors:
                     raise RuntimeError(f"Cache retrieval failed: {e}") from e
                 # If cache retrieval fails but we're ignoring errors, continue to function call
@@ -217,7 +221,9 @@ class cached:
                 # Track the cache key for later cleanup
                 with self._lock:
                     self._cache_keys.add(cache_key)
-            except Exception as e:
+            except (
+                Exception
+            ) as e:  # intentionally broad — cache storage may fail any way
                 if not self.ignore_errors:
                     raise RuntimeError(f"Cache storage failed: {e}") from e
                 # If cache storage fails but we're ignoring errors, still return the result
@@ -265,7 +271,9 @@ class cached:
                 with self._lock:
                     self._cache_keys.discard(cache_key)
                 deleted += 1
-            except Exception:
+            except (
+                Exception
+            ):  # intentionally broad — key may have been deleted externally
                 # Key might have been deleted externally or expired
                 with self._lock:
                     self._cache_keys.discard(cache_key)
@@ -305,7 +313,7 @@ class cached:
         if self._owns_cache and self.cache_instance is not None:
             try:
                 self.cache_instance.close()
-            except Exception:
+            except Exception:  # intentionally broad — cleanup must not raise
                 pass  # Ignore errors during cleanup
 
     @classmethod
@@ -432,7 +440,9 @@ class cache_if:
                     cache_key = _generate_cache_key(
                         func, args, kwargs, self.key_prefix, cache_instance.config
                     )
-            except Exception as e:
+            except (
+                Exception
+            ) as e:  # intentionally broad — user key_func may raise anything
                 if self.ignore_errors:
                     # If key generation fails, just call the function
                     return func(*args, **kwargs)
@@ -451,7 +461,9 @@ class cache_if:
                     with self._lock:
                         self._hits += 1
                     return cached_result
-            except Exception as e:
+            except (
+                Exception
+            ) as e:  # intentionally broad — cache retrieval may fail any way
                 if not self.ignore_errors:
                     raise RuntimeError(f"Cache retrieval failed: {e}") from e
                 # If cache retrieval fails but we're ignoring errors, continue to function call
@@ -466,7 +478,9 @@ class cache_if:
             # Check condition before caching
             try:
                 should_cache = self.condition(result)
-            except Exception as e:
+            except (
+                Exception
+            ) as e:  # intentionally broad — user condition may raise anything
                 if not self.ignore_errors:
                     raise RuntimeError(f"Condition evaluation failed: {e}") from e
                 # If condition evaluation fails, don't cache but return result
@@ -484,7 +498,9 @@ class cache_if:
                     # Track the cache key for later cleanup
                     with self._lock:
                         self._cache_keys.add(cache_key)
-                except Exception as e:
+                except (
+                    Exception
+                ) as e:  # intentionally broad — cache storage may fail any way
                     if not self.ignore_errors:
                         raise RuntimeError(f"Cache storage failed: {e}") from e
                     # If cache storage fails but we're ignoring errors, still return the result
@@ -532,7 +548,9 @@ class cache_if:
                 with self._lock:
                     self._cache_keys.discard(cache_key)
                 deleted += 1
-            except Exception:
+            except (
+                Exception
+            ):  # intentionally broad — key may have been deleted externally
                 # Key might have been deleted externally or expired
                 with self._lock:
                     self._cache_keys.discard(cache_key)
@@ -572,7 +590,7 @@ class cache_if:
         if self._owns_cache and self.cache_instance is not None:
             try:
                 self.cache_instance.close()
-            except Exception:
+            except Exception:  # intentionally broad — cleanup must not raise
                 pass  # Ignore errors during cleanup
 
 

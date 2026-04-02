@@ -37,7 +37,7 @@ class PolarsDataFrameHandler(CacheHandler):
             data.write_parquet(io.BytesIO())
             logger.debug(f"Polars DataFrame validation passed: shape={data.shape}")
             return True
-        except Exception as e:
+        except Exception as e:  # intentionally broad — parquet compatibility check
             logger.debug(f"Polars DataFrame validation failed: {e}")
             return False
 
@@ -73,7 +73,7 @@ class PolarsDataFrameHandler(CacheHandler):
                     },
                 )
 
-            except Exception as e:
+            except Exception as e:  # intentionally broad — re-raises as CacheWriteError
                 raise CacheWriteError(
                     f"Failed to write Polars DataFrame to Parquet: {e}",
                     handler_type="polars_dataframe",
@@ -97,7 +97,7 @@ class PolarsDataFrameHandler(CacheHandler):
                 logger.debug(f"Polars DataFrame loaded successfully: shape={df.shape}")
                 return df
 
-            except Exception as e:
+            except Exception as e:  # intentionally broad — re-raises as CacheReadError
                 if isinstance(e, CacheReadError):
                     raise
                 raise CacheReadError(

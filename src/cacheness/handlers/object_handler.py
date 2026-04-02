@@ -110,7 +110,7 @@ class ObjectHandler(CacheHandler):
                 # Only compress if object is larger than threshold
                 if len(test_data) < config.compression.compression_threshold_bytes:
                     should_compress = False
-            except Exception:
+            except Exception:  # intentionally broad — size estimation may fail any way
                 # If we can't estimate size, use compression anyway (but respect "none" codec)
                 should_compress = (
                     BLOSC_AVAILABLE

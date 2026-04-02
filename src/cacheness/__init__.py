@@ -50,6 +50,7 @@ from .interfaces import (
     WriteBlobResult,
 )  # Export interface for custom handlers
 from .entry_list import EntryList  # noqa: F401
+from .error_handling import CacheSecurityError, CacheBackendError  # noqa: F401
 
 # Import config validation and file loading (Phase 2.4)
 from .config import (
@@ -261,6 +262,9 @@ __all__ = [
     "cache_if",
     # Version info
     "__version__",
+    # Exception types
+    "CacheSecurityError",
+    "CacheBackendError",
 ]
 
 # Add YAML config support if PyYAML available (Phase 2.4)

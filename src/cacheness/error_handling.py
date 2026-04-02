@@ -65,6 +65,18 @@ class CacheMetadataError(CacheError):
     pass
 
 
+class CacheSecurityError(CacheError):
+    """Raised when cache security operations fail (signing, verification, key management)."""
+
+    pass
+
+
+class CacheBackendError(CacheError):
+    """Raised when cache backend operations fail (storage I/O, blob operations)."""
+
+    pass
+
+
 def with_error_handling(
     error_type: Type[CacheError] = CacheError,
     context: Optional[Dict[str, Any]] = None,
@@ -89,7 +101,9 @@ def with_error_handling(
             except CacheError:
                 # Re-raise cache errors as-is
                 raise
-            except Exception as e:
+            except (
+                Exception
+            ) as e:  # intentionally broad — converts arbitrary errors to CacheError
                 # Convert other exceptions to cache errors
                 error_context = (context or {}).copy()
                 error_context.update(
@@ -144,7 +158,7 @@ def cache_operation_context(operation: str, **context):
     except CacheError:
         logger.error(f"Cache operation failed: {operation}", extra=context)
         raise
-    except Exception as e:
+    except Exception as e:  # intentionally broad — re-raises after logging
         logger.error(
             f"Unexpected error in cache operation: {operation} - {e}", extra=context
         )
@@ -172,7 +186,9 @@ def log_cache_performance(func: Callable) -> Callable:
 
             return result
 
-        except Exception as e:
+        except (
+            Exception
+        ) as e:  # intentionally broad — performance logging must not crash caller
             duration = time.time() - start_time
             logger.warning(
                 f"Cache operation {func.__name__} failed after {duration:.3f}s: {e}"
@@ -308,7 +324,9 @@ def log_configuration_validation(config_class: str):
                 result = func(self, *args, **kwargs)
                 logger.debug(f"{config_class} configuration validated successfully")
                 return result
-            except Exception as e:
+            except (
+                Exception
+            ) as e:  # intentionally broad — validation logging must not crash caller
                 logger.error(f"{config_class} configuration validation failed: {e}")
                 raise
 

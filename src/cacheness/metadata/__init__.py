@@ -105,13 +105,13 @@ def create_metadata_backend(backend_type: str = "auto", **kwargs) -> MetadataBac
                 db_file = kwargs.get("db_file", "cache_metadata.db")
                 echo = kwargs.get("echo", False)
                 backend = SqliteBackend(db_file, echo, namespace=namespace)
-            except Exception:
+            except Exception:  # intentionally broad — cascading backend fallback
                 try:
                     # Fall back to in-memory SQLite if file-based fails
                     logger.warning("File-based SQLite failed, using in-memory SQLite")
                     echo = kwargs.get("echo", False)
                     backend = SqliteBackend(":memory:", echo, namespace=namespace)
-                except Exception:
+                except Exception:  # intentionally broad — final fallback to JSON
                     # Final fallback to JSON
                     logger.warning("SQLite backends failed, falling back to JSON")
                     metadata_file = kwargs.get(

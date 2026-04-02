@@ -695,7 +695,9 @@ class SqliteBackend(MetadataBackend):
                     logger.debug(
                         f"Serialized full_metadata: {len(full_metadata_json)} chars"
                     )
-                except Exception as e:
+                except (
+                    Exception
+                ) as e:  # intentionally broad — JSON serialization fallback
                     # If serialization fails, skip full_metadata
                     logger.warning(f"Failed to serialize full_metadata JSON: {e}")
                     full_metadata_json = None
@@ -1181,7 +1183,7 @@ class SqliteBackend(MetadataBackend):
         """Ensure connections are closed when the backend is garbage collected."""
         try:
             self.close()
-        except Exception:
+        except Exception:  # intentionally broad — cleanup must not raise
             # Suppress errors during interpreter shutdown
             pass
 

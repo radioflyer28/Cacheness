@@ -123,7 +123,7 @@ def _ensure_jsonb_value(value):
         try:
             parsed = json_loads(value)
             return parsed if isinstance(parsed, dict) else None
-        except Exception:
+        except Exception:  # intentionally broad — JSON parsing fallback
             return None
     return None
 
@@ -846,7 +846,7 @@ class PostgresBackend(MetadataBackend):
                     stats = self._PgCacheStats(id=1)
                     session.add(stats)
                     session.commit()
-            except Exception as e:
+            except Exception as e:  # intentionally broad — stats init is best-effort
                 logger.warning(f"Failed to initialize stats: {e}")
                 session.rollback()
 
@@ -870,7 +870,7 @@ class PostgresBackend(MetadataBackend):
                     for cache_key, entry_data in metadata.get("entries", {}).items():
                         self._upsert_entry(session, cache_key, entry_data)
                     session.commit()
-                except Exception as e:
+                except Exception as e:  # intentionally broad — re-raises after rollback
                     session.rollback()
                     logger.error(f"Failed to save metadata: {e}")
                     raise
@@ -896,7 +896,7 @@ class PostgresBackend(MetadataBackend):
                 try:
                     self._upsert_entry(session, cache_key, entry_data)
                     session.commit()
-                except Exception as e:
+                except Exception as e:  # intentionally broad — re-raises after rollback
                     session.rollback()
                     logger.error(f"Failed to put entry {cache_key}: {e}")
                     raise
@@ -1096,7 +1096,7 @@ class PostgresBackend(MetadataBackend):
                 if isinstance(ckp, str):
                     ckp = json_loads(ckp)
                 result["metadata"]["cache_key_params"] = ckp
-            except Exception:
+            except Exception:  # intentionally broad — JSON parsing for cache_key_params
                 pass
 
         return result
@@ -1117,7 +1117,7 @@ class PostgresBackend(MetadataBackend):
                     )
                     session.commit()
                     return result.rowcount > 0
-                except Exception as e:
+                except Exception as e:  # intentionally broad — re-raises after rollback
                     session.rollback()
                     logger.error(f"Failed to remove entry {cache_key}: {e}")
                     raise
@@ -1187,7 +1187,7 @@ class PostgresBackend(MetadataBackend):
 
                     session.commit()
                     return True
-                except Exception as e:
+                except Exception as e:  # intentionally broad — re-raises after rollback
                     session.rollback()
                     logger.error(f"Failed to update entry {cache_key}: {e}")
                     raise
@@ -1302,7 +1302,9 @@ class PostgresBackend(MetadataBackend):
                     )
                 )
                 session.commit()
-            except Exception as e:
+            except (
+                Exception
+            ) as e:  # intentionally broad — access time update is best-effort
                 session.rollback()
                 logger.warning(f"Failed to update access time for {cache_key}: {e}")
 
@@ -1316,7 +1318,9 @@ class PostgresBackend(MetadataBackend):
                     .values(cache_hits=self._PgCacheStats.cache_hits + 1)
                 )
                 session.commit()
-            except Exception as e:
+            except (
+                Exception
+            ) as e:  # intentionally broad — hits increment is best-effort
                 session.rollback()
                 logger.warning(f"Failed to increment hits: {e}")
 
@@ -1330,7 +1334,9 @@ class PostgresBackend(MetadataBackend):
                     .values(cache_misses=self._PgCacheStats.cache_misses + 1)
                 )
                 session.commit()
-            except Exception as e:
+            except (
+                Exception
+            ) as e:  # intentionally broad — misses increment is best-effort
                 session.rollback()
                 logger.warning(f"Failed to increment misses: {e}")
 
@@ -1377,7 +1383,9 @@ class PostgresBackend(MetadataBackend):
 
                     return count
 
-                except Exception as e:
+                except (
+                    Exception
+                ) as e:  # intentionally broad — re-raises cleanup failure
                     session.rollback()
                     logger.error(f"Cleanup failed: {e}")
                     return 0
@@ -1449,7 +1457,7 @@ class PostgresBackend(MetadataBackend):
                         "removed_entries": removed_entries,
                     }
 
-                except Exception as e:
+                except Exception as e:  # intentionally broad — LRU cleanup failure
                     session.rollback()
                     logger.error(f"LRU cleanup failed: {e}")
                     return {"count": 0, "removed_entries": []}
@@ -1484,7 +1492,7 @@ class PostgresBackend(MetadataBackend):
                     logger.info(f"Cleared all {count} cache entries")
                     return count
 
-                except Exception as e:
+                except Exception as e:  # intentionally broad — clear all failure
                     session.rollback()
                     logger.error(f"Clear all failed: {e}")
                     return 0
@@ -1494,14 +1502,14 @@ class PostgresBackend(MetadataBackend):
         try:
             self.engine.dispose()
             logger.debug("PostgreSQL engine disposed")
-        except Exception as e:
+        except Exception as e:  # intentionally broad — connection close is best-effort
             logger.warning(f"Error closing PostgreSQL connection: {e}")
 
     def __del__(self):
         """Cleanup on garbage collection."""
         try:
             self.close()
-        except Exception:
+        except Exception:  # intentionally broad — cleanup must not raise
             pass
 
     def __enter__(self):
@@ -1524,7 +1532,7 @@ def _auto_register():
             if "postgresql" not in _metadata_backend_registry:
                 register_metadata_backend("postgresql", PostgresBackend)
                 logger.debug("Auto-registered PostgreSQL metadata backend")
-        except Exception as e:
+        except Exception as e:  # intentionally broad — auto-registration is best-effort
             logger.debug(f"Could not auto-register PostgreSQL backend: {e}")
 
 

@@ -62,7 +62,7 @@ class JsonBackend(MetadataBackend):
                     logger.warning("JSON metadata has invalid schema, starting fresh")
                 else:
                     return data
-            except Exception:
+            except Exception:  # intentionally broad — corrupted JSON file
                 logger.warning("JSON metadata corrupted, starting fresh")
 
         return {
@@ -96,14 +96,14 @@ class JsonBackend(MetadataBackend):
                 import shutil
 
                 shutil.move(temp_path, self.metadata_file)
-            except Exception:
+            except Exception:  # intentionally broad — cleanup temp on any write failure
                 # Clean up temp file on failure
                 try:
                     os.remove(temp_path)
                 except OSError:
                     pass
                 raise
-        except Exception as e:
+        except Exception as e:  # intentionally broad — best-effort save
             logger.error(f"Failed to save JSON metadata: {e}")
 
     def get_entry(self, cache_key: str) -> Optional[Dict[str, Any]]:
@@ -492,7 +492,7 @@ class JsonBackend(MetadataBackend):
                     data = json_loads(f.read())
                 if isinstance(data, dict) and "namespaces" in data:
                     return data
-            except Exception:
+            except Exception:  # intentionally broad — corrupted namespace registry
                 logger.warning("Namespace registry corrupted, starting fresh")
         return {"namespaces": {}}
 
@@ -513,13 +513,13 @@ class JsonBackend(MetadataBackend):
                 with os.fdopen(fd, "w") as f:
                     f.write(json_dumps(registry, default=str))
                 shutil.move(temp_path, self._registry_file)
-            except Exception:
+            except Exception:  # intentionally broad — cleanup temp on any write failure
                 try:
                     os.remove(temp_path)
                 except OSError:
                     pass
                 raise
-        except Exception as e:
+        except Exception as e:  # intentionally broad — best-effort registry save
             logger.error(f"Failed to save namespace registry: {e}")
 
     def _ensure_namespace_registry(self) -> None:
@@ -614,7 +614,7 @@ class JsonBackend(MetadataBackend):
                 try:
                     with open(ns_file, "w") as f:
                         f.write(json_dumps(ns_data, default=str))
-                except Exception as e:
+                except Exception as e:  # intentionally broad — re-raises as OSError
                     raise OSError(
                         f"Failed to create metadata file for namespace "
                         f"{namespace_id!r}: {e}"
