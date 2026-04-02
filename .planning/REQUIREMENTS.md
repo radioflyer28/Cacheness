@@ -37,7 +37,7 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| CONC-01 | — | Not started |
-| INTG-01 | — | Not started |
-| INTG-02 | — | Not started |
-| MGMT-01 | — | Not started |
+| CONC-01 | Phase 7 | Not started |
+| INTG-01 | Phase 8 | Not started |
+| INTG-02 | Phase 9 | Not started |
+| MGMT-01 | Phase 10 | Not started |
