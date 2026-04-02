@@ -4,16 +4,11 @@
 
 Cacheness is a Python disk caching library with pluggable metadata backends (JSON/SQLite/PostgreSQL) and handler-based type-aware serialization (DataFrames, NumPy arrays, TensorFlow tensors, etc.). It also serves as a standalone persistent key-value store via storage mode. This milestone addresses technical debt, security gaps, error handling inconsistencies, test coverage gaps, and code structure issues identified by the codebase audit.
 
-## Current Milestone: v0.7.0 Cleanup & Hardening
+## Current State
 
-**Goal:** Improve reliability, security, and maintainability without changing public API semantics.
+**Shipped:** v0.7.0 Cleanup & Hardening (2026-04-02)
 
-**Target features:**
-- Code decomposition (core.py → mixins, metadata.py → package, handlers.py → package)
-- Security hardening (blob content hashing default-on, Windows key permissions, per-namespace key derivation, configurable key fallback)
-- Error handling cleanup (narrow ~30 broad `except Exception` catches)
-- Test coverage gaps (thread safety tests, key rotation tests)
-- Handler robustness (type detection ordering guardrails)
+The codebase has been decomposed from monolithic files into well-structured packages and mixins, exception handling has been narrowed to specific types, security defaults hardened, and test coverage expanded with thread safety and key rotation tests.
 
 ## Core Value
 
@@ -37,20 +32,19 @@ Improve reliability, security, and maintainability of Cacheness without changing
 - ✓ Configuration via dataclasses with human-readable size/duration parsing — existing
 - ✓ S3-compatible blob storage — existing
 - ✓ Comprehensive test suite (1,427 tests) — existing
+- ✓ Handler package split (handlers.py → handlers/ package) — v0.7.0
+- ✓ Metadata package split (metadata.py → metadata/ package) — v0.7.0
+- ✓ Core mixin decomposition (core.py → 4 mixins) — v0.7.0
+- ✓ Narrowed exception handling with CacheSecurityError/CacheBackendError — v0.7.0
+- ✓ Blob content hashing enabled by default — v0.7.0
+- ✓ Configurable key fallback behavior (raise_on_key_fallback) — v0.7.0
+- ✓ Thread safety smoke tests — v0.7.0
+- ✓ Key rotation scenario tests — v0.7.0
+- ✓ Handler priority values with conflict detection — v0.7.0
 
 ### Active
 
-- [ ] Decompose `core.py` (3,307 lines) into focused mixins/delegates
-- [ ] Split `metadata.py` (2,562 lines) into per-backend modules
-- [ ] Split `handlers.py` (1,425 lines) into per-handler modules
-- [ ] Narrow broad `except Exception` catches (~30 instances) to specific exception types
-- [ ] Enable blob content hashing by default (not just metadata signing)
-- [ ] Implement proper signing key file permissions on Windows (ACLs or documented limitation)
-- [ ] Add per-namespace key derivation (HKDF from master key + namespace ID)
-- [ ] Make in-memory key fallback behavior configurable (fail-loud option)
-- [ ] Add thread safety tests for concurrent `put()`/`get()` operations
-- [ ] Add key rotation scenario tests
-- [ ] Improve handler type detection robustness (document ordering constraints, add guardrails)
+(No active requirements — next milestone not yet scoped)
 
 ### Out of Scope
 
@@ -59,15 +53,18 @@ Improve reliability, security, and maintainability of Cacheness without changing
 - TensorFlow handler fixes — low priority, platform issues (Windows hangs)
 - JSON backend O(n²) write performance — documented limitation, mitigation is "use SQLite"
 - Export/import cache — low priority convenience feature
+- Per-namespace key derivation via HKDF — needs migration path design (deferred from v0.7.0)
+- Windows key file ACLs via `icacls` — document limitation for now (deferred from v0.7.0)
+- Blob content encryption at rest — feature addition, not hardening
 
 ## Context
 
-- **Codebase state:** 16,613 lines of Python across 27 source files. Well-tested (1,427 passed, 102 skipped).
+- **Codebase state:** 17,022 lines of Python across ~40 source files. Well-tested (1,616 passed, 101 skipped).
 - **Codebase map:** `.planning/codebase/` contains 7 detailed analysis documents from 2026-04-02.
-- **Key concern:** The three largest files (`core.py`, `metadata.py`, `handlers.py`) contain 7,294 lines combined — nearly half the codebase. Decomposition is the highest-impact structural change.
-- **Security gaps:** Signing covers metadata but not blob content by default. Windows key permissions are ineffective. Namespace key isolation is opt-in rather than default.
-- **Error handling:** 30+ broad `except Exception` catches mask bugs and make debugging difficult.
-- **Test gaps:** No concurrency tests despite documented thread-safety limitations. No key rotation tests.
+- **Structure:** Code decomposed into `handlers/` (11 files), `metadata/` (5 files), and 4 mixin files alongside `core.py`.
+- **Security:** Blob content hashing on by default. Key fallback configurable. HMAC-SHA256 signing.
+- **Error handling:** All `except Exception` catches narrowed or annotated `# intentionally broad`.
+- **Tests:** Thread safety and key rotation scenarios covered. Handler conflict detection warns on overlapping matches.
 
 ## Testing Philosophy & Workflow
 
@@ -125,10 +122,12 @@ New tests must match the quality and coverage strategies already employed:
 
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
-| Mixins over inheritance for core.py decomposition | Preserves single `UnifiedCache` class API, no breaking changes | — Pending |
-| Package-per-backend for metadata.py | Clear separation, each backend file independent | — Pending |
-| Package-per-handler for handlers.py | Handlers are independent, registry stays in `__init__.py` | — Pending |
+| Mixins over inheritance for core.py decomposition | Preserves single `UnifiedCache` class API, no breaking changes | ✓ Good — 4 mixins extracted cleanly |
+| Package-per-backend for metadata.py | Clear separation, each backend file independent | ✓ Good — 5-file package |
+| Package-per-handler for handlers.py | Handlers are independent, registry stays in `registry.py` | ✓ Good — 11-file package |
 | Cleanup + hardening only (no async/eviction) | Scope control — async and eviction are large features deserving their own milestones | ✓ Good |
+| `_compat.py` pattern for shared imports | Avoids circular imports in package splits | ✓ Good — reused across handlers/ and metadata/ |
+| Inline execution for phases 4-6 | Simple enough to not need formal plan files | ✓ Good — faster delivery |
 
 ## Evolution
 
@@ -148,4 +147,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-02 after milestone v0.7.0 started*
+*Last updated: 2026-04-02 after v0.7.0 milestone*
