@@ -403,13 +403,17 @@ class SecurityConfig:
         True  # Automatically delete entries with invalid signatures
     )
 
+    # Key fallback behavior
+    raise_on_key_fallback: bool = False  # If True, raise CacheSecurityError instead of falling back to in-memory key
+
     def __post_init__(self):
         """Validate security configuration."""
         logger.debug(
             f"Security configured: signing={self.enable_entry_signing}, "
             f"in_memory_key={self.use_in_memory_key}, "
             f"allow_unsigned={self.allow_unsigned_entries}, "
-            f"delete_invalid={self.delete_invalid_signatures}"
+            f"delete_invalid={self.delete_invalid_signatures}, "
+            f"raise_on_key_fallback={self.raise_on_key_fallback}"
         )
 
 

@@ -224,7 +224,7 @@ class VerificationMixin:
             logger.warning(f"Failed to sign entry {cache_key}: {e}")
 
     def verify_integrity(
-        self, repair: bool = False, verify_hashes: bool = False
+        self, repair: bool = False, verify_hashes: bool = True
     ) -> IntegrityReport:
         """
         Verify cache integrity by cross-checking blob files and metadata entries.

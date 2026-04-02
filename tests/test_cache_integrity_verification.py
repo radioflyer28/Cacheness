@@ -384,7 +384,7 @@ class TestVerifyIntegrityCombined:
         cache = _make_cache(tmp_path)
 
         # Without repair or hash check
-        report = cache.verify_integrity()
+        report = cache.verify_integrity(verify_hashes=False)
         assert "orphaned_blobs" in report
         assert "dangling_entries" in report
         assert "size_mismatches" in report
@@ -395,6 +395,6 @@ class TestVerifyIntegrityCombined:
         report = cache.verify_integrity(repair=True)
         assert "repaired" in report
 
-        # With hash check
-        report = cache.verify_integrity(verify_hashes=True)
+        # Default includes hash check (verify_hashes=True by default)
+        report = cache.verify_integrity()
         assert "hash_mismatches" in report

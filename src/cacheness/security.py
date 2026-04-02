@@ -79,6 +79,7 @@ class CacheEntrySigner:
         self,
         key_file_path: Path,
         use_in_memory_key: bool = False,
+        raise_on_key_fallback: bool = False,
     ):
         """
         Initialize the cache entry signer.
@@ -86,9 +87,13 @@ class CacheEntrySigner:
         Args:
             key_file_path: Path to the signing key file (ignored if use_in_memory_key=True)
             use_in_memory_key: If True, use in-memory key instead of persistent file
+            raise_on_key_fallback: If True, raise CacheSecurityError instead of
+                silently falling back to an in-memory key when the key file
+                cannot be written
         """
         self.key_file_path = key_file_path
         self.use_in_memory_key = use_in_memory_key
+        self.raise_on_key_fallback = raise_on_key_fallback
         self.secret_key = self._load_or_generate_key()
 
         key_type = "in-memory" if use_in_memory_key else "persistent"
@@ -151,6 +156,13 @@ class CacheEntrySigner:
             return key
 
         except OSError as e:
+            if self.raise_on_key_fallback:
+                from .error_handling import CacheSecurityError
+
+                raise CacheSecurityError(
+                    f"Failed to persist signing key to {self.key_file_path}: {e}. "
+                    f"Set raise_on_key_fallback=False to allow in-memory fallback."
+                ) from e
             logger.error(f"Failed to generate signing key: {e}")
             # Fallback to in-memory key (not persistent)
             logger.warning("Using in-memory signing key (not persistent)")
@@ -408,6 +420,7 @@ def create_cache_signer(
     cache_dir: Path,
     key_file: str = "cache_signing_key.bin",
     use_in_memory_key: bool = False,
+    raise_on_key_fallback: bool = False,
 ) -> CacheEntrySigner:
     """
     Factory function to create a cache entry signer.
@@ -416,9 +429,11 @@ def create_cache_signer(
         cache_dir: Cache directory where key file will be stored
         key_file: Name of the signing key file (ignored if use_in_memory_key=True)
         use_in_memory_key: If True, use in-memory key instead of persistent file
+        raise_on_key_fallback: If True, raise CacheSecurityError instead of
+            silently falling back to an in-memory key
 
     Returns:
         Configured CacheEntrySigner instance
     """
     key_file_path = cache_dir / key_file
-    return CacheEntrySigner(key_file_path, use_in_memory_key)
+    return CacheEntrySigner(key_file_path, use_in_memory_key, raise_on_key_fallback)

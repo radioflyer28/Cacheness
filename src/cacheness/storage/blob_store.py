@@ -110,6 +110,7 @@ class BlobStore:
         enable_signing: bool = False,
         signing_key_file: str = "cache_signing_key.bin",
         use_in_memory_key: bool = False,
+        raise_on_key_fallback: bool = False,
         config: Optional[CacheConfig] = None,
         namespace: str = "default",
     ):
@@ -128,6 +129,8 @@ class BlobStore:
             enable_signing: If True, enable HMAC-SHA256 entry signing
             signing_key_file: Name of the signing key file
             use_in_memory_key: If True, use ephemeral in-memory signing key
+            raise_on_key_fallback: If True, raise CacheSecurityError instead of
+                silently falling back to an in-memory key
             config: Optional CacheConfig for handler configuration. If not provided,
                 a default config is created from compression parameters.
             namespace: Namespace for blob isolation. Non-default namespaces store
@@ -197,7 +200,9 @@ class BlobStore:
         # Initialize entry signer for metadata integrity protection
         self.signer = None
         if enable_signing:
-            self._init_signer(signing_key_file, use_in_memory_key)
+            self._init_signer(
+                signing_key_file, use_in_memory_key, raise_on_key_fallback
+            )
 
         logger.debug(f"BlobStore initialized at {self.cache_dir}")
 
@@ -223,6 +228,7 @@ class BlobStore:
         self,
         signing_key_file: str,
         use_in_memory_key: bool,
+        raise_on_key_fallback: bool = False,
     ) -> None:
         """Initialize the cache entry signer."""
         try:
@@ -232,6 +238,7 @@ class BlobStore:
                 cache_dir=self.cache_dir,
                 key_file=signing_key_file,
                 use_in_memory_key=use_in_memory_key,
+                raise_on_key_fallback=raise_on_key_fallback,
             )
             info = self.signer.get_field_info()
             logger.info(
@@ -724,7 +731,7 @@ class BlobStore:
     # ── Integrity verification ────────────────────────────────────────
 
     def verify_integrity(
-        self, repair: bool = False, verify_hashes: bool = False
+        self, repair: bool = False, verify_hashes: bool = True
     ) -> IntegrityReport:
         """
         Verify blob store integrity by cross-checking blob files and metadata.
