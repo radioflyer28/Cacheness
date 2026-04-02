@@ -49,7 +49,9 @@ Plans:
   2. On cache init (when `cleanup_on_init=True`), stale intent entries older than a configurable threshold are detected and their orphaned blobs deleted
   3. A simulated crash (kill between blob write and metadata commit) leaves an intent entry that is cleaned up on next cache init
   4. Normal successful writes leave no residual intent entries
-**Plans**: TBD
+**Plans**: 1 plan
+Plans:
+- [ ] 08-01-PLAN.md — WriteIntentJournal + core.py integration + tests
 
 ### Phase 9: Blob Integrity Validation
 **Goal**: Blob content integrity is validated end-to-end — users can trust that stored blobs have not been tampered with or corrupted
