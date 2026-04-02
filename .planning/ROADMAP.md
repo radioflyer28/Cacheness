@@ -42,7 +42,9 @@ Plans:
   2. SQLAlchemy models and shared base class are in a dedicated shared module
   3. `from cacheness.metadata import MetadataBackend, JsonMetadataBackend, SqliteMetadataBackend` works unchanged
   4. All 1,427+ existing tests pass without modification to test files
-**Plans**: TBD
+**Plans:** 1 plan
+Plans:
+- [ ] 02-01-PLAN.md — Create metadata/ package, split backends into individual files, re-export via __init__.py
 
 ### Phase 3: Core Mixin Decomposition
 **Goal**: core.py decomposes into focused mixins while preserving the single UnifiedCache class API and all import paths
