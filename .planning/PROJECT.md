@@ -4,6 +4,17 @@
 
 Cacheness is a Python disk caching library with pluggable metadata backends (JSON/SQLite/PostgreSQL) and handler-based type-aware serialization (DataFrames, NumPy arrays, TensorFlow tensors, etc.). It also serves as a standalone persistent key-value store via storage mode. This milestone addresses technical debt, security gaps, error handling inconsistencies, test coverage gaps, and code structure issues identified by the codebase audit.
 
+## Current Milestone: v1.0 Cleanup & Hardening
+
+**Goal:** Improve reliability, security, and maintainability without changing public API semantics.
+
+**Target features:**
+- Code decomposition (core.py → mixins, metadata.py → package, handlers.py → package)
+- Security hardening (blob content hashing default-on, Windows key permissions, per-namespace key derivation, configurable key fallback)
+- Error handling cleanup (narrow ~30 broad `except Exception` catches)
+- Test coverage gaps (thread safety tests, key rotation tests)
+- Handler robustness (type detection ordering guardrails)
+
 ## Core Value
 
 Improve reliability, security, and maintainability of Cacheness without changing its public API semantics — make the library safer, more debuggable, and easier to evolve.
@@ -58,6 +69,50 @@ Improve reliability, security, and maintainability of Cacheness without changing
 - **Error handling:** 30+ broad `except Exception` catches mask bugs and make debugging difficult.
 - **Test gaps:** No concurrency tests despite documented thread-safety limitations. No key rotation tests.
 
+## Testing Philosophy & Workflow
+
+### Red-Green-Red TDD
+
+All new code follows the **red-green-red** cycle:
+
+1. **Red** — Write a failing test that defines the expected behavior
+2. **Green** — Write the minimum code to make the test pass
+3. **Red** — Refactor, confirm the test still passes, then write the next failing test
+
+Tests are written *before* implementation, not after. A feature is not done until its tests pass and existing tests remain green.
+
+### Tiered Test Execution
+
+Run the smallest useful set of tests at each stage — fast feedback, full coverage before push:
+
+| Tier | When | What | Time |
+|------|------|------|------|
+| **Tier 1** | After each code change | Tests directly exercising modified code | ~5-15s |
+| **Tier 2** | After planned changes, before full suite | Add regression-risk and cross-cutting tests | ~30-60s |
+| **Full suite** | Once before push | All 1,427+ tests | ~48s parallel |
+
+Use the source-to-test mapping in `copilot-instructions.md` to select Tier 1 files. Add cross-cutting tests (integrity, parity, fault injection) for Tier 2.
+
+### Test Quality Standards
+
+New tests must match the quality and coverage strategies already employed:
+
+- **One test file per concern area** — not per source file. Group by behavior domain (`test_cache_integrity.py`, `test_namespace_isolation.py`).
+- **Parametrize across backends** — any test touching metadata must run against JSON, SQLite, and (where dockerized) PostgreSQL.
+- **Fault injection** — use `patch.object` to simulate failures (disk errors, metadata write failures, network issues). See `tests/test_fault_injection.py`.
+- **Property-based testing** — use Hypothesis for invariant verification where applicable. See `tests/test_property_based.py`.
+- **Backend parity** — when adding behavior to one backend, verify all backends behave identically via `tests/test_backend_parity.py`.
+- **Optional dependency guards** — use `@pytest.mark.skipif(not DEP_AVAILABLE, ...)` and `pytest.importorskip()` for optional deps (numpy, pandas, polars, dill, blosc2).
+- **Fixture lifecycle** — always close caches and clean up temp dirs. Use context managers or `yield` + explicit `cache.close()`.
+- **xdist grouping** — tests sharing Docker resources (PostgreSQL, real S3) use `@pytest.mark.xdist_group("docker")`.
+- **No sleeping in tests** — use deterministic waits or mock time. Exception: Windows file-handle cleanup may require minimal `gc.collect()` + sleep.
+
+### Test Naming
+
+- Test functions: `test_<behavior_under_test>` — descriptive enough to serve as documentation
+- Test classes: group related tests as `class Test<Feature>:`
+- Parametrized IDs: use `pytest.param(..., id="descriptive-label")`
+
 ## Constraints
 
 - **Backward compatibility**: All existing public APIs must remain unchanged. Imports from `cacheness` must continue to work.
@@ -93,4 +148,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-02 after initialization*
+*Last updated: 2026-04-02 after milestone v1.0 started*
