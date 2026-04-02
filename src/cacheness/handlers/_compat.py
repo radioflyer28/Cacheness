@@ -2,8 +2,23 @@
 
 import logging
 
-
-# Import focused interfaces
+# Import focused interfaces from parent package
+from ..interfaces import (  # noqa: F401
+    CacheHandler,
+    HandlerResult,
+    BlobReadContext,
+    CacheWriteError,
+    CacheReadError,
+)
+from ..error_handling import cache_operation_context  # noqa: F401
+from ..compress_pickle import (
+    BLOSC_AVAILABLE,  # noqa: F401
+    is_pickleable,  # noqa: F401
+    is_dill_serializable,  # noqa: F401
+    optimize_compression_params,  # noqa: F401
+    write_file as write_compressed_pickle,  # noqa: F401
+    read_file as read_compressed_pickle,  # noqa: F401
+)
 
 # DataFrame libraries with fallback
 try:
@@ -21,11 +36,6 @@ try:
 except ImportError:
     pd = None  # type: ignore
     PANDAS_AVAILABLE = False
-
-# Import compressed pickle utilities
-from ..compress_pickle import (
-    DILL_AVAILABLE,
-)
 
 # Optional dependency - blosc2 for array compression
 try:
