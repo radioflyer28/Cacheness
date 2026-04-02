@@ -46,6 +46,7 @@ class CacheStorageConfig:
     temp_dir: Optional[str] = (
         None  # Temporary directory for atomic writes (None = use cache_dir/tmp)
     )
+    stale_intent_threshold_seconds: float = 300.0  # Threshold for orphan cleanup
 
     @property
     def max_cache_size_bytes(self) -> Optional[int]:

@@ -64,6 +64,10 @@ class StorageModeMixin:
                     cleanup.set_remote(self._blob_store.blob_backend, actual_path_str)
 
                 metadata_dict = self._build_metadata_dict(result, file_hash)
+
+                # Record write intent for crash recovery (non-inline only)
+                self._write_journal.record_intent(cache_key, result.actual_path)
+
                 entry_data = {
                     "data_type": handler.data_type,
                     "description": description,
@@ -83,6 +87,9 @@ class StorageModeMixin:
 
             self._sign_entry_if_enabled(cache_key, entry_data, metadata_dict)
             self.metadata_backend.put_entry(cache_key, entry_data)
+
+            # Clear write intent — metadata committed successfully
+            self._write_journal.clear_intent(cache_key)
             self._cleanup_stale_blob(cache_key, old_blob_path, result.actual_path)
 
             logger.debug(f"Stored {handler.data_type} {cache_key} (storage mode)")
@@ -91,6 +98,7 @@ class StorageModeMixin:
 
         except Exception as e:  # intentionally broad — re-raises after cleanup
             cleanup.rollback()
+            self._write_journal.clear_intent(cache_key)
             data_type = handler.data_type if "handler" in locals() else "unknown"
             logger.error(
                 f"Failed to store {data_type} (storage mode): {type(e).__name__}: {e}"

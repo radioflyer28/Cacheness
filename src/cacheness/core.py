@@ -191,9 +191,18 @@ class UnifiedCache(
         # Shares metadata_backend, handlers, lock, signer, and config
         self._init_blob_store()
 
-        # Clean up expired entries on initialization
+        # Initialize write intent journal for crash recovery
+        from .write_intent import WriteIntentJournal
+
+        self._write_journal = WriteIntentJournal(
+            self.cache_dir,
+            self.config.storage.stale_intent_threshold_seconds,
+        )
+
+        # Clean up expired entries and stale write intents on initialization
         if self.config.storage.cleanup_on_init:
             self._cleanup_expired()
+            self._cleanup_stale_intents()
 
         logger.info(
             f"✅ Unified cache initialized: {self.cache_dir} (backend: {self.actual_backend})"
@@ -885,6 +894,12 @@ class UnifiedCache(
         if removed_count > 0:
             logger.info(f"Cleaned up {removed_count} expired cache entries")
 
+    def _cleanup_stale_intents(self):
+        """Remove orphaned blobs from stale write intents (crash recovery)."""
+        cleaned = self._write_journal.cleanup_stale_intents()
+        if cleaned > 0:
+            logger.info(f"Cleaned up {cleaned} stale write intents")
+
     # ── Shared put helpers ────────────────────────────────────────────
     # Extracted from _storage_mode_put() and put() to eliminate duplicated
     # metadata construction, signing, and stale-blob cleanup logic.
@@ -1204,6 +1219,9 @@ class UnifiedCache(
                     # Update metadata
                     metadata_dict = self._build_metadata_dict(result, file_hash)
 
+                    # Record write intent for crash recovery (non-inline only)
+                    self._write_journal.record_intent(cache_key, result.actual_path)
+
                 # Store complete cache key parameters as JSON for debugging/querying (if enabled)
                 # This captures the original kwargs used to derive the cache key
                 # Pre-serialize to JSON strings so backend can be standalone storage
@@ -1262,7 +1280,8 @@ class UnifiedCache(
 
                 self.metadata_backend.put_entry(cache_key, entry_data)
 
-                # Clean up old blob if the path changed
+                # Clear write intent — metadata committed successfully
+                self._write_journal.clear_intent(cache_key)
                 self._cleanup_stale_blob(cache_key, old_blob_path, result.actual_path)
 
                 # Handle custom metadata if provided
@@ -1282,11 +1301,13 @@ class UnifiedCache(
 
             except (OSError, IOError) as e:
                 cleanup.rollback()
+                self._write_journal.clear_intent(cache_key)
                 data_type = handler.data_type if "handler" in locals() else "unknown"
                 logger.error(f"Failed to cache {data_type} (I/O error): {e}")
                 raise
             except Exception as e:  # intentionally broad — re-raises after cleanup
                 cleanup.rollback()
+                self._write_journal.clear_intent(cache_key)
                 data_type = handler.data_type if "handler" in locals() else "unknown"
                 logger.error(f"Failed to cache {data_type}: {type(e).__name__}: {e}")
                 raise
