@@ -264,11 +264,12 @@ class TestListHandlers:
             assert required_keys.issubset(handler_info.keys())
 
     def test_list_handlers_priority_is_position(self, registry):
-        """Priority should match position in list."""
+        """Position should match index in list, priority from handler attribute."""
         result = registry.list_handlers()
 
         for i, handler_info in enumerate(result):
-            assert handler_info["priority"] == i
+            assert handler_info["position"] == i
+            assert isinstance(handler_info["priority"], int)
 
     def test_list_handlers_identifies_builtin(self, registry):
         """Built-in handlers should be marked is_builtin=True."""

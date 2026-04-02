@@ -160,18 +160,35 @@ class HandlerRegistry:
         return True
 
     def get_handler(self, data: Any) -> CacheHandler:
-        """Get the appropriate handler for the given data."""
-        for handler in self.handlers:
-            # Try to pass config to can_handle if the method supports it
-            try:
-                if handler.can_handle(data, self.config):
-                    return handler
-            except TypeError:
-                # Fallback for handlers that don't accept config parameter
-                if handler.can_handle(data):
-                    return handler
+        """Get the appropriate handler for the given data.
 
-        raise ValueError(f"No handler available for data type: {type(data)}")
+        Uses first-match semantics based on handler list order.
+        Logs a warning when multiple handlers claim to handle the same data,
+        to surface potential priority conflicts.
+        """
+        matched = []
+        for handler in self.handlers:
+            try:
+                handles = handler.can_handle(data, self.config)
+            except TypeError:
+                handles = handler.can_handle(data)
+            if handles:
+                matched.append(handler)
+
+        if not matched:
+            raise ValueError(f"No handler available for data type: {type(data)}")
+
+        if len(matched) > 1:
+            names = [
+                f"{h.data_type}(priority={getattr(h, 'priority', '?')})"
+                for h in matched
+            ]
+            logger.warning(
+                f"Multiple handlers match {type(data).__name__}: {', '.join(names)}. "
+                f"Using {matched[0].data_type} (first match)."
+            )
+
+        return matched[0]
 
     def get_handler_by_type(self, data_type: str) -> CacheHandler:
         """Get handler by data type string."""
@@ -290,7 +307,8 @@ class HandlerRegistry:
             result.append(
                 {
                     "name": handler.data_type,
-                    "priority": i,
+                    "priority": getattr(handler, "priority", i),
+                    "position": i,
                     "class": handler.__class__.__name__,
                     "is_builtin": handler.data_type in builtin_types,
                 }

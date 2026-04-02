@@ -19,6 +19,8 @@ from ._compat import (
 class PolarsDataFrameHandler(CacheHandler):
     """Handler for Polars DataFrames using Parquet format."""
 
+    priority: int = 30
+
     def can_handle(self, data: Any) -> bool:
         """Check if data is a Polars DataFrame that can be saved to Parquet."""
         if not POLARS_AVAILABLE or pl is None:

@@ -21,6 +21,8 @@ from ._compat import (
 class TensorFlowTensorHandler(CacheHandler):
     """Handler for TensorFlow tensors using blosc2.save_tensor/load_tensor."""
 
+    priority: int = 45
+
     def can_handle(self, data: Any) -> bool:
         """Check if data is a TensorFlow tensor that can be cached."""
         # Quick check for obviously non-tensor types before importing TensorFlow

@@ -18,6 +18,8 @@ from ._compat import (
 class PolarsSeriesHandler(CacheHandler):
     """Handler for Polars Series using Parquet format."""
 
+    priority: int = 10
+
     def can_handle(self, data: Any) -> bool:
         """Check if data is a Polars Series."""
         if not POLARS_AVAILABLE or pl is None:

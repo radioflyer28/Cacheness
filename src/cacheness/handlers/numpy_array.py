@@ -19,6 +19,8 @@ from ._compat import (
 class ArrayHandler(CacheHandler):
     """Handler for NumPy arrays using blosc2 or NPZ format."""
 
+    priority: int = 50
+
     def can_handle(self, data: Any) -> bool:
         """Check if data is a NumPy array or dict of arrays."""
         if isinstance(data, np.ndarray):

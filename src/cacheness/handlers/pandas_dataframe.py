@@ -18,6 +18,8 @@ from ._compat import (
 class PandasDataFrameHandler(CacheHandler):
     """Handler for Pandas DataFrames using Parquet format."""
 
+    priority: int = 40
+
     def can_handle(self, data: Any) -> bool:
         """Check if data is a Pandas DataFrame."""
         if not PANDAS_AVAILABLE or pd is None:

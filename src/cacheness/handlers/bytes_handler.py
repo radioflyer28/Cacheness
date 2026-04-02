@@ -27,6 +27,8 @@ class BytesHandler(CacheHandler):
     files rather than being unnecessarily pickled.
     """
 
+    priority: int = 60
+
     def can_handle(self, data: Any, config: Any = None) -> bool:
         """Accept ``bytes``, ``bytearray``, and ``memoryview``."""
         return isinstance(data, (bytes, bytearray, memoryview))

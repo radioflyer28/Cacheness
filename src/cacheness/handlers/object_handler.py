@@ -23,6 +23,8 @@ from ._compat import (
 class ObjectHandler(CacheHandler):
     """Handler for general Python objects using compressed pickle."""
 
+    priority: int = 100
+
     def can_handle(self, data: Any, config: Any = None) -> bool:
         """Check if data can be pickled or dill-serialized.
 
