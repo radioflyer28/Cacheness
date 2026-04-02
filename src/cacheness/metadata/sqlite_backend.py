@@ -233,7 +233,9 @@ class SqliteBackend(MetadataBackend):
         self.SessionLocal = sessionmaker(
             autocommit=False, autoflush=False, bind=self.engine
         )
-        self._lock = threading.Lock()
+        self._lock = (
+            threading.RLock()
+        )  # RLock: allows re-entrant acquisition from composed operations
 
         # Create core tables only (cache_entries, cache_stats,
         # cacheness_namespaces).  Custom metadata tables are created
@@ -498,7 +500,7 @@ class SqliteBackend(MetadataBackend):
 
     def list_namespaces(self) -> list:
         """List all registered namespaces from the registry."""
-        with self.SessionLocal() as session:
+        with self._lock, self.SessionLocal() as session:
             rows = (
                 session.execute(
                     select(CacheNamespace).order_by(CacheNamespace.created_at)
@@ -866,7 +868,7 @@ class SqliteBackend(MetadataBackend):
         """Return lightweight flat entry dicts — raw SQL, no ORM hydration."""
         from sqlalchemy import text
 
-        with self.SessionLocal() as session:
+        with self._lock, self.SessionLocal() as session:
             tbl = self._entries_table
             rows = session.execute(
                 text(
@@ -922,7 +924,7 @@ class SqliteBackend(MetadataBackend):
 
     def list_entries(self) -> List[Dict[str, Any]]:
         """List all cache entries — Core column select, no ORM hydration."""
-        with self.SessionLocal() as session:
+        with self._lock, self.SessionLocal() as session:
             CE = self._CacheEntry
             # Core column select — avoids SQLAlchemy ORM identity-map overhead
             rows = session.execute(
@@ -995,7 +997,7 @@ class SqliteBackend(MetadataBackend):
 
     def get_stats(self) -> Dict[str, Any]:
         """Get cache statistics using SQL aggregates (no full table scan)."""
-        with self.SessionLocal() as session:
+        with self._lock, self.SessionLocal() as session:
             # Single aggregation query — no Python-side iteration
             CE = self._CacheEntry
             row = session.execute(

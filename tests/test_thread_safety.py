@@ -98,6 +98,68 @@ class TestThreadSafetyJson:
         assert not errors, f"Errors during mixed concurrent ops: {errors}"
 
 
+class TestReentrantLocking:
+    """Prove SqliteBackend's RLock allows nested lock acquisition without deadlock.
+
+    These tests would deadlock with threading.Lock but succeed with threading.RLock.
+    """
+
+    def test_reentrant_lock_sqlite_cleanup_by_size(self, tmp_path):
+        """Put enough entries to trigger size-based cleanup — exercises re-entrant path."""
+        config = CacheConfig(
+            storage=CacheStorageConfig(
+                cache_dir=str(tmp_path),
+                max_cache_size="1KB",
+            ),
+            metadata=CacheMetadataConfig(metadata_backend="sqlite"),
+            compression=CompressionConfig(use_blosc2_arrays=False),
+        )
+        cache = cacheness(config)
+
+        # Put several entries to exceed the 1KB limit, triggering cleanup_by_size
+        # internally via _enforce_size_limit → metadata_backend.cleanup_by_size
+        for i in range(10):
+            cache.put(f"value_{i}" * 50, test_key=f"key_{i}")
+
+        # No deadlock — test completes. Verify cache is functional.
+        entries = cache.list_entries()
+        assert len(entries) > 0
+
+    def test_reentrant_lock_sqlite_get_stats_during_cleanup(self, tmp_path):
+        """Call get_stats while holding the cache lock — simulates re-entrant backend access."""
+        cache = _make_cache(tmp_path, "sqlite")
+        for i in range(5):
+            cache.put(f"value_{i}", test_key=f"key_{i}")
+
+        # Acquire the cache-level lock, then call backend methods that also acquire it
+        with cache._lock:
+            stats = cache.metadata_backend.get_stats()
+            assert stats["total_entries"] == 5
+
+            cache.metadata_backend.cleanup_by_size(target_size_bytes=0)
+            stats_after = cache.metadata_backend.get_stats()
+            assert stats_after["total_entries"] < 5
+
+    def test_reentrant_lock_sqlite_nested_calls(self, tmp_path):
+        """Direct nested lock acquisition on SqliteBackend — would deadlock with Lock."""
+        cache = _make_cache(tmp_path, "sqlite")
+        for i in range(3):
+            cache.put(f"value_{i}", test_key=f"key_{i}")
+
+        backend = cache.metadata_backend
+
+        # Acquire the backend lock, then call a method that also acquires it
+        with backend._lock:
+            stats = backend.get_stats()
+            assert stats["total_entries"] == 3
+
+            entries = backend.list_entries()
+            assert len(entries) == 3
+
+            summaries = backend.iter_entry_summaries()
+            assert len(summaries) == 3
+
+
 class TestThreadSafetySqlite:
     """Thread safety smoke tests with SQLite metadata backend."""
 
