@@ -38,7 +38,7 @@
   3. A new stress test exercises re-entrant lock acquisition (nested backend calls from a single thread) and completes without hanging
 **Plans:** 1 plan
 Plans:
-- [ ] 07-01-PLAN.md — Lock→RLock swap, lock consistency audit, re-entrancy tests
+- [x] 07-01-PLAN.md — Lock→RLock swap, lock consistency audit, re-entrancy tests
 
 ### Phase 8: Crash-Safe Write Intent Logging
 **Goal**: Incomplete writes are automatically detected and cleaned up — no orphaned blobs accumulate silently after crashes
