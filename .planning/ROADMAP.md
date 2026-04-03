@@ -74,7 +74,9 @@ Plans:
   2. Entries signed with the shared master key (pre-HKDF) still verify successfully (migration path)
   3. New entries in different namespaces produce different signatures for identical data
   4. Disabling HKDF reverts to shared-key behavior (opt-out path)
-**Plans**: TBD
+**Plans:** 1 plan
+Plans:
+- [ ] 16-01-PLAN.md — HKDF derivation, config, wiring, tests, docs (3 tasks, wave 1)
 
 ### Phase 17: Key Rotation API
 **Goal**: Users can rotate signing keys and re-sign existing entries without data loss
