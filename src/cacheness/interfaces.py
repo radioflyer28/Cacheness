@@ -79,6 +79,20 @@ class EntrySummary(TypedDict, total=False):
     blob_data: bytes  # raw inline blob bytes (only present when is_inline=1)
 
 
+@dataclass
+class RotationResult:
+    """Result of a key rotation operation.
+
+    Returned by ``UnifiedCache.rotate_key()`` and ``BlobStore.rotate_key()``.
+    """
+
+    total: int = 0
+    re_signed: int = 0
+    failed: int = 0
+    skipped: int = 0
+    failures: list = field(default_factory=list)
+
+
 class BlobReadContext(TypedDict, total=False):
     """Metadata dict passed to ``handler.get()`` during deserialization.
 

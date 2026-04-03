@@ -256,6 +256,102 @@ class BlobStore:
             logger.warning(f"Failed to initialize entry signer: {e}")
             self.signer = None
 
+    def rotate_key(self, new_key_file: "str | Path") -> "RotationResult":
+        """Rotate the signing key and re-sign all blob entries.
+
+        Loads a new 32-byte signing key, replaces the current key file,
+        creates a fresh signer, then iterates every entry to re-sign.
+
+        Best-effort: individual entry failures are recorded in
+        :attr:`RotationResult.failures`, not raised.
+
+        Args:
+            new_key_file: Path to a file containing exactly 32 random bytes.
+
+        Returns:
+            :class:`RotationResult` with re-sign counts.
+
+        Raises:
+            CacheSecurityError: If signing is not enabled, the file does
+                not exist, or the key is not 32 bytes.
+        """
+        from ..error_handling import CacheSecurityError
+        from ..interfaces import RotationResult
+        from ..security import create_cache_signer
+
+        if self.signer is None:
+            raise CacheSecurityError(
+                "Entry signing is not enabled — cannot rotate key"
+            )
+
+        new_key_path = Path(new_key_file)
+        if not new_key_path.is_file():
+            raise CacheSecurityError(
+                f"Key file does not exist: {new_key_path}"
+            )
+        new_key_bytes = new_key_path.read_bytes()
+        if len(new_key_bytes) != 32:
+            raise CacheSecurityError(
+                f"Invalid key length ({len(new_key_bytes)} bytes) — expected 32"
+            )
+
+        with self._lock:
+            # Overwrite the current key file with the new key
+            dest = Path(self.signer.key_file_path)
+            dest.write_bytes(new_key_bytes)
+
+            # Create a new signer using the replaced key file
+            new_signer = create_cache_signer(
+                cache_dir=self.cache_dir,
+                key_file=dest.name,
+                use_in_memory_key=False,
+                key_fallback_policy=self.signer.key_fallback_policy,
+                namespace_id=self._namespace,
+                use_hkdf_derivation=self.signer.use_hkdf_derivation,
+            )
+
+            result = RotationResult()
+            entries = self.backend.iter_entry_summaries()
+            result.total = len(entries)
+
+            for entry in entries:
+                cache_key = entry["cache_key"]
+                try:
+                    full_entry = self.backend.get_entry(cache_key)
+                    if full_entry is None:
+                        result.skipped += 1
+                        continue
+
+                    # BlobStore flatten-for-signing pattern (matches put/get)
+                    nested_meta = full_entry.get("metadata", {})
+                    signable = {**full_entry, **nested_meta, "cache_key": cache_key}
+                    new_sig = new_signer.sign_entry(signable)
+
+                    # Store in both top-level and nested metadata
+                    full_entry["entry_signature"] = new_sig
+                    nested_meta["entry_signature"] = new_sig
+                    full_entry["metadata"] = nested_meta
+
+                    self.backend.put_entry(cache_key, full_entry)
+                    result.re_signed += 1
+                except Exception as e:  # intentionally broad — best-effort re-sign
+                    result.failed += 1
+                    result.failures.append(
+                        {"cache_key": cache_key, "error": str(e)}
+                    )
+                    logger.warning(f"Failed to re-sign blob entry {cache_key}: {e}")
+
+            # Replace the signer instance
+            self.signer = new_signer
+
+            logger.info(
+                f"BlobStore key rotation complete: {result.re_signed}/{result.total} "
+                f"entries re-signed, {result.failed} failed, "
+                f"{result.skipped} skipped"
+            )
+
+        return result
+
     def put(
         self,
         data: Any,

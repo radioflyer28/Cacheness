@@ -394,6 +394,127 @@ class UnifiedCache(
         except (ValueError, TypeError, OSError) as e:
             logger.warning(f"Namespace signing/verification failed: {e}")
 
+    def rotate_key(self, new_key_file: str | Path) -> "RotationResult":
+        """Rotate the signing key and re-sign all entries and namespace.
+
+        Loads a new 32-byte signing key from *new_key_file*, replaces the
+        current key file, creates a fresh :class:`CacheEntrySigner` with
+        HKDF derivation for the current namespace, then iterates every
+        entry to re-sign it as v3.  The namespace registry row is also
+        re-signed.
+
+        The operation is **best-effort**: if an individual entry fails to
+        re-sign (e.g. corrupt metadata), it is skipped and recorded in
+        :attr:`RotationResult.failures`.  The lock is held for the entire
+        duration so concurrent ``put()``/``get()`` calls block until
+        rotation finishes.
+
+        Args:
+            new_key_file: Path to a file containing exactly 32 random bytes
+                          (the new signing key).
+
+        Returns:
+            :class:`RotationResult` with counts of re-signed / failed /
+            skipped entries.
+
+        Raises:
+            CacheSecurityError: If signing is not enabled, *new_key_file*
+                does not exist, or the key is not exactly 32 bytes.
+        """
+        from .error_handling import CacheSecurityError
+        from .interfaces import RotationResult
+        from .security import create_cache_signer
+
+        if self.signer is None:
+            raise CacheSecurityError(
+                "Entry signing is not enabled — cannot rotate key"
+            )
+
+        new_key_path = Path(new_key_file)
+        if not new_key_path.is_file():
+            raise CacheSecurityError(
+                f"Key file does not exist: {new_key_path}"
+            )
+        new_key_bytes = new_key_path.read_bytes()
+        if len(new_key_bytes) != 32:
+            raise CacheSecurityError(
+                f"Invalid key length ({len(new_key_bytes)} bytes) — expected 32"
+            )
+
+        with self._lock:
+            # Overwrite the current key file with the new key
+            dest = Path(self.signer.key_file_path)
+            dest.write_bytes(new_key_bytes)
+
+            # Create a new signer using the replaced key file
+            new_signer = create_cache_signer(
+                cache_dir=self.cache_dir,
+                key_file=dest.name,
+                use_in_memory_key=False,
+                key_fallback_policy=self.config.security.key_fallback_policy,
+                namespace_id=self.namespace,
+                use_hkdf_derivation=self.config.security.use_hkdf_derivation,
+            )
+
+            result = RotationResult()
+            entries = self.metadata_backend.iter_entry_summaries()
+            result.total = len(entries)
+
+            for entry in entries:
+                cache_key = entry["cache_key"]
+                try:
+                    full_entry = self.metadata_backend.get_entry(cache_key)
+                    if full_entry is None:
+                        result.skipped += 1
+                        continue
+
+                    metadata = full_entry.get("metadata", {})
+                    signable = self._extract_signable_fields(
+                        cache_key, full_entry, metadata
+                    )
+                    new_sig = new_signer.sign_entry(signable)
+                    metadata["entry_signature"] = new_sig
+                    full_entry["metadata"] = metadata
+                    self.metadata_backend.put_entry(cache_key, full_entry)
+                    result.re_signed += 1
+                except Exception as e:  # intentionally broad — best-effort re-sign
+                    result.failed += 1
+                    result.failures.append(
+                        {"cache_key": cache_key, "error": str(e)}
+                    )
+                    logger.warning(f"Failed to re-sign entry {cache_key}: {e}")
+
+            # Re-sign namespace (D-12)
+            try:
+                ns_info = self.metadata_backend.get_namespace(self.namespace)
+                if ns_info is not None:
+                    ns_data = {
+                        "namespace_id": ns_info.namespace_id,
+                        "display_name": ns_info.display_name,
+                        "created_at": ns_info.created_at,
+                    }
+                    ns_sig = new_signer.sign_namespace(ns_data)
+                    self.metadata_backend.set_namespace_signature(
+                        ns_info.namespace_id, ns_sig
+                    )
+            except Exception as e:  # intentionally broad — namespace re-sign failure is non-fatal
+                logger.warning(f"Failed to re-sign namespace: {e}")
+
+            # Replace the signer instance (all subsequent ops use new key)
+            self.signer = new_signer
+
+            # Also update the shared BlobStore signer if it exists
+            if hasattr(self, "_blob_store") and self._blob_store is not None:
+                self._blob_store.signer = new_signer
+
+            logger.info(
+                f"Key rotation complete: {result.re_signed}/{result.total} "
+                f"entries re-signed, {result.failed} failed, "
+                f"{result.skipped} skipped"
+            )
+
+        return result
+
     def _init_blob_store(self):
         """Initialize internal BlobStore for storage delegation.
 
