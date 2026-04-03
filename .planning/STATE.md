@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v0.10.0
 milestone_name: Security & Architecture
-status: executing
-last_updated: "2026-04-03T18:44:57.100Z"
-last_activity: 2026-04-03
+status: idle
+last_updated: "2026-04-03T19:45:00Z"
+last_activity: 2026-04-03 -- Phase 17 execution complete
 progress:
   total_phases: 6
-  completed_phases: 2
-  total_plans: 2
-  completed_plans: 2
-  percent: 0
+  completed_phases: 3
+  total_plans: 5
+  completed_plans: 5
+  percent: 50
 ---
 
 # Project State
@@ -20,13 +20,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-03)
 
 **Core value:** Reliable, type-aware disk caching with pluggable backends
-**Current focus:** Phase 16 — hkdf-key-derivation
+**Current focus:** Phase 17 complete — ready for Phase 18
 
 ## Current Position
 
-Phase: 17
-Plan: Not started
-Status: Executing Phase 16
-Last activity: 2026-04-03
+Phase: 17 (key-rotation-api) — COMPLETE
+Plan: 2 of 2 (all complete)
+Status: Phase 17 execution complete
+Last activity: 2026-04-03 -- Phase 17 execution complete
 
-Progress: [░░░░░░░░░░] 0% — 0/6 phases complete
+Progress: [█████░░░░░] 50% — 3/6 phases complete

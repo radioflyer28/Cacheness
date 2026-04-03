@@ -126,7 +126,9 @@ class TestUnifiedCacheRotateKey:
         sig_after = ns_info_after.signature if ns_info_after else None
 
         assert sig_after is not None
-        assert sig_after != sig_before, "Namespace signature should change after rotation"
+        assert sig_after != sig_before, (
+            "Namespace signature should change after rotation"
+        )
 
     def test_entries_verify_after_rotation(self, tmp_path):
         """After rotation, all entries are readable with the new key."""

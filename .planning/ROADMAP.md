@@ -46,7 +46,8 @@
 - [x] **Phase 15: Configurable Key Fallback** — User-controlled key fallback policy (raise/warn/fallback)
 - [x] **Phase 16: HKDF Key Derivation** — Per-namespace key derivation from master key
  (completed 2026-04-03)
-- [ ] **Phase 17: Key Rotation API** — Manual rotate_key() with re-sign and old-key handling
+- [x] **Phase 17: Key Rotation API** — Manual rotate_key() with re-sign and old-key handling
+ (completed 2026-04-03)
 - [ ] **Phase 18: Encryption at Rest** — AES-GCM blob encryption, disabled by default
 - [ ] **Phase 19: Core Decomposition II** — Extract eviction, namespace, and init logic into mixins
 - [ ] **Phase 20: Concurrency & Atomics Verification** — Thread safety and atomic write correctness
@@ -90,8 +91,8 @@ Plans:
   4. Rotation is atomic — partial failure leaves entries in a consistent state
 **Plans:** 2 plans
 Plans:
-- [ ] 17-01-PLAN.md — RotationResult dataclass + rotate_key() on UnifiedCache and BlobStore (2 tasks, wave 1)
-- [ ] 17-02-PLAN.md — Comprehensive tests + security documentation (2 tasks, wave 2)
+- [x] 17-01-PLAN.md — RotationResult dataclass + rotate_key() on UnifiedCache and BlobStore (2 tasks, wave 1)
+- [x] 17-02-PLAN.md — Comprehensive tests + security documentation (2 tasks, wave 2)
 
 ### Phase 18: Encryption at Rest
 **Goal**: Cached blob data can be encrypted on disk — disabled by default, signing unaffected
@@ -145,9 +146,9 @@ Plans:
 | 12. Threading Model Documentation | v0.9.0 | Complete | 2026-04-03 |
 | 13. Deserialization Security | v0.9.0 | Complete | 2026-04-03 |
 | 14. Windows Key File Permissions | v0.9.0 | Complete | 2026-04-03 |
-| 15. Configurable Key Fallback | v0.10.0 | Not started | - |
+| 15. Configurable Key Fallback | v0.10.0 | Complete | 2026-04-03 |
 | 16. HKDF Key Derivation | 1/1 | Complete    | 2026-04-03 |
-| 17. Key Rotation API | v0.10.0 | Not started | - |
+| 17. Key Rotation API | v0.10.0 | Complete | 2026-04-03 |
 | 18. Encryption at Rest | v0.10.0 | Not started | - |
 | 19. Core Decomposition II | v0.10.0 | Not started | - |
 | 20. Concurrency & Atomics Verification | v0.10.0 | Not started | - |
