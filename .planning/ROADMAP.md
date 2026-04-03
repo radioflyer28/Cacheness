@@ -104,7 +104,10 @@ Plans:
   3. Encryption is disabled by default — existing users see zero behavior change
   4. Configuration exposed via `CacheMetadataConfig` (`encryption_enabled`, `encryption_key_file`)
   5. Unencrypted entries remain readable when encryption is later enabled (migration path)
-**Plans**: TBD
+**Plans:** 2 plans
+Plans:
+- [ ] 18-01-PLAN.md — Core encryption module + BlobStore integration (2 tasks, wave 1)
+- [ ] 18-02-PLAN.md — Comprehensive tests + security documentation (2 tasks, wave 2)
 
 ### Phase 19: Core Decomposition II
 **Goal**: core.py reduced from ~2500 to ~1500 lines via mixin/delegate extraction
