@@ -226,6 +226,9 @@ class ObjectHandler(CacheHandler):
         decompressed_data = blosc.decompress(compressed_data)
 
         # Deserialize with dill
+        # SECURITY: dill.loads can execute arbitrary code. Blob integrity is
+        # verified upstream via file_hash + HMAC signature before reaching here.
+        # See docs/SECURITY.md "Deserialization Security" for the full threat model.
         return dill.loads(decompressed_data)
 
     def get(self, file_path: Path, metadata: BlobReadContext) -> Any:
@@ -381,6 +384,9 @@ class ObjectHandler(CacheHandler):
         else:
             raw = blob
 
+        # SECURITY: pickle/dill loads can execute arbitrary code. Blob integrity
+        # is verified upstream via file_hash + HMAC signature before reaching here.
+        # See docs/SECURITY.md "Deserialization Security" for the full threat model.
         if serializer == "dill" and DILL_AVAILABLE and dill is not None:
             return dill.loads(raw)
         return _pickle.loads(raw)

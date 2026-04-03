@@ -423,6 +423,31 @@ no_signing_config = CacheConfig(
 - ❌ Process memory attacks
 - ❌ OS-level privilege escalation
 
+### Deserialization Security
+
+Cacheness uses `pickle` and (optionally) `dill` for serializing Python objects. Both can execute arbitrary code during deserialization — this is a known class of vulnerability.
+
+**Layered defense model:**
+
+| Layer | Mechanism | What it protects | Default |
+|-------|-----------|-----------------|---------|
+| **Blob integrity** | xxhash file hash stored in metadata, verified on `get()` | Detects any modification to the blob file on disk | On (`verify_cache_integrity=True`) |
+| **Metadata signing** | HMAC-SHA256 of metadata fields including `file_hash` | Prevents an attacker from updating the `file_hash` to match a tampered blob | On (`enable_entry_signing=True`) |
+| **Signature verification** | Signature checked on every `get()` call | Rejects entries with invalid signatures | On |
+
+**How the defense works end-to-end:**
+1. On `put()`: blob is written → `file_hash` (xxhash) computed → `file_hash` included in HMAC signature → signature stored in metadata
+2. On `get()`: metadata loaded → signature verified (catches metadata tampering) → `file_hash` recomputed from blob on disk → compared to stored `file_hash` (catches blob tampering) → only then is `pickle.loads()` / `dill.loads()` called
+3. An attacker who modifies a blob file **cannot** update the `file_hash` without breaking the HMAC signature
+
+**Important:** This defense requires both signing AND hash verification to be enabled (both are on by default since v0.7.0). Disabling either creates a gap:
+- `enable_entry_signing=False` → attacker can modify both blob and `file_hash` in metadata
+- `verify_cache_integrity=False` → `file_hash` is not checked on read, tampered blob is deserialized
+
+**Residual risks:**
+- An attacker with OS-level access could replace the signing key file AND the metadata AND the blob, achieving a complete cache substitution. Mitigation: use `use_in_memory_key=True` in high-security environments
+- `dill` extends pickle's attack surface (can serialize closures, lambdas, etc.) — use only when needed
+
 ### Risk Assessment
 
 | Configuration | Security Level | Performance Impact | Use Case |

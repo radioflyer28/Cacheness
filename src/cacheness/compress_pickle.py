@@ -889,9 +889,15 @@ def read_file(filepath, *, nparray=True):
                         # Fall back to regular decompression
                         f.seek(0)
                         decompressed_chunks = list(decomp_byte_arr(f))
+                        # SECURITY: pickle.loads can execute arbitrary code.
+                        # Blob integrity is verified upstream via file_hash +
+                        # HMAC signature before this function is called.
                         return pickle.loads(b"".join(decompressed_chunks))
             else:
                 decompressed_chunks = list(decomp_byte_arr(f))
+                # SECURITY: pickle.loads can execute arbitrary code.
+                # Blob integrity is verified upstream via file_hash +
+                # HMAC signature before this function is called.
                 return pickle.loads(b"".join(decompressed_chunks))
     except Exception as e:  # intentionally broad — re-raises as CompressionError
         if isinstance(e, (CompressionError, FileNotFoundError)):
