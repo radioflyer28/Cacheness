@@ -36,6 +36,7 @@ Build a Hypothesis-based property test suite for cache key derivation:
 2. **Properties to verify:**
    - **Determinism:** Same input → same key (always)
    - **Collision resistance:** Different inputs → different keys (with high probability)
+   - **Induced collision search:** Systematically generate pairs of inputs that are "close" (differ by one element, off-by-one numerics, type coercion boundaries like `1` vs `1.0` vs `True`, `[]` vs `()`, `{}` vs `OrderedDict()`, `b""` vs `""`, NaN vs NaN) and verify they produce distinct keys. This catches hash function weaknesses that random fuzzing may not reach.
    - **Stability across calls:** Key generated twice in same process is identical
    - **Roundtrip:** `put(data, **kwargs)` then `get(**kwargs)` retrieves the same data
    - **Prefix stripping:** `prefix`, `description`, `custom_metadata`, `ttl_seconds` params are excluded from key hash
