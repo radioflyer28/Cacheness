@@ -184,6 +184,49 @@ config = CacheConfig(
 
 > **Migration:** Entries signed with the shared key (v2/ns1) remain verifiable after HKDF is enabled. The signature version identifies which key was used for verification.
 
+### Key Rotation
+
+`rotate_key()` loads a new signing key, re-derives HKDF namespace keys, and re-signs all existing entries with the new key. Available on both `UnifiedCache` and `BlobStore`.
+
+```python
+import secrets
+from pathlib import Path
+
+# Generate a new 32-byte signing key
+new_key = Path("/secure/new_signing_key.bin")
+new_key.write_bytes(secrets.token_bytes(32))
+
+# Rotate — re-signs all entries as v3 with new HKDF-derived key
+result = cache.rotate_key(new_key)
+print(f"Rotated: {result.re_signed}/{result.total} entries re-signed")
+if result.failed:
+    print(f"Failures: {result.failures}")
+```
+
+BlobStore uses the same API:
+
+```python
+result = store.rotate_key(new_key)
+```
+
+**RotationResult fields:**
+
+| Field | Description |
+|-------|-------------|
+| `total` | Number of entries found |
+| `re_signed` | Successfully re-signed with new key |
+| `failed` | Failed to re-sign (recorded in `failures`) |
+| `skipped` | Entries that disappeared between iteration and re-sign |
+| `failures` | List of `{"cache_key": str, "error": str}` dicts |
+
+**Crash recovery:** If a crash occurs mid-rotation, the cache continues working. The existing signature version routing handles mixed v2/v3 state — old entries verify with the master key, new entries with the derived key. Re-run `rotate_key()` to complete the migration.
+
+**Best practices:**
+- Generate keys with `secrets.token_bytes(32)` (cryptographically secure)
+- Set restrictive file permissions on key files (`chmod 600` / `icacls`)
+- Keep a backup of the old key until rotation is verified
+- The lock is held for the entire operation — schedule rotation during low-traffic periods
+
 ## Signing Keys and Namespaces
 
 ### Current Behavior

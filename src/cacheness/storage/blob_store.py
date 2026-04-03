@@ -55,7 +55,7 @@ import logging
 import os
 import threading
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 from datetime import datetime, timezone
 
 import xxhash
@@ -69,6 +69,9 @@ from .paths import resolve_actual_path, to_relative_path
 # Import CacheConfig for proper handler configuration
 from ..config import CacheConfig, CompressionConfig
 from ..interfaces import BlobReadContext, WriteBlobResult, IntegrityReport
+
+if TYPE_CHECKING:
+    from ..interfaces import RotationResult
 
 logger = logging.getLogger(__name__)
 
@@ -204,7 +207,9 @@ class BlobStore:
         self.signer = None
         if enable_signing:
             self._init_signer(
-                signing_key_file, use_in_memory_key, key_fallback_policy,
+                signing_key_file,
+                use_in_memory_key,
+                key_fallback_policy,
                 use_hkdf_derivation=use_hkdf_derivation,
             )
 
@@ -280,15 +285,11 @@ class BlobStore:
         from ..security import create_cache_signer
 
         if self.signer is None:
-            raise CacheSecurityError(
-                "Entry signing is not enabled — cannot rotate key"
-            )
+            raise CacheSecurityError("Entry signing is not enabled — cannot rotate key")
 
         new_key_path = Path(new_key_file)
         if not new_key_path.is_file():
-            raise CacheSecurityError(
-                f"Key file does not exist: {new_key_path}"
-            )
+            raise CacheSecurityError(f"Key file does not exist: {new_key_path}")
         new_key_bytes = new_key_path.read_bytes()
         if len(new_key_bytes) != 32:
             raise CacheSecurityError(
@@ -336,9 +337,7 @@ class BlobStore:
                     result.re_signed += 1
                 except Exception as e:  # intentionally broad — best-effort re-sign
                     result.failed += 1
-                    result.failures.append(
-                        {"cache_key": cache_key, "error": str(e)}
-                    )
+                    result.failures.append({"cache_key": cache_key, "error": str(e)})
                     logger.warning(f"Failed to re-sign blob entry {cache_key}: {e}")
 
             # Replace the signer instance

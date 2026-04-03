@@ -13,7 +13,7 @@ import logging
 import uuid
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Dict, Any, List, Callable, Tuple
+from typing import TYPE_CHECKING, Optional, Dict, Any, List, Callable, Tuple
 
 from .config import CacheConfig, _DEFAULT_TTL, create_cache_config
 from .entry_list import EntryList
@@ -27,6 +27,9 @@ from ._verification_mixin import VerificationMixin
 from ._stats_mixin import StatsMixin
 from ._custom_metadata_mixin import CustomMetadataMixin
 from ._storage_mode_mixin import StorageModeMixin
+
+if TYPE_CHECKING:
+    from .interfaces import RotationResult
 
 logger = logging.getLogger(__name__)
 
@@ -426,15 +429,11 @@ class UnifiedCache(
         from .security import create_cache_signer
 
         if self.signer is None:
-            raise CacheSecurityError(
-                "Entry signing is not enabled — cannot rotate key"
-            )
+            raise CacheSecurityError("Entry signing is not enabled — cannot rotate key")
 
         new_key_path = Path(new_key_file)
         if not new_key_path.is_file():
-            raise CacheSecurityError(
-                f"Key file does not exist: {new_key_path}"
-            )
+            raise CacheSecurityError(f"Key file does not exist: {new_key_path}")
         new_key_bytes = new_key_path.read_bytes()
         if len(new_key_bytes) != 32:
             raise CacheSecurityError(
@@ -479,9 +478,7 @@ class UnifiedCache(
                     result.re_signed += 1
                 except Exception as e:  # intentionally broad — best-effort re-sign
                     result.failed += 1
-                    result.failures.append(
-                        {"cache_key": cache_key, "error": str(e)}
-                    )
+                    result.failures.append({"cache_key": cache_key, "error": str(e)})
                     logger.warning(f"Failed to re-sign entry {cache_key}: {e}")
 
             # Re-sign namespace (D-12)
@@ -497,7 +494,9 @@ class UnifiedCache(
                     self.metadata_backend.set_namespace_signature(
                         ns_info.namespace_id, ns_sig
                     )
-            except Exception as e:  # intentionally broad — namespace re-sign failure is non-fatal
+            except (
+                Exception
+            ) as e:  # intentionally broad — namespace re-sign failure is non-fatal
                 logger.warning(f"Failed to re-sign namespace: {e}")
 
             # Replace the signer instance (all subsequent ops use new key)
@@ -2849,9 +2848,7 @@ class UnifiedCache(
                         "📝 Batch put: failed to store entry with kwargs %s",
                         {k: v for k, v in kw.items() if k != "custom_metadata"},
                     )
-            logger.info(
-                f"📝 Batch put: cached {stored}/{len(items)} entries"
-            )
+            logger.info(f"📝 Batch put: cached {stored}/{len(items)} entries")
             return stored
 
     def get_batch(
