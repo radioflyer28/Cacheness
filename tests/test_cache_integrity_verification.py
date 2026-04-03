@@ -398,3 +398,98 @@ class TestVerifyIntegrityCombined:
         # Default includes hash check (verify_hashes=True by default)
         report = cache.verify_integrity()
         assert "hash_mismatches" in report
+
+
+# ===========================================================================
+# Signature Verification via verify_integrity
+# ===========================================================================
+
+
+class TestVerifyIntegritySignatures:
+    """Tests for HMAC signature verification in verify_integrity()."""
+
+    def _make_signed_cache(self, tmp_dir):
+        """Create a cacheness instance with entry signing enabled."""
+        from cacheness.config import SecurityConfig
+
+        config = CacheConfig(
+            storage=CacheStorageConfig(cache_dir=str(tmp_dir)),
+            metadata=CacheMetadataConfig(metadata_backend="json"),
+            compression=CompressionConfig(use_blosc2_arrays=False),
+            security=SecurityConfig(
+                enable_entry_signing=True,
+                allow_unsigned_entries=True,
+            ),
+        )
+        return cacheness(config)
+
+    def test_file_hash_in_signed_fields(self):
+        """Confirmatory: file_hash must be in HMAC signed fields for all versions."""
+        from cacheness.security import CacheEntrySigner
+
+        for version, fields in CacheEntrySigner.SIGNED_FIELDS_BY_VERSION.items():
+            assert "file_hash" in fields, (
+                f"file_hash missing from signed fields v{version}"
+            )
+
+    def test_verify_integrity_detects_signature_failure(self, tmp_path):
+        """Tampered signature should be detected by verify_signatures=True."""
+        cache = self._make_signed_cache(tmp_path)
+        cache_key = cache.put("signed data", test_key="sig_test")
+
+        # Tamper with the stored signature in metadata
+        entry = cache.metadata_backend.get_entry(cache_key)
+        entry["metadata"]["entry_signature"] = "tampered_signature_value"
+        entry["entry_signature"] = "tampered_signature_value"
+        cache.metadata_backend.put_entry(cache_key, entry)
+
+        report = cache.verify_integrity(verify_signatures=True)
+
+        assert "signature_failures" in report
+        failures = report["signature_failures"]
+        assert len(failures) >= 1
+        tampered = [f for f in failures if f["cache_key"] == cache_key]
+        assert len(tampered) == 1
+        assert tampered[0]["reason"] == "invalid_signature"
+
+    def test_verify_integrity_signature_clean(self, tmp_path):
+        """Properly signed cache should have no signature failures."""
+        cache = self._make_signed_cache(tmp_path)
+        cache.put("good data", test_key="clean_sig")
+
+        report = cache.verify_integrity(verify_signatures=True)
+
+        assert "signature_failures" in report
+        assert report["signature_failures"] == []
+
+    def test_verify_integrity_no_signatures_by_default(self, tmp_path):
+        """verify_integrity() without verify_signatures should not include signature_failures."""
+        cache = self._make_signed_cache(tmp_path)
+        cache.put("data", test_key="default_sig")
+
+        report = cache.verify_integrity()
+
+        assert "signature_failures" not in report
+
+    def test_verify_integrity_blob_tampering_end_to_end(self, tmp_path):
+        """Modified blob content should be caught by both hash and signature checks."""
+        cache = self._make_signed_cache(tmp_path)
+        cache_key = cache.put("important data", test_key="e2e_test")
+
+        entry = cache.metadata_backend.get_entry(cache_key)
+        actual_path = cache._resolve_actual_path(entry["metadata"]["actual_path"])
+
+        # Corrupt the blob on disk
+        with open(actual_path, "r+b") as f:
+            f.seek(0)
+            f.write(b"\x00\x00\x00\x00")
+
+        report = cache.verify_integrity(verify_hashes=True, verify_signatures=True)
+
+        # Hash mismatch should be detected
+        assert len(report["hash_mismatches"]) >= 1
+        # Signature should still be valid (metadata wasn't tampered)
+        sig_failures = [
+            f for f in report["signature_failures"] if f["cache_key"] == cache_key
+        ]
+        assert len(sig_failures) == 0

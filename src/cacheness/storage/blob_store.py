@@ -731,7 +731,10 @@ class BlobStore:
     # ── Integrity verification ────────────────────────────────────────
 
     def verify_integrity(
-        self, repair: bool = False, verify_hashes: bool = True
+        self,
+        repair: bool = False,
+        verify_hashes: bool = True,
+        verify_signatures: bool = False,
     ) -> IntegrityReport:
         """
         Verify blob store integrity by cross-checking blob files and metadata.
@@ -741,6 +744,8 @@ class BlobStore:
         - Dangling metadata: entries pointing to missing blobs
         - Size mismatches: metadata file_size != actual size in storage
         - Hash mismatches: metadata file_hash != actual file hash (if verify_hashes)
+        - Signature failures: entries with invalid or missing HMAC signatures
+          (if verify_signatures)
 
         Works with any blob backend (filesystem, S3, in-memory, etc.).
 
@@ -748,10 +753,13 @@ class BlobStore:
             repair: If True, delete orphaned blobs and remove dangling entries.
             verify_hashes: If True, also verify file hashes (slower but catches
                 corruption).
+            verify_signatures: If True, verify HMAC signatures on all entries
+                that have them. Requires a signer to be configured.
 
         Returns:
             Dict with keys: orphaned_blobs, dangling_entries, size_mismatches,
-            hash_mismatches (if verify_hashes), repaired (if repair).
+            hash_mismatches (if verify_hashes), signature_failures
+            (if verify_signatures), repaired (if repair).
         """
         with self._lock:
             # 1. Inventory all blobs in storage (delegates to blob_backend
@@ -864,7 +872,13 @@ class BlobStore:
                             }
                         )
 
-            # 7. Repair if requested
+            # 7. Check HMAC signatures (optional)
+            #    Signature verification is handled by the caller
+            #    (_verification_mixin) which has access to
+            #    _extract_signable_fields() for proper normalization.
+            signature_failures: list[dict[str, Any]] = []
+
+            # 8. Repair if requested
             repaired = {"orphans_deleted": 0, "dangling_removed": 0}
             if repair:
                 for blob_path in orphaned_blobs:
@@ -892,6 +906,7 @@ class BlobStore:
                 dangling_entries=dangling_entries,
                 size_mismatches=size_mismatches,
                 hash_mismatches=hash_mismatches if verify_hashes else None,
+                signature_failures=signature_failures if verify_signatures else None,
                 repaired=repaired if repair else None,
             )
 
@@ -900,6 +915,7 @@ class BlobStore:
                 + len(dangling_entries)
                 + len(size_mismatches)
                 + len(hash_mismatches)
+                + len(signature_failures)
             )
             if total_issues == 0:
                 logger.info("Blob store integrity check passed — no issues found")
@@ -912,6 +928,11 @@ class BlobStore:
                     + (
                         f", {len(hash_mismatches)} hash mismatches"
                         if verify_hashes
+                        else ""
+                    )
+                    + (
+                        f", {len(signature_failures)} signature failures"
+                        if verify_signatures
                         else ""
                     )
                 )

@@ -224,7 +224,10 @@ class VerificationMixin:
             logger.warning(f"Failed to sign entry {cache_key}: {e}")
 
     def verify_integrity(
-        self, repair: bool = False, verify_hashes: bool = True
+        self,
+        repair: bool = False,
+        verify_hashes: bool = True,
+        verify_signatures: bool = False,
     ) -> IntegrityReport:
         """
         Verify cache integrity by cross-checking blob files and metadata entries.
@@ -234,16 +237,55 @@ class VerificationMixin:
         - Dangling metadata: entries pointing to missing blob files
         - Size mismatches: metadata file_size != actual file size on disk
         - Hash mismatches: metadata file_hash != actual file hash (if verify_hashes=True)
+        - Signature failures: entries with invalid or missing HMAC signatures
+          (if verify_signatures=True)
 
         Args:
             repair: If True, delete orphaned blobs and remove dangling metadata entries.
             verify_hashes: If True, also verify file hashes (slower but catches corruption).
+            verify_signatures: If True, verify HMAC signatures on all entries.
 
         Returns:
             IntegrityReport with orphaned_blobs, dangling_entries, size_mismatches,
-            hash_mismatches (if verify_hashes), repaired (if repair).
+            hash_mismatches (if verify_hashes), signature_failures (if verify_signatures),
+            repaired (if repair).
             Supports dict-style access for backward compatibility.
         """
-        return self._blob_store.verify_integrity(
-            repair=repair, verify_hashes=verify_hashes
+        report = self._blob_store.verify_integrity(
+            repair=repair,
+            verify_hashes=verify_hashes,
+            verify_signatures=verify_signatures,
         )
+
+        # Signature verification at the mixin level — uses
+        # _extract_signable_fields() for proper created_at normalization.
+        if verify_signatures and self.signer:
+            signature_failures = []
+            for entry_summary in self.metadata_backend.iter_entry_summaries():
+                cache_key = entry_summary.get("cache_key", "")
+                if not cache_key:
+                    continue
+                full_entry = self.metadata_backend.get_entry(cache_key)
+                if full_entry is None:
+                    continue
+                metadata = full_entry.get("metadata", {})
+                stored_signature = full_entry.get("entry_signature") or metadata.get(
+                    "entry_signature"
+                )
+                if stored_signature is None:
+                    signature_failures.append(
+                        {"cache_key": cache_key, "reason": "unsigned"}
+                    )
+                    continue
+                signable = self._extract_signable_fields(
+                    cache_key=cache_key,
+                    entry_data=full_entry,
+                    metadata=metadata,
+                )
+                if not self.signer.verify_entry(signable, stored_signature):
+                    signature_failures.append(
+                        {"cache_key": cache_key, "reason": "invalid_signature"}
+                    )
+            report.signature_failures = signature_failures
+
+        return report

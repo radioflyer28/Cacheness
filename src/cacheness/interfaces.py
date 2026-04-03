@@ -236,6 +236,7 @@ class IntegrityReport:
     dangling_entries: List[Dict[str, Any]] = field(default_factory=list)
     size_mismatches: List[Dict[str, Any]] = field(default_factory=list)
     hash_mismatches: Optional[List[Dict[str, Any]]] = None
+    signature_failures: Optional[List[Dict[str, Any]]] = None
     repaired: Optional[Dict[str, Any]] = None
 
     # -- dict-compatible accessors (76+ test accesses use report["key"]) --
@@ -246,6 +247,7 @@ class IntegrityReport:
             "dangling_entries",
             "size_mismatches",
             "hash_mismatches",
+            "signature_failures",
             "repaired",
         }
     )
@@ -263,6 +265,8 @@ class IntegrityReport:
         }
         if self.hash_mismatches is not None:
             d["hash_mismatches"] = self.hash_mismatches
+        if self.signature_failures is not None:
+            d["signature_failures"] = self.signature_failures
         if self.repaired is not None:
             d["repaired"] = self.repaired
         return d
