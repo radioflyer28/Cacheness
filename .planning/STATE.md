@@ -1,16 +1,16 @@
 ---
 gsd_state_version: 1.0
-milestone: v0.9.0
-milestone_name: Completeness & Hardening
-status: Shipped
+milestone: v0.10.0
+milestone_name: Security & Architecture
+status: In progress
 last_updated: "2026-04-03"
 last_activity: 2026-04-03
 progress:
-  total_phases: 4
-  completed_phases: 4
-  total_plans: 4
-  completed_plans: 4
-  percent: 100
+  total_phases: 0
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
 ---
 
 # Project State
@@ -20,13 +20,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-03)
 
 **Core value:** Reliable, type-aware disk caching with pluggable backends
-**Current focus:** v0.9.0 shipped — ready for next milestone
+**Current focus:** v0.10.0 Security & Architecture — defining requirements
 
 ## Current Position
 
-Phase: —
+Phase: Not started (defining requirements)
 Plan: —
-Status: Milestone v0.9.0 shipped
-Last activity: 2026-04-03 — v0.9.0 archived and tagged
+Status: Defining requirements
+Last activity: 2026-04-03 — Milestone v0.10.0 started
 
 Progress: [██████████] 100% — v0.9.0 shipped

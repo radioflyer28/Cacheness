@@ -1,4 +1,4 @@
-# Cacheness — Completeness & Hardening
+# Cacheness — Security & Architecture
 
 ## What This Is
 
@@ -8,11 +8,20 @@ Cacheness is a Python disk caching library with pluggable metadata backends (JSO
 
 **Shipped:** v0.9.0 Completeness & Hardening (2026-04-03)
 
-All management APIs complete (`put_batch()` rounds out `get_batch()`, `delete_batch()`, `touch_batch()`). Threading model accurately documented with RLock concurrency model. Deserialization security documented with 3-layer defense model. Cross-platform key file permissions via `icacls` on Windows. Test suite at 1651 passed / 101 skipped / 0 failures.
+All management APIs complete. Threading model documented. Deserialization security documented with 3-layer defense model. Cross-platform key file permissions. Test suite at 1651 passed / 101 skipped / 0 failures.
 
-## Current Milestone: (none — ready for next milestone)
+## Current Milestone: v0.10.0 Security & Architecture
 
-All v0.9.0 requirements shipped. Ready for `/gsd-new-milestone` to define next scope.
+**Goal:** Strengthen cryptographic isolation, add encryption at rest, make key management configurable, and continue core.py decomposition.
+
+**Target features:**
+- Per-namespace key derivation via HKDF — derive namespace-specific signing keys from a master key
+- Configurable key fallback behavior — replace silent in-memory fallback with user-controlled policy
+- Blob content encryption at rest — encrypt cached data on disk with AES-GCM or similar
+- Further core.py decomposition — extract more concerns to reduce from ~2500 to ~1500 lines
+- Thread safety under concurrent access — test and fix concurrent put/get from multiple threads
+- Cross-platform atomic writes — verify shutil.move correctness on Windows cross-volume scenarios
+- Key rotation scenario tests — test key file deletion, restart, and old-key entry handling
 
 ## Core Value
 
@@ -59,7 +68,13 @@ Improve reliability, security, and maintainability of Cacheness without changing
 
 ### Active
 
-(None — define with `/gsd-new-milestone`)
+- [ ] Per-namespace key derivation via HKDF — v0.10.0
+- [ ] Configurable key fallback behavior — v0.10.0
+- [ ] Blob content encryption at rest — v0.10.0
+- [ ] Further core.py decomposition — v0.10.0
+- [ ] Thread safety under concurrent access — v0.10.0
+- [ ] Cross-platform atomic write verification — v0.10.0
+- [ ] Key rotation scenario tests — v0.10.0
 
 ### Out of Scope
 
@@ -68,8 +83,7 @@ Improve reliability, security, and maintainability of Cacheness without changing
 - TensorFlow handler fixes — low priority, platform issues (Windows hangs)
 - JSON backend O(n²) write performance — documented limitation, mitigation is "use SQLite"
 - Export/import cache — low priority convenience feature
-- Per-namespace key derivation via HKDF — needs migration path design (deferred from v0.7.0)
-- Blob content encryption at rest — feature addition, not hardening
+
 
 ## Context
 
@@ -167,4 +181,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-03 after v0.9.0 milestone shipped*
+*Last updated: 2026-04-03 after v0.10.0 milestone started*
