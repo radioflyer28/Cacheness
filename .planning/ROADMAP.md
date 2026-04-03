@@ -86,4 +86,4 @@
 | 11. put_batch() API | v0.9.0 | Complete | 2026-04-03 |
 | 12. Threading Model Documentation | v0.9.0 | Complete | 2026-04-03 |
 | 13. Deserialization Security | v0.9.0 | Complete | 2026-04-03 |
-| 14. Windows Key File Permissions | v0.9.0 | Not Started | — |
+| 14. Windows Key File Permissions | v0.9.0 | Complete | 2026-04-03 |

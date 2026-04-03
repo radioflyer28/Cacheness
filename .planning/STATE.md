@@ -7,10 +7,10 @@ last_updated: "2026-04-03"
 last_activity: 2026-04-03
 progress:
   total_phases: 4
-  completed_phases: 3
-  total_plans: 3
-  completed_plans: 3
-  percent: 75
+  completed_phases: 4
+  total_plans: 4
+  completed_plans: 4
+  percent: 100
 ---
 
 # Project State
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-03)
 
 Phase: 14 (Windows Key File Permissions)
 Plan: —
-Status: Not started
-Last activity: 2026-04-03 — Phase 13 complete (deserialization security)
+Status: Complete
+Last activity: 2026-04-03 — Phase 14 complete (Windows key file permissions)
 
-Progress: [███████░░░] 75% — v0.9.0 in progress
+Progress: [██████████] 100% — v0.9.0 all phases complete
