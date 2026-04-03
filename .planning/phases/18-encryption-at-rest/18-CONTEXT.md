@@ -8,6 +8,8 @@
 
 Implement AES-256-GCM encryption of cached blob data at rest. Encryption is disabled by default — existing users see zero behavior change. When enabled, blob content is encrypted after handler compression and decrypted before handler decompression. Signing remains independent and operates on metadata. Unencrypted entries remain readable when encryption is later enabled (migration path).
 
+**Primary threat model:** Storing cached data on remote servers (S3, PostgreSQL, libSQL cloud replicas) that are not fully trusted — either because the server could be compromised, or because the storage provider shouldn't have access to the data. Encryption happens **client-side** before data leaves the local process, so the server only ever stores ciphertext. A server breach exposes only ciphertext, useless without the client-held master key. This is especially important for the tiered cache pattern (local + remote UnifiedCache) and libSQL embedded replicas that sync metadata to Turso Cloud.
+
 </domain>
 
 <decisions>

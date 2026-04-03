@@ -608,7 +608,9 @@ if cache.signer:
 
 ## Encryption at Rest (Planned)
 
-Cacheness currently provides **integrity** protection (signing, hash verification) but not **confidentiality** — blobs and metadata are stored as plaintext on disk. Encryption at rest is planned to close this gap.
+Cacheness currently provides **integrity** protection (signing, hash verification) but not **confidentiality** — blobs and metadata are stored as plaintext. Encryption at rest is planned to close this gap.
+
+**Primary threat model:** Cached data stored on remote servers (S3, PostgreSQL, libSQL cloud replicas) that could be compromised. Encryption must happen **client-side** — data is encrypted before it leaves the local process, so the server never sees plaintext. A server breach exposes only ciphertext, which is useless without the client-held master key.
 
 ### Current Security Posture
 
@@ -640,14 +642,15 @@ Key management would leverage the existing `SecurityConfig` and HKDF infrastruct
 **Protected against (with both signing + encryption enabled):**
 - ✅ Cache metadata tampering (signing)
 - ✅ Blob file tampering (hash + signing)
-- ✅ Reading cached data from disk (blob encryption)
+- ✅ Reading cached data from disk or remote storage (client-side blob encryption)
 - ✅ Reading cache keys and metadata from disk (metadata encryption via libSQL)
 - ✅ Replay attacks (timestamp in signed fields)
+- ✅ Server compromise — remote storage only holds ciphertext, encrypted client-side before upload
 
 **Still not protected against:**
 - ❌ Complete database + key file replacement (use `use_in_memory_key=True`)
-- ❌ Process memory attacks
-- ❌ OS-level privilege escalation
+- ❌ Process memory attacks on the client
+- ❌ OS-level privilege escalation on the client
 
 See [FUTURE_IMPROVEMENTS.md](FUTURE_IMPROVEMENTS.md#11-encryption-at-rest--medium-priority) for implementation roadmap and design considerations.
 
