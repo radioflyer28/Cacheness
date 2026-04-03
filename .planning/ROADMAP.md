@@ -63,7 +63,7 @@
   4. `fallback` policy silently uses in-memory key without warning
 **Plans:** 1 plan
 Plans:
-- [ ] 15-01-PLAN.md — Config + implementation + tests + docs (3 tasks)
+- [ ] 15-01-PLAN.md — Config, security, core, blob_store changes + tests + docs (3 tasks, wave 1)
 
 ### Phase 16: HKDF Key Derivation
 **Goal**: Each namespace derives its own signing key from the master key — cryptographic isolation
