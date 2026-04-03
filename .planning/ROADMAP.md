@@ -61,7 +61,9 @@ Plans:
   1. The existing `file_hash` field is confirmed to be covered by the metadata HMAC signature (i.e., tampering with blob content changes `file_hash`, which invalidates the signed metadata entry)
   2. `verify_integrity()` detects a blob whose content has been modified on disk (hash mismatch) when `verify_hashes=True`
   3. If a gap is found (file_hash not in signed fields, or xxhash insufficiency for authentication), an explicit `blob_hmac` field is added and verified — with backward compatibility for entries without it
-**Plans**: TBD
+**Plans**: 1 plan
+Plans:
+- [ ] 09-01-PLAN.md — Add verify_signatures to verify_integrity() + tests
 
 ### Phase 10: Prefix Deletion API
 **Goal**: Users can bulk-delete cache entries by key prefix in a single call, with backend-optimized performance
