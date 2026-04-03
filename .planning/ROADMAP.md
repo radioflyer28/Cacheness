@@ -61,7 +61,9 @@
   2. `raise` policy causes `CacheSecurityError` when key file is missing
   3. `warn` policy logs a warning and falls back to in-memory key (current default behavior)
   4. `fallback` policy silently uses in-memory key without warning
-**Plans**: TBD
+**Plans:** 1 plan
+Plans:
+- [ ] 15-01-PLAN.md — Config + implementation + tests + docs (3 tasks)
 
 ### Phase 16: HKDF Key Derivation
 **Goal**: Each namespace derives its own signing key from the master key — cryptographic isolation
