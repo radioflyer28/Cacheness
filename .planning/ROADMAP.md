@@ -51,7 +51,7 @@ Plans:
   4. Normal successful writes leave no residual intent entries
 **Plans**: 1 plan
 Plans:
-- [ ] 08-01-PLAN.md — WriteIntentJournal + core.py integration + tests
+- [x] 08-01-PLAN.md — WriteIntentJournal + core.py integration + tests
 
 ### Phase 9: Blob Integrity Validation
 **Goal**: Blob content integrity is validated end-to-end — users can trust that stored blobs have not been tampered with or corrupted
@@ -85,7 +85,7 @@ Plans:
 | 4. Exception Handling | v0.7.0 | Complete | 2026-04-02 |
 | 5. Security Hardening | v0.7.0 | Complete | 2026-04-02 |
 | 6. Test Gaps & Handler Robustness | v0.7.0 | Complete | 2026-04-02 |
-| 7. Concurrency Foundation | v0.8.0 | Not started | - |
-| 8. Crash-Safe Write Intent Logging | v0.8.0 | Not started | - |
+| 7. Concurrency Foundation | v0.8.0 | Complete | 2026-04-02 |
+| 8. Crash-Safe Write Intent Logging | v0.8.0 | Complete | 2026-04-02 |
 | 9. Blob Integrity Validation | v0.8.0 | Not started | - |
 | 10. Prefix Deletion API | v0.8.0 | Not started | - |
