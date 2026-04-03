@@ -10,6 +10,16 @@ Cacheness is a Python disk caching library with pluggable metadata backends (JSO
 
 Reliability and integrity hardening complete: SqliteBackend uses RLock for deadlock-free re-entrant calls, crash-safe write intent journal prevents orphaned blobs, HMAC signature verification validates blob integrity end-to-end, and `delete_by_prefix()` provides backend-optimized bulk deletion. Test suite at 1641 passed / 101 skipped / 0 failures.
 
+## Current Milestone: v0.9.0 Management APIs
+
+**Goal:** Complete the missing management operations layer — give users direct control over cache entries without workarounds.
+
+**Target features:**
+- `update_blob_data()` — update an existing entry's blob content without changing the cache key
+- `touch()` — refresh an entry's TTL without retrieving/re-storing data
+- `get_metadata()` — retrieve metadata for a cache entry without loading the blob
+- `put_batch()` / `get_batch()` / `delete_batch()` — batch operations with backend-level efficiency
+
 ## Core Value
 
 Improve reliability, security, and maintainability of Cacheness without changing its public API semantics — make the library safer, more debuggable, and easier to evolve.
@@ -160,4 +170,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-03 after v0.8.0 milestone shipped*
+*Last updated: 2026-04-03 after v0.9.0 milestone started*
