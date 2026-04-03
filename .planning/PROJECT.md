@@ -10,15 +10,20 @@ Cacheness is a Python disk caching library with pluggable metadata backends (JSO
 
 Reliability and integrity hardening complete: SqliteBackend uses RLock for deadlock-free re-entrant calls, crash-safe write intent journal prevents orphaned blobs, HMAC signature verification validates blob integrity end-to-end, and `delete_by_prefix()` provides backend-optimized bulk deletion. Test suite at 1641 passed / 101 skipped / 0 failures.
 
-## Current Milestone: v0.9.0 Management APIs
+## Current Milestone: v0.9.0 Completeness & Hardening
 
-**Goal:** Complete the missing management operations layer — give users direct control over cache entries without workarounds.
+**Goal:** Close remaining gaps identified in CONCERNS.md — complete the batch API surface, fix contradictory documentation, and harden security on all platforms.
 
-**Target features:**
-- `update_blob_data()` — update an existing entry's blob content without changing the cache key
-- `touch()` — refresh an entry's TTL without retrieving/re-storing data
-- `get_metadata()` — retrieve metadata for a cache entry without loading the blob
-- `put_batch()` / `get_batch()` / `delete_batch()` — batch operations with backend-level efficiency
+**Scope (adjusted from initial analysis):**
+- Most management APIs (`update_data()`, `touch()`, `get_metadata()`, `get_batch()`, `delete_batch()`, `touch_batch()`) already exist — only `put_batch()` is missing
+- Configurable in-memory key fallback (`use_in_memory_key`, `raise_on_key_fallback`) already shipped in v0.7.0
+- 16 concurrency stress tests already exist in `test_concurrency_stress.py`
+
+**Actual work:**
+- `put_batch()` — the only missing batch operation
+- Threading model documentation — fix contradictions between API_REFERENCE.md and TROUBLESHOOTING.md
+- Deserialization security — document layered defense model, verify blob tampering detection
+- Windows key file permissions — replace no-op chmod with icacls
 
 ## Core Value
 
@@ -59,10 +64,11 @@ Improve reliability, security, and maintainability of Cacheness without changing
 
 ### Active
 
-- [ ] Management APIs: `update_blob_data()`, `touch()`, `get_metadata()`, batch operations
-- [ ] Document threading model and concurrency boundaries
-- [ ] Concurrent stress tests for put/get/delete
-- [ ] `put_batch()` / `get_batch()` with backend-level transactions
+- [ ] `put_batch()` with backend-level transactions (MGMT-01)
+- [ ] Fix contradictory threading model documentation (DOC-01)
+- [ ] Deserialization security documentation and blob tampering test (SEC-01)
+- [ ] Windows key file permissions via icacls (SEC-02)
+- [ ] Update CONCERNS.md to reflect implemented APIs (MGMT-02)
 
 ### Out of Scope
 
@@ -72,7 +78,6 @@ Improve reliability, security, and maintainability of Cacheness without changing
 - JSON backend O(n²) write performance — documented limitation, mitigation is "use SQLite"
 - Export/import cache — low priority convenience feature
 - Per-namespace key derivation via HKDF — needs migration path design (deferred from v0.7.0)
-- Windows key file ACLs via `icacls` — document limitation for now (deferred from v0.7.0)
 - Blob content encryption at rest — feature addition, not hardening
 
 ## Context
