@@ -1211,3 +1211,73 @@ class TestMemoryCacheConfig:
 
         assert config.metadata.memory_cache_maxsize == 1
         assert config.metadata.memory_cache_ttl_seconds == 0.1
+
+
+class TestDeleteByPrefix:
+    """Tests for UnifiedCache.delete_by_prefix()."""
+
+    def _make_cache(self, tmp_dir, backend="json"):
+        from cacheness.config import CacheStorageConfig, CacheMetadataConfig
+
+        config = CacheConfig(
+            storage=CacheStorageConfig(cache_dir=str(tmp_dir)),
+            metadata=CacheMetadataConfig(metadata_backend=backend),
+        )
+        return cacheness(config)
+
+    def test_delete_by_prefix_basic(self, tmp_path):
+        """Delete entries matching a prefix, leaving others intact."""
+        cache = self._make_cache(tmp_path)
+        cache.put("a1", cache_key="models_bert")
+        cache.put("a2", cache_key="models_gpt")
+        cache.put("b1", cache_key="data_train")
+
+        deleted = cache.delete_by_prefix("models_")
+
+        assert deleted == 2
+        assert cache.get(cache_key="models_bert") is None
+        assert cache.get(cache_key="models_gpt") is None
+        assert cache.get(cache_key="data_train") == "b1"
+
+    def test_delete_by_prefix_removes_blobs(self, tmp_path):
+        """Blob files must be removed alongside metadata."""
+        cache = self._make_cache(tmp_path)
+        cache.put("payload", cache_key="rm_blob")
+        entry = cache.metadata_backend.get_entry("rm_blob")
+        actual_path = cache._resolve_actual_path(entry["metadata"]["actual_path"])
+        assert Path(actual_path).exists()
+
+        cache.delete_by_prefix("rm_")
+
+        assert not Path(actual_path).exists()
+        assert cache.metadata_backend.get_entry("rm_blob") is None
+
+    def test_delete_by_prefix_no_match(self, tmp_path):
+        """Non-matching prefix returns 0 without error."""
+        cache = self._make_cache(tmp_path)
+        cache.put("data", cache_key="keep_this")
+
+        assert cache.delete_by_prefix("nonexistent_") == 0
+        assert cache.get(cache_key="keep_this") == "data"
+
+    def test_delete_by_prefix_empty_string(self, tmp_path):
+        """Empty prefix matches all entries."""
+        cache = self._make_cache(tmp_path)
+        cache.put("a", cache_key="x")
+        cache.put("b", cache_key="y")
+
+        deleted = cache.delete_by_prefix("")
+
+        assert deleted == 2
+
+    def test_delete_by_prefix_sqlite(self, tmp_path):
+        """Same behavior with SQLite backend (SQL LIKE path)."""
+        cache = self._make_cache(tmp_path, backend="sqlite")
+        cache.put("s1", cache_key="prefix_one")
+        cache.put("s2", cache_key="prefix_two")
+        cache.put("s3", cache_key="other_three")
+
+        deleted = cache.delete_by_prefix("prefix_")
+
+        assert deleted == 2
+        assert cache.get(cache_key="other_three") == "s3"

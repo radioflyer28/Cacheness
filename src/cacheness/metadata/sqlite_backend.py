@@ -922,6 +922,18 @@ class SqliteBackend(MetadataBackend):
                 result.append(flat)
             return result
 
+    def keys_by_prefix(self, prefix: str) -> list[str]:
+        """Return cache keys starting with *prefix* using SQL LIKE."""
+        with self._lock, self.SessionLocal() as session:
+            from sqlalchemy import text
+
+            tbl = self._entries_table
+            rows = session.execute(
+                text(f'SELECT cache_key FROM "{tbl}" WHERE cache_key LIKE :pattern'),
+                {"pattern": prefix + "%"},
+            ).fetchall()
+            return [row[0] for row in rows]
+
     def list_entries(self) -> List[Dict[str, Any]]:
         """List all cache entries — Core column select, no ORM hydration."""
         with self._lock, self.SessionLocal() as session:

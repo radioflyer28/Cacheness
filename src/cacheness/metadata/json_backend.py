@@ -248,6 +248,13 @@ class JsonBackend(MetadataBackend):
                 result.append(flat)  # type: ignore[arg-type]
             return result
 
+    def keys_by_prefix(self, prefix: str) -> List[str]:
+        """Return cache keys starting with *prefix* (Python-side filter)."""
+        with self._lock:
+            return [
+                k for k in self._metadata.get("entries", {}) if k.startswith(prefix)
+            ]
+
     def list_entries(self) -> List[Dict[str, Any]]:
         """List all cache entries with metadata (simple entries iteration)."""
         with self._lock:

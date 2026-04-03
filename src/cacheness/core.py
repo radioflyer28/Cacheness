@@ -2539,6 +2539,38 @@ class UnifiedCache(
 
     # ── Bulk & Batch Operations ───────────────────────────────────────────
 
+    def delete_by_prefix(self, prefix: str) -> int:
+        """Delete all cache entries whose cache key starts with *prefix*.
+
+        Uses backend-optimized prefix lookup when available (SQL ``LIKE``
+        on SQLite/PostgreSQL) and falls back to Python-side filtering for
+        the JSON backend.
+
+        Both the metadata entry **and** the corresponding blob file are
+        removed for each matching key.
+
+        Args:
+            prefix: The cache key prefix to match.  An empty string
+                matches everything (equivalent to :meth:`clear_all`).
+
+        Returns:
+            int: Number of entries deleted.
+
+        Example::
+
+            deleted = cache.delete_by_prefix("myapp/models/")
+        """
+        with self._lock:
+            keys = self.metadata_backend.keys_by_prefix(prefix)
+            deleted = 0
+            for key in keys:
+                if self._blob_store.delete(key):
+                    deleted += 1
+            logger.info(
+                f"🗑️ Prefix delete: removed {deleted} entries matching '{prefix}*'"
+            )
+            return deleted
+
     def delete_where(self, filter_fn: Callable[[Dict[str, Any]], bool]) -> int:
         """
         Delete all cache entries matching a filter function.

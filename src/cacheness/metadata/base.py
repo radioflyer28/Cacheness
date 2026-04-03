@@ -197,6 +197,19 @@ class MetadataBackend(ABC):
             result.append(flat)  # type: ignore[arg-type]
         return result
 
+    def keys_by_prefix(self, prefix: str) -> List[str]:
+        """Return cache keys that start with *prefix*.
+
+        The default implementation filters ``iter_entry_summaries()`` in
+        Python.  SQL-backed backends should override with a ``LIKE``
+        query for better performance on large caches.
+        """
+        return [
+            e["cache_key"]
+            for e in self.iter_entry_summaries()
+            if e.get("cache_key", "").startswith(prefix)
+        ]
+
     # --- Schema versioning ---
 
     def get_schema_version(self, namespace_id: str = DEFAULT_NAMESPACE) -> int:
@@ -632,6 +645,9 @@ class CachedMetadataBackend(MetadataBackend):
 
     def iter_entry_summaries(self) -> List[EntrySummary]:
         return self.backend.iter_entry_summaries()
+
+    def keys_by_prefix(self, prefix: str) -> List[str]:
+        return self.backend.keys_by_prefix(prefix)
 
     def get_stats(self) -> Dict[str, Any]:
         """Get cache statistics with optional entry cache stats."""
