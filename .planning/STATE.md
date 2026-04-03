@@ -7,10 +7,10 @@ last_updated: "2026-04-03"
 last_activity: 2026-04-03
 progress:
   total_phases: 4
-  completed_phases: 1
-  total_plans: 1
-  completed_plans: 1
-  percent: 25
+  completed_phases: 2
+  total_plans: 2
+  completed_plans: 2
+  percent: 50
 ---
 
 # Project State
@@ -24,9 +24,9 @@ See: .planning/PROJECT.md (updated 2026-04-03)
 
 ## Current Position
 
-Phase: 12 (Threading Model Documentation)
+Phase: 13 (Deserialization Security)
 Plan: —
 Status: Not started
-Last activity: 2026-04-03 — Phase 11 complete (put_batch API)
+Last activity: 2026-04-03 — Phase 12 complete (threading docs)
 
-Progress: [██░░░░░░░░] 25% — v0.9.0 in progress
+Progress: [█████░░░░░] 50% — v0.9.0 in progress

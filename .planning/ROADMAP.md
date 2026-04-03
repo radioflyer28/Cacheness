@@ -48,7 +48,7 @@
 - API_REFERENCE.md Thread Safety section documents actual RLock behavior and backend-level protections
 - TROUBLESHOOTING.md is consistent with API_REFERENCE.md
 - Concurrency boundaries clearly documented per backend
-- Status: Not Started
+- Status: Complete ✔ (2026-04-03)
 
 #### Phase 13: Deserialization Security
 **Goal:** Harden pickle/dill deserialization paths with defense-in-depth documentation and verification that existing protections (HMAC + file_hash) cover blob tampering.
@@ -84,6 +84,6 @@
 | 9. Blob Integrity Validation | v0.8.0 | Complete | 2026-04-02 |
 | 10. Prefix Deletion API | v0.8.0 | Complete | 2026-04-02 |
 | 11. put_batch() API | v0.9.0 | Complete | 2026-04-03 |
-| 12. Threading Model Documentation | v0.9.0 | Not Started | — |
+| 12. Threading Model Documentation | v0.9.0 | Complete | 2026-04-03 |
 | 13. Deserialization Security | v0.9.0 | Not Started | — |
 | 14. Windows Key File Permissions | v0.9.0 | Not Started | — |
