@@ -2,7 +2,7 @@
 gsd_state_version: 1.0
 milestone: v0.9.0
 milestone_name: Completeness & Hardening
-status: In progress
+status: Shipped
 last_updated: "2026-04-03"
 last_activity: 2026-04-03
 progress:
@@ -20,13 +20,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-03)
 
 **Core value:** Reliable, type-aware disk caching with pluggable backends
-**Current focus:** v0.9.0 Completeness & Hardening — 4 phases (11-14)
+**Current focus:** v0.9.0 shipped — ready for next milestone
 
 ## Current Position
 
-Phase: 14 (Windows Key File Permissions)
+Phase: —
 Plan: —
-Status: Complete
-Last activity: 2026-04-03 — Phase 14 complete (Windows key file permissions)
+Status: Milestone v0.9.0 shipped
+Last activity: 2026-04-03 — v0.9.0 archived and tagged
 
-Progress: [██████████] 100% — v0.9.0 all phases complete
+Progress: [██████████] 100% — v0.9.0 shipped

@@ -195,10 +195,10 @@ if __name__ == "__main__":
     rng = np.random.default_rng(42)
 
     from pathlib import Path
-    
+
     tmp = Path("./custom_meta_linked_cache")
     tmp.mkdir(exist_ok=True)
-    
+
     try:
         config = CacheConfig(cache_dir=str(tmp), metadata_backend="sqlite")
         cache = cacheness(config)

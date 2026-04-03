@@ -1,5 +1,21 @@
 # Milestones
 
+## v0.9.0 Completeness & Hardening (Shipped: 2026-04-03)
+
+**Phases completed:** 4 phases, 4 plans, 20 files changed (+606/-56 lines)
+**Test baseline:** 1641 → 1651 tests (10 new, 0 regressions)
+**Git range:** `8f1a340..e7be809` (11 commits)
+
+**Key accomplishments:**
+
+1. Completed batch API surface — `put_batch()` alongside existing `get_batch()`, `delete_batch()`, `touch_batch()` (8 tests)
+2. Fixed contradictory threading documentation — discovered 22+ methods use RLock, corrected API_REFERENCE.md and TROUBLESHOOTING.md
+3. Documented 3-layer deserialization defense model (xxhash + HMAC + signature verification) in SECURITY.md with code comments at all pickle/dill sites
+4. Cross-platform key file permissions — `icacls` on Windows replaces no-op `chmod(0o600)` (2 tests)
+5. Updated CONCERNS.md — 5 items marked as resolved with version references
+
+---
+
 ## v0.8.0 API & Robustness (Shipped: 2026-04-03)
 
 **Phases completed:** 4 phases, 4 plans, 28 files changed (+1740/-36 lines)

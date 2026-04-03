@@ -4,7 +4,7 @@
 
 - ✅ **v0.7.0 Cleanup & Hardening** — Phases 1-6 (shipped 2026-04-02) — [archive](milestones/v0.7.0-ROADMAP.md)
 - ✅ **v0.8.0 API & Robustness** — Phases 7-10 (shipped 2026-04-03) — [archive](milestones/v0.8.0-ROADMAP.md)
-- 🔄 **v0.9.0 Completeness & Hardening** — Phases 11-14 (in progress)
+- ✅ **v0.9.0 Completeness & Hardening** — Phases 11-14 (shipped 2026-04-03) — [archive](milestones/v0.9.0-ROADMAP.md)
 
 ## Phases
 
@@ -30,44 +30,15 @@
 
 </details>
 
-### v0.9.0 Completeness & Hardening
+<details>
+<summary>✅ v0.9.0 Completeness & Hardening (Phases 11-14) — SHIPPED 2026-04-03</summary>
 
-#### Phase 11: put_batch() API
-**Goal:** Implement the missing `put_batch()` batch operation on UnifiedCache, completing the batch operations surface alongside existing `get_batch()`, `delete_batch()`, and `touch_batch()`.
-**Requirements:** MGMT-01
-**Success Criteria:**
-- `put_batch()` method exists on UnifiedCache and accepts a list of (key_kwargs, data) tuples
-- Backend-level transaction support for SQLite
-- Tests cover JSON and SQLite backends, multiple data types, partial failure handling
-- Status: Complete ✔ (2026-04-03)
+- [x] Phase 11: put_batch() API — completed 2026-04-03
+- [x] Phase 12: Threading Model Documentation — completed 2026-04-03
+- [x] Phase 13: Deserialization Security — completed 2026-04-03
+- [x] Phase 14: Windows Key File Permissions — completed 2026-04-03
 
-#### Phase 12: Threading Model Documentation
-**Goal:** Fix contradictory concurrency documentation and accurately document the post-v0.8.0 threading model. API_REFERENCE.md claims "thread-safe for all operations" while TROUBLESHOOTING.md says "not thread-safe" — both are outdated.
-**Requirements:** DOC-01
-**Success Criteria:**
-- API_REFERENCE.md Thread Safety section documents actual RLock behavior and backend-level protections
-- TROUBLESHOOTING.md is consistent with API_REFERENCE.md
-- Concurrency boundaries clearly documented per backend
-- Status: Complete ✔ (2026-04-03)
-
-#### Phase 13: Deserialization Security
-**Goal:** Harden pickle/dill deserialization paths with defense-in-depth documentation and verification that existing protections (HMAC + file_hash) cover blob tampering.
-**Requirements:** SEC-01
-**Success Criteria:**
-- SECURITY.md documents the layered defense model (HMAC metadata signing + file_hash blob verification)
-- Code comments at all 7 deserialization sites reference the security model
-- Test verifies that blob tampering is detected when verify_hashes=True (default)
-- Status: Complete ✔ (2026-04-03)
-
-#### Phase 14: Windows Key File Permissions
-**Goal:** Replace the no-op `chmod(0o600)` on Windows with `icacls`-based ACL restriction so the signing key file is actually protected.
-**Requirements:** SEC-02
-**Success Criteria:**
-- Windows: `icacls` restricts key file to current user
-- Graceful fallback on `icacls` failure (log warning, continue)
-- Test covers the Windows permission code path
-- SECURITY.md documents Windows key file behavior
-- Status: Not Started
+</details>
 
 ## Progress
 

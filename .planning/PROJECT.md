@@ -1,29 +1,18 @@
-# Cacheness — API & Robustness
+# Cacheness — Completeness & Hardening
 
 ## What This Is
 
-Cacheness is a Python disk caching library with pluggable metadata backends (JSON/SQLite/PostgreSQL) and handler-based type-aware serialization (DataFrames, NumPy arrays, TensorFlow tensors, etc.). It also serves as a standalone persistent key-value store via storage mode. This milestone addresses technical debt, security gaps, error handling inconsistencies, test coverage gaps, and code structure issues identified by the codebase audit.
+Cacheness is a Python disk caching library with pluggable metadata backends (JSON/SQLite/PostgreSQL) and handler-based type-aware serialization (DataFrames, NumPy arrays, TensorFlow tensors, etc.). It also serves as a standalone persistent key-value store via storage mode.
 
 ## Current State
 
-**Shipped:** v0.8.0 API & Robustness (2026-04-03)
+**Shipped:** v0.9.0 Completeness & Hardening (2026-04-03)
 
-Reliability and integrity hardening complete: SqliteBackend uses RLock for deadlock-free re-entrant calls, crash-safe write intent journal prevents orphaned blobs, HMAC signature verification validates blob integrity end-to-end, and `delete_by_prefix()` provides backend-optimized bulk deletion. Test suite at 1641 passed / 101 skipped / 0 failures.
+All management APIs complete (`put_batch()` rounds out `get_batch()`, `delete_batch()`, `touch_batch()`). Threading model accurately documented with RLock concurrency model. Deserialization security documented with 3-layer defense model. Cross-platform key file permissions via `icacls` on Windows. Test suite at 1651 passed / 101 skipped / 0 failures.
 
-## Current Milestone: v0.9.0 Completeness & Hardening
+## Current Milestone: (none — ready for next milestone)
 
-**Goal:** Close remaining gaps identified in CONCERNS.md — complete the batch API surface, fix contradictory documentation, and harden security on all platforms.
-
-**Scope (adjusted from initial analysis):**
-- Most management APIs (`update_data()`, `touch()`, `get_metadata()`, `get_batch()`, `delete_batch()`, `touch_batch()`) already exist — only `put_batch()` is missing
-- Configurable in-memory key fallback (`use_in_memory_key`, `raise_on_key_fallback`) already shipped in v0.7.0
-- 16 concurrency stress tests already exist in `test_concurrency_stress.py`
-
-**Actual work:**
-- `put_batch()` — the only missing batch operation
-- Threading model documentation — fix contradictions between API_REFERENCE.md and TROUBLESHOOTING.md
-- Deserialization security — document layered defense model, verify blob tampering detection
-- Windows key file permissions — replace no-op chmod with icacls
+All v0.9.0 requirements shipped. Ready for `/gsd-new-milestone` to define next scope.
 
 ## Core Value
 
@@ -62,13 +51,15 @@ Improve reliability, security, and maintainability of Cacheness without changing
 - ✓ End-to-end blob integrity validation via HMAC signature verification — v0.8.0
 - ✓ `delete_by_prefix()` with SQL LIKE optimization — v0.8.0
 
+- ✓ `put_batch()` with batch storage API — v0.9.0
+- ✓ Accurate threading model documentation — v0.9.0
+- ✓ Deserialization security documentation and verification — v0.9.0
+- ✓ Cross-platform key file permissions (Windows icacls) — v0.9.0
+- ✓ CONCERNS.md updated to reflect all resolved items — v0.9.0
+
 ### Active
 
-- [ ] `put_batch()` with backend-level transactions (MGMT-01)
-- [ ] Fix contradictory threading model documentation (DOC-01)
-- [ ] Deserialization security documentation and blob tampering test (SEC-01)
-- [ ] Windows key file permissions via icacls (SEC-02)
-- [ ] Update CONCERNS.md to reflect implemented APIs (MGMT-02)
+(None — define with `/gsd-new-milestone`)
 
 ### Out of Scope
 
@@ -82,13 +73,13 @@ Improve reliability, security, and maintainability of Cacheness without changing
 
 ## Context
 
-- **Codebase state:** ~18,000 lines of Python across ~42 source files. Well-tested (1,641 passed, 101 skipped).
+- **Codebase state:** ~18,500 lines of Python across ~42 source files. Well-tested (1,651 passed, 101 skipped).
 - **Codebase map:** `.planning/codebase/` contains 7 detailed analysis documents from 2026-04-02.
 - **Structure:** Code decomposed into `handlers/` (11 files), `metadata/` (5 files), and 4 mixin files alongside `core.py`.
-- **Security:** Blob content hashing on by default. Key fallback configurable. HMAC-SHA256 signing. End-to-end signature verification available.
-- **Concurrency:** SqliteBackend uses RLock for re-entrant safety. Write intent journal prevents orphaned blobs.
+- **Security:** Blob content hashing on by default. Key fallback configurable. HMAC-SHA256 signing. End-to-end signature verification. Cross-platform key file permissions. 3-layer deserialization defense documented.
+- **Concurrency:** SqliteBackend uses RLock for re-entrant safety. Write intent journal prevents orphaned blobs. Full threading model documented.
 - **Error handling:** All `except Exception` catches narrowed or annotated `# intentionally broad`.
-- **Tests:** Thread safety, key rotation, re-entrancy stress, write intent, signature verification, and prefix deletion covered.
+- **Tests:** Thread safety, key rotation, re-entrancy stress, write intent, signature verification, prefix deletion, batch operations, and key file permissions covered.
 
 ## Testing Philosophy & Workflow
 
@@ -155,7 +146,8 @@ New tests must match the quality and coverage strategies already employed:
 | RLock over ReadWriteLock | ReadWriteLock needs call-chain audit to avoid deadlocks; RLock sufficient for current patterns | ✓ Good — simple, no deadlocks |
 | File-based intent journal over metadata table | Backend-agnostic, crash-safe, no schema migration, lazy dir creation | ✓ Good — 12 tests pass |
 | No new blob_hmac field | file_hash already in HMAC signed fields — transitive blob integrity guaranteed | ✓ Good — no unnecessary complexity |
-| Prefix deletion on explicit cache keys | Hashed kwarg-derived keys cannot be prefix-matched meaningfully | ✓ Good — clear semantics |
+| Document existing deserialization defenses vs add new code | 3-layer model already covers threats — documenting > adding unnecessary code | ✓ Good |
+| icacls over win32security for Windows key permissions | Zero new dependencies, available on all Windows | ✓ Good |
 
 ## Evolution
 
@@ -175,4 +167,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-03 after v0.9.0 milestone started*
+*Last updated: 2026-04-03 after v0.9.0 milestone shipped*

@@ -27,11 +27,13 @@ def demo_unified_cache(tmp: Path):
     print("── UnifiedCache  put_file / get_file ────────────────────────────")
 
     cache_dir = tmp / "cache"
-    cache = cacheness(CacheConfig(
-        cache_dir=str(cache_dir),
-        metadata_backend="sqlite",
-        store_full_metadata=True,   # enables original_filename in metadata_dict
-    ))
+    cache = cacheness(
+        CacheConfig(
+            cache_dir=str(cache_dir),
+            metadata_backend="sqlite",
+            store_full_metadata=True,  # enables original_filename in metadata_dict
+        )
+    )
     src_dir = tmp / "src"
     src_dir.mkdir()
     out_dir = tmp / "out"
@@ -54,7 +56,7 @@ def demo_unified_cache(tmp: Path):
         cache.get_file(cache_key=key, dest=dest, overwrite=False)
         print("  ERROR: expected FileExistsError")
     except FileExistsError:
-        print(f"  overwrite=False → FileExistsError raised correctly ✓")
+        print("  overwrite=False → FileExistsError raised correctly ✓")
 
     # --- get as raw bytes (no dest) ---
     raw = cache.get_file(cache_key=key)
@@ -72,7 +74,9 @@ def demo_unified_cache(tmp: Path):
     move_dest = cache.get_file(cache_key=move_key, dest=out_dir / "data.csv", move=True)
     assert move_dest is not None and move_dest.exists()
     assert not cache.exists(cache_key=move_key), "entry removed after move-out"
-    print(f"  move-out → {move_dest.name}  removed from cache: {not cache.exists(cache_key=move_key)}")
+    print(
+        f"  move-out → {move_dest.name}  removed from cache: {not cache.exists(cache_key=move_key)}"
+    )
     print()
 
 
@@ -94,7 +98,7 @@ def demo_blob_store(tmp: Path):
 
         # move-in
         tmp_weights = src_dir / "weights.bin"
-        tmp_weights.write_bytes(b"\x00\xFF" * 512)
+        tmp_weights.write_bytes(b"\x00\xff" * 512)
         wkey = store.put_file(tmp_weights, move=True)
         print(f"  move-in  original deleted: {not tmp_weights.exists()}")
 

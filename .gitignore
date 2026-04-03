@@ -47,6 +47,12 @@ WORKTREE.md
 # Beads
 /.beads/dolt
 
+# GSD (get-shit-done) install files — framework runtime, not repo docs
+.github/get-shit-done/
+.github/gsd-file-manifest.json
+.github/agents/
+.github/skills/
+
 # Quality check error logs
 .quality-errors.log
 cache_metadata.json

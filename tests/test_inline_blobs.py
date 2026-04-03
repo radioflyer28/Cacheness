@@ -51,6 +51,7 @@ class TestInlineBlobConfig:
 
 # ── Helpers ────────────────────────────────────────────────────────
 
+
 def _make_cache(tmp_path, name="cache", **kwargs):
     """Create a UnifiedCache with given kwargs via CacheConfig."""
     config = CacheConfig(cache_dir=str(tmp_path / name), **kwargs)
@@ -114,6 +115,7 @@ class TestInlineBlobPutGet:
         """An object larger than max_inline_size should remain as a file."""
         # Create incompressible data larger than 4KB (random bytes don't compress)
         import os
+
         data = os.urandom(8000)
         cache_key = inline_cache.put(data, cache_key="large-obj")
 
@@ -128,6 +130,7 @@ class TestInlineBlobPutGet:
     def test_large_object_roundtrip(self, inline_cache):
         """Large objects (not inlined) should still roundtrip normally."""
         import os
+
         data = os.urandom(8000)
         inline_cache.put(data, cache_key="large-rt")
         result = inline_cache.get(cache_key="large-rt")
@@ -153,7 +156,10 @@ class TestInlineBlobPutGet:
         blob_files = [
             f
             for f in cache_dir.rglob("*")
-            if f.is_file() and not f.name.endswith((".db", ".json", ".db-journal", ".db-wal", ".db-shm"))
+            if f.is_file()
+            and not f.name.endswith(
+                (".db", ".json", ".db-journal", ".db-wal", ".db-shm")
+            )
         ]
         assert len(blob_files) == 0, f"Found unexpected blob files: {blob_files}"
 
@@ -237,6 +243,7 @@ class TestInlineBlobUpdateData:
     def test_update_small_to_large(self, cache):
         """Updating an inlined entry with large data should de-inline it."""
         import os
+
         cache.put({"v": 1}, cache_key="update-s2l")
         success = cache.update_data(os.urandom(8000), cache_key="update-s2l")
         assert success is True
@@ -254,7 +261,9 @@ class TestInlineBlobIntegrity:
 
     @pytest.fixture
     def cache(self, tmp_path):
-        return _make_cache(tmp_path, "cache", max_inline_size=4096, verify_cache_integrity=True)
+        return _make_cache(
+            tmp_path, "cache", max_inline_size=4096, verify_cache_integrity=True
+        )
 
     def test_integrity_roundtrip(self, cache):
         """Integrity-verified inline blob should roundtrip."""
@@ -287,6 +296,7 @@ class TestInlineBlobEntrySummaries:
     def test_summary_has_is_inline(self, cache):
         """Entry summaries should include is_inline field."""
         import os
+
         cache.put({"small": True}, cache_key="summary-inline")
         cache.put(os.urandom(8000), cache_key="summary-file")
 
@@ -321,6 +331,7 @@ class TestInlineBlobOverwrite:
     def test_overwrite_file_with_inlined(self, cache):
         """Overwriting a large (file) entry with a small (inline) value."""
         import os
+
         cache.put(os.urandom(8000), cache_key="overwrite-f2i")
         cache.put({"small": True}, cache_key="overwrite-f2i")
 
@@ -333,6 +344,7 @@ class TestInlineBlobOverwrite:
     def test_overwrite_inlined_with_file(self, cache):
         """Overwriting a small (inline) entry with a large (file) value."""
         import os
+
         big_data = os.urandom(8000)
         cache.put({"small": True}, cache_key="overwrite-i2f")
         cache.put(big_data, cache_key="overwrite-i2f")
@@ -365,6 +377,7 @@ class TestInlineBlobDelete:
     def test_clear_with_inline_entries(self, cache):
         """Clearing cache with mixed inline/file entries should work."""
         import os
+
         cache.put({"small": True}, cache_key="clear-inline")
         cache.put(os.urandom(8000), cache_key="clear-file")
 

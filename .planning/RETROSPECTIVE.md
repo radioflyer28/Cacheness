@@ -91,13 +91,56 @@
 
 ---
 
+## Milestone: v0.9.0 — Completeness & Hardening
+
+**Shipped:** 2026-04-03
+**Phases:** 4 | **Plans:** 4
+
+### What Was Built
+
+1. `put_batch()` API completing the batch operations surface (`put_batch`, `get_batch`, `delete_batch`, `touch_batch`)
+2. Threading model documentation fixed — corrected false claim that `_lock` is never acquired (it's acquired by 22+ methods)
+3. Deserialization security documented — 3-layer defense model (xxhash + HMAC + signature verification) at all pickle/dill sites
+4. Cross-platform key file permissions — `icacls` on Windows replaces no-op `chmod(0o600)`
+
+### What Worked
+
+- **Discovery-first approach** — Explore subagent found that most "missing" APIs already existed, reducing MGMT scope from 6+ items to just `put_batch()`
+- **Documentation as the deliverable** — Phases 12-13 proved that documenting existing defenses is more valuable than adding unnecessary code (existing 3-layer model was already sound)
+- **CONCERNS.md as scope source** — using the codebase audit document to drive milestone requirements produced highly targeted, actionable work
+
+### What Was Inefficient
+
+- **Git commit timeouts** — several commits timed out in the terminal, requiring background terminal checks and retry logic. Intermittent issue, likely Windows GPG or hook overhead.
+- **gsd-tools stale data** — `roadmap analyze` returned v0.7.0 data instead of v0.9.0. The tooling couldn't parse the multi-milestone ROADMAP correctly, requiring manual phase tracking.
+- **Planning overhead for documentation phases** — full discuss→plan→execute cycle was unnecessary for phases that were purely documentation fixes
+
+### Patterns Established
+
+- `_set_key_file_permissions()` as cross-platform static method pattern — OS detection at call site, graceful fallback on both platforms
+- CONCERNS.md as milestone scope driver — items listed as "missing" or "broken" become requirements, resolved items get version annotations
+- Documentation phases can skip formal planning — investigate, fix, commit
+
+### Key Lessons
+
+- Always verify documentation claims against actual code — TROUBLESHOOTING.md's false threading claim persisted across 2 milestones because nobody checked
+- `icacls /inheritance:r /grant:r` is the Windows equivalent of `chmod 0o600` — no pywin32 dependency needed
+- Small milestones (4 phases) complete in a single session, ideal for cleanup/hardening work
+
+### Cost Observations
+
+- Sessions: 2 (planning + phases 11-12, phases 13-14 + lifecycle)
+- Notable: Entire milestone from requirements definition through push in ~2 hours
+
+---
+
 ## Cross-Milestone Trends
 
-| Metric | v0.7.0 | v0.8.0 |
-|--------|--------|--------|
-| Phases | 6 | 4 |
-| Plans (formal) | 3 | 4 |
-| Tests added | 12 | 25 |
-| Test total | 1616 | 1641 |
-| Files changed | 39 | 28 |
-| Lines +/- | +6480/-5661 | +1740/-36 |
+| Metric | v0.7.0 | v0.8.0 | v0.9.0 |
+|--------|--------|--------|--------|
+| Phases | 6 | 4 | 4 |
+| Plans (formal) | 3 | 4 | 4 |
+| Tests added | 12 | 25 | 10 |
+| Test total | 1616 | 1641 | 1651 |
+| Files changed | 39 | 28 | 20 |
+| Lines +/- | +6480/-5661 | +1740/-36 | +606/-56 |

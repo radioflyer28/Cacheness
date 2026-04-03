@@ -35,6 +35,7 @@ from cacheness.metadata import Base
 
 # -- 1. put_with_meta / get_with_meta ----------------------------------------
 
+
 def demo_put_get_with_meta(cache):
     print("── put_with_meta / get_with_meta ────────────────────────────────")
 
@@ -53,11 +54,15 @@ def demo_put_get_with_meta(cache):
         print("  miss (unexpected)")
 
     # Miss returns None
-    assert cache.get_with_meta(experiment="exp_001", model="lightgbm", accuracy=0.94) is None
+    assert (
+        cache.get_with_meta(experiment="exp_001", model="lightgbm", accuracy=0.94)
+        is None
+    )
     print("  non-existent key → None ✓\n")
 
 
 # -- 2. on= key discriminator ------------------------------------------------
+
 
 def demo_on_discriminator(cache):
     print("── on= key discriminator ─────────────────────────────────────────")
@@ -79,6 +84,7 @@ def demo_on_discriminator(cache):
 
 # -- 3. query_with_meta -------------------------------------------------------
 
+
 def demo_query_with_meta(cache):
     print("── query_with_meta ───────────────────────────────────────────────")
     hits = list(cache.query_with_meta(experiment="exp_001", model="xgboost"))
@@ -90,6 +96,7 @@ def demo_query_with_meta(cache):
 
 # -- 4. put_with_model / get_with_model (requires SQLAlchemy) ----------------
 
+
 def demo_put_get_with_model(cache):
     print("── put_with_model / get_with_model ───────────────────────────────")
 
@@ -100,16 +107,17 @@ def demo_put_get_with_model(cache):
     @custom_metadata_model("ml_runs")
     class RunMeta(Base, CustomMetadataBase):
         __tablename__ = "custom_ml_runs"
-        run_id     = Column(String(50), nullable=False, index=True)
+        run_id = Column(String(50), nullable=False, index=True)
         model_type = Column(String(50), nullable=False, index=True)
-        accuracy   = Column(Float,      nullable=False)
-        n_samples  = Column(Integer,    nullable=False)
+        accuracy = Column(Float, nullable=False)
+        n_samples = Column(Integer, nullable=False)
 
     migrate_custom_metadata_tables(cache)
 
     data = np.random.rand(200, 20)
     cache.put_with_model(
-        data, RunMeta,
+        data,
+        RunMeta,
         run_id="run_42",
         model_type="random_forest",
         accuracy=0.91,
@@ -137,11 +145,13 @@ def demo_put_get_with_model(cache):
 def main():
     tmp = tempfile.mkdtemp(prefix="cacheness_conv_meta_")
     try:
-        cache = cacheness(CacheConfig(
-            cache_dir=tmp,
-            metadata_backend="sqlite",
-            store_full_metadata=True,
-        ))
+        cache = cacheness(
+            CacheConfig(
+                cache_dir=tmp,
+                metadata_backend="sqlite",
+                store_full_metadata=True,
+            )
+        )
 
         demo_put_get_with_meta(cache)
         demo_on_discriminator(cache)
