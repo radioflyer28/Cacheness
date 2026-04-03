@@ -11,6 +11,7 @@ Validates that:
 """
 
 import pytest
+import os
 import tempfile
 import shutil
 from datetime import datetime, timezone
@@ -109,6 +110,63 @@ class TestSignerNamespaceMethods:
         # Adding schema_version should not affect the signature
         ns_data_with_version = {**ns_data, "schema_version": 99}
         assert signer.verify_namespace(ns_data_with_version, sig) is True
+
+
+# ---------------------------------------------------------------------------
+# Unit tests for key file permissions
+# ---------------------------------------------------------------------------
+
+
+class TestKeyFilePermissions:
+    """Verify that _set_key_file_permissions applies OS-appropriate protections."""
+
+    def test_key_file_permissions_applied_on_generate(self, tmp_path):
+        """Key file gets restrictive permissions when generated."""
+        import sys
+
+        key_path = tmp_path / "key.bin"
+        signer = CacheEntrySigner(key_file_path=key_path)
+
+        assert key_path.exists()
+        if sys.platform == "win32":
+            # On Windows, verify icacls removed inherited permissions
+            # and only the current user has access
+            import subprocess
+
+            result = subprocess.run(
+                ["icacls", str(key_path)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            assert result.returncode == 0
+            output = result.stdout
+            # After ACL change: no inherited "(I)" entries,
+            # only the current user should appear
+            assert "(I)" not in output, "Inherited permissions should be removed"
+            assert os.getlogin() in output, "Current user should have access"
+        else:
+            import stat
+
+            mode = key_path.stat().st_mode
+            assert mode & stat.S_IRWXG == 0, "Group should have no access"
+            assert mode & stat.S_IRWXO == 0, "Others should have no access"
+
+    def test_set_key_file_permissions_static_method(self, tmp_path):
+        """_set_key_file_permissions works as a standalone static method."""
+        import sys
+
+        key_path = tmp_path / "test_key.bin"
+        key_path.write_bytes(b"x" * 32)
+
+        CacheEntrySigner._set_key_file_permissions(key_path)
+
+        if sys.platform != "win32":
+            import stat
+
+            mode = key_path.stat().st_mode
+            assert mode & stat.S_IRWXG == 0
+            assert mode & stat.S_IRWXO == 0
 
 
 # ---------------------------------------------------------------------------

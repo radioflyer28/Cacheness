@@ -75,7 +75,9 @@ config = CacheConfig(
 ```
 
 **Characteristics:**
-- ✅ Key stored in `cache_signing_key.bin` with restrictive permissions (0600)
+- ✅ Key stored in `cache_signing_key.bin` with restrictive permissions
+  - **Unix/macOS:** `chmod 0600` (owner read/write only)
+  - **Windows:** `icacls` removes inherited permissions, grants only the current user `(R,W)`
 - ✅ Cache entries remain valid across process restarts
 - ✅ Good for development and persistent environments
 - ⚠️ Key file could potentially be compromised if disk access is breached

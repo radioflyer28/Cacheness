@@ -21,7 +21,10 @@ Security Model:
 
 import hmac
 import hashlib
+import os
 import secrets
+import subprocess
+import sys
 import logging
 from pathlib import Path
 from typing import Dict, Any, List
@@ -144,13 +147,8 @@ class CacheEntrySigner:
             # Save key with restrictive permissions
             self.key_file_path.write_bytes(key)
 
-            # Set restrictive file permissions (owner read/write only)
-            try:
-                self.key_file_path.chmod(0o600)
-            except OSError as e:
-                logger.warning(
-                    f"Failed to set restrictive permissions on key file: {e}"
-                )
+            # Set restrictive file permissions (owner-only access)
+            self._set_key_file_permissions(self.key_file_path)
 
             logger.info(f"Generated new signing key: {self.key_file_path}")
             return key
@@ -167,6 +165,36 @@ class CacheEntrySigner:
             # Fallback to in-memory key (not persistent)
             logger.warning("Using in-memory signing key (not persistent)")
             return key
+
+    @staticmethod
+    def _set_key_file_permissions(path: Path) -> None:
+        """Set restrictive permissions on the key file (owner-only access)."""
+        if sys.platform == "win32":
+            # On Windows, chmod is a no-op for ACLs. Use icacls to restrict
+            # the key file to the current user only.
+            try:
+                username = os.getlogin()
+                subprocess.run(
+                    [
+                        "icacls",
+                        str(path),
+                        "/inheritance:r",
+                        "/grant:r",
+                        f"{username}:(R,W)",
+                    ],
+                    check=True,
+                    capture_output=True,
+                    timeout=10,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to set Windows ACL on key file: {e}")
+        else:
+            try:
+                path.chmod(0o600)
+            except OSError as e:
+                logger.warning(
+                    f"Failed to set restrictive permissions on key file: {e}"
+                )
 
     def _create_signature_payload(
         self, entry_data: SignableFields, version: int
