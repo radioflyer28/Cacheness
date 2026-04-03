@@ -337,6 +337,8 @@ class UnifiedCache(
                     key_file=self.config.security.signing_key_file,
                     use_in_memory_key=self.config.security.use_in_memory_key,
                     key_fallback_policy=self.config.security.key_fallback_policy,
+                    namespace_id=self.namespace,
+                    use_hkdf_derivation=self.config.security.use_hkdf_derivation,
                 )
 
                 info = self.signer.get_field_info()

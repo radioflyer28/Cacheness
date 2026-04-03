@@ -113,6 +113,7 @@ class BlobStore:
         key_fallback_policy: str = "warn",
         config: Optional[CacheConfig] = None,
         namespace: str = "default",
+        use_hkdf_derivation: bool = True,
     ):
         """
         Initialize a BlobStore.
@@ -203,7 +204,8 @@ class BlobStore:
         self.signer = None
         if enable_signing:
             self._init_signer(
-                signing_key_file, use_in_memory_key, key_fallback_policy
+                signing_key_file, use_in_memory_key, key_fallback_policy,
+                use_hkdf_derivation=use_hkdf_derivation,
             )
 
         logger.debug(f"BlobStore initialized at {self.cache_dir}")
@@ -231,6 +233,7 @@ class BlobStore:
         signing_key_file: str,
         use_in_memory_key: bool,
         key_fallback_policy: str = "warn",
+        use_hkdf_derivation: bool = True,
     ) -> None:
         """Initialize the cache entry signer."""
         try:
@@ -241,6 +244,8 @@ class BlobStore:
                 key_file=signing_key_file,
                 use_in_memory_key=use_in_memory_key,
                 key_fallback_policy=key_fallback_policy,
+                namespace_id=self._namespace,
+                use_hkdf_derivation=use_hkdf_derivation,
             )
             info = self.signer.get_field_info()
             logger.info(
