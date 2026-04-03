@@ -7,10 +7,10 @@ last_updated: "2026-04-03"
 last_activity: 2026-04-03
 progress:
   total_phases: 4
-  completed_phases: 2
-  total_plans: 2
-  completed_plans: 2
-  percent: 50
+  completed_phases: 3
+  total_plans: 3
+  completed_plans: 3
+  percent: 75
 ---
 
 # Project State
@@ -24,9 +24,9 @@ See: .planning/PROJECT.md (updated 2026-04-03)
 
 ## Current Position
 
-Phase: 13 (Deserialization Security)
+Phase: 14 (Windows Key File Permissions)
 Plan: —
 Status: Not started
-Last activity: 2026-04-03 — Phase 12 complete (threading docs)
+Last activity: 2026-04-03 — Phase 13 complete (deserialization security)
 
-Progress: [█████░░░░░] 50% — v0.9.0 in progress
+Progress: [███████░░░] 75% — v0.9.0 in progress
