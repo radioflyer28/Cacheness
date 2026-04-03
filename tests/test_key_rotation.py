@@ -116,7 +116,7 @@ class TestKeyRotation:
             assert cache2.get(test_key=f"entry_{i}") == f"new_{i}"
 
     def test_raise_on_key_fallback(self, tmp_path):
-        """raise_on_key_fallback=True raises CacheSecurityError on write failure."""
+        """key_fallback_policy='raise' raises CacheSecurityError on write failure."""
         from cacheness.error_handling import CacheSecurityError
         from cacheness.security import CacheEntrySigner
         from pathlib import Path
@@ -139,21 +139,21 @@ class TestKeyRotation:
             CacheEntrySigner(
                 key_file_path=impossible_key,
                 use_in_memory_key=False,
-                raise_on_key_fallback=True,
+                key_fallback_policy="raise",
             )
 
     def test_no_raise_on_key_fallback_by_default(self, tmp_path):
-        """By default, key write failure falls back to in-memory key silently."""
+        """By default (warn mode), key write failure falls back to in-memory key."""
         from cacheness.security import CacheEntrySigner
 
         blocker_file = tmp_path / "blocker"
         blocker_file.write_text("block")
         impossible_key = blocker_file / "subdir" / "key.bin"
 
-        # Should NOT raise — falls back to in-memory key
+        # Should NOT raise — falls back to in-memory key with warning
         signer = CacheEntrySigner(
             key_file_path=impossible_key,
             use_in_memory_key=False,
-            raise_on_key_fallback=False,
+            key_fallback_policy="warn",
         )
         assert signer.secret_key is not None
