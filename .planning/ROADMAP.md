@@ -39,7 +39,7 @@
 - `put_batch()` method exists on UnifiedCache and accepts a list of (key_kwargs, data) tuples
 - Backend-level transaction support for SQLite
 - Tests cover JSON and SQLite backends, multiple data types, partial failure handling
-- Status: Not Started
+- Status: Complete ✔ (2026-04-03)
 
 #### Phase 12: Threading Model Documentation
 **Goal:** Fix contradictory concurrency documentation and accurately document the post-v0.8.0 threading model. API_REFERENCE.md claims "thread-safe for all operations" while TROUBLESHOOTING.md says "not thread-safe" — both are outdated.
@@ -83,7 +83,7 @@
 | 8. Crash-Safe Write Intent Logging | v0.8.0 | Complete | 2026-04-02 |
 | 9. Blob Integrity Validation | v0.8.0 | Complete | 2026-04-02 |
 | 10. Prefix Deletion API | v0.8.0 | Complete | 2026-04-02 |
-| 11. put_batch() API | v0.9.0 | Not Started | — |
+| 11. put_batch() API | v0.9.0 | Complete | 2026-04-03 |
 | 12. Threading Model Documentation | v0.9.0 | Not Started | — |
 | 13. Deserialization Security | v0.9.0 | Not Started | — |
 | 14. Windows Key File Permissions | v0.9.0 | Not Started | — |
