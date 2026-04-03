@@ -43,7 +43,7 @@
 
 ### v0.10.0 Security & Architecture (Phases 15-20)
 
-- [ ] **Phase 15: Configurable Key Fallback** — User-controlled key fallback policy (raise/warn/fallback)
+- [x] **Phase 15: Configurable Key Fallback** — User-controlled key fallback policy (raise/warn/fallback)
 - [ ] **Phase 16: HKDF Key Derivation** — Per-namespace key derivation from master key
 - [ ] **Phase 17: Key Rotation API** — Manual rotate_key() with re-sign and old-key handling
 - [ ] **Phase 18: Encryption at Rest** — AES-GCM blob encryption, disabled by default
@@ -63,7 +63,7 @@
   4. `fallback` policy silently uses in-memory key without warning
 **Plans:** 1 plan
 Plans:
-- [ ] 15-01-PLAN.md — Config, security, core, blob_store changes + tests + docs (3 tasks, wave 1)
+- [x] 15-01-PLAN.md — Config, security, core, blob_store changes + tests + docs (3 tasks, wave 1)
 
 ### Phase 16: HKDF Key Derivation
 **Goal**: Each namespace derives its own signing key from the master key — cryptographic isolation
