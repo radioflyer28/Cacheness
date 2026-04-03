@@ -82,7 +82,7 @@ class CacheEntrySigner:
         self,
         key_file_path: Path,
         use_in_memory_key: bool = False,
-        raise_on_key_fallback: bool = False,
+        key_fallback_policy: str = "warn",
     ):
         """
         Initialize the cache entry signer.
@@ -90,13 +90,14 @@ class CacheEntrySigner:
         Args:
             key_file_path: Path to the signing key file (ignored if use_in_memory_key=True)
             use_in_memory_key: If True, use in-memory key instead of persistent file
-            raise_on_key_fallback: If True, raise CacheSecurityError instead of
-                silently falling back to an in-memory key when the key file
-                cannot be written
+            key_fallback_policy: What to do when key file cannot be written.
+                'raise' = raise CacheSecurityError
+                'warn' = log WARNING + use in-memory key
+                'fallback' = silently use in-memory key
         """
         self.key_file_path = key_file_path
         self.use_in_memory_key = use_in_memory_key
-        self.raise_on_key_fallback = raise_on_key_fallback
+        self.key_fallback_policy = key_fallback_policy
         self.secret_key = self._load_or_generate_key()
 
         key_type = "in-memory" if use_in_memory_key else "persistent"
@@ -118,9 +119,20 @@ class CacheEntrySigner:
                 # Load existing key
                 key = self.key_file_path.read_bytes()
                 if len(key) != 32:
-                    logger.warning(
-                        f"Invalid key length ({len(key)} bytes), generating new key"
-                    )
+                    if self.key_fallback_policy == "raise":
+                        from .error_handling import CacheSecurityError
+
+                        raise CacheSecurityError(
+                            f"Invalid signing key length ({len(key)} bytes) "
+                            f"in {self.key_file_path}. Expected 32 bytes. "
+                            f"Delete the file and retry."
+                        )
+                    elif self.key_fallback_policy == "warn":
+                        logger.warning(
+                            f"Invalid key length ({len(key)} bytes) in "
+                            f"{self.key_file_path}, generating new key"
+                        )
+                    # "fallback" mode: no log, just regenerate
                     return self._generate_new_key()
                 logger.debug(f"Loaded signing key from {self.key_file_path}")
                 return key
@@ -154,16 +166,21 @@ class CacheEntrySigner:
             return key
 
         except OSError as e:
-            if self.raise_on_key_fallback:
+            if self.key_fallback_policy == "raise":
                 from .error_handling import CacheSecurityError
 
                 raise CacheSecurityError(
                     f"Failed to persist signing key to {self.key_file_path}: {e}. "
-                    f"Set raise_on_key_fallback=False to allow in-memory fallback."
+                    f"Set key_fallback_policy='warn' or 'fallback' "
+                    f"to allow in-memory fallback."
                 ) from e
-            logger.error(f"Failed to generate signing key: {e}")
-            # Fallback to in-memory key (not persistent)
-            logger.warning("Using in-memory signing key (not persistent)")
+            elif self.key_fallback_policy == "warn":
+                logger.warning(
+                    f"Failed to persist signing key to "
+                    f"{self.key_file_path}: {e}. "
+                    f"Using in-memory signing key (not persistent)."
+                )
+            # "fallback" mode: silent — no log output
             return key
 
     @staticmethod
@@ -448,7 +465,7 @@ def create_cache_signer(
     cache_dir: Path,
     key_file: str = "cache_signing_key.bin",
     use_in_memory_key: bool = False,
-    raise_on_key_fallback: bool = False,
+    key_fallback_policy: str = "warn",
 ) -> CacheEntrySigner:
     """
     Factory function to create a cache entry signer.
@@ -456,12 +473,13 @@ def create_cache_signer(
     Args:
         cache_dir: Cache directory where key file will be stored
         key_file: Name of the signing key file (ignored if use_in_memory_key=True)
-        use_in_memory_key: If True, use in-memory key instead of persistent file
-        raise_on_key_fallback: If True, raise CacheSecurityError instead of
-            silently falling back to an in-memory key
+        key_fallback_policy: What to do when key file cannot be written.
+            'raise' = raise CacheSecurityError
+            'warn' = log WARNING + use in-memory key
+            'fallback' = silently use in-memory key
 
     Returns:
         Configured CacheEntrySigner instance
     """
     key_file_path = cache_dir / key_file
-    return CacheEntrySigner(key_file_path, use_in_memory_key, raise_on_key_fallback)
+    return CacheEntrySigner(key_file_path, use_in_memory_key, key_fallback_policy)

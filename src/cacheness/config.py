@@ -405,16 +405,36 @@ class SecurityConfig:
     )
 
     # Key fallback behavior
-    raise_on_key_fallback: bool = False  # If True, raise CacheSecurityError instead of falling back to in-memory key
+    raise_on_key_fallback: bool = False  # Deprecated: use key_fallback_policy instead
+    key_fallback_policy: str = "warn"  # "raise", "warn", or "fallback"
 
     def __post_init__(self):
         """Validate security configuration."""
+        # Deprecation shim: raise_on_key_fallback -> key_fallback_policy
+        if self.raise_on_key_fallback and self.key_fallback_policy == "warn":
+            import warnings
+
+            warnings.warn(
+                "raise_on_key_fallback is deprecated. "
+                "Use key_fallback_policy='raise' instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            self.key_fallback_policy = "raise"
+
+        valid_policies = ("raise", "warn", "fallback")
+        if self.key_fallback_policy not in valid_policies:
+            raise ValueError(
+                f"key_fallback_policy must be one of {valid_policies}, "
+                f"got {self.key_fallback_policy!r}"
+            )
+
         logger.debug(
             f"Security configured: signing={self.enable_entry_signing}, "
             f"in_memory_key={self.use_in_memory_key}, "
             f"allow_unsigned={self.allow_unsigned_entries}, "
             f"delete_invalid={self.delete_invalid_signatures}, "
-            f"raise_on_key_fallback={self.raise_on_key_fallback}"
+            f"key_fallback_policy={self.key_fallback_policy}"
         )
 
 

@@ -336,7 +336,7 @@ class UnifiedCache(
                     cache_dir=self.cache_dir,
                     key_file=self.config.security.signing_key_file,
                     use_in_memory_key=self.config.security.use_in_memory_key,
-                    raise_on_key_fallback=self.config.security.raise_on_key_fallback,
+                    key_fallback_policy=self.config.security.key_fallback_policy,
                 )
 
                 info = self.signer.get_field_info()
