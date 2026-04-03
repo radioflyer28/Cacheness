@@ -41,8 +41,9 @@ class TestSignerNamespaceMethods:
             "created_at": datetime(2026, 1, 1, tzinfo=timezone.utc),
         }
         sig = signer.sign_namespace(ns_data)
-        assert sig.startswith("ns1:")
-        assert len(sig) > 4  # "ns1:" + hex
+        assert sig.startswith("ns")  # ns1: or ns2: depending on HKDF
+        assert ":" in sig
+        assert len(sig) > 4  # "nsN:" + hex
         assert signer.verify_namespace(ns_data, sig) is True
 
     def test_verify_detects_tampering(self, signer):
@@ -198,7 +199,7 @@ class TestNamespaceSigningIntegration:
         ns = cache.metadata_backend.get_namespace("default")
         assert ns is not None
         assert ns.signature is not None
-        assert ns.signature.startswith("ns1:")
+        assert ns.signature.startswith(("ns1:", "ns2:"))
         cache.close()
 
     def test_json_namespace_signed_on_init(self, cache_dir):
@@ -207,7 +208,7 @@ class TestNamespaceSigningIntegration:
         ns = cache.metadata_backend.get_namespace("default")
         assert ns is not None
         assert ns.signature is not None
-        assert ns.signature.startswith("ns1:")
+        assert ns.signature.startswith(("ns1:", "ns2:"))
         cache.close()
 
     def test_signature_survives_reconnect(self, cache_dir):
@@ -249,7 +250,7 @@ class TestNamespaceSigningIntegration:
         ns = cache2.metadata_backend.get_namespace("team_a")
         assert ns is not None
         assert ns.signature is not None
-        assert ns.signature.startswith("ns1:")
+        assert ns.signature.startswith(("ns1:", "ns2:"))
         cache2.close()
 
 

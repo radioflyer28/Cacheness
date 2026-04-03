@@ -163,6 +163,27 @@ config = CacheConfig(
 
 > **Deprecation notice:** The boolean `raise_on_key_fallback` parameter is deprecated. Use `key_fallback_policy="raise"` instead. Setting `raise_on_key_fallback=True` automatically maps to `key_fallback_policy="raise"` with a deprecation warning.
 
+### Per-Namespace Key Derivation (HKDF)
+
+By default, Cacheness derives a unique signing key for each namespace using HKDF-SHA256 (RFC 5869). This provides cryptographic isolation — compromising one namespace's derived key does not reveal the master key or other namespaces' keys.
+
+```python
+# HKDF is enabled by default
+cache = cacheness()  # Each namespace gets its own derived key
+
+# Disable HKDF to use shared key (legacy behavior)
+config = CacheConfig(
+    security=SecurityConfig(use_hkdf_derivation=False)
+)
+```
+
+| Setting | Signing key | Entry format | Namespace format |
+|---------|-------------|--------------|------------------|
+| `use_hkdf_derivation=True` (default) | HKDF-derived per namespace | `v3:{hex}` | `ns2:{hex}` |
+| `use_hkdf_derivation=False` | Shared master key | `v2:{hex}` | `ns1:{hex}` |
+
+> **Migration:** Entries signed with the shared key (v2/ns1) remain verifiable after HKDF is enabled. The signature version identifies which key was used for verification.
+
 ## Signing Keys and Namespaces
 
 ### Current Behavior
