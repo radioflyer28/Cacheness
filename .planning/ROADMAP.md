@@ -63,7 +63,7 @@ Plans:
   3. If a gap is found (file_hash not in signed fields, or xxhash insufficiency for authentication), an explicit `blob_hmac` field is added and verified — with backward compatibility for entries without it
 **Plans**: 1 plan
 Plans:
-- [ ] 09-01-PLAN.md — Add verify_signatures to verify_integrity() + tests
+- [x] 09-01-PLAN.md — Add verify_signatures to verify_integrity() + tests
 
 ### Phase 10: Prefix Deletion API
 **Goal**: Users can bulk-delete cache entries by key prefix in a single call, with backend-optimized performance
@@ -89,5 +89,5 @@ Plans:
 | 6. Test Gaps & Handler Robustness | v0.7.0 | Complete | 2026-04-02 |
 | 7. Concurrency Foundation | v0.8.0 | Complete | 2026-04-02 |
 | 8. Crash-Safe Write Intent Logging | v0.8.0 | Complete | 2026-04-02 |
-| 9. Blob Integrity Validation | v0.8.0 | Not started | - |
+| 9. Blob Integrity Validation | v0.8.0 | Complete | 2026-04-02 |
 | 10. Prefix Deletion API | v0.8.0 | Not started | - |
