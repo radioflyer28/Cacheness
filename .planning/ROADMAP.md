@@ -142,7 +142,7 @@ Plans:
 | 13. Deserialization Security | v0.9.0 | Complete | 2026-04-03 |
 | 14. Windows Key File Permissions | v0.9.0 | Complete | 2026-04-03 |
 | 15. Configurable Key Fallback | v0.10.0 | Not started | - |
-| 16. HKDF Key Derivation | 1/1 | Complete   | 2026-04-03 |
+| 16. HKDF Key Derivation | 1/1 | Complete    | 2026-04-03 |
 | 17. Key Rotation API | v0.10.0 | Not started | - |
 | 18. Encryption at Rest | v0.10.0 | Not started | - |
 | 19. Core Decomposition II | v0.10.0 | Not started | - |
