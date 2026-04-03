@@ -44,7 +44,8 @@
 ### v0.10.0 Security & Architecture (Phases 15-20)
 
 - [x] **Phase 15: Configurable Key Fallback** — User-controlled key fallback policy (raise/warn/fallback)
-- [x] **Phase 16: HKDF Key Derivation** — Per-namespace key derivation from master key (completed 2026-04-03)
+- [x] **Phase 16: HKDF Key Derivation** — Per-namespace key derivation from master key
+ (completed 2026-04-03)
 - [ ] **Phase 17: Key Rotation API** — Manual rotate_key() with re-sign and old-key handling
 - [ ] **Phase 18: Encryption at Rest** — AES-GCM blob encryption, disabled by default
 - [ ] **Phase 19: Core Decomposition II** — Extract eviction, namespace, and init logic into mixins
@@ -87,7 +88,10 @@ Plans:
   2. After rotation, old entries verify successfully with new key
   3. Deleting old key file and restarting cache handles old-key entries gracefully (no crash)
   4. Rotation is atomic — partial failure leaves entries in a consistent state
-**Plans**: TBD
+**Plans:** 2 plans
+Plans:
+- [ ] 17-01-PLAN.md — RotationResult dataclass + rotate_key() on UnifiedCache and BlobStore (2 tasks, wave 1)
+- [ ] 17-02-PLAN.md — Comprehensive tests + security documentation (2 tasks, wave 2)
 
 ### Phase 18: Encryption at Rest
 **Goal**: Cached blob data can be encrypted on disk — disabled by default, signing unaffected
