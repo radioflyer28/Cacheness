@@ -208,6 +208,32 @@ When contributing to Cacheness, avoid these violations of separation of concerns
 4. **Blob backends doing serialization** — blob backends manage file lifecycle (delete, exists), not data formats
 5. **Direct `Path.unlink()` / `Path.exists()` in BlobStore** — use `self.blob_backend` methods for file lifecycle operations
 
+## Tiered Cache Composition (Future)
+
+The `TieredCache` pattern composes two `UnifiedCache` instances — a fast local tier and a durable remote tier — with automatic pull-through on miss:
+
+```
+┌─────────────────────────────────────────────┐
+│              TieredCache (~200 LOC)          │
+│         Orchestration only, no I/O          │
+├──────────────────┬──────────────────────────┤
+│  Local Tier      │  Remote Tier             │
+│  UnifiedCache    │  UnifiedCache            │
+│  SQLite+FS       │  PostgreSQL/libSQL+S3    │
+│  μs reads        │  ms reads, durable       │
+│  LRU, 10GB cap   │  unlimited, signed       │
+└──────────────────┴──────────────────────────┘
+```
+
+**Key design principle:** TieredCache is pure orchestration — it calls `local.get()` / `remote.get()` / `local.put()` and manages invalidation policy. No new backends, no new serialization, no new metadata schemas. This keeps it under 200 lines.
+
+**Invalidation strategies:**
+- **TTL-based:** Local entries expire after N seconds (simple, slightly stale)
+- **Metadata-version check:** Compare local vs remote metadata on hit (precise, cheap if remote uses libSQL embedded replicas)
+- **None:** Single-user or read-heavy workloads where staleness isn't a concern
+
+See [FUTURE_IMPROVEMENTS.md](FUTURE_IMPROVEMENTS.md#9-tiered-pull-through-cache--medium-priority) for full design discussion.
+
 ## Related Documentation
 
 - [Backend Selection Guide](BACKEND_SELECTION.md) — Choosing metadata backends

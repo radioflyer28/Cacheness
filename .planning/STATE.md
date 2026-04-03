@@ -30,3 +30,11 @@ Status: Phase 17 execution complete
 Last activity: 2026-04-03 -- Phase 17 execution complete
 
 Progress: [█████░░░░░] 50% — 3/6 phases complete
+
+## Accumulated Context
+
+### Pending Todos (3)
+
+1. Store cacheness version in metadata for migration support (database)
+2. Tiered pull-through cache (general)
+3. Encryption at rest for metadata and blobs (general)

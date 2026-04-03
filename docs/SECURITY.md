@@ -514,7 +514,7 @@ no_signing_config = CacheConfig(
 - ✅ Unauthorized cache entry creation
 
 **Not Protected Against:**
-- ❌ Direct file system access to cached data files (blobs are not encrypted)
+- ❌ Direct file system access to cached data files (blobs are not encrypted — see [Encryption at Rest](#encryption-at-rest-planned) for planned work)
 - ❌ Complete database replacement
 - ❌ Process memory attacks
 - ❌ OS-level privilege escalation
@@ -605,6 +605,51 @@ if cache.signer:
     print(f"In-memory key: {info['use_in_memory_key']}")
     print(f"Key file exists: {info['key_exists']}")
 ```
+
+## Encryption at Rest (Planned)
+
+Cacheness currently provides **integrity** protection (signing, hash verification) but not **confidentiality** — blobs and metadata are stored as plaintext on disk. Encryption at rest is planned to close this gap.
+
+### Current Security Posture
+
+| Layer | Protection | Status |
+|-------|-----------|--------|
+| Metadata signing (HMAC-SHA256) | Integrity | ✅ Shipped (v0.7.0+, v3 signatures with HKDF) |
+| Blob hash verification (xxhash) | Integrity | ✅ Shipped (v0.7.0+) |
+| Key rotation | Key lifecycle | ✅ Shipped (v0.10.0) |
+| Metadata encryption | Confidentiality | ⬜ Planned (via libSQL `encryption_key`) |
+| Blob encryption | Confidentiality | ⬜ Planned (AES-256-GCM envelope encryption) |
+
+### Metadata Encryption
+
+The planned [libSQL metadata backend](LIBSQL_BACKEND.md) supports native encryption at rest via the `encryption_key` connection parameter. This encrypts the entire SQLite database — cache keys, timestamps, data type metadata, custom metadata — all become opaque on disk.
+
+**Important limitation:** Metadata encryption protects metadata confidentiality but not blob files. An attacker with filesystem access can still read cached DataFrames, NumPy arrays, and pickled objects.
+
+### Blob Encryption
+
+Full data confidentiality requires encrypting blob files in the handler write path. The proposed design uses AES-256-GCM envelope encryption:
+
+1. On `put()`: handler serializes data → generate a per-blob DEK (data encryption key) → encrypt blob with DEK → encrypt DEK with master key → store encrypted blob + encrypted DEK
+2. On `get()`: decrypt DEK with master key → decrypt blob → pass plaintext to handler for deserialization
+
+Key management would leverage the existing `SecurityConfig` and HKDF infrastructure — derive blob encryption keys per namespace, same pattern as signing keys.
+
+### Threat Model with Encryption
+
+**Protected against (with both signing + encryption enabled):**
+- ✅ Cache metadata tampering (signing)
+- ✅ Blob file tampering (hash + signing)
+- ✅ Reading cached data from disk (blob encryption)
+- ✅ Reading cache keys and metadata from disk (metadata encryption via libSQL)
+- ✅ Replay attacks (timestamp in signed fields)
+
+**Still not protected against:**
+- ❌ Complete database + key file replacement (use `use_in_memory_key=True`)
+- ❌ Process memory attacks
+- ❌ OS-level privilege escalation
+
+See [FUTURE_IMPROVEMENTS.md](FUTURE_IMPROVEMENTS.md#11-encryption-at-rest--medium-priority) for implementation roadmap and design considerations.
 
 ## Examples
 

@@ -4,7 +4,7 @@
 
 This document outlines potential improvements to cacheness, prioritized by impact and effort. It also addresses frequently requested features and explains architectural decisions (particularly regarding REST API).
 
-**Last Updated:** February 5, 2026
+**Last Updated:** April 3, 2026
 
 ---
 
@@ -20,29 +20,27 @@ This document outlines potential improvements to cacheness, prioritized by impac
 
 ## High Priority - Core Functionality Gaps
 
-### 1. **Complete Missing Management Operations** ✅ Highest Priority
+### 1. **Complete Missing Management Operations** ✅ Partially Shipped
 
 **Status:** Analyzed in [MISSING_MANAGEMENT_API.md](MISSING_MANAGEMENT_API.md)
 
-**Missing Operations:**
+**Shipped (v0.8.0–v0.9.0):**
+- ✅ `delete_by_prefix(**kwargs)` — bulk delete matching entries (v0.8.0, Phase 10)
+- ✅ `put_batch(items)` — batch put with partial-success semantics (v0.9.0, Phase 11)
+
+**Remaining Operations:**
 - `update_blob_data(cache_key, new_data)` - Update data at existing key without changing key
-- `delete_by_prefix(**kwargs)` - Bulk delete matching entries
 - `touch(**kwargs, ttl_seconds)` - Refresh TTL without reloading data
 - `get_metadata(**kwargs)` - Expose backend metadata access in cache layer
-- Batch operations: `get_batch()`, `delete_batch()`, `update_batch()`
+- Batch operations: `get_batch()`, `delete_batch()`
 - Copy/move operations: `copy(source, dest)`, `move(source, dest)` (convenience wrappers)
-
-**Why High Priority:**
-- Frequently requested by users
-- Common operations in real-world usage
-- Well-defined, fits existing architecture cleanly
 
 **Impact:** High - These are essential for production use cases
 
 **Effort:** Medium - APIs designed, just need implementation
 
 **Implementation Plan:**
-1. Storage backend layer: Add `update_blob_data()`, `delete_by_prefix()`, batch operations
+1. Storage backend layer: Add `update_blob_data()`, remaining batch operations
 2. Cache layer: Add `touch()`, expose `get_metadata()`, add convenience wrappers
 3. Test across all backends (SQLite, PostgreSQL, JSON, Memory)
 4. Document in API reference
@@ -294,38 +292,16 @@ cacheness verify ./cache
 
 ### 5. **Connection Pooling for Database Backends** ⚠️ Medium Priority
 
-**Current State:** One connection per operation (inefficient for high concurrency)
+**Current State:** SQLAlchemy's `QueuePool` is already used by the PostgreSQL backend. SQLite uses a single-connection model with `RLock` for thread safety (appropriate for file-based databases).
 
-**Proposed:**
-
-```python
-from cacheness.core import UnifiedCache
-from cacheness.backends import PostgreSQLBackend
-
-# Connection pool configuration
-backend = PostgreSQLBackend(
-    "postgresql://user:pass@host/db",
-    pool_size=10,           # Normal pool size
-    max_overflow=20,        # Additional connections under load
-    pool_timeout=30,        # Wait up to 30s for connection
-    pool_recycle=3600       # Recycle connections after 1 hour
-)
-
-cache = UnifiedCache(metadata_backend=backend)
-
-# Multiple concurrent operations share pool
-# No connection exhaustion
-```
-
-**Why Needed:**
-- High-concurrency workloads (web servers, APIs)
-- Avoid connection exhaustion
-- Reduce connection overhead
-- Better resource utilization
+**What's needed:**
+- Expose pool configuration parameters (`pool_size`, `max_overflow`, `pool_timeout`) in `CacheConfig`
+- Document pool tuning for high-concurrency PostgreSQL deployments
+- Consider connection pool metrics for observability
 
 **Current Workaround:**
 ```python
-# Users must manage connections manually
+# Users can pass a custom engine with pool settings
 from sqlalchemy import create_engine, pool
 
 engine = create_engine(
@@ -335,12 +311,6 @@ engine = create_engine(
 )
 backend = PostgreSQLBackend(engine=engine)
 ```
-
-**Implementation:**
-- Use SQLAlchemy pooling (already dependency)
-- Default to sensible pool sizes
-- Make configurable
-- Document for high-concurrency scenarios
 
 **Impact:** Medium - Important for web service use cases
 
@@ -520,58 +490,154 @@ df_v2 = cache.get(key="data_v2")
 
 ---
 
-### 9. **Tiered Storage (Hot/Cold)** ⚠️ Low Priority
+### 9. **Tiered Pull-Through Cache** ✅ Medium Priority
 
-**Concept:** Automatically move old/cold data to cheaper storage
+**Concept:** Compose two `UnifiedCache` instances — a fast local cache backed by a remote shared store — with automatic pull-through on miss.
 
 **Proposed:**
 
 ```python
-cache = UnifiedCache(
-    hot_storage=MemoryBlobStore(),           # Fast, expensive
-    warm_storage=FilesystemBlobStore(...),   # Medium
-    cold_storage=S3BlobStore(...),           # Slow, cheap
-    
-    # Aging policy
-    hot_to_warm_days=1,   # Memory → Disk after 1 day
-    warm_to_cold_days=7   # Disk → S3 after 7 days
+from cacheness.tiered import TieredCache
+from cacheness.core import UnifiedCache
+
+# Local tier: SQLite + filesystem (microsecond reads)
+local = UnifiedCache(cache_dir="./local_cache", metadata_backend="sqlite")
+
+# Remote tier: PostgreSQL/libSQL + S3 (shared, durable)
+remote = UnifiedCache(
+    metadata_backend=PostgreSQLBackend("postgresql://team-db"),
+    blob_store=S3BlobStore("s3://team-cache")
 )
 
-# Recent data in memory (fast)
-cache.put(data, key="recent")
-result = cache.get(key="recent")  # ~1ms (memory)
+cache = TieredCache(local=local, remote=remote, max_local_size_gb=10)
 
-# Older data on disk (medium)
-# ... 2 days later ...
-result = cache.get(key="recent")  # ~10ms (disk)
+# First access: miss locally → fetch from remote → cache locally
+result = cache.get(key="experiment_001")  # ~100ms (S3 fetch)
 
-# Old data in S3 (slow but cheap)
-# ... 10 days later ...
-result = cache.get(key="recent")  # ~100ms (S3)
+# Second access: hit local cache
+result = cache.get(key="experiment_001")  # ~1ms (local disk)
+
+# Writes go to remote first (source of truth), then local
+cache.put(data, key="experiment_002")  # Remote + local
 ```
 
-**Use Cases:**
-- Large caches with access skew (hot/cold data)
-- Cost optimization (memory expensive, S3 cheap)
-- Performance tiers for different data ages
+**Why This Design:**
+- **Composes existing primitives** — no new backends needed, just orchestration (~200 LOC)
+- **Caches blobs locally** — unlike libSQL embedded replicas which only sync metadata, this caches actual data files on local disk
+- **Independent policies per tier** — local: 10GB cap, LRU, no signing. Remote: unlimited, signed, encrypted
+- **Works with any backend combination** — SQLite+filesystem → PostgreSQL+S3, JSON+filesystem → libSQL+S3, etc.
 
-**Trade-offs:**
-- ✅ Optimizes cost vs performance
-- ✅ Keeps hot data fast
-- ❌ Very complex implementation (background migration, tier tracking)
-- ❌ Unpredictable latency (don't know which tier)
-- ❌ Hard to reason about
+**Invalidation strategies:**
+1. **TTL-based** — local entries expire after N seconds. Simple, slightly stale. Fine for most caching use cases.
+2. **Metadata-version check** — on local hit, compare local entry's timestamp/hash against remote metadata. If stale, re-fetch blob. Especially cheap if remote metadata uses libSQL embedded replicas (local microsecond read for staleness check).
+3. **No invalidation** — for single-user or read-heavy workloads, staleness isn't a problem.
 
-**Alternatives:**
-- Use separate caches for hot/cold data
-- Let users manage tiers explicitly
-- Use cloud provider features (S3 lifecycle policies)
+**Storage mode value:** For storage mode users, the tiered cache becomes a **local workspace pattern** — work against local Cacheness, persist to a remote store. Think of it like git's local/remote model. The `migrate()` API (see section 10 below) would work at each tier independently.
 
-**Impact:** Low - Very niche, enterprise-scale problem
+**Impact:** High - Fills the gap between local-only and fully-remote caching
 
-**Effort:** Very High - Complex background jobs, state management
+**Effort:** Low-Medium - Thin orchestration layer over existing `UnifiedCache` instances
 
-**Recommendation:** Don't implement - too complex for benefit
+---
+
+### 10. **Version-in-Metadata for Migration Support** ✅ Medium-High Priority
+
+**Concept:** Store the Cacheness version (or serialization format version) per entry in metadata, enabling targeted migration when Cacheness is upgraded.
+
+**Why Not Version-in-Cache-Key:**
+Version-in-cache-key forces full invalidation on every upgrade — every cached entry becomes a miss even if the serialization format didn't change. Version-in-metadata enables per-entry migration decisions.
+
+**Why It Matters:**
+- **Decorator mode:** A format-incompatible entry causes a cache miss and re-execution — acceptable but wasteful when migration could preserve it.
+- **Storage mode (critical):** There is no function to re-execute. If an upgrade changes serialization and old entries can't be read, that's **data loss**, not a performance hit.
+
+**Proposed:**
+
+```python
+# On put(): store version with every entry
+entry.cacheness_version = "0.10.0"
+entry.serialization_format_version = 2  # bumps only when format changes
+
+# On get(): check compatibility
+if entry.serialization_format_version < CURRENT_FORMAT_VERSION:
+    data = deserialize_with_compat(entry)  # compat path
+    # Optionally re-serialize in new format (lazy migration)
+
+# Bulk migration API
+cache.migrate()  # re-serializes all stale entries
+cache.migrate(dry_run=True)  # report what would change
+```
+
+**Design considerations:**
+- **Version granularity:** `cacheness.__version__` vs a separate `serialization_format_version` that only bumps when format actually changes (reduces unnecessary migrations)
+- **Handler-level versioning:** Each handler (parquet for DataFrames, blosc2 for NumPy, pickle for objects) may evolve independently — consider per-handler format versions
+- **Backward compatibility window:** Define how many prior format versions must be readable without explicit migration
+- **Lazy migration:** Entries re-written in new format on first access rather than requiring big-bang migration
+
+**Impact:** High - Essential for storage mode users, valuable for all users
+
+**Effort:** Medium - Schema migration for all backends + compat read paths
+
+---
+
+### 11. **Encryption at Rest** ✅ Medium Priority
+
+**Concept:** Protect cached data confidentiality — not just integrity (which signing already provides). Two complementary layers: metadata encryption and blob encryption.
+
+**Current state:** Cacheness provides **integrity** via HMAC signing (v2/v3 signatures, HKDF-derived per-namespace keys, key rotation). Blobs are stored as plaintext files on disk. Anyone with filesystem access can read cached data.
+
+#### Metadata Encryption (via libSQL)
+
+libSQL's built-in `encryption_key` parameter encrypts the SQLite database at rest:
+
+```python
+# libSQL backend with metadata encryption
+cache = UnifiedCache(
+    metadata_backend=LibsqlBackend(
+        db_file="cache_metadata.db",
+        encryption_key=os.environ["CACHE_ENC_KEY"],
+    )
+)
+# Metadata DB is AES-encrypted on disk — cache keys, timestamps, paths all protected
+```
+
+This covers metadata confidentiality (cache keys, data types, timestamps, custom metadata) but **not blob files**. See [LIBSQL_BACKEND.md](LIBSQL_BACKEND.md) for full libSQL research.
+
+#### Blob Encryption
+
+For full confidentiality, blobs need encryption in the write path:
+
+```python
+# Proposed: blob encryption config
+config = CacheConfig(
+    security=SecurityConfig(
+        enable_entry_signing=True,       # integrity (existing)
+        enable_blob_encryption=True,     # confidentiality (new)
+        blob_encryption_key=os.environ["BLOB_ENC_KEY"],
+    )
+)
+```
+
+**Design considerations:**
+- **Algorithm:** AES-256-GCM (authenticated encryption — confidentiality + integrity in one pass)
+- **Envelope encryption:** Generate a unique DEK (data encryption key) per blob, encrypt the DEK with the master key, store encrypted DEK alongside the blob. This limits the blast radius of a single compromised DEK.
+- **Integration point:** Encrypt after handler serialization, decrypt before handler deserialization. Transparent to handlers.
+- **Key management:** Leverage existing `SecurityConfig` and HKDF infrastructure. Derive blob encryption keys per namespace (same HKDF pattern as signing keys).
+- **Performance:** AES-256-GCM is hardware-accelerated on modern CPUs (AES-NI). Overhead is proportional to blob size, not metadata complexity.
+- **Interaction with signing:** Signing covers metadata fields including `file_hash`. With blob encryption, `file_hash` should be computed on the **ciphertext** (not plaintext), so integrity verification doesn't require decryption.
+
+**Orthogonality with signing:**
+
+| Feature | Protects | Against |
+|---------|----------|---------|
+| Entry signing (existing) | Metadata integrity | Tampering with cache keys, timestamps, file hashes |
+| Blob hash verification (existing) | Blob integrity | Tampering with cached data files |
+| Metadata encryption (libSQL) | Metadata confidentiality | Reading cache keys, data types, paths |
+| Blob encryption (proposed) | Blob confidentiality | Reading cached data files |
+
+**Impact:** Medium-High - Completes the security story for sensitive data use cases
+
+**Effort:** Medium - Encryption primitives are straightforward; key management is the hard part (but HKDF infra exists)
 
 ---
 
@@ -812,13 +878,34 @@ data = cache.get(experiment: "exp_001")
 
 ## Recommended Implementation Roadmap
 
-### Phase 1: Essential Management Operations (3-6 months)
+### Recently Shipped (v0.7.0–v0.10.0)
 
-**Goal:** Complete missing CRUD operations
+The following capabilities from earlier roadmap versions have been implemented:
+
+| Feature | Milestone | What shipped |
+|---------|-----------|-------------|
+| Handler package split | v0.7.0 | `handlers/` package with 11 files, `HandlerRegistry` with priority-based selection |
+| Metadata package split | v0.7.0 | `metadata/` package with ABC, JSON, SQLite backends |
+| Core mixin decomposition | v0.7.0 | 4 mixins extracted from `core.py` (verification, stats, custom metadata, storage mode) |
+| Narrow exception handling | v0.7.0 | Zero unannotated `except Exception` in `src/cacheness/` |
+| Concurrency foundation | v0.8.0 | Thread-safe `RLock` + SQLite WAL pragmas, crash-safe write-intent logging |
+| Blob integrity validation | v0.8.0 | `verify_integrity(verify_signatures=True)`, `IntegrityReport.signature_failures` |
+| `delete_by_prefix()` | v0.8.0 | Bulk prefix deletion with backend-optimized queries (SQL LIKE for SQLite) |
+| `put_batch()` | v0.9.0 | Batch put with partial-success semantics |
+| Deserialization security docs | v0.9.0 | Layered defense model documented, code-level comments |
+| Windows key file permissions | v0.9.0 | `icacls`-based permission management for key files |
+| Configurable key fallback | v0.10.0 | `key_fallback_policy` ("warn"/"raise"/"fallback") replacing boolean flag |
+| HKDF key derivation | v0.10.0 | Per-namespace derived keys via HKDF-SHA256 (RFC 5869) |
+| Key rotation API | v0.10.0 | `rotate_key()` with `RotationResult`, crash-safe mixed v2/v3 state |
+
+---
+
+### Phase 1: Remaining Management Operations
+
+**Goal:** Complete missing CRUD operations (partially shipped)
 
 1. **Storage Backend Layer**
    - [ ] `update_blob_data(cache_key, new_data)` - Replace data at key
-   - [ ] `delete_where(filter_fn)` - Conditional bulk delete
    - [ ] `get_entries_batch(cache_keys)` - Batch get metadata
    - [ ] `delete_entries_batch(cache_keys)` - Batch delete
    - [ ] `copy_entry(source, dest)` / `move_entry(source, dest)` - Convenience wrappers
@@ -827,7 +914,6 @@ data = cache.get(experiment: "exp_001")
    - [ ] `cache.update_data(data, **kwargs)` - Update wrapper
    - [ ] `cache.touch(**kwargs, ttl_seconds)` - Refresh TTL
    - [ ] `cache.get_metadata(**kwargs)` - Expose metadata access
-   - [ ] `cache.delete_by_prefix(**kwargs)` - Convenience wrapper
    - [ ] `cache.get_batch([kwargs_list])` - Batch get wrapper
    - [ ] `cache.copy(source, dest)` / `cache.move(source, dest)` - Convenience wrappers
 
@@ -840,82 +926,76 @@ data = cache.get(experiment: "exp_001")
 
 ---
 
-### Phase 2: Async Support (6-9 months)
+### Phase 2: Version-in-Metadata & Migration Support
+
+**Goal:** Enable safe upgrades and format migration (see [Section 10](#10-version-in-metadata-for-migration-support--medium-high-priority))
+
+1. **Schema changes** — add `cacheness_version` and `serialization_format_version` fields to all metadata backends
+2. **Compat read paths** — per-handler version dispatch for backward-compatible deserialization
+3. **`cache.migrate()` API** — bulk re-serialization with `dry_run=True` support
+4. **Critical for storage mode** — no function to re-execute on format change
+
+**Priority:** ✅✅✅ High - Essential for storage mode, valuable for all users
+
+---
+
+### Phase 3: Encryption at Rest
+
+**Goal:** Protect cached data confidentiality, not just integrity (see [Section 11](#11-encryption-at-rest--medium-priority))
+
+1. **Metadata encryption** — via libSQL backend (`encryption_key` parameter)
+2. **Blob encryption** — AES-256-GCM envelope encryption in the blob write path
+3. **Key management** — leverage existing `SecurityConfig` and HKDF infrastructure
+
+**Priority:** ✅✅ Medium-High - Completes the security story (signing = integrity, encryption = confidentiality)
+
+---
+
+### Phase 4: Tiered Pull-Through Cache
+
+**Goal:** Compose local + remote caches with automatic pull-through (see [Section 9](#9-tiered-pull-through-cache--medium-priority))
+
+1. **`TieredCache` orchestrator** — thin wrapper composing two `UnifiedCache` instances (~200 LOC)
+2. **Invalidation strategies** — TTL-based, metadata-version check, or no invalidation
+3. **Local size cap** — evict from local tier when size exceeds limit
+
+**Priority:** ✅ Medium - High value for teams sharing caches
+
+---
+
+### Phase 5: Async Support
 
 **Goal:** Enable modern async Python workflows
 
-1. **Async Backends**
-   - [ ] `AsyncPostgreSQLBackend` (using asyncpg)
-   - [ ] `AsyncS3BlobStore` (using aioboto3)
-   - [ ] `AsyncAzureBlobStore` (using aioazure)
-   - [ ] `AsyncSQLiteBackend` (using aiosqlite) - optional
+1. **Async Backends** — `AsyncPostgreSQLBackend` (asyncpg), `AsyncS3BlobStore` (aioboto3)
+2. **`AsyncUnifiedCache`** — separate class, sync handlers run in executor
+3. **Documentation** — FastAPI integration example, benchmarks
 
-2. **Async Cache Layer**
-   - [ ] `AsyncUnifiedCache` class
-   - [ ] All operations async (`await cache.get()`, etc.)
-   - [ ] Async context manager (`async with cache:`)
-   - [ ] Async batch operations (concurrent by default)
-
-3. **Handler Integration**
-   - [ ] Run sync handlers in thread executor
-   - [ ] Don't block async event loop
-
-4. **Documentation & Examples**
-   - [ ] Async API reference
-   - [ ] FastAPI integration example
-   - [ ] Performance benchmarks (sync vs async)
-
-**Priority:** ✅✅ High - Modern Python standard, enables web services
+**Priority:** ✅ Medium - Modern Python standard, enables web services
 
 ---
 
-### Phase 3: CLI Tool (2-3 months)
+### Phase 6: CLI Tool
 
 **Goal:** Improve developer experience for debugging/maintenance
 
-1. **Core Commands**
-   - [ ] `cacheness inspect <path>` - Show cache overview
-   - [ ] `cacheness list <path>` - List entries with details
-   - [ ] `cacheness query <path> --sql <query>` - SQL queries
-   - [ ] `cacheness stats <path>` - Statistics by type, size, age
-   - [ ] `cacheness cleanup <path> --ttl <seconds>` - Remove expired
-   - [ ] `cacheness verify <path>` - Check integrity
+1. **Core Commands** — `cacheness inspect`, `list`, `stats`, `cleanup`, `verify`
+2. **Advanced Commands** — `cacheness migrate`, `export`, `import`
+3. **Output Formatting** — table, JSON, CSV
 
-2. **Advanced Commands**
-   - [ ] `cacheness migrate --from <source> --to <dest>` - Migrate backends
-   - [ ] `cacheness export <path> --output <file>` - Export cache
-   - [ ] `cacheness import <file> --into <path>` - Import cache
-
-3. **Output Formatting**
-   - [ ] Table format (default)
-   - [ ] JSON format (`--format json`)
-   - [ ] CSV format (`--format csv`)
-
-**Priority:** ✅ Medium-High - High impact on DX, relatively easy
+**Priority:** ⚠️ Medium - High DX impact, relatively easy
 
 ---
 
-### Phase 4: Eviction Policies (Optional - 6-12 months)
+### Phase 7: Eviction Policies (Optional)
 
 **Goal:** Better resource management
 
-1. **Policy Implementations**
-   - [ ] `LRUPolicy` - Least Recently Used
-   - [ ] `LFUPolicy` - Least Frequently Used
-   - [ ] `SizeBasedPolicy` - Total cache size limit
-   - [ ] `CompositePolicy` - Combine multiple policies
+1. **Policies** — LRU, LFU, SizeBasedPolicy, CompositePolicy
+2. **Schema changes** — `last_accessed` timestamp, `access_count`
+3. **Background eviction** — non-blocking policy enforcement
 
-2. **Metadata Schema Updates**
-   - [ ] Add `last_accessed` timestamp
-   - [ ] Add `access_count` for LFU
-   - [ ] Migration for existing caches
-
-3. **Background Eviction**
-   - [ ] Background task for policy enforcement
-   - [ ] Don't block cache operations
-   - [ ] Configurable check frequency
-
-**Priority:** ⚠️ Medium - Nice-to-have, enables new use cases
+**Priority:** ⚠️ Low-Medium - Nice-to-have
 
 ---
 
@@ -924,7 +1004,6 @@ data = cache.get(experiment: "exp_001")
 - ❌ **REST API** - Contradicts philosophy, adds overhead, alternatives better
 - ❌ **Content Deduplication** - Complex, niche benefit
 - ❌ **Delta Compression** - Very complex, use external version control
-- ❌ **Tiered Storage** - Extremely complex, narrow use case
 - ❌ **Built-in Distributed Lock** - Use external lock manager (Redis, etcd)
 - ❌ **Built-in Metrics/Monitoring** - Use standard observability tools
 
@@ -934,32 +1013,34 @@ data = cache.get(experiment: "exp_001")
 
 ### Top 3 Priorities
 
-1. **✅ Complete Management Operations** (3-6 months)
-   - Missing CRUD operations, batch operations, convenience wrappers
+1. **✅ Remaining Management Operations**
+   - `update_data`, `touch`, `get_batch`, copy/move
    - Highest user impact, well-defined scope
-   - **Start here**
+   - **Start here — partially shipped**
 
-2. **✅ Async/Await Support** (6-9 months)
-   - Modern Python standard, enables web services
-   - High impact, aligns with ecosystem trends
+2. **✅ Version-in-Metadata for Migration Support**
+   - Critical for storage mode (data loss prevention)
+   - Per-entry format versioning + `migrate()` API
    - **Do this second**
 
-3. **✅ CLI Tool** (2-3 months)
-   - Debugging, maintenance, migration
-   - High DX impact, relatively easy
+3. **✅ Encryption at Rest**
+   - Metadata encryption via libSQL, blob encryption via AES-256-GCM
+   - Completes signing (integrity) + encryption (confidentiality)
    - **Do this third**
 
 ### Consider Later
 
+- ⚠️ **Tiered Pull-Through Cache** - High value for teams, low implementation effort
+- ⚠️ **Async Support** - Important for web services, high effort
+- ⚠️ **CLI Tool** - Good DX, moderate effort
 - ⚠️ **LRU/LFU Eviction** - Useful but not essential
-- ⚠️ **Connection Pooling** - Easy win for high concurrency
+- ⚠️ **Connection Pool Config** - Easy win for PostgreSQL users
 - ⚠️ **Better Type Hints** - Nice DX improvement
 
 ### Don't Build
 
 - ❌ **REST API** - Wrong abstraction, contradicts philosophy
 - ❌ **Deduplication** - Too complex for benefit
-- ❌ **Tiered Storage** - Too complex for benefit
 
 ---
 
