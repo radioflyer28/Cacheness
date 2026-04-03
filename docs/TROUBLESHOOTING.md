@@ -235,16 +235,16 @@ data = cache.get(experiment="broken")  # None, but entry still in metadata
 - Data corruption in multi-threaded scenarios
 - "Database is locked" with SQLite
 
-**Important Notes:**
-- `UnifiedCache` has `_lock` field but **never acquires it** - not thread-safe
-- JSON backend: Protected by `threading.Lock()` at backend level
-- SQLite backend: Uses WAL mode + per-operation locks
-- PostgreSQL backend: Uses `ThreadPoolExecutor` for connection pooling
+**Concurrency Model (since v0.8.0):**
+- `UnifiedCache` uses a reentrant lock (`threading.RLock`) that protects **all** public methods including `put()`, `get()`, `invalidate()`, batch operations, and management APIs
+- JSON backend: Protected by its own `RLock` for in-memory dict and disk I/O
+- SQLite backend: Uses its own `RLock` plus SQLAlchemy sessions with WAL mode
+- PostgreSQL backend: Uses SQLAlchemy session management with connection pooling
 
 **Solutions:**
-1. **Use backend-level concurrency protection** (already in place)
-2. **Use process-level parallelism instead of threads** when possible
-3. **Implement external locking** if coordinating across multiple cache instances
+1. **Single process, multiple threads:** Fully thread-safe — share a single `UnifiedCache` instance across threads
+2. **Multiple processes, same cache directory:** Use SQLite backend (WAL mode handles concurrent access) or PostgreSQL. JSON backend is NOT safe for multi-process access
+3. **"Database is locked" errors:** Ensure you're using SQLite backend (not JSON) and that WAL mode is enabled (default)
 
 ## Additional Resources
 

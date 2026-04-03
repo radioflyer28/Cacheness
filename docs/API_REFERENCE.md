@@ -1793,7 +1793,28 @@ register_handler("custom_type", CustomHandler())
 
 ## Thread Safety
 
-Cacheness is thread-safe for all operations:
+Cacheness is thread-safe for all operations. A reentrant lock (`threading.RLock`) protects all cache operations at both the core and backend levels.
+
+### Concurrency Model
+
+**Core layer (`UnifiedCache`):**
+- All public methods (`put()`, `get()`, `invalidate()`, `update_data()`, `touch()`, batch operations, etc.) acquire `self._lock` (an `RLock`) for their entire duration.
+- The blob store shares the same lock instance — no separate synchronization needed.
+- `RLock` allows composed operations (e.g., `delete_where()` calling `invalidate()`) without deadlocking.
+
+**Metadata backends:**
+- **SQLite:** Uses its own `RLock` plus SQLAlchemy sessions. WAL mode enables concurrent readers. All metadata operations are atomic.
+- **JSON:** Uses its own `RLock` protecting the in-memory dict and disk I/O. Each write re-serializes the entire file.
+- **PostgreSQL:** Uses SQLAlchemy session management with connection pooling.
+
+**What's safe:**
+- Multiple threads sharing a single `UnifiedCache` instance — fully safe
+- Concurrent `put()`, `get()`, `invalidate()`, batch operations — all serialized via `RLock`
+- Mixed read/write workloads from multiple threads — safe
+
+**What's NOT covered:**
+- **Multi-process access to the same cache directory** — use SQLite backend (WAL mode) or PostgreSQL for process-level concurrency. JSON backend is NOT safe for multi-process access.
+- **Cross-machine access** — use PostgreSQL backend with S3 blob storage.
 
 ```python
 import threading
