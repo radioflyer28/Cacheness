@@ -33,8 +33,9 @@ Progress: [█████░░░░░] 50% — 3/6 phases complete
 
 ## Accumulated Context
 
-### Pending Todos (3)
+### Pending Todos (4)
 
 1. Store cacheness version in metadata for migration support (database)
 2. Tiered pull-through cache (general)
 3. Encryption at rest for metadata and blobs (general)
+4. Property-based stress testing for cache key serialization (testing)
