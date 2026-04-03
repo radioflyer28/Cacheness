@@ -59,18 +59,18 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| SEC-01 | — | Pending |
-| SEC-02 | — | Pending |
-| SEC-03 | — | Pending |
-| SEC-04 | — | Pending |
-| ARCH-01 | — | Pending |
-| TEST-01 | — | Pending |
-| TEST-02 | — | Pending |
+| SEC-01 | Phase 16 | Pending |
+| SEC-02 | Phase 15 | Pending |
+| SEC-03 | Phase 18 | Pending |
+| SEC-04 | Phase 17 | Pending |
+| ARCH-01 | Phase 19 | Pending |
+| TEST-01 | Phase 20 | Pending |
+| TEST-02 | Phase 20 | Pending |
 
 **Coverage:**
 - v0.10.0 requirements: 7 total
-- Mapped to phases: 0
-- Unmapped: 7 ⚠️
+- Mapped to phases: 7
+- Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-04-03*

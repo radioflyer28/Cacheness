@@ -6,7 +6,7 @@ status: In progress
 last_updated: "2026-04-03"
 last_activity: 2026-04-03
 progress:
-  total_phases: 0
+  total_phases: 6
   completed_phases: 0
   total_plans: 0
   completed_plans: 0
@@ -20,13 +20,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-03)
 
 **Core value:** Reliable, type-aware disk caching with pluggable backends
-**Current focus:** v0.10.0 Security & Architecture — defining requirements
+**Current focus:** v0.10.0 Security & Architecture — Phase 15: Configurable Key Fallback
 
 ## Current Position
 
-Phase: Not started (defining requirements)
+Phase: 15 — Configurable Key Fallback
 Plan: —
-Status: Defining requirements
-Last activity: 2026-04-03 — Milestone v0.10.0 started
+Status: Not started
+Last activity: 2026-04-03 — Roadmap created for v0.10.0
 
-Progress: [██████████] 100% — v0.9.0 shipped
+Progress: [░░░░░░░░░░] 0% — 0/6 phases complete
