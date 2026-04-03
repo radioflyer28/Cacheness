@@ -44,7 +44,7 @@
 ### v0.10.0 Security & Architecture (Phases 15-20)
 
 - [x] **Phase 15: Configurable Key Fallback** — User-controlled key fallback policy (raise/warn/fallback)
-- [ ] **Phase 16: HKDF Key Derivation** — Per-namespace key derivation from master key
+- [x] **Phase 16: HKDF Key Derivation** — Per-namespace key derivation from master key (completed 2026-04-03)
 - [ ] **Phase 17: Key Rotation API** — Manual rotate_key() with re-sign and old-key handling
 - [ ] **Phase 18: Encryption at Rest** — AES-GCM blob encryption, disabled by default
 - [ ] **Phase 19: Core Decomposition II** — Extract eviction, namespace, and init logic into mixins
@@ -74,9 +74,9 @@ Plans:
   2. Entries signed with the shared master key (pre-HKDF) still verify successfully (migration path)
   3. New entries in different namespaces produce different signatures for identical data
   4. Disabling HKDF reverts to shared-key behavior (opt-out path)
-**Plans:** 1 plan
+**Plans:** 1/1 plans complete
 Plans:
-- [ ] 16-01-PLAN.md — HKDF derivation, config, wiring, tests, docs (3 tasks, wave 1)
+- [x] 16-01-PLAN.md — HKDF derivation, config, wiring, tests, docs (3 tasks, wave 1)
 
 ### Phase 17: Key Rotation API
 **Goal**: Users can rotate signing keys and re-sign existing entries without data loss
@@ -142,7 +142,7 @@ Plans:
 | 13. Deserialization Security | v0.9.0 | Complete | 2026-04-03 |
 | 14. Windows Key File Permissions | v0.9.0 | Complete | 2026-04-03 |
 | 15. Configurable Key Fallback | v0.10.0 | Not started | - |
-| 16. HKDF Key Derivation | v0.10.0 | Not started | - |
+| 16. HKDF Key Derivation | 1/1 | Complete   | 2026-04-03 |
 | 17. Key Rotation API | v0.10.0 | Not started | - |
 | 18. Encryption at Rest | v0.10.0 | Not started | - |
 | 19. Core Decomposition II | v0.10.0 | Not started | - |
