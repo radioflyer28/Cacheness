@@ -408,6 +408,9 @@ class SecurityConfig:
     raise_on_key_fallback: bool = False  # Deprecated: use key_fallback_policy instead
     key_fallback_policy: str = "warn"  # "raise", "warn", or "fallback"
 
+    # HKDF per-namespace key derivation
+    use_hkdf_derivation: bool = True  # Derive per-namespace keys via HKDF-SHA256
+
     def __post_init__(self):
         """Validate security configuration."""
         # Deprecation shim: raise_on_key_fallback -> key_fallback_policy
@@ -434,7 +437,8 @@ class SecurityConfig:
             f"in_memory_key={self.use_in_memory_key}, "
             f"allow_unsigned={self.allow_unsigned_entries}, "
             f"delete_invalid={self.delete_invalid_signatures}, "
-            f"key_fallback_policy={self.key_fallback_policy}"
+            f"key_fallback_policy={self.key_fallback_policy}, "
+            f"hkdf={self.use_hkdf_derivation}"
         )
 
 

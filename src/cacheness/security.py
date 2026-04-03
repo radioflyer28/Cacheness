@@ -35,6 +35,17 @@ from .interfaces import SignableFields
 logger = logging.getLogger(__name__)
 
 
+def _hkdf_sha256(ikm: bytes, info: bytes, length: int = 32, salt: bytes = b"") -> bytes:
+    """HKDF-SHA256 key derivation (RFC 5869) using stdlib only."""
+    # Extract: PRK = HMAC-SHA256(salt, IKM)
+    if not salt:
+        salt = b"\x00" * 32
+    prk = hmac.new(salt, ikm, hashlib.sha256).digest()
+    # Expand: OKM = HMAC-SHA256(PRK, info || 0x01) — single block for 32 bytes
+    okm = hmac.new(prk, info + b"\x01", hashlib.sha256).digest()
+    return okm[:length]
+
+
 class CacheEntrySigner:
     """
     HMAC-based cache entry signer for metadata integrity protection.
@@ -73,6 +84,17 @@ class CacheEntrySigner:
             "compression_codec",
             "created_at",
         ],
+        3: [
+            "cache_key",
+            "data_type",
+            "file_size",
+            "file_hash",
+            "object_type",
+            "storage_format",
+            "serializer",
+            "compression_codec",
+            "created_at",
+        ],
     }
 
     # Current version used when signing new entries.
@@ -83,6 +105,8 @@ class CacheEntrySigner:
         key_file_path: Path,
         use_in_memory_key: bool = False,
         key_fallback_policy: str = "warn",
+        namespace_id: str = "default",
+        use_hkdf_derivation: bool = True,
     ):
         """
         Initialize the cache entry signer.
@@ -94,17 +118,32 @@ class CacheEntrySigner:
                 'raise' = raise CacheSecurityError
                 'warn' = log WARNING + use in-memory key
                 'fallback' = silently use in-memory key
+            namespace_id: Namespace identifier for HKDF key derivation
+            use_hkdf_derivation: If True, derive per-namespace keys via HKDF-SHA256
         """
         self.key_file_path = key_file_path
         self.use_in_memory_key = use_in_memory_key
         self.key_fallback_policy = key_fallback_policy
+        self.namespace_id = namespace_id
+        self.use_hkdf_derivation = use_hkdf_derivation
         self.secret_key = self._load_or_generate_key()
+
+        # Store master key and derive per-namespace key
+        self.master_key = self.secret_key
+        if use_hkdf_derivation:
+            self.derived_key = _hkdf_sha256(
+                self.master_key,
+                info=f"cacheness-ns-v1:{namespace_id}".encode("utf-8"),
+            )
+        else:
+            self.derived_key = self.master_key
 
         key_type = "in-memory" if use_in_memory_key else "persistent"
         current_fields = self.SIGNED_FIELDS_BY_VERSION[self.CURRENT_SIGNATURE_VERSION]
         logger.debug(
             f"Cache signer initialized: version={self.CURRENT_SIGNATURE_VERSION}, "
-            f"fields={current_fields}, key_type={key_type}"
+            f"fields={current_fields}, key_type={key_type}, "
+            f"hkdf={use_hkdf_derivation}, namespace={namespace_id}"
         )
 
     def _load_or_generate_key(self) -> bytes:
@@ -273,11 +312,11 @@ class CacheEntrySigner:
             Versioned signature string in the format ``v{N}:{hex_signature}``
         """
         try:
-            version = self.CURRENT_SIGNATURE_VERSION
+            version = 3 if self.use_hkdf_derivation else self.CURRENT_SIGNATURE_VERSION
             payload = self._create_signature_payload(entry_data, version)
 
             hex_sig = hmac.new(
-                self.secret_key, payload.encode("utf-8"), hashlib.sha256
+                self.derived_key, payload.encode("utf-8"), hashlib.sha256
             ).hexdigest()
 
             versioned = f"v{version}:{hex_sig}"
@@ -331,8 +370,10 @@ class CacheEntrySigner:
         version, hex_sig = self.parse_versioned_signature(stored_signature)
         try:
             payload = self._create_signature_payload(entry_data, version)
+            # v1/v2 used the master key; v3+ uses the HKDF-derived key
+            key = self.derived_key if version >= 3 else self.master_key
             expected_signature = hmac.new(
-                self.secret_key, payload.encode("utf-8"), hashlib.sha256
+                key, payload.encode("utf-8"), hashlib.sha256
             ).hexdigest()
 
             is_valid = hmac.compare_digest(expected_signature, hex_sig)
@@ -398,10 +439,11 @@ class CacheEntrySigner:
         """
         try:
             payload = self._create_namespace_payload(namespace_data)
+            ns_version = "ns2" if self.use_hkdf_derivation else "ns1"
             hex_sig = hmac.new(
-                self.secret_key, payload.encode("utf-8"), hashlib.sha256
+                self.derived_key, payload.encode("utf-8"), hashlib.sha256
             ).hexdigest()
-            versioned = f"ns1:{hex_sig}"
+            versioned = f"{ns_version}:{hex_sig}"
             logger.debug(f"Signed namespace {namespace_data.get('namespace_id', '?')}")
             return versioned
         except (ValueError, TypeError) as e:
@@ -422,7 +464,7 @@ class CacheEntrySigner:
         """
         if not stored_signature:
             return False
-        # Parse — expect "ns1:<hex>"
+        # Parse — expect "ns1:<hex>" or "ns2:<hex>"
         prefix, _, hex_sig = stored_signature.partition(":")
         if not prefix.startswith("ns") or not hex_sig:
             logger.warning(
@@ -431,8 +473,10 @@ class CacheEntrySigner:
             return False
         try:
             payload = self._create_namespace_payload(namespace_data)
+            # ns1 used master key; ns2 uses HKDF-derived key
+            key = self.derived_key if prefix == "ns2" else self.master_key
             expected = hmac.new(
-                self.secret_key, payload.encode("utf-8"), hashlib.sha256
+                key, payload.encode("utf-8"), hashlib.sha256
             ).hexdigest()
             is_valid = hmac.compare_digest(expected, hex_sig)
             if not is_valid:
@@ -458,6 +502,8 @@ class CacheEntrySigner:
             if not self.use_in_memory_key
             else False,
             "use_in_memory_key": self.use_in_memory_key,
+            "use_hkdf_derivation": self.use_hkdf_derivation,
+            "namespace_id": self.namespace_id,
         }
 
 
@@ -466,6 +512,8 @@ def create_cache_signer(
     key_file: str = "cache_signing_key.bin",
     use_in_memory_key: bool = False,
     key_fallback_policy: str = "warn",
+    namespace_id: str = "default",
+    use_hkdf_derivation: bool = True,
 ) -> CacheEntrySigner:
     """
     Factory function to create a cache entry signer.
@@ -477,9 +525,17 @@ def create_cache_signer(
             'raise' = raise CacheSecurityError
             'warn' = log WARNING + use in-memory key
             'fallback' = silently use in-memory key
+        namespace_id: Namespace identifier for HKDF key derivation
+        use_hkdf_derivation: If True, derive per-namespace keys via HKDF-SHA256
 
     Returns:
         Configured CacheEntrySigner instance
     """
     key_file_path = cache_dir / key_file
-    return CacheEntrySigner(key_file_path, use_in_memory_key, key_fallback_policy)
+    return CacheEntrySigner(
+        key_file_path,
+        use_in_memory_key,
+        key_fallback_policy,
+        namespace_id=namespace_id,
+        use_hkdf_derivation=use_hkdf_derivation,
+    )
