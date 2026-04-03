@@ -496,6 +496,73 @@ class TestDeleteMatching:
         assert cache.get(run="r3") == {"v": 3}
 
 
+class TestPutBatch:
+    """Test put_batch() for storing multiple entries in one call."""
+
+    def test_put_batch_basic(self, memory_cache):
+        """Store multiple entries and verify all are retrievable."""
+        stored = memory_cache.put_batch([
+            ({"val": 1}, {"key": "k1"}),
+            ({"val": 2}, {"key": "k2"}),
+            ({"val": 3}, {"key": "k3"}),
+        ])
+        assert stored == 3
+        assert memory_cache.get(key="k1") == {"val": 1}
+        assert memory_cache.get(key="k2") == {"val": 2}
+        assert memory_cache.get(key="k3") == {"val": 3}
+
+    def test_put_batch_empty_list(self, memory_cache):
+        """Empty input stores nothing."""
+        assert memory_cache.put_batch([]) == 0
+
+    def test_put_batch_mixed_types(self, memory_cache):
+        """Store different data types in one batch."""
+        stored = memory_cache.put_batch([
+            (np.array([1, 2, 3]), {"kind": "array"}),
+            ({"key": "value"}, {"kind": "dict"}),
+        ])
+        assert stored == 2
+        np.testing.assert_array_equal(
+            memory_cache.get(kind="array"), np.array([1, 2, 3])
+        )
+        assert memory_cache.get(kind="dict") == {"key": "value"}
+
+    def test_put_batch_overwrites_existing(self, memory_cache):
+        """Putting to an existing key overwrites the entry."""
+        memory_cache.put({"old": True}, key="k1")
+        stored = memory_cache.put_batch([
+            ({"new": True}, {"key": "k1"}),
+        ])
+        assert stored == 1
+        assert memory_cache.get(key="k1") == {"new": True}
+
+    @pytest.mark.parametrize(
+        "cache_fixture", ["memory_cache", "json_cache", "sqlite_cache"]
+    )
+    def test_put_batch_all_backends(self, cache_fixture, request):
+        """put_batch works on every backend."""
+        cache = request.getfixturevalue(cache_fixture)
+        stored = cache.put_batch([
+            (np.array([10]), {"idx": "i1"}),
+            (np.array([20]), {"idx": "i2"}),
+        ])
+        assert stored == 2
+        for idx_val in ("i1", "i2"):
+            assert cache.get(idx=idx_val) is not None
+
+    def test_put_batch_roundtrip_with_get_batch(self, memory_cache):
+        """put_batch entries are retrievable via get_batch."""
+        memory_cache.put_batch([
+            ({"a": 1}, {"exp": "e1"}),
+            ({"b": 2}, {"exp": "e2"}),
+        ])
+        results = memory_cache.get_batch([{"exp": "e1"}, {"exp": "e2"}])
+        assert len(results) == 2
+        vals = list(results.values())
+        assert {"a": 1} in vals
+        assert {"b": 2} in vals
+
+
 class TestGetBatch:
     """Test get_batch() for retrieving multiple entries."""
 

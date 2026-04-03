@@ -2691,6 +2691,46 @@ class UnifiedCache(
             logger.info(f"🗑️ Bulk delete (matching): removed {deleted} entries")
             return deleted
 
+    def put_batch(
+        self,
+        items: List[Tuple[Any, Dict[str, Any]]],
+    ) -> int:
+        """
+        Put multiple cache entries in one call.
+
+        Args:
+            items: List of ``(data, kwargs)`` tuples. Each *kwargs* dict
+                   accepts the same parameters as :meth:`put` (e.g.
+                   ``cache_key``, ``ttl_seconds``, ``description``,
+                   ``custom_metadata``, plus any domain kwargs for key
+                   generation).
+
+        Returns:
+            int: Number of entries that were successfully stored.
+
+        Example:
+            stored = cache.put_batch([
+                (df_train, {"experiment": "exp_001", "split": "train"}),
+                (df_test,  {"experiment": "exp_001", "split": "test"}),
+            ])
+            print(f"Cached {stored} entries")
+        """
+        with self._lock:
+            stored = 0
+            for data, kw in items:
+                try:
+                    self.put(data, **kw)
+                    stored += 1
+                except Exception:  # intentionally broad — partial success allowed
+                    logger.warning(
+                        "📝 Batch put: failed to store entry with kwargs %s",
+                        {k: v for k, v in kw.items() if k != "custom_metadata"},
+                    )
+            logger.info(
+                f"📝 Batch put: cached {stored}/{len(items)} entries"
+            )
+            return stored
+
     def get_batch(
         self,
         kwargs_list: List[Dict[str, Any]],
