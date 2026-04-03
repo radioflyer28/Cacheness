@@ -1,4 +1,4 @@
-# Cacheness — Cleanup & Hardening Milestone
+# Cacheness — API & Robustness
 
 ## What This Is
 
@@ -6,19 +6,9 @@ Cacheness is a Python disk caching library with pluggable metadata backends (JSO
 
 ## Current State
 
-**Shipped:** v0.7.0 Cleanup & Hardening (2026-04-02)
+**Shipped:** v0.8.0 API & Robustness (2026-04-03)
 
-The codebase has been decomposed from monolithic files into well-structured packages and mixins, exception handling has been narrowed to specific types, security defaults hardened, and test coverage expanded with thread safety and key rotation tests.
-
-## Current Milestone: v0.8.0 API & Robustness
-
-**Goal:** Add missing management operations, improve concurrency safety, and harden data integrity — addressing remaining concerns from the codebase audit.
-
-**Target features:**
-- Missing management APIs: `update_blob_data()`, `delete_by_prefix()`, `touch()`, `get_metadata()`, batch operations
-- Concurrency safety: optional thread-safe mode for `put()`/`get()` or clearer documented boundaries
-- Blob HMAC signing: extend HMAC-SHA256 signing to cover blob content (not just metadata)
-- Orphaned blob prevention: improve crash-recovery beyond manual `verify_integrity(repair=True)`
+Reliability and integrity hardening complete: SqliteBackend uses RLock for deadlock-free re-entrant calls, crash-safe write intent journal prevents orphaned blobs, HMAC signature verification validates blob integrity end-to-end, and `delete_by_prefix()` provides backend-optimized bulk deletion. Test suite at 1641 passed / 101 skipped / 0 failures.
 
 ## Core Value
 
@@ -52,12 +42,17 @@ Improve reliability, security, and maintainability of Cacheness without changing
 - ✓ Key rotation scenario tests — v0.7.0
 - ✓ Handler priority values with conflict detection — v0.7.0
 
+- ✓ Concurrency safety: SqliteBackend RLock swap — v0.8.0
+- ✓ Crash-safe write intent journal for orphaned blob prevention — v0.8.0
+- ✓ End-to-end blob integrity validation via HMAC signature verification — v0.8.0
+- ✓ `delete_by_prefix()` with SQL LIKE optimization — v0.8.0
+
 ### Active
 
-- [ ] Management APIs: `update_blob_data()`, `delete_by_prefix()`, `touch()`, `get_metadata()`, batch operations
-- [ ] Concurrency safety for `put()`/`get()` paths
-- [ ] Blob HMAC signing (extend signing to blob content)
-- [ ] Orphaned blob prevention/cleanup improvements
+- [ ] Management APIs: `update_blob_data()`, `touch()`, `get_metadata()`, batch operations
+- [ ] Document threading model and concurrency boundaries
+- [ ] Concurrent stress tests for put/get/delete
+- [ ] `put_batch()` / `get_batch()` with backend-level transactions
 
 ### Out of Scope
 
@@ -72,12 +67,13 @@ Improve reliability, security, and maintainability of Cacheness without changing
 
 ## Context
 
-- **Codebase state:** 17,022 lines of Python across ~40 source files. Well-tested (1,616 passed, 101 skipped).
+- **Codebase state:** ~18,000 lines of Python across ~42 source files. Well-tested (1,641 passed, 101 skipped).
 - **Codebase map:** `.planning/codebase/` contains 7 detailed analysis documents from 2026-04-02.
 - **Structure:** Code decomposed into `handlers/` (11 files), `metadata/` (5 files), and 4 mixin files alongside `core.py`.
-- **Security:** Blob content hashing on by default. Key fallback configurable. HMAC-SHA256 signing.
+- **Security:** Blob content hashing on by default. Key fallback configurable. HMAC-SHA256 signing. End-to-end signature verification available.
+- **Concurrency:** SqliteBackend uses RLock for re-entrant safety. Write intent journal prevents orphaned blobs.
 - **Error handling:** All `except Exception` catches narrowed or annotated `# intentionally broad`.
-- **Tests:** Thread safety and key rotation scenarios covered. Handler conflict detection warns on overlapping matches.
+- **Tests:** Thread safety, key rotation, re-entrancy stress, write intent, signature verification, and prefix deletion covered.
 
 ## Testing Philosophy & Workflow
 
@@ -141,6 +137,10 @@ New tests must match the quality and coverage strategies already employed:
 | Cleanup + hardening only (no async/eviction) | Scope control — async and eviction are large features deserving their own milestones | ✓ Good |
 | `_compat.py` pattern for shared imports | Avoids circular imports in package splits | ✓ Good — reused across handlers/ and metadata/ |
 | Inline execution for phases 4-6 | Simple enough to not need formal plan files | ✓ Good — faster delivery |
+| RLock over ReadWriteLock | ReadWriteLock needs call-chain audit to avoid deadlocks; RLock sufficient for current patterns | ✓ Good — simple, no deadlocks |
+| File-based intent journal over metadata table | Backend-agnostic, crash-safe, no schema migration, lazy dir creation | ✓ Good — 12 tests pass |
+| No new blob_hmac field | file_hash already in HMAC signed fields — transitive blob integrity guaranteed | ✓ Good — no unnecessary complexity |
+| Prefix deletion on explicit cache keys | Hashed kwarg-derived keys cannot be prefix-matched meaningfully | ✓ Good — clear semantics |
 
 ## Evolution
 
@@ -160,4 +160,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-02 after v0.8.0 milestone started*
+*Last updated: 2026-04-03 after v0.8.0 milestone shipped*

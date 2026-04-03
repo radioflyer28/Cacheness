@@ -1,5 +1,20 @@
 # Milestones
 
+## v0.8.0 API & Robustness (Shipped: 2026-04-03)
+
+**Phases completed:** 4 phases, 4 plans, 28 files changed (+1740/-36 lines)
+**Test baseline:** 1616 → 1641 tests (25 new, 0 regressions)
+**Git range:** `c801520..914a1a0` (14 commits)
+
+**Key accomplishments:**
+
+1. Swapped SqliteBackend `Lock` → `RLock` with consistent lock acquisition across all public methods — re-entrant calls no longer deadlock
+2. Added crash-safe `WriteIntentJournal` — intent files track in-flight blob writes, orphaned blobs auto-cleaned on cache init
+3. Added `verify_signatures=True` parameter to `verify_integrity()` — end-to-end HMAC signature verification confirms blob tamper detection via `file_hash`
+4. Added `delete_by_prefix()` API with backend-optimized SQL `LIKE` queries for bulk key-prefix deletion
+
+---
+
 ## v0.7.0 Cleanup & Hardening (Shipped: 2026-04-02)
 
 **Phases completed:** 6 phases, 6 commits, 39 files changed (+6480/-5661 lines)
