@@ -88,6 +88,7 @@ class RotationResult:
 
     total: int = 0
     re_signed: int = 0
+    re_encrypted: int = 0
     failed: int = 0
     skipped: int = 0
     failures: list = field(default_factory=list)

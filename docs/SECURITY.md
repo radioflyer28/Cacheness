@@ -606,53 +606,84 @@ if cache.signer:
     print(f"Key file exists: {info['key_exists']}")
 ```
 
-## Encryption at Rest (Planned)
+## Encryption at Rest
 
-Cacheness currently provides **integrity** protection (signing, hash verification) but not **confidentiality** — blobs and metadata are stored as plaintext. Encryption at rest is planned to close this gap.
+Cacheness provides **AES-256-GCM encryption** for blob content, protecting confidentiality of cached data on disk. Combined with integrity signing (HMAC-SHA256) and hash verification, this delivers a defence-in-depth posture.
 
-**Primary threat model:** Cached data stored on remote servers (S3, PostgreSQL, libSQL cloud replicas) that could be compromised. Encryption must happen **client-side** — data is encrypted before it leaves the local process, so the server never sees plaintext. A server breach exposes only ciphertext, which is useless without the client-held master key.
-
-### Current Security Posture
+### Security Posture
 
 | Layer | Protection | Status |
 |-------|-----------|--------|
 | Metadata signing (HMAC-SHA256) | Integrity | ✅ Shipped (v0.7.0+, v3 signatures with HKDF) |
 | Blob hash verification (xxhash) | Integrity | ✅ Shipped (v0.7.0+) |
 | Key rotation | Key lifecycle | ✅ Shipped (v0.10.0) |
+| **Blob encryption (AES-256-GCM)** | **Confidentiality** | **✅ Shipped (v0.10.0)** |
 | Metadata encryption | Confidentiality | ⬜ Planned (via libSQL `encryption_key`) |
-| Blob encryption | Confidentiality | ⬜ Planned (AES-256-GCM envelope encryption) |
 
-### Metadata Encryption
+### Enabling Encryption
 
-The planned [libSQL metadata backend](LIBSQL_BACKEND.md) supports native encryption at rest via the `encryption_key` connection parameter. This encrypts the entire SQLite database — cache keys, timestamps, data type metadata, custom metadata — all become opaque on disk.
+Install the encryption extra:
 
-**Important limitation:** Metadata encryption protects metadata confidentiality but not blob files. An attacker with filesystem access can still read cached DataFrames, NumPy arrays, and pickled objects.
+```bash
+pip install cacheness[encryption]
+# or: uv add cacheness[encryption]
+```
 
-### Blob Encryption
+Configure via `SecurityConfig`:
 
-Full data confidentiality requires encrypting blob files in the handler write path. The proposed design uses AES-256-GCM envelope encryption:
+```python
+from cacheness import cacheness, CacheConfig, SecurityConfig
 
-1. On `put()`: handler serializes data → generate a per-blob DEK (data encryption key) → encrypt blob with DEK → encrypt DEK with master key → store encrypted blob + encrypted DEK
-2. On `get()`: decrypt DEK with master key → decrypt blob → pass plaintext to handler for deserialization
+config = CacheConfig(
+    security=SecurityConfig(
+        enable_entry_signing=True,
+        enable_content_encryption=True,
+        # encryption_key_file defaults to "cache_signing_key.bin"
+        # (same 32-byte key used for signing)
+    )
+)
+cache = cacheness(config)
 
-Key management would leverage the existing `SecurityConfig` and HKDF infrastructure — derive blob encryption keys per namespace, same pattern as signing keys.
+# Data is now encrypted on disk with AES-256-GCM
+cache.put(sensitive_data, on={"patient": "P001"})
+result = cache.get(on={"patient": "P001"})  # transparently decrypted
+```
+
+### How It Works
+
+1. **Key derivation**: A 32-byte master key (from `encryption_key_file`) is passed through HKDF-SHA256 with the namespace as domain separation, producing a per-namespace AES-256 key.
+2. **On `put()`**: Handler serializes data → a random 12-byte IV is generated → blob is encrypted with AES-256-GCM → encrypted blob replaces the plaintext file. The `encryption_algorithm` and `encryption_iv` are stored in entry metadata.
+3. **On `get()`**: Encrypted blob is read → decrypted using the derived key + stored IV → plaintext is passed to the handler for deserialization.
+4. **Hash verification**: The file hash (xxhash) is computed on the **encrypted** ciphertext, verifying the integrity of what's actually stored on disk.
+
+### Key Rotation with Re-encryption
+
+`rotate_key()` re-encrypts all encrypted entries with the new key:
+
+```python
+result = cache.rotate_key("path/to/new_key.bin")
+print(f"Re-signed: {result.re_signed}, Re-encrypted: {result.re_encrypted}")
+```
+
+The `RotationResult.re_encrypted` field reports how many entries were re-encrypted.
+
+### Metadata Encryption (Planned)
+
+The planned [libSQL metadata backend](LIBSQL_BACKEND.md) will support native encryption at rest via the `encryption_key` connection parameter, encrypting the entire metadata database (cache keys, timestamps, custom metadata).
 
 ### Threat Model with Encryption
 
 **Protected against (with both signing + encryption enabled):**
 - ✅ Cache metadata tampering (signing)
 - ✅ Blob file tampering (hash + signing)
-- ✅ Reading cached data from disk or remote storage (client-side blob encryption)
-- ✅ Reading cache keys and metadata from disk (metadata encryption via libSQL)
+- ✅ Reading cached data from disk (blob encryption)
 - ✅ Replay attacks (timestamp in signed fields)
-- ✅ Server compromise — remote storage only holds ciphertext, encrypted client-side before upload
 
-**Still not protected against:**
+**Not yet protected against:**
+- ⬜ Reading cache keys and metadata from disk (planned: metadata encryption via libSQL)
 - ❌ Complete database + key file replacement (use `use_in_memory_key=True`)
-- ❌ Process memory attacks on the client
-- ❌ OS-level privilege escalation on the client
-
-See [FUTURE_IMPROVEMENTS.md](FUTURE_IMPROVEMENTS.md#11-encryption-at-rest--medium-priority) for implementation roadmap and design considerations.
+- ❌ Process memory attacks
+- ❌ OS-level privilege escalation
 
 ## Examples
 

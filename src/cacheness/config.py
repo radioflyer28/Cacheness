@@ -411,6 +411,10 @@ class SecurityConfig:
     # HKDF per-namespace key derivation
     use_hkdf_derivation: bool = True  # Derive per-namespace keys via HKDF-SHA256
 
+    # Encryption at rest (AES-256-GCM)
+    enable_content_encryption: bool = False
+    encryption_key_file: str = "cache_signing_key.bin"  # Reuses signing key by default
+
     def __post_init__(self):
         """Validate security configuration."""
         # Deprecation shim: raise_on_key_fallback -> key_fallback_policy
@@ -432,13 +436,26 @@ class SecurityConfig:
                 f"got {self.key_fallback_policy!r}"
             )
 
+        # Validate encryption dependency
+        if self.enable_content_encryption:
+            try:
+                import cryptography  # noqa: F401
+            except ImportError:
+                from .error_handling import CacheConfigurationError
+
+                raise CacheConfigurationError(
+                    "Install cacheness[encryption] for AES-GCM encryption "
+                    "support: pip install cacheness[encryption]"
+                )
+
         logger.debug(
             f"Security configured: signing={self.enable_entry_signing}, "
             f"in_memory_key={self.use_in_memory_key}, "
             f"allow_unsigned={self.allow_unsigned_entries}, "
             f"delete_invalid={self.delete_invalid_signatures}, "
             f"key_fallback_policy={self.key_fallback_policy}, "
-            f"hkdf={self.use_hkdf_derivation}"
+            f"hkdf={self.use_hkdf_derivation}, "
+            f"encryption={self.enable_content_encryption}"
         )
 
 

@@ -506,6 +506,72 @@ class UnifiedCache(
             if hasattr(self, "_blob_store") and self._blob_store is not None:
                 self._blob_store.signer = new_signer
 
+            # Re-encrypt entries if encryption is enabled
+            if (
+                hasattr(self, "_blob_store")
+                and self._blob_store is not None
+                and self._blob_store._encryption_key is not None
+            ):
+                from .encryption import (
+                    decrypt_blob,
+                    encrypt_blob,
+                    derive_encryption_key,
+                )
+
+                old_enc_key = self._blob_store._encryption_key
+                new_enc_key = derive_encryption_key(new_key_bytes, self.namespace)
+
+                for entry_summary in entries:
+                    cache_key = entry_summary["cache_key"]
+                    try:
+                        full_entry = self.metadata_backend.get_entry(cache_key)
+                        if full_entry is None:
+                            continue
+                        meta = full_entry.get("metadata", {})
+                        if meta.get("encryption_algorithm") is None:
+                            continue
+
+                        actual_path_str = meta.get("actual_path")
+                        if not actual_path_str:
+                            continue
+                        blob_path = Path(self._resolve_actual_path(actual_path_str))
+                        if not blob_path.is_file():
+                            continue
+
+                        old_iv = bytes.fromhex(meta["encryption_iv"])
+                        ciphertext = blob_path.read_bytes()
+                        plaintext = decrypt_blob(ciphertext, old_enc_key, old_iv)
+                        new_ciphertext, new_iv, _ = encrypt_blob(plaintext, new_enc_key)
+                        blob_path.write_bytes(new_ciphertext)
+
+                        meta["encryption_iv"] = new_iv.hex()
+                        file_hash = self._calculate_file_hash(blob_path)
+                        if file_hash:
+                            meta["file_hash"] = file_hash
+                            full_entry["file_hash"] = file_hash
+                        full_entry["file_size"] = len(new_ciphertext)
+                        full_entry["metadata"] = meta
+
+                        # Re-sign after re-encryption
+                        signable = self._extract_signable_fields(
+                            cache_key, full_entry, meta
+                        )
+                        new_sig = new_signer.sign_entry(signable)
+                        meta["entry_signature"] = new_sig
+                        full_entry["metadata"] = meta
+
+                        self.metadata_backend.put_entry(cache_key, full_entry)
+                        result.re_encrypted += 1
+                    except (
+                        Exception
+                    ) as e:  # intentionally broad — best-effort re-encrypt
+                        result.failures.append(
+                            {"cache_key": cache_key, "error": f"re-encrypt: {e}"}
+                        )
+                        logger.warning(f"Failed to re-encrypt {cache_key}: {e}")
+
+                self._blob_store._encryption_key = new_enc_key
+
             logger.info(
                 f"Key rotation complete: {result.re_signed}/{result.total} "
                 f"entries re-signed, {result.failed} failed, "

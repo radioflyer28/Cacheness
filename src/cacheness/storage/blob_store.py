@@ -213,6 +213,11 @@ class BlobStore:
                 use_hkdf_derivation=use_hkdf_derivation,
             )
 
+        # Initialize encryption (requires config with SecurityConfig)
+        self._encryption_key: Optional[bytes] = None
+        if config is not None and config.security.enable_content_encryption:
+            self._init_encryptor(config.security, namespace)
+
         logger.debug(f"BlobStore initialized at {self.cache_dir}")
 
     # ── Path normalization helpers ────────────────────────────────────
@@ -260,6 +265,34 @@ class BlobStore:
         except Exception as e:  # intentionally broad — signer init failure is non-fatal
             logger.warning(f"Failed to initialize entry signer: {e}")
             self.signer = None
+
+    def _init_encryptor(
+        self,
+        security_config: "Any",
+        namespace: str,
+    ) -> None:
+        """Initialize encryption key from security config.
+
+        Reads the master key from the encryption key file (which defaults
+        to the signing key file) and derives a per-namespace AES-256 key.
+        """
+        from ..encryption import derive_encryption_key
+
+        key_path = self.cache_dir / security_config.encryption_key_file
+        if not key_path.is_file():
+            logger.warning(
+                f"Encryption key file not found: {key_path} — encryption disabled"
+            )
+            return
+        master_key = key_path.read_bytes()
+        if len(master_key) != 32:
+            logger.warning(
+                f"Encryption key file has invalid length ({len(master_key)} bytes, "
+                f"expected 32) — encryption disabled"
+            )
+            return
+        self._encryption_key = derive_encryption_key(master_key, namespace)
+        logger.info("Content encryption enabled (AES-256-GCM)")
 
     def rotate_key(self, new_key_file: "str | Path") -> "RotationResult":
         """Rotate the signing key and re-sign all blob entries.
@@ -340,6 +373,71 @@ class BlobStore:
                     result.failures.append({"cache_key": cache_key, "error": str(e)})
                     logger.warning(f"Failed to re-sign blob entry {cache_key}: {e}")
 
+            # Re-encrypt entries if encryption is enabled
+            if self._encryption_key is not None:
+                from ..encryption import (
+                    decrypt_blob,
+                    encrypt_blob,
+                    derive_encryption_key,
+                )
+
+                old_enc_key = self._encryption_key
+                new_enc_key = derive_encryption_key(new_key_bytes, self._namespace)
+
+                for entry in entries:
+                    cache_key = entry["cache_key"]
+                    try:
+                        full_entry = self.backend.get_entry(cache_key)
+                        if full_entry is None:
+                            continue
+                        nested_meta = full_entry.get("metadata", {})
+                        if nested_meta.get("encryption_algorithm") is None:
+                            continue
+
+                        # Resolve blob path
+                        actual_path_str = nested_meta.get("actual_path")
+                        if not actual_path_str:
+                            continue
+                        resolved = self._resolve_actual_path(actual_path_str)
+                        blob_path = Path(resolved)
+                        if not blob_path.is_file():
+                            continue
+
+                        # Decrypt with old key, re-encrypt with new key
+                        old_iv = bytes.fromhex(nested_meta["encryption_iv"])
+                        ciphertext = blob_path.read_bytes()
+                        plaintext = decrypt_blob(ciphertext, old_enc_key, old_iv)
+                        new_ciphertext, new_iv, _ = encrypt_blob(plaintext, new_enc_key)
+                        blob_path.write_bytes(new_ciphertext)
+
+                        # Update metadata with new IV and file hash
+                        nested_meta["encryption_iv"] = new_iv.hex()
+                        file_hash = self._calculate_file_hash(blob_path)
+                        if file_hash:
+                            nested_meta["file_hash"] = file_hash
+                            full_entry["file_hash"] = file_hash
+                        full_entry["file_size"] = len(new_ciphertext)
+                        full_entry["metadata"] = nested_meta
+
+                        # Re-sign with new signer after re-encryption
+                        signable = {**full_entry, **nested_meta, "cache_key": cache_key}
+                        new_sig = new_signer.sign_entry(signable)
+                        full_entry["entry_signature"] = new_sig
+                        nested_meta["entry_signature"] = new_sig
+                        full_entry["metadata"] = nested_meta
+
+                        self.backend.put_entry(cache_key, full_entry)
+                        result.re_encrypted += 1
+                    except (
+                        Exception
+                    ) as e:  # intentionally broad — best-effort re-encrypt
+                        result.failures.append(
+                            {"cache_key": cache_key, "error": f"re-encrypt: {e}"}
+                        )
+                        logger.warning(f"Failed to re-encrypt blob {cache_key}: {e}")
+
+                self._encryption_key = new_enc_key
+
             # Replace the signer instance
             self.signer = new_signer
 
@@ -388,8 +486,21 @@ class BlobStore:
             # Store the data using the handler (writes to local filesystem)
             result = handler.put(data, base_path, self.config)
 
-            # Persist through blob_backend (may rename, upload, etc.)
+            # Encrypt blob content if encryption is enabled
+            # Encryption happens AFTER handler compression, BEFORE blob backend write
+            encryption_meta: Dict[str, str] = {}
             handler_path = Path(result.actual_path)
+            if self._encryption_key is not None:
+                from ..encryption import encrypt_blob
+
+                plaintext = handler_path.read_bytes()
+                ciphertext, iv, algo = encrypt_blob(plaintext, self._encryption_key)
+                handler_path.write_bytes(ciphertext)
+                result.file_size = len(ciphertext)
+                encryption_meta["encryption_algorithm"] = algo.decode()
+                encryption_meta["encryption_iv"] = iv.hex()
+
+            # Persist through blob_backend (may rename, upload, etc.)
             final_path = self.blob_backend.write_blob_from_path(
                 str(handler_path), handler_path.name
             )
@@ -416,6 +527,8 @@ class BlobStore:
             custom_metadata["compression_codec"] = self.compression
             if file_hash:
                 custom_metadata["file_hash"] = file_hash
+            # Add encryption metadata if blob was encrypted
+            custom_metadata.update(encryption_meta)
 
             entry_data = {
                 "cache_key": blob_key,
@@ -497,28 +610,63 @@ class BlobStore:
                 logger.warning(f"Blob file missing: {actual_path}")
                 return None
 
-            # Get the handler based on data type
-            data_type = entry.get("data_type", "object")
-            handler = self.handlers.get_handler_by_type(data_type)
-
-            # Build handler metadata by merging entry with nested metadata
+            # Decrypt if entry was encrypted
             nested_meta = entry.get("metadata", {})
-            handler_metadata = {
-                **entry,
-                **nested_meta,  # Flatten nested metadata to top level
-            }
+            enc_algo = nested_meta.get("encryption_algorithm")
+            temp_path = None
+            read_path = actual_path
+            if enc_algo:
+                if self._encryption_key is None:
+                    logger.warning(
+                        f"Encrypted entry {key} but no encryption key configured"
+                    )
+                    return None
+                import tempfile
+                from ..encryption import decrypt_blob
 
-            if handler is None:
-                # Fall back to generic read
-                return read_file(actual_path)
+                ciphertext = actual_path.read_bytes()
+                iv = bytes.fromhex(nested_meta["encryption_iv"])
+                plaintext = decrypt_blob(ciphertext, self._encryption_key, iv)
+                # Write decrypted content to temp file for handler to read
+                tmp_fd = tempfile.NamedTemporaryFile(
+                    dir=actual_path.parent,
+                    delete=False,
+                    suffix=actual_path.suffix,
+                )
+                tmp_fd.write(plaintext)
+                tmp_fd.close()
+                temp_path = Path(tmp_fd.name)
+                read_path = temp_path
 
-            # Read using handler
-            data = handler.get(actual_path, handler_metadata)
+            try:
+                # Get the handler based on data type
+                data_type = entry.get("data_type", "object")
+                handler = self.handlers.get_handler_by_type(data_type)
 
-            # Update access time
-            self.backend.update_access_time(key)
+                # Build handler metadata by merging entry with nested metadata
+                nested_meta = entry.get("metadata", {})
+                handler_metadata = {
+                    **entry,
+                    **nested_meta,  # Flatten nested metadata to top level
+                }
 
-            return data
+                if handler is None:
+                    # Fall back to generic read
+                    return read_file(read_path)
+
+                # Read using handler
+                data = handler.get(read_path, handler_metadata)
+
+                # Update access time
+                self.backend.update_access_time(key)
+
+                return data
+            finally:
+                if temp_path is not None:
+                    try:
+                        temp_path.unlink()
+                    except OSError:
+                        pass
 
     def get_metadata(self, key: str) -> Optional[Dict[str, Any]]:
         """
@@ -1076,8 +1224,19 @@ class BlobStore:
         handler = self.handlers.get_handler(data)
         result = handler.put(data, base_path, config or self.config)
 
-        # Persist through blob_backend (rename, upload, etc.)
+        # Encrypt blob content if encryption is enabled
         handler_path = Path(result.actual_path)
+        if self._encryption_key is not None:
+            from ..encryption import encrypt_blob
+
+            plaintext = handler_path.read_bytes()
+            ciphertext, iv, algo = encrypt_blob(plaintext, self._encryption_key)
+            handler_path.write_bytes(ciphertext)
+            result.file_size = len(ciphertext)
+            result.extra["encryption_algorithm"] = algo.decode()
+            result.extra["encryption_iv"] = iv.hex()
+
+        # Persist through blob_backend (rename, upload, etc.)
         final_path = self.blob_backend.write_blob_from_path(
             str(handler_path), handler_path.name
         )
@@ -1111,6 +1270,7 @@ class BlobStore:
 
         Does NOT acquire the lock — caller is responsible for synchronization.
         Does NOT check metadata or verify signatures.
+        Transparently decrypts encrypted blobs when encryption key is available.
 
         Args:
             path: Path to the blob file
@@ -1120,10 +1280,43 @@ class BlobStore:
         Returns:
             Deserialized data object
         """
-        handler = self.handlers.get_handler_by_type(data_type)
-        if handler is None:
-            return read_file(path)
-        return handler.get(path, handler_metadata)
+        # Check if blob is encrypted
+        enc_algo = handler_metadata.get("encryption_algorithm")
+        temp_path = None
+        read_path = path
+        if enc_algo:
+            if self._encryption_key is None:
+                logger.warning(
+                    f"Encrypted blob at {path} but no encryption key configured"
+                )
+                return None
+            import tempfile
+            from ..encryption import decrypt_blob
+
+            ciphertext = path.read_bytes()
+            iv = bytes.fromhex(handler_metadata["encryption_iv"])
+            plaintext = decrypt_blob(ciphertext, self._encryption_key, iv)
+            tmp_fd = tempfile.NamedTemporaryFile(
+                dir=path.parent,
+                delete=False,
+                suffix=path.suffix,
+            )
+            tmp_fd.write(plaintext)
+            tmp_fd.close()
+            temp_path = Path(tmp_fd.name)
+            read_path = temp_path
+
+        try:
+            handler = self.handlers.get_handler_by_type(data_type)
+            if handler is None:
+                return read_file(read_path)
+            return handler.get(read_path, handler_metadata)
+        finally:
+            if temp_path is not None:
+                try:
+                    temp_path.unlink()
+                except OSError:
+                    pass
 
     def _clear_blob_files(self) -> int:
         """

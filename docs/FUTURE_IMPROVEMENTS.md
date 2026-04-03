@@ -582,11 +582,9 @@ cache.migrate(dry_run=True)  # report what would change
 
 ### 11. **Encryption at Rest** ✅ Medium Priority
 
-**Concept:** Protect cached data confidentiality — not just integrity (which signing already provides). Client-side encryption before data reaches storage, so untrusted or compromisable servers never see plaintext.
+**Concept:** Protect cached data confidentiality — not just integrity (which signing already provides). Two complementary layers: metadata encryption and blob encryption.
 
-**Primary threat model:** Cached data stored on remote servers (S3 blobs, PostgreSQL metadata, libSQL with cloud sync) that could be compromised. The encryption boundary must be the client — data is encrypted before it leaves the local process, and the server only ever stores ciphertext. This is especially important for the [tiered cache pattern](#9-tiered-pull-through-cache--medium-priority) where blobs are synced to shared S3 buckets or metadata is replicated via libSQL embedded replicas.
-
-**Current state:** Cacheness provides **integrity** via HMAC signing (v2/v3 signatures, HKDF-derived per-namespace keys, key rotation). Blobs are stored as plaintext files on disk. Anyone with filesystem or server access can read cached data.
+**Current state:** Cacheness provides **integrity** via HMAC signing (v2/v3 signatures, HKDF-derived per-namespace keys, key rotation). Blobs are stored as plaintext files on disk. Anyone with filesystem access can read cached data.
 
 #### Metadata Encryption (via libSQL)
 
@@ -622,12 +620,11 @@ config = CacheConfig(
 
 **Design considerations:**
 - **Algorithm:** AES-256-GCM (authenticated encryption — confidentiality + integrity in one pass)
-- **Client-side encryption boundary:** Encryption happens in `BlobStore.put()` after handler serialization, before the blob backend writes to storage. The remote backend (S3, filesystem, future GCS) only ever receives ciphertext. Decryption happens in `BlobStore.get()` after blob backend reads, before handler deserialization.
 - **Envelope encryption:** Generate a unique DEK (data encryption key) per blob, encrypt the DEK with the master key, store encrypted DEK alongside the blob. This limits the blast radius of a single compromised DEK.
-- **Key management:** Leverage existing `SecurityConfig` and HKDF infrastructure. Derive blob encryption keys per namespace using HKDF with a different info string (`cacheness-aes-gcm-v1:{namespace_id}`) — same master key, cryptographically isolated from signing keys.
+- **Integration point:** Encrypt after handler serialization, decrypt before handler deserialization. Transparent to handlers.
+- **Key management:** Leverage existing `SecurityConfig` and HKDF infrastructure. Derive blob encryption keys per namespace (same HKDF pattern as signing keys).
 - **Performance:** AES-256-GCM is hardware-accelerated on modern CPUs (AES-NI). Overhead is proportional to blob size, not metadata complexity.
 - **Interaction with signing:** Signing covers metadata fields including `file_hash`. With blob encryption, `file_hash` should be computed on the **ciphertext** (not plaintext), so integrity verification doesn't require decryption.
-- **Remote storage model:** Encrypted blobs can be stored on untrusted S3 buckets, shared PostgreSQL databases, or libSQL cloud replicas. A server compromise exposes only ciphertext — useless without the client-held master key.
 
 **Orthogonality with signing:**
 

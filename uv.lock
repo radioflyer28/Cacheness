@@ -203,6 +203,9 @@ dataframes = [
     { name = "polars" },
     { name = "pyarrow" },
 ]
+encryption = [
+    { name = "cryptography" },
+]
 postgresql = [
     { name = "psycopg", extra = ["binary"] },
     { name = "sqlalchemy" },
@@ -237,6 +240,7 @@ dataframes = [
 ]
 dev = [
     { name = "beads-mcp" },
+    { name = "cryptography" },
     { name = "hypothesis" },
     { name = "moto", extra = ["s3"] },
     { name = "pytest" },
@@ -276,6 +280,7 @@ requires-dist = [
     { name = "boto3", marker = "extra == 'cloud'", specifier = ">=1.26.0" },
     { name = "boto3", marker = "extra == 's3'", specifier = ">=1.26.0" },
     { name = "cachetools", specifier = ">=6.1.0" },
+    { name = "cryptography", marker = "extra == 'encryption'", specifier = ">=41.0.0" },
     { name = "dill", marker = "extra == 'recommended'", specifier = ">=0.4.0" },
     { name = "duckdb-engine", marker = "extra == 'recommended'", specifier = ">=0.16.0" },
     { name = "numpy", marker = "extra == 'recommended'", specifier = ">=2.0.0" },
@@ -293,7 +298,7 @@ requires-dist = [
     { name = "tensorflow", marker = "extra == 'tensorflow'", specifier = ">=2.0.0" },
     { name = "xxhash", specifier = ">=3.5.0" },
 ]
-provides-extras = ["recommended", "dataframes", "tensorflow", "s3", "postgresql", "cloud"]
+provides-extras = ["recommended", "dataframes", "tensorflow", "s3", "postgresql", "cloud", "encryption"]
 
 [package.metadata.requires-dev]
 cloud = [
@@ -308,6 +313,7 @@ dataframes = [
 ]
 dev = [
     { name = "beads-mcp", specifier = ">=0.55.4" },
+    { name = "cryptography", specifier = ">=41.0.0" },
     { name = "hypothesis", specifier = ">=6.151.5" },
     { name = "moto", extras = ["s3"], specifier = ">=5.0.0" },
     { name = "pytest", specifier = ">=8.4.1" },
