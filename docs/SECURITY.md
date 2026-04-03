@@ -133,6 +133,36 @@ config = CacheConfig(
 
 > **Important:** After key rotation, existing entries will fail signature verification. Set `allow_unsigned_entries=True` or `delete_invalid_signatures=True` during the transition period.
 
+### Key Fallback Policy
+
+Controls what happens when a signing key cannot be persisted to disk (e.g., read-only filesystem, permission errors) or when a corrupt key file is detected.
+
+```python
+from cacheness import cacheness
+from cacheness.config import CacheConfig, SecurityConfig
+
+# Default: warn and use an in-memory key
+cache = cacheness()  # key_fallback_policy="warn"
+
+# Strict: raise CacheSecurityError on key problems
+config = CacheConfig(
+    security=SecurityConfig(key_fallback_policy="raise")
+)
+
+# Silent fallback: use in-memory key without logging
+config = CacheConfig(
+    security=SecurityConfig(key_fallback_policy="fallback")
+)
+```
+
+| Policy | On key write failure | On corrupt key file | Use case |
+|--------|---------------------|---------------------|----------|
+| `"warn"` (default) | Log WARNING, use in-memory key | Log WARNING, regenerate | General use — visible but non-blocking |
+| `"raise"` | Raise `CacheSecurityError` | Raise `CacheSecurityError` | Production — fail fast on key issues |
+| `"fallback"` | Silent in-memory key | Silent regenerate | CI/containers — no noise |
+
+> **Deprecation notice:** The boolean `raise_on_key_fallback` parameter is deprecated. Use `key_fallback_policy="raise"` instead. Setting `raise_on_key_fallback=True` automatically maps to `key_fallback_policy="raise"` with a deprecation warning.
+
 ## Signing Keys and Namespaces
 
 ### Current Behavior
