@@ -75,7 +75,9 @@ Plans:
   3. JSON backend falls back to Python-side prefix filtering (documented as slower for large caches)
   4. Deleting by prefix also removes the corresponding blob files, not just metadata
   5. Calling `delete_by_prefix()` with a prefix that matches no entries returns 0 without error
-**Plans**: TBD
+**Plans**: 1 plan
+Plans:
+- [x] 10-01-PLAN.md — delete_by_prefix + backend keys_by_prefix + tests
 
 ## Progress
 
@@ -90,4 +92,4 @@ Plans:
 | 7. Concurrency Foundation | v0.8.0 | Complete | 2026-04-02 |
 | 8. Crash-Safe Write Intent Logging | v0.8.0 | Complete | 2026-04-02 |
 | 9. Blob Integrity Validation | v0.8.0 | Complete | 2026-04-02 |
-| 10. Prefix Deletion API | v0.8.0 | Not started | - |
+| 10. Prefix Deletion API | v0.8.0 | Complete | 2026-04-02 |
