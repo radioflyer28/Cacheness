@@ -36,25 +36,24 @@ A grep across `src/cacheness/**/*.py` (including ignored files) returned zero re
 - Files: `src/cacheness/serialization.py`, `src/cacheness/core.py`
 - Workaround: Critical bug pattern documented in copilot-instructions. All new parameters must be added to the strip list.
 
-**`UnifiedCache._lock` inconsistently acquired:**
-- Issue: `_lock` (an `RLock`) is used in ~18 methods (management operations, stats, bulk operations) but is NOT acquired in the critical `put()` and `get()` paths. The TROUBLESHOOTING.md explicitly documents that `UnifiedCache` is "not thread-safe" despite having a lock field.
-- Files: `src/cacheness/core.py` (line 164 — lock creation, lines 1854/2035 — put/get without lock)
-- Impact: Concurrent `put()`/`get()` calls from multiple threads can cause data races, especially with the JSON backend.
-- Workaround: Thread safety is provided at the backend level (JSON uses `threading.Lock()`, SQLite uses WAL mode). Documented in TROUBLESHOOTING.md.
+**`UnifiedCache._lock` consistently acquired (resolved in v0.9.0):**
+- ~~Issue: `_lock` inconsistently acquired~~ — Investigation found `_lock` IS acquired in put/get and 22+ other methods. TROUBLESHOOTING.md and API_REFERENCE.md corrected.
+- Files: `src/cacheness/core.py`, `docs/API_REFERENCE.md`, `docs/TROUBLESHOOTING.md`
+- Status: **Resolved** — documentation was wrong, code was correct.
 
 ## Security Considerations
 
-**Pickle/dill deserialization of untrusted data:**
-- Risk: `pickle.loads()` and `dill.loads()` can execute arbitrary code during deserialization. Cacheness uses both in `src/cacheness/compress_pickle.py` (lines ~204, ~284, ~888) and `src/cacheness/handlers.py` (lines ~1226, ~1249, ~1382).
-- Files: `src/cacheness/compress_pickle.py`, `src/cacheness/handlers.py`
-- Current mitigation: HMAC-SHA256 signing of metadata fields (detects tampering of metadata but NOT blob file content). Dill docs include explicit security warnings. The `DILL_INTEGRATION.md` doc has a critical security warning section.
-- Recommendations: The signing only covers metadata fields, not the actual serialized blob content. An attacker with file-system access could replace a blob file while keeping metadata signatures intact if the file hash isn't verified (file hash verification is optional via `verify_cache_integrity`). Consider making blob content hashing always-on or at minimum default-on.
+**Pickle/dill deserialization of untrusted data (documented in v0.9.0):**
+- Risk: `pickle.loads()` and `dill.loads()` can execute arbitrary code during deserialization.
+- Files: `src/cacheness/compress_pickle.py`, `src/cacheness/handlers/object_handler.py`
+- Current mitigation: 3-layer defense: file_hash (xxhash) integrity check → HMAC-SHA256 metadata signing → signature verification before deserialization. Security comments added at all 5 deserialization sites.
+- Status: **Documented** in `docs/SECURITY.md` "Deserialization Security" section with full threat model.
 
-**Signing key file permissions on Windows:**
-- Risk: `security.py` sets `chmod(0o600)` on the signing key file, but this is a no-op on Windows. The key file may be readable by other users.
-- Files: `src/cacheness/security.py` (line ~144)
-- Current mitigation: A `try/except` wraps the chmod call, logging a warning on failure.
-- Recommendations: Use Windows ACLs (via `win32security` or `icacls`) for actual permission restriction on Windows, or document this as a known limitation.
+**Signing key file permissions — cross-platform (resolved in v0.9.0):**
+- ~~Risk: `chmod(0o600)` is a no-op on Windows~~
+- Files: `src/cacheness/security.py` (`_set_key_file_permissions` static method)
+- Current mitigation: Cross-platform permission setting: Unix uses `chmod(0o600)`, Windows uses `icacls` to remove inheritance and grant only the current user `(R,W)`.
+- Status: **Resolved** in v0.9.0.
 
 **Shared signing key across namespaces:**
 - Risk: All namespaces sharing the same `cache_dir` share the same signing key by default. No cryptographic isolation between tenants.
@@ -128,11 +127,9 @@ A grep across `src/cacheness/**/*.py` (including ignored files) returned zero re
 - Impact: Cannot bound cache size by disk usage or entry count. Users must manage eviction externally.
 - Priority: Medium-High — documented in `docs/FUTURE_IMPROVEMENTS.md`.
 
-**Missing management operations:**
-- What's missing: `update_blob_data()`, `delete_by_prefix()`, `touch()`, `get_metadata()` at cache layer, batch operations (`get_batch`, `delete_batch`, `update_batch`).
-- Files: Documented in `docs/MISSING_MANAGEMENT_API.md`
-- Impact: Common production operations require manual implementation.
-- Priority: High — APIs are designed but not yet implemented.
+**Management operations (resolved in v0.9.0):**
+- ~~What's missing: Various management APIs~~ — All APIs now implemented: `put()`, `get()`, `update_data()`, `touch()`, `get_metadata()`, `put_batch()`, `get_batch()`, `delete_batch()`, `touch_batch()`, `delete_by_prefix()`, `delete_where()`, `delete_matching()`.
+- Status: **Resolved** — `put_batch()` added in v0.9.0, all others already existed.
 
 ## Platform-Specific Issues
 
@@ -146,10 +143,9 @@ A grep across `src/cacheness/**/*.py` (including ignored files) returned zero re
 - Files: `tests/test_tensorflow_handler.py`
 - Impact: TF handler cannot be validated on Windows CI.
 
-**`chmod(0o600)` is a no-op on Windows:**
-- Issue: Signing key file permissions are not actually restricted on Windows.
-- Files: `src/cacheness/security.py` (line ~144)
-- Impact: Key file may be readable by other local users on Windows.
+**`chmod(0o600)` is a no-op on Windows (resolved in v0.9.0):**
+- ~~Issue: Signing key file permissions are not actually restricted on Windows.~~
+- Status: **Resolved** — Now uses `icacls` on Windows. See Security Considerations section.
 
 ## Dependency Risks
 
