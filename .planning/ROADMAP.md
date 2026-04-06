@@ -59,7 +59,7 @@
 ### v0.11.0 Cross-Backend Hardening (Phases 23-26)
 
 - [x] **Phase 23: Encryption Schema & Storage** — Add encryption columns to SQLite/PG, migrations, fix put_entry/get_entry (completed)
-- [ ] **Phase 24: Cross-Backend Test Parity** — Parametrize encryption tests across all 3 backends
+- [x] **Phase 24: Cross-Backend Test Parity** — Parametrize encryption tests across all 3 backends (completed)
 - [ ] **Phase 25: Inline Blob Encryption** — Encrypt direct inline path, decrypt on read, key rotation for inline entries
 - [ ] **Phase 26: Integration & Hardening** — Config validation, migration testing on existing databases
 
@@ -89,7 +89,7 @@ Plans:
   3. PostgreSQL encryption tests are grouped with `@pytest.mark.xdist_group("docker")`
 **Plans**: 1 plan
 Plans:
-- [ ] 24-01-PLAN.md — Parametrize 12 encryption integration tests + fix outdated comment
+- [x] 24-01-PLAN.md — Parametrize 12 encryption integration tests + fix outdated comment
 
 ### Phase 25: Inline Blob Encryption
 **Goal**: Inline blobs (stored directly in metadata) are encrypted at rest, just like file-backed blobs

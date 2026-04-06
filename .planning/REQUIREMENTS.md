@@ -10,7 +10,7 @@
 
 - [ ] **ENC-01**: Encryption metadata (`encryption_algorithm`, `encryption_iv`) preserved across SQLite and PostgreSQL backends via dedicated schema columns
 - [ ] **ENC-02**: Encrypted blob roundtrip (put→get) works correctly with all 3 metadata backends (JSON, SQLite, PostgreSQL)
-- [ ] **ENC-03**: Encryption tests parametrized across all backends with full parity
+- [x] **ENC-03**: Encryption tests parametrized across all backends with full parity
 
 ### Inline Blob Encryption
 
@@ -41,7 +41,7 @@
 |-------------|-------|--------|
 | ENC-01 | Phase 23 | Not started |
 | ENC-02 | Phase 23 | Not started |
-| ENC-03 | Phase 24 | Not started |
+| ENC-03 | Phase 24 | Complete |
 | INLINE-01 | Phase 25 | Not started |
 | INLINE-02 | Phase 25 | Not started |
 | INLINE-03 | Phase 25 | Not started |
