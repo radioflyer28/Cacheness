@@ -58,7 +58,7 @@
 
 ### v0.11.0 Cross-Backend Hardening (Phases 23-26)
 
-- [ ] **Phase 23: Encryption Schema & Storage** — Add encryption columns to SQLite/PG, migrations, fix put_entry/get_entry
+- [x] **Phase 23: Encryption Schema & Storage** — Add encryption columns to SQLite/PG, migrations, fix put_entry/get_entry (completed)
 - [ ] **Phase 24: Cross-Backend Test Parity** — Parametrize encryption tests across all 3 backends
 - [ ] **Phase 25: Inline Blob Encryption** — Encrypt direct inline path, decrypt on read, key rotation for inline entries
 - [ ] **Phase 26: Integration & Hardening** — Config validation, migration testing on existing databases
@@ -76,8 +76,8 @@
   4. Encrypted blob roundtrip (put→get) returns original data with all 3 metadata backends
 **Plans**: 2 plans
 Plans:
-- [ ] 23-01-PLAN.md — SQLite encryption schema, field handling, and tests
-- [ ] 23-02-PLAN.md — PostgreSQL encryption schema, field handling, and tests
+- [x] 23-01-PLAN.md — SQLite encryption schema, field handling, and tests
+- [x] 23-02-PLAN.md — PostgreSQL encryption schema, field handling, and tests
 
 ### Phase 24: Cross-Backend Test Parity
 **Goal**: Encryption test coverage is equal across all metadata backends, not just JSON
