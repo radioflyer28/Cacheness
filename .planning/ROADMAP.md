@@ -51,7 +51,7 @@
 - [x] **Phase 18: Encryption at Rest** — AES-GCM blob encryption, disabled by default (completed outside GSD)
 - [x] **Phase 19: Core Decomposition II** — Extract eviction, namespace, and init logic into mixins (completed outside GSD)
 - [ ] **Phase 20: Concurrency & Atomics Verification** — Thread safety and atomic write correctness (superseded by Phase 22)
-- [ ] **Phase 21: Retroactive Verification & Docs Cleanup** — Close doc gaps for code-complete requirements
+- [x] **Phase 21: Retroactive Verification & Docs Cleanup** — Close doc gaps for code-complete requirements
 - [ ] **Phase 22: Concurrency & Integration Testing** — Thread safety, atomic writes, cross-phase integration tests
 
 ## Phase Details
@@ -108,8 +108,8 @@ Plans:
   5. Unencrypted entries remain readable when encryption is later enabled (migration path)
 **Plans:** 2 plans
 Plans:
-- [ ] 18-01-PLAN.md — Core encryption module + BlobStore integration (2 tasks, wave 1)
-- [ ] 18-02-PLAN.md — Comprehensive tests + security documentation (2 tasks, wave 2)
+- [x] 18-01-PLAN.md — Core encryption module + BlobStore integration (2 tasks, wave 1)
+- [x] 18-02-PLAN.md — Comprehensive tests + security documentation (2 tasks, wave 2)
 
 ### Phase 19: Core Decomposition II
 **Goal**: core.py reduced from ~2500 to ~1500 lines via mixin/delegate extraction
@@ -120,7 +120,9 @@ Plans:
   2. Extracted concerns live in focused mixin or delegate files (following v0.7.0 pattern)
   3. All existing tests pass unchanged — no public API changes
   4. `from cacheness.core import UnifiedCache` continues to work
-**Plans**: TBD
+**Plans**: Completed outside GSD
+Plans:
+- [x] Mixin extraction completed outside GSD
 
 ### Phase 20: Concurrency & Atomics Verification (Superseded)
 **Goal**: Verify thread safety and atomic write correctness through testing — fix bugs if found
@@ -142,7 +144,7 @@ Plans:
 **Tasks:** ~6
 **Plans**: 1 plan
 Plans:
-- [ ] 21-01-PLAN.md — Verify SEC-02/SEC-03/ARCH-01, export RotationResult, update docs (3 tasks, wave 1)
+- [x] 21-01-PLAN.md — Verify SEC-02/SEC-03/ARCH-01, export RotationResult, update docs (3 tasks, wave 1)
 
 ### Phase 22: Concurrency & Integration Testing
 **Goal**: Satisfy TEST-01 and TEST-02 through new targeted tests + cross-phase integration coverage
@@ -182,5 +184,5 @@ Plans:
 | 18. Encryption at Rest | v0.10.0 | Complete | 2026-04-03 |
 | 19. Core Decomposition II | v0.10.0 | Complete | 2026-04-03 |
 | 20. Concurrency & Atomics Verification | v0.10.0 | Superseded | - |
-| 21. Retroactive Verification & Docs Cleanup | v0.10.0 | Not started | - |
+| 21. Retroactive Verification & Docs Cleanup | v0.10.0 | Complete | 2026-04-06 |
 | 22. Concurrency & Integration Testing | v0.10.0 | Not started | - |

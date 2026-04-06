@@ -11,12 +11,12 @@ Requirements for Security & Architecture milestone. Each maps to roadmap phases.
 
 - [x] **SEC-01**: Per-namespace key derivation via HKDF — derive namespace-specific signing keys from master key + namespace ID. Existing entries with shared key must still verify (migration path).
 - [x] **SEC-02**: Configurable key fallback behavior — replace silent in-memory fallback with user-controlled policy (`raise` / `warn` / `fallback`). Default: `warn` (preserves current behavior with explicit configuration).
-- [ ] **SEC-03**: Blob content encryption at rest — AES-GCM encryption of cached blob data on disk. Disabled by default, signing remains enabled. Configuration exposed via `CacheMetadataConfig` with `encryption_enabled`, `encryption_key_file`, etc.
+- [x] **SEC-03**: Blob content encryption at rest — AES-GCM encryption of cached blob data on disk. Disabled by default, signing remains enabled. Configuration exposed via `CacheMetadataConfig` with `encryption_enabled`, `encryption_key_file`, etc.
 - [x] **SEC-04**: Manual key rotation API — `rotate_key()` re-derives namespace keys and re-signs existing entries. Includes test scenarios: delete old key file, restart cache, verify old-key entries handled gracefully.
 
 ### Architecture
 
-- [ ] **ARCH-01**: Further core.py decomposition — extract eviction, namespace management, and/or initialization logic into mixins or delegates. Target: ~2500 → ~1500 lines. All existing tests must pass unchanged.
+- [x] **ARCH-01**: Further core.py decomposition — extract eviction, namespace management, and/or initialization logic into mixins or delegates. Target: ~2500 → ~1500 lines. All existing tests must pass unchanged.
 
 ### Testing
 
@@ -60,10 +60,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | Requirement | Phase | Status |
 |-------------|-------|--------|
 | SEC-01 | Phase 16 | Complete |
-| SEC-02 | Phase 15 → Phase 21 (verification) | Code complete, verification pending |
-| SEC-03 | Phase 18 → Phase 21 (verification) | Code complete, verification pending |
+| SEC-02 | Phase 15 → Phase 21 (verified) | Complete |
+| SEC-03 | Phase 18 → Phase 21 (verified) | Complete |
 | SEC-04 | Phase 17 | Complete |
-| ARCH-01 | Phase 19 → Phase 21 (verification) | Code complete, verification pending |
+| ARCH-01 | Phase 19 → Phase 21 (verified) | Complete |
 | TEST-01 | Phase 20 → Phase 22 (gap closure) | Pending |
 | TEST-02 | Phase 20 → Phase 22 (gap closure) | Pending |
 
@@ -74,4 +74,4 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 ---
 *Requirements defined: 2026-04-03*
-*Last updated: 2026-04-03*
+*Last updated: 2026-04-06*

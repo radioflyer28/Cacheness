@@ -46,6 +46,7 @@ from .interfaces import (
     EntrySummary,
     HandlerResult,
     IntegrityReport,
+    RotationResult,
     SignableFields,
     WriteBlobResult,
 )  # Export interface for custom handlers
@@ -245,6 +246,7 @@ __all__ = [
     "HandlerResult",  # Typed return contract for handler put()
     "WriteBlobResult",  # Typed return contract for _write_blob()
     "IntegrityReport",  # Typed return contract for verify_integrity()
+    "RotationResult",  # Typed return contract for rotate_key()
     "SignableFields",  # Typed contract for signable entry fields
     "EntrySummary",  # Typed contract for iter_entry_summaries()
     "BlobReadContext",  # Typed contract for handler.get() metadata

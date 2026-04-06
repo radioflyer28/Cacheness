@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v0.10.0
 milestone_name: Security & Architecture
-status: idle
-last_updated: "2026-04-03T19:45:00Z"
-last_activity: 2026-04-03 -- Phase 17 execution complete
+status: executing
+last_updated: "2026-04-06T15:30:00.000Z"
+last_activity: 2026-04-06 -- Phase 21 tasks executed
 progress:
-  total_phases: 6
-  completed_phases: 3
-  total_plans: 5
+  total_phases: 8
+  completed_phases: 4
+  total_plans: 7
   completed_plans: 5
-  percent: 50
+  percent: 63
 ---
 
 # Project State
@@ -20,16 +20,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-03)
 
 **Core value:** Reliable, type-aware disk caching with pluggable backends
-**Current focus:** Phase 17 complete — ready for Phase 18
+**Current focus:** Phase 21 complete, Phase 22 next
 
 ## Current Position
 
-Phase: 17 (key-rotation-api) — COMPLETE
-Plan: 2 of 2 (all complete)
-Status: Phase 17 execution complete
-Last activity: 2026-04-03 -- Phase 17 execution complete
+Phase: 21 (retroactive-verification) — COMPLETE
+Plan: 1 of 1 — done
+Status: Phase 21 complete
+Last activity: 2026-04-06 -- Phase 21 verification and docs cleanup done
 
-Progress: [█████░░░░░] 50% — 3/6 phases complete
+Progress: [██████░░░░] 63% — 4/6 phases complete (excl. superseded Phase 20)
 
 ## Accumulated Context
 
