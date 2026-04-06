@@ -57,8 +57,8 @@ class TestSqliteSchemaVersioning:
     def test_migrations_run_on_fresh_db(self, sqlite_backend):
         """Fresh database should have all migrations applied."""
         version = sqlite_backend.get_schema_version(DEFAULT_NAMESPACE)
-        # v1 baseline + v1→v2 partial index + v2→v3 access_count/ttl/expires_at
-        assert version == 3
+        # v1 baseline + v1→v2 partial index + v2→v3 access_count/ttl/expires_at + v3→v4 encryption
+        assert version == 4
 
     def test_migrations_idempotent(self, sqlite_backend_path):
         """Opening the same database twice should not fail or re-run migrations."""
@@ -100,7 +100,7 @@ class TestSqliteNamespaceRegistry:
         ns = sqlite_backend.create_namespace("project_alpha", "Project Alpha")
         assert ns.namespace_id == "project_alpha"
         assert ns.display_name == "Project Alpha"
-        assert ns.schema_version == 3
+        assert ns.schema_version == 4
 
         # Verify tables were created
         from sqlalchemy import inspect
@@ -364,10 +364,10 @@ class TestSqliteBackwardCompatibility:
 class TestSqlitePartialIndex:
     """Test the v2 partial index on metadata_dict IS NOT NULL."""
 
-    def test_schema_version_is_v3(self, sqlite_backend):
-        """Fresh database should be at schema version 3."""
+    def test_schema_version_is_v4(self, sqlite_backend):
+        """Fresh database should be at schema version 4."""
         version = sqlite_backend.get_schema_version(DEFAULT_NAMESPACE)
-        assert version == 3
+        assert version == 4
 
     def test_partial_index_exists_default_table(self, sqlite_backend):
         """Default table should have idx_metadata_notnull partial index."""
@@ -485,11 +485,11 @@ class TestSqlitePartialIndex:
         assert "idx_metadata_notnull" not in index_names
         engine2.dispose()
 
-        # Open with SqliteBackend — should auto-migrate v1→v2→v3
+        # Open with SqliteBackend — should auto-migrate v1→v2→v3→v4
         backend = SqliteBackend(db_file)
 
-        # Schema should now be v3
-        assert backend.get_schema_version(DEFAULT_NAMESPACE) == 3
+        # Schema should now be v4
+        assert backend.get_schema_version(DEFAULT_NAMESPACE) == 4
 
         # Partial index should exist
         inspector = inspect(backend.engine)
@@ -508,7 +508,7 @@ class TestSqlitePartialIndex:
         v2 = backend2.get_schema_version(DEFAULT_NAMESPACE)
         backend2.close()
 
-        assert v1 == v2 == 3
+        assert v1 == v2 == 4
 
     def test_query_plan_uses_partial_index(self, sqlite_backend):
         """EXPLAIN QUERY PLAN should reference the partial index."""
@@ -747,9 +747,9 @@ class TestSqliteV3Columns:
             session.commit()
         engine.dispose()
 
-        # Open with SqliteBackend — should auto-migrate v1→v2→v3
+        # Open with SqliteBackend — should auto-migrate v1→v2→v3→v4
         backend = SqliteBackend(db_file)
-        assert backend.get_schema_version(DEFAULT_NAMESPACE) == 3
+        assert backend.get_schema_version(DEFAULT_NAMESPACE) == 4
 
         # v3 columns should exist
         inspector = inspect(backend.engine)
@@ -771,3 +771,94 @@ class TestSqliteV3Columns:
         assert entry["expires_at"] is None
 
         backend.close()
+
+
+class TestSqliteV3ToV4Migration:
+    """Test v3→v4 migration adds encryption columns."""
+
+    def test_v3_to_v4_migration_adds_columns(self, sqlite_backend):
+        """Verify migration adds encryption_algorithm, encryption_iv, cacheness_version."""
+        from sqlalchemy import text
+
+        with sqlite_backend.SessionLocal() as session:
+            cols = {
+                row[1]
+                for row in session.execute(
+                    text('PRAGMA table_info("cache_entries")')
+                ).fetchall()
+            }
+        assert "encryption_algorithm" in cols
+        assert "encryption_iv" in cols
+        assert "cacheness_version" in cols
+
+    def test_encryption_metadata_roundtrip_sqlite(self, sqlite_backend):
+        """Verify put_entry preserves encryption fields and get_entry returns them."""
+        entry_data = {
+            "description": "encrypted entry",
+            "data_type": "bytes",
+            "file_size": 100,
+            "metadata": {
+                "object_type": "bytes",
+                "storage_format": "raw",
+                "encryption_algorithm": "AES-256-GCM",
+                "encryption_iv": "abcdef0123456789",
+                "file_hash": "somehash",
+            },
+        }
+        sqlite_backend.put_entry("test_enc_key", entry_data)
+        result = sqlite_backend.get_entry("test_enc_key")
+        assert result is not None
+        meta = result["metadata"]
+        assert meta["encryption_algorithm"] == "AES-256-GCM"
+        assert meta["encryption_iv"] == "abcdef0123456789"
+
+    def test_cacheness_version_roundtrip_sqlite(self, sqlite_backend):
+        """Verify cacheness_version column preserved through put/get."""
+        entry_data = {
+            "description": "versioned entry",
+            "data_type": "bytes",
+            "file_size": 50,
+            "metadata": {
+                "cacheness_version": "0.11.0",
+            },
+        }
+        sqlite_backend.put_entry("test_ver_key", entry_data)
+        result = sqlite_backend.get_entry("test_ver_key")
+        assert result is not None
+        assert result["metadata"]["cacheness_version"] == "0.11.0"
+
+    def test_iter_entry_summaries_includes_encryption_fields(self, sqlite_backend):
+        """Verify iter_entry_summaries includes encryption metadata."""
+        entry_data = {
+            "description": "enc summary",
+            "data_type": "bytes",
+            "file_size": 100,
+            "metadata": {
+                "encryption_algorithm": "AES-256-GCM",
+                "encryption_iv": "deadbeef",
+            },
+        }
+        sqlite_backend.put_entry("sum_enc_key", entry_data)
+        summaries = sqlite_backend.iter_entry_summaries()
+        enc_summary = [s for s in summaries if s["cache_key"] == "sum_enc_key"]
+        assert len(enc_summary) == 1
+        assert enc_summary[0]["encryption_algorithm"] == "AES-256-GCM"
+        assert enc_summary[0]["encryption_iv"] == "deadbeef"
+
+    def test_update_entry_metadata_encryption_fields(self, sqlite_backend):
+        """Verify update_entry_metadata can update encryption fields."""
+        entry_data = {
+            "description": "update enc",
+            "data_type": "bytes",
+            "file_size": 100,
+            "metadata": {
+                "encryption_algorithm": "AES-256-GCM",
+                "encryption_iv": "old_iv",
+            },
+        }
+        sqlite_backend.put_entry("upd_enc_key", entry_data)
+        sqlite_backend.update_entry_metadata(
+            "upd_enc_key", {"encryption_iv": "new_iv"}
+        )
+        result = sqlite_backend.get_entry("upd_enc_key")
+        assert result["metadata"]["encryption_iv"] == "new_iv"

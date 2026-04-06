@@ -155,6 +155,40 @@ def _sqlite_migrate_v2_to_v3(backend: "SqliteBackend", namespace_id: str) -> Non
     )
 
 
+def _sqlite_migrate_v3_to_v4(backend: "SqliteBackend", namespace_id: str) -> None:
+    """v3 → v4: add encryption_algorithm, encryption_iv, cacheness_version columns."""
+    if namespace_id == DEFAULT_NAMESPACE:
+        table = "cache_entries"
+    else:
+        table = f"cache_entries_{namespace_id}"
+
+    with backend.SessionLocal() as session:
+        existing_cols = {
+            row[1]
+            for row in session.execute(text(f'PRAGMA table_info("{table}")')).fetchall()
+        }
+
+        if "encryption_algorithm" not in existing_cols:
+            session.execute(
+                text(f'ALTER TABLE "{table}" ADD COLUMN encryption_algorithm TEXT')
+            )
+        if "encryption_iv" not in existing_cols:
+            session.execute(
+                text(f'ALTER TABLE "{table}" ADD COLUMN encryption_iv TEXT')
+            )
+        if "cacheness_version" not in existing_cols:
+            session.execute(
+                text(f'ALTER TABLE "{table}" ADD COLUMN cacheness_version TEXT')
+            )
+        session.commit()
+
+    logger.info(
+        "SQLite v3→v4: added encryption_algorithm/encryption_iv/cacheness_version "
+        "columns on %r",
+        table,
+    )
+
+
 class SqliteBackend(MetadataBackend):
     """SQLite database-based metadata backend using SQLAlchemy ORM."""
 
@@ -321,6 +355,7 @@ class SqliteBackend(MetadataBackend):
         return [
             (1, 2, _sqlite_migrate_v1_to_v2),
             (2, 3, _sqlite_migrate_v2_to_v3),
+            (3, 4, _sqlite_migrate_v3_to_v4),
         ]
 
     # --- Namespace registry overrides ---
@@ -376,7 +411,10 @@ class SqliteBackend(MetadataBackend):
                     expires_at      DATETIME,
                     blob_data       BLOB,
                     is_inline       INTEGER NOT NULL DEFAULT 0,
-                    inline_ext      TEXT
+                    inline_ext      TEXT,
+                    encryption_algorithm TEXT,
+                    encryption_iv   TEXT,
+                    cacheness_version TEXT
                 )
             """)
             )
@@ -437,7 +475,7 @@ class SqliteBackend(MetadataBackend):
             ns = CacheNamespace(
                 namespace_id=namespace_id,
                 display_name=display_name,
-                schema_version=3,
+                schema_version=4,
                 created_at=now,
             )
             session.add(ns)
@@ -609,6 +647,9 @@ class SqliteBackend(MetadataBackend):
                     CE.blob_data,
                     CE.is_inline,
                     CE.inline_ext,
+                    CE.encryption_algorithm,
+                    CE.encryption_iv,
+                    CE.cacheness_version,
                     CE.metadata_dict,
                 ).where(CE.cache_key == cache_key)
             ).one_or_none()
@@ -640,6 +681,12 @@ class SqliteBackend(MetadataBackend):
                 metadata["s3_etag"] = row.s3_etag
             if row.inline_ext is not None:
                 metadata["inline_ext"] = row.inline_ext
+            if row.encryption_algorithm is not None:
+                metadata["encryption_algorithm"] = row.encryption_algorithm
+            if row.encryption_iv is not None:
+                metadata["encryption_iv"] = row.encryption_iv
+            if row.cacheness_version is not None:
+                metadata["cacheness_version"] = row.cacheness_version
 
             # Include metadata_dict (user-facing kwargs) if stored
             if row.metadata_dict is not None:
@@ -721,6 +768,9 @@ class SqliteBackend(MetadataBackend):
                 "metadata_dict", None
             )  # User metadata for querying
             inline_ext = metadata.pop("inline_ext", None)
+            encryption_algorithm = metadata.pop("encryption_algorithm", None)
+            encryption_iv = metadata.pop("encryption_iv", None)
+            cacheness_version = metadata.pop("cacheness_version", None)
 
             # Remove redundant fields that are already stored as columns
             metadata.pop("data_type", None)  # Already stored in data_type column
@@ -763,12 +813,14 @@ class SqliteBackend(MetadataBackend):
                      file_hash, entry_signature, s3_etag, cache_key_params, metadata_dict,
                      object_type, storage_format, serializer, compression_codec, actual_path,
                      created_at, accessed_at, access_count, ttl_seconds, expires_at,
-                     blob_data, is_inline, inline_ext)
+                     blob_data, is_inline, inline_ext,
+                     encryption_algorithm, encryption_iv, cacheness_version)
                     VALUES (:cache_key, :description, :data_type, :file_size, 
                            :file_hash, :entry_signature, :s3_etag, :cache_key_params, :metadata_dict,
                            :object_type, :storage_format, :serializer, :compression_codec, :actual_path,
                            :created_at, :accessed_at, :access_count, :ttl_seconds, :expires_at,
-                           :blob_data, :is_inline, :inline_ext)
+                           :blob_data, :is_inline, :inline_ext,
+                           :encryption_algorithm, :encryption_iv, :cacheness_version)
                 """),
                 {
                     "cache_key": cache_key,
@@ -793,6 +845,9 @@ class SqliteBackend(MetadataBackend):
                     "blob_data": entry_data.get("blob_data"),
                     "is_inline": entry_data.get("is_inline", 0),
                     "inline_ext": inline_ext,
+                    "encryption_algorithm": encryption_algorithm,
+                    "encryption_iv": encryption_iv,
+                    "cacheness_version": cacheness_version,
                 },
             )
             session.commit()
@@ -860,6 +915,12 @@ class SqliteBackend(MetadataBackend):
                 entry.is_inline = updates["is_inline"]
             if "inline_ext" in updates:
                 entry.inline_ext = updates["inline_ext"]
+            if "encryption_algorithm" in updates:
+                entry.encryption_algorithm = updates["encryption_algorithm"]
+            if "encryption_iv" in updates:
+                entry.encryption_iv = updates["encryption_iv"]
+            if "cacheness_version" in updates:
+                entry.cacheness_version = updates["cacheness_version"]
 
             session.commit()
             return True
@@ -879,6 +940,7 @@ class SqliteBackend(MetadataBackend):
                     f"       file_hash, entry_signature, metadata_dict, "
                     f"       s3_etag, access_count, ttl_seconds, expires_at, "
                     f"       is_inline "
+                    f"       ,encryption_algorithm, encryption_iv, cacheness_version "
                     f'FROM "{tbl}"'
                 )
             ).fetchall()
@@ -919,6 +981,12 @@ class SqliteBackend(MetadataBackend):
                     flat["expires_at"] = row[17]
                 # Phase 2 inline blob flag
                 flat["is_inline"] = row[18] or 0
+                if row[19] is not None:
+                    flat["encryption_algorithm"] = row[19]
+                if row[20] is not None:
+                    flat["encryption_iv"] = row[20]
+                if row[21] is not None:
+                    flat["cacheness_version"] = row[21]
                 result.append(flat)
             return result
 

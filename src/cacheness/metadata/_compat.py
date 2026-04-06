@@ -145,6 +145,9 @@ try:
         blob_data = Column(LargeBinary, nullable=True)
         is_inline = Column(Integer, default=0, nullable=False, server_default="0")
         inline_ext = Column(String(20), nullable=True)
+        encryption_algorithm = Column(Text, nullable=True)
+        encryption_iv = Column(Text, nullable=True)
+        cacheness_version = Column(Text, nullable=True)
 
     class CacheStatsMixin:
         """Column definitions shared by all cache_stats tables."""
