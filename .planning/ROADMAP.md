@@ -87,7 +87,9 @@ Plans:
   1. Every existing encryption test runs against JSON, SQLite, and PostgreSQL backends
   2. No encryption test is hardcoded to a single backend
   3. PostgreSQL encryption tests are grouped with `@pytest.mark.xdist_group("docker")`
-**Plans**: TBD
+**Plans**: 1 plan
+Plans:
+- [ ] 24-01-PLAN.md — Parametrize 12 encryption integration tests + fix outdated comment
 
 ### Phase 25: Inline Blob Encryption
 **Goal**: Inline blobs (stored directly in metadata) are encrypted at rest, just like file-backed blobs
