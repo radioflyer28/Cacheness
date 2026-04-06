@@ -54,6 +54,7 @@ try:
         String,
         DateTime,
         LargeBinary,
+        Text,
         Index,
         select,
         update,
@@ -175,6 +176,9 @@ if SQLALCHEMY_AVAILABLE:
         blob_data = Column(LargeBinary, nullable=True)
         is_inline = Column(Integer, default=0, nullable=False, server_default="0")
         inline_ext = Column(String(20), nullable=True)
+        encryption_algorithm = Column(Text, nullable=True)
+        encryption_iv = Column(Text, nullable=True)
+        cacheness_version = Column(Text, nullable=True)
 
     class PgCacheStatsMixin:
         """Column definitions shared by all PG cache_stats tables."""
@@ -430,6 +434,45 @@ def _pg_migrate_v2_to_v3(backend: "PostgresBackend", namespace_id: str) -> None:
     )
 
 
+def _pg_migrate_v3_to_v4(backend: "PostgresBackend", namespace_id: str) -> None:
+    """Migrate v3 → v4: add encryption_algorithm, encryption_iv, cacheness_version.
+
+    * ``encryption_algorithm`` — algorithm used for encryption (e.g. 'AES-256-GCM')
+    * ``encryption_iv`` — initialization vector for encrypted blobs
+    * ``cacheness_version`` — Cacheness version that wrote the entry
+
+    All ALTER TABLE ADD COLUMN uses ``IF NOT EXISTS`` (PG 9.6+) for idempotency.
+    """
+    table = (
+        "cache_entries"
+        if namespace_id == DEFAULT_NAMESPACE
+        else f"cache_entries_{namespace_id}"
+    )
+
+    with backend.SessionLocal() as session:
+        session.execute(
+            text(
+                f'ALTER TABLE "{table}" '
+                f"ADD COLUMN IF NOT EXISTS encryption_algorithm TEXT"
+            )
+        )
+        session.execute(
+            text(f'ALTER TABLE "{table}" ADD COLUMN IF NOT EXISTS encryption_iv TEXT')
+        )
+        session.execute(
+            text(
+                f'ALTER TABLE "{table}" ADD COLUMN IF NOT EXISTS cacheness_version TEXT'
+            )
+        )
+        session.commit()
+
+    logger.info(
+        "PG v3→v4: added encryption_algorithm/encryption_iv/cacheness_version "
+        "columns on %r",
+        table,
+    )
+
+
 class PostgresBackend(MetadataBackend):
     """
     PostgreSQL metadata backend for distributed caching.
@@ -602,6 +645,7 @@ class PostgresBackend(MetadataBackend):
         return [
             (1, 2, _pg_migrate_v1_to_v2),
             (2, 3, _pg_migrate_v2_to_v3),
+            (3, 4, _pg_migrate_v3_to_v4),
         ]
 
     # --- Namespace registry overrides ---
@@ -658,7 +702,10 @@ class PostgresBackend(MetadataBackend):
                         expires_at      TIMESTAMP WITH TIME ZONE,
                         blob_data       BYTEA,
                         is_inline       INTEGER NOT NULL DEFAULT 0,
-                        inline_ext      TEXT
+                        inline_ext      TEXT,
+                        encryption_algorithm TEXT,
+                        encryption_iv   TEXT,
+                        cacheness_version TEXT
                     )
                 """)
                 )
@@ -720,7 +767,7 @@ class PostgresBackend(MetadataBackend):
                 ns = PgCacheNamespace(
                     namespace_id=namespace_id,
                     display_name=display_name,
-                    schema_version=3,
+                    schema_version=4,
                     created_at=now,
                 )
                 session.add(ns)
@@ -921,6 +968,9 @@ class PostgresBackend(MetadataBackend):
         cache_key_params = metadata.pop("cache_key_params", None)
         metadata_dict_value = metadata.pop("metadata_dict", None)
         inline_ext = metadata.pop("inline_ext", None)
+        encryption_algorithm = metadata.pop("encryption_algorithm", None)
+        encryption_iv = metadata.pop("encryption_iv", None)
+        cacheness_version = metadata.pop("cacheness_version", None)
 
         # Handle timestamps - always use UTC
         created_at = entry_data.get("created_at")
@@ -1009,6 +1059,9 @@ class PostgresBackend(MetadataBackend):
                     blob_data=entry_data.get("blob_data"),
                     is_inline=entry_data.get("is_inline", 0),
                     inline_ext=inline_ext,
+                    encryption_algorithm=encryption_algorithm,
+                    encryption_iv=encryption_iv,
+                    cacheness_version=cacheness_version,
                 )
             )
         else:
@@ -1036,6 +1089,9 @@ class PostgresBackend(MetadataBackend):
                 blob_data=entry_data.get("blob_data"),
                 is_inline=entry_data.get("is_inline", 0),
                 inline_ext=inline_ext,
+                encryption_algorithm=encryption_algorithm,
+                encryption_iv=encryption_iv,
+                cacheness_version=cacheness_version,
             )
             session.add(entry)
 
@@ -1083,6 +1139,12 @@ class PostgresBackend(MetadataBackend):
             metadata["s3_etag"] = entry.s3_etag
         if getattr(entry, "inline_ext", None):
             metadata["inline_ext"] = entry.inline_ext
+        if getattr(entry, "encryption_algorithm", None):
+            metadata["encryption_algorithm"] = entry.encryption_algorithm
+        if getattr(entry, "encryption_iv", None):
+            metadata["encryption_iv"] = entry.encryption_iv
+        if getattr(entry, "cacheness_version", None):
+            metadata["cacheness_version"] = entry.cacheness_version
 
         if metadata:
             result["metadata"] = metadata
@@ -1184,6 +1246,12 @@ class PostgresBackend(MetadataBackend):
                         entry.is_inline = updates["is_inline"]
                     if "inline_ext" in updates:
                         entry.inline_ext = updates["inline_ext"]
+                    if "encryption_algorithm" in updates:
+                        entry.encryption_algorithm = updates["encryption_algorithm"]
+                    if "encryption_iv" in updates:
+                        entry.encryption_iv = updates["encryption_iv"]
+                    if "cacheness_version" in updates:
+                        entry.cacheness_version = updates["cacheness_version"]
 
                     session.commit()
                     return True
@@ -1204,7 +1272,8 @@ class PostgresBackend(MetadataBackend):
                     f"       compression_codec, actual_path, "
                     f"       file_hash, entry_signature, metadata_dict, "
                     f"       s3_etag, access_count, ttl_seconds, expires_at, "
-                    f"       is_inline "
+                    f"       is_inline, "
+                    f"       encryption_algorithm, encryption_iv, cacheness_version "
                     f'FROM "{tbl}"'
                 )
             ).fetchall()
@@ -1244,6 +1313,12 @@ class PostgresBackend(MetadataBackend):
                     flat["expires_at"] = row[17]
                 # Phase 2 inline blob flag
                 flat["is_inline"] = row[18] or 0
+                if row[19] is not None:
+                    flat["encryption_algorithm"] = row[19]
+                if row[20] is not None:
+                    flat["encryption_iv"] = row[20]
+                if row[21] is not None:
+                    flat["cacheness_version"] = row[21]
                 result.append(flat)
             return result
 

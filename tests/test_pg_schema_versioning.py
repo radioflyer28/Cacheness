@@ -84,7 +84,7 @@ class TestPgSchemaVersioning:
         pg_backend.set_schema_version(DEFAULT_NAMESPACE, 99)
         assert pg_backend.get_schema_version(DEFAULT_NAMESPACE) == 99
         # Restore
-        pg_backend.set_schema_version(DEFAULT_NAMESPACE, 3)
+        pg_backend.set_schema_version(DEFAULT_NAMESPACE, 4)
 
     def test_get_schema_version_unknown_namespace(self, pg_backend):
         """Unknown namespace returns 0."""
@@ -93,7 +93,7 @@ class TestPgSchemaVersioning:
     def test_migrations_run_on_fresh_db(self, pg_backend):
         """Fresh database should have all migrations applied."""
         version = pg_backend.get_schema_version(DEFAULT_NAMESPACE)
-        assert version == 3
+        assert version == 4
 
     def test_migrations_idempotent(self):
         """Opening the same database twice should not fail or re-run migrations."""
@@ -121,6 +121,104 @@ class TestPgSchemaVersioning:
         pg_backend._run_migrations()  # Should not raise
 
 
+# ── v3 → v4 migration ─────────────────────────────────────────────────
+
+
+@requires_postgres
+@pytest.mark.xdist_group("docker")
+class TestPgV3ToV4Migration:
+    """Test v3→v4 migration: encryption_algorithm, encryption_iv, cacheness_version."""
+
+    def test_migration_adds_columns(self, pg_backend):
+        """v3→v4 migration should add three new columns."""
+        from sqlalchemy import inspect
+
+        inspector = inspect(pg_backend.engine)
+        cols = {c["name"] for c in inspector.get_columns("cache_entries")}
+        assert "encryption_algorithm" in cols
+        assert "encryption_iv" in cols
+        assert "cacheness_version" in cols
+
+    def test_encryption_metadata_roundtrip(self, pg_backend):
+        """Encryption fields should survive put/get round-trip."""
+        pg_backend.put_entry(
+            "enc_rt_001",
+            {
+                "data_type": "pickle",
+                "metadata": {
+                    "encryption_algorithm": "AES-256-GCM",
+                    "encryption_iv": "base64iv==",
+                },
+            },
+        )
+        entry = pg_backend.get_entry("enc_rt_001")
+        assert entry is not None
+        meta = entry.get("metadata", {})
+        assert meta.get("encryption_algorithm") == "AES-256-GCM"
+        assert meta.get("encryption_iv") == "base64iv=="
+        pg_backend.remove_entry("enc_rt_001")
+
+    def test_cacheness_version_roundtrip(self, pg_backend):
+        """cacheness_version should survive put/get round-trip."""
+        pg_backend.put_entry(
+            "cv_rt_001",
+            {
+                "data_type": "pickle",
+                "metadata": {
+                    "cacheness_version": "0.11.0",
+                },
+            },
+        )
+        entry = pg_backend.get_entry("cv_rt_001")
+        assert entry is not None
+        meta = entry.get("metadata", {})
+        assert meta.get("cacheness_version") == "0.11.0"
+        pg_backend.remove_entry("cv_rt_001")
+
+    def test_iter_entry_summaries_includes_encryption(self, pg_backend):
+        """iter_entry_summaries should include encryption fields."""
+        pg_backend.put_entry(
+            "enc_sum_001",
+            {
+                "data_type": "pickle",
+                "metadata": {
+                    "encryption_algorithm": "AES-256-GCM",
+                    "encryption_iv": "sumiv==",
+                    "cacheness_version": "0.11.0",
+                },
+            },
+        )
+        summaries = pg_backend.iter_entry_summaries()
+        entry = next((s for s in summaries if s["cache_key"] == "enc_sum_001"), None)
+        assert entry is not None
+        assert entry.get("encryption_algorithm") == "AES-256-GCM"
+        assert entry.get("encryption_iv") == "sumiv=="
+        assert entry.get("cacheness_version") == "0.11.0"
+        pg_backend.remove_entry("enc_sum_001")
+
+    def test_update_entry_metadata_encryption(self, pg_backend):
+        """update_entry_metadata should handle encryption fields."""
+        pg_backend.put_entry(
+            "enc_upd_001",
+            {"data_type": "pickle", "metadata": {}},
+        )
+        pg_backend.update_entry_metadata(
+            "enc_upd_001",
+            {
+                "encryption_algorithm": "AES-256-GCM",
+                "encryption_iv": "updiv==",
+                "cacheness_version": "0.11.0",
+            },
+        )
+        entry = pg_backend.get_entry("enc_upd_001")
+        assert entry is not None
+        meta = entry.get("metadata", {})
+        assert meta.get("encryption_algorithm") == "AES-256-GCM"
+        assert meta.get("encryption_iv") == "updiv=="
+        assert meta.get("cacheness_version") == "0.11.0"
+        pg_backend.remove_entry("enc_upd_001")
+
+
 # ── Namespace registry ─────────────────────────────────────────────────
 
 
@@ -139,7 +237,7 @@ class TestPgNamespaceRegistry:
         ns = pg_backend.create_namespace("project_alpha", "Project Alpha")
         assert ns.namespace_id == "project_alpha"
         assert ns.display_name == "Project Alpha"
-        assert ns.schema_version == 3
+        assert ns.schema_version == 4
 
         # Per-namespace tables should exist
         from sqlalchemy import inspect
@@ -205,7 +303,7 @@ class TestPgNamespaceRegistry:
         assert ns is not None
         assert ns.namespace_id == "lookup_ns"
         assert ns.display_name == "Lookup Test"
-        assert ns.schema_version == 3
+        assert ns.schema_version == 4
 
         assert pg_backend.get_namespace("nonexistent") is None
 
@@ -254,7 +352,7 @@ class TestPgNamespaceRegistry:
     def test_set_schema_version_on_created_namespace(self, pg_backend):
         """Schema version can be set on namespaces created via create_namespace."""
         pg_backend.create_namespace("versioned_ns")
-        assert pg_backend.get_schema_version("versioned_ns") == 3
+        assert pg_backend.get_schema_version("versioned_ns") == 4
 
         pg_backend.set_schema_version("versioned_ns", 5)
         assert pg_backend.get_schema_version("versioned_ns") == 5
@@ -318,9 +416,9 @@ class TestPgBackwardCompatibility:
 class TestPgJsonbSchema:
     """Test JSONB column types, GIN index, and migration."""
 
-    def test_schema_version_is_v3(self, pg_backend):
-        """After init, default namespace should be at schema v3."""
-        assert pg_backend.get_schema_version(DEFAULT_NAMESPACE) == 3
+    def test_schema_version_is_v4(self, pg_backend):
+        """After init, default namespace should be at schema v4."""
+        assert pg_backend.get_schema_version(DEFAULT_NAMESPACE) == 4
 
     def test_metadata_dict_column_is_jsonb(self, pg_backend):
         """metadata_dict column should be JSONB type."""
@@ -368,7 +466,7 @@ class TestPgJsonbSchema:
         v2 = b2.get_schema_version(DEFAULT_NAMESPACE)
         b2.close()
 
-        assert v1 == v2 == 3
+        assert v1 == v2 == 4
 
 
 @requires_postgres
