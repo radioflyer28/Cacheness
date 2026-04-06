@@ -5,7 +5,7 @@
 - ✅ **v0.7.0 Cleanup & Hardening** — Phases 1-6 (shipped 2026-04-02) — [archive](milestones/v0.7.0-ROADMAP.md)
 - ✅ **v0.8.0 API & Robustness** — Phases 7-10 (shipped 2026-04-03) — [archive](milestones/v0.8.0-ROADMAP.md)
 - ✅ **v0.9.0 Completeness & Hardening** — Phases 11-14 (shipped 2026-04-03) — [archive](milestones/v0.9.0-ROADMAP.md)
-- 🔄 **v0.10.0 Security & Architecture** — Phases 15-20
+- 🔄 **v0.10.0 Security & Architecture** — Phases 15-22
 
 ## Phases
 
@@ -41,16 +41,18 @@
 
 </details>
 
-### v0.10.0 Security & Architecture (Phases 15-20)
+### v0.10.0 Security & Architecture (Phases 15-22)
 
 - [x] **Phase 15: Configurable Key Fallback** — User-controlled key fallback policy (raise/warn/fallback)
 - [x] **Phase 16: HKDF Key Derivation** — Per-namespace key derivation from master key
  (completed 2026-04-03)
 - [x] **Phase 17: Key Rotation API** — Manual rotate_key() with re-sign and old-key handling
  (completed 2026-04-03)
-- [ ] **Phase 18: Encryption at Rest** — AES-GCM blob encryption, disabled by default
-- [ ] **Phase 19: Core Decomposition II** — Extract eviction, namespace, and init logic into mixins
-- [ ] **Phase 20: Concurrency & Atomics Verification** — Thread safety and atomic write correctness
+- [x] **Phase 18: Encryption at Rest** — AES-GCM blob encryption, disabled by default (completed outside GSD)
+- [x] **Phase 19: Core Decomposition II** — Extract eviction, namespace, and init logic into mixins (completed outside GSD)
+- [ ] **Phase 20: Concurrency & Atomics Verification** — Thread safety and atomic write correctness (superseded by Phase 22)
+- [ ] **Phase 21: Retroactive Verification & Docs Cleanup** — Close doc gaps for code-complete requirements
+- [ ] **Phase 22: Concurrency & Integration Testing** — Thread safety, atomic writes, cross-phase integration tests
 
 ## Phase Details
 
@@ -120,15 +122,38 @@ Plans:
   4. `from cacheness.core import UnifiedCache` continues to work
 **Plans**: TBD
 
-### Phase 20: Concurrency & Atomics Verification
+### Phase 20: Concurrency & Atomics Verification (Superseded)
 **Goal**: Verify thread safety and atomic write correctness through testing — fix bugs if found
 **Depends on**: Nothing (independent test-and-fix work)
 **Requirements**: TEST-01, TEST-02
+**Status**: Superseded by Phase 22 (gap closure)
+**Plans**: N/A
+
+### Phase 21: Retroactive Verification & Docs Cleanup
+**Goal**: Close documentation gaps for code-complete requirements identified by milestone audit
+**Depends on**: Nothing (documentation/verification work)
+**Requirements**: SEC-02, SEC-03, SEC-04, ARCH-01
+**Gap Closure:** Closes partial gaps from v0.10.0 audit
 **Success Criteria** (what must be TRUE):
-  1. Concurrent `put()`/`get()` from 8+ threads produces no data races or corruption (JSON and SQLite)
-  2. No deadlocks observed under sustained concurrent access (60s stress test)
-  3. `shutil.move()` atomic writes verified correct on Windows same-volume scenarios
-  4. Concurrent writes to the same key produce no file corruption
+  1. VERIFICATION.md exists for Phases 15, 18, 19 confirming code meets requirements
+  2. REQUIREMENTS.md checkboxes updated for SEC-02, SEC-03, SEC-04, ARCH-01
+  3. ROADMAP.md and STATE.md reflect actual completion status of Phases 18, 19
+  4. `RotationResult` exported from `cacheness.__init__.py`
+**Tasks:** ~6
+**Plans**: TBD
+
+### Phase 22: Concurrency & Integration Testing
+**Goal**: Satisfy TEST-01 and TEST-02 through new targeted tests + cross-phase integration coverage
+**Depends on**: Phase 21 (docs should be clean before adding new tests)
+**Requirements**: TEST-01, TEST-02
+**Gap Closure:** Closes unsatisfied gaps from v0.10.0 audit
+**Success Criteria** (what must be TRUE):
+  1. Concurrent `rotate_key()` + `put()`/`get()` stress test passes (no races, no corruption)
+  2. Concurrent encrypted put/get across 8+ threads passes (no data corruption)
+  3. Cross-platform atomic rename verification (Windows same-volume `shutil.move()` correctness)
+  4. No deadlocks under 60s sustained concurrent access
+  5. Cross-phase integration test: `key_fallback_policy='fallback'` + HKDF + encryption combined
+**Tasks:** ~4
 **Plans**: TBD
 
 ## Progress
@@ -152,6 +177,8 @@ Plans:
 | 15. Configurable Key Fallback | v0.10.0 | Complete | 2026-04-03 |
 | 16. HKDF Key Derivation | 1/1 | Complete    | 2026-04-03 |
 | 17. Key Rotation API | v0.10.0 | Complete | 2026-04-03 |
-| 18. Encryption at Rest | v0.10.0 | Not started | - |
-| 19. Core Decomposition II | v0.10.0 | Not started | - |
-| 20. Concurrency & Atomics Verification | v0.10.0 | Not started | - |
+| 18. Encryption at Rest | v0.10.0 | Complete | 2026-04-03 |
+| 19. Core Decomposition II | v0.10.0 | Complete | 2026-04-03 |
+| 20. Concurrency & Atomics Verification | v0.10.0 | Superseded | - |
+| 21. Retroactive Verification & Docs Cleanup | v0.10.0 | Not started | - |
+| 22. Concurrency & Integration Testing | v0.10.0 | Not started | - |
