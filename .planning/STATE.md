@@ -2,7 +2,7 @@
 gsd_state_version: 1.0
 milestone: v0.10.0
 milestone_name: Security & Architecture
-status: audited
+status: shipped
 last_updated: "2026-04-06"
 last_activity: 2026-04-06
 progress:
@@ -17,25 +17,24 @@ progress:
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-04-03)
+See: .planning/PROJECT.md (updated 2026-04-06)
 
 **Core value:** Reliable, type-aware disk caching with pluggable backends
-**Current focus:** v0.10.0 milestone audit complete — ready to ship
+**Current focus:** Planning next milestone
 
 ## Current Position
 
-Phase: All phases complete
+Phase: N/A — v0.10.0 shipped
 Plan: N/A
-Status: Milestone audit passed — 7/7 requirements satisfied
+Status: v0.10.0 milestone shipped
 Last activity: 2026-04-06
 
-Progress: [██████████] 100% — 7/7 phases complete (Phase 20 superseded by Phase 22)
+Progress: v0.10.0 complete — 7/7 requirements satisfied, 1727 tests
 
 ## Accumulated Context
 
-### Pending Todos (4)
+### Pending Todos (3)
 
 1. Store cacheness version in metadata for migration support (database)
 2. Tiered pull-through cache (general)
-3. Encryption at rest for metadata and blobs (general)
-4. Property-based stress testing for cache key serialization (testing)
+3. Property-based stress testing for cache key serialization (testing)

@@ -134,13 +134,61 @@
 
 ---
 
+## Milestone: v0.10.0 — Security & Architecture
+
+**Shipped:** 2026-04-06
+**Phases:** 8 (7 complete + 1 superseded) | **Plans:** 9
+
+### What Was Built
+
+1. Per-namespace HKDF-SHA256 key derivation — cryptographic isolation between namespaces
+2. Configurable key fallback policy (raise/warn/fallback) with backward-compatible deprecation shim
+3. Key rotation API (`rotate_key()`) on both UnifiedCache and BlobStore with `RotationResult` tracking
+4. AES-256-GCM encryption at rest with HKDF-derived per-namespace encryption keys
+5. Core decomposition II — core.py from 2874 to 1422 lines via 11 mixin files
+6. 18 concurrency & integration tests — thread safety stress, atomic writes, cross-phase feature composition
+
+### What Worked
+
+- **Milestone audit as quality gate** — running `/gsd-audit-milestone` mid-milestone caught doc gaps (missing VERIFICATION.md for 3 phases) and requirement gaps (TEST-01/TEST-02 unsatisfied). This drove Phases 21-22 as targeted gap closure rather than discovering issues at ship time.
+- **Outside-GSD work + retroactive verification** — Phases 18-19 were implemented outside GSD but retroactively verified in Phase 21. This proved that formal verification can be decoupled from implementation.
+- **Phase supersession** — Phase 20 was planned but superseded by Phase 22 (a more comprehensive version). Clean supersession tracking prevented wasted effort.
+- **Cross-phase integration testing** — Phase 22 tested all three security features together (fallback + HKDF + encryption), catching composition issues that per-feature tests wouldn't find.
+
+### What Was Inefficient
+
+- **Phases 18-19 outside GSD** — no SUMMARY.md files, requiring Phase 21 to create retroactive verification artifacts. If they'd been tracked through GSD, the audit would have passed on first run.
+- **REQUIREMENTS.md/ROADMAP.md checkbox staleness** — TEST-01/TEST-02 checkboxes not updated when Phase 22 completed, requiring manual fixes during audit. Phase completion should auto-update requirement checkboxes.
+- **bd hook version mismatch** — pre-commit hook was from bd 0.55.4 but bd was at 0.63.3, blocking commits until hooks were reinstalled.
+
+### Patterns Established
+
+- `_hkdf_sha256()` as stdlib-only HKDF implementation (hmac + hashlib, no external crypto dependency for signing)
+- `key_fallback_policy` 3-mode pattern with deprecation shim for old boolean field
+- `RotationResult` dataclass for tracking bulk re-signing operations
+- `encryption.py` as standalone encryption module with `encrypt_blob()`/`decrypt_blob()`
+- Milestone audit → gap closure phases → re-audit as the quality assurance loop
+
+### Key Lessons
+
+- Always run milestone audit before declaring "done" — it catches systematic gaps that per-phase verification misses
+- Phase supersession is cleaner than modifying existing phases — Phase 22 replaced Phase 20 with better scope
+- Integration tests that combine multiple features are high-value but easy to forget — plan them explicitly
+
+### Cost Observations
+
+- Sessions: ~5 (planning, phases 15-17, phases 18-19 outside GSD, phase 21 retroactive, phase 22 + audit)
+- Notable: Largest milestone yet (8 phases, 76 new tests, +9464 lines) — took 4 days vs 1 day for prior milestones
+
+---
+
 ## Cross-Milestone Trends
 
-| Metric | v0.7.0 | v0.8.0 | v0.9.0 |
-|--------|--------|--------|--------|
-| Phases | 6 | 4 | 4 |
-| Plans (formal) | 3 | 4 | 4 |
-| Tests added | 12 | 25 | 10 |
-| Test total | 1616 | 1641 | 1651 |
-| Files changed | 39 | 28 | 20 |
-| Lines +/- | +6480/-5661 | +1740/-36 | +606/-56 |
+| Metric | v0.7.0 | v0.8.0 | v0.9.0 | v0.10.0 |
+|--------|--------|--------|--------|---------|
+| Phases | 6 | 4 | 4 | 8 (7+1 superseded) |
+| Plans (formal) | 3 | 4 | 4 | 9 |
+| Tests added | 12 | 25 | 10 | 76 |
+| Test total | 1616 | 1641 | 1651 | 1727 |
+| Files changed | 39 | 28 | 20 | 67 |
+| Lines +/- | +6480/-5661 | +1740/-36 | +606/-56 | +9464/-2220 |

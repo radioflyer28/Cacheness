@@ -1,27 +1,14 @@
-# Cacheness — Security & Architecture
+# Cacheness
 
 ## What This Is
 
-Cacheness is a Python disk caching library with pluggable metadata backends (JSON/SQLite/PostgreSQL) and handler-based type-aware serialization (DataFrames, NumPy arrays, TensorFlow tensors, etc.). It also serves as a standalone persistent key-value store via storage mode.
+Cacheness is a Python disk caching library with pluggable metadata backends (JSON/SQLite/PostgreSQL) and handler-based type-aware serialization (DataFrames, NumPy arrays, TensorFlow tensors, etc.). It features cryptographic signing (HMAC-SHA256 with per-namespace HKDF key derivation), optional AES-256-GCM encryption at rest, and configurable security policies. Also serves as a standalone persistent key-value store via storage mode.
 
 ## Current State
 
-**Shipped:** v0.9.0 Completeness & Hardening (2026-04-03)
+**Shipped:** v0.10.0 Security & Architecture (2026-04-06)
 
-All management APIs complete. Threading model documented. Deserialization security documented with 3-layer defense model. Cross-platform key file permissions. Test suite at 1651 passed / 101 skipped / 0 failures.
-
-## Current Milestone: v0.10.0 Security & Architecture
-
-**Goal:** Strengthen cryptographic isolation, add encryption at rest, make key management configurable, and continue core.py decomposition.
-
-**Target features:**
-- Per-namespace key derivation via HKDF — derive namespace-specific signing keys from a master key
-- Configurable key fallback behavior — replace silent in-memory fallback with user-controlled policy
-- Blob content encryption at rest — encrypt cached data on disk with AES-GCM or similar
-- Further core.py decomposition — extract more concerns to reduce from ~2500 to ~1500 lines
-- Thread safety under concurrent access — test and fix concurrent put/get from multiple threads
-- Cross-platform atomic writes — verify shutil.move correctness on Windows cross-volume scenarios
-- Key rotation scenario tests — test key file deletion, restart, and old-key entry handling
+Full security infrastructure complete: per-namespace HKDF key derivation, configurable key fallback policies, key rotation API with atomic re-signing, and AES-256-GCM encryption at rest. Core decomposed from 2874 to 1422 lines via 11 mixin extractions. Thread safety verified under concurrent rotation, encrypted access, and sustained multi-threaded access. Test suite at 1727 passed / 101 skipped / 0 failures.
 
 ## Core Value
 
@@ -66,15 +53,17 @@ Improve reliability, security, and maintainability of Cacheness without changing
 - ✓ Cross-platform key file permissions (Windows icacls) — v0.9.0
 - ✓ CONCERNS.md updated to reflect all resolved items — v0.9.0
 
+- ✓ Per-namespace key derivation via HKDF — v0.10.0
+- ✓ Configurable key fallback policy (raise/warn/fallback) — v0.10.0
+- ✓ Blob content encryption at rest (AES-256-GCM) — v0.10.0
+- ✓ Key rotation API with atomic re-signing — v0.10.0
+- ✓ Further core.py decomposition (2874 → 1422 lines) — v0.10.0
+- ✓ Thread safety under concurrent access (verified) — v0.10.0
+- ✓ Cross-platform atomic write verification — v0.10.0
+
 ### Active
 
-- [ ] Per-namespace key derivation via HKDF — v0.10.0
-- [ ] Configurable key fallback behavior — v0.10.0
-- [ ] Blob content encryption at rest — v0.10.0
-- [ ] Further core.py decomposition — v0.10.0
-- [ ] Thread safety under concurrent access — v0.10.0
-- [ ] Cross-platform atomic write verification — v0.10.0
-- [ ] Key rotation scenario tests — v0.10.0
+(None — next milestone not yet planned)
 
 ### Out of Scope
 
@@ -83,17 +72,18 @@ Improve reliability, security, and maintainability of Cacheness without changing
 - TensorFlow handler fixes — low priority, platform issues (Windows hangs)
 - JSON backend O(n²) write performance — documented limitation, mitigation is "use SQLite"
 - Export/import cache — low priority convenience feature
+- Automated key rotation — needs background task infrastructure, defer until demand
 
 
 ## Context
 
-- **Codebase state:** ~18,500 lines of Python across ~42 source files. Well-tested (1,651 passed, 101 skipped).
+- **Codebase state:** ~20,000 lines of Python across ~55 source files. Well-tested (1,727 passed, 101 skipped).
 - **Codebase map:** `.planning/codebase/` contains 7 detailed analysis documents from 2026-04-02.
-- **Structure:** Code decomposed into `handlers/` (11 files), `metadata/` (5 files), and 4 mixin files alongside `core.py`.
-- **Security:** Blob content hashing on by default. Key fallback configurable. HMAC-SHA256 signing. End-to-end signature verification. Cross-platform key file permissions. 3-layer deserialization defense documented.
-- **Concurrency:** SqliteBackend uses RLock for re-entrant safety. Write intent journal prevents orphaned blobs. Full threading model documented.
+- **Structure:** Code decomposed into `handlers/` (11 files), `metadata/` (5 files), and 15 mixin/helper files alongside `core.py` (1,422 lines).
+- **Security:** Per-namespace HKDF key derivation. AES-256-GCM encryption at rest. Configurable key fallback policy (raise/warn/fallback). Key rotation API. HMAC-SHA256 signing. End-to-end signature verification. Cross-platform key file permissions. 3-layer deserialization defense.
+- **Concurrency:** SqliteBackend uses RLock for re-entrant safety. Write intent journal prevents orphaned blobs. Thread safety verified under concurrent rotation, encryption, and sustained access. Atomic writes verified on Windows.
 - **Error handling:** All `except Exception` catches narrowed or annotated `# intentionally broad`.
-- **Tests:** Thread safety, key rotation, re-entrancy stress, write intent, signature verification, prefix deletion, batch operations, and key file permissions covered.
+- **Tests:** 1,727 tests covering thread safety, key rotation, encryption, concurrency stress, atomic writes, cross-phase integration, and all core functionality.
 
 ## Testing Philosophy & Workflow
 
@@ -162,6 +152,12 @@ New tests must match the quality and coverage strategies already employed:
 | No new blob_hmac field | file_hash already in HMAC signed fields — transitive blob integrity guaranteed | ✓ Good — no unnecessary complexity |
 | Document existing deserialization defenses vs add new code | 3-layer model already covers threats — documenting > adding unnecessary code | ✓ Good |
 | icacls over win32security for Windows key permissions | Zero new dependencies, available on all Windows | ✓ Good |
+| HKDF-SHA256 for per-namespace key derivation | RFC 5869, stdlib-only (hmac+hashlib), no new deps | ✓ Good — cryptographic namespace isolation |
+| 3-mode key fallback policy over boolean | More expressive (raise/warn/fallback), backward-compatible deprecation shim | ✓ Good |
+| AES-256-GCM for encryption at rest | Authenticated encryption, HKDF-derived per-namespace keys, opt-in | ✓ Good |
+| Phase 20 superseded by Phase 22 | Phase 20 never executed; Phase 22 (gap closure) addressed same TEST-01/TEST-02 requirements more comprehensively | ✓ Good |
+| Retroactive verification (Phase 21) for outside-GSD work | Phases 18-19 complete but lacked VERIFICATION.md — Phase 21 created them | ✓ Good |
+| Further mixin extraction (11 mixins) | core.py 2874→1422 lines, clean separation of concerns | ✓ Good |
 
 ## Evolution
 
@@ -181,4 +177,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-03 after v0.10.0 milestone started*
+*Last updated: 2026-04-06 after v0.10.0 milestone completed*

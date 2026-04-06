@@ -1,5 +1,22 @@
 # Milestones
 
+## v0.10.0 Security & Architecture (Shipped: 2026-04-06)
+
+**Phases completed:** 7 phases (1 superseded), 9 plans, 67 files changed (+9464/-2220 lines)
+**Test baseline:** 1651 → 1727 tests (76 new, 0 regressions)
+**Git range:** `a08df6b..fc6a603` (42 commits)
+
+**Key accomplishments:**
+
+1. Per-namespace HKDF-SHA256 key derivation — each namespace derives its own signing key from the master key, preventing cross-namespace key compromise
+2. Configurable key fallback policy — 3 modes (raise/warn/fallback) replacing silent in-memory fallback, with backward-compatible deprecation shim
+3. Key rotation API — `rotate_key()` re-derives namespace keys and re-signs all entries atomically, with `RotationResult` tracking
+4. AES-256-GCM encryption at rest — opt-in blob content encryption with HKDF-derived per-namespace encryption keys and authenticated encryption
+5. Core decomposition II — reduced `core.py` from 2874 to 1422 lines via 11 mixin files + helper extraction
+6. Concurrency & integration testing — 18 thread safety stress tests covering concurrent rotation, encrypted access, deadlock detection, atomic writes, and cross-phase integration
+
+---
+
 ## v0.9.0 Completeness & Hardening (Shipped: 2026-04-03)
 
 **Phases completed:** 4 phases, 4 plans, 20 files changed (+606/-56 lines)
