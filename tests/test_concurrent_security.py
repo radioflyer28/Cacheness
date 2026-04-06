@@ -60,8 +60,8 @@ def signing_cache():
 def encrypted_cache():
     """JSON-backed cache with signing and encryption enabled.
 
-    Uses JSON backend because encryption+SQLite has a known incompatibility
-    (matching the test_encryption_at_rest.py pattern).
+    Uses JSON backend for simplicity. Encryption works with all backends
+    (JSON, SQLite, PostgreSQL) since Phase 23 added encryption schema columns.
     """
     with tempfile.TemporaryDirectory() as temp_dir:
         key_file = Path(temp_dir) / "cache_signing_key.bin"
