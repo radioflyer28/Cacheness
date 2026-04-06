@@ -1,253 +1,130 @@
-# Technology Stack — v0.8.0 Additions
+# Technology Stack
 
-**Project:** Cacheness v0.8.0 API & Robustness
-**Researched:** 2026-04-02
-**Scope:** Stack changes needed for management APIs, concurrency safety, HMAC blob signing, orphaned blob prevention
+**Project:** Cacheness v0.11.0 — Cross-Backend Encryption Hardening
+**Researched:** 2026-04-06
 
-## Executive Summary
+## Recommendation: No New Dependencies
 
-All four v0.8.0 features can be implemented using **Python standard library only** — no new third-party dependencies required. The existing stack (xxhash, hmac, threading, pathlib) provides everything needed. This is the ideal outcome for a hardening milestone.
+**No new packages, libraries, or version bumps are needed.** The existing stack already provides every primitive required for cross-backend encryption. The problem is entirely an integration gap — the SQLite and PostgreSQL backends silently drop encryption metadata fields because they lack dedicated columns for them.
 
-## Recommended Stack Additions
+## Existing Stack (Already Sufficient)
 
-### No New Dependencies Required
+### Encryption Library
+| Technology | Version | Purpose | Status |
+|------------|---------|---------|--------|
+| `cryptography` | ≥41.0.0 | AES-256-GCM encryption, HKDF-SHA256 key derivation | ✅ Already handles all encryption operations |
 
-| Feature | Technology | Already Available | Rationale |
-|---------|-----------|-------------------|-----------|
-| Management APIs | Python stdlib | Yes — `pathlib`, `typing` | Pure method additions to `UnifiedCache`; no external libraries needed |
-| Concurrency safety | `threading.RLock` (stdlib) | Yes — already in core.py L173 | Extend existing lock to `put()`/`get()` paths; configurable via CacheConfig |
-| HMAC blob signing | `hmac` + `hashlib` (stdlib) | Yes — already in security.py | Extend `CacheEntrySigner` to sign blob content hash; uses same HMAC-SHA256 |
-| Orphaned blob prevention | `pathlib` + `os` (stdlib) | Yes — `_PutCleanup` exists | Write-ahead intent log or metadata-first ordering; no external deps |
+AES-256-GCM with random 12-byte IV and 16-byte auth tag — no additional cryptographic primitives needed. The `AESGCM` class from `cryptography.hazmat.primitives.ciphers.aead` and `InvalidTag` exception cover the full encrypt/decrypt/authenticate cycle.
 
-### Existing Dependencies Leveraged
+### Database Backends
+| Technology | Version | Purpose | Status |
+|------------|---------|---------|--------|
+| SQLAlchemy | ≥2.0.0 | ORM for SQLite and PostgreSQL metadata backends | ✅ Supports `ALTER TABLE ADD COLUMN` migrations |
+| psycopg[binary] | ≥3.1.0 | PostgreSQL adapter | ✅ Handles `BYTEA` and `VARCHAR` seamlessly |
 
-| Library | Version | Current Use | v0.8.0 Use |
-|---------|---------|-------------|------------|
-| `xxhash` | ≥3.5.0 | File content hashing (`file_hash` field) | Blob HMAC: hash blob content for signing; orphan detection: verify blob existence |
-| `hmac` + `hashlib` | stdlib | HMAC-SHA256 metadata entry signatures | Extend to include blob content hash in signed fields |
-| `threading` | stdlib | `RLock` in core.py (management ops only) | Extend lock scope to `put()`/`get()` when `thread_safe=True` |
-| `SQLAlchemy` | ≥2.0.0 | SQLite/PostgreSQL metadata backends | Batch operations via bulk inserts/updates; `delete_by_prefix` via SQL LIKE |
-| `cachetools` | ≥6.1.0 | In-memory metadata cache layer | No changes needed |
+### Binary Data Handling
+| Backend | Column Type | Binary Support | Encryption Compatibility |
+|---------|-------------|----------------|--------------------------|
+| JSON | Native dict | Full (stores entire metadata dict) | ✅ Works today — encryption_algorithm and encryption_iv preserved |
+| SQLite | `BLOB` (blob_data), `TEXT`/`VARCHAR` (metadata fields) | Full — SQLite BLOB stores arbitrary bytes | ⚠️ **Broken** — missing columns for encryption metadata |
+| PostgreSQL | `BYTEA` (blob_data), `VARCHAR` (metadata fields) | Full — BYTEA stores arbitrary bytes | ⚠️ **Broken** — missing columns for encryption metadata |
 
-## Feature-Specific Stack Analysis
+## Root Cause: Missing Schema Columns
 
-### 1. Management APIs
+### What's Broken
 
-**Stack impact: Zero new dependencies.**
+Both SQLite and PostgreSQL `put_entry()` methods extract known metadata fields into dedicated columns by **popping** them from the metadata dict:
 
-| API | Implementation Approach | Stack Used |
-|-----|------------------------|------------|
-| `update_blob_data()` | Write new blob → update metadata entry → delete old blob | Existing handler pipeline + metadata backends |
-| `delete_by_prefix()` | Backend-specific: SQL `LIKE` for SQLite/PG, dict iteration for JSON | SQLAlchemy (existing) for SQL backends |
-| `touch()` | Update `accessed_at` timestamp in metadata | Already partially implemented (core.py L2435) |
-| `get_metadata()` | Read metadata entry without loading blob | Metadata backend `.get_meta()` — already exists at backend level |
-| Batch operations | Loop with optional transaction wrapping | SQLAlchemy sessions (existing) for SQL; dict ops for JSON |
-
-**Key integration point:** `update_blob_data()` must reuse the existing `_write_blob()` → `_store_metadata()` pipeline from `put()`. Extract shared helper methods rather than duplicating logic.
-
-**Batch operations consideration:** For `get_batch()`/`delete_batch()`, SQLite and PostgreSQL can use `IN (...)` clauses for efficiency. The JSON backend will use sequential dict operations. No new dependency needed — SQLAlchemy handles the SQL generation.
-
-### 2. Concurrency Safety
-
-**Stack impact: Zero new dependencies. Stdlib `threading` already imported.**
-
-**Current state:**
-- `self._lock = threading.RLock()` exists at core.py L173
-- Lock acquired in ~12 management methods (list, delete, clear, etc.)
-- Lock **NOT** acquired in `put()` and `get()` — the hot paths
-- Backend-level locks: JSON uses `threading.Lock()`, SQLite uses WAL mode
-
-**Recommended approach — configurable thread-safe mode:**
-
-```python
-# In CacheConfig or a new ConcurrencyConfig dataclass
-thread_safe: bool = False  # Default off for backward compat + zero overhead
+```
+object_type, storage_format, serializer, compression_codec, actual_path,
+file_hash, entry_signature, s3_etag, cache_key_params, metadata_dict, inline_ext
 ```
 
-When `thread_safe=True`, wrap `put()` and `get()` in `with self._lock:`. The `RLock` (reentrant) already handles nested calls (e.g., `put()` → `_write_blob()` → sign entry).
+After these pops, `encryption_algorithm` and `encryption_iv` remain in the leftover dict — which is then **discarded**. Neither backend has columns for these fields, and neither stores leftover metadata.
 
-**Why NOT `filelock` or `portalocker`:**
-- These provide **cross-process** file locking, which is a different problem
-- SQLite already handles multi-process via WAL mode + `PRAGMA busy_timeout`
-- JSON backend is explicitly documented as "not safe for concurrency" — file locks won't fix its fundamental O(n²) issue
-- Adding cross-process locking would be a significant scope increase for v0.8.0
-- Thread-level safety (within a single process) is the stated goal
+On `get_entry()`, only known column values are reconstructed into the returned metadata dict — so `encryption_algorithm` and `encryption_iv` are never returned to the caller.
 
-**Why NOT `asyncio` locks:**
-- Async support is explicitly out of scope (separate milestone)
-- `threading.RLock` is the correct primitive for synchronous thread safety
+**Result:** `_read_blob()` sees `encryption_algorithm = None` → treats blob as plaintext → handler receives ciphertext → crash or corruption.
 
-**Why `RLock` over `Lock`:**
-- Already chosen in existing code (L173)
-- Correct: `put()` calls `_sign_entry_if_enabled()` which calls `signer.sign_entry()` — reentrant lock prevents deadlock if internal methods also acquire the lock
+### What Needs Adding
 
-**Performance note:** When `thread_safe=False` (default), add zero overhead. Don't use a context manager — use a simple `if self._thread_safe: self._lock.acquire()` pattern or a no-op context manager to avoid runtime cost when disabled.
+Two new columns per cache_entries table (both SQLite and PostgreSQL):
 
-### 3. HMAC Blob Signing
+| Column | Type | Purpose |
+|--------|------|---------|
+| `encryption_algorithm` | `VARCHAR(20)` / `String(20)` | Algorithm identifier (e.g. `"aes-256-gcm"`) |
+| `encryption_iv` | `VARCHAR(32)` / `String(32)` | Hex-encoded 12-byte IV (24 hex chars) |
 
-**Stack impact: Zero new dependencies. Extends existing `hmac` + `hashlib` + `xxhash` usage.**
+These are small, fixed-size strings — no binary handling needed. The IV is already hex-encoded by `encrypt_blob()`.
 
-**Current signing flow:**
-1. `CacheEntrySigner.sign_entry()` creates HMAC-SHA256 over metadata fields (security.py)
-2. `SignableFields` TypedDict defines the signed field set (interfaces.py)
-3. `file_hash` (xxhash digest of blob content) is already a signed field in v2
-4. Signing key is stored at `{cache_dir}/.cache_signing_key`
+### Schema Migration Path
 
-**Current gap:** The `file_hash` in metadata IS signed, but an attacker with filesystem access could:
-1. Replace the blob file with malicious content
-2. Update the `file_hash` in metadata to match the new blob
-3. Re-sign the metadata (if they have the signing key) — but the signing key is on the same filesystem
+**SQLite:** Add a `v3 → v4` migration (following the existing `_sqlite_migrate_v2_to_v3` pattern) that runs `ALTER TABLE ADD COLUMN` for both fields. Fully idempotent with `IF NOT EXISTS` column check via `PRAGMA table_info`.
 
-**Recommended approach — include blob content hash in HMAC payload:**
+**PostgreSQL:** Add a `v3 → v4` migration using `ALTER TABLE ADD COLUMN IF NOT EXISTS`.
 
-The `file_hash` field is already included in `SIGNED_FIELDS_BY_VERSION[2]`. The real protection requires:
+**ORM Models:** Add `encryption_algorithm = Column(String(20), nullable=True)` and `encryption_iv = Column(String(32), nullable=True)` to:
+- `CacheEntryMixin` in `src/cacheness/metadata/_compat.py`
+- `PgCacheEntryMixin` in `src/cacheness/storage/backends/postgresql_backend.py`
 
-1. **Verify blob hash on read** — in `get()`, compute xxhash of the blob file and compare to stored `file_hash` before deserialization. This is partially done when `verify_cache_integrity=True` but not on every `get()`.
-2. **Add `blob_hmac` field** — a separate HMAC-SHA256 of the raw blob content using the signing key. Stored in metadata alongside `entry_signature`. Verified on `get()` before deserialization.
+## Second Issue: Inline Blob + Encryption Interaction
 
-```python
-# New field in metadata entry (computed during put())
-blob_hmac = hmac.new(secret_key, blob_bytes, hashlib.sha256).hexdigest()
-```
+### `_try_direct_inline` Bypasses Encryption
 
-**Why HMAC over just xxhash verification:**
-- xxhash is fast but NOT cryptographic — collision-prone against adversaries
-- HMAC-SHA256 provides authentication: proves the blob was written by someone with the signing key
-- Consistent with existing metadata signing approach
+The zero-disk inline path (`_try_direct_inline`) calls `handler.put_bytes()` and stores the result directly as `blob_data` — it **never** calls `_write_blob()`, so encryption is never applied. Inline blobs stored via this path are plaintext even when `enable_content_encryption=True`.
 
-**Performance consideration:** Reading the entire blob to compute HMAC on every `get()` adds I/O. Make it configurable:
-- `verify_blob_hmac: bool = True` (in `SecurityConfig` or `CacheConfig`)
-- For large blobs (>100MB), consider chunked HMAC computation (HMAC naturally supports incremental `update()`)
+**Fix options (no new deps needed):**
+1. Apply `encrypt_blob()` to the bytes in `_try_direct_inline` before storing as `blob_data` — sets encryption_algorithm/encryption_iv in metadata
+2. Skip `_try_direct_inline` when encryption is enabled (force disk path which encrypts correctly)
 
-**Streaming HMAC for large files:**
-```python
-h = hmac.new(secret_key, digestmod=hashlib.sha256)
-with open(blob_path, "rb") as f:
-    while chunk := f.read(8192):
-        h.update(chunk)
-blob_hmac = h.hexdigest()
-```
+Option 2 is simpler and avoids subtle correctness bugs. Option 1 is more performant but requires careful `_read_inline_blob` changes.
 
-This uses zero additional memory beyond the 8KB read buffer. `hmac` stdlib module handles this natively.
+### `_try_inline_blob` Partially Works
 
-**Schema version bump:** Add `blob_hmac` to `SignableFields` TypedDict and bump `CURRENT_SIGNATURE_VERSION` to 3. Existing v2 entries without `blob_hmac` continue to verify via backward-compatible version branching (already implemented in `parse_versioned_signature()`).
+This path reads from a file already encrypted by `_write_blob`, so encrypted ciphertext is stored as `blob_data`. On read, `_read_inline_blob` tries the `get_bytes()` fast path first — which would fail since it receives ciphertext. The fallback to temp file + `_read_blob()` does decrypt correctly.
 
-### 4. Orphaned Blob Prevention
-
-**Stack impact: Zero new dependencies.**
-
-**Current orphan creation pattern:**
-```
-put() flow:
-  1. Write blob to filesystem       ← crash here = orphaned blob
-  2. Store metadata entry            ← crash here = orphaned blob
-  3. cleanup.commit()                ← after this, entry is consistent
-```
-
-`_PutCleanup` (core.py L85) handles normal exception rollback but NOT process kills.
-
-**Approach A — Write-Ahead Intent Log (recommended):**
-
-Use a simple intent file in the cache directory:
-
-```python
-# Before writing blob:
-intent_path = cache_dir / ".put_intents" / f"{cache_key}.intent"
-intent_path.write_text(json.dumps({"key": cache_key, "ts": now}))
-
-# After metadata confirmed:
-intent_path.unlink()
-
-# On startup (cleanup_on_init):
-# Scan .put_intents/ for stale intents → delete corresponding blobs
-```
-
-**Why a file-based intent log:**
-- Survives process crashes (unlike in-memory tracking)
-- No new dependencies — `pathlib` + `json` (stdlib)
-- Atomic file creation is reliable on both Windows and Unix
-- Intent files are tiny (<200 bytes) — negligible disk impact
-- Compatible with all blob backends (filesystem, S3, in-memory)
-
-**Why NOT SQLite WAL or a separate recovery database:**
-- Adds complexity for a simple problem
-- JSON backend users don't have SQLite available
-- Intent files are simpler and more reliable
-
-**Approach B — Metadata-First Write Order:**
-
-Write metadata first (with a `status: "pending"` field), then write blob, then update metadata to `status: "committed"`. On startup, entries with `status: "pending"` are cleaned up.
-
-**Tradeoff:** Approach B avoids the intent file but changes the write order. The current blob-first order is intentional — it ensures blobs exist before metadata references them. Reversing this creates "dangling metadata" entries (metadata pointing to non-existent blobs) instead of orphaned blobs. Dangling metadata is arguably worse because `get()` would return errors instead of silently wasting disk space.
-
-**Recommendation:** Approach A (intent log). It preserves the current blob-first write order, is lightweight, and handles the crash window cleanly.
-
-**S3 blob backend consideration:** For S3, orphaned objects after crash are cleaned up the same way — the intent file records the S3 URI, and cleanup deletes the remote object. The `_PutCleanup.set_remote()` pattern already tracks remote resources.
+**Fix:** Either skip the `get_bytes()` fast path when encryption metadata is present, or decrypt the bytes before calling `get_bytes()`.
 
 ## What NOT to Add
 
-| Dependency | Why Not |
-|-----------|---------|
-| `filelock` / `portalocker` | Cross-process locking is out of scope; SQLite WAL handles multi-process; thread safety is the goal |
-| `asyncio` locks | Async support is a separate milestone |
-| `aiofiles` | No async file I/O needed |
-| `atomicwrites` | `shutil.move` + `NamedTemporaryFile` already provides atomic writes |
-| `tenacity` / retry libraries | Retry logic is simple enough to inline (3-5 lines) |
-| `cryptography` package | `hmac` + `hashlib` from stdlib is sufficient for HMAC-SHA256 |
-| Any database migration tool | Schema changes (adding `blob_hmac` column) handled by existing SQLAlchemy + Alembic-style migrations in metadata backends |
-
-## Alternatives Considered
-
-| Category | Recommended | Alternative | Why Not |
-|----------|-------------|-------------|---------|
-| Thread safety | `threading.RLock` (existing) | `threading.Lock` | RLock already chosen; supports reentrant calls from put→sign |
-| Thread safety | Configurable `thread_safe=True` | Always-on locking | Backward compat + zero overhead when disabled |
-| Blob HMAC | `hmac.new()` + `hashlib.sha256` (stdlib) | `cryptography.hazmat.primitives.hmac` | Stdlib is sufficient; `cryptography` adds ~30MB dependency |
-| Blob integrity | HMAC-SHA256 of blob content | xxhash verification only | xxhash isn't cryptographic — doesn't prove authorship |
-| Orphan prevention | File-based intent log | Metadata-first write order | Preserves current blob-first order; avoids dangling metadata |
-| Orphan prevention | File-based intent log | SQLite-based WAL | Simpler; works with JSON backend too |
-| Batch ops | Sequential with optional SQL transactions | `concurrent.futures` parallelism | I/O bound operations; thread pool adds complexity for marginal gain |
-
-## Configuration Surface
-
-New config fields needed (all in existing `CacheConfig` dataclass tree):
-
-```python
-@dataclass
-class CacheConfig:
-    # Existing fields...
-    thread_safe: bool = False           # Enable thread-safe put()/get()
-
-@dataclass
-class SecurityConfig:
-    # Existing fields...
-    sign_blob_content: bool = True      # Compute HMAC over blob content
-    verify_blob_hmac: bool = True       # Verify blob HMAC on get()
-```
+| Not Needed | Reason |
+|------------|--------|
+| New encryption library | `cryptography>=41.0.0` already provides everything |
+| SQLite encryption extension (SEE/sqlcipher) | Overkill — we encrypt blobs at the application layer, not the database |
+| Additional Python DB drivers | psycopg3 and SQLAlchemy already handle all binary/VARCHAR operations |
+| Key management service integration | Out of scope — local key file approach is sufficient |
+| New serialization format for encrypted metadata | Plain VARCHAR columns for algo+IV are sufficient |
 
 ## Installation
 
+No changes to `pyproject.toml` dependencies. Existing extras already cover all needs:
+
 ```bash
-# No new dependencies to install
-# Existing install commands unchanged:
-uv add cacheness
-uv add cacheness[recommended]
+# Encryption support (already defined)
+pip install cacheness[encryption]    # → cryptography>=41.0.0
+
+# PostgreSQL support (already defined)
+pip install cacheness[postgresql]    # → psycopg[binary]>=3.1.0, sqlalchemy>=2.0.0
 ```
-
-## Sources
-
-- Python stdlib `hmac` module: HIGH confidence — used in existing `security.py`
-- Python stdlib `threading` module: HIGH confidence — `RLock` already in `core.py`
-- Existing codebase: `_PutCleanup` pattern (core.py L85-140), `CacheEntrySigner` (security.py), `SignableFields` (interfaces.py)
-- `CONCERNS.md` codebase audit: orphaned blob pattern, `_lock` inconsistency, signing gaps
-- xxhash non-cryptographic nature: HIGH confidence — documented in xxhash README as "extremely fast non-cryptographic hash"
 
 ## Confidence Assessment
 
-| Area | Confidence | Reason |
-|------|------------|--------|
-| Management APIs | HIGH | Pure API additions; no new tech needed; patterns exist in codebase |
-| Concurrency safety | HIGH | `threading.RLock` already in use; configurable extension is straightforward |
-| HMAC blob signing | HIGH | `hmac` + `hashlib` stdlib; extends existing `CacheEntrySigner` pattern |
-| Orphaned blob prevention | MEDIUM | Intent-log approach is sound but needs careful testing for Windows file semantics and S3 failure modes |
-| No new deps needed | HIGH | All four features use stdlib or existing dependencies |
+| Finding | Confidence | Source |
+|---------|------------|--------|
+| No new deps needed | HIGH | Direct code inspection of encryption.py, config.py, blob_store.py |
+| Missing columns root cause | HIGH | Traced put_entry/get_entry in both sqlite_backend.py and postgresql_backend.py |
+| Inline blob interaction bugs | HIGH | Direct code inspection of _inline_blob_mixin.py, _write_blob, _read_blob |
+| Migration path (ALTER TABLE) | HIGH | Existing v2→v3 migration pattern already demonstrates this exact approach |
+| SQLite BLOB/VARCHAR handles encryption metadata | HIGH | SQLite natively supports these types, confirmed by existing blob_data column |
+| PostgreSQL BYTEA/VARCHAR handles encryption metadata | HIGH | PG model already has LargeBinary and String columns, confirmed in postgresql_backend.py |
+
+## Sources
+
+- `src/cacheness/encryption.py` — encryption primitives (lines 1-104)
+- `src/cacheness/storage/blob_store.py` — encryption integration in `_write_blob` (L1196-1260) and `_read_blob` (L1262-1330)
+- `src/cacheness/metadata/sqlite_backend.py` — `put_entry` (L685-805), `get_entry` (L585-685)
+- `src/cacheness/storage/backends/postgresql_backend.py` — `_upsert_entry` (L920-1050), `_entry_to_dict` (L1050-1100)
+- `src/cacheness/metadata/_compat.py` — `CacheEntryMixin` column definitions (L110-148)
+- `src/cacheness/_inline_blob_mixin.py` — inline blob paths (L1-200)
+- `tests/test_encryption_at_rest.py` — confirms JSON-only encryption tests (L1-80)
+- `tests/test_concurrent_security.py` — documents known SQLite+encryption incompatibility (L63)
