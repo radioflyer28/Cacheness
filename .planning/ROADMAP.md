@@ -100,7 +100,10 @@ Plans:
   2. `_read_inline_blob()` decrypts ciphertext before passing to handler when entry has encryption metadata
   3. `rotate_key()` decrypts inline entries with old key and re-encrypts with new key
   4. Inline encrypted roundtrip produces correct data for all supported types
-**Plans**: TBD
+**Plans**: 2 plans
+Plans:
+- [ ] 25-01-PLAN.md — Encrypt inline write path + decrypt inline read path
+- [ ] 25-02-PLAN.md — Key rotation inline branch + inline encryption tests
 
 ### Phase 26: Integration & Hardening
 **Goal**: Known-bad configuration combinations fail loudly at init, and schema migrations work on real databases
