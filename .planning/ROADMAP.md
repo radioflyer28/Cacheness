@@ -158,7 +158,10 @@ Plans:
   4. No deadlocks under 60s sustained concurrent access
   5. Cross-phase integration test: `key_fallback_policy='fallback'` + HKDF + encryption combined
 **Tasks:** ~4
-**Plans**: TBD
+**Plans**: 2 plans
+Plans:
+- [ ] 22-01-PLAN.md — Concurrent security stress tests: rotate_key races, encrypted access, deadlock detection (1 task, wave 1)
+- [ ] 22-02-PLAN.md — Atomic write verification + cross-phase integration tests (2 tasks, wave 1)
 
 ## Progress
 
