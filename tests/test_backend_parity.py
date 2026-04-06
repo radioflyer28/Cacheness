@@ -4,10 +4,107 @@ Backend Operation Parity Tests
 
 Verifies that SQLite and PostgreSQL metadata backends behave identically
 for all operations defined in the MetadataBackend interface.
+
+Also verifies encryption test parity across JSON, SQLite, and PostgreSQL
+backends (Phase 24 / ENC-03).
 """
 
+import os
+import secrets
+
 import pytest
+
+cryptography = pytest.importorskip("cryptography")
+
 from datetime import datetime, timezone
+
+from cacheness.config import CacheConfig, CacheMetadataConfig, CacheStorageConfig, CompressionConfig, SecurityConfig  # noqa: E402
+from cacheness.core import UnifiedCache as cacheness  # noqa: E402
+from cacheness.error_handling import CacheConfigurationError  # noqa: E402
+from cacheness.interfaces import RotationResult  # noqa: E402
+from cacheness.storage.blob_store import BlobStore  # noqa: E402
+
+try:
+    from cacheness.storage.backends.postgresql_backend import PostgresBackend
+    _HAS_PG = True
+except ImportError:
+    _HAS_PG = False
+
+
+def _get_pg_url():
+    return os.environ.get("CACHENESS_TEST_POSTGRES_URL")
+
+
+def _generate_key_file(path):
+    """Write 32 random bytes to a file and return the path."""
+    path.write_bytes(secrets.token_bytes(32))
+    return path
+
+
+def _make_encrypted_cache_for_backend(tmp_path, backend, **security_overrides):
+    """Create a UnifiedCache with encryption enabled for the specified backend."""
+    key_file = tmp_path / "cache_signing_key.bin"
+    if not key_file.exists():
+        _generate_key_file(key_file)
+    defaults = {
+        "enable_entry_signing": True,
+        "enable_content_encryption": True,
+        "encryption_key_file": "cache_signing_key.bin",
+        "allow_unsigned_entries": True,
+        "delete_invalid_signatures": False,
+    }
+    defaults.update(security_overrides)
+    security = SecurityConfig(**defaults)
+    metadata_cfg = CacheMetadataConfig(metadata_backend=backend)
+    if backend == "postgresql":
+        metadata_cfg = CacheMetadataConfig(
+            metadata_backend="postgresql",
+            metadata_backend_options={"connection_url": _get_pg_url()},
+        )
+    config = CacheConfig(
+        storage=CacheStorageConfig(cache_dir=str(tmp_path)),
+        metadata=metadata_cfg,
+        compression=CompressionConfig(use_blosc2_arrays=False),
+        security=security,
+    )
+    return cacheness(config)
+
+
+def _make_encrypted_blobstore_for_backend(tmp_path, backend, **overrides):
+    """Create a BlobStore with encryption enabled for the specified backend."""
+    key_file = tmp_path / "cache_signing_key.bin"
+    if not key_file.exists():
+        _generate_key_file(key_file)
+    security = SecurityConfig(
+        enable_entry_signing=True,
+        enable_content_encryption=True,
+        encryption_key_file="cache_signing_key.bin",
+        allow_unsigned_entries=True,
+        **overrides,
+    )
+    metadata_cfg = CacheMetadataConfig(metadata_backend=backend)
+    if backend == "postgresql":
+        metadata_cfg = CacheMetadataConfig(
+            metadata_backend="postgresql",
+            metadata_backend_options={"connection_url": _get_pg_url()},
+        )
+    config = CacheConfig(
+        storage=CacheStorageConfig(cache_dir=str(tmp_path)),
+        metadata=metadata_cfg,
+        compression=CompressionConfig(use_blosc2_arrays=False),
+        security=security,
+    )
+    # BlobStore only accepts "json", "sqlite", or a MetadataBackend instance
+    backend_arg = backend
+    if backend == "postgresql":
+        backend_arg = PostgresBackend(connection_url=_get_pg_url())
+    return BlobStore(
+        cache_dir=tmp_path,
+        backend=backend_arg,
+        enable_signing=True,
+        config=config,
+        namespace="default",
+    )
 
 
 class TestBackendParity:
@@ -414,6 +511,235 @@ class TestKnownDifferences:
         # This is documented as a known difference
 
         sqlite.close()
+
+
+# ── Encryption Backend Parity Tests (Phase 24 / ENC-03) ───────────
+
+
+def _skip_if_pg_unavailable(backend):
+    """Skip test if backend is postgresql and PG is not available."""
+    if backend == "postgresql":
+        if not _HAS_PG or not _get_pg_url():
+            pytest.skip("PostgreSQL not available")
+
+
+@pytest.mark.xdist_group("docker")
+class TestEncryptionBackendParity_BlobStore:
+    """BlobStore encryption tests parametrized across all backends."""
+
+    @pytest.mark.parametrize("backend", ["json", "sqlite", "postgresql"])
+    def test_encrypted_put_get_roundtrip(self, tmp_path, backend):
+        """put with encryption, get returns original data."""
+        _skip_if_pg_unavailable(backend)
+        store = _make_encrypted_blobstore_for_backend(tmp_path, backend)
+        blob_key = store.put({"msg": "encrypted"}, key="test-data")
+        result = store.get(blob_key)
+        assert result == {"msg": "encrypted"}
+
+    @pytest.mark.parametrize("backend", ["json", "sqlite", "postgresql"])
+    def test_encrypted_entry_metadata_has_encryption_fields(self, tmp_path, backend):
+        """Encrypted entry metadata contains encryption_algorithm and encryption_iv."""
+        _skip_if_pg_unavailable(backend)
+        store = _make_encrypted_blobstore_for_backend(tmp_path, backend)
+        blob_key = store.put("hello", key="enc-meta-test")
+        meta = store.get_metadata(blob_key)
+        nested = meta.get("metadata", {})
+        assert nested.get("encryption_algorithm") == "aes-256-gcm"
+        assert "encryption_iv" in nested
+        iv_hex = nested["encryption_iv"]
+        assert len(bytes.fromhex(iv_hex)) == 12
+
+    @pytest.mark.parametrize("backend", ["json", "sqlite", "postgresql"])
+    def test_unencrypted_entry_readable_with_encryption_enabled(self, tmp_path, backend):
+        """Store without encryption, enable encryption, old entry still readable."""
+        _skip_if_pg_unavailable(backend)
+        # First: store without encryption using same backend
+        backend_arg = backend
+        if backend == "postgresql":
+            backend_arg = PostgresBackend(connection_url=_get_pg_url())
+        config_no_enc = CacheConfig(
+            storage=CacheStorageConfig(cache_dir=str(tmp_path)),
+            compression=CompressionConfig(use_blosc2_arrays=False),
+            security=SecurityConfig(enable_entry_signing=False),
+        )
+        store_plain = BlobStore(
+            cache_dir=tmp_path, backend=backend_arg, config=config_no_enc
+        )
+        blob_key = store_plain.put("pre-encryption data", key="legacy")
+
+        # Second: create store with encryption enabled (same dir)
+        store_enc = _make_encrypted_blobstore_for_backend(tmp_path, backend)
+        result = store_enc.get(blob_key)
+        assert result == "pre-encryption data"
+
+    @pytest.mark.parametrize("backend", ["json", "sqlite", "postgresql"])
+    def test_encrypted_entry_without_key_returns_none(self, tmp_path, backend):
+        """Encrypted entry with no encryption key configured returns None."""
+        _skip_if_pg_unavailable(backend)
+        store_enc = _make_encrypted_blobstore_for_backend(tmp_path, backend)
+        blob_key = store_enc.put("secret", key="locked")
+
+        # Create store WITHOUT encryption key
+        backend_arg = backend
+        if backend == "postgresql":
+            backend_arg = PostgresBackend(connection_url=_get_pg_url())
+        config_no_enc = CacheConfig(
+            storage=CacheStorageConfig(cache_dir=str(tmp_path)),
+            compression=CompressionConfig(use_blosc2_arrays=False),
+            security=SecurityConfig(enable_entry_signing=False),
+        )
+        store_plain = BlobStore(
+            cache_dir=tmp_path, backend=backend_arg, config=config_no_enc
+        )
+        result = store_plain.get(blob_key)
+        assert result is None
+
+    @pytest.mark.parametrize("backend", ["json", "sqlite", "postgresql"])
+    def test_encryption_disabled_by_default(self, tmp_path, backend):
+        """Default BlobStore does not encrypt, no encryption_algorithm in metadata."""
+        _skip_if_pg_unavailable(backend)
+        backend_arg = backend
+        if backend == "postgresql":
+            backend_arg = PostgresBackend(connection_url=_get_pg_url())
+        config = CacheConfig(
+            storage=CacheStorageConfig(cache_dir=str(tmp_path)),
+            compression=CompressionConfig(use_blosc2_arrays=False),
+        )
+        store = BlobStore(cache_dir=tmp_path, backend=backend_arg, config=config)
+        blob_key = store.put("not encrypted", key="plain")
+        meta = store.get_metadata(blob_key)
+        nested = meta.get("metadata", {})
+        assert "encryption_algorithm" not in nested
+
+
+@pytest.mark.xdist_group("docker")
+class TestEncryptionBackendParity_UnifiedCache:
+    """UnifiedCache encryption tests parametrized across all backends."""
+
+    @pytest.mark.parametrize("backend", ["json", "sqlite", "postgresql"])
+    def test_cache_encrypted_put_get_roundtrip(self, tmp_path, backend):
+        """UnifiedCache with encryption, put/get works for string data."""
+        _skip_if_pg_unavailable(backend)
+        cache = _make_encrypted_cache_for_backend(tmp_path, backend)
+        cache.put("secure string", on={"prefix": "test"}, description="roundtrip")
+        result = cache.get(on={"prefix": "test"})
+        assert result == "secure string"
+
+    @pytest.mark.parametrize("backend", ["json", "sqlite", "postgresql"])
+    def test_cache_encrypted_put_get_various_types(self, tmp_path, backend):
+        """Encryption works with dict, list, int, float."""
+        _skip_if_pg_unavailable(backend)
+        cache = _make_encrypted_cache_for_backend(tmp_path, backend)
+
+        cache.put({"key": "value"}, on={"kind": "dict"})
+        cache.put([1, 2, 3], on={"kind": "list"})
+        cache.put(42, on={"kind": "int"})
+        cache.put(3.14, on={"kind": "float"})
+
+        assert cache.get(on={"kind": "dict"}) == {"key": "value"}
+        assert cache.get(on={"kind": "list"}) == [1, 2, 3]
+        assert cache.get(on={"kind": "int"}) == 42
+        assert cache.get(on={"kind": "float"}) == 3.14
+
+    @pytest.mark.parametrize("backend", ["json", "sqlite", "postgresql"])
+    def test_cache_encryption_disabled_by_default(self, tmp_path, backend):
+        """Default UnifiedCache has no encryption."""
+        _skip_if_pg_unavailable(backend)
+        metadata_cfg = CacheMetadataConfig(metadata_backend=backend)
+        if backend == "postgresql":
+            metadata_cfg = CacheMetadataConfig(
+                metadata_backend="postgresql",
+                metadata_backend_options={"connection_url": _get_pg_url()},
+            )
+        config = CacheConfig(
+            storage=CacheStorageConfig(cache_dir=str(tmp_path)),
+            metadata=metadata_cfg,
+            compression=CompressionConfig(use_blosc2_arrays=False),
+        )
+        cache = cacheness(config)
+        cache.put("no encryption", on={"prefix": "plain"})
+        entries = cache.list_entries()
+        for e in entries:
+            meta = e.get("metadata", {})
+            assert "encryption_algorithm" not in meta
+
+    @pytest.mark.parametrize("backend", ["json", "sqlite", "postgresql"])
+    def test_cache_mixed_encrypted_unencrypted(self, tmp_path, backend):
+        """Some entries encrypted, some not, all readable."""
+        _skip_if_pg_unavailable(backend)
+        metadata_cfg = CacheMetadataConfig(metadata_backend=backend)
+        if backend == "postgresql":
+            metadata_cfg = CacheMetadataConfig(
+                metadata_backend="postgresql",
+                metadata_backend_options={"connection_url": _get_pg_url()},
+            )
+        config_plain = CacheConfig(
+            storage=CacheStorageConfig(cache_dir=str(tmp_path)),
+            metadata=metadata_cfg,
+            compression=CompressionConfig(use_blosc2_arrays=False),
+            security=SecurityConfig(enable_entry_signing=False),
+        )
+        cache_plain = cacheness(config_plain)
+        cache_plain.put("old data", on={"mix": "unencrypted"})
+
+        cache_enc = _make_encrypted_cache_for_backend(tmp_path, backend)
+        cache_enc.put("new data", on={"mix": "encrypted"})
+
+        assert cache_enc.get(on={"mix": "unencrypted"}) == "old data"
+        assert cache_enc.get(on={"mix": "encrypted"}) == "new data"
+
+    @pytest.mark.parametrize("backend", ["json", "sqlite", "postgresql"])
+    def test_cache_init_without_cryptography_raises(self, tmp_path, backend, monkeypatch):
+        """When cryptography is not importable, enable_content_encryption raises."""
+        _skip_if_pg_unavailable(backend)
+        original_import = (
+            __builtins__.__import__
+            if hasattr(__builtins__, "__import__")
+            else __import__
+        )
+
+        def mock_import(name, *args, **kwargs):
+            if name == "cryptography":
+                raise ImportError("mocked")
+            return original_import(name, *args, **kwargs)
+
+        monkeypatch.setattr("builtins.__import__", mock_import)
+
+        with pytest.raises(CacheConfigurationError, match="cacheness\\[encryption\\]"):
+            SecurityConfig(enable_content_encryption=True)
+
+
+@pytest.mark.xdist_group("docker")
+class TestEncryptionBackendParity_KeyRotation:
+    """Key rotation tests parametrized across all backends."""
+
+    @pytest.mark.parametrize("backend", ["json", "sqlite", "postgresql"])
+    def test_rotate_key_re_encrypts_entries(self, tmp_path, backend):
+        """rotate_key re-encrypts, RotationResult.re_encrypted > 0."""
+        _skip_if_pg_unavailable(backend)
+        cache = _make_encrypted_cache_for_backend(tmp_path, backend)
+        cache.put("secret1", on={"rot": "one"})
+        cache.put("secret2", on={"rot": "two"})
+
+        new_key = _generate_key_file(tmp_path / "new_key.bin")
+        result = cache.rotate_key(new_key)
+
+        assert isinstance(result, RotationResult)
+        assert result.re_encrypted == 2
+
+    @pytest.mark.parametrize("backend", ["json", "sqlite", "postgresql"])
+    def test_rotated_encrypted_entries_readable(self, tmp_path, backend):
+        """After rotation, encrypted entries still readable with new key."""
+        _skip_if_pg_unavailable(backend)
+        cache = _make_encrypted_cache_for_backend(tmp_path, backend)
+        cache.put("alpha", on={"rot2": "a"})
+        cache.put("beta", on={"rot2": "b"})
+
+        new_key = _generate_key_file(tmp_path / "new_key.bin")
+        cache.rotate_key(new_key)
+
+        assert cache.get(on={"rot2": "a"}) == "alpha"
+        assert cache.get(on={"rot2": "b"}) == "beta"
 
 
 if __name__ == "__main__":
