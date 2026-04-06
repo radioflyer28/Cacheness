@@ -16,9 +16,9 @@ import pytest
 
 cryptography = pytest.importorskip("cryptography")
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone  # noqa: E402
 
-from cacheness.config import CacheConfig, CacheMetadataConfig, CacheStorageConfig, CompressionConfig, SecurityConfig  # noqa: E402
+from cacheness.config import CacheConfig, CacheMetadataConfig, CacheStorageConfig, CompressionConfig, SecurityConfig  # noqa: E402  # fmt: skip
 from cacheness.core import UnifiedCache as cacheness  # noqa: E402
 from cacheness.error_handling import CacheConfigurationError  # noqa: E402
 from cacheness.interfaces import RotationResult  # noqa: E402
@@ -26,6 +26,7 @@ from cacheness.storage.blob_store import BlobStore  # noqa: E402
 
 try:
     from cacheness.storage.backends.postgresql_backend import PostgresBackend
+
     _HAS_PG = True
 except ImportError:
     _HAS_PG = False
@@ -550,7 +551,9 @@ class TestEncryptionBackendParity_BlobStore:
         assert len(bytes.fromhex(iv_hex)) == 12
 
     @pytest.mark.parametrize("backend", ["json", "sqlite", "postgresql"])
-    def test_unencrypted_entry_readable_with_encryption_enabled(self, tmp_path, backend):
+    def test_unencrypted_entry_readable_with_encryption_enabled(
+        self, tmp_path, backend
+    ):
         """Store without encryption, enable encryption, old entry still readable."""
         _skip_if_pg_unavailable(backend)
         # First: store without encryption using same backend
@@ -689,7 +692,9 @@ class TestEncryptionBackendParity_UnifiedCache:
         assert cache_enc.get(on={"mix": "encrypted"}) == "new data"
 
     @pytest.mark.parametrize("backend", ["json", "sqlite", "postgresql"])
-    def test_cache_init_without_cryptography_raises(self, tmp_path, backend, monkeypatch):
+    def test_cache_init_without_cryptography_raises(
+        self, tmp_path, backend, monkeypatch
+    ):
         """When cryptography is not importable, enable_content_encryption raises."""
         _skip_if_pg_unavailable(backend)
         original_import = (
