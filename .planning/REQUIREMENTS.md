@@ -39,11 +39,11 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| ENC-01 | — | Not started |
-| ENC-02 | — | Not started |
-| ENC-03 | — | Not started |
-| INLINE-01 | — | Not started |
-| INLINE-02 | — | Not started |
-| INLINE-03 | — | Not started |
-| HARD-01 | — | Not started |
-| HARD-02 | — | Not started |
+| ENC-01 | Phase 23 | Not started |
+| ENC-02 | Phase 23 | Not started |
+| ENC-03 | Phase 24 | Not started |
+| INLINE-01 | Phase 25 | Not started |
+| INLINE-02 | Phase 25 | Not started |
+| INLINE-03 | Phase 25 | Not started |
+| HARD-01 | Phase 26 | Not started |
+| HARD-02 | Phase 26 | Not started |
