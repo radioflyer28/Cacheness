@@ -12,8 +12,6 @@ files:
 
 Cacheness provides integrity protection (HMAC signing, hash verification) but not confidentiality. Blobs are stored as plaintext files on disk. Anyone with filesystem access can read cached data — DataFrames, NumPy arrays, pickled objects, etc. Metadata (cache keys, data types, timestamps) is also plaintext in JSON/SQLite.
 
-**Primary threat model:** Storing cached data on a remote server (S3, PostgreSQL, libSQL with cloud sync) that is not fully trusted — either because it could be compromised, or because the storage provider shouldn't have access to the data. Encryption must happen **client-side** before data leaves the local machine, so the server never sees plaintext.
-
 ## Solution
 
 Two complementary layers:
