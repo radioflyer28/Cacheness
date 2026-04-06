@@ -60,7 +60,7 @@
 
 - [x] **Phase 23: Encryption Schema & Storage** — Add encryption columns to SQLite/PG, migrations, fix put_entry/get_entry (completed)
 - [x] **Phase 24: Cross-Backend Test Parity** — Parametrize encryption tests across all 3 backends (completed)
-- [ ] **Phase 25: Inline Blob Encryption** — Encrypt direct inline path, decrypt on read, key rotation for inline entries
+- [x] **Phase 25: Inline Blob Encryption** — Encrypt direct inline path, decrypt on read, key rotation for inline entries (completed 2026-04-06)
 - [ ] **Phase 26: Integration & Hardening** — Config validation, migration testing on existing databases
 
 ## Phase Details
@@ -102,8 +102,8 @@ Plans:
   4. Inline encrypted roundtrip produces correct data for all supported types
 **Plans**: 2 plans
 Plans:
-- [ ] 25-01-PLAN.md — Encrypt inline write path + decrypt inline read path
-- [ ] 25-02-PLAN.md — Key rotation inline branch + inline encryption tests
+- [x] 25-01-PLAN.md — Encrypt inline write path + decrypt inline read path
+- [x] 25-02-PLAN.md — Key rotation inline branch + inline encryption tests
 
 ### Phase 26: Integration & Hardening
 **Goal**: Known-bad configuration combinations fail loudly at init, and schema migrations work on real databases
