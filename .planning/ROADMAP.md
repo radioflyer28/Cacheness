@@ -74,7 +74,10 @@
   2. `put_entry()` preserves encryption metadata fields when writing to SQLite and PostgreSQL backends
   3. `get_entry()` returns encryption metadata fields from SQLite and PostgreSQL backends
   4. Encrypted blob roundtrip (put→get) returns original data with all 3 metadata backends
-**Plans**: TBD
+**Plans**: 2 plans
+Plans:
+- [ ] 23-01-PLAN.md — SQLite encryption schema, field handling, and tests
+- [ ] 23-02-PLAN.md — PostgreSQL encryption schema, field handling, and tests
 
 ### Phase 24: Cross-Backend Test Parity
 **Goal**: Encryption test coverage is equal across all metadata backends, not just JSON
