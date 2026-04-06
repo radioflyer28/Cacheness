@@ -26,15 +26,17 @@ See: .planning/PROJECT.md (updated 2026-04-06)
 
 Phase: 23 — Encryption Schema & Storage
 Plan: Not started
-Status: Roadmap created, ready for planning
-Last activity: 2026-04-06 — Roadmap created (4 phases, 8 requirements)
+Status: Context gathered, ready for planning
+Last activity: 2026-04-06 — Phase 23 context gathered (7 decisions captured)
 
 Progress: ░░░░░░░░░░ 0/4 phases
 
 ## Accumulated Context
 
-### Pending Todos (3)
+### Pending Todos (2)
 
-1. Store cacheness version in metadata for migration support (database)
-2. Tiered pull-through cache (general)
-3. Property-based stress testing for cache key serialization (testing)
+1. Tiered pull-through cache (general)
+2. Property-based stress testing for cache key serialization (testing)
+
+*Note: "Store cacheness version in metadata" folded into Phase 23 (D-06)*
+*Note: "Encryption at rest for metadata and blobs" folded into Phase 23 (ENC-01/ENC-02)*
