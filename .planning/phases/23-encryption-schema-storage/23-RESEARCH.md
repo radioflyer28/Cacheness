@@ -314,17 +314,17 @@ metadata_dict["cacheness_version"] = __version__
 | A2 | `cacheness_version` should be populated from `__version__` | Code Examples | Low — simple to change the source; column exists regardless |
 | A3 | PG `_entry_to_dict` doesn't currently include `metadata_dict` key in result | Pitfall 3 | Low — verified by source code reading; PG includes metadata_dict via JSONB natively via `cache_key_params` handling |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Where should `cacheness_version` be populated?**
    - What we know: Column will exist after migration. Would be populated on new entries.
    - What's unclear: Should it go in `core.py` `put()`, `_build_metadata_dict()`, or in each backend's `put_entry()` as a default?
-   - Recommendation: Add to `_build_metadata_dict()` in `_inline_blob_mixin.py` since that's where all metadata assembly happens. This is an agent discretion item.
+   - RESOLVED: Agent discretion — add column only in v3→v4 migration; population logic deferred to executor's judgment (likely `_build_metadata_dict()`). Plans add the column but don't mandate population site.
 
 2. **Should `iter_entry_summaries()` include encryption fields?**
    - What we know: Key rotation in `core.py` uses `get_entry()` not `iter_entry_summaries()`. `verify_integrity()` uses `iter_entry_summaries()`.
    - What's unclear: Whether `verify_integrity()` needs encryption fields for its logic.
-   - Recommendation: Include them for completeness — they're needed if integrity verification ever checks encryption state. Small cost.
+   - RESOLVED: Include for completeness — both plans implement this. Needed if integrity verification ever checks encryption state.
 
 ## Validation Architecture
 
