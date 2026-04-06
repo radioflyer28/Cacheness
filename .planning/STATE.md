@@ -1,16 +1,16 @@
 ---
 gsd_state_version: 1.0
-milestone: v0.10.0
-milestone_name: Security & Architecture
-status: shipped
+milestone: v0.11.0
+milestone_name: Cross-Backend Hardening
+status: in_progress
 last_updated: "2026-04-06"
 last_activity: 2026-04-06
 progress:
-  total_phases: 8
-  completed_phases: 7
-  total_plans: 9
-  completed_plans: 9
-  percent: 100
+  total_phases: 0
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
 ---
 
 # Project State
@@ -20,16 +20,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-06)
 
 **Core value:** Reliable, type-aware disk caching with pluggable backends
-**Current focus:** Planning next milestone
+**Current focus:** v0.11.0 Cross-Backend Hardening — encryption across all backends
 
 ## Current Position
 
-Phase: N/A — v0.10.0 shipped
-Plan: N/A
-Status: v0.10.0 milestone shipped
-Last activity: 2026-04-06
+Phase: Not started (defining requirements)
+Plan: —
+Status: Defining requirements
+Last activity: 2026-04-06 — Milestone v0.11.0 started
 
-Progress: v0.10.0 complete — 7/7 requirements satisfied, 1727 tests
+Progress: Milestone started, researching scope
 
 ## Accumulated Context
 

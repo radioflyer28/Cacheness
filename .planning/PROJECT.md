@@ -6,9 +6,21 @@ Cacheness is a Python disk caching library with pluggable metadata backends (JSO
 
 ## Current State
 
-**Shipped:** v0.10.0 Security & Architecture (2026-04-06)
+**In progress:** v0.11.0 Cross-Backend Hardening
 
-Full security infrastructure complete: per-namespace HKDF key derivation, configurable key fallback policies, key rotation API with atomic re-signing, and AES-256-GCM encryption at rest. Core decomposed from 2874 to 1422 lines via 11 mixin extractions. Thread safety verified under concurrent rotation, encrypted access, and sustained multi-threaded access. Test suite at 1727 passed / 101 skipped / 0 failures.
+Ensuring encryption at rest works with all metadata backends (JSON, SQLite, PostgreSQL), not just JSON. Addressing cross-backend inconsistencies and hardening the encryption + inline blob interaction.
+
+**Previous:** v0.10.0 Security & Architecture (shipped 2026-04-06) — full security infrastructure, core decomposition, thread safety verification. 1727 tests.
+
+## Current Milestone: v0.11.0 Cross-Backend Hardening
+
+**Goal:** Ensure encryption at rest works with all metadata backends and address remaining cross-backend inconsistencies.
+
+**Target features:**
+- Encryption at rest verified and working with SQLite and PostgreSQL backends
+- Inline blob + encryption interaction handled correctly
+- Cross-backend test parity for encryption features
+- Additional hardening as identified by research
 
 ## Core Value
 
@@ -63,7 +75,10 @@ Improve reliability, security, and maintainability of Cacheness without changing
 
 ### Active
 
-(None — next milestone not yet planned)
+- [ ] Encryption at rest working with SQLite backend — v0.11.0
+- [ ] Encryption at rest working with PostgreSQL backend — v0.11.0
+- [ ] Inline blob + encryption interaction handled — v0.11.0
+- [ ] Cross-backend encryption test parity — v0.11.0
 
 ### Out of Scope
 
@@ -177,4 +192,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-06 after v0.10.0 milestone completed*
+*Last updated: 2026-04-06 after v0.11.0 milestone started*
