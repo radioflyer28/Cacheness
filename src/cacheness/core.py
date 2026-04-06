@@ -479,24 +479,51 @@ class UnifiedCache(
                             continue
 
                         actual_path_str = meta.get("actual_path")
-                        if not actual_path_str:
-                            continue
-                        blob_path = Path(self._resolve_actual_path(actual_path_str))
-                        if not blob_path.is_file():
-                            continue
-
                         old_iv = bytes.fromhex(meta["encryption_iv"])
-                        ciphertext = blob_path.read_bytes()
-                        plaintext = decrypt_blob(ciphertext, old_enc_key, old_iv)
-                        new_ciphertext, new_iv, _ = encrypt_blob(plaintext, new_enc_key)
-                        blob_path.write_bytes(new_ciphertext)
 
-                        meta["encryption_iv"] = new_iv.hex()
-                        file_hash = self._calculate_file_hash(blob_path)
-                        if file_hash:
-                            meta["file_hash"] = file_hash
-                            full_entry["file_hash"] = file_hash
-                        full_entry["file_size"] = len(new_ciphertext)
+                        if actual_path_str:
+                            # File-backed blob: read from disk, re-encrypt, write back
+                            blob_path = Path(self._resolve_actual_path(actual_path_str))
+                            if not blob_path.is_file():
+                                continue
+                            ciphertext = blob_path.read_bytes()
+                            plaintext = decrypt_blob(ciphertext, old_enc_key, old_iv)
+                            new_ciphertext, new_iv, _ = encrypt_blob(
+                                plaintext, new_enc_key
+                            )
+                            blob_path.write_bytes(new_ciphertext)
+
+                            meta["encryption_iv"] = new_iv.hex()
+                            file_hash = self._calculate_file_hash(blob_path)
+                            if file_hash:
+                                meta["file_hash"] = file_hash
+                                full_entry["file_hash"] = file_hash
+                            full_entry["file_size"] = len(new_ciphertext)
+                        elif (
+                            full_entry.get("is_inline")
+                            and full_entry.get("blob_data") is not None
+                        ):
+                            # Inline blob: decrypt/re-encrypt blob_data in metadata
+                            ciphertext = full_entry["blob_data"]
+                            plaintext = decrypt_blob(ciphertext, old_enc_key, old_iv)
+                            new_ciphertext, new_iv, _ = encrypt_blob(
+                                plaintext, new_enc_key
+                            )
+                            full_entry["blob_data"] = new_ciphertext
+
+                            meta["encryption_iv"] = new_iv.hex()
+                            if self.config.metadata.verify_cache_integrity:
+                                import xxhash
+
+                                computed_hash = xxhash.xxh3_64(
+                                    new_ciphertext
+                                ).hexdigest()
+                                meta["file_hash"] = computed_hash
+                                full_entry["file_hash"] = computed_hash
+                            full_entry["file_size"] = len(new_ciphertext)
+                        else:
+                            # No actual_path and not inline — skip
+                            continue
                         full_entry["metadata"] = meta
 
                         # Re-sign after re-encryption

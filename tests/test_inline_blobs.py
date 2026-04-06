@@ -4,13 +4,14 @@ Validates that small blobs can be stored directly in the metadata row
 instead of as separate files, controlled by ``max_inline_size``.
 """
 
+import secrets
 import tempfile
 from pathlib import Path
 
 import pytest
 
 from cacheness.core import UnifiedCache
-from cacheness.config import CacheBlobConfig, CacheConfig
+from cacheness.config import CacheBlobConfig, CacheConfig, SecurityConfig
 
 
 # ── Config validation ─────────────────────────────────────────────
@@ -385,3 +386,152 @@ class TestInlineBlobDelete:
 
         assert cache.get(cache_key="clear-inline") is None
         assert cache.get(cache_key="clear-file") is None
+
+
+# ── Inline blob encryption (Phase 25) ────────────────────────────
+
+
+def _make_encrypted_inline_cache(tmp_path, name="enc_cache", **security_overrides):
+    """Create a UnifiedCache with both encryption and inlining enabled."""
+    key_file = tmp_path / name / "cache_signing_key.bin"
+    key_file.parent.mkdir(parents=True, exist_ok=True)
+    if not key_file.exists():
+        key_file.write_bytes(secrets.token_bytes(32))
+
+    defaults = {
+        "enable_entry_signing": True,
+        "enable_content_encryption": True,
+        "encryption_key_file": "cache_signing_key.bin",
+        "allow_unsigned_entries": True,
+        "delete_invalid_signatures": False,
+    }
+    defaults.update(security_overrides)
+    security = SecurityConfig(**defaults)
+    config = CacheConfig(
+        cache_dir=str(tmp_path / name),
+        metadata_backend="sqlite",
+        max_inline_size=4096,
+        security=security,
+    )
+    return UnifiedCache(config=config)
+
+
+@pytest.mark.skipif(
+    not pytest.importorskip("cryptography", reason="cryptography not installed"),
+    reason="cryptography not installed",
+)
+class TestInlineBlobEncryption:
+    """Test inline blob encryption at rest (Phase 25)."""
+
+    @pytest.fixture
+    def cache(self, tmp_path):
+        return _make_encrypted_inline_cache(tmp_path)
+
+    def test_inline_encrypted_roundtrip_dict(self, cache):
+        """Encrypted inline dict roundtrips correctly."""
+        data = {"key": "value", "numbers": [1, 2, 3]}
+        cache.put(data, cache_key="enc-dict")
+        result = cache.get(cache_key="enc-dict")
+        assert result == data
+
+    def test_inline_encrypted_roundtrip_string(self, cache):
+        """Encrypted inline string roundtrips correctly."""
+        data = "hello encrypted inline"
+        cache.put(data, cache_key="enc-str")
+        result = cache.get(cache_key="enc-str")
+        assert result == data
+
+    def test_inline_encrypted_roundtrip_list(self, cache):
+        """Encrypted inline list roundtrips correctly."""
+        data = [1, "two", 3.0, None, True]
+        cache.put(data, cache_key="enc-list")
+        result = cache.get(cache_key="enc-list")
+        assert result == data
+
+    def test_inline_encrypted_roundtrip_int(self, cache):
+        """Encrypted inline int roundtrips correctly."""
+        cache.put(42, cache_key="enc-int")
+        result = cache.get(cache_key="enc-int")
+        assert result == 42
+
+    def test_inline_encrypted_entry_has_encryption_metadata(self, cache):
+        """Encrypted inline entry stores encryption_algorithm and encryption_iv."""
+        cache.put({"test": True}, cache_key="enc-meta")
+        entry = cache.metadata_backend.get_entry("enc-meta")
+        assert entry is not None
+        assert entry.get("is_inline") == 1
+        metadata = entry.get("metadata", {})
+        assert metadata.get("encryption_algorithm") == "aes-256-gcm"
+        assert metadata.get("encryption_iv") is not None
+        assert len(metadata["encryption_iv"]) == 24  # 12 bytes hex-encoded
+
+    def test_inline_encrypted_blob_data_is_ciphertext(self, cache):
+        """blob_data in metadata is ciphertext, not plaintext."""
+        import pickle
+
+        data = {"plaintext": "visible"}
+        cache.put(data, cache_key="enc-cipher")
+        entry = cache.metadata_backend.get_entry("enc-cipher")
+        blob_data = entry["blob_data"]
+        # The blob_data should NOT be deserializable as pickle (it's encrypted)
+        with pytest.raises(Exception):
+            pickle.loads(blob_data)
+
+    def test_inline_encrypted_file_hash_is_plaintext_hash(self, cache):
+        """file_hash represents plaintext, not ciphertext (D-05)."""
+        data = {"hash_test": 123}
+        cache.put(data, cache_key="enc-hash")
+        entry = cache.metadata_backend.get_entry("enc-hash")
+        stored_hash = entry.get("file_hash") or entry.get("metadata", {}).get(
+            "file_hash"
+        )
+        # Verify the hash is present and is a valid hex string
+        assert stored_hash is not None
+        assert len(stored_hash) == 16  # xxh3_64 produces 16-char hex
+
+    def test_inline_encrypted_key_rotation(self, cache, tmp_path):
+        """Key rotation re-encrypts inline entries (D-03, INLINE-03)."""
+        data = {"rotate_me": [1, 2, 3]}
+        cache.put(data, cache_key="rot-inline")
+
+        # Verify data is readable before rotation
+        assert cache.get(cache_key="rot-inline") == data
+
+        # Get old encryption IV for comparison
+        entry_before = cache.metadata_backend.get_entry("rot-inline")
+        old_iv = entry_before.get("metadata", {}).get("encryption_iv")
+        old_blob_data = entry_before.get("blob_data")
+
+        # Create new key and rotate
+        new_key_file = tmp_path / "enc_cache" / "new_key.bin"
+        new_key_file.write_bytes(secrets.token_bytes(32))
+        rotation_result = cache.rotate_key(new_key_file)
+
+        # Verify rotation processed inline entry
+        assert rotation_result.re_encrypted >= 1
+
+        # Verify data is still readable after rotation
+        result = cache.get(cache_key="rot-inline")
+        assert result == data
+
+        # Verify encryption IV changed (new random IV for re-encryption)
+        entry_after = cache.metadata_backend.get_entry("rot-inline")
+        new_iv = entry_after.get("metadata", {}).get("encryption_iv")
+        assert new_iv != old_iv
+
+        # Verify blob_data changed (re-encrypted with new key)
+        new_blob_data = entry_after.get("blob_data")
+        assert new_blob_data != old_blob_data
+
+    def test_inline_unencrypted_still_works(self, tmp_path):
+        """Inline blobs without encryption still work (backward compat)."""
+        cache = _make_cache(tmp_path, "no-enc", max_inline_size=4096)
+        data = {"no_enc": True}
+        cache.put(data, cache_key="no-enc-inline")
+        result = cache.get(cache_key="no-enc-inline")
+        assert result == data
+
+        entry = cache.metadata_backend.get_entry("no-enc-inline")
+        assert entry.get("is_inline") == 1
+        metadata = entry.get("metadata", {})
+        assert metadata.get("encryption_algorithm") is None

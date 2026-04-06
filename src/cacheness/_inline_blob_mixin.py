@@ -127,10 +127,6 @@ class InlineBlobMixin:
 
         # Compute hash from raw bytes (D-05: hash plaintext before encryption)
         computed_hash: Optional[str] = None
-        if self.config.metadata.verify_cache_integrity:
-            import xxhash
-
-            computed_hash = xxhash.xxh3_64(blob_bytes).hexdigest()
 
         # Encrypt inline blob if encryption is enabled (D-01)
         encryption_meta: dict[str, str] = {}
@@ -147,6 +143,14 @@ class InlineBlobMixin:
             blob_bytes = ciphertext
             encryption_meta["encryption_algorithm"] = algo.decode()
             encryption_meta["encryption_iv"] = iv.hex()
+
+        # Hash what's stored in blob_data (ciphertext when encrypted,
+        # plaintext otherwise) — consistent with file-backed entries
+        # and the verification mixin which hashes blob_data directly.
+        if self.config.metadata.verify_cache_integrity:
+            import xxhash
+
+            computed_hash = xxhash.xxh3_64(blob_bytes).hexdigest()
 
         inline_ext = handler.get_file_extension(self.config)
 
@@ -189,9 +193,7 @@ class InlineBlobMixin:
             from .encryption import decrypt_blob
 
             iv = bytes.fromhex(metadata["encryption_iv"])
-            blob_bytes = decrypt_blob(
-                blob_bytes, self._blob_store._encryption_key, iv
-            )
+            blob_bytes = decrypt_blob(blob_bytes, self._blob_store._encryption_key, iv)
 
         # Fast path — zero-disk deserialization via get_bytes()
         try:
