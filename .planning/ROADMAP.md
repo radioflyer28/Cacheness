@@ -52,7 +52,8 @@
 - [x] **Phase 19: Core Decomposition II** — Extract eviction, namespace, and init logic into mixins (completed outside GSD)
 - [ ] **Phase 20: Concurrency & Atomics Verification** — Thread safety and atomic write correctness (superseded by Phase 22)
 - [x] **Phase 21: Retroactive Verification & Docs Cleanup** — Close doc gaps for code-complete requirements
-- [x] **Phase 22: Concurrency & Integration Testing** — Thread safety, atomic writes, cross-phase integration tests (completed 2026-04-06)
+- [x] **Phase 22: Concurrency & Integration Testing** — Thread safety, atomic writes, cross-phase integration tests
+ (completed 2026-04-06)
 
 ## Phase Details
 
@@ -160,8 +161,8 @@ Plans:
 **Tasks:** ~4
 **Plans**: 2 plans
 Plans:
-- [ ] 22-01-PLAN.md — Concurrent security stress tests: rotate_key races, encrypted access, deadlock detection (1 task, wave 1)
-- [ ] 22-02-PLAN.md — Atomic write verification + cross-phase integration tests (2 tasks, wave 1)
+- [x] 22-01-PLAN.md — Concurrent security stress tests: rotate_key races, encrypted access, deadlock detection (1 task, wave 1)
+- [x] 22-02-PLAN.md — Atomic write verification + cross-phase integration tests (2 tasks, wave 1)
 
 ## Progress
 

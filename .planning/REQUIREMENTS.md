@@ -20,8 +20,8 @@ Requirements for Security & Architecture milestone. Each maps to roadmap phases.
 
 ### Testing
 
-- [ ] **TEST-01**: Thread safety under concurrent access — concurrent `put()`/`get()` from multiple threads against `UnifiedCache`. Verify no data races, no corruption, no deadlocks across JSON and SQLite backends.
-- [ ] **TEST-02**: Cross-platform atomic write verification — verify `shutil.move()` correctness on Windows, especially same-volume temp file scenarios. Verify no corruption under concurrent writes.
+- [x] **TEST-01**: Thread safety under concurrent access — concurrent `put()`/`get()` from multiple threads against `UnifiedCache`. Verify no data races, no corruption, no deadlocks across JSON and SQLite backends.
+- [x] **TEST-02**: Cross-platform atomic write verification — verify `shutil.move()` correctness on Windows, especially same-volume temp file scenarios. Verify no corruption under concurrent writes.
 
 ## Future Requirements
 
@@ -64,8 +64,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | SEC-03 | Phase 18 → Phase 21 (verified) | Complete |
 | SEC-04 | Phase 17 | Complete |
 | ARCH-01 | Phase 19 → Phase 21 (verified) | Complete |
-| TEST-01 | Phase 20 → Phase 22 (gap closure) | Pending |
-| TEST-02 | Phase 20 → Phase 22 (gap closure) | Pending |
+| TEST-01 | Phase 20 → Phase 22 (gap closure) | Complete |
+| TEST-02 | Phase 20 → Phase 22 (gap closure) | Complete |
 
 **Coverage:**
 - v0.10.0 requirements: 7 total
