@@ -140,7 +140,9 @@ Plans:
   3. ROADMAP.md and STATE.md reflect actual completion status of Phases 18, 19
   4. `RotationResult` exported from `cacheness.__init__.py`
 **Tasks:** ~6
-**Plans**: TBD
+**Plans**: 1 plan
+Plans:
+- [ ] 21-01-PLAN.md — Verify SEC-02/SEC-03/ARCH-01, export RotationResult, update docs (3 tasks, wave 1)
 
 ### Phase 22: Concurrency & Integration Testing
 **Goal**: Satisfy TEST-01 and TEST-02 through new targeted tests + cross-phase integration coverage
