@@ -120,7 +120,9 @@ class TestConcurrentAtomicWrites:
         )
         for tid in range(4):
             val = cache.get(key=f"key-{tid}")
-            assert val == f"data-{tid}", f"key-{tid}: expected 'data-{tid}', got {val!r}"
+            assert val == f"data-{tid}", (
+                f"key-{tid}: expected 'data-{tid}', got {val!r}"
+            )
         cache.close()
 
     def test_no_temp_file_residue_after_concurrent_writes(self, tmp_path):

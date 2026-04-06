@@ -19,7 +19,13 @@ from pathlib import Path
 
 import pytest
 
-from cacheness.config import CacheConfig, CacheMetadataConfig, CacheStorageConfig, CompressionConfig, SecurityConfig
+from cacheness.config import (
+    CacheConfig,
+    CacheMetadataConfig,
+    CacheStorageConfig,
+    CompressionConfig,
+    SecurityConfig,
+)
 from cacheness.core import UnifiedCache
 
 
@@ -211,7 +217,9 @@ class TestConcurrentEncryptedAccess:
                 f.result()  # propagate exceptions
 
         assert not errors, f"Write errors: {errors}"
-        assert len(cache.list_entries()) == 80, f"Expected 80 entries, got {len(cache.list_entries())}"
+        assert len(cache.list_entries()) == 80, (
+            f"Expected 80 entries, got {len(cache.list_entries())}"
+        )
 
         # Read phase — verify all entries round-trip
         read_errors = []
@@ -290,6 +298,7 @@ class TestDeadlockDetection:
         def rotator():
             try:
                 import time
+
                 time.sleep(1)  # let writers/readers start first
                 cache.rotate_key(new_key_path)
             except Exception as e:
@@ -297,9 +306,13 @@ class TestDeadlockDetection:
 
         threads = []
         for i in range(4):
-            threads.append(threading.Thread(target=writer, args=(i,), name=f"writer-{i}"))
+            threads.append(
+                threading.Thread(target=writer, args=(i,), name=f"writer-{i}")
+            )
         for i in range(4):
-            threads.append(threading.Thread(target=reader, args=(i,), name=f"reader-{i}"))
+            threads.append(
+                threading.Thread(target=reader, args=(i,), name=f"reader-{i}")
+            )
         threads.append(threading.Thread(target=rotator, name="rotator"))
 
         for t in threads:
