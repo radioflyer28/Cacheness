@@ -145,6 +145,12 @@ class UpdateMixin:
                         "is_inline": 1,
                         "inline_ext": direct["inline_ext"],
                     }
+                    # Propagate encryption metadata from inline path (D-01)
+                    if "encryption_algorithm" in direct:
+                        updates["encryption_algorithm"] = direct[
+                            "encryption_algorithm"
+                        ]
+                        updates["encryption_iv"] = direct["encryption_iv"]
                     if hasattr(handler, "data_type"):
                         updates["data_type"] = handler.data_type
                     if result.serializer:

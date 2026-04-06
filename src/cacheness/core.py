@@ -823,6 +823,12 @@ class UnifiedCache(
                     metadata_dict["inline_ext"] = direct["inline_ext"]
                     if file_hash is not None:
                         metadata_dict["file_hash"] = file_hash
+                    # Propagate encryption metadata from inline path (D-01)
+                    if "encryption_algorithm" in direct:
+                        metadata_dict["encryption_algorithm"] = direct[
+                            "encryption_algorithm"
+                        ]
+                        metadata_dict["encryption_iv"] = direct["encryption_iv"]
                 else:
                     # Delegate file I/O + handler dispatch to BlobStore
                     wb = self._blob_store._write_blob(

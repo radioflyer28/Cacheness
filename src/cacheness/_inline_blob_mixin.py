@@ -125,12 +125,28 @@ class InlineBlobMixin:
         if len(blob_bytes) > max_inline:
             return None
 
-        # Compute hash from raw bytes
+        # Compute hash from raw bytes (D-05: hash plaintext before encryption)
         computed_hash: Optional[str] = None
         if self.config.metadata.verify_cache_integrity:
             import xxhash
 
             computed_hash = xxhash.xxh3_64(blob_bytes).hexdigest()
+
+        # Encrypt inline blob if encryption is enabled (D-01)
+        encryption_meta: dict[str, str] = {}
+        if (
+            hasattr(self, "_blob_store")
+            and self._blob_store is not None
+            and self._blob_store._encryption_key is not None
+        ):
+            from .encryption import encrypt_blob
+
+            ciphertext, iv, algo = encrypt_blob(
+                blob_bytes, self._blob_store._encryption_key
+            )
+            blob_bytes = ciphertext
+            encryption_meta["encryption_algorithm"] = algo.decode()
+            encryption_meta["encryption_iv"] = iv.hex()
 
         inline_ext = handler.get_file_extension(self.config)
 
@@ -140,6 +156,7 @@ class InlineBlobMixin:
             "inline_ext": inline_ext,
             "result": result,
             "handler": handler,
+            **encryption_meta,
         }
 
     def _read_inline_blob(
@@ -155,6 +172,26 @@ class InlineBlobMixin:
         temporary file and delegating to the handler's ``get()`` method.
         """
         blob_bytes: bytes = entry["blob_data"]
+
+        # Decrypt inline blob if encryption metadata is present (D-02)
+        enc_algo = metadata.get("encryption_algorithm")
+        if enc_algo:
+            if (
+                not hasattr(self, "_blob_store")
+                or self._blob_store is None
+                or self._blob_store._encryption_key is None
+            ):
+                logger.warning(
+                    "Encrypted inline blob for %s but no encryption key configured",
+                    data_type,
+                )
+                return None
+            from .encryption import decrypt_blob
+
+            iv = bytes.fromhex(metadata["encryption_iv"])
+            blob_bytes = decrypt_blob(
+                blob_bytes, self._blob_store._encryption_key, iv
+            )
 
         # Fast path — zero-disk deserialization via get_bytes()
         try:
