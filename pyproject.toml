@@ -78,6 +78,7 @@ dev = [
     "beads-mcp>=0.55.4",
     "pytest-xdist>=3.8.0",
     "cryptography>=41.0.0",
+    "pytest-json-report>=1.5.0",
 ]
 tensorflow = [
     "tensorflow>=2.0.0",
@@ -102,11 +103,14 @@ build-backend = "uv_build"
 [tool.pytest.ini_options]
 minversion = "6.0"
 addopts = [
-    "-ra",
     "-q", 
     "--strict-markers",
     "-n", "auto",
     "--dist", "loadgroup",
+    "--tb", "short",
+    "--json-report",
+    "--json-report-file", ".test-results.json",
+    "--json-report-omit", "log", "keywords", "collectors",
 ]
 testpaths = ["tests"]
 python_files = ["test_*.py"]

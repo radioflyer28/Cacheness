@@ -55,6 +55,9 @@ WORKTREE.md
 
 # Quality check error logs
 .quality-errors.log
+
+# Test results
+.test-results.json
 cache_metadata.json
 team_data_metadata.json
 examples/cache/cache_signing_key.bin
