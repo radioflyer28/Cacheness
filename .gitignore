@@ -61,3 +61,8 @@ WORKTREE.md
 cache_metadata.json
 team_data_metadata.json
 examples/cache/cache_signing_key.bin
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
