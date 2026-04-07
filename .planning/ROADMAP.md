@@ -135,7 +135,12 @@ Plans:
   4. All 8 REQUIREMENTS.md checkboxes are checked and traceability table shows Complete
   5. SUMMARY frontmatters include `requirements_completed` field
   6. Misleading comment in `_inline_blob_mixin.py` L130 is fixed
-**Plans**: TBD
+**Plans**: 3 plans
+
+Plans:
+- [ ] 27-01-PLAN.md — Phase 23 retroactive verification & summaries (ENC-01, ENC-02)
+- [ ] 27-02-PLAN.md — Phases 24 & 25 retroactive verification (ENC-03, INLINE-01/02/03)
+- [ ] 27-03-PLAN.md — Comment fix, Phase 26 SUMMARYs, REQUIREMENTS.md finalization (HARD-01/02)
 
 ## Progress
 
