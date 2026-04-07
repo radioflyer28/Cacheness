@@ -60,7 +60,8 @@
 
 - [x] **Phase 23: Encryption Schema & Storage** — Add encryption columns to SQLite/PG, migrations, fix put_entry/get_entry (completed)
 - [x] **Phase 24: Cross-Backend Test Parity** — Parametrize encryption tests across all 3 backends (completed)
-- [x] **Phase 25: Inline Blob Encryption** — Encrypt direct inline path, decrypt on read, key rotation for inline entries (completed 2026-04-06)
+- [x] **Phase 25: Inline Blob Encryption** — Encrypt direct inline path, decrypt on read, key rotation for inline entries
+ (completed 2026-04-06)
 - [ ] **Phase 26: Integration & Hardening** — Config validation, migration testing on existing databases
 
 ## Phase Details
@@ -114,7 +115,11 @@ Plans:
   2. Known-bad config combos (e.g., encryption + unsigned mode) are rejected with actionable error messages
   3. Schema migration from v3→v4 succeeds on a SQLite database containing existing cached entries
   4. Schema migration preserves all existing entries and their metadata
-**Plans**: TBD
+**Plans**: 2 plans
+
+Plans:
+- [ ] 26-01-PLAN.md — Config validation for known-bad combinations
+- [ ] 26-02-PLAN.md — Real-data v3→v4 migration tests (SQLite + PostgreSQL)
 
 ## Progress
 
