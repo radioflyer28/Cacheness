@@ -2,6 +2,7 @@
 phase: 25-inline-blob-encryption
 plan: 01
 status: complete
+requirements_completed: [INLINE-01, INLINE-02]
 ---
 
 ## Summary

@@ -2,6 +2,7 @@
 plan: 25-02
 status: completed
 commit: 5a8a8ce
+requirements_completed: [INLINE-03]
 ---
 
 ## Summary

@@ -2,6 +2,7 @@
 phase: 24-cross-backend-test-parity
 plan: 01
 status: complete
+requirements_completed: [ENC-03]
 ---
 
 ## Summary
