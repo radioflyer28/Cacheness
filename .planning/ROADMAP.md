@@ -62,7 +62,7 @@
 - [x] **Phase 24: Cross-Backend Test Parity** — Parametrize encryption tests across all 3 backends (completed)
 - [x] **Phase 25: Inline Blob Encryption** — Encrypt direct inline path, decrypt on read, key rotation for inline entries
  (completed 2026-04-06)
-- [ ] **Phase 26: Integration & Hardening** — Config validation, migration testing on existing databases
+- [x] **Phase 26: Integration & Hardening** — Config validation, migration testing on existing databases (completed 2026-04-07)
 
 ## Phase Details
 
@@ -118,8 +118,8 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [ ] 26-01-PLAN.md — Config validation for known-bad combinations
-- [ ] 26-02-PLAN.md — Real-data v3→v4 migration tests (SQLite + PostgreSQL)
+- [x] 26-01-PLAN.md — Config validation for known-bad combinations
+- [x] 26-02-PLAN.md — Real-data v3→v4 migration tests (SQLite + PostgreSQL)
 
 ## Progress
 
