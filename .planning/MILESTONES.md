@@ -1,5 +1,22 @@
 # Milestones
 
+## v0.11.0 Cross-Backend Hardening (Shipped: 2026-04-07)
+
+**Phases completed:** 5 phases, 10 plans, 14 files changed (+1453/-50 lines)
+**Test baseline:** 1727 → 1773 tests (46 new, 0 regressions)
+**Git range:** `5202beb..c0bde0d` (10 code commits)
+
+**Key accomplishments:**
+
+1. SQLite & PostgreSQL encryption schema — added `encryption_algorithm`, `encryption_iv`, `cacheness_version` columns via v3→v4 migration with full roundtrip verification
+2. Cross-backend encryption test parity — parametrized 12 encryption integration tests across JSON, SQLite, and PostgreSQL backends
+3. Inline blob encryption — encrypted direct inline write path, decryption on read, and key rotation for inline entries
+4. Config validation hardening — 4 init-time checks for known-bad configuration combos (encryption without key, encryption + unsigned mode, etc.) with actionable error messages
+5. Real-data migration testing — v3→v4 schema migration verified on SQLite and PostgreSQL databases containing existing cached entries
+6. Retroactive verification — formal VERIFICATION.md and SUMMARY.md artifacts for all phases, 8/8 requirements with complete traceability
+
+---
+
 ## v0.10.0 Security & Architecture (Shipped: 2026-04-06)
 
 **Phases completed:** 7 phases (1 superseded), 9 plans, 67 files changed (+9464/-2220 lines)

@@ -2,8 +2,8 @@
 gsd_state_version: 1.0
 milestone: v0.11.0
 milestone_name: Cross-Backend Hardening
-status: executing
-last_updated: "2026-04-07T14:15:07.377Z"
+status: completed
+last_updated: "2026-04-07T14:21:13.211Z"
 last_activity: 2026-04-07
 progress:
   total_phases: 5
@@ -17,19 +17,19 @@ progress:
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-04-06)
+See: .planning/PROJECT.md (updated 2026-04-07)
 
 **Core value:** Reliable, type-aware disk caching with pluggable backends
-**Current focus:** Phase 27 — retroactive-verification
+**Current focus:** Planning next milestone
 
 ## Current Position
 
-Phase: 27
-Plan: Not started
-Status: Executing Phase 27
+Phase: (none — milestone complete)
+Plan: (none)
+Status: v0.11.0 shipped
 Last activity: 2026-04-07
 
-Progress: ███████░░░ 3/4 phases
+Progress: ██████████ 5/5 phases (100%)
 
 ## Accumulated Context
 

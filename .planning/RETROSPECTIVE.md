@@ -182,13 +182,61 @@
 
 ---
 
+## Milestone: v0.11.0 — Cross-Backend Hardening
+
+**Shipped:** 2026-04-07
+**Phases:** 5 | **Plans:** 10
+
+### What Was Built
+
+1. SQLite & PostgreSQL encryption schema — `encryption_algorithm`, `encryption_iv`, `cacheness_version` columns via v3→v4 migration
+2. Cross-backend encryption test parity — 12 encryption tests parametrized across JSON, SQLite, and PostgreSQL
+3. Inline blob encryption — encrypted write path, decryption on read, key rotation for inline entries
+4. Config validation hardening — 4 init-time checks for known-bad configuration combos with actionable error messages
+5. Real-data migration testing — v3→v4 schema migration verified on populated SQLite and PostgreSQL databases
+6. Retroactive verification — formal VERIFICATION.md and SUMMARY.md for all phases, 8/8 requirements with complete traceability
+
+### What Worked
+
+- **Milestone audit before final phase** — running `/gsd-audit-milestone` identified missing verification artifacts for Phases 23-25, which Phase 27 then closed systematically. All gaps caught before ship.
+- **pytest-json-report** — switching from pipe-based output parsing to `.test-results.json` artifact eliminated 3800 lines of xdist noise, giving clean 4-line summaries. Major improvement for agent workflows.
+- **Focused milestone scope** — 5 phases, all tightly scoped around one theme (cross-backend encryption). No scope creep, no superseded phases.
+- **Retroactive verification as explicit phase** — Phase 27 specifically closed all audit gaps, instead of ad-hoc fixes. Clean pattern from v0.10.0 reused successfully.
+
+### What Was Inefficient
+
+- **Git commit CRLF timeouts** — multi-line commit messages with CRLF warnings caused terminal timeouts on Windows. Workaround: short single-line messages. Root cause: `core.autocrlf` + verbose git output.
+- **GSD tooling state drift** — `roadmap analyze` showed stale phase counts (reported 4 phases when there were 5 after Phase 27 was added). Required manual tracking.
+- **Double-pass for summaries** — Phases 23-25 executed without SUMMARY.md files, then Phase 27 had to create them retroactively. Better to produce summaries during initial execution.
+
+### Patterns Established
+
+- `pytest-json-report` for clean test output parsing in CI/agent workflows
+- `CacheConfigurationError` with fix suggestions ("`To fix: ...`") for init-time validation
+- `v3→v4` schema migration pattern for adding nullable columns without data loss
+- Retroactive verification phase as standard gap-closure mechanism
+
+### Key Lessons
+
+- Always produce SUMMARY.md during phase execution, not retroactively — saves an entire phase
+- JSON test artifacts are far superior to pipe parsing for programmatic test result access
+- Short single-line git commit messages avoid Windows terminal timeout issues
+- Focused milestones (single theme, 5 phases) complete faster and with fewer issues than broad ones
+
+### Cost Observations
+
+- Sessions: ~4 (planning + phases 23-24, phases 25-26, phase 27, milestone completion)
+- Notable: Smallest code delta (+1453/-50 lines) but highest plan count (10) — most work was test infrastructure
+
+---
+
 ## Cross-Milestone Trends
 
-| Metric | v0.7.0 | v0.8.0 | v0.9.0 | v0.10.0 |
-|--------|--------|--------|--------|---------|
-| Phases | 6 | 4 | 4 | 8 (7+1 superseded) |
-| Plans (formal) | 3 | 4 | 4 | 9 |
-| Tests added | 12 | 25 | 10 | 76 |
-| Test total | 1616 | 1641 | 1651 | 1727 |
-| Files changed | 39 | 28 | 20 | 67 |
-| Lines +/- | +6480/-5661 | +1740/-36 | +606/-56 | +9464/-2220 |
+| Metric | v0.7.0 | v0.8.0 | v0.9.0 | v0.10.0 | v0.11.0 |
+|--------|--------|--------|--------|---------|---------|
+| Phases | 6 | 4 | 4 | 8 (7+1 superseded) | 5 |
+| Plans (formal) | 3 | 4 | 4 | 9 | 10 |
+| Tests added | 12 | 25 | 10 | 76 | 46 |
+| Test total | 1616 | 1641 | 1651 | 1727 | 1773 |
+| Files changed | 39 | 28 | 20 | 67 | 14 |
+| Lines +/- | +6480/-5661 | +1740/-36 | +606/-56 | +9464/-2220 | +1453/-50 |
