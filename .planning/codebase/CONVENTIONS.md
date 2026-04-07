@@ -1,67 +1,91 @@
 # Coding Conventions
 
-**Analysis Date:** 2026-04-02
+**Analysis Date:** 2026-04-07
 
-## Code Style
+## Language & Runtime
 
-**Formatting:**
-- Tool: **Ruff** (configured in `pyproject.toml`)
-- Line length: **88** characters
-- Target version: **Python 3.12** (`target-version = "py312"`)
-- Run: `uv run ruff format .` (auto-format), `uv run ruff check --fix .` (auto-fix lint)
-
-**Type Checking:**
-- Tool: **ty** (`uv run ty check`)
-- Configured as dev dependency in `pyproject.toml`
-
-**Package Manager:**
-- **uv** exclusively — never raw `pip` or `python`
-- Commands: `uv run pytest`, `uv run python`, `uv sync`, `uv add <pkg>`
+**Primary:** Python 3.12+ (target-version in ruff config)
+**Package Manager:** `uv` — never `pip` or `python` directly
+**Build Backend:** `uv_build` via `pyproject.toml`
 
 ## Naming Patterns
 
 **Files:**
-- Snake_case for all Python modules: `blob_store.py`, `error_handling.py`, `size_utils.py`
-- Test files prefixed with `test_`: `test_core.py`, `test_blob_store.py`
-- No abbreviations in module names (except established ones like `config`, `utils`)
+- Source modules: `snake_case.py` — e.g. `blob_store.py`, `error_handling.py`, `write_intent.py`
+- Private mixins: `_snake_case.py` — e.g. `_verification_mixin.py`, `_batch_mixin.py`, `_put_cleanup.py`
+- Compatibility shims: `_compat.py` — one per package (`handlers/_compat.py`, `metadata/_compat.py`)
+- Test files: `test_snake_case.py` — mirror source module names
 
 **Classes:**
-- PascalCase: `UnifiedCache`, `BlobStore`, `HandlerRegistry`, `CacheEntrySigner`
-- ABC/interface classes: `MetadataBackend`, `CacheHandler`, `BlobBackend`
-- Exception classes: `CacheError`, `CacheStorageError`, `CacheConfigurationError`
-- TypedDicts: `SignableFields`, `EntrySummary`, `BlobReadContext`
-- Dataclasses: `CacheConfig`, `CacheStorageConfig`, `NamespaceInfo`
-- Internal helper classes: `_PutCleanup` (leading underscore for private)
+- PascalCase: `UnifiedCache`, `BlobStore`, `HandlerRegistry`, `WriteIntentJournal`
+- Mixins: `*Mixin` suffix — `VerificationMixin`, `StorageModeMixin`, `BatchMixin`
+- Dataclasses: PascalCase — `CacheConfig`, `CacheStorageConfig`, `RotationResult`, `HandlerResult`
+- TypedDicts: PascalCase — `SignableFields`, `EntrySummary`, `BlobReadContext`
+- Exceptions: `Cache*Error` — `CacheSecurityError`, `CacheBackendError`, `CacheConfigurationError`
+- Backends: `*Backend` suffix — `JsonBackend`, `SqliteBackend`, `PostgresBackend`
+- Handlers: `*Handler` suffix — `ArrayHandler`, `PandasDataFrameHandler`, `ObjectHandler`
 
-**Functions/Methods:**
-- snake_case: `put_entry()`, `get_handler()`, `verify_integrity()`
-- Private methods: leading underscore `_init_metadata_backend()`, `_cleanup_expired()`
-- Module-level helpers: leading underscore `_normalize_function_args()`, `_serialize_path_object()`
-- Boolean helpers: `is_pickleable()`, `is_dill_serializable()`
+**Functions:**
+- snake_case: `create_metadata_backend()`, `validate_namespace_id()`, `derive_encryption_key()`
+- Private helpers: `_snake_case` — `_normalize_function_args()`, `_intent_filename()`, `_make_cache()`
+- Factory functions: `create_*` — `create_metadata_backend()`, `create_cache_config()`, `create_entry_cache()`
 
-**Variables:**
-- snake_case: `cache_dir`, `blob_path`, `entry_data`
-- Module-level constants: UPPER_SNAKE_CASE — `DEFAULT_NAMESPACE`, `BLOSC2_AVAILABLE`, `NAMESPACE_ID_PATTERN`
-- Availability flags: `POLARS_AVAILABLE`, `PANDAS_AVAILABLE`, `TENSORFLOW_AVAILABLE`
-- Private module-level state: `_custom_metadata_registry`, `_decorator_cache_instances`
+**Variables / Constants:**
+- Module-level flags: `SCREAMING_SNAKE` — `BLOSC2_AVAILABLE`, `PANDAS_AVAILABLE`, `CRYPTOGRAPHY_AVAILABLE`
+- Module-level defaults: `SCREAMING_SNAKE` — `DEFAULT_NAMESPACE`, `NAMESPACE_ID_PATTERN`
+- Sentinel values: `_SCREAMING_SNAKE` — `_DEFAULT_TTL = object()`
+- Logger: `logger = logging.getLogger(__name__)` — one per module, always at module top
 
-**Constants/Sentinels:**
-- Sentinel objects: `_DEFAULT_TTL = object()` (to distinguish None from unspecified)
-- Regex patterns: `NAMESPACE_ID_PATTERN = re.compile(r"^[a-z0-9_]{1,48}$")`
+## Code Style
+
+**Formatting:**
+- Ruff formatter — config in `pyproject.toml`
+- Line length: 88 characters
+- Target version: Python 3.12
+
+**Linting:**
+- Ruff linter with default rule set
+- Ignored rules: `B008` (function calls in defaults), `C901` (complexity)
+- Per-file ignores: `tests/**` → `F401`, `F841`, `E721`; `benchmarks/**` → `F841`; `examples/**` → `F401`, `E402`
+- Type checking: `ty` (`uv run ty check`) — excludes `tests/`, `benchmarks/`, `examples/`
+
+**Two-phase quality gates:**
+```bash
+# Phase 1 — auto-fix (never fails)
+uv run ruff format $files; uv run ruff check --fix $files
+# Phase 2 — validate (may fail)
+uv run ruff check $files; uv run ty check $files
+```
 
 ## Import Organization
 
-**Order (enforced by Ruff):**
-1. Standard library (`import os`, `import threading`, `from pathlib import Path`)
-2. Third-party packages (`import xxhash`, `import numpy as np`)
-3. Local/project imports (`from .core import UnifiedCache`, `from .interfaces import ...`)
+**Order (enforced by ruff/isort):**
+1. Standard library (`import os`, `from pathlib import Path`)
+2. Third-party (`import numpy as np`, `import pytest`)
+3. Local/project (`from .config import CacheConfig`, `from ._compat import ...`)
 
-**Relative imports within package:**
-- Always use relative imports within `src/cacheness/`: `from .config import CacheConfig`
-- Cross-subpackage: `from ..config import CacheConfig` (in `storage/` subpackage)
+**Key patterns:**
 
-**Optional dependency pattern:**
-- Use try/except blocks with availability flags at module level:
+**`_compat.py` as shared import hub:**
+Each sub-package (`handlers/`, `metadata/`) has a `_compat.py` that centralizes imports from the parent package and optional dependency detection. All sub-modules import shared symbols from `_compat` rather than reaching up to parent packages directly.
+
+```python
+# src/cacheness/handlers/_compat.py
+from ..interfaces import (  # noqa: F401
+    CacheHandler, HandlerResult, BlobReadContext,
+    CacheWriteError, CacheReadError,
+)
+from ..error_handling import cache_operation_context  # noqa: F401
+from ..compress_pickle import (
+    BLOSC_AVAILABLE,  # noqa: F401
+    write_file as write_compressed_pickle,  # noqa: F401
+    read_file as read_compressed_pickle,  # noqa: F401
+)
+```
+
+**CRITICAL:** Re-exports in `_compat.py` MUST use `# noqa: F401` to prevent ruff from removing them as unused imports. Missing these annotations breaks all sub-module imports.
+
+**Optional dependency guards:**
 ```python
 try:
     import polars as pl
@@ -70,164 +94,250 @@ except ImportError:
     pl = None  # type: ignore
     POLARS_AVAILABLE = False
 ```
-- Used extensively in `src/cacheness/handlers.py`, `src/cacheness/serialization.py`
 
 **Lazy imports for heavy dependencies:**
-- TensorFlow uses lazy import pattern via `_lazy_import_tensorflow()` in `src/cacheness/handlers.py`
-- Avoids slow startup times and system-level issues
+```python
+# TensorFlow — lazy loaded to avoid startup cost
+TENSORFLOW_AVAILABLE = False
+tf = None
+_tensorflow_import_attempted = False
 
-**noqa usage:**
-- `# noqa: F401` for re-exports in `__init__.py` files
-- Import `# noqa: E402` collapsed to single-line to suppress properly (documented gotcha)
+def _lazy_import_tensorflow():
+    global tf, TENSORFLOW_AVAILABLE, _tensorflow_import_attempted
+    if _tensorflow_import_attempted:
+        return tf, TENSORFLOW_AVAILABLE
+    _tensorflow_import_attempted = True
+    try:
+        import tensorflow as tf_module
+        tf = tf_module
+        TENSORFLOW_AVAILABLE = True
+    except ImportError:
+        tf = None
+```
+
+**`__init__.py` for backward compatibility:**
+Package `__init__.py` files re-export all public names so external code using `from cacheness.handlers import ArrayHandler` continues to work after monolith-to-package splits.
+
+**`TYPE_CHECKING` for circular imports:**
+```python
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from .interfaces import RotationResult
+```
 
 ## Error Handling
 
-**Exception hierarchy** (defined in `src/cacheness/error_handling.py`):
+**Exception hierarchy:**
+All custom exceptions inherit from `CacheError` (base), defined in `src/cacheness/error_handling.py`:
+
 ```
-CacheError (base)
-├── CacheConfigurationError
-├── CacheStorageError
-├── CacheSerializationError
-├── CacheHandlerError
-├── CacheIntegrityError
-└── CacheMetadataError
+CacheError
+├── CacheConfigurationError    — invalid configuration
+├── CacheStorageError          — storage I/O failures
+├── CacheSerializationError    — key serialization failures
+├── CacheHandlerError          — handler put/get failures
+├── CacheIntegrityError        — hash/signature verification failures
+├── CacheMetadataError         — metadata backend failures
+├── CacheSecurityError         — signing, verification, key management
+└── CacheBackendError          — storage I/O, blob operations
 ```
 
-**Base exception includes context dict:**
+`CacheError` accepts optional `context: Dict[str, Any]` and auto-logs on creation.
+
+**`# intentionally broad` annotation:**
+Every deliberate `except Exception` in the codebase is annotated with a comment explaining WHY it's broad. No unannotated bare `except Exception` remains anywhere in `src/cacheness/`. The annotation follows the pattern:
+
 ```python
-class CacheError(Exception):
-    def __init__(self, message: str, context: Optional[Dict[str, Any]] = None):
-        self.context = context or {}
+except Exception as e:  # intentionally broad — <reason>
 ```
 
-**Decorator-based error handling:**
-- `@with_error_handling(error_type=CacheStorageError)` — converts generic exceptions to typed cache errors
-- Re-raises `CacheError` subclasses as-is; wraps other exceptions
+Common reasons:
+- `# intentionally broad — atexit cleanup` (cleanup must not raise)
+- `# intentionally broad — pickle may raise anything` (deserialization)
+- `# intentionally broad — cache retrieval may fail any way` (decorator resilience)
+- `# intentionally broad — best-effort re-sign` (key rotation fallback)
+- `# intentionally broad — hooks must not crash the caller` (lifecycle callbacks)
+- `# intentionally broad — re-raises after cleanup` (error conversion)
 
-**Context manager:**
-- `cache_operation_context(operation, **context)` — standardized logging + timing for operations
-- Used in `src/cacheness/core.py` for put/get operations
+**Error handling decorators:**
+```python
+# src/cacheness/error_handling.py
+@with_error_handling(error_type=CacheStorageError, context={...})
+def some_storage_op():
+    ...
+```
 
-**Rollback pattern:**
-- `_PutCleanup` class in `src/cacheness/core.py` — tracks resources (local blob, remote S3 object) during `put()`, rolls back on failure
-- Commit/rollback semantics: `cleanup.commit()` disarms, `cleanup.rollback()` deletes orphans
+**Context manager for operations:**
+```python
+with cache_operation_context("store_pandas_dataframe", shape=data.shape):
+    ...  # auto-logs start/end/duration, raises CacheError on failure
+```
 
-**Error propagation principles:**
-- `get()` is destructive on errors — auto-deletes entries that fail to load (except transient IO)
-- CacheError subclasses propagate through; generic exceptions are wrapped
-- Silent suppression only in cleanup/shutdown paths (`pass` in `except` blocks)
+**Config validation with fix suggestions:**
+`CacheConfigurationError` in `src/cacheness/config.py` provides actionable messages:
+```python
+raise CacheConfigurationError(
+    "Encryption is enabled with entry signing disabled. "
+    "Encrypted data without integrity signing is unsafe. "
+    "Set enable_entry_signing=True to ensure encrypted "
+    "entries are signed."
+)
+```
+
+## Architecture Patterns
+
+### Mixin Decomposition
+
+`UnifiedCache` in `src/cacheness/core.py` uses 11 mixins to keep the main class focused on coordination. Each mixin is a private `_*.py` module:
+
+```python
+class UnifiedCache(
+    VerificationMixin,    # _verification_mixin.py — signing, integrity
+    StatsMixin,           # _stats_mixin.py — hit/miss stats
+    CustomMetadataMixin,  # _custom_metadata_mixin.py — linked tables
+    StorageModeMixin,     # _storage_mode_mixin.py — no-eviction mode
+    QueryMixin,           # _query_mixin.py — list/search operations
+    ConvenienceMixin,     # _convenience_mixin.py — get_or_set, etc.
+    BatchMixin,           # _batch_mixin.py — delete_by_prefix, put_batch
+    FileOpsMixin,         # _file_ops_mixin.py — put_file/get_file
+    GetVariantsMixin,     # _get_variants_mixin.py — get+return metadata
+    UpdateMixin,          # _update_mixin.py — update_data, update_description
+    InlineBlobMixin,      # _inline_blob_mixin.py — small blob inlining
+):
+```
+
+Mixins access `self.config`, `self._lock`, `self.metadata_backend`, `self._blob_store` from UnifiedCache.
+
+### Handler Priority System
+
+Handlers implement `CacheHandler` ABC from `src/cacheness/interfaces.py`. Each handler declares a `priority: int` class attribute. Lower number = higher priority (checked first).
+
+```python
+# Priority order (lower = checked first):
+PolarsSeriesHandler      # priority: 10
+PandasSeriesHandler      # priority: 20
+PolarsDataFrameHandler   # priority: 30
+PandasDataFrameHandler   # priority: 40
+ArrayHandler             # priority: 50  (NumPy arrays)
+BytesHandler             # priority: 60  (bytes/bytearray/memoryview)
+ObjectHandler            # priority: 100 (pickle fallback — always last)
+```
+
+`HandlerRegistry` (`src/cacheness/handlers/registry.py`) iterates handlers in priority order, calling `can_handle(data)`. First match wins. Custom handlers can be registered with explicit priority.
+
+### Configuration Dataclasses
+
+`CacheConfig` in `src/cacheness/config.py` is the root config, composing 8 focused sub-configs:
+
+```python
+CacheConfig
+├── storage: CacheStorageConfig     — cache_dir, max_cache_size, atomic writes
+├── metadata: CacheMetadataConfig   — backend type, TTL, memory cache
+├── blob: CacheBlobConfig           — blob backend, sharding, inline size
+├── compression: CompressionConfig  — parquet, pickle, blosc2 codecs
+├── serialization: SerializationConfig — key hashing, depth limits
+├── handlers: HandlerConfig         — enable/disable, priority order
+├── security: SecurityConfig        — signing, encryption, key fallback
+└── hooks: HooksConfig              — on_evict, on_integrity_failure callbacks
+```
+
+Each dataclass has `__post_init__` validation. `CacheConfig.__init__` also accepts flat kwargs for backward compatibility (e.g., `cache_dir=...` maps to `storage.cache_dir`).
+
+### Crash Safety: WriteIntentJournal
+
+`WriteIntentJournal` in `src/cacheness/write_intent.py` implements crash-safe blob writes:
+
+1. `record_intent(cache_key, blob_path)` — writes `.intent` JSON file
+2. Handler writes blob to disk
+3. Metadata backend commits entry
+4. `clear_intent(cache_key)` — removes `.intent` file
+
+On cache init, `cleanup_stale_intents()` deletes orphaned blobs from crashed writes.
+
+### TypedDict Contracts
+
+Interface contracts for cross-module dict passing use `TypedDict` with `total=False`:
+- `SignableFields` — fields included in HMAC signatures (`src/cacheness/interfaces.py`)
+- `EntrySummary` — lightweight entry dict from `iter_entry_summaries()` (`src/cacheness/interfaces.py`)
+- `BlobReadContext` — metadata dict passed to `handler.get()` (`src/cacheness/interfaces.py`)
+
+### Result Dataclasses
+
+Operations return well-defined dataclass results:
+- `HandlerResult` — handler put() output (storage_format, file_size, actual_path, extra) (`src/cacheness/interfaces.py`)
+- `RotationResult` — key rotation stats (total, re_signed, re_encrypted, failed, skipped) (`src/cacheness/interfaces.py`)
+- `IntegrityReport` — integrity audit results (`src/cacheness/interfaces.py`)
+- `EntryData` — full entry data + metadata (`src/cacheness/interfaces.py`)
+
+### Decorator Pattern
+
+`src/cacheness/decorators.py` provides `@cached` and `@cache_if` decorators. Key patterns:
+- `weakref` tracking of cache instances for atexit cleanup
+- `atexit.register` for cleanup on interpreter exit
+- `functools.wraps` for metadata preservation
+- Thread-safe via `threading.Lock`
+
+### Thread Safety
+
+`UnifiedCache` uses `threading.RLock` (`self._lock`) for all state-mutating operations. The RLock allows re-entrant calls (e.g., `delete_where` → `invalidate` → lock again).
+
+### Namespace Isolation
+
+Namespaces provide multi-tenant cache isolation:
+- Validated by `validate_namespace_id()` — lowercase alphanumeric + underscore, 1-48 chars
+- Per-namespace tables (SQLite/PG) or files (JSON)
+- Per-namespace HKDF-derived signing/encryption keys
+
+### Encryption at Rest
+
+AES-256-GCM in `src/cacheness/encryption.py`:
+- Encrypt-then-sign: blob encrypted, then HMAC signs ciphertext
+- HKDF-SHA256 key derivation per namespace
+- Two write paths: `BlobStore.put()` and `BlobStore._write_blob()` (both handle encryption)
+- Metadata stores `encryption_algorithm` and `encryption_iv` fields
 
 ## Logging
 
 **Framework:** Python `logging` module
-
-**Pattern:** Module-level logger in every source file:
+**Pattern:** One logger per module at module level:
 ```python
 logger = logging.getLogger(__name__)
 ```
 
-**Log levels used:**
-- `logger.debug()` — operation start/completion, timing, configuration details
-- `logger.info()` — initialization success, backend selection, feature availability
-- `logger.warning()` — fallback paths, failed cleanup, suppressed errors
-- `logger.error()` — operation failures (via CacheError constructor)
+**Levels used:**
+- `logger.debug(...)` — config details, operation timing, flow tracing
+- `logger.info(...)` — cache operations (put/get/delete), cleanup summaries
+- `logger.warning(...)` — fallback behavior, deprecated features, suppressed errors
+- `logger.error(...)` — operation failures (via `CacheError.__init__` auto-logging)
 
-**Emoji usage in logs:**
-- ✅ for initialization success: `"✅ Unified cache initialized: ..."`
-- 📊 for feature availability: `"📊 Both Polars and Pandas available"`
-- 🗄️ for backend selection: `"🗄️  Using SQLite backend"`
-- ⚠️ for warnings: `"⚠️  Neither Polars nor Pandas available"`
-- ⚡ for performance info: `"⚡ Using in-memory SQLite backend"`
+**f-string formatting** used throughout (not `%` or `.format()`).
 
-**Test logging config** (in `pyproject.toml`):
-- `log_cli = true`, level `WARNING`
-- Override with `--log-cli-level=INFO`
+## Comments & Documentation
 
-## Design Patterns
+**Module docstrings:** Triple-quoted at top of every module, describing purpose and key abstractions.
 
-**Strategy Pattern:**
-- Core architecture: `UnifiedCache` delegates format-specific operations to `CacheHandler` implementations
-- `HandlerRegistry` selects the appropriate handler based on data type
-- Handlers: `ArrayHandler`, `ObjectHandler`, `PolarsDataFrameHandler`, `PandasDataFrameHandler`, `BytesHandler`
+**Class docstrings:** Present on all public classes with usage examples in `HandlerRegistry`, `WriteIntentJournal`.
 
-**Registry Pattern:**
-- `HandlerRegistry` in `src/cacheness/handlers.py` — handler selection by data type
-- Metadata backend registry in `src/cacheness/storage/backends/__init__.py` — `register_metadata_backend()`, `get_metadata_backend()`
-- Blob backend registry in `src/cacheness/storage/backends/blob_backends.py` — `register_blob_backend()`, `get_blob_backend()`
-- Custom metadata model registry in `src/cacheness/custom_metadata.py` — `@custom_metadata_model()` decorator
+**Inline comments:** Explain *why*, not *what*. Key patterns:
+- `# intentionally broad — <reason>` on `except Exception`
+- `# noqa: F401` on re-exports in `_compat.py` and `__init__.py`
+- `# noqa: E402` on imports after `pytest.importorskip()`
 
-**Factory Pattern:**
-- `create_metadata_backend()` in `src/cacheness/metadata.py` — creates backend by type string
-- `create_cache_config()` in `src/cacheness/config.py` — creates config from kwargs
-- `get_blob_backend()` in `src/cacheness/storage/backends/blob_backends.py`
+## Module Design
 
-**Abstract Base Class (ABC):**
-- `MetadataBackend` in `src/cacheness/metadata.py` — interface for JSON/SQLite/PostgreSQL backends
-- `CacheHandler` in `src/cacheness/interfaces.py` — interface for type-specific handlers
-- `BlobBackend` in `src/cacheness/storage/backends/blob_backends.py` — interface for blob storage
+**Exports:** `__init__.py` re-exports public API via explicit imports. `__all__` used in `handlers/__init__.py`.
 
-**Dataclass Configuration:**
-- `CacheConfig` composed of sub-configs: `CacheStorageConfig`, `CacheMetadataConfig`, `CompressionConfig`, `SerializationConfig`, `HandlerConfig`, `SecurityConfig`, `HooksConfig`
-- Each sub-config uses `@dataclass` with defaults and `__post_init__` validation
+**Package splits:** Monoliths split via the pattern:
+1. `_compat.py` — shared imports, optional deps, ORM models
+2. `base.py` — ABCs and base classes
+3. `*_backend.py` / `*_handler.py` — concrete implementations
+4. `__init__.py` — re-exports + factory functions
 
-**Thread Safety:**
-- `threading.RLock()` in `UnifiedCache` — re-entrant lock for put/get/delete atomicity
-- Thread-safe metadata backends (SQLite WAL mode, JSON file locking)
-
-**Cleanup/Resource Management:**
-- `_PutCleanup` in `src/cacheness/core.py` — RAII-style cleanup for `put()` operations
-- `atexit.register()` in `src/cacheness/decorators.py` — cleanup decorator-created caches
-- `weakref.ref` tracking for decorator caches to avoid preventing garbage collection
-
-## Type Annotations
-
-**Approach:** Comprehensive type annotations throughout, targeting Python 3.12+
-
-**Common patterns:**
-- `Optional[X]` for nullable parameters/returns
-- `Dict[str, Any]` for metadata dicts
-- `Union[str, int]` for flexible inputs (e.g., size config)
-- `Callable` for function parameters (decorators, hooks)
-- `Tuple` for multi-return values
-- `List[Dict[str, Any]]` for entry listings
-
-**TypedDict usage** (in `src/cacheness/interfaces.py`):
-- `SignableFields` — fields included in HMAC signatures
-- `EntrySummary` — lightweight flat dict from `iter_entry_summaries()`
-- `BlobReadContext` — metadata dict passed to handler `get()`
-- `total=False` used for optional fields
-
-**Type comments for import guards:**
+**Sentinel values:** Use `object()` sentinels to distinguish "not provided" from `None`:
 ```python
-pl = None  # type: ignore
+_DEFAULT_TTL = object()
 ```
-
-## Documentation / Docstrings
-
-**Style:** Google-style docstrings with `Args:`, `Returns:`, `Raises:` sections
-
-**Module-level docstrings:**
-- Present in every source module
-- Include feature lists, usage examples, and architectural notes
-- Use reStructuredText-style header underlines (`===`, `---`)
-
-**Class docstrings:**
-- Describe purpose and usage pattern
-- Note thread safety if applicable
-
-**Method docstrings:**
-- `Args:` with type and description for each parameter
-- `Returns:` with type and description
-- `Raises:` for expected exceptions
-
-**Attribute docstrings:**
-- `@dataclass` fields documented via class docstring or inline comments
-- `NamespaceInfo` uses `Attributes:` section in class docstring
-
-**Public API docstrings** in `src/cacheness/__init__.py`:
-- Full module-level docstring with Quick Start example
-- Key features listed
 
 ---
 
-*Convention analysis: 2026-04-02*
+*Convention analysis: 2026-04-07*

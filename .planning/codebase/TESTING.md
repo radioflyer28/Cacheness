@@ -1,156 +1,372 @@
 # Testing Patterns
 
-**Analysis Date:** 2026-04-02
+**Analysis Date:** 2026-04-07
 
 ## Test Framework
 
 **Runner:**
-- **pytest** >= 8.4.1 (configured in `pyproject.toml`)
-- Config section: `[tool.pytest.ini_options]`
+- pytest >= 8.4.1
+- Config: `pyproject.toml` under `[tool.pytest.ini_options]`
 
-**Key Plugins:**
-- `pytest-xdist` >= 3.8.0 — parallel test execution (`-n auto --dist loadgroup`)
-- `pytest-cov` >= 6.2.1 — coverage reporting
-- `hypothesis` >= 6.151.5 — property-based testing
-- `moto[s3]` >= 5.0.0 — AWS S3 mocking
+**Parallel Execution:**
+- `pytest-xdist` >= 3.8.0 — enabled by default via `-n auto --dist loadgroup`
+- Tests sharing Docker resources grouped via `@pytest.mark.xdist_group("docker")`
 
 **Assertion Library:**
-- Built-in pytest assertions (no third-party assertion library)
+- pytest native asserts (no third-party assertion library)
+
+**JSON Report:**
+- `pytest-json-report` >= 1.5.0 — writes `.test-results.json` (gitignored)
+- Parse results: `(Get-Content .test-results.json | ConvertFrom-Json).summary`
+- Configured in `pyproject.toml` addopts: `--json-report --json-report-file .test-results.json --json-report-omit log keywords collectors`
 
 **Run Commands:**
 ```bash
-# Full test suite (parallel, default)
+# Full suite (parallel, ~48s)
 uv run pytest tests/ -x -q --ignore=tests/test_tensorflow_handler.py
 
-# Sequential run (disable xdist)
+# Sequential (disable xdist, ~237s — useful for debugging)
 uv run pytest tests/ -x -q --ignore=tests/test_tensorflow_handler.py -p no:xdist
 
-# Specific test file
-uv run pytest tests/test_core.py -x -q
+# Targeted (single file)
+uv run pytest tests/test_core.py -x -q --tb=short
 
-# With coverage
-uv run pytest tests/ --cov=cacheness --cov-report=html
-
-# With verbose logging
-uv run pytest tests/ --log-cli-level=INFO
+# Parse JSON results after run
+(Get-Content .test-results.json | ConvertFrom-Json).summary
 ```
 
-**Baseline:** 1427 passed, 102 skipped, 0 failures (~48s parallel, ~237s sequential)
+**IMPORTANT:** Never pipe pytest output through `Select-String` or grep — use JSON report instead.
 
-## Test File and Directory Structure
+## Test Baseline
 
-**Location:** All tests in a top-level `tests/` directory (separate from source)
+**Current:** 1773 passed, 122 skipped, 0 failures
+**Windows:** Always add `--ignore=tests/test_tensorflow_handler.py` — TF tests hang
 
-**Naming:** `test_*.py` — one file per concern area, not per source file
+## Test File Organization
 
-**Structure:**
-```
-tests/
-├── conftest.py                         # Shared fixtures (PostgreSQL, S3, mocked S3)
-├── test_core.py                        # Core UnifiedCache + CacheConfig
-├── test_handlers.py                    # Handler system (Array, Object, DataFrame, Series)
-├── test_metadata.py                    # Metadata backend integration
-├── test_blob_store.py                  # BlobStore low-level API
-├── test_decorators.py                  # @cached, @cache_if decorators
-├── test_error_handling.py              # Error handling module
-├── test_config_validation.py           # Config validation
-├── test_config_options.py              # Config options
-├── test_update_operations.py           # Update/upsert operations
-├── test_cache_integrity.py             # Cache integrity verification
-├── test_cache_integrity_verification.py # Integrity audit
-├── test_cache_signing.py               # HMAC signing
-├── test_concurrency_stress.py          # Thread safety stress tests
-├── test_fault_injection.py             # Fault injection via mock.patch
-├── test_property_based.py              # Hypothesis property-based tests
-├── test_backend_parity.py              # Backend behavioral parity
-├── test_backend_compatibility.py       # Backend compatibility
-├── test_schema_versioning.py           # Schema migration
-├── test_sqlite_schema_versioning.py    # SQLite-specific schema versioning
-├── test_json_schema_versioning.py      # JSON-specific schema versioning
-├── test_pg_schema_versioning.py        # PostgreSQL schema versioning
-├── test_namespace_config.py            # Namespace configuration
-├── test_namespace_integration.py       # Namespace integration
-├── test_namespace_isolation.py         # Namespace isolation
-├── test_namespace_plumbing.py          # Namespace plumbing
-├── test_namespace_signing.py           # Namespace signing
-├── test_s3_blob_backend.py             # S3 blob backend (moto-mocked)
-├── test_s3_etag_integrity.py           # S3 ETag verification
-├── test_s3_etag_metadata.py            # S3 ETag metadata
-├── test_s3_orphan_cleanup.py           # S3 orphan cleanup
-├── test_docker_integration.py          # Docker-based PostgreSQL/S3 tests
-├── test_tensorflow_handler.py          # TensorFlow handler (Windows-excluded)
-├── test_entry_list.py                  # EntryList wrapper
-├── test_serialization.py              # Serialization
-├── test_compress_pickle.py             # Compression
-├── test_size_utils.py                  # Size/duration parsing
-├── test_file_hashing.py                # File hashing
-├── test_directory_sharding.py          # Directory sharding
-├── test_storage_mode.py                # Storage mode (BlobStore standalone)
-├── test_custom_metadata.py             # Custom metadata models
-├── test_custom_metadata_backends.py    # Custom metadata backends
-├── test_custom_metadata_namespace.py   # Custom metadata namespacing
-├── ...                                 # ~65 test files total
-```
+**Location:** All tests in top-level `tests/` directory (not co-located with source).
 
-## Source-to-Test File Mapping
+**Naming:** `test_<module_or_feature>.py` — mirrors source module names or feature areas.
 
-| Source file changed | Primary test files |
-|---------------------|--------------------|
+**Source → test file mapping:**
+
+| Source file | Primary test files |
+|---|---|
 | `src/cacheness/core.py` | `tests/test_core.py`, `tests/test_storage_mode.py` |
 | `src/cacheness/storage/blob_store.py` | `tests/test_blob_store.py`, `tests/test_blob_namespace.py` |
-| `src/cacheness/storage/backends/blob_backends.py` | `tests/test_blob_store.py`, `tests/test_s3_blob_backend.py` |
-| `src/cacheness/storage/backends/s3_backend.py` | `tests/test_s3_blob_backend.py` |
-| `src/cacheness/handlers.py` | `tests/test_handlers.py` |
-| `src/cacheness/metadata.py` | `tests/test_metadata.py`, `tests/test_sqlite_schema_versioning.py` |
-| `src/cacheness/size_utils.py`, `src/cacheness/config.py` | `tests/test_size_utils.py`, `tests/test_core.py` |
-| `src/cacheness/security.py` | `tests/test_cache_signing.py` |
-| Path/namespace logic | `tests/test_directory_sharding.py`, `tests/test_namespace_config.py` |
+| `src/cacheness/storage/blob_backends.py` | `tests/test_blob_store.py`, `tests/test_blob_namespace.py`, `tests/test_s3_blob_backend.py` |
+| `src/cacheness/handlers/*.py` | `tests/test_handlers.py` |
+| `src/cacheness/metadata/*.py` | `tests/test_metadata.py`, `tests/test_sqlite_schema_versioning.py` |
+| `src/cacheness/security.py` | `tests/test_security.py` (via `test_namespace_signing.py`, `test_cache_signing.py`) |
+| `src/cacheness/config.py` | `tests/test_config_validation.py`, `tests/test_core.py` |
+| `src/cacheness/encryption.py` | `tests/test_encryption_at_rest.py` |
+| `src/cacheness/write_intent.py` | `tests/test_write_intent.py` |
+| `src/cacheness/decorators.py` | `tests/test_decorators.py` |
 
-## Fixture Patterns
+**Cross-cutting test files:**
+- `tests/test_cache_integrity.py` — end-to-end integrity verification
+- `tests/test_backend_parity.py` — cross-backend behavioral equivalence
+- `tests/test_fault_injection.py` — I/O failure simulation
+- `tests/test_concurrency_stress.py` — multi-threaded stress tests
+- `tests/test_property_based.py` — Hypothesis property-based tests
+- `tests/test_cross_phase_integration.py` — cross-feature integration
+
+## Test Structure
+
+**Suite Organization:**
+```python
+# tests/test_core.py
+class TestCacheConfig:
+    """Test CacheConfig class functionality."""
+
+    def test_default_config(self):
+        """Test default configuration values."""
+        config = CacheConfig()
+        assert config.storage.cache_dir == "./cache"
+        assert config.metadata.default_ttl_seconds == 86400
+
+    def test_custom_config(self):
+        """Test custom configuration values."""
+        ...
+```
+
+Tests are grouped into classes by feature/component. Each test method tests one behavior.
+
+**Import pattern:**
+```python
+from cacheness import CacheConfig, cacheness
+from cacheness.core import UnifiedCache as cacheness  # in tests needing UnifiedCache directly
+from cacheness.config import CacheStorageConfig, CacheMetadataConfig, SecurityConfig
+```
+
+**IMPORTANT:** `from cacheness import UnifiedCache` does NOT work. The public export is `cacheness` (an alias for `UnifiedCache`). Use `from cacheness.core import UnifiedCache` when the class name is needed.
+
+## Fixtures
 
 **Shared fixtures** in `tests/conftest.py`:
-- **Session-scoped availability checks:** `postgres_available`, `s3_available` — check Docker containers with short timeouts, return `bool`
-- **Session-scoped engines:** `postgres_engine` — creates SQLAlchemy engine, skips if unavailable
-- **Function-scoped connections:** `postgres_connection`, `postgres_clean_db` — per-test isolation with schema teardown
-- **Mocked AWS:** `mock_s3_client`, `mock_s3_bucket` — uses `moto.mock_aws()` context manager, no Docker required
-
-**Common in-test fixture patterns:**
-
 ```python
-@pytest.fixture
-def temp_cache_dir(self):
-    """Create a temporary directory for testing."""
-    with tempfile.TemporaryDirectory() as temp_dir:
-        yield Path(temp_dir) / "test_cache"
+# Session-scoped — check Docker service availability
+@pytest.fixture(scope="session")
+def postgres_available() -> bool:
+    """Check if PostgreSQL is available (with a short timeout)."""
+    try:
+        with psycopg.connect(..., connect_timeout=3):
+            return True
+    except Exception:
+        return False
 
+@pytest.fixture(scope="session")
+def postgres_engine(postgres_available):
+    """Create SQLAlchemy engine for PostgreSQL."""
+    if not postgres_available:
+        pytest.skip("PostgreSQL not available")
+    engine = create_engine(get_postgres_url())
+    yield engine
+    engine.dispose()
+
+# Function-scoped — per-test isolation
 @pytest.fixture
-def test_config(self, temp_cache_dir):
-    """Create a test configuration."""
+def postgres_clean_db(postgres_connection):
+    """Provide a clean PostgreSQL database for a test."""
+    postgres_connection.execute(text("CREATE SCHEMA IF NOT EXISTS cache"))
+    postgres_connection.commit()
+    yield postgres_connection
+    postgres_connection.execute(text("DROP SCHEMA IF EXISTS cache CASCADE"))
+    postgres_connection.commit()
+```
+
+**Per-test cache factory** (common pattern across test files):
+```python
+def _make_cache(tmp_path, backend="json"):
+    """Create a cacheness instance for testing."""
     config = CacheConfig(
-        cache_dir=str(temp_cache_dir),
-        metadata_backend="json",
-        cleanup_on_init=False,
+        storage=CacheStorageConfig(cache_dir=str(tmp_path)),
+        metadata=CacheMetadataConfig(metadata_backend=backend),
+        compression=CompressionConfig(use_blosc2_arrays=False),
     )
-    return config
+    return cacheness(config)
 ```
 
-**BlobStore fixtures** in `tests/test_blob_store.py`:
+**`tmp_path` fixture:** pytest built-in, used for all cache directories. Ensures test isolation.
+
+**Encrypted cache factory:**
 ```python
-@pytest.fixture
-def blob_dir(tmp_path):
-    return tmp_path / "blobs"
-
-@pytest.fixture
-def store(blob_dir):
-    return BlobStore(cache_dir=blob_dir, backend="json")
-
-@pytest.fixture
-def signed_store(blob_dir):
-    return BlobStore(cache_dir=blob_dir, backend="json",
-                     enable_signing=True, use_in_memory_key=True)
+def _make_encrypted_cache(tmp_path, **security_overrides):
+    """Create a UnifiedCache with encryption and signing enabled."""
+    key_file = tmp_path / "cache_signing_key.bin"
+    if not key_file.exists():
+        key_file.write_bytes(secrets.token_bytes(32))
+    defaults = {
+        "enable_entry_signing": True,
+        "enable_content_encryption": True,
+        "encryption_key_file": "cache_signing_key.bin",
+        "allow_unsigned_entries": True,
+        "delete_invalid_signatures": False,
+    }
+    defaults.update(security_overrides)
+    security = SecurityConfig(**defaults)
+    config = CacheConfig(
+        storage=CacheStorageConfig(cache_dir=str(tmp_path)),
+        metadata=CacheMetadataConfig(metadata_backend="json"),
+        compression=CompressionConfig(use_blosc2_arrays=False),
+        security=security,
+    )
+    return cacheness(config)
 ```
 
-**Cache lifecycle pattern:** Create + yield + close:
+## Mocking
+
+**Framework:** `unittest.mock` (standard library)
+
+**Patterns:**
+```python
+# Patch metadata backend to simulate crash
+with patch.object(
+    cache.metadata_backend,
+    "put_entry",
+    side_effect=RuntimeError("Simulated metadata write failure"),
+):
+    with pytest.raises(RuntimeError, match="Simulated metadata write failure"):
+        cache.put(data, test_key="orphan_test")
+
+# Patch OS-level I/O
+with patch("builtins.open", side_effect=OSError(errno.ENOSPC, "No space left")):
+    ...
+```
+
+**What to mock:**
+- Metadata backend methods (`put_entry`, `get_entry`) for fault injection
+- OS/filesystem calls for I/O failure simulation
+- External services (S3 via `moto`)
+
+**What NOT to mock:**
+- Handler logic (test with real data through the full put/get pipeline)
+- Configuration validation (test with real `CacheConfig` instances)
+- Compression/serialization (test roundtrip with actual data)
+
+## Backend Parametrization
+
+**Cross-backend parity tests** in `tests/test_backend_parity.py`:
+```python
+@pytest.mark.parametrize("backend", ["json", "sqlite", "postgresql"])
+class TestEncryptionBackendParity_BlobStore:
+    def test_encrypt_decrypt_roundtrip(self, tmp_path, backend):
+        if backend == "postgresql":
+            pg_url = _get_pg_url()
+            if not pg_url:
+                pytest.skip("PostgreSQL not available")
+        cache = _make_encrypted_cache_for_backend(tmp_path, backend)
+        ...
+```
+
+**Pattern:** Parametrize on `backend` string, skip PostgreSQL when Docker unavailable.
+
+## Docker Integration
+
+**External services:** PostgreSQL and S3 (Garage) via `docker-compose.yml`
+
+**xdist grouping:** Tests that need Docker are grouped to run on the same worker:
+```python
+# Module-level marker for all tests in file
+pytestmark = pytest.mark.xdist_group("docker")
+
+# Or per-class
+@pytest.mark.xdist_group("docker")
+class TestPostgresqlSchemaV3ToV4:
+    ...
+```
+
+**Availability check:** Session-scoped fixtures attempt connection with short timeouts, `pytest.skip()` on failure.
+
+**Files using Docker:**
+- `tests/test_docker_integration.py` — full PostgreSQL + S3 integration
+- `tests/test_backend_parity.py` — cross-backend encryption tests
+- `tests/test_pg_schema_versioning.py` — PostgreSQL schema migrations
+- `tests/test_config_integration_example.py` — config with real backends
+
+## Optional Dependency Guards
+
+**Module-level `importorskip`:**
+```python
+# tests/test_encryption_at_rest.py
+cryptography = pytest.importorskip("cryptography")
+
+# Imports AFTER importorskip use # noqa: E402
+from cacheness.config import CacheConfig, SecurityConfig  # noqa: E402
+from cacheness.encryption import encrypt_blob, decrypt_blob  # noqa: E402
+```
+
+**`# noqa: E402` placement:** When using `pytest.importorskip()` at module level, ALL subsequent imports get `# noqa: E402`. Collapse to single-line imports — multi-line `# noqa: E402` on closing paren does NOT work.
+
+**Per-test `skipif`:**
+```python
+@pytest.mark.skipif(not _has_pandas(), reason="Pandas not available")
+def test_pandas_dataframe_caching(self):
+    ...
+```
+
+**Per-test `importorskip`:**
+```python
+def test_entry_list_to_dataframe(self):
+    pd = pytest.importorskip("pandas")
+    ...
+```
+
+**Availability helper functions:**
+```python
+def _has_pandas():
+    import importlib.util
+    return importlib.util.find_spec("pandas") is not None
+```
+
+## Property-Based Tests (Hypothesis)
+
+Located in `tests/test_property_based.py`:
+
+```python
+from hypothesis import given, settings, assume, HealthCheck
+from hypothesis import strategies as st
+
+# Custom strategies for JSON-safe values
+json_values = st.one_of(
+    st.text(min_size=0, max_size=100),
+    st.integers(min_value=-1000, max_value=1000),
+    st.floats(allow_nan=False, allow_infinity=False),
+    st.booleans(),
+)
+
+@given(data=st.lists(st.floats(allow_nan=False, allow_infinity=False), min_size=1, max_size=100))
+@settings(max_examples=50, suppress_health_check=[HealthCheck.too_slow])
+def test_numpy_array_roundtrip(self, data, tmp_path):
+    """Any valid float array survives put → get."""
+    arr = np.array(data)
+    ...
+```
+
+**Invariants tested:**
+1. Handler round-trip: `put(obj) → get()` returns equivalent obj
+2. Cache key determinism: same input → same key, always
+3. Metadata backend contract: put → get → delete consistency
+4. Compression round-trip: compress → decompress preserves data
+
+## Fault Injection
+
+Located in `tests/test_fault_injection.py`:
+
+**Patterns tested:**
+1. Orphaned blob on `put()` crash (metadata write failure after blob write)
+2. `get()` auto-deletion on transient I/O errors
+3. `get()` auto-deletion on handler exception (deserialization failure)
+4. JSON backend corruption recovery
+5. Disk full during blob write (patched `OSError(errno.ENOSPC)`)
+6. TOCTOU race in `get()` (file exists → file gone on open)
+
+```python
+class TestOrphanedBlobOnPutCrash:
+    def test_blob_cleaned_up_on_metadata_failure(self, tmp_path):
+        cache = _make_cache(tmp_path)
+        data = {"key": "value"}
+        with patch.object(
+            cache.metadata_backend, "put_entry",
+            side_effect=RuntimeError("Simulated metadata write failure"),
+        ):
+            with pytest.raises(RuntimeError):
+                cache.put(data, test_key="orphan_test")
+        # Verify no orphaned blob files remain
+        blob_files = list(tmp_path.rglob("*.pkl*"))
+        assert blob_files == []
+```
+
+## Concurrency / Thread Safety Tests
+
+Located in `tests/test_concurrency_stress.py` and `tests/test_thread_safety.py`:
+
+```python
+class TestConcurrentPutSameKey:
+    def test_last_writer_wins_no_corruption(self, stress_cache):
+        errors = []
+        num_threads = 8
+
+        def writer(thread_id):
+            try:
+                data = {"thread": thread_id, "value": thread_id * 100}
+                cache.put(data, key="shared")
+            except Exception as e:
+                errors.append(f"Thread {thread_id}: {e}")
+
+        threads = [threading.Thread(target=writer, args=(i,))
+                   for i in range(num_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+
+        assert not errors
+        result = cache.get(key="shared")
+        assert isinstance(result, dict)
+```
+
+**Thread safety fixtures:**
 ```python
 @pytest.fixture
 def stress_cache():
@@ -161,292 +377,130 @@ def stress_cache():
         cache.close()
 ```
 
-**Manual cleanup fixtures** (when `yield` cleanup isn't enough):
-```python
-@pytest.fixture
-def temp_cache_signing_enabled():
-    temp_dir = Path(tempfile.mkdtemp())
-    try:
-        config = CacheConfig(cache_dir=str(temp_dir / "cache"), ...)
-        cache = UnifiedCache(config)
-        yield cache, temp_dir
-        cache.close()
-    finally:
-        if temp_dir.exists():
-            shutil.rmtree(temp_dir)
+## Tiered Testing Strategy
+
+During development, use tiered testing to minimize feedback time:
+
+| Tier | When | What to run | Time |
+|---|---|---|---|
+| **Tier 1** | After each code change | Tests directly exercising modified code | ~5-15s |
+| **Tier 2** | After all planned changes | Add regression-risk tests | ~30-60s |
+| **Full suite** | Once before push | All tests | ~48s parallel |
+
+**Example workflow:**
+```bash
+# Tier 1 — editing core.py and blob_store.py
+uv run pytest tests/test_core.py tests/test_blob_store.py -x -q --ignore=tests/test_tensorflow_handler.py
+
+# Tier 2 — add cross-cutting tests
+uv run pytest tests/test_core.py tests/test_blob_store.py tests/test_cache_integrity.py tests/test_update_operations.py -x -q --ignore=tests/test_tensorflow_handler.py
+
+# Full suite — before push
+uv run pytest tests/ -x -q --ignore=tests/test_tensorflow_handler.py
 ```
 
-## Mocking / Patching
+## pytest Configuration
 
-**Framework:** `unittest.mock` (stdlib) — `Mock`, `patch`, `patch.object`
+From `pyproject.toml`:
 
-**Common mocking patterns:**
-
-1. **Fault injection** via `patch.object` (in `tests/test_fault_injection.py`):
-```python
-with patch.object(
-    cache.metadata_backend,
-    "put_entry",
-    side_effect=RuntimeError("Simulated metadata write failure"),
-):
-    with pytest.raises(RuntimeError, match="Simulated metadata write failure"):
-        cache.put(data, test_key="orphan_test")
-```
-
-2. **AWS S3 mocking** via `moto` (in `tests/test_s3_blob_backend.py`):
-```python
-@pytest.fixture
-def s3_backend(aws_credentials, s3_bucket):
-    from cacheness.storage.backends.s3_backend import S3BlobBackend
-    with mock_aws():
-        client = boto3.client("s3", region_name="us-east-1")
-        client.create_bucket(Bucket=s3_bucket)
-        yield S3BlobBackend(bucket=s3_bucket, ...)
-```
-
-3. **Module-level patching** for optional dependencies:
-```python
-with patch("cacheness.handlers.BLOSC2_AVAILABLE", False):
-    # Test fallback behavior
-```
-
-## Test Markers and Parametrization
-
-**Registered markers** (in `pyproject.toml`):
-```python
+```toml
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = [
+    "-q",
+    "--strict-markers",
+    "-n", "auto",
+    "--dist", "loadgroup",
+    "--tb", "short",
+    "--json-report",
+    "--json-report-file", ".test-results.json",
+    "--json-report-omit", "log", "keywords", "collectors",
+]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
 markers = [
     "slow: marks tests as slow",
     "integration: marks tests as integration tests",
     "optional_deps: tests that require optional dependencies",
     "xdist_group: group tests to run on the same xdist worker",
 ]
-```
-
-**Strict marker enforcement:** `--strict-markers` is in default addopts — unregistered markers cause errors.
-
-**Module-level markers:**
-```python
-# Skip entire module if dependency missing
-pytestmark = [
-    pytest.mark.skipif(not MOTO_AVAILABLE, reason="moto not installed"),
-    pytest.mark.skipif(not BOTO3_AVAILABLE, reason="boto3 not installed"),
-]
-
-# Group all tests in module for same xdist worker
-pytestmark = pytest.mark.xdist_group("docker")
-```
-
-**skipif pattern for optional deps:**
-```python
-@pytest.mark.skipif(not PANDAS_AVAILABLE, reason="Pandas not available")
-def test_pandas_dataframe_handler(self):
-    ...
-
-@pytest.mark.skipif(not _has_polars(), reason="Polars Series tests require polars")
-def test_polars_series_handler(self):
-    ...
-```
-
-**importorskip pattern:**
-```python
-pd = pytest.importorskip("pandas")
-```
-
-**Parametrization** (used in `tests/test_update_operations.py`, `tests/test_namespace_integration.py`, `tests/test_schema_versioning.py`):
-```python
-@pytest.mark.parametrize("backend", ["json", "sqlite"])
-def test_feature_across_backends(self, backend, tmp_path):
-    ...
-
-@pytest.mark.parametrize(
-    "input_data, expected",
-    [
-        ({"key": "value"}, True),
-        (42, True),
-        (None, False),
-    ],
-)
-def test_handler_variations(self, input_data, expected):
-    ...
-```
-
-## Parallel Test Execution (xdist)
-
-**Default config** (in `pyproject.toml`):
-```ini
-addopts = ["-n", "auto", "--dist", "loadgroup"]
-```
-
-**Worker distribution:** `loadgroup` — tests in the same `xdist_group` run on the same worker.
-
-**Docker resource grouping:**
-```python
-pytestmark = pytest.mark.xdist_group("docker")
-```
-All tests in `tests/test_docker_integration.py` share the same worker to avoid concurrent Docker container access conflicts.
-
-**Disable parallelism:** `uv run pytest ... -p no:xdist`
-
-## Test Categories
-
-**Unit Tests** (~majority of test suite):
-- Test individual classes/functions in isolation
-- Use `tmp_path`/`tempfile.TemporaryDirectory()` for filesystem isolation
-- Examples: `tests/test_core.py`, `tests/test_handlers.py`, `tests/test_metadata.py`, `tests/test_size_utils.py`
-
-**Integration Tests:**
-- Test multi-component interaction (cache + backend + handlers)
-- Examples: `tests/test_integration.py`, `tests/test_namespace_integration.py`, `tests/test_config_integration_example.py`
-
-**Docker Integration Tests** (require `docker-compose up -d`):
-- PostgreSQL backend operations
-- S3/Garage blob storage
-- Grouped via `@pytest.mark.xdist_group("docker")`
-- Example: `tests/test_docker_integration.py`
-
-**Property-Based Tests** (Hypothesis):
-- Random input generation for invariant verification
-- Handler round-trip, cache key determinism, metadata contract, compression round-trip
-- Example: `tests/test_property_based.py`
-
-**Stress Tests:**
-- Concurrent access patterns (multi-threaded put/get/delete)
-- Lock re-entrancy verification
-- Example: `tests/test_concurrency_stress.py`, `tests/test_sqlite_concurrency.py`
-
-**Fault Injection Tests:**
-- Simulate I/O failures, mid-operation crashes, data corruption
-- Use `unittest.mock.patch` to inject faults
-- Example: `tests/test_fault_injection.py`
-
-**Backend Parity Tests:**
-- Verify SQLite and PostgreSQL backends behave identically
-- Example: `tests/test_backend_parity.py`, `tests/test_backend_compatibility.py`
-
-**Schema Versioning Tests:**
-- Test schema migration across backend types
-- Examples: `tests/test_schema_versioning.py`, `tests/test_sqlite_schema_versioning.py`, `tests/test_json_schema_versioning.py`, `tests/test_pg_schema_versioning.py`
-
-## Test Class Organization
-
-**Pattern:** Group related tests into classes with descriptive names:
-```python
-class TestCacheConfig:
-    """Test CacheConfig class functionality."""
-
-    def test_default_config(self):
-        ...
-
-    def test_custom_config(self):
-        ...
-
-
-class TestCacheness:
-    """Test cacheness class functionality."""
-
-    @pytest.fixture
-    def temp_cache_dir(self):
-        ...
-
-    def test_put_get_roundtrip(self, temp_cache_dir):
-        ...
-```
-
-**Fixtures scoped to class:** Define fixtures as methods inside the class using `@pytest.fixture`.
-
-**Some files use module-level functions** instead of classes (e.g., `tests/test_docker_integration.py`):
-```python
-def test_postgresql_basic_operations(cacheness_cache_from_yaml):
-    ...
-```
-
-## Coverage
-
-**Configuration** (in `pyproject.toml`):
-```ini
-[tool.coverage.run]
-source = ["cacheness"]
-omit = ["*/tests/*", "*/test_*"]
-
-[tool.coverage.report]
-exclude_lines = [
-    "pragma: no cover",
-    "def __repr__",
-    "raise AssertionError",
-    "raise NotImplementedError",
-]
-```
-
-**Run coverage:**
-```bash
-uv run pytest tests/ --cov=cacheness --cov-report=html
-```
-
-**No enforced minimum** — coverage is informational, not gating.
-
-## Import Pattern for Tests
-
-**Critical gotcha:** `from cacheness import UnifiedCache` does NOT work for the `UnifiedCache` class directly. It is exported as `cacheness`:
-```python
-# Correct
-from cacheness import CacheConfig, cacheness
-from cacheness.core import UnifiedCache
-
-# Wrong
-from cacheness import UnifiedCache  # This does NOT work
-```
-
-**Standard test imports:**
-```python
-import pytest
-import tempfile
-import numpy as np
-from pathlib import Path
-from unittest.mock import patch, Mock
-
-from cacheness import CacheConfig, cacheness
-from cacheness.core import UnifiedCache
-from cacheness.config import CacheStorageConfig, CacheMetadataConfig, ...
-from cacheness.metadata import SqliteBackend, JsonBackend, create_metadata_backend
-from cacheness.storage import BlobStore
-```
-
-## Known Test Quirks
-
-**TensorFlow tests hang on Windows:**
-- `tests/test_tensorflow_handler.py` must always be excluded on Windows
-- Add `--ignore=tests/test_tensorflow_handler.py` to all test commands
-
-**Optional dependency skipping:**
-- Tests for Pandas, Polars, boto3, moto, psycopg gracefully skip when dependencies are missing
-- ~102 tests are typically skipped in a standard run (optional deps not installed)
-
-**`get()` is destructive on errors:**
-- Auto-deletes entries that fail to load (except transient IO errors)
-- Tests must account for this behavior — a failed `get()` removes the entry
-
-**Logging suppression:**
-- Default test log level is `WARNING` (set in `pyproject.toml`)
-- Deprecation and PendingDeprecation warnings are filtered out
-
-**Warning filters:**
-```ini
+log_cli = true
+log_cli_level = "WARNING"
 filterwarnings = [
     "ignore::DeprecationWarning",
     "ignore::PendingDeprecationWarning",
 ]
 ```
 
-## Tiered Testing Strategy
+**Key settings:**
+- `--strict-markers` — undefined markers are errors
+- `-n auto` — auto-detect CPU count for parallel
+- `--dist loadgroup` — respect `xdist_group` markers
+- `--tb short` — concise tracebacks
 
-During development, use tiered testing to minimize feedback loops:
+## Test Types
 
-| Tier | When | What to run | Time |
-|------|------|-------------|------|
-| **Tier 1** | After each code change | Tests directly exercising modified code | ~5-15s |
-| **Tier 2** | After all planned changes | Add regression-risk tests | ~30-60s |
-| **Full suite** | Once before push | All tests | ~48s parallel |
+**Unit Tests:**
+- Handler tests (`test_handlers.py`) — isolated handler put/get with real data
+- Config tests (`test_config_validation.py`) — dataclass validation
+- Schema tests (`test_sqlite_schema_versioning.py`, `test_json_schema_versioning.py`) — migration logic
+
+**Integration Tests:**
+- Core tests (`test_core.py`) — full put/get/delete through UnifiedCache
+- Storage mode tests (`test_storage_mode.py`) — no-eviction mode
+- Decorator tests (`test_decorators.py`) — `@cached` / `@cache_if` end-to-end
+
+**Cross-Backend Tests:**
+- `test_backend_parity.py` — same operations across JSON/SQLite/PostgreSQL
+- `test_backend_compatibility.py` — data portability between backends
+
+**Stress/Resilience Tests:**
+- `test_concurrency_stress.py` — multi-threaded race conditions
+- `test_fault_injection.py` — simulated I/O failures
+- `test_thread_safety.py` — concurrent put/get smoke tests
+
+**Property-Based Tests:**
+- `test_property_based.py` — Hypothesis-generated random data roundtrips
+
+## Common Test Patterns
+
+**Cache factory function per test file:**
+```python
+def _make_cache(tmp_path, backend="json"):
+    config = CacheConfig(
+        storage=CacheStorageConfig(cache_dir=str(tmp_path)),
+        metadata=CacheMetadataConfig(metadata_backend=backend),
+        compression=CompressionConfig(use_blosc2_arrays=False),
+    )
+    return cacheness(config)
+```
+
+**`use_blosc2_arrays=False`** in test configs — avoids optional-dependency failures and simplifies blob format assertions.
+
+**Error assertion:**
+```python
+with pytest.raises(ValueError, match="must be positive"):
+    CacheBlobConfig(max_inline_size=-1)
+
+with pytest.raises(CacheConfigurationError):
+    SecurityConfig(enable_content_encryption=True, enable_entry_signing=False)
+```
+
+**Round-trip verification:**
+```python
+cache.put(data, test_key="roundtrip")
+result = cache.get(test_key="roundtrip")
+assert result == data  # or np.array_equal for arrays
+```
+
+**Blob cleanup assertion:**
+```python
+blob_files = list(tmp_path.rglob("*.pkl*"))
+assert blob_files == [], f"Orphaned blob files: {blob_files}"
+```
 
 ---
 
-*Testing analysis: 2026-04-02*
+*Testing analysis: 2026-04-07*

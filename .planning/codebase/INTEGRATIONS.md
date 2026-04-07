@@ -1,218 +1,211 @@
 # External Integrations
 
-**Analysis Date:** 2026-04-02
+**Analysis Date:** 2026-04-07
 
-## Metadata Backends
+## APIs & External Services
 
-Cacheness supports three pluggable metadata backends, selected at cache creation time. All implement `MetadataBackend` ABC defined in `src/cacheness/metadata.py`.
+**No external API calls at runtime.** Cacheness is a local-first caching library. External services (S3, PostgreSQL) are optional backends configured by the user.
 
-**JSON Backend (built-in, no dependencies):**
-- Implementation: `src/cacheness/metadata.py` → `JsonBackend`
-- Storage: single JSON file per cache directory
-- Use case: <200 entries, development, NOT safe for concurrent access
-- Thread safety: file-level locking via `threading.Lock`
+## Data Storage
 
-**SQLite Backend (requires `sqlalchemy`):**
-- Implementation: `src/cacheness/metadata.py` → `SqliteBackend`
-- Storage: SQLite database file (e.g., `metadata.db`)
-- Use case: 200+ entries, production, multi-process safe
-- ORM: SQLAlchemy >=2.0 with declarative models
-- Custom metadata: SQLAlchemy models via `src/cacheness/custom_metadata.py` (`@custom_metadata_model` decorator)
-- Schema versioning: built-in migration system
-- Config example: `config/local_sqlite_fs.yaml`
+### Blob Storage Backends
 
-**PostgreSQL Backend (requires `psycopg`, `sqlalchemy`):**
-- Implementation: `src/cacheness/storage/backends/postgresql_backend.py` → `PostgresBackend`
-- Connection: SQLAlchemy `create_engine()` with connection pooling
-- Use case: distributed teams, multi-server caching
-- Features: SSL/TLS support, configurable pool size, automatic table creation with indexes
-- Config example: `config/test_config.yaml` → `metadata.metadata_backend_options.connection_url`
+All blob backends implement `BlobBackend` ABC from `src/cacheness/storage/backends/blob_backends.py`.
 
-**Backend registry:**
-- Registration: `register_metadata_backend()` in `src/cacheness/storage/backends/__init__.py`
-- Factory: `get_metadata_backend(name, **kwargs)` / `create_metadata_backend()`
-- Listing: `list_metadata_backends()`
+**Filesystem (default):**
+- Implementation: `FilesystemBlobBackend` in `src/cacheness/storage/backends/blob_backends.py`
+- Write path: `BlobStore._write_blob()` in `src/cacheness/storage/blob_store.py`
+- Features: atomic writes (temp file + rename), git-style directory sharding (configurable `shard_chars`, default 2)
+- Storage: local filesystem under `cache_dir` (default `./cache/default/`)
 
-## Blob Storage Backends
+**In-Memory:**
+- Implementation: `MemoryBlobBackend` in `src/cacheness/storage/backends/blob_backends.py`
+- Purpose: testing and ephemeral caches
+- Storage: Python dict in process memory
 
-Blob backends handle raw data storage, separate from metadata. All implement `BlobBackend` ABC defined in `src/cacheness/storage/backends/blob_backends.py`.
+**S3-Compatible:**
+- Implementation: `S3BlobBackend` in `src/cacheness/storage/backends/s3_backend.py`
+- SDK: `boto3>=1.26.0` (optional dependency, `cacheness[s3]`)
+- Supports: Amazon S3, MinIO, Garage (S3-compatible)
+- Auth: `aws_access_key_id` + `aws_secret_access_key` via backend options (never hardcoded)
+- Features: namespace-prefixed keys, integrity verification via S3 MD5 ETags
+- Config option: `blob_backend_options.endpoint_url` for non-AWS endpoints
+- Registration: `register_blob_backend("s3", S3BlobBackend)`
 
-**Filesystem Backend (built-in, default):**
-- Implementation: `src/cacheness/storage/backends/blob_backends.py` → `FilesystemBlobBackend`
-- Storage: local filesystem with configurable directory sharding (`shard_chars`)
-- Use case: single-machine caching, development
+**Inline Blob Storage:**
+- Implementation: `InlineBlobMixin` in `src/cacheness/_inline_blob_mixin.py`
+- Purpose: store small blobs directly in metadata DB (avoids filesystem I/O)
+- Config: `CacheBlobConfig.max_inline_size` (0 = disabled, recommended 4000 for SQLite, 2000 for PostgreSQL)
+- Stored as: base64-encoded column in metadata entry
+- Encryption: inline blobs are encrypted when content encryption is enabled
 
-**In-Memory Backend (built-in):**
-- Implementation: `src/cacheness/storage/backends/blob_backends.py` → `InMemoryBlobBackend`
-- Use case: testing only
+### Metadata Backends
 
-**S3-Compatible Backend (requires `boto3`):**
-- Implementation: `src/cacheness/storage/backends/s3_backend.py` → `S3BlobBackend`
-- Supports: Amazon S3, Garage, MinIO, any S3-compatible service
-- Features: namespace isolation via key prefixes, integrity verification (`S3IntegrityError`), configurable endpoint/region/SSL
-- Auth: `aws_access_key_id`, `aws_secret_access_key` passed via config or environment
-- Config example: `config/test_config.yaml` → `blob.blob_backend_options`
+All metadata backends implement `MetadataBackend` ABC from `src/cacheness/metadata/base.py`.
 
-**Backend registry:**
-- Registration: `register_blob_backend()` in `src/cacheness/storage/backends/blob_backends.py`
-- Factory: `get_blob_backend(name, **kwargs)`
-- Listing: `list_blob_backends()`
+**JSON Backend (simple, dev-only):**
+- Implementation: `JsonBackend` in `src/cacheness/metadata/json_backend.py`
+- Storage: single JSON file per namespace (`cache_metadata.json` / `{namespace}_metadata.json`)
+- Thread safety: `threading.Lock` per instance
+- Limitations: NOT safe for multi-process concurrency, O(n) scans, no schema migration
+- Best for: <200 entries, single-process use, development
 
-## Docker / Container Setup
+**SQLite Backend (production default):**
+- Implementation: `SqliteBackend` in `src/cacheness/metadata/sqlite_backend.py`
+- ORM: SQLAlchemy 2.0+ with declarative models
+- Database file: configurable `sqlite_db_file` (default `cache_metadata.db`)
+- Thread safety: `threading.Lock` + SQLite WAL mode journal
+- Schema versioning: migration system with version tracking per namespace
+  - v1 → v2: partial index on `metadata_dict IS NOT NULL`
+  - v2 → v3: `cacheness_version` column
+  - v3 → v4: `encryption_algorithm`, `encryption_iv`, `cacheness_version` columns (idempotent via `PRAGMA table_info`)
+- Migrations defined in: `src/cacheness/metadata/sqlite_backend.py` (`get_migrations()`)
+- Features: `query_meta()` fast path, `keys_by_prefix()` via SQL LIKE, batch operations
+- Best for: 200+ entries, production, multi-process
 
-**Docker Compose** (`docker-compose.yml`) provides two services for local development and integration testing:
+**PostgreSQL Backend (distributed):**
+- Implementation: `PostgresBackend` in `src/cacheness/storage/backends/postgresql_backend.py`
+- ORM: SQLAlchemy 2.0+ with psycopg3 adapter
+- Connection: `postgresql+psycopg://` URL via `metadata_backend_options.connection_url`
+- Adapter: `psycopg[binary]>=3.1.0` (optional dependency, `cacheness[postgresql]`)
+- Thread safety: SQLAlchemy connection pooling
+- Schema versioning: same v3→v4 migration as SQLite (encryption columns)
+- Migrations defined in: `src/cacheness/storage/backends/postgresql_backend.py` (`get_migrations()`)
+- Features: connection pooling, SSL/TLS support, optimized indexes
+- Best for: distributed teams, multi-server deployments
 
-**PostgreSQL:**
-- Image: `postgres:16-alpine`
-- Container: `cacheness-postgres`
-- Port: `5432:5432`
-- Database: `cacheness_test`
-- Healthcheck: `pg_isready -U cacheness`
-- Volume: `postgres_data` (persistent)
-- Network: `cacheness-network` (bridge)
+**ORM Models** shared across SQLite and PostgreSQL (`src/cacheness/metadata/_compat.py`):
+- `CacheEntryMixin` — per-namespace table with columns: `id`, `cache_key`, `file_path`, `data_type`, `file_hash`, `file_size_bytes`, `description`, `metadata_dict`, `signature`, `signed_fields_version`, `encryption_algorithm`, `encryption_iv`, `cacheness_version`, `inline_blob`, timestamps
+- `CacheStats` — cache hit/miss statistics
+- `CacheNamespace` — namespace registry with metadata
+- Dynamic table creation via `_get_namespace_models(namespace_id)`
 
-**Garage (S3-compatible object storage):**
-- Base image: `dxflrs/garage:v1.3.1` (multi-stage via `config/Dockerfile.garage`)
-- Runtime image: `alpine:3.19` with openssl
-- Container: `cacheness-garage`
-- Ports: `3900` (S3 API), `3903` (Admin API)
-- Init script: `config/garage-init.sh` — auto-configures layout, creates API keys, provisions buckets (`cache-bucket`, `test-bucket`)
-- Config: `config/garage.toml` — SQLite metadata engine, single-node replication, region `us-east-1`
-- Volumes: `garage_meta`, `garage_data` (persistent)
-- Network: `cacheness-network` (bridge)
+### Caching Layer (in-memory)
 
-**Setup tooling:**
-- `Makefile` — `make up`, `make down`, `make clean`, `make logs`
-- `scripts/setup_local_env.py` — automated environment setup script
-- `scripts/setup_local_env.bat` — Windows batch setup
+- Implementation: `CachedMetadataBackend` wrapper in `src/cacheness/metadata/base.py`
+- Uses: `cachetools` (LRU, LFU, FIFO, or random replacement)
+- Config: `CacheMetadataConfig.enable_memory_cache`, `memory_cache_type`, `memory_cache_maxsize`, `memory_cache_ttl_seconds`
+- Purpose: reduces disk I/O for metadata lookups (sits between application and disk backend)
 
-## S3-Compatible Cloud Storage
+## Authentication & Security
 
-**Integration points:**
-- Backend: `src/cacheness/storage/backends/s3_backend.py`
-- Client: `boto3` SDK
-- Tested with: Garage (local dev via Docker), moto (unit tests via `mock_aws`)
-- Config keys: `bucket`, `endpoint_url`, `aws_access_key_id`, `aws_secret_access_key`, `region_name`
-- Features: content-addressable storage, namespace isolation via key prefixes, SHA-256 integrity checks
+### Entry Signing (HMAC-SHA256)
 
-**Test infrastructure:**
-- Unit tests: `moto[s3]` mock (no real S3 needed) — `tests/conftest.py` → `mock_aws` fixture
-- Integration tests: Docker Garage container — `tests/conftest.py` → `get_s3_config()`
-- Docker group: tests using real S3/PostgreSQL are grouped via `@pytest.mark.xdist_group("docker")`
+- Implementation: `CacheEntrySigner` in `src/cacheness/security.py`
+- Algorithm: HMAC-SHA256 with version-based signed field lists
+- Key file: configurable `signing_key_file` (default `cache_signing_key.bin`)
+- Key generation: `secrets.token_bytes(32)` via `src/cacheness/security.py`
+- Key derivation: HKDF-SHA256 per-namespace keys (`_hkdf_sha256()` in `src/cacheness/security.py`)
+  - Info string: `b"cacheness-hmac-v1:" + namespace_id.encode()`
+- Signed fields (v2): `cache_key`, `data_type`, `file_hash`, `file_size_bytes`, `file_path`, `description`
+- Verification: on every `get()` call when `enable_entry_signing=True`
+- Key fallback policy: `"raise"` | `"warn"` | `"fallback"` — configurable via `SecurityConfig.key_fallback_policy`
+- Key rotation: `UnifiedCache.rotate_signing_key()` re-signs all entries with new key
 
-## PostgreSQL Integration
+### Encryption at Rest (AES-256-GCM)
 
-**Integration points:**
-- Backend: `src/cacheness/storage/backends/postgresql_backend.py`
-- Client: `psycopg` (psycopg3) via SQLAlchemy engine
-- Connection string format: `postgresql+psycopg://user:pass@host:port/db`
+- Implementation: `src/cacheness/encryption.py`
+- Algorithm: AES-256-GCM authenticated encryption (12-byte random IV per blob)
+- Key derivation: HKDF-SHA256 per-namespace encryption keys
+  - Info string: `b"cacheness-aes-gcm-v1:" + namespace_id.encode()`
+  - Master key: 32-byte key from `encryption_key_file` (reuses signing key by default)
+- Dependency: `cryptography>=41.0.0` (optional, `cacheness[encryption]`)
+- Integration points:
+  - Blob writes: `BlobStore._write_blob()` encrypts between handler compression and backend write
+  - Blob reads: `BlobStore._read_blob()` decrypts between backend read and handler decompression
+  - Inline blobs: `InlineBlobMixin._try_inline_write()` encrypts before DB storage
+- Metadata fields: `encryption_algorithm`, `encryption_iv` stored per entry (schema v4)
+- Key rotation: `UnifiedCache.rotate_signing_key()` also re-encrypts all blobs with new key
+- Config validation: prevents unsafe combos (encryption without signing, in-memory key with encryption)
 
-**Test infrastructure:**
-- Integration tests: Docker PostgreSQL container
-- Connection config: `tests/conftest.py` → `get_postgres_url()` reads from env vars with fallback defaults
-- Environment variables: `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB`
+### Key File Security
 
-## Data Serialization Integrations
+- Key file permissions:
+  - Unix: `os.chmod(path, 0o600)` — owner-only read/write
+  - Windows: `icacls` — removes inherited permissions, grants owner full control (`src/cacheness/security.py`)
+- Key file location: inside cache directory by default
+- In-memory keys: `SecurityConfig.use_in_memory_key=True` for testing (not compatible with encryption)
 
-**Type-aware handlers** in `src/cacheness/handlers.py` and `src/cacheness/storage/handlers/__init__.py`:
+## File Integrity
 
-| Handler | Data Type | Serialization Format | Library |
-|---------|-----------|---------------------|---------|
-| `ArrayHandler` | NumPy arrays | blosc2 compressed tensor | `numpy`, `blosc2` |
-| `PandasDataFrameHandler` | Pandas DataFrames | Parquet via PyArrow | `pandas`, `pyarrow` |
-| `PandasSeriesHandler` | Pandas Series | Parquet via PyArrow | `pandas`, `pyarrow` |
-| `PolarsDataFrameHandler` | Polars DataFrames | Parquet | `polars`, `pyarrow` |
-| `BytesHandler` | bytes/bytearray/memoryview | Raw (no serialization) | stdlib |
-| `ObjectHandler` | Generic Python objects | pickle/dill + blosc2 compression | `pickle`, `dill`, `blosc2` |
-| `TensorHandler` | TensorFlow tensors | TF-native format | `tensorflow` |
+**xxHash-based file hashing:**
+- Algorithm: xxh3_64 (fast, non-cryptographic)
+- Implementation: `src/cacheness/file_hashing.py`
+- Used for: blob integrity verification, content-addressable storage
+- Parallel hashing: `ProcessPoolExecutor` for large directories
+- Hash stored in: `file_hash` column in metadata entry (encrypted ciphertext is hashed, not plaintext)
 
-**Handler registry:** `HandlerRegistry` in `src/cacheness/handlers.py` — auto-detects type and dispatches to appropriate handler.
+**Write Intent Journal:**
+- Implementation: `WriteIntentJournal` in `src/cacheness/write_intent.py`
+- Purpose: crash-safe blob writes — records intent before blob write, removes after metadata commit
+- Stale intent cleanup: orphaned intents older than `stale_intent_threshold_seconds` (default 300s) are cleaned on cache init
+- Storage: `.intents/` subdirectory under cache dir
 
-## Compression Integrations
-
-Compression support in `src/cacheness/compress_pickle.py` and `src/cacheness/storage/compression.py`:
-
-| Codec | Library | Notes |
-|-------|---------|-------|
-| blosc2/blosclz | `blosc2` | Default, fastest for arrays |
-| lz4 | `blosc2` | Very fast |
-| lz4hc | `blosc2` | High compression variant |
-| zstd | `blosc2` | Excellent ratio |
-| zlib | `blosc2` | Standard |
-| gzip | stdlib | Fallback |
-| snappy | `blosc2` | Google's fast compressor |
-
-## Security Integrations
-
-**Cryptographic signing** (`src/cacheness/security.py`):
-- Algorithm: HMAC-SHA256
-- Purpose: cache entry integrity verification (tamper detection)
-- Key management: auto-generated key files, key rotation support
-- Signature versioning: version-based signed field lists for safe schema evolution
-- Uses stdlib `hmac`, `hashlib`, `secrets`
-
-**File integrity:**
-- xxhash-based file hashing (`src/cacheness/file_hashing.py`)
-- Parallel directory hashing via `ProcessPoolExecutor`
-
-## Authentication & Identity
-
-- No auth provider — Cacheness is a library, not a service
-- S3 auth: AWS credential pairs passed via config
-- PostgreSQL auth: connection string credentials
-- Cache signing keys: local binary files (auto-generated)
-
-## CI/CD & Deployment
-
-**CI Pipeline:**
-- No CI config files detected in the repository (no `.github/workflows/`, no `.gitlab-ci.yml`)
-- Quality gates run locally via pre-commit hooks and manual scripts
-
-**Deployment:**
-- Distributed as a Python package via `uv_build`
-- pip-installable: `pip install cacheness` or `pip install cacheness[cloud]`
+**Integrity Verification:**
+- Implementation: `VerificationMixin` in `src/cacheness/_verification_mixin.py`
+- `verify_integrity()` detects: orphaned blobs, dangling metadata, hash mismatches, signature failures
+- `verify_integrity(verify_signatures=True)` also checks HMAC signatures
+- Returns: `IntegrityReport` dataclass (`src/cacheness/interfaces.py`)
 
 ## Monitoring & Observability
 
-**Logging:**
-- Framework: Python stdlib `logging`
-- All modules create module-level loggers: `logger = logging.getLogger(__name__)`
-- Test log level: WARNING (configurable via `--log-cli-level`)
+**Error Tracking:**
+- No external error tracking service
+- Custom exception hierarchy in `src/cacheness/error_handling.py`:
+  `CacheError` → `CacheConfigurationError`, `CacheStorageError`, `CacheSerializationError`, `CacheHandlerError`, `CacheIntegrityError`, `CacheMetadataError`, `CacheSecurityError`, `CacheBackendError`
 
-**Error tracking:**
-- Custom exception hierarchy in `src/cacheness/error_handling.py`: `CacheError` base with context dict
-- Handler-specific errors: `CacheWriteError`, `CacheReadError`, `CacheFormatError` in `src/cacheness/interfaces.py`
-- S3 integrity errors: `S3IntegrityError` in `src/cacheness/storage/backends/s3_backend.py`
+**Logs:**
+- Python `logging` module throughout
+- Logger names: `cacheness.core`, `cacheness.security`, `cacheness.encryption`, etc.
+- Test config: `log_cli_level = "WARNING"` (override with `--log-cli-level=INFO`)
 
-**Metrics:**
-- Built-in cache statistics: `cache.get_stats()` — hit/miss rates, entry counts, size
-- Integrity reports: `IntegrityReport` dataclass in `src/cacheness/interfaces.py`
+**Lifecycle Hooks:**
+- `HooksConfig.on_evict(cache_key, reason)` — called on entry eviction
+- `HooksConfig.on_integrity_failure(cache_key, failure_type, detail)` — called on hash/signature failures
+- Hooks are synchronous, exceptions are swallowed
+
+## CI/CD & Deployment
+
+**Hosting:**
+- Library published as Python package (no hosted deployment)
+
+**CI Pipeline:**
+- No CI/CD config in repository (local development only)
+- Quality gates: `scripts/quality-check.ps1` / `scripts/quality-check.sh`
+- Pre-commit hook: `scripts/hooks/pre-commit` (auto-runs ruff format + check)
+
+**Docker (testing only):**
+- `docker-compose.yml` at repo root
+- PostgreSQL 16 Alpine — metadata backend testing (port 5432)
+- Garage (S3-compatible) — blob backend testing (port 3900 S3 API, port 3903 admin)
+- NOT for production — hardcoded test credentials
 
 ## Environment Configuration
 
-**Required env vars:** None (all have sensible defaults)
+**Required env vars:**
+- None — all config is via Python objects or config files
 
-**Optional env vars for integration testing:**
-- `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB` — PostgreSQL connection
-- `S3_ENDPOINT_URL`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET`, `S3_REGION` — S3 connection
+**Optional env vars:**
+- Standard AWS env vars (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_DEFAULT_REGION`) — used by boto3 if S3 backend is configured without explicit credentials
 
 **Config files:**
-- `config/test_config.yaml` — PostgreSQL + S3 Garage (full integration)
-- `config/test_config.json` — same as YAML in JSON format
-- `config/local_sqlite_fs.yaml` — SQLite + filesystem (no Docker needed)
-- `config/garage.toml` — Garage S3 server configuration
-- `config/Dockerfile.garage` — multi-stage Dockerfile for Garage container
+- `config/test_config.json` — JSON test config (PostgreSQL + Garage S3)
+- `config/test_config.yaml` — YAML test config (same as JSON)
+- `config/local_sqlite_fs.yaml` — Local SQLite + filesystem config
+- `config/garage.toml` — Garage S3 server config
+- `config/Dockerfile.garage` — Garage Docker image build
 
 ## Webhooks & Callbacks
 
-**Incoming:** None
+**Incoming:** None — this is a library, not a service
 
-**Outgoing:** None
+**Outgoing:** None — no external API calls at runtime
 
-**Hook system:**
-- `HooksConfig` in `src/cacheness/config.py` — internal lifecycle hooks (not external webhooks)
-- Git hooks: `scripts/hooks/` — pre-commit quality checks, bd sync
+**Internal callbacks:**
+- `HooksConfig.on_evict` — eviction notification
+- `HooksConfig.on_integrity_failure` — integrity failure notification
+- Custom metadata models via `@custom_metadata_model` decorator (`src/cacheness/custom_metadata.py`)
 
 ---
 
-*Integration audit: 2026-04-02*
+*Integration audit: 2026-04-07*

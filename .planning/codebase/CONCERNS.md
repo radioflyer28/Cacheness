@@ -1,215 +1,248 @@
 # Codebase Concerns
 
-**Analysis Date:** 2026-04-02
+**Analysis Date:** 2026-04-07
+**Codebase Version:** v0.11.0 (post Cross-Backend Hardening milestone)
+
+## Resolved Since Last Audit (v0.7.0–v0.11.0)
+
+The following concerns from the 2026-04-02 audit have been resolved:
+
+- **Broad `except Exception` usage** — All 60+ instances annotated with `# intentionally broad` and justification (v0.7.0). New error types `CacheSecurityError`, `CacheBackendError` added.
+- **`core.py` monolith (3,307 lines)** — Decomposed into 12 mixins + core (v0.7.0, Phase 3). Core is now 1,217 lines.
+- **`metadata.py` monolith (2,562 lines)** — Split into `metadata/` package: `base.py`, `json_backend.py`, `sqlite_backend.py`, `_compat.py` (v0.7.0, Phase 2).
+- **`handlers.py` monolith (1,425 lines)** — Split into `handlers/` package: 11 files (v0.7.0, Phase 1).
+- **Thread safety (`_lock` inconsistency)** — Confirmed `RLock` is acquired in put/get and 22+ methods. Docs corrected (v0.8.0).
+- **Crash safety** — `WriteIntentJournal` records intent before blob write, cleans stale intents on init (v0.8.0, Phase 8).
+- **Signing key permissions on Windows** — `icacls` used on Windows, `chmod 0o600` on Unix (v0.9.0, Phase 14).
+- **Shared signing key across namespaces** — HKDF-SHA256 key derivation per namespace is now default (`use_hkdf_derivation=True`) (v0.10.0).
+- **Key fallback behavior** — Configurable via `key_fallback_policy` ("raise"/"warn"/"fallback") (v0.10.0, Phase 15).
+- **Encryption at rest** — AES-256-GCM with random 12-byte IV per blob, HKDF-derived per-namespace keys (v0.10.0).
+- **Encryption schema in metadata** — `encryption_algorithm`, `encryption_iv`, `cacheness_version` columns added to SQLite/PG (v0.11.0, Phase 23).
+- **Cross-backend encryption parity** — Parametrized tests across JSON/SQLite/PostgreSQL backends (v0.11.0, Phase 24).
+- **Config validation** — Bad combos (encryption without signing, encryption without key file) caught at construction time (v0.11.0, Phase 26).
+
+---
 
 ## Tech Debt
 
-**No TODO/FIXME/HACK/XXX markers found in source code.**
-A grep across `src/cacheness/**/*.py` (including ignored files) returned zero results for these comment markers, indicating either disciplined maintenance or that issues are tracked externally (beads issue tracker).
+### High Severity
 
 **JSON backend O(n²) scaling:**
-- Issue: `JsonBackend._save_to_disk()` re-serializes the entire metadata file on every write operation.
-- Files: `src/cacheness/metadata.py` (line ~1130)
-- Impact: Write performance degrades quadratically with cache size. With 500+ entries, individual writes take seconds instead of milliseconds.
-- Fix approach: Documented as a known limitation. Mitigation: switch to SQLite backend for >200 entries. No incremental write support planned for JSON.
+- Issue: `JsonBackend._save_to_disk()` re-serializes the entire metadata file on every write. `_load_from_disk()` loads the full file into memory on init.
+- Files: `src/cacheness/metadata/json_backend.py` (lines 74–106)
+- Impact: Write performance degrades quadratically with entry count. At 500+ entries, individual writes take seconds. Memory usage grows linearly.
+- Fix approach: Known limitation — documented in `docs/TROUBLESHOOTING.md`. Recommended mitigation: switch to SQLite for >200 entries. No incremental write support planned for JSON.
 
-**Broad `except Exception` usage:**
-- Issue: Over 30 instances of `except Exception` across source files, particularly in `src/cacheness/core.py` (~15 instances), `src/cacheness/compress_pickle.py` (~10 instances), and `src/cacheness/custom_metadata.py` (~6 instances). Many swallow errors with only logging.
-- Files: `src/cacheness/core.py`, `src/cacheness/compress_pickle.py`, `src/cacheness/custom_metadata.py`
-- Impact: Can mask bugs, make debugging difficult, and silently degrade correctness. For example, `_init_auto_backend()` catches all exceptions when trying SQLite and silently falls back to JSON.
-- Fix approach: Narrow exception types where possible; ensure swallowed exceptions are logged at DEBUG or WARNING level (most already are).
+**Deprecated API surface still present:**
+- Issue: Three deprecated APIs remain in the codebase without removal timeline.
+- Files:
+  - `src/cacheness/config.py` (line 408): `raise_on_key_fallback` — deprecated in favor of `key_fallback_policy`
+  - `src/cacheness/config.py` (line 661): `store_cache_key_params` — deprecated in favor of `store_full_metadata`
+  - `src/cacheness/_custom_metadata_mixin.py` (line 342): `query_custom_metadata()` — deprecated in favor of `query_custom()`
+- Impact: Increases API surface, confuses new users, complicates documentation.
+- Fix approach: Add deprecation timeline (e.g., remove in v1.0). Emit `DeprecationWarning` consistently (already done for two of three).
 
-## Known Issues and Workarounds
+### Medium Severity
 
-**`get()` is destructive on errors (default behavior):**
-- Issue: When `delete_on_error=True` (the default), `get()` auto-deletes entries that fail to load due to deserialization failures, corruption, or handler mismatches.
-- Files: `src/cacheness/core.py` (lines ~2127, ~2268)
-- Workaround: Set `CacheMetadataConfig(delete_on_error=False)` to preserve entries and return `None` instead. In `storage_mode=True`, entries are never deleted regardless of this setting.
+**`postgresql_backend.py` is 1,410 lines:**
+- Issue: Largest file in the codebase. Combines the PostgreSQL metadata backend, schema migrations, namespace management, query optimization, and connection pool handling.
+- Files: `src/cacheness/storage/backends/postgresql_backend.py`
+- Impact: Difficult to navigate and modify. Changes in migration logic risk breaking query paths.
+- Fix approach: Could split into `pg_backend.py` + `pg_migrations.py` + `pg_namespace.py`, following the pattern used for `metadata/` split.
 
-**Orphaned blob files after crashes:**
-- Issue: Hard crashes between blob write and metadata write leave orphaned blob files on disk. Cacheness writes blobs first, then metadata.
-- Files: `src/cacheness/core.py` (`_PutCleanup` class), `src/cacheness/storage/blob_store.py`
-- Workaround: Run `cache.verify_integrity(repair=True)` periodically to detect and clean orphaned blobs. The `_PutCleanup` class handles rollback during normal exceptions, but not process kills.
+**`config.py` is 1,253 lines — large dataclass constellation:**
+- Issue: Contains 7+ dataclasses (`CacheMetadataConfig`, `StorageConfig`, `CompressionConfig`, `SerializationConfig`, `HandlerConfig`, `SecurityConfig`, `CacheConfig`) plus factory functions and convenience builders.
+- Files: `src/cacheness/config.py`
+- Impact: Finding a specific config option requires scanning 1,200+ lines. Adding new config requires modifying a very large file.
+- Fix approach: Split into `config/` package by area (storage, security, handlers, etc.) if it continues growing.
 
-**Cache key collisions with `**kwargs`:**
-- Issue: `_create_cache_key()` must carefully strip `prefix`, `description`, `custom_metadata`, `ttl_seconds` before hashing. Failure to strip new control parameters is a recurring bug pattern.
+**`ast.literal_eval` for shape parsing in numpy handler:**
+- Issue: `ast.literal_eval(shape_str)` is used to reconstruct NumPy array shapes from stored strings at two sites. While `literal_eval` is safe (only evaluates literals), the input comes from file bytes read from disk.
+- Files: `src/cacheness/handlers/numpy_array.py` (lines 167, 282)
+- Impact: Minimal security risk (`literal_eval` is safe), but if the binary format header is corrupted, the error message is unhelpful.
+- Fix approach: Add explicit validation that the parsed result is a tuple of ints.
+
+### Low Severity
+
+**`type: ignore` annotations in metadata ORM layer:**
+- Issue: 6 `type: ignore[no-redef]` and 1 `type: ignore[arg-type]` in `metadata/_compat.py` for fallback class definitions when SQLAlchemy is unavailable.
+- Files: `src/cacheness/metadata/_compat.py` (lines 197, 312–327)
+- Impact: Type checker noise. The pattern is intentional (conditional imports), but tools report these as issues.
+- Fix approach: Consider `TYPE_CHECKING` guard or Protocol-based stubs to satisfy type checkers.
+
+---
+
+## Known Bugs / Limitations
+
+**`get()` is destructive on errors (by design):**
+- Issue: With `delete_on_error=True` (default), `get()` auto-deletes entries that fail deserialization. This prevents retry if the failure was transient (e.g., file locked).
+- Files: `src/cacheness/core.py`
+- Workaround: Set `CacheMetadataConfig(delete_on_error=False)` to preserve entries and return `None`.
+- In `storage_mode=True`, entries are never deleted regardless.
+
+**Orphaned blob files after hard crashes:**
+- Issue: A hard crash (kill -9, power loss) between blob write and metadata commit leaves orphaned blobs. The `WriteIntentJournal` (v0.8.0) catches most cases, but intents are not fsynced — a kernel crash before intent flush can still leave orphans.
+- Files: `src/cacheness/write_intent.py`, `src/cacheness/storage/blob_store.py`
+- Workaround: Run `cache.verify_integrity(repair=True)` periodically.
+
+**Cache key fragility with new `put()` parameters:**
+- Issue: `_create_cache_key()` strips known control parameters (`prefix`, `description`, `custom_metadata`, `ttl_seconds`) before hashing. Adding a new named parameter to `put()` without adding it to the strip list silently changes all cache keys.
 - Files: `src/cacheness/serialization.py`, `src/cacheness/core.py`
-- Workaround: Critical bug pattern documented in copilot-instructions. All new parameters must be added to the strip list.
+- Mitigation: Documented in `.github/copilot-instructions.md` as a critical bug pattern.
 
-**`UnifiedCache._lock` consistently acquired (resolved in v0.9.0):**
-- ~~Issue: `_lock` inconsistently acquired~~ — Investigation found `_lock` IS acquired in put/get and 22+ other methods. TROUBLESHOOTING.md and API_REFERENCE.md corrected.
-- Files: `src/cacheness/core.py`, `docs/API_REFERENCE.md`, `docs/TROUBLESHOOTING.md`
-- Status: **Resolved** — documentation was wrong, code was correct.
+**TensorFlow handler disabled:**
+- Issue: `TensorFlowTensorHandler` exists and is fully implemented, but is commented out in `HandlerRegistry` due to system compatibility issues (hangs on Windows, import side effects).
+- Files: `src/cacheness/handlers/registry.py` (lines 79–84, 110–112), `src/cacheness/handlers/tensorflow_tensor.py`
+- Impact: Users must install TensorFlow and manually enable via config — but even then the handler is not registered. Tests are in `tests/test_tensorflow_handler.py` (always ignored on Windows).
+- Documented: `docs/TENSORFLOW_HANDLER_STATUS.md`
+
+---
 
 ## Security Considerations
 
-**Pickle/dill deserialization of untrusted data (documented in v0.9.0):**
-- Risk: `pickle.loads()` and `dill.loads()` can execute arbitrary code during deserialization.
-- Files: `src/cacheness/compress_pickle.py`, `src/cacheness/handlers/object_handler.py`
-- Current mitigation: 3-layer defense: file_hash (xxhash) integrity check → HMAC-SHA256 metadata signing → signature verification before deserialization. Security comments added at all 5 deserialization sites.
-- Status: **Documented** in `docs/SECURITY.md` "Deserialization Security" section with full threat model.
+### Addressed
 
-**Signing key file permissions — cross-platform (resolved in v0.9.0):**
-- ~~Risk: `chmod(0o600)` is a no-op on Windows~~
-- Files: `src/cacheness/security.py` (`_set_key_file_permissions` static method)
-- Current mitigation: Cross-platform permission setting: Unix uses `chmod(0o600)`, Windows uses `icacls` to remove inheritance and grant only the current user `(R,W)`.
-- Status: **Resolved** in v0.9.0.
+| Feature | Status | Files |
+|---------|--------|-------|
+| HMAC-SHA256 metadata signing | ✅ v1/v2/v3 signatures, versioned | `src/cacheness/security.py` |
+| HKDF per-namespace key derivation | ✅ Default on (`use_hkdf_derivation=True`) | `src/cacheness/security.py` |
+| AES-256-GCM blob encryption | ✅ Optional (`enable_content_encryption`) | `src/cacheness/encryption.py` |
+| Key rotation | ✅ `rotate_signing_key()` re-signs all entries | `src/cacheness/core.py`, `src/cacheness/storage/blob_store.py` |
+| Config validation | ✅ Bad combos caught at construction | `src/cacheness/config.py` |
+| Cross-platform key permissions | ✅ Unix `chmod 0o600`, Windows `icacls` | `src/cacheness/security.py` |
+| Deserialization security docs | ✅ 5 call sites annotated, SECURITY.md | `src/cacheness/compress_pickle.py`, `src/cacheness/handlers/object_handler.py` |
 
-**Shared signing key across namespaces:**
-- Risk: All namespaces sharing the same `cache_dir` share the same signing key by default. No cryptographic isolation between tenants.
-- Files: `src/cacheness/security.py`, config at `src/cacheness/config.py`
-- Current mitigation: Documented in `docs/SECURITY.md`. Users can configure per-namespace `signing_key_file` names.
-- Recommendations: Consider per-namespace key derivation (e.g., HKDF from master key + namespace ID) as a default.
+### Remaining Considerations
 
-**Fallback to in-memory key on disk errors:**
-- Risk: If the signing key file cannot be written, `_generate_new_key()` silently falls back to an in-memory key. This means existing entries will fail verification, and new entries will be signed with a transient key.
-- Files: `src/cacheness/security.py` (lines ~155-160)
-- Current mitigation: Warning logged. The system continues to function.
-- Recommendations: Consider raising an error instead of silently degrading, or at least make the fallback behavior configurable.
+**Pickle/dill deserialization of untrusted data (inherent risk):**
+- Risk: `pickle.loads()` (4 sites in `compress_pickle.py`, 1 in `object_handler.py`) and `dill.loads()` (2 sites) can execute arbitrary code.
+- Files: `src/cacheness/compress_pickle.py` (lines 204, 895, 898, 901), `src/cacheness/handlers/object_handler.py` (lines 232, 260, 391, 392)
+- Current mitigation: 3-layer integrity chain (xxhash → HMAC → signature verification) runs before deserialization. Security comments at all sites. Documented in `docs/SECURITY.md`.
+- Residual risk: If an attacker can write to the cache directory AND knows/compromises the signing key, they can inject malicious pickled objects. This is inherent to any pickle-based cache.
 
-## Performance Concerns
+**`subprocess.run` for Windows ACL:**
+- Risk: `os.getlogin()` result is interpolated into an `icacls` command array. This is safe (array form, not shell string), but `os.getlogin()` can fail in non-interactive contexts (services, containers).
+- Files: `src/cacheness/security.py` (lines 233–245)
+- Impact: Key file permissions may not be set in headless Windows environments. Logged as warning, not fatal.
 
-**`core.py` is 3,307 lines — monolithic coordination module:**
-- Problem: The main `UnifiedCache` class in `src/cacheness/core.py` is over 3,300 lines. It handles initialization, put, get, metadata management, blob storage delegation, entry signing, integrity verification, custom metadata, namespace management, statistics, and eviction.
-- Files: `src/cacheness/core.py`
-- Impact: Difficult to navigate, test, and modify. Changes in one area (e.g., eviction) risk breaking another (e.g., put/get). High merge-conflict risk.
-- Improvement path: Extract coherent concerns into mixins or delegate classes (e.g., `_CacheVerifier`, `_CacheStatistics`).
+**No metadata encryption for SQLite:**
+- Risk: SQLite metadata databases store cache keys, timestamps, data types, custom metadata, and encryption IVs in plaintext. Blob encryption protects blob content but metadata is still readable.
+- Files: `src/cacheness/metadata/sqlite_backend.py`
+- Mitigation: Use a separate encrypted filesystem, or wait for potential libSQL backend with built-in `encryption_key` support (see `docs/LIBSQL_BACKEND.md`).
 
-**`metadata.py` is 2,562 lines — three backend implementations in one file:**
-- Problem: JSON, SQLite, and PostgreSQL backend implementations coexist in a single file.
-- Files: `src/cacheness/metadata.py`
-- Impact: Lengthy file, hard to navigate. Backend-specific changes require working through unrelated code.
-- Improvement path: Split into `metadata/json_backend.py`, `metadata/sqlite_backend.py`, `metadata/pg_backend.py` with shared base in `metadata/base.py`.
+---
 
-**JSON backend loads entire file into memory:**
-- Problem: `_load_from_disk()` reads and parses the complete JSON metadata file on every backend initialization. Each write re-serializes the entire structure.
-- Files: `src/cacheness/metadata.py` (lines ~1110-1130)
-- Cause: JSON has no incremental update capability.
-- Improvement path: Already mitigated by recommending SQLite for >200 entries. Not worth fixing in JSON backend.
+## Performance Bottlenecks
+
+**JSON backend full-file rewrite:**
+- Problem: Every `put_entry()` triggers `_save_to_disk()` which serializes and writes the entire metadata dict.
+- Files: `src/cacheness/metadata/json_backend.py` (lines 74–106)
+- Cause: JSON format has no random-access update capability.
+- Recommendation: Use SQLite backend for any cache with >200 entries.
+
+**`_normalize_function_args` uses `inspect.signature` on every decorator call:**
+- Problem: `inspect.signature(func)` is called on every cached function invocation to normalize positional/keyword arguments for consistent cache keys.
+- Files: `src/cacheness/core.py` (lines 42–74)
+- Impact: Measured overhead is small (~microseconds) but adds up in tight loops with many cached function calls.
+- Improvement path: Could cache the signature per function (keyed by `id(func)`).
+
+**Handler `can_handle()` chain:**
+- Problem: `HandlerRegistry.get_handler()` iterates all registered handlers calling `can_handle()` until one matches. Some handlers import optional libraries in `can_handle()`.
+- Files: `src/cacheness/handlers/registry.py`
+- Impact: Negligible for typical use (5–8 handlers), but lazy TensorFlow import avoidance required special early-return checks in `can_handle()`.
+- Mitigation: Handlers are priority-sorted. The common types (DataFrame, ndarray) match early.
+
+---
 
 ## Fragile Areas
 
 **Handler type detection ordering:**
-- Files: `src/cacheness/handlers.py` (1,425 lines)
-- Why fragile: `HandlerRegistry` iterates handlers in registration order and uses the first `can_handle()` match. Adding a new handler that matches broadly (e.g., anything with `.dtype`) can shadow existing handlers. The TensorFlow handler uses elaborate early-return checks to avoid accidentally matching numpy arrays.
-- Safe modification: Always add specific handlers before generic ones. Test with all data types after adding/modifying handlers.
-- Test coverage: `tests/test_handlers.py` provides good coverage, but edge cases with overlapping type detection are easy to miss.
+- Files: `src/cacheness/handlers/registry.py`, individual handler `can_handle()` methods
+- Why fragile: Priority-based handler selection means a new handler with a broad `can_handle()` can shadow specific handlers. TensorFlow tensor handler needed elaborate early returns to avoid matching numpy arrays.
+- Safe modification: Always assign higher priority numbers (lower priority) to generic handlers. Test with all data types.
+- Test coverage: `tests/test_handlers.py` covers priority and conflict detection.
 
-**`_create_cache_key()` parameter stripping:**
-- Files: `src/cacheness/serialization.py`, `src/cacheness/core.py`
-- Why fragile: New named parameters added to `put()` must also be added to the strip list in `_create_cache_key()`. Missing a parameter causes it to be included in the cache key, breaking key stability.
-- Safe modification: Add new parameter to the strip list AND add a test that verifies the key doesn't change when the parameter varies.
-- Test coverage: Covered in `tests/test_core.py`, but regressions are easy if the checklist is missed.
+**Mixin diamond inheritance in `UnifiedCache`:**
+- Files: `src/cacheness/core.py` (lines 86–99)
+- Why fragile: `UnifiedCache` inherits from 12 mixins. All mixins access `self.metadata_backend`, `self.blob_store`, `self._lock`, `self.signer`, and `self.config` via `self`. A mixin that accidentally shadows one of these attributes breaks all other mixins.
+- Safe modification: Mixins should never define `__init__`. All shared state is initialized in `UnifiedCache.__init__`.
+- Test coverage: Full test suite exercises all mixin methods through `UnifiedCache`.
 
-**Atomic write pattern on Windows:**
-- Files: `src/cacheness/metadata.py` (line ~1152, `shutil.move`), `src/cacheness/storage/backends/blob_backends.py` (line ~292)
-- Why fragile: Atomic rename (`shutil.move`) is not truly atomic on Windows if source and destination are on different volumes. `NamedTemporaryFile` behavior differs between Windows and Unix. File handle cleanup requires explicit `gc.collect()` and sleep delays in tests.
-- Safe modification: See `docs/WINDOWS_COMPATIBILITY.md` for patterns. Always use `delete=False` with `NamedTemporaryFile` on Windows.
-- Test coverage: Platform-specific fixtures in `tests/conftest.py` handle cleanup ordering.
-
-## Missing Features / Incomplete Implementations
-
-**TensorFlow handler disabled:**
-- What's missing: The `TensorFlowTensorHandler` is fully implemented but disabled due to system compatibility issues. TF tests hang on Windows and must always be ignored.
-- Files: `src/cacheness/handlers.py` (line ~74, lazy import), `docs/TENSORFLOW_HANDLER_STATUS.md`
-- Impact: TensorFlow tensor caching is not reliably available. Users must handle TF serialization manually.
-- Priority: Low — TF is a heavy optional dependency.
-
-**No async/await support:**
-- What's missing: All cache operations are synchronous. No `AsyncUnifiedCache` exists.
-- Files: Documented in `docs/FUTURE_IMPROVEMENTS.md`
-- Impact: Cannot efficiently integrate with async web frameworks (FastAPI, aiohttp). Concurrent I/O operations cannot overlap.
-- Priority: High — documented as a key future improvement.
-
-**No advanced eviction policies:**
-- What's missing: Only TTL-based eviction. No LRU, LFU, or size-based eviction.
-- Files: `src/cacheness/core.py` (eviction logic scattered through `_cleanup_expired()`)
-- Impact: Cannot bound cache size by disk usage or entry count. Users must manage eviction externally.
-- Priority: Medium-High — documented in `docs/FUTURE_IMPROVEMENTS.md`.
-
-**Management operations (resolved in v0.9.0):**
-- ~~What's missing: Various management APIs~~ — All APIs now implemented: `put()`, `get()`, `update_data()`, `touch()`, `get_metadata()`, `put_batch()`, `get_batch()`, `delete_batch()`, `touch_batch()`, `delete_by_prefix()`, `delete_where()`, `delete_matching()`.
-- Status: **Resolved** — `put_batch()` added in v0.9.0, all others already existed.
-
-## Platform-Specific Issues
-
-**Windows file locking:**
-- Issue: Windows has stricter file locking semantics. SQLite database files cannot be deleted while connections are open. `NamedTemporaryFile` keeps file handles open by default.
-- Files: `src/cacheness/core.py` (context manager / `close()`), `src/cacheness/metadata.py` (SQLite backend disposal)
-- Impact: Test fixtures require explicit cleanup ordering with `gc.collect()` and sleep delays. Documented extensively in `docs/WINDOWS_COMPATIBILITY.md`.
-
-**TensorFlow tests hang on Windows:**
-- Issue: TF handler tests must always be ignored on Windows (`--ignore=tests/test_tensorflow_handler.py`). The tests hang indefinitely.
-- Files: `tests/test_tensorflow_handler.py`
-- Impact: TF handler cannot be validated on Windows CI.
-
-**`chmod(0o600)` is a no-op on Windows (resolved in v0.9.0):**
-- ~~Issue: Signing key file permissions are not actually restricted on Windows.~~
-- Status: **Resolved** — Now uses `icacls` on Windows. See Security Considerations section.
-
-## Dependency Risks
-
-**TensorFlow (optional, heavy):**
-- Risk: TensorFlow is a ~500MB+ dependency that can cause system-level issues (GPU driver conflicts, protobuf version incompatibilities). Import is extremely slow.
-- Files: `src/cacheness/handlers.py` (lazy import at line ~79)
-- Impact: Lazy import mitigates startup cost, but the handler is effectively disabled on Windows.
-- Migration plan: Already isolated as optional dependency group. Consider removing from core handlers and making it a plugin.
-
-**SQLAlchemy dependency for SQLite/PostgreSQL:**
-- Risk: SQLAlchemy is a large ORM that adds complexity. Using raw `sqlite3` would be lighter for the SQLite backend.
-- Files: `src/cacheness/metadata.py` (SQLite backend), `src/cacheness/storage/backends/postgresql_backend.py`
-- Impact: Not a significant risk — SQLAlchemy is stable and well-maintained. Provides useful abstractions for schema migration.
-- Migration plan: None needed. Core dependency for production backends.
-
-**Blosc2 for compression:**
-- Risk: `blosc2` has C extensions that can fail to build on some platforms. Binary wheels may not be available for all architectures.
-- Files: `src/cacheness/handlers.py`, `src/cacheness/compress_pickle.py`
-- Impact: Graceful degradation — code checks `BLOSC2_AVAILABLE` and falls back to pickle or lz4. NumPy array compression unavailable without blosc2.
-- Migration plan: Already handled via optional dependency group and availability checks.
-
-**`dill` serialization risks:**
-- Risk: Dill extends pickle's attack surface. Cached objects may become incompatible across Python versions or if class definitions change (silent data corruption or crashes).
-- Files: `src/cacheness/handlers.py` (line ~1226), `src/cacheness/compress_pickle.py` (line ~284)
-- Impact: Documented extensively in `docs/DILL_INTEGRATION.md` with security warnings.
-- Migration plan: Dill is optional. Users can disable it via handler configuration.
-
-## Areas That Need Refactoring
-
-**`core.py` decomposition (3,307 lines):**
-- Files: `src/cacheness/core.py`
-- Why: Single file contains initialization, CRUD operations, verification, statistics, eviction, namespace management, custom metadata support, and storage mode delegation. This is the most complex file in the codebase by a wide margin.
-- Suggested approach: Extract `_StorageModeMixin` (lines ~1678+), `_VerificationMixin`, `_StatisticsMixin`, and `_CustomMetadataMixin` to reduce the class to ~1,500 lines.
-
-**`metadata.py` backend separation (2,562 lines):**
-- Files: `src/cacheness/metadata.py`
-- Why: Three complete backend implementations (JSON, SQLite, PostgreSQL) in one file with a shared base class. Each backend is 500-800 lines.
-- Suggested approach: Create `metadata/` package with `base.py`, `json_backend.py`, `sqlite_backend.py`, and re-export from `metadata/__init__.py`.
-
-**`handlers.py` handler isolation (1,425 lines):**
-- Files: `src/cacheness/handlers.py`
-- Why: All handler implementations (Array, DataFrame, Series, Object, Dill, Inline, Raw, TensorFlow) in one file.
-- Suggested approach: Create `handlers/` package with one file per handler. The `HandlerRegistry` stays in `handlers/__init__.py`.
-
-## Test Coverage Gaps
-
-**Thread safety under concurrent access:**
-- What's not tested: No tests exercise concurrent `put()`/`get()` from multiple threads against `UnifiedCache` directly. Backend-level thread safety is implicitly tested.
-- Files: No dedicated concurrency test file exists.
-- Risk: Data races in `UnifiedCache` methods that don't acquire `_lock` (put, get).
-- Priority: Medium — thread safety is documented as limited, but users may assume it works.
-
-**Cross-platform atomic writes:**
-- What's not tested: No tests verify that `shutil.move()` atomic rename actually prevents corruption on Windows when the temp file and destination are on different volumes.
-- Files: `src/cacheness/metadata.py`, `src/cacheness/storage/backends/blob_backends.py`
-- Risk: Low — temp files are created in the same directory as the destination.
-- Priority: Low.
-
-**Key rotation scenarios:**
-- What's not tested: No test exercises key rotation (deleting key file, restarting, and verifying that entries signed with the old key are properly handled).
-- Files: `src/cacheness/security.py`
-- Risk: Users following the documented key rotation procedure may encounter unexpected behavior.
-- Priority: Medium.
+**Signature version compatibility chain:**
+- Files: `src/cacheness/security.py` (v1/v2/v3 + ns1/ns2 signatures)
+- Why fragile: Verification must handle bare-hex (v1), versioned (v2), HKDF-derived (v3), and namespace (ns1/ns2) signatures. Adding v4 requires updating `parse_versioned_signature`, `SIGNED_FIELDS_BY_VERSION`, and verification key selection logic.
+- Safe modification: Always add new versions, never modify existing version semantics. The version is embedded in the signature string.
 
 ---
 
-*Concerns audit: 2026-04-02*
+## Missing Features
+
+**Async/await support:**
+- All operations are synchronous. No `AsyncUnifiedCache` class exists.
+- Impact: Cannot efficiently use in async frameworks (FastAPI, aiohttp). Large blob I/O blocks the event loop.
+- Files: No async code exists anywhere in `src/cacheness/`.
+- Effort: High — requires async backends (asyncpg, aiosqlite, aioboto3), separate `AsyncUnifiedCache` class.
+- Documented: `docs/FUTURE_IMPROVEMENTS.md` section 2.
+
+**Advanced eviction policies:**
+- Only TTL-based eviction exists. No LRU, LFU, or size-based eviction.
+- Impact: Cannot bound cache size on disk, no access-pattern-aware eviction.
+- Documented: `docs/FUTURE_IMPROVEMENTS.md` section 3.
+
+**Tiered pull-through cache:**
+- No composition of local + remote caches with automatic pull-through.
+- Impact: Users must manually manage local/remote cache coordination.
+- Status: Pending todo in `.planning/STATE.md`. Design documented in `docs/FUTURE_IMPROVEMENTS.md` section 9.
+
+**CLI tool for cache inspection:**
+- All cache operations require Python code. No `cacheness inspect`, `cacheness list`, `cacheness cleanup` commands.
+- Impact: Debugging and maintenance require writing scripts.
+- Documented: `docs/FUTURE_IMPROVEMENTS.md` section 4.
+
+**Remaining management APIs:**
+- `get_batch()`, `delete_batch()`, `touch()`, `get_metadata()`, `copy()`, `move()` not implemented.
+- `put_batch()` and `delete_by_prefix()` shipped in v0.8.0–v0.9.0.
+- Documented: `docs/FUTURE_IMPROVEMENTS.md` section 1.
+
+---
+
+## Platform-Specific Issues
+
+**Windows:**
+- TensorFlow handler tests hang and must always be ignored (`--ignore=tests/test_tensorflow_handler.py`).
+- `os.getlogin()` in `security.py` can fail in Windows service/container contexts.
+- `icacls` timeout is hardcoded to 10 seconds (`subprocess.run(..., timeout=10)`).
+- Git commit messages with non-ASCII characters (em dashes, unicode) can cause terminal hangs.
+
+**macOS:**
+- No known issues.
+
+**Linux:**
+- No known issues.
+
+---
+
+## Test Coverage Gaps
+
+**Property-based testing for cache key serialization:**
+- What's not tested: Edge cases in `serialize_for_cache_key()` with complex nested objects, circular references, large collections.
+- Files: `src/cacheness/serialization.py`
+- Risk: Cache key collisions or instability with unusual data types.
+- Priority: Medium — pending todo in `.planning/STATE.md`.
+- Approach: Hypothesis-based property tests to verify determinism and collision resistance.
+
+**TensorFlow handler integration:**
+- What's not tested: Full integration on Windows (always skipped).
+- Files: `tests/test_tensorflow_handler.py`
+- Risk: Handler may be broken on Windows without detection.
+- Priority: Low — handler is disabled by default.
+
+**Concurrent encryption operations:**
+- What's not tested: Multiple threads encrypting/decrypting simultaneously with key rotation in progress.
+- Files: `src/cacheness/encryption.py`, `src/cacheness/core.py`
+- Risk: Key rotation during concurrent encrypt operations could produce entries with mixed key states.
+- Priority: Medium — thread safety tests exist for signing but not specifically for encryption + rotation.
+
+---
+
+*Concerns audit: 2026-04-07 (post v0.11.0)*
