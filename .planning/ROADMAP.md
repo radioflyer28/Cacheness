@@ -56,13 +56,15 @@
 
 </details>
 
-### v0.11.0 Cross-Backend Hardening (Phases 23-26)
+### v0.11.0 Cross-Backend Hardening (Phases 23-27)
 
 - [x] **Phase 23: Encryption Schema & Storage** — Add encryption columns to SQLite/PG, migrations, fix put_entry/get_entry (completed)
 - [x] **Phase 24: Cross-Backend Test Parity** — Parametrize encryption tests across all 3 backends (completed)
 - [x] **Phase 25: Inline Blob Encryption** — Encrypt direct inline path, decrypt on read, key rotation for inline entries
  (completed 2026-04-06)
-- [x] **Phase 26: Integration & Hardening** — Config validation, migration testing on existing databases (completed 2026-04-07)
+- [x] **Phase 26: Integration & Hardening** — Config validation, migration testing on existing databases
+ (completed 2026-04-07)
+- [ ] **Phase 27: Retroactive Verification & Doc Cleanup** — Create missing VERIFICATION.md/SUMMARY.md for Phases 23-25, update REQUIREMENTS.md traceability, fix tech debt
 
 ## Phase Details
 
@@ -121,6 +123,20 @@ Plans:
 - [x] 26-01-PLAN.md — Config validation for known-bad combinations
 - [x] 26-02-PLAN.md — Real-data v3→v4 migration tests (SQLite + PostgreSQL)
 
+### Phase 27: Retroactive Verification & Doc Cleanup
+**Goal**: All v0.11.0 phases have formal verification artifacts and REQUIREMENTS.md traceability is accurate
+**Depends on**: Phase 23, Phase 24, Phase 25, Phase 26
+**Requirements**: ENC-01, ENC-02, ENC-03, INLINE-01, INLINE-02, INLINE-03, HARD-01, HARD-02
+**Gap Closure**: Closes all gaps from v0.11.0 audit
+**Success Criteria** (what must be TRUE):
+  1. Phase 23 has VERIFICATION.md and SUMMARY.md files with evidence of requirement satisfaction
+  2. Phase 24 has VERIFICATION.md with evidence of requirement satisfaction
+  3. Phase 25 has VERIFICATION.md with evidence of requirement satisfaction
+  4. All 8 REQUIREMENTS.md checkboxes are checked and traceability table shows Complete
+  5. SUMMARY frontmatters include `requirements_completed` field
+  6. Misleading comment in `_inline_blob_mixin.py` L130 is fixed
+**Plans**: TBD
+
 ## Progress
 
 | Phase | Milestone | Status | Completed |
@@ -129,4 +145,4 @@ Plans:
 | 7-10 | v0.8.0 | Complete | 2026-04-03 |
 | 11-14 | v0.9.0 | Complete | 2026-04-03 |
 | 15-22 | v0.10.0 | Complete | 2026-04-06 |
-| 23-26 | v0.11.0 | Not started | — |
+| 23-27 | v0.11.0 | In progress | — |
