@@ -448,6 +448,36 @@ class SecurityConfig:
                     "support: pip install cacheness[encryption]"
                 )
 
+        # Validate bad config combos (HARD-01)
+        if self.enable_content_encryption:
+            from .error_handling import CacheConfigurationError
+
+            # Combo 1: encryption + no key file (when not using in-memory key)
+            if not self.use_in_memory_key and not self.encryption_key_file:
+                raise CacheConfigurationError(
+                    "Encryption is enabled but no key file is configured. "
+                    "Set encryption_key_file to a file path, or set "
+                    "use_in_memory_key=True for ephemeral caches."
+                )
+
+            # Combo 2: encryption + signing disabled
+            if not self.enable_entry_signing:
+                raise CacheConfigurationError(
+                    "Encryption is enabled with entry signing disabled. "
+                    "Encrypted data without integrity signing is unsafe. "
+                    "Set enable_entry_signing=True to ensure encrypted "
+                    "entries are signed."
+                )
+
+            # Combo 3: use_in_memory_key + encryption
+            if self.use_in_memory_key:
+                raise CacheConfigurationError(
+                    "In-memory key with encryption enabled. In-memory keys "
+                    "are not persisted -- cached data will be unreadable "
+                    "after process restart. Set encryption_key_file to a "
+                    "persistent path, or disable encryption."
+                )
+
         logger.debug(
             f"Security configured: signing={self.enable_entry_signing}, "
             f"in_memory_key={self.use_in_memory_key}, "
@@ -762,6 +792,19 @@ class CacheConfig:
         """Validate overall configuration consistency."""
         # Validate backend compatibility
         self._validate_backend_compatibility()
+
+        # Combo 5: JSON backend + inline blobs (HARD-01)
+        if (
+            self.metadata.metadata_backend == "json"
+            and self.blob.max_inline_size > 0
+        ):
+            from .error_handling import CacheConfigurationError
+
+            raise CacheConfigurationError(
+                "JSON metadata backend does not support inline blob storage. "
+                "Set max_inline_size=0, or switch to 'sqlite' or 'postgresql' "
+                "backend."
+            )
 
         logger.info("Cache configuration initialized with focused sub-configurations")
 

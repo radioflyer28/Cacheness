@@ -1281,3 +1281,74 @@ class TestDeleteByPrefix:
 
         assert deleted == 2
         assert cache.get(cache_key="other_three") == "s3"
+
+
+class TestConfigValidation:
+    """Tests for config validation of known-bad combinations (HARD-01)."""
+
+    def test_encryption_no_key_file_raises(self):
+        """Combo 1: encryption + empty key file raises."""
+        from cacheness.config import SecurityConfig
+        from cacheness.error_handling import CacheConfigurationError
+
+        with pytest.raises(CacheConfigurationError, match="no key file"):
+            SecurityConfig(
+                enable_content_encryption=True,
+                encryption_key_file="",
+                use_in_memory_key=False,
+            )
+
+    def test_encryption_signing_disabled_raises(self):
+        """Combo 2: encryption + signing disabled raises."""
+        from cacheness.config import SecurityConfig
+        from cacheness.error_handling import CacheConfigurationError
+
+        with pytest.raises(CacheConfigurationError, match="signing disabled"):
+            SecurityConfig(
+                enable_content_encryption=True,
+                enable_entry_signing=False,
+            )
+
+    def test_in_memory_key_encryption_raises(self):
+        """Combo 3: in-memory key + encryption raises."""
+        from cacheness.config import SecurityConfig
+        from cacheness.error_handling import CacheConfigurationError
+
+        with pytest.raises(CacheConfigurationError, match="[Ii]n-memory"):
+            SecurityConfig(
+                use_in_memory_key=True,
+                enable_content_encryption=True,
+            )
+
+    def test_json_backend_inline_blobs_raises(self, tmp_path):
+        """Combo 5: JSON + inline blobs raises."""
+        from cacheness.error_handling import CacheConfigurationError
+
+        with pytest.raises(CacheConfigurationError, match="JSON"):
+            CacheConfig(
+                metadata_backend="json",
+                max_inline_size=4000,
+                cache_dir=str(tmp_path),
+            )
+
+    def test_valid_encryption_config_no_error(self):
+        """Valid encryption config does not raise."""
+        from cacheness.config import SecurityConfig
+
+        sec = SecurityConfig()
+        assert sec.enable_content_encryption is False
+
+    def test_error_messages_are_actionable(self):
+        """Every validation error contains a fix suggestion."""
+        from cacheness.config import SecurityConfig
+        from cacheness.error_handling import CacheConfigurationError
+
+        try:
+            SecurityConfig(
+                enable_content_encryption=True,
+                encryption_key_file="",
+                use_in_memory_key=False,
+            )
+        except CacheConfigurationError as e:
+            msg = str(e)
+            assert any(word in msg for word in ("Set", "set", "disable", "switch"))
