@@ -6,9 +6,9 @@ Cacheness is a Python disk caching library with pluggable metadata backends (JSO
 
 ## Current State
 
-**In progress:** v0.11.0 Cross-Backend Hardening
+**Completed:** v0.11.0 Cross-Backend Hardening (shipped 2026-04-07)
 
-Ensuring encryption at rest works with all metadata backends (JSON, SQLite, PostgreSQL), not just JSON. Addressing cross-backend inconsistencies and hardening the encryption + inline blob interaction.
+Encryption at rest now works with all metadata backends (JSON, SQLite, PostgreSQL). Inline blob + encryption interaction handled. Cross-backend test parity verified. All 8 requirements satisfied with formal verification artifacts.
 
 **Previous:** v0.10.0 Security & Architecture (shipped 2026-04-06) — full security infrastructure, core decomposition, thread safety verification. 1727 tests.
 
@@ -65,6 +65,11 @@ Improve reliability, security, and maintainability of Cacheness without changing
 - ✓ Cross-platform key file permissions (Windows icacls) — v0.9.0
 - ✓ CONCERNS.md updated to reflect all resolved items — v0.9.0
 
+- ✓ Encryption at rest working with SQLite backend — v0.11.0
+- ✓ Encryption at rest working with PostgreSQL backend — v0.11.0
+- ✓ Inline blob + encryption interaction handled — v0.11.0
+- ✓ Cross-backend encryption test parity — v0.11.0
+
 - ✓ Per-namespace key derivation via HKDF — v0.10.0
 - ✓ Configurable key fallback policy (raise/warn/fallback) — v0.10.0
 - ✓ Blob content encryption at rest (AES-256-GCM) — v0.10.0
@@ -75,10 +80,7 @@ Improve reliability, security, and maintainability of Cacheness without changing
 
 ### Active
 
-- [ ] Encryption at rest working with SQLite backend — v0.11.0
-- [ ] Encryption at rest working with PostgreSQL backend — v0.11.0
-- [ ] Inline blob + encryption interaction handled — v0.11.0
-- [ ] Cross-backend encryption test parity — v0.11.0
+No active requirements. Next milestone not yet started.
 
 ### Out of Scope
 
@@ -92,13 +94,13 @@ Improve reliability, security, and maintainability of Cacheness without changing
 
 ## Context
 
-- **Codebase state:** ~20,000 lines of Python across ~55 source files. Well-tested (1,727 passed, 101 skipped).
+- **Codebase state:** ~20,000 lines of Python across ~55 source files. Well-tested (1,773 passed, 122 skipped).
 - **Codebase map:** `.planning/codebase/` contains 7 detailed analysis documents from 2026-04-02.
 - **Structure:** Code decomposed into `handlers/` (11 files), `metadata/` (5 files), and 15 mixin/helper files alongside `core.py` (1,422 lines).
 - **Security:** Per-namespace HKDF key derivation. AES-256-GCM encryption at rest. Configurable key fallback policy (raise/warn/fallback). Key rotation API. HMAC-SHA256 signing. End-to-end signature verification. Cross-platform key file permissions. 3-layer deserialization defense.
 - **Concurrency:** SqliteBackend uses RLock for re-entrant safety. Write intent journal prevents orphaned blobs. Thread safety verified under concurrent rotation, encryption, and sustained access. Atomic writes verified on Windows.
 - **Error handling:** All `except Exception` catches narrowed or annotated `# intentionally broad`.
-- **Tests:** 1,727 tests covering thread safety, key rotation, encryption, concurrency stress, atomic writes, cross-phase integration, and all core functionality.
+- **Tests:** 1,773 tests covering thread safety, key rotation, encryption, concurrency stress, atomic writes, cross-backend parity, inline blob encryption, config validation, migration hardening, and all core functionality.
 
 ## Testing Philosophy & Workflow
 
