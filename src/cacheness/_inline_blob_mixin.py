@@ -125,7 +125,7 @@ class InlineBlobMixin:
         if len(blob_bytes) > max_inline:
             return None
 
-        # Compute hash from raw bytes (D-05: hash plaintext before encryption)
+        # Hash is computed below on blob_data (ciphertext when encrypted, plaintext otherwise)
         computed_hash: Optional[str] = None
 
         # Encrypt inline blob if encryption is enabled (D-01)

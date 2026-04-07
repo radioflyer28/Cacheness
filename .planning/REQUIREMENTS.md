@@ -8,20 +8,20 @@
 
 ### Encryption Backend Support
 
-- [ ] **ENC-01**: Encryption metadata (`encryption_algorithm`, `encryption_iv`) preserved across SQLite and PostgreSQL backends via dedicated schema columns
-- [ ] **ENC-02**: Encrypted blob roundtrip (put→get) works correctly with all 3 metadata backends (JSON, SQLite, PostgreSQL)
-- [ ] **ENC-03**: Encryption tests parametrized across all backends with full parity
+- [x] **ENC-01**: Encryption metadata (`encryption_algorithm`, `encryption_iv`) preserved across SQLite and PostgreSQL backends via dedicated schema columns
+- [x] **ENC-02**: Encrypted blob roundtrip (put→get) works correctly with all 3 metadata backends (JSON, SQLite, PostgreSQL)
+- [x] **ENC-03**: Encryption tests parametrized across all backends with full parity
 
 ### Inline Blob Encryption
 
-- [ ] **INLINE-01**: Direct inline path (`_try_direct_inline`) encrypts data before storing in metadata
-- [ ] **INLINE-02**: Inline read path (`_read_inline_blob`) decrypts ciphertext before passing to handler
-- [ ] **INLINE-03**: Key rotation handles inline entries (decrypt with old key, re-encrypt with new key)
+- [x] **INLINE-01**: Direct inline path (`_try_direct_inline`) encrypts data before storing in metadata
+- [x] **INLINE-02**: Inline read path (`_read_inline_blob`) decrypts ciphertext before passing to handler
+- [x] **INLINE-03**: Key rotation handles inline entries (decrypt with old key, re-encrypt with new key)
 
 ### Hardening
 
-- [ ] **HARD-01**: Config validation fails loudly for known-bad configuration combinations at init time
-- [ ] **HARD-02**: Schema migration tested on existing databases containing data
+- [x] **HARD-01**: Config validation fails loudly for known-bad configuration combinations at init time
+- [x] **HARD-02**: Schema migration tested on existing databases containing data
 
 ## Future Requirements
 
@@ -39,11 +39,11 @@
 
 | Requirement | Phase | Verification Phase | Status |
 |-------------|-------|-------------------|--------|
-| ENC-01 | Phase 23 | Phase 27 | Pending |
-| ENC-02 | Phase 23 | Phase 27 | Pending |
-| ENC-03 | Phase 24 | Phase 27 | Pending |
-| INLINE-01 | Phase 25 | Phase 27 | Pending |
-| INLINE-02 | Phase 25 | Phase 27 | Pending |
-| INLINE-03 | Phase 25 | Phase 27 | Pending |
+| ENC-01 | Phase 23 | Phase 27 | Complete |
+| ENC-02 | Phase 23 | Phase 27 | Complete |
+| ENC-03 | Phase 24 | Phase 27 | Complete |
+| INLINE-01 | Phase 25 | Phase 27 | Complete |
+| INLINE-02 | Phase 25 | Phase 27 | Complete |
+| INLINE-03 | Phase 25 | Phase 27 | Complete |
 | HARD-01 | Phase 26 | Phase 26 | Complete |
 | HARD-02 | Phase 26 | Phase 26 | Complete |

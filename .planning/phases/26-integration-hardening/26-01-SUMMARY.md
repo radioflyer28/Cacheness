@@ -4,6 +4,7 @@ plan: 01
 status: completed
 started: 2025-04-07
 completed: 2025-04-07
+requirements_completed: [HARD-01]
 ---
 
 ## Summary
