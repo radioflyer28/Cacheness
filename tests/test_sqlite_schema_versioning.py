@@ -862,3 +862,277 @@ class TestSqliteV3ToV4Migration:
         )
         result = sqlite_backend.get_entry("upd_enc_key")
         assert result["metadata"]["encryption_iv"] == "new_iv"
+
+
+class TestSqliteV3ToV4RealDataMigration:
+    """Test v3->v4 migration on a database with existing cached entries (HARD-02)."""
+
+    def test_v3_to_v4_migration_preserves_existing_data(self, tmp_path):
+        """Opening a v3 database with entries should migrate to v4 and preserve all data."""
+        import json
+        from sqlalchemy import create_engine, text, inspect as sa_inspect
+        from sqlalchemy.orm import sessionmaker
+
+        db_file = str(tmp_path / "v3_with_data.db")
+        engine = create_engine(f"sqlite:///{db_file}")
+        Session = sessionmaker(bind=engine)
+
+        with Session() as session:
+            session.execute(text("""
+                CREATE TABLE cacheness_namespaces (
+                    namespace_id VARCHAR(100) PRIMARY KEY,
+                    display_name VARCHAR(200) NOT NULL DEFAULT '',
+                    schema_version INTEGER NOT NULL DEFAULT 3,
+                    created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+                    signature VARCHAR(200)
+                )
+            """))
+            session.execute(text("""
+                INSERT INTO cacheness_namespaces
+                    (namespace_id, display_name, schema_version)
+                VALUES ('default', 'Default', 3)
+            """))
+
+            session.execute(text("""
+                CREATE TABLE cache_entries (
+                    cache_key VARCHAR(16) PRIMARY KEY,
+                    description VARCHAR(500) NOT NULL DEFAULT '',
+                    data_type VARCHAR(20) NOT NULL,
+                    created_at DATETIME NOT NULL,
+                    accessed_at DATETIME NOT NULL,
+                    file_size INTEGER NOT NULL DEFAULT 0,
+                    file_hash VARCHAR(16),
+                    entry_signature VARCHAR(100),
+                    s3_etag VARCHAR(100),
+                    object_type VARCHAR(100),
+                    storage_format VARCHAR(20),
+                    serializer VARCHAR(20),
+                    compression_codec VARCHAR(20),
+                    actual_path VARCHAR(500),
+                    cache_key_params TEXT,
+                    metadata_dict TEXT,
+                    access_count INTEGER NOT NULL DEFAULT 0,
+                    ttl_seconds INTEGER,
+                    expires_at DATETIME,
+                    blob_data BLOB,
+                    is_inline INTEGER NOT NULL DEFAULT 0,
+                    inline_ext TEXT
+                )
+            """))
+
+            session.execute(text("""
+                CREATE TABLE cache_stats (
+                    id INTEGER PRIMARY KEY DEFAULT 1,
+                    cache_hits INTEGER NOT NULL DEFAULT 0,
+                    cache_misses INTEGER NOT NULL DEFAULT 0,
+                    last_updated DATETIME NOT NULL DEFAULT (datetime('now'))
+                )
+            """))
+            session.execute(text("""
+                INSERT INTO cache_stats (id, cache_hits, cache_misses)
+                VALUES (1, 10, 5)
+            """))
+
+            session.execute(text(
+                "CREATE INDEX idx_list_entries ON cache_entries (created_at DESC)"
+            ))
+            session.execute(text(
+                "CREATE INDEX idx_cleanup ON cache_entries (created_at)"
+            ))
+            session.execute(text(
+                "CREATE INDEX idx_size_mgmt ON cache_entries (file_size, created_at)"
+            ))
+            session.execute(text(
+                "CREATE INDEX idx_data_type ON cache_entries (data_type)"
+            ))
+            session.execute(text(
+                "CREATE INDEX IF NOT EXISTS idx_metadata_notnull "
+                "ON cache_entries (metadata_dict, created_at DESC) "
+                "WHERE metadata_dict IS NOT NULL"
+            ))
+            session.execute(text(
+                "CREATE INDEX IF NOT EXISTS idx_expires_at "
+                "ON cache_entries (expires_at) WHERE expires_at IS NOT NULL"
+            ))
+            session.execute(text(
+                "CREATE INDEX IF NOT EXISTS idx_access_count "
+                "ON cache_entries (access_count, accessed_at)"
+            ))
+
+            # Insert plain cached entry
+            session.execute(text("""
+                INSERT INTO cache_entries
+                    (cache_key, description, data_type, created_at, accessed_at,
+                     file_size, file_hash, object_type, storage_format, metadata_dict)
+                VALUES
+                    ('plain_entry_01', 'test plain entry', 'pickle',
+                     datetime('now'), datetime('now'), 256, 'hash_abc123',
+                     'dict', 'pickle', :metadata)
+            """), {"metadata": json.dumps({
+                "object_type": "dict",
+                "storage_format": "pickle",
+            })})
+
+            # Insert entry with custom metadata
+            session.execute(text("""
+                INSERT INTO cache_entries
+                    (cache_key, description, data_type, created_at, accessed_at,
+                     file_size, file_hash, object_type, storage_format, metadata_dict)
+                VALUES
+                    ('custom_meta_01', 'entry with custom metadata', 'pickle',
+                     datetime('now'), datetime('now'), 512, 'hash_def456',
+                     'list', 'pickle', :metadata)
+            """), {"metadata": json.dumps({
+                "object_type": "list",
+                "storage_format": "pickle",
+                "user_tag": "experiment_42",
+                "model_version": "v2.1",
+            })})
+
+            session.commit()
+        engine.dispose()
+
+        # Verify v3 schema (no v4 columns)
+        engine2 = create_engine(f"sqlite:///{db_file}")
+        with engine2.connect() as conn:
+            cols = {
+                row[1]
+                for row in conn.execute(
+                    text('PRAGMA table_info("cache_entries")')
+                ).fetchall()
+            }
+        assert "encryption_algorithm" not in cols
+        engine2.dispose()
+
+        # Open with SqliteBackend -- should auto-migrate v3->v4
+        backend = SqliteBackend(db_file)
+
+        # Schema should now be v4
+        assert backend.get_schema_version(DEFAULT_NAMESPACE) == 4
+
+        # Verify v4 columns exist
+        inspector = sa_inspect(backend.engine)
+        col_names = {c["name"] for c in inspector.get_columns("cache_entries")}
+        assert "encryption_algorithm" in col_names
+        assert "encryption_iv" in col_names
+        assert "cacheness_version" in col_names
+
+        # Verify plain entry survived migration
+        plain = backend.get_entry("plain_entry_01")
+        assert plain is not None
+        assert plain["description"] == "test plain entry"
+        assert plain["data_type"] == "pickle"
+        assert plain["file_size"] == 256
+
+        # Verify custom metadata entry survived migration
+        custom = backend.get_entry("custom_meta_01")
+        assert custom is not None
+        assert custom["description"] == "entry with custom metadata"
+        meta = custom.get("metadata", {})
+        # Custom metadata is inside metadata_dict as JSON string
+        metadata_dict = json.loads(meta.get("metadata_dict", "{}"))
+        assert metadata_dict.get("user_tag") == "experiment_42"
+        assert metadata_dict.get("model_version") == "v2.1"
+
+        backend.close()
+
+    def test_v3_to_v4_migration_preserves_custom_metadata(self, tmp_path):
+        """Custom metadata stored in metadata_dict survives v3->v4 migration."""
+        import json
+        from sqlalchemy import create_engine, text
+        from sqlalchemy.orm import sessionmaker
+
+        db_file = str(tmp_path / "v3_custom_meta.db")
+        engine = create_engine(f"sqlite:///{db_file}")
+        Session = sessionmaker(bind=engine)
+
+        with Session() as session:
+            session.execute(text("""
+                CREATE TABLE cacheness_namespaces (
+                    namespace_id VARCHAR(100) PRIMARY KEY,
+                    display_name VARCHAR(200) NOT NULL DEFAULT '',
+                    schema_version INTEGER NOT NULL DEFAULT 3,
+                    created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+                    signature VARCHAR(200)
+                )
+            """))
+            session.execute(text(
+                "INSERT INTO cacheness_namespaces "
+                "(namespace_id, display_name, schema_version) "
+                "VALUES ('default', 'Default', 3)"
+            ))
+
+            session.execute(text("""
+                CREATE TABLE cache_entries (
+                    cache_key VARCHAR(16) PRIMARY KEY,
+                    description VARCHAR(500) NOT NULL DEFAULT '',
+                    data_type VARCHAR(20) NOT NULL,
+                    created_at DATETIME NOT NULL,
+                    accessed_at DATETIME NOT NULL,
+                    file_size INTEGER NOT NULL DEFAULT 0,
+                    file_hash VARCHAR(16),
+                    entry_signature VARCHAR(100),
+                    s3_etag VARCHAR(100),
+                    object_type VARCHAR(100),
+                    storage_format VARCHAR(20),
+                    serializer VARCHAR(20),
+                    compression_codec VARCHAR(20),
+                    actual_path VARCHAR(500),
+                    cache_key_params TEXT,
+                    metadata_dict TEXT,
+                    access_count INTEGER NOT NULL DEFAULT 0,
+                    ttl_seconds INTEGER,
+                    expires_at DATETIME,
+                    blob_data BLOB,
+                    is_inline INTEGER NOT NULL DEFAULT 0,
+                    inline_ext TEXT
+                )
+            """))
+
+            session.execute(text("""
+                CREATE TABLE cache_stats (
+                    id INTEGER PRIMARY KEY DEFAULT 1,
+                    cache_hits INTEGER NOT NULL DEFAULT 0,
+                    cache_misses INTEGER NOT NULL DEFAULT 0,
+                    last_updated DATETIME NOT NULL DEFAULT (datetime('now'))
+                )
+            """))
+
+            for i in range(5):
+                session.execute(text("""
+                    INSERT INTO cache_entries
+                        (cache_key, description, data_type, created_at,
+                         accessed_at, file_size, object_type, storage_format,
+                         metadata_dict)
+                    VALUES
+                        (:key, :desc, 'pickle', datetime('now'),
+                         datetime('now'), :size, 'dict', 'pickle', :metadata)
+                """), {
+                    "key": f"batch_{i:03d}",
+                    "desc": f"batch entry {i}",
+                    "size": 100 + i * 50,
+                    "metadata": json.dumps({
+                        "object_type": "dict",
+                        "storage_format": "pickle",
+                        "batch_id": i,
+                        "run_name": f"run_{i}",
+                    }),
+                })
+            session.commit()
+        engine.dispose()
+
+        # Migrate via SqliteBackend
+        backend = SqliteBackend(db_file)
+        assert backend.get_schema_version(DEFAULT_NAMESPACE) == 4
+
+        # Verify all 5 entries survived
+        for i in range(5):
+            entry = backend.get_entry(f"batch_{i:03d}")
+            assert entry is not None, f"Entry batch_{i:03d} lost during migration"
+            assert entry["description"] == f"batch entry {i}"
+            meta = entry.get("metadata", {})
+            metadata_dict = json.loads(meta.get("metadata_dict", "{}"))
+            assert metadata_dict.get("batch_id") == i
+            assert metadata_dict.get("run_name") == f"run_{i}"
+
+        backend.close()

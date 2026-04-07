@@ -591,3 +591,118 @@ class TestPgJsonbStorage:
         assert md["note"] == "updated"
 
         pg_backend.remove_entry("jb_upd_001")
+
+
+@requires_postgres
+@pytest.mark.xdist_group("docker")
+class TestPgV3ToV4RealDataMigration:
+    """Test that v4 schema handles v3-era data patterns correctly (HARD-02).
+
+    Since PostgreSQL fixtures run full migration, we verify that entries
+    without encryption fields (the v3 data pattern) are correctly preserved.
+    """
+
+    def test_v3_style_entries_survive_on_v4_schema(self, pg_backend):
+        """Entries without encryption fields (v3 pattern) work on v4 schema."""
+        pg_backend.put_entry("v3_plain_001", {
+            "description": "plain v3-style entry",
+            "data_type": "pickle",
+            "file_size": 256,
+            "metadata": {
+                "object_type": "dict",
+                "storage_format": "pickle",
+                "file_hash": "v3hash123",
+            },
+        })
+
+        entry = pg_backend.get_entry("v3_plain_001")
+        assert entry is not None
+        assert entry["description"] == "plain v3-style entry"
+        assert entry["data_type"] == "pickle"
+        assert entry["file_size"] == 256
+        meta = entry.get("metadata", {})
+        assert meta.get("object_type") == "dict"
+        # Encryption fields should be absent or None (v3 data has no encryption)
+        assert meta.get("encryption_algorithm") is None
+        assert meta.get("encryption_iv") is None
+
+        pg_backend.remove_entry("v3_plain_001")
+
+    def test_v3_style_custom_metadata_preserved(self, pg_backend):
+        """Custom metadata from v3-era entries preserved on v4 schema."""
+        import json
+
+        pg_backend.put_entry("v3_custom_001", {
+            "description": "v3-style with custom metadata",
+            "data_type": "pickle",
+            "file_size": 512,
+            "metadata": {
+                "object_type": "list",
+                "storage_format": "pickle",
+                "file_hash": "v3meta456",
+                "metadata_dict": json.dumps({
+                    "user_tag": "experiment_99",
+                    "model_version": "v3.0",
+                }),
+            },
+        })
+
+        entry = pg_backend.get_entry("v3_custom_001")
+        assert entry is not None
+        meta = entry.get("metadata", {})
+        md = meta.get("metadata_dict")
+        if isinstance(md, str):
+            md = json.loads(md)
+        assert md["user_tag"] == "experiment_99"
+        assert md["model_version"] == "v3.0"
+
+        pg_backend.remove_entry("v3_custom_001")
+
+    def test_v3_and_v4_entries_coexist(self, pg_backend):
+        """v3-style (no encryption) and v4-style (with encryption) entries coexist."""
+        pg_backend.put_entry("coexist_v3", {
+            "data_type": "pickle",
+            "metadata": {"object_type": "str", "storage_format": "pickle"},
+        })
+        pg_backend.put_entry("coexist_v4", {
+            "data_type": "pickle",
+            "metadata": {
+                "object_type": "bytes",
+                "storage_format": "raw",
+                "encryption_algorithm": "AES-256-GCM",
+                "encryption_iv": "coexist_iv",
+                "cacheness_version": "0.11.0",
+            },
+        })
+
+        v3_entry = pg_backend.get_entry("coexist_v3")
+        v4_entry = pg_backend.get_entry("coexist_v4")
+
+        assert v3_entry is not None
+        assert v4_entry is not None
+        assert v3_entry["metadata"].get("encryption_algorithm") is None
+        assert v4_entry["metadata"].get("encryption_algorithm") == "AES-256-GCM"
+        assert v4_entry["metadata"].get("cacheness_version") == "0.11.0"
+
+        pg_backend.remove_entry("coexist_v3")
+        pg_backend.remove_entry("coexist_v4")
+
+    def test_iter_entry_summaries_v3_style_entries(self, pg_backend):
+        """iter_entry_summaries includes v3-style entries with null encryption fields."""
+        pg_backend.put_entry("v3_sum_001", {
+            "data_type": "pickle",
+            "file_size": 100,
+            "metadata": {
+                "object_type": "dict",
+                "storage_format": "pickle",
+            },
+        })
+
+        summaries = list(pg_backend.iter_entry_summaries())
+        entry = next(
+            (s for s in summaries if s["cache_key"] == "v3_sum_001"), None
+        )
+        assert entry is not None
+        assert entry["file_size"] == 100
+
+        pg_backend.remove_entry("v3_sum_001")
