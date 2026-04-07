@@ -64,7 +64,7 @@
  (completed 2026-04-06)
 - [x] **Phase 26: Integration & Hardening** — Config validation, migration testing on existing databases
  (completed 2026-04-07)
-- [ ] **Phase 27: Retroactive Verification & Doc Cleanup** — Create missing VERIFICATION.md/SUMMARY.md for Phases 23-25, update REQUIREMENTS.md traceability, fix tech debt
+- [x] **Phase 27: Retroactive Verification & Doc Cleanup** — Create missing VERIFICATION.md/SUMMARY.md for Phases 23-25, update REQUIREMENTS.md traceability, fix tech debt (completed 2026-04-07)
 
 ## Phase Details
 
@@ -138,9 +138,9 @@ Plans:
 **Plans**: 3 plans
 
 Plans:
-- [ ] 27-01-PLAN.md — Phase 23 retroactive verification & summaries (ENC-01, ENC-02)
-- [ ] 27-02-PLAN.md — Phases 24 & 25 retroactive verification (ENC-03, INLINE-01/02/03)
-- [ ] 27-03-PLAN.md — Comment fix, Phase 26 SUMMARYs, REQUIREMENTS.md finalization (HARD-01/02)
+- [x] 27-01-PLAN.md — Phase 23 retroactive verification & summaries (ENC-01, ENC-02)
+- [x] 27-02-PLAN.md — Phases 24 & 25 retroactive verification (ENC-03, INLINE-01/02/03)
+- [x] 27-03-PLAN.md — Comment fix, Phase 26 SUMMARYs, REQUIREMENTS.md finalization (HARD-01/02)
 
 ## Progress
 
