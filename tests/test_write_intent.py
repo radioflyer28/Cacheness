@@ -85,6 +85,43 @@ class TestWriteIntentJournal:
         cleaned = journal.cleanup_stale_intents()
         assert cleaned == 1
 
+    def test_cleanup_resolves_relative_blob_path_against_cache_dir(
+        self, tmp_path, monkeypatch
+    ):
+        """Relative intent blob paths are cache-dir relative, not CWD relative."""
+        journal = WriteIntentJournal(tmp_path, stale_threshold_seconds=0)
+        blob_file = tmp_path / "default" / "relative_blob.pkl"
+        blob_file.parent.mkdir()
+        blob_file.write_bytes(b"orphaned data")
+
+        intent_path = journal.record_intent("relative_key", "default/relative_blob.pkl")
+        monkeypatch.chdir(tmp_path.parent)
+        time.sleep(0.05)
+
+        cleaned = journal.cleanup_stale_intents()
+
+        assert cleaned == 1
+        assert not blob_file.exists()
+        assert not intent_path.exists()
+
+    def test_cleanup_preserves_blob_when_entry_exists(self, tmp_path):
+        """Crash after metadata commit should clear intent without deleting the blob."""
+        journal = WriteIntentJournal(tmp_path, stale_threshold_seconds=0)
+        blob_file = tmp_path / "default" / "committed_blob.pkl"
+        blob_file.parent.mkdir()
+        blob_file.write_bytes(b"committed data")
+
+        intent_path = journal.record_intent("committed_key", str(blob_file))
+        time.sleep(0.05)
+
+        cleaned = journal.cleanup_stale_intents(
+            entry_exists=lambda key: key == "committed_key"
+        )
+
+        assert cleaned == 1
+        assert blob_file.exists()
+        assert not intent_path.exists()
+
 
 class TestWriteIntentIntegration:
     """Integration tests with UnifiedCache."""
@@ -172,3 +209,52 @@ class TestWriteIntentIntegration:
         if intents_dir.exists():
             intent_files = list(intents_dir.glob("*.intent"))
             assert len(intent_files) == 0
+
+
+class TestStorageModeWriteIntentCleanup:
+    """Storage mode still performs conservative stale-intent cleanup."""
+
+    def _make_storage_cache(self, tmp_path):
+        config = CacheConfig(
+            storage=CacheStorageConfig(
+                cache_dir=str(tmp_path),
+                stale_intent_threshold_seconds=0,
+            ),
+            metadata=CacheMetadataConfig(metadata_backend="sqlite"),
+            compression=CompressionConfig(use_blosc2_arrays=False),
+            storage_mode=True,
+        )
+        return cacheness(config)
+
+    def test_storage_mode_preserves_committed_entry_and_removes_intent(self, tmp_path):
+        cache = self._make_storage_cache(tmp_path)
+        cache.put("durable", cache_key="committed-key")
+
+        entry = cache.metadata_backend.get_entry("committed-key")
+        assert entry is not None
+        blob_path = cache._resolve_actual_path(entry["metadata"]["actual_path"])
+        intent_path = cache._write_journal.record_intent(
+            "committed-key", entry["metadata"]["actual_path"]
+        )
+        time.sleep(0.05)
+
+        reopened = self._make_storage_cache(tmp_path)
+
+        assert reopened.get("committed-key") == "durable"
+        assert blob_path.exists()
+        assert not intent_path.exists()
+
+    def test_storage_mode_removes_uncommitted_orphan_blob_and_intent(self, tmp_path):
+        cache = self._make_storage_cache(tmp_path)
+        blob_file = tmp_path / "default" / "orphan.pkl"
+        blob_file.parent.mkdir(exist_ok=True)
+        blob_file.write_bytes(b"orphaned")
+        intent_path = cache._write_journal.record_intent(
+            "orphan-key", "default/orphan.pkl"
+        )
+        time.sleep(0.05)
+
+        self._make_storage_cache(tmp_path)
+
+        assert not blob_file.exists()
+        assert not intent_path.exists()

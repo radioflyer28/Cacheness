@@ -8,6 +8,7 @@ detected and their orphaned blobs deleted.
 import logging
 import time
 from pathlib import Path
+from typing import Callable, Optional
 
 from .json_utils import dumps as json_dumps
 from .json_utils import loads as json_loads
@@ -33,7 +34,8 @@ class WriteIntentJournal:
     """
 
     def __init__(self, cache_dir: Path, stale_threshold_seconds: float = 300.0):
-        self._intents_dir = cache_dir / ".intents"
+        self._cache_dir = Path(cache_dir)
+        self._intents_dir = self._cache_dir / ".intents"
         self._stale_threshold = stale_threshold_seconds
 
     def _ensure_dir(self) -> None:
@@ -65,7 +67,9 @@ class WriteIntentJournal:
         except OSError:
             pass
 
-    def cleanup_stale_intents(self) -> int:
+    def cleanup_stale_intents(
+        self, entry_exists: Optional[Callable[[str], bool]] = None
+    ) -> int:
         """Delete orphaned blobs from stale (crashed) writes.
 
         Scans the intents directory for files older than the configured
@@ -88,10 +92,30 @@ class WriteIntentJournal:
                 if now - created_at < self._stale_threshold:
                     continue  # still fresh — skip
 
+                cache_key = data.get("cache_key", "")
+                if entry_exists is not None and cache_key:
+                    try:
+                        if entry_exists(cache_key):
+                            intent_path.unlink(missing_ok=True)
+                            logger.info(
+                                "Removed stale write intent for committed key: "
+                                f"{cache_key}"
+                            )
+                            cleaned += 1
+                            continue
+                    except Exception:
+                        logger.warning(
+                            f"Failed to check committed entry for stale intent: {cache_key}",
+                            exc_info=True,
+                        )
+                        continue
+
                 # Delete the orphaned blob if it exists
                 blob_path = data.get("blob_path")
                 if blob_path:
                     bp = Path(blob_path)
+                    if not bp.is_absolute():
+                        bp = self._cache_dir / bp
                     if bp.exists():
                         bp.unlink()
                         logger.info(
@@ -100,9 +124,7 @@ class WriteIntentJournal:
 
                 # Remove the intent file
                 intent_path.unlink(missing_ok=True)
-                logger.info(
-                    f"Cleaned stale write intent for key: {data.get('cache_key', '?')}"
-                )
+                logger.info(f"Cleaned stale write intent for key: {cache_key or '?'}")
                 cleaned += 1
 
             except Exception:  # intentionally broad — cleanup must not crash init

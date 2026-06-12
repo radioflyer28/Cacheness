@@ -149,10 +149,12 @@ class UnifiedCache(
             self.config.storage.stale_intent_threshold_seconds,
         )
 
-        # Clean up expired entries and stale write intents on initialization
+        # Clean up expired entries on initialization when enabled. Stale write
+        # intents are always cleaned conservatively so storage mode can recover
+        # uncommitted orphan blobs without deleting committed entries.
         if self.config.storage.cleanup_on_init:
             self._cleanup_expired()
-            self._cleanup_stale_intents()
+        self._cleanup_stale_intents()
 
         logger.info(
             f"✅ Unified cache initialized: {self.cache_dir} (backend: {self.actual_backend})"
@@ -772,7 +774,9 @@ class UnifiedCache(
 
     def _cleanup_stale_intents(self):
         """Remove orphaned blobs from stale write intents (crash recovery)."""
-        cleaned = self._write_journal.cleanup_stale_intents()
+        cleaned = self._write_journal.cleanup_stale_intents(
+            entry_exists=lambda key: self.metadata_backend.get_entry(key) is not None
+        )
         if cleaned > 0:
             logger.info(f"Cleaned up {cleaned} stale write intents")
 
