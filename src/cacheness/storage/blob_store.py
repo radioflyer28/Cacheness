@@ -50,9 +50,7 @@ Usage:
     store.delete(blob_id)
 """
 
-import glob
 import logging
-import os
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
@@ -1327,25 +1325,40 @@ class BlobStore:
         Returns:
             Number of blob files deleted
         """
-        blob_extensions = ["pkl", "npz", "b2nd", "b2tr", "parquet"]
-        pickle_codecs = ["lz4", "zstd", "gzip", "zst", "gz", "bz2", "xz"]
+        reserved_metadata_names = {
+            "cacheness_namespaces.json",
+        }
 
-        patterns = [str(self.cache_dir / f"*.{ext}") for ext in blob_extensions]
-        for codec in pickle_codecs:
-            patterns.append(str(self.cache_dir / f"*.pkl.{codec}"))
-        patterns.append(str(self.cache_dir / "*.pkl.*"))
+        def is_reserved(path: Path) -> bool:
+            if any(part == ".intents" for part in path.parts):
+                return True
+            name = path.name
+            return (
+                name in reserved_metadata_names
+                or name.endswith(".db")
+                or name.endswith(".db-wal")
+                or name.endswith(".db-shm")
+                or name.startswith("cache_metadata.json")
+                or name.endswith("_metadata.json")
+                or name.startswith("cache_signing_key")
+                or name.startswith(".cache_signing_key")
+            )
 
-        processed: set[str] = set()
-        for pattern in patterns:
-            for file_path in glob.glob(pattern):
-                if file_path not in processed:
-                    try:
-                        os.remove(file_path)
-                        processed.add(file_path)
-                    except OSError as e:
-                        logger.warning(f"Failed to remove blob file {file_path}: {e}")
+        blob_root = getattr(
+            self.blob_backend, "base_dir", self.cache_dir / self._namespace
+        )
 
-        return len(processed)
+        removed_count = 0
+        for file_path in blob_root.rglob("*"):
+            if not file_path.is_file() or is_reserved(file_path):
+                continue
+            try:
+                file_path.unlink()
+                removed_count += 1
+            except OSError as e:
+                logger.warning(f"Failed to remove blob file {file_path}: {e}")
+
+        return removed_count
 
     # ── Private helper methods ────────────────────────────────────────
 

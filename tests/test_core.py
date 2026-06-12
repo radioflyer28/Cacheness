@@ -577,6 +577,111 @@ class TestCacheness:
         count = cache.clear()
         assert count == 5
 
+    def test_clear_all_removes_namespace_blob_files_and_preserves_reserved_files(
+        self, tmp_path
+    ):
+        """clear_all() removes namespace blobs without deleting reserved files."""
+        from cacheness.config import (
+            CacheMetadataConfig,
+            CacheStorageConfig,
+            CompressionConfig,
+            HandlerConfig,
+            SecurityConfig,
+            SerializationConfig,
+        )
+
+        cache_dir = tmp_path / "cache"
+
+        def make_config(namespace="default"):
+            return CacheConfig(
+                storage=CacheStorageConfig(cache_dir=str(cache_dir)),
+                metadata=CacheMetadataConfig(metadata_backend="json"),
+                compression=CompressionConfig(use_blosc2_arrays=False),
+                serialization=SerializationConfig(),
+                handlers=HandlerConfig(),
+                security=SecurityConfig(
+                    enable_entry_signing=True,
+                    signing_key_file="cache_signing_key.bin",
+                ),
+                namespace=namespace,
+            )
+
+        cache = cacheness(make_config())
+        cache.metadata_backend.create_namespace("custom_ns", "Custom")
+        custom_cache = cacheness(make_config(namespace="custom_ns"))
+
+        cache.put({"default": 1}, cache_key="default-one")
+        cache.put({"default": 2}, cache_key="default-two")
+        custom_cache.put({"custom": 3}, cache_key="custom-one")
+
+        blob_files_before = [
+            p
+            for p in cache_dir.rglob("*")
+            if p.is_file()
+            and ".intents" not in p.parts
+            and not p.name.startswith("cache_metadata.json")
+            and not p.name.endswith("_metadata.json")
+            and not p.name.startswith("cache_signing_key")
+            and p.name != "cacheness_namespaces.json"
+        ]
+        assert blob_files_before
+
+        removed_count = cache.clear_all()
+
+        default_blob_files_after = [
+            p for p in (cache_dir / "default").rglob("*") if p.is_file()
+        ]
+        custom_blob_files_after = [
+            p for p in (cache_dir / "custom_ns").rglob("*") if p.is_file()
+        ]
+        assert default_blob_files_after == []
+        assert custom_blob_files_after
+        assert removed_count == 2
+        assert custom_cache.get("custom-one") == {"custom": 3}
+        assert (cache_dir / "cache_metadata.json").exists()
+        assert (cache_dir / "custom_ns_metadata.json").exists()
+        assert (cache_dir / "cacheness_namespaces.json").exists()
+        assert (cache_dir / "cache_signing_key.bin").exists()
+
+    def test_clear_all_namespaces_removes_namespace_blob_directories(self, tmp_path):
+        """clear_all_namespaces() removes non-default namespace blob directories."""
+        from cacheness.config import (
+            CacheMetadataConfig,
+            CacheStorageConfig,
+            CompressionConfig,
+            HandlerConfig,
+            SerializationConfig,
+        )
+
+        cache_dir = tmp_path / "cache"
+
+        def make_config(namespace="default"):
+            return CacheConfig(
+                storage=CacheStorageConfig(cache_dir=str(cache_dir)),
+                metadata=CacheMetadataConfig(metadata_backend="json"),
+                compression=CompressionConfig(use_blosc2_arrays=False),
+                serialization=SerializationConfig(),
+                handlers=HandlerConfig(),
+                namespace=namespace,
+            )
+
+        cache = cacheness(make_config())
+        cache.metadata_backend.create_namespace("custom_ns", "Custom")
+        custom_cache = cacheness(make_config(namespace="custom_ns"))
+
+        cache.put({"default": 1}, cache_key="default-one")
+        custom_cache.put({"custom": 2}, cache_key="custom-one")
+        assert any((cache_dir / "default").rglob("*"))
+        assert any((cache_dir / "custom_ns").rglob("*"))
+
+        results = cache.clear_all_namespaces()
+
+        assert results["default"] == 1
+        assert results["custom_ns"] == -1
+        assert not any(p.is_file() for p in (cache_dir / "default").rglob("*"))
+        assert not (cache_dir / "custom_ns").exists()
+        assert (cache_dir / "cache_metadata.json").exists()
+
     def test_cleanup_expired_removes_entries(self):
         """Test that cleanup_expired() removes expired entries."""
         import time
