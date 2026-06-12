@@ -3,6 +3,7 @@
 import logging
 import os
 import threading
+import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, Any, Optional, List
@@ -59,11 +60,11 @@ class JsonBackend(MetadataBackend):
                     data = json_loads(f.read())
                 # Validate schema: must be a dict with an "entries" key
                 if not isinstance(data, dict) or "entries" not in data:
-                    logger.warning("JSON metadata has invalid schema, starting fresh")
+                    self._preserve_corrupt_metadata("invalid schema")
                 else:
                     return data
             except Exception:  # intentionally broad — corrupted JSON file
-                logger.warning("JSON metadata corrupted, starting fresh")
+                self._preserve_corrupt_metadata("corrupt JSON")
 
         return {
             "entries": {},  # cache_key -> complete entry dict (with structured fields)
@@ -71,7 +72,23 @@ class JsonBackend(MetadataBackend):
             "cache_misses": 0,
         }
 
-    def _save_to_disk(self):
+    def _preserve_corrupt_metadata(self, reason: str) -> None:
+        """Move corrupt metadata aside before starting with an empty store."""
+        backup_path = self.metadata_file.with_name(
+            f"{self.metadata_file.name}.corrupt-{int(time.time())}"
+        )
+        try:
+            self.metadata_file.replace(backup_path)
+            logger.error(
+                f"JSON metadata {reason}; preserved corrupt file at {backup_path}"
+            )
+        except OSError as exc:
+            logger.error(
+                f"JSON metadata {reason}; failed to preserve corrupt file "
+                f"{self.metadata_file}: {exc}"
+            )
+
+    def _save_to_disk(self, raise_on_error: bool = False):
         """Save metadata to JSON file using atomic write pattern to prevent corruption."""
         import tempfile
 
@@ -79,9 +96,9 @@ class JsonBackend(MetadataBackend):
             # Check if parent directory exists (may have been deleted during cleanup)
             if not self.metadata_file.parent.exists():
                 logger.debug(
-                    f"Metadata directory no longer exists: {self.metadata_file.parent}"
+                    f"Metadata directory no longer exists; recreating: {self.metadata_file.parent}"
                 )
-                return
+                self.metadata_file.parent.mkdir(parents=True, exist_ok=True)
 
             # Write to temp file first, then rename for atomicity
             fd, temp_path = tempfile.mkstemp(
@@ -103,8 +120,10 @@ class JsonBackend(MetadataBackend):
                 except OSError:
                     pass
                 raise
-        except Exception as e:  # intentionally broad — best-effort save
+        except Exception as e:  # intentionally broad — optionally best-effort save
             logger.error(f"Failed to save JSON metadata: {e}")
+            if raise_on_error:
+                raise
 
     def get_entry(self, cache_key: str) -> Optional[Dict[str, Any]]:
         """Get specific cache entry metadata (simple entry lookup)."""
@@ -157,7 +176,7 @@ class JsonBackend(MetadataBackend):
 
             # Store complete entry - simple and efficient
             self._metadata["entries"][cache_key] = entry
-            self._save_to_disk()
+            self._save_to_disk(raise_on_error=True)
 
     def remove_entry(self, cache_key: str) -> bool:
         """Remove cache entry metadata."""
@@ -165,7 +184,7 @@ class JsonBackend(MetadataBackend):
             entries = self._metadata.get("entries", {})
             if cache_key in entries:
                 del entries[cache_key]
-                self._save_to_disk()
+                self._save_to_disk(raise_on_error=True)
                 return True
             return False
 

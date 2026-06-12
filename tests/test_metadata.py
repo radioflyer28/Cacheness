@@ -6,6 +6,7 @@ Tests the metadata storage systems and their integration with the cache.
 
 import pytest
 import tempfile
+import shutil
 from pathlib import Path
 
 from cacheness.metadata import (
@@ -50,6 +51,58 @@ class TestMetadataBackendCreation:
         # Should raise ValueError for invalid backend type
         with pytest.raises(ValueError, match="Unknown backend type"):
             create_metadata_backend(backend_type="invalid", cache_dir=str(temp_dir))
+
+
+class TestJsonBackendPersistenceFailures:
+    """JSON backend persistence failures distinguish data writes from telemetry."""
+
+    def test_put_entry_raises_when_save_fails(self, tmp_path, monkeypatch):
+        backend = JsonBackend(tmp_path / "metadata.json")
+
+        def fail_move(*args, **kwargs):
+            raise OSError("simulated move failure")
+
+        monkeypatch.setattr("shutil.move", fail_move)
+
+        with pytest.raises(OSError, match="simulated move failure"):
+            backend.put_entry("key", {"data_type": "pickle", "metadata": {}})
+
+    def test_remove_entry_raises_when_save_fails(self, tmp_path, monkeypatch):
+        backend = JsonBackend(tmp_path / "metadata.json")
+        backend.put_entry("key", {"data_type": "pickle", "metadata": {}})
+
+        def fail_move(*args, **kwargs):
+            raise OSError("simulated move failure")
+
+        monkeypatch.setattr("shutil.move", fail_move)
+
+        with pytest.raises(OSError, match="simulated move failure"):
+            backend.remove_entry("key")
+
+    def test_update_access_time_remains_best_effort_on_save_failure(
+        self, tmp_path, monkeypatch
+    ):
+        backend = JsonBackend(tmp_path / "metadata.json")
+        backend.put_entry("key", {"data_type": "pickle", "metadata": {}})
+
+        def fail_move(*args, **kwargs):
+            raise OSError("simulated move failure")
+
+        monkeypatch.setattr("shutil.move", fail_move)
+
+        backend.update_access_time("key")
+
+    def test_put_entry_recreates_missing_parent_directory(self, tmp_path):
+        metadata_dir = tmp_path / "metadata-dir"
+        metadata_dir.mkdir()
+        metadata_file = metadata_dir / "metadata.json"
+        backend = JsonBackend(metadata_file)
+        shutil.rmtree(metadata_dir)
+
+        backend.put_entry("key", {"data_type": "pickle", "metadata": {}})
+
+        assert metadata_file.exists()
+        assert backend.get_entry("key") is not None
 
 
 class TestMetadataIntegration:

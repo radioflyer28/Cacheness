@@ -342,6 +342,20 @@ class TestJsonBackwardCompatibility:
         assert backend.get_schema_version(DEFAULT_NAMESPACE) == 1
         backend.close()
 
+    def test_corrupt_metadata_file_is_preserved(self, tmp_path, caplog):
+        """Corrupt metadata is backed up before the backend starts empty."""
+        metadata_file = tmp_path / "metadata.json"
+        metadata_file.write_text("NOT VALID JSON{{{", encoding="utf-8")
+
+        with caplog.at_level("ERROR", logger="cacheness.metadata.json_backend"):
+            backend = JsonBackend(metadata_file)
+
+        assert backend.load_metadata()["entries"] == {}
+        backups = list(tmp_path.glob("metadata.json.corrupt-*"))
+        assert len(backups) == 1
+        assert "metadata.json.corrupt-" in caplog.text
+        backend.close()
+
 
 class TestJsonV3Columns:
     """Test v3 schema fields in JSON backend: access_count, ttl_seconds, expires_at."""
