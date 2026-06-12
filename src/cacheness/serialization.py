@@ -6,8 +6,16 @@ This module provides consistent serialization for cache key generation
 across both UnifiedCache and decorator usage with configurable ordering strategy.
 """
 
+from datetime import date, datetime, time
+from decimal import Decimal
+from enum import Enum
+import logging
 from typing import Any, Optional
 import xxhash
+
+logger = logging.getLogger(__name__)
+_warned_unstable_hash_types: set[str] = set()
+_warned_unstable_repr_types: set[str] = set()
 
 
 def _serialize_path_object(obj: Any, config: Optional[Any] = None) -> Optional[str]:
@@ -319,7 +327,8 @@ def _serialize_with_config(
 
         # Special handling for tuples (common case)
         if isinstance(obj, tuple):
-            # For small tuples, use recursive; for large ones, use hash
+            # For small tuples, use recursive; for large ones, hash the
+            # deterministic recursive serialization of each element.
             if len(obj) <= max_tuple_length:
                 items = [
                     _serialize_with_config(
@@ -339,8 +348,24 @@ def _serialize_with_config(
                 ]
                 return f"tuple:[{','.join(items)}]"
             else:
-                # Large tuple - fall through to hashable handling
-                pass
+                items = [
+                    _serialize_with_config(
+                        item,
+                        config,
+                        enable_basic,
+                        enable_special,
+                        enable_collections,
+                        enable_introspection,
+                        enable_hashable,
+                        enable_string,
+                        max_tuple_length,
+                        max_depth,
+                        depth + 1,
+                    )
+                    for item in obj
+                ]
+                digest = xxhash.xxh3_64(",".join(items).encode()).hexdigest()[:16]
+                return f"tuple_hashed:{len(obj)}:{digest}"
 
     # 4. Objects with __dict__ (good introspection for custom classes)
     if enable_introspection:
@@ -362,17 +387,38 @@ def _serialize_with_config(
 
     # 5. Hashable objects (performance fallback when introspection isn't useful)
     if enable_hashable:
-        if hasattr(obj, "__hash__") and obj.__hash__ is not None:
+        stable_scalar = (int, float, bool, complex, Decimal, datetime, date, time)
+        if obj is None or isinstance(obj, stable_scalar):
             try:
-                # Test if the object is actually hashable
-                hash_value = hash(obj)
-                return f"hashed:{type(obj).__name__}:{hash_value}"
+                if isinstance(obj, Enum):
+                    return f"enum:{type(obj).__name__}:{obj.name}:{obj.value}"
+                return f"hashed:{type(obj).__name__}:{hash(obj)}"
             except (TypeError, ValueError):
                 pass  # Fall through to string representation
+        elif isinstance(obj, Enum):
+            return f"enum:{type(obj).__name__}:{obj.name}:{obj.value}"
+        elif hasattr(obj, "__hash__") and obj.__hash__ is not None:
+            type_name = type(obj).__name__
+            if type_name not in _warned_unstable_hash_types:
+                logger.warning(
+                    "Skipping unstable hash() fallback for %s while building cache key",
+                    type_name,
+                )
+                _warned_unstable_hash_types.add(type_name)
 
     # 6. Final fallback: string representation
     if enable_string:
-        return f"{type(obj).__name__}:{str(obj)}"
+        value = str(obj)
+        if " object at 0x" in value:
+            type_name = type(obj).__name__
+            if type_name not in _warned_unstable_repr_types:
+                logger.warning(
+                    "Using low-quality stable repr marker for %s while building cache key",
+                    type_name,
+                )
+                _warned_unstable_repr_types.add(type_name)
+            value = f"{type_name}:unstable_repr"
+        return f"{type(obj).__name__}:{value}"
 
     # If all methods are disabled, this is an error case
     return f"no_serialization_method:{type(obj).__name__}"

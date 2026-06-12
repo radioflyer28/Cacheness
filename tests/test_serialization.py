@@ -31,10 +31,10 @@ class TestUnifiedSerialization:
             "tuple:[int:1,str:two,float:3.0]" in result
         )  # Small tuples use recursive serialization
 
-        # Large tuples use hash for performance
+        # Large tuples use deterministic element serialization + digest
         large_tuple = tuple(range(20))  # > 10 elements
         result = serialize_for_cache_key(large_tuple)
-        assert "hashed:tuple:" in result  # Large tuples use hash
+        assert result.startswith("tuple_hashed:20:")
 
         # Dictionaries (not hashable, serialized recursively and sorted by key)
         result = serialize_for_cache_key({"b": 2, "a": 1})
@@ -75,8 +75,8 @@ class TestUnifiedSerialization:
 
         obj_no_dict = HashableWithoutDict(99)
         result = serialize_for_cache_key(obj_no_dict)
-        # Should fall back to hash since no __dict__
-        assert "hashed:HashableWithoutDict:" in result
+        # Should avoid unstable hash/default repr material
+        assert result == "HashableWithoutDict:HashableWithoutDict:unstable_repr"
 
     def test_non_hashable_objects(self):
         """Test serialization of objects without __hash__ method."""

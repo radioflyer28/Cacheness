@@ -8,6 +8,9 @@ the same cache key, maximizing cache hit reliability.
 """
 
 import tempfile
+import os
+import subprocess
+import sys
 import numpy as np
 import pytest
 from pathlib import Path
@@ -34,6 +37,29 @@ class TestDataClassForConsistency:
 
     def __hash__(self):
         return hash((self.name, self.value))
+
+
+def test_large_string_tuple_key_stable_across_pythonhashseed():
+    """Large tuple fallback must not depend on Python's randomized hash seed."""
+    script = (
+        "from cacheness.serialization import create_unified_cache_key; "
+        "t = tuple(f'value-{i}' for i in range(15)); "
+        "print(create_unified_cache_key({'x': t}))"
+    )
+
+    keys = []
+    for seed in ("1", "2"):
+        env = {**os.environ, "PYTHONHASHSEED": seed}
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        keys.append(result.stdout.strip())
+
+    assert keys[0] == keys[1]
 
 
 class HashableClassForConsistency:

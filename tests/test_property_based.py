@@ -258,6 +258,13 @@ class TestCacheKeyDeterminism:
         key2 = create_unified_cache_key(reversed_params)
         assert key1 == key2, "Key depends on dict insertion order"
 
+    @given(values=st.lists(st.text(max_size=20), min_size=11, max_size=20))
+    @settings(max_examples=50, deadline=None)
+    def test_large_tuple_key_is_deterministic(self, values):
+        """Large tuples must use deterministic key material."""
+        params = {"x": tuple(values)}
+        assert create_unified_cache_key(params) == create_unified_cache_key(params)
+
     @given(
         params=param_dicts,
         description=st.text(max_size=50),
