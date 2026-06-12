@@ -2,6 +2,7 @@
 created: 2026-06-12T15:45:54.188Z
 title: Fix write-intent journal path resolution and safety checks
 area: storage
+resolves_phase: 28
 files:
   - src/cacheness/write_intent.py:93
   - src/cacheness/core.py:884

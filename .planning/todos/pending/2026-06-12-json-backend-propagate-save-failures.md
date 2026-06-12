@@ -2,6 +2,7 @@
 created: 2026-06-12T15:45:54.188Z
 title: JSON backend - propagate save failures, preserve corrupt files
 area: database
+resolves_phase: 28
 files:
   - src/cacheness/metadata/json_backend.py
 ---

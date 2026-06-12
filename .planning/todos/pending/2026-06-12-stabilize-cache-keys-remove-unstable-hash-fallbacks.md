@@ -2,6 +2,7 @@
 created: 2026-06-12T15:45:54.188Z
 title: Stabilize cache keys - remove unstable hash()/str() fallbacks
 area: general
+resolves_phase: 28
 files:
   - src/cacheness/serialization.py:330
   - src/cacheness/serialization.py:363

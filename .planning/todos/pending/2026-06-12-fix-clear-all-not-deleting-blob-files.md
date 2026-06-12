@@ -2,6 +2,7 @@
 created: 2026-06-12T15:45:54.188Z
 title: Fix clear_all() not deleting blob files
 area: storage
+resolves_phase: 28
 files:
   - src/cacheness/storage/blob_store.py:1321
   - src/cacheness/core.py:1155

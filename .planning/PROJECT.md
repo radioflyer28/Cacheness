@@ -10,17 +10,23 @@ Cacheness is a Python disk caching library with pluggable metadata backends (JSO
 
 Encryption at rest now works with all metadata backends (JSON, SQLite, PostgreSQL). Inline blob + encryption interaction handled. Cross-backend test parity verified. All 8 requirements satisfied with formal verification artifacts.
 
+**Planning:** v0.12.0 Reliability Remediation (started 2026-06-12)
+
+The next milestone is sourced from the 2026-06-12 code review, pending todos, planted seeds, and backlog phase buckets. It focuses on silent data-loss fixes first, then TTL/eviction consistency, multi-process/backend parity, security posture, storage-mode durability decisions, and small independent polish fixes.
+
 **Previous:** v0.10.0 Security & Architecture (shipped 2026-04-06) — full security infrastructure, core decomposition, thread safety verification. 1727 tests.
 
-## Current Milestone: v0.11.0 Cross-Backend Hardening
+## Current Milestone: v0.12.0 Reliability Remediation
 
-**Goal:** Ensure encryption at rest works with all metadata backends and address remaining cross-backend inconsistencies.
+**Goal:** Close the highest-risk reliability, durability, parity, and security gaps identified by the June 12 code review before larger feature work resumes.
 
 **Target features:**
-- Encryption at rest verified and working with SQLite and PostgreSQL backends
-- Inline blob + encryption interaction handled correctly
-- Cross-backend test parity for encryption features
-- Additional hardening as identified by research
+- Silent data-loss fixes from Wave 1: blob cleanup, write-intent safety, JSON persistence failures, corrupt metadata handling, and stable persistent cache keys
+- TTL and eviction consistency across local and remote storage paths
+- Multi-process and backend parity hardening for overwrites, temp files, blob enumeration, and user metadata
+- Security posture improvements for signature verification, encrypted reads, key rotation, and signing scheme consistency
+- Storage-mode hardening for destructive APIs, crash-recovery coverage, and an explicit durability/fsync contract
+- Low-risk small fixes from the code review action list
 
 ## Core Value
 
@@ -80,7 +86,11 @@ Improve reliability, security, and maintainability of Cacheness without changing
 
 ### Active
 
-No active requirements. Next milestone not yet started.
+- [ ] Fix Wave 1 silent data-loss and broken-guarantee findings from `docs/CODE_REVIEW_FINDINGS.md`.
+- [ ] Promote backlog phases 999.1-999.4 into executable v0.12.0 phases.
+- [ ] Incorporate matching planted seeds: storage-mode API hardening, write-intent-before-blob-write, fsync/storage-mode durability, and signing-scheme unification.
+- [ ] Preserve strict backward compatibility unless a requirement explicitly documents migration behavior.
+- [ ] Maintain zero test regressions with targeted tiered tests and full-suite verification before ship.
 
 ### Out of Scope
 
@@ -90,6 +100,9 @@ No active requirements. Next milestone not yet started.
 - JSON backend O(n²) write performance — documented limitation, mitigation is "use SQLite"
 - Export/import cache — low priority convenience feature
 - Automated key rotation — needs background task infrastructure, defer until demand
+- Tiered pull-through cache — future feature; v0.12.0 handles its reliability and parity prerequisites first
+- Flipping `allow_unsigned_entries` default — breaking change, reserve for a future major-version window
+- JSON backend write batching/debouncing — performance design decision; defer until after persistence semantics are hardened
 
 
 ## Context
@@ -101,6 +114,9 @@ No active requirements. Next milestone not yet started.
 - **Concurrency:** SqliteBackend uses RLock for re-entrant safety. Write intent journal prevents orphaned blobs. Thread safety verified under concurrent rotation, encryption, and sustained access. Atomic writes verified on Windows.
 - **Error handling:** All `except Exception` catches narrowed or annotated `# intentionally broad`.
 - **Tests:** 1,773 tests covering thread safety, key rotation, encryption, concurrency stress, atomic writes, cross-backend parity, inline blob encryption, config validation, migration hardening, and all core functionality.
+- **Code review source:** `docs/CODE_REVIEW_FINDINGS.md` and `docs/CODE_REVIEW_ACTIONS.md` define the v0.12.0 remediation waves and acceptance criteria.
+- **Pending todos:** `.planning/todos/pending/` contains six work items; four are Wave 1 execution todos, one adds property-based cache-key stress coverage, and one tracks tiered cache as future scope.
+- **Seeds:** `.planning/seeds/` contains six planted ideas. v0.12.0 includes SEED-001, SEED-004, SEED-005, and SEED-006; SEED-002 and SEED-003 remain dormant.
 
 ## Testing Philosophy & Workflow
 
@@ -194,4 +210,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-07 after v0.11.0 milestone completed*
+*Last updated: 2026-06-12 after v0.12.0 milestone started*

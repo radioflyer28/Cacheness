@@ -1,35 +1,33 @@
 ---
 gsd_state_version: 1.0
-milestone: v0.11.0
-milestone_name: Cross-Backend Hardening
-status: completed
-last_updated: "2026-04-07T14:21:13.211Z"
-last_activity: 2026-04-07
+milestone: v0.12.0
+milestone_name: Reliability Remediation
+status: planning
+last_updated: "2026-06-12T19:52:26.857Z"
+last_activity: 2026-06-12
 progress:
   total_phases: 5
-  completed_phases: 5
-  total_plans: 10
-  completed_plans: 10
-  percent: 100
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
 ---
 
 # Project State
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-04-07)
+See: .planning/PROJECT.md (updated 2026-06-12)
 
-**Core value:** Reliable, type-aware disk caching with pluggable backends
-**Current focus:** Planning next milestone
+**Core value:** Improve reliability, security, and maintainability of Cacheness without changing public API semantics
+**Current focus:** v0.12.0 Reliability Remediation
 
 ## Current Position
 
-Phase: (none — milestone complete)
-Plan: (none)
-Status: v0.11.0 shipped
-Last activity: 2026-04-07
-
-Progress: ██████████ 5/5 phases (100%)
+Phase: 28 — Silent Data-Loss Remediation
+Plan: —
+Status: Ready to discuss/plan
+Last activity: 2026-06-12 — Milestone v0.12.0 roadmap created
 
 ## Accumulated Context
 
@@ -47,7 +45,7 @@ Progress: ██████████ 5/5 phases (100%)
 ### Code Review (2026-06-12)
 
 Full review in `docs/CODE_REVIEW_FINDINGS.md`; execution specs in `docs/CODE_REVIEW_ACTIONS.md`.
+
 - Wave 1 (silent data loss) → pending todos above
 - Waves 2–4 + small fixes → backlog phases 999.1–999.4 in ROADMAP.md
 - Decision-gated items → seeds SEED-001…006 in .planning/seeds/
-

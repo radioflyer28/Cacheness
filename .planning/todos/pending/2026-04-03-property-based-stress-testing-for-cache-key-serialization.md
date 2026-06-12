@@ -2,6 +2,7 @@
 created: 2026-04-03T20:47:59.531Z
 title: Property-based stress testing for cache key serialization
 area: testing
+resolves_phase: 28
 files:
   - src/cacheness/serialization.py
   - src/cacheness/core.py
