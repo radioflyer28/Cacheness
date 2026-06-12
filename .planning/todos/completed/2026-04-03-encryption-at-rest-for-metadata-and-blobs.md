@@ -2,11 +2,16 @@
 created: 2026-04-03T20:10:58.493Z
 title: Encryption at rest for metadata and blobs
 area: general
+status: completed
+completed: 2026-06-12
+resolution: Shipped in Phase 23 (ENC-01/ENC-02, D-01/D-02) — AES-256-GCM blob encryption with HKDF keys, hash-over-ciphertext. Residual gaps tracked separately.
 files:
   - docs/SECURITY.md
   - docs/FUTURE_IMPROVEMENTS.md
   - docs/LIBSQL_BACKEND.md
 ---
+
+> **Closed 2026-06-12:** Blob encryption shipped in Phase 23 (`src/cacheness/encryption.py`, inline-blob D-01/D-02 paths). The 2026-06 code review confirmed the crypto fundamentals are sound (AES-256-GCM, random nonces, HKDF domain separation, hash-over-ciphertext) but found residual gaps now tracked as **TASK-14** in `docs/CODE_REVIEW_ACTIONS.md` (findings S2/S3: decrypted plaintext written to temp files on disk during reads; encrypted reads bypass the blob-backend abstraction, breaking memory:// and s3://). Metadata-at-rest encryption (libSQL `encryption_key`) remains unimplemented — still listed in CONCERNS.md.
 
 ## Problem
 

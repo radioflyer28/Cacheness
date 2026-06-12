@@ -10,6 +10,8 @@ files:
 
 ## Problem
 
+> **2026-06-12 code review update:** Finding **U1** in `docs/CODE_REVIEW_FINDINGS.md` *proved* this class of bug exists today: `_serialize_with_config()` fallback 5 uses `hash(obj)` (PYTHONHASHSEED-randomized for string-containing objects like tuples >10 elements; id-based for default objects) and fallback 6 uses `str(obj)` (default repr embeds memory addresses). Keys are NOT stable across processes. The fix is **TASK-4** in `docs/CODE_REVIEW_ACTIONS.md` (also captured as todo 2026-06-12-stabilize-cache-keys…). This property suite should land with or immediately after that fix to lock it in — add **cross-process stability** (same key under different PYTHONHASHSEED subprocesses) as a first-class property below.
+
 Cache key generation (`create_unified_cache_key` in `serialization.py`, `_generate_cache_key` in `decorators.py`) is a critical correctness boundary — if two different inputs produce the same key, data is silently corrupted. If the same input produces different keys across Python versions or dependency upgrades (NumPy, Pandas, Polars), cache misses silently invalidate data.
 
 Current tests are example-based: they check known inputs against expected outputs. This misses edge cases in:

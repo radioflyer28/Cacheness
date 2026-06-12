@@ -2,6 +2,9 @@
 created: 2026-04-03T19:44:09.447Z
 title: Store cacheness version in metadata for migration support
 area: database
+status: completed
+completed: 2026-06-12
+resolution: Shipped in Phase 23 (D-06) — cacheness_version column exists in SQLite/PG schemas and is stamped on put. Caveat tracked as TASK-19.
 files:
   - src/cacheness/metadata/base.py
   - src/cacheness/metadata/sqlite_backend.py
@@ -9,6 +12,8 @@ files:
   - src/cacheness/core.py
   - src/cacheness/_storage_mode_mixin.py
 ---
+
+> **Closed 2026-06-12:** The `cacheness_version` column shipped in Phase 23 (D-06). Caveat from the 2026-06 code review (finding **U7** / **TASK-19**): `pyproject.toml` still says `0.6.0` while the changelog is at v0.11.x, so the stamped version is wrong — fix is queued in the small-fixes backlog phase. The larger `migrate()` API / per-handler format versions / lazy migration ideas below were NOT implemented — re-capture as a seed if still wanted.
 
 ## Problem
 

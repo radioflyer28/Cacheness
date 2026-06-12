@@ -24,3 +24,12 @@ Invalidation strategies: TTL-based, metadata-version check (cheap with libSQL em
 For storage mode users, this becomes a local workspace pattern — work locally, persist to remote. Like git's local/remote model.
 
 See FUTURE_IMPROVEMENTS.md section 9 and ARCHITECTURE.md "Tiered Cache Composition" for full design.
+
+### Prerequisites from 2026-06-12 code review (`docs/CODE_REVIEW_FINDINGS.md`)
+
+A tiered design composes local + remote tiers, so these findings become load-bearing and should be fixed first:
+
+- **CachedMetadataBackend staleness** (metadata/base.py:518): serves stale reads vs. external writes for up to its TTL — a tiered cache makes multi-writer the *normal* case; invalidation strategy must account for it.
+- **U2** (SQLite/PG silently drop user metadata that JSON preserves): tier promotion (`remote.get()` → `local.put()`) across different backends would silently lose metadata until TASK-10 lands.
+- **R13** (eviction skips remote `://` blobs): local-tier LRU eviction is the core mechanism here — TASK-8 must land first.
+- **U4** (divergent signing schemes UnifiedCache vs BlobStore): entries promoted between tiers must verify under one scheme (see SEED on signing unification).

@@ -76,3 +76,44 @@
 | 11-14 | v0.9.0 | Complete | 2026-04-03 |
 | 15-22 | v0.10.0 | Complete | 2026-04-06 |
 | 23-27 | v0.11.0 | Complete | 2026-04-07 |
+
+## Backlog
+
+Items sourced from the 2026-06-12 code review (`docs/CODE_REVIEW_FINDINGS.md`). Execution specs with acceptance criteria live in `docs/CODE_REVIEW_ACTIONS.md` (TASK-N references below). Wave-1 items (silent data loss) are NOT here — they're captured as pending todos for immediate work.
+
+### Phase 999.1: TTL & eviction consistency (BACKLOG)
+
+**Goal:** One coherent TTL/eviction story — per-entry `expires_at` honored end-to-end, cleanup paths delete blob files, counters survive overwrites, remote blobs evicted.
+**Requirements:** Code review Wave 2 — TASK-5 (R5 per-entry TTL), TASK-6 (R6 init-cleanup orphans blobs), TASK-7 (R9/R10 preserve access_count/created_at), TASK-8 (R13 remote blob eviction)
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (promote with /gsd-review-backlog when ready)
+
+### Phase 999.2: Multi-process & parity hardening (BACKLOG)
+
+**Goal:** Same observable behavior across backends and safe concurrent/multi-process operation — no silent metadata loss on SQLite/PG, no temp-file races, non-destructive overwrites, integrity checks that see all blobs.
+**Requirements:** Code review Wave 3 — TASK-9 (R11 unique temp names), TASK-10 (U2 user-metadata parity), TASK-11 (R7 non-destructive overwrite, incl. `_storage_mode_put`), TASK-12 (R12 backend-driven blob enumeration)
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (promote with /gsd-review-backlog when ready)
+
+### Phase 999.3: Security posture hardening (BACKLOG)
+
+**Goal:** Signing and encryption guarantees that hold under the documented threat model — no signature downgrade paths, no plaintext on disk during encrypted reads, crash-safe key rotation.
+**Requirements:** Code review Wave 4 — TASK-13 (S1 min signature version + unsigned-entry docs), TASK-14 (S2/S3 in-memory decryption, backend-routed reads), TASK-15 (S4 two-phase rotate_key)
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (promote with /gsd-review-backlog when ready)
+
+### Phase 999.4: Code review small fixes (BACKLOG)
+
+**Goal:** Batch of low-risk independent fixes from the code review — each one commit, no design decisions needed.
+**Requirements:** TASK-16 (metadata dict mutation), TASK-17 (sanitize-key collisions), TASK-18 (double read in get), TASK-19 (pyproject version 0.6.0→current), TASK-20 (absolute blob_id rejection), TASK-21 (SQLite PRAGMA placement), TASK-22 (S3 delete failure reporting), TASK-23 (root re-export of UnifiedCache)
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (promote with /gsd-review-backlog when ready)
+
