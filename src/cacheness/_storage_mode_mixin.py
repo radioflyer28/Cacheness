@@ -58,6 +58,12 @@ class StorageModeMixin:
                     "is_inline": 1,
                 }
             else:
+                planned_blob_path = base_file_path.with_suffix(
+                    handler.get_file_extension(self.config)
+                )
+                self._write_journal.record_intent(
+                    cache_key, str(planned_blob_path.relative_to(self.cache_dir))
+                )
                 wb = self._blob_store._write_blob(
                     data, base_file_path, compute_hash=True
                 )
@@ -70,9 +76,6 @@ class StorageModeMixin:
                     cleanup.set_remote(self._blob_store.blob_backend, actual_path_str)
 
                 metadata_dict = self._build_metadata_dict(result, file_hash)
-
-                # Record write intent for crash recovery (non-inline only)
-                self._write_journal.record_intent(cache_key, result.actual_path)
 
                 entry_data = {
                     "data_type": handler.data_type,

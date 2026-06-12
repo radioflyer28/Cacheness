@@ -199,6 +199,22 @@ class TestWriteIntentIntegration:
             intent_files = list(intents_dir.glob("*.intent"))
             assert len(intent_files) == 0
 
+    def test_cache_mode_records_intent_before_blob_write(self, tmp_path, monkeypatch):
+        """Non-inline cache writes record an intent before blob I/O starts."""
+        cache = _make_cache(tmp_path)
+        intents_dir = tmp_path / ".intents"
+
+        def fail_after_check(*args, **kwargs):
+            assert list(intents_dir.glob("*.intent"))
+            raise RuntimeError("blob write interrupted")
+
+        monkeypatch.setattr(cache._blob_store, "_write_blob", fail_after_check)
+
+        with pytest.raises(RuntimeError, match="blob write interrupted"):
+            cache.put({"payload": "not-inline"}, cache_key="pre-write-cache")
+
+        assert not list(intents_dir.glob("*.intent"))
+
     def test_overwrite_clears_intent(self, tmp_path):
         """Overwriting an existing key should not leave stale intents."""
         cache = _make_cache(tmp_path)
@@ -258,3 +274,18 @@ class TestStorageModeWriteIntentCleanup:
 
         assert not blob_file.exists()
         assert not intent_path.exists()
+
+    def test_storage_mode_records_intent_before_blob_write(self, tmp_path, monkeypatch):
+        cache = self._make_storage_cache(tmp_path)
+        intents_dir = tmp_path / ".intents"
+
+        def fail_after_check(*args, **kwargs):
+            assert list(intents_dir.glob("*.intent"))
+            raise RuntimeError("blob write interrupted")
+
+        monkeypatch.setattr(cache._blob_store, "_write_blob", fail_after_check)
+
+        with pytest.raises(RuntimeError, match="blob write interrupted"):
+            cache.put({"payload": "not-inline"}, cache_key="pre-write-storage")
+
+        assert not list(intents_dir.glob("*.intent"))

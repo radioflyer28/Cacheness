@@ -862,6 +862,12 @@ class UnifiedCache(
                         metadata_dict["encryption_iv"] = direct["encryption_iv"]
                 else:
                     # Delegate file I/O + handler dispatch to BlobStore
+                    planned_blob_path = base_file_path.with_suffix(
+                        handler.get_file_extension(self.config)
+                    )
+                    self._write_journal.record_intent(
+                        cache_key, str(planned_blob_path.relative_to(self.cache_dir))
+                    )
                     wb = self._blob_store._write_blob(
                         data,
                         base_file_path,
@@ -883,9 +889,6 @@ class UnifiedCache(
 
                     # Update metadata
                     metadata_dict = self._build_metadata_dict(result, file_hash)
-
-                    # Record write intent for crash recovery (non-inline only)
-                    self._write_journal.record_intent(cache_key, result.actual_path)
 
                 # Store complete cache key parameters as JSON for debugging/querying (if enabled)
                 # This captures the original kwargs used to derive the cache key
