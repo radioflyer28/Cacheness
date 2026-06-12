@@ -2,13 +2,13 @@
 gsd_state_version: 1.0
 milestone: v0.12.0
 milestone_name: Reliability Remediation
-status: planning
-last_updated: "2026-06-12T19:52:26.857Z"
+status: ready_to_execute
+last_updated: "2026-06-12T20:36:38.547Z"
 last_activity: 2026-06-12
 progress:
   total_phases: 5
   completed_phases: 0
-  total_plans: 0
+  total_plans: 5
   completed_plans: 0
   percent: 0
 ---
@@ -26,8 +26,8 @@ See: .planning/PROJECT.md (updated 2026-06-12)
 
 Phase: 28 — Silent Data-Loss Remediation
 Plan: —
-Status: Ready to discuss/plan
-Last activity: 2026-06-12 — Milestone v0.12.0 roadmap created
+Status: Ready to execute
+Last activity: 2026-06-12 — Phase 28 planned with 5 Wave 1 remediation plans
 
 ## Accumulated Context
 

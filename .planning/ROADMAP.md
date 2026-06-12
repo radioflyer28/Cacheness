@@ -97,7 +97,7 @@
 **Goal:** Eliminate the highest-risk data-loss and broken-guarantee defects before broader hardening work begins.
 **Requirements:** REL-01, REL-02, REL-03, REL-04, REL-05, REL-06, KEY-01, KEY-02
 **Source:** Pending todos for TASK-1 through TASK-4, property-based cache-key todo, SEED-006
-**Plans:** 0 plans
+**Plans:** 5 plans
 
 Success criteria:
 1. `clear_all()` and `clear_all_namespaces()` remove namespace blob files without deleting reserved metadata or key files.
@@ -107,7 +107,11 @@ Success criteria:
 5. Tier-1 tests from TASK-1 through TASK-4 pass with the TensorFlow tests ignored on Windows.
 
 Plans:
-- [ ] TBD via `$gsd-discuss-phase 28` / `$gsd-plan-phase 28`
+- [ ] 28-01-PLAN.md - TASK-1 clear_all namespace blob cleanup (REL-01)
+- [ ] 28-02-PLAN.md - TASK-2 write-intent path resolution, committed-entry guard, storage-mode cleanup (REL-02, REL-03, REL-04)
+- [ ] 28-03-PLAN.md - SEED-006 record write intent before blob write follow-up (REL-02, REL-03, REL-04)
+- [ ] 28-04-PLAN.md - TASK-3 JSON backend persistence failures and corrupt-file preservation (REL-05, REL-06)
+- [ ] 28-05-PLAN.md - TASK-4 stable cache-key fallbacks and property tests (KEY-01, KEY-02)
 
 ### Phase 29: TTL & Eviction Consistency
 
@@ -213,4 +217,3 @@ Plans:
 
 Plans:
 - [ ] TBD (promote with /gsd-review-backlog when ready)
-
