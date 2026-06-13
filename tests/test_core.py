@@ -930,6 +930,75 @@ class TestCacheness:
             # Blob file should be gone
             assert not blob_path.exists()
 
+    def test_init_cleanup_expired_deletes_blob_files_and_invokes_hook(self):
+        """Init-time cleanup uses the public cleanup path."""
+        from cacheness.config import (
+            CacheConfig,
+            CacheStorageConfig,
+            CacheMetadataConfig,
+            CompressionConfig,
+            SerializationConfig,
+            HandlerConfig,
+            HooksConfig,
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            evicted = []
+
+            def on_evict(cache_key: str, reason: str) -> None:
+                evicted.append((cache_key, reason))
+
+            base_config = CacheConfig(
+                storage=CacheStorageConfig(
+                    cache_dir=temp_dir,
+                    cleanup_on_init=False,
+                ),
+                metadata=CacheMetadataConfig(
+                    metadata_backend="json",
+                    default_ttl_seconds=3600,
+                ),
+                compression=CompressionConfig(use_blosc2_arrays=False),
+                serialization=SerializationConfig(),
+                handlers=HandlerConfig(),
+                hooks=HooksConfig(on_evict=on_evict),
+            )
+            cache = cacheness(base_config)
+
+            cache.put(np.array([1, 2, 3]), key="init_expired")
+            cache_key = cache._create_cache_key({"key": "init_expired"})
+            entry = cache.metadata_backend.get_entry(cache_key)
+            actual_path = entry.get("actual_path") or entry.get("metadata", {}).get(
+                "actual_path"
+            )
+            blob_path = cache._resolve_actual_path(actual_path)
+            assert blob_path.exists()
+
+            created_at = datetime.now(timezone.utc) - timedelta(hours=2)
+            entry["created_at"] = created_at.isoformat()
+            entry["ttl_seconds"] = 1
+            entry["expires_at"] = (created_at + timedelta(seconds=1)).isoformat()
+            cache.metadata_backend.put_entry(cache_key, entry)
+
+            cleanup_config = CacheConfig(
+                storage=CacheStorageConfig(
+                    cache_dir=temp_dir,
+                    cleanup_on_init=True,
+                ),
+                metadata=CacheMetadataConfig(
+                    metadata_backend="json",
+                    default_ttl_seconds=3600,
+                ),
+                compression=CompressionConfig(use_blosc2_arrays=False),
+                serialization=SerializationConfig(),
+                handlers=HandlerConfig(),
+                hooks=HooksConfig(on_evict=on_evict),
+            )
+            reopened = cacheness(cleanup_config)
+
+            assert reopened.metadata_backend.get_entry(cache_key) is None
+            assert not blob_path.exists()
+            assert evicted == [(cache_key, "expired")]
+
     def test_cleanup_expired_empty_cache(self):
         """Test cleanup_expired() on empty cache returns 0."""
         from cacheness import cacheness
