@@ -1361,6 +1361,119 @@ class TestCacheness:
             f"Cache size {total_size_mb}MB should be <= 0.005MB after enforcement"
         )
 
+    def test_size_limit_eviction_deletes_memory_uri_blob(self, temp_cache_dir):
+        """D-19/D-22: size eviction deletes URI blobs via the blob backend."""
+        from cacheness.config import (
+            CacheMetadataConfig,
+            CacheStorageConfig,
+            CompressionConfig,
+            HandlerConfig,
+            SerializationConfig,
+        )
+        from cacheness.storage.backends.blob_backends import InMemoryBlobBackend
+
+        config = CacheConfig(
+            storage=CacheStorageConfig(
+                cache_dir=str(temp_cache_dir),
+                max_cache_size=None,
+                max_cache_size_mb=None,
+            ),
+            metadata=CacheMetadataConfig(metadata_backend="json"),
+            compression=CompressionConfig(use_blosc2_arrays=False),
+            serialization=SerializationConfig(),
+            handlers=HandlerConfig(),
+        )
+        cache = cacheness(config)
+        cache._blob_store.blob_backend = InMemoryBlobBackend()
+
+        cache.put({"payload": "old-" + ("x" * 1200)}, cache_key="old-uri-blob")
+        old_entry = cache.metadata_backend.get_entry("old-uri-blob")
+        old_path = old_entry["metadata"]["actual_path"]
+        assert old_path.startswith("memory://")
+        assert cache._blob_store.blob_backend.exists(old_path)
+
+        cache.put({"payload": "new-" + ("y" * 1200)}, cache_key="new-uri-blob")
+
+        cache.config.storage.max_cache_size = 1000
+        cache._enforce_size_limit()
+
+        assert cache.metadata_backend.get_entry("old-uri-blob") is None
+        assert not cache._blob_store.blob_backend.exists(old_path)
+        assert cache.get(cache_key="new-uri-blob") == {"payload": "new-" + ("y" * 1200)}
+
+    def test_size_limit_remote_delete_failure_logs_warning(
+        self, temp_cache_dir, caplog
+    ):
+        """D-21: remote deletion failures warn and do not crash enforcement."""
+        from cacheness.config import (
+            CacheBlobConfig,
+            CacheMetadataConfig,
+            CacheStorageConfig,
+            CompressionConfig,
+            HandlerConfig,
+            SerializationConfig,
+        )
+
+        config = CacheConfig(
+            storage=CacheStorageConfig(cache_dir=str(temp_cache_dir), max_cache_size=1),
+            metadata=CacheMetadataConfig(metadata_backend="json"),
+            compression=CompressionConfig(use_blosc2_arrays=False),
+            serialization=SerializationConfig(),
+            handlers=HandlerConfig(),
+            blob=CacheBlobConfig(blob_backend="memory"),
+        )
+        cache = cacheness(config)
+
+        with (
+            patch.object(
+                cache.metadata_backend,
+                "get_stats",
+                return_value={"total_size_bytes": 2},
+            ),
+            patch.object(
+                cache.metadata_backend,
+                "cleanup_by_size",
+                return_value={
+                    "count": 1,
+                    "removed_entries": [
+                        {"cache_key": "remote-key", "actual_path": "memory://boom"}
+                    ],
+                },
+            ),
+            patch.object(
+                cache._blob_store.blob_backend,
+                "delete_blob",
+                side_effect=RuntimeError("backend unavailable"),
+            ),
+            caplog.at_level("WARNING", logger="cacheness.core"),
+        ):
+            cache._enforce_size_limit()
+
+        assert (
+            "Failed to delete remote blob memory://boom during size enforcement"
+            in caplog.text
+        )
+        assert "backend unavailable" in caplog.text
+
+    def test_storage_mode_size_enforcement_remains_disabled(self, temp_cache_dir):
+        """D-23: storage mode does not gain size-eviction behavior."""
+        config = CacheConfig(
+            cache_dir=str(temp_cache_dir),
+            metadata_backend="json",
+            blob_backend="memory",
+            storage_mode=True,
+            max_cache_size=1,
+        )
+        cache = cacheness(config)
+
+        cache.put({"payload": "durable-" + ("z" * 2000)}, cache_key="durable-key")
+        cache._enforce_size_limit()
+
+        assert cache.config.storage.max_cache_size_bytes is None
+        assert cache.get(cache_key="durable-key") == {
+            "payload": "durable-" + ("z" * 2000)
+        }
+
 
 class TestFactoryMethods:
     """Test factory methods for creating specialized cache instances."""
