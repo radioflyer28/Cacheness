@@ -23,7 +23,7 @@
 
 - [x] **TTL-01**: User can set per-entry TTL and have stored `expires_at` honored by reads and cleanup across JSON, SQLite, and PostgreSQL semantics.
 - [x] **TTL-02**: User can rely on init-time expired-entry cleanup deleting both metadata and blob files through the same path as public cleanup.
-- [ ] **TTL-03**: User can overwrite or update metadata without unexpectedly resetting access counters, provenance timestamps, expiry semantics, or signatures.
+- [x] **TTL-03**: User can overwrite or update metadata without unexpectedly resetting access counters, provenance timestamps, expiry semantics, or signatures.
 - [ ] **TTL-04**: User can rely on size/eviction cleanup deleting remote blobs through the configured blob backend instead of leaking S3 or memory-backed objects.
 
 ### Multi-Process and Backend Parity
@@ -86,7 +86,7 @@
 | KEY-02 | Phase 28 | Pending |
 | TTL-01 | Phase 29 | Complete |
 | TTL-02 | Phase 29 | Complete |
-| TTL-03 | Phase 29 | Pending |
+| TTL-03 | Phase 29 | Complete |
 | TTL-04 | Phase 29 | Pending |
 | PAR-01 | Phase 30 | Pending |
 | PAR-02 | Phase 30 | Pending |

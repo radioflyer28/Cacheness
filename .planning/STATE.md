@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v0.12.0
 milestone_name: Reliability Remediation
 status: ready
-last_updated: "2026-06-13T22:03:22.560Z"
-last_activity: Completed Phase 29 Plan 02 on 2026-06-13; ready for 29-03
+last_updated: "2026-06-13T22:27:02.584Z"
+last_activity: Completed Phase 29 Plan 03 on 2026-06-13; ready for 29-04
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 9
-  completed_plans: 7
-  percent: 11
+  completed_plans: 8
+  percent: 89
 ---
 
 # Project State
@@ -25,9 +25,9 @@ See: .planning/PROJECT.md (updated 2026-06-12)
 ## Current Position
 
 Phase: 29 — TTL & Eviction Consistency
-Plan: 03
+Plan: 04
 Status: ready
-Last activity: Completed Phase 29 Plan 02 on 2026-06-13; ready for 29-03
+Last activity: Completed Phase 29 Plan 03 on 2026-06-13; ready for 29-04
 
 ## Accumulated Context
 
@@ -56,9 +56,12 @@ Full review in `docs/CODE_REVIEW_FINDINGS.md`; execution specs in `docs/CODE_REV
 |-------|------|----------|-------|
 | Phase 29-ttl-eviction-consistency P01 | 38min | 2 tasks | 12 files |
 | Phase 29-ttl-eviction-consistency P02 | 8min | 2 tasks | 2 files |
+| Phase 29-ttl-eviction-consistency P03 | 17min | 2 tasks | 9 files |
 
 ## Decisions
 
 - [Phase 29-ttl-eviction-consistency]: Stored expires_at is authoritative for cache-mode reads and cleanup; fallback TTL applies only when expires_at is absent. — Completed by Phase 29 Plan 01 / TTL-01.
 - [Phase 29-ttl-eviction-consistency]: Read-path expired-entry deletion remained outside Plan 29-02 scope per D-10.
 - [Phase 29-ttl-eviction-consistency]: TTL-02 init cleanup delegates to public cleanup_expired so constructor cleanup deletes blobs and invokes on_evict.
+- [Phase 29-ttl-eviction-consistency]: TTL-03 metadata-only backend updates preserve created_at, ttl_seconds, and expires_at by default; content updates pass explicit timestamps. — Completed by Phase 29 Plan 03.
+- [Phase 29-ttl-eviction-consistency]: SQLite and PostgreSQL same-key overwrites preserve existing access_count. — Completed by Phase 29 Plan 03.
