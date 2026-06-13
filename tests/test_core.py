@@ -788,6 +788,67 @@ class TestCacheness:
             assert not cache.exists(key="test_1")
             assert not cache.exists(key="test_2")
 
+    def test_cleanup_expired_honors_stored_expires_at_for_blob_cleanup(self):
+        """Public cleanup uses stored expires_at before fallback TTL."""
+        from datetime import datetime, timedelta, timezone
+        from cacheness import cacheness
+        from cacheness.config import (
+            CacheConfig,
+            CacheStorageConfig,
+            CacheMetadataConfig,
+            CompressionConfig,
+            SerializationConfig,
+            HandlerConfig,
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            now = datetime.now(timezone.utc)
+            storage_config = CacheStorageConfig(
+                cache_dir=temp_dir, cleanup_on_init=False
+            )
+            metadata_config = CacheMetadataConfig(
+                metadata_backend="json",
+                default_ttl_seconds=99999,
+            )
+            config = CacheConfig(
+                storage=storage_config,
+                metadata=metadata_config,
+                compression=CompressionConfig(),
+                serialization=SerializationConfig(),
+                handlers=HandlerConfig(),
+            )
+            cache = cacheness(config)
+
+            cache.put({"expired": True}, key="stored-past")
+            cache.put({"expired": False}, key="stored-future")
+
+            past_key = cache._create_cache_key({"key": "stored-past"})
+            future_key = cache._create_cache_key({"key": "stored-future"})
+            past_entry = cache.metadata_backend.get_entry(past_key)
+            future_entry = cache.metadata_backend.get_entry(future_key)
+
+            past_path = cache._resolve_actual_path(past_entry["actual_path"])
+            future_path = cache._resolve_actual_path(future_entry["actual_path"])
+            assert past_path.exists()
+            assert future_path.exists()
+
+            past_entry["created_at"] = (now - timedelta(minutes=1)).isoformat()
+            past_entry["ttl_seconds"] = -1
+            past_entry["expires_at"] = (now - timedelta(seconds=1)).isoformat()
+            future_entry["created_at"] = (now - timedelta(days=10)).isoformat()
+            future_entry["ttl_seconds"] = 999999
+            future_entry["expires_at"] = (now + timedelta(days=1)).isoformat()
+            cache.metadata_backend.put_entry(past_key, past_entry)
+            cache.metadata_backend.put_entry(future_key, future_entry)
+
+            removed = cache.cleanup_expired(ttl_seconds=99999)
+
+            assert removed == 1
+            assert cache.metadata_backend.get_entry(past_key) is None
+            assert not past_path.exists()
+            assert cache.metadata_backend.get_entry(future_key) is not None
+            assert future_path.exists()
+
     def test_cleanup_expired_deletes_blob_files(self):
         import time
 
@@ -1094,6 +1155,38 @@ class TestCacheness:
 
             # Should not be expired with longer TTL: 3 hours = 10800 seconds
             assert cache._is_expired("test_key", ttl_seconds=10800) is False
+
+    def test_is_expired_honors_stored_expires_at_before_fallback_ttl(self, cache):
+        """Stored expires_at is authoritative over caller fallback TTL."""
+        from datetime import datetime, timedelta, timezone
+        from unittest.mock import patch
+
+        now = datetime(2026, 6, 13, 12, 0, tzinfo=timezone.utc)
+        recent_created = (now - timedelta(minutes=1)).isoformat()
+        old_created = (now - timedelta(days=10)).isoformat()
+
+        past_expiry_entry = {
+            "created_at": recent_created,
+            "expires_at": (now - timedelta(seconds=1)).isoformat(),
+        }
+        future_expiry_entry = {
+            "created_at": old_created,
+            "expires_at": (now + timedelta(days=1)).isoformat(),
+        }
+
+        with patch("cacheness.core.datetime") as mock_datetime:
+            mock_datetime.now.return_value = now
+            mock_datetime.fromisoformat = datetime.fromisoformat
+
+            with patch.object(
+                cache.metadata_backend, "get_entry", return_value=past_expiry_entry
+            ):
+                assert cache._is_expired("past-expiry", ttl_seconds=99999) is True
+
+            with patch.object(
+                cache.metadata_backend, "get_entry", return_value=future_expiry_entry
+            ):
+                assert cache._is_expired("future-expiry", ttl_seconds=1) is False
 
     def test_timezone_consistency_across_cache_operations(self, cache):
         """Test that all cache operations use consistent UTC timezone handling"""

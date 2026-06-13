@@ -7,6 +7,7 @@ Tests the metadata storage systems and their integration with the cache.
 import pytest
 import tempfile
 import shutil
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from cacheness.metadata import (
@@ -51,6 +52,56 @@ class TestMetadataBackendCreation:
         # Should raise ValueError for invalid backend type
         with pytest.raises(ValueError, match="Unknown backend type"):
             create_metadata_backend(backend_type="invalid", cache_dir=str(temp_dir))
+
+
+class TestStoredExpiryCleanup:
+    """Stored expires_at takes precedence over fallback cleanup TTL."""
+
+    @pytest.mark.parametrize("backend_name", ["json", "sqlite"])
+    def test_cleanup_expired_honors_stored_expiry_before_created_at(
+        self, tmp_path, backend_name
+    ):
+        if backend_name == "json":
+            backend = JsonBackend(tmp_path / "metadata.json")
+        else:
+            backend = SqliteBackend(db_file=str(tmp_path / "metadata.db"))
+
+        now = datetime.now(timezone.utc)
+        recent_created = (now - timedelta(minutes=1)).isoformat()
+        old_created = (now - timedelta(days=10)).isoformat()
+
+        backend.put_entry(
+            "past_expiry_recent_created",
+            {
+                "cache_key": "past_expiry_recent_created",
+                "data_type": "object",
+                "file_size": 1,
+                "created_at": recent_created,
+                "ttl_seconds": -1,
+                "expires_at": (now - timedelta(seconds=1)).isoformat(),
+                "metadata": {},
+            },
+        )
+        backend.put_entry(
+            "future_expiry_old_created",
+            {
+                "cache_key": "future_expiry_old_created",
+                "data_type": "object",
+                "file_size": 1,
+                "created_at": old_created,
+                "ttl_seconds": 999999,
+                "expires_at": (now + timedelta(days=1)).isoformat(),
+                "metadata": {},
+            },
+        )
+
+        removed = backend.cleanup_expired(ttl_seconds=99999)
+
+        assert removed == 1
+        assert backend.get_entry("past_expiry_recent_created") is None
+        assert backend.get_entry("future_expiry_old_created") is not None
+        if hasattr(backend, "close"):
+            backend.close()
 
 
 class TestJsonBackendPersistenceFailures:

@@ -304,6 +304,40 @@ class TestBackendParity:
         assert sqlite_backend.get_entry("recent_key") is not None
         assert removed_count >= 1
 
+        now = datetime.now(timezone.utc)
+        sqlite_backend.put_entry(
+            "stored_past_recent_created",
+            {
+                "cache_key": "stored_past_recent_created",
+                "description": "Stored expiry is past",
+                "data_type": "object",
+                "file_size": 128,
+                "created_at": (now - timedelta(minutes=1)).isoformat(),
+                "ttl_seconds": -1,
+                "expires_at": (now - timedelta(seconds=1)).isoformat(),
+                "metadata": {},
+            },
+        )
+        sqlite_backend.put_entry(
+            "stored_future_old_created",
+            {
+                "cache_key": "stored_future_old_created",
+                "description": "Stored expiry is future",
+                "data_type": "object",
+                "file_size": 128,
+                "created_at": (now - timedelta(days=10)).isoformat(),
+                "ttl_seconds": 999999,
+                "expires_at": (now + timedelta(days=1)).isoformat(),
+                "metadata": {},
+            },
+        )
+
+        stored_removed_count = sqlite_backend.cleanup_expired(ttl_seconds=99999)
+
+        assert sqlite_backend.get_entry("stored_past_recent_created") is None
+        assert sqlite_backend.get_entry("stored_future_old_created") is not None
+        assert stored_removed_count == 1
+
     def test_cleanup_by_size_parity(self, sqlite_backend):
         """Test that cleanup_by_size works identically."""
         import time

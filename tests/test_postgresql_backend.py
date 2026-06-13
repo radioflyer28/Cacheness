@@ -11,6 +11,7 @@ PostgreSQL-specific tests are marked and require a running PostgreSQL instance.
 import pytest
 import tempfile
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -278,6 +279,37 @@ class TestPostgresBackendWithDatabase:
         entries = backend.list_entries()
         cleanup_entries = [e for e in entries if e["cache_key"].startswith("cleanup_")]
         assert len(cleanup_entries) == 3
+
+    def test_cleanup_expired_honors_stored_expires_at(self, backend):
+        """PostgreSQL cleanup uses stored expires_at before fallback TTL."""
+        now = datetime.now(timezone.utc)
+
+        backend.put_entry(
+            "pg_past_expiry_recent_created",
+            {
+                "data_type": "test",
+                "file_size": 0,
+                "created_at": (now - timedelta(minutes=1)).isoformat(),
+                "ttl_seconds": -1,
+                "expires_at": (now - timedelta(seconds=1)).isoformat(),
+            },
+        )
+        backend.put_entry(
+            "pg_future_expiry_old_created",
+            {
+                "data_type": "test",
+                "file_size": 0,
+                "created_at": (now - timedelta(days=10)).isoformat(),
+                "ttl_seconds": 999999,
+                "expires_at": (now + timedelta(days=1)).isoformat(),
+            },
+        )
+
+        removed = backend.cleanup_expired(99999)
+
+        assert removed == 1
+        assert backend.get_entry("pg_past_expiry_recent_created") is None
+        assert backend.get_entry("pg_future_expiry_old_created") is not None
 
     def test_clear_all(self, backend):
         """Test clearing all entries."""

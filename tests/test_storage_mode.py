@@ -11,6 +11,7 @@ Validates that UnifiedCache with storage_mode=True:
 import time
 import pytest
 import numpy as np
+from datetime import datetime, timedelta, timezone
 
 from cacheness.config import CacheConfig, CacheMetadataConfig
 from cacheness.core import UnifiedCache
@@ -113,6 +114,26 @@ class TestNoTTLExpiration:
         storage_cache.put("data", cache_key="k2")
         storage_cache._cleanup_expired()
         assert storage_cache.exists(cache_key="k2")
+
+    def test_get_ignores_stored_past_expires_at(self, tmp_path):
+        """Storage mode returns data even if metadata has a past expires_at."""
+        config = CacheConfig(
+            cache_dir=str(tmp_path / "store"),
+            storage_mode=True,
+            metadata=CacheMetadataConfig(metadata_backend="json"),
+        )
+        cache = UnifiedCache(config=config)
+        cache.put({"durable": True}, cache_key="ttl-bypass")
+
+        entry = cache.metadata_backend.get_entry("ttl-bypass")
+        entry["ttl_seconds"] = -1
+        entry["expires_at"] = (
+            datetime.now(timezone.utc) - timedelta(days=1)
+        ).isoformat()
+        cache.metadata_backend._metadata["entries"]["ttl-bypass"] = entry
+        cache.metadata_backend._save_to_disk()
+
+        assert cache.get(cache_key="ttl-bypass") == {"durable": True}
 
     def test_normal_cache_expires(self, normal_cache):
         """Sanity: normal cache with 1s TTL expires entries."""
