@@ -147,9 +147,7 @@ class UpdateMixin:
                     }
                     # Propagate encryption metadata from inline path (D-01)
                     if "encryption_algorithm" in direct:
-                        updates["encryption_algorithm"] = direct[
-                            "encryption_algorithm"
-                        ]
+                        updates["encryption_algorithm"] = direct["encryption_algorithm"]
                         updates["encryption_iv"] = direct["encryption_iv"]
                     if hasattr(handler, "data_type"):
                         updates["data_type"] = handler.data_type
@@ -211,6 +209,9 @@ class UpdateMixin:
                         updates["inline_ext"] = None
 
                 # Delegate metadata-only update to backend (no I/O in metadata layer)
+                now = datetime.now(timezone.utc).isoformat()
+                updates["created_at"] = now
+                updates["accessed_at"] = now
                 self.metadata_backend.update_entry_metadata(
                     cache_key=cache_key, updates=updates
                 )

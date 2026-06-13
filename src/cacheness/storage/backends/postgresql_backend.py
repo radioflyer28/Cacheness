@@ -1055,7 +1055,6 @@ class PostgresBackend(MetadataBackend):
                     actual_path=actual_path,
                     cache_key_params=jsonb_params,
                     metadata_dict=jsonb_metadata,
-                    access_count=access_count_val,
                     ttl_seconds=ttl_seconds_val,
                     expires_at=expires_at,
                     blob_data=entry_data.get("blob_data"),
@@ -1213,10 +1212,6 @@ class PostgresBackend(MetadataBackend):
                     if not entry:
                         return False
 
-                    # Update derived metadata fields
-                    now = datetime.now(timezone.utc)
-                    entry.created_at = now  # Reset timestamp
-
                     if "file_size" in updates:
                         entry.file_size = updates["file_size"]
                     if "file_hash" in updates:
@@ -1254,6 +1249,35 @@ class PostgresBackend(MetadataBackend):
                         entry.encryption_iv = updates["encryption_iv"]
                     if "cacheness_version" in updates:
                         entry.cacheness_version = updates["cacheness_version"]
+                    if "created_at" in updates:
+                        created_at = updates["created_at"]
+                        if isinstance(created_at, str):
+                            created_at = datetime.fromisoformat(created_at)
+                            if created_at.tzinfo is None:
+                                created_at = created_at.replace(tzinfo=timezone.utc)
+                            else:
+                                created_at = created_at.astimezone(timezone.utc)
+                        entry.created_at = created_at
+                    if "accessed_at" in updates:
+                        accessed_at = updates["accessed_at"]
+                        if isinstance(accessed_at, str):
+                            accessed_at = datetime.fromisoformat(accessed_at)
+                            if accessed_at.tzinfo is None:
+                                accessed_at = accessed_at.replace(tzinfo=timezone.utc)
+                            else:
+                                accessed_at = accessed_at.astimezone(timezone.utc)
+                        entry.accessed_at = accessed_at
+                    if "ttl_seconds" in updates:
+                        entry.ttl_seconds = updates["ttl_seconds"]
+                    if "expires_at" in updates:
+                        expires_at = updates["expires_at"]
+                        if isinstance(expires_at, str):
+                            expires_at = datetime.fromisoformat(expires_at)
+                            if expires_at.tzinfo is None:
+                                expires_at = expires_at.replace(tzinfo=timezone.utc)
+                            else:
+                                expires_at = expires_at.astimezone(timezone.utc)
+                        entry.expires_at = expires_at
 
                     session.commit()
                     return True

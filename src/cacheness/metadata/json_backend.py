@@ -208,10 +208,6 @@ class JsonBackend(MetadataBackend):
             if not entry:
                 return False
 
-            # Update derived metadata (file_size, content_hash, created_at)
-            now = datetime.now(timezone.utc)
-            entry["created_at"] = now.isoformat()  # Reset timestamp
-
             if "file_size" in updates:
                 entry["file_size"] = updates["file_size"]
             if "data_type" in updates:
@@ -222,6 +218,14 @@ class JsonBackend(MetadataBackend):
                 )
             if "serializer" in updates:
                 entry["serializer"] = updates["serializer"]
+            if "created_at" in updates:
+                entry["created_at"] = updates["created_at"]
+            if "accessed_at" in updates:
+                entry["accessed_at"] = updates["accessed_at"]
+            if "ttl_seconds" in updates:
+                entry["ttl_seconds"] = updates["ttl_seconds"]
+            if "expires_at" in updates:
+                entry["expires_at"] = updates["expires_at"]
 
             # Update metadata dict with new values
             metadata = entry.get("metadata", {})

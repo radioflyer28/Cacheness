@@ -804,13 +804,13 @@ class SqliteBackend(MetadataBackend):
             elif isinstance(expires_at, str):
                 expires_at = datetime.fromisoformat(expires_at)
 
-            # Use efficient INSERT OR REPLACE with dedicated columns - zero JSON overhead
+            # Use conflict-update semantics so overwrites preserve access_count.
             from sqlalchemy import text
 
             tbl = self._entries_table
             session.execute(
                 text(f"""
-                    INSERT OR REPLACE INTO "{tbl}"
+                    INSERT INTO "{tbl}"
                     (cache_key, description, data_type, file_size, 
                      file_hash, entry_signature, s3_etag, cache_key_params, metadata_dict,
                      object_type, storage_format, serializer, compression_codec, actual_path,
@@ -823,6 +823,30 @@ class SqliteBackend(MetadataBackend):
                            :created_at, :accessed_at, :access_count, :ttl_seconds, :expires_at,
                            :blob_data, :is_inline, :inline_ext,
                            :encryption_algorithm, :encryption_iv, :cacheness_version)
+                    ON CONFLICT(cache_key) DO UPDATE SET
+                        description = excluded.description,
+                        data_type = excluded.data_type,
+                        file_size = excluded.file_size,
+                        file_hash = excluded.file_hash,
+                        entry_signature = excluded.entry_signature,
+                        s3_etag = excluded.s3_etag,
+                        cache_key_params = excluded.cache_key_params,
+                        metadata_dict = excluded.metadata_dict,
+                        object_type = excluded.object_type,
+                        storage_format = excluded.storage_format,
+                        serializer = excluded.serializer,
+                        compression_codec = excluded.compression_codec,
+                        actual_path = excluded.actual_path,
+                        created_at = excluded.created_at,
+                        accessed_at = excluded.accessed_at,
+                        ttl_seconds = excluded.ttl_seconds,
+                        expires_at = excluded.expires_at,
+                        blob_data = excluded.blob_data,
+                        is_inline = excluded.is_inline,
+                        inline_ext = excluded.inline_ext,
+                        encryption_algorithm = excluded.encryption_algorithm,
+                        encryption_iv = excluded.encryption_iv,
+                        cacheness_version = excluded.cacheness_version
                 """),
                 {
                     "cache_key": cache_key,
@@ -888,10 +912,6 @@ class SqliteBackend(MetadataBackend):
             if not entry:
                 return False
 
-            # Update derived metadata fields
-            now = datetime.now(timezone.utc)
-            entry.created_at = now  # Reset timestamp
-
             if "file_size" in updates:
                 entry.file_size = updates["file_size"]
             if "file_hash" in updates:
@@ -923,6 +943,23 @@ class SqliteBackend(MetadataBackend):
                 entry.encryption_iv = updates["encryption_iv"]
             if "cacheness_version" in updates:
                 entry.cacheness_version = updates["cacheness_version"]
+            if "created_at" in updates:
+                created_at = updates["created_at"]
+                if isinstance(created_at, str):
+                    created_at = datetime.fromisoformat(created_at)
+                entry.created_at = created_at
+            if "accessed_at" in updates:
+                accessed_at = updates["accessed_at"]
+                if isinstance(accessed_at, str):
+                    accessed_at = datetime.fromisoformat(accessed_at)
+                entry.accessed_at = accessed_at
+            if "ttl_seconds" in updates:
+                entry.ttl_seconds = updates["ttl_seconds"]
+            if "expires_at" in updates:
+                expires_at = updates["expires_at"]
+                if isinstance(expires_at, str):
+                    expires_at = datetime.fromisoformat(expires_at)
+                entry.expires_at = expires_at
 
             session.commit()
             return True
