@@ -786,7 +786,7 @@ class UnifiedCache(
         ttl_seconds = self.config.metadata.default_ttl_seconds
         if ttl_seconds is None:
             return  # No TTL configured — nothing to expire
-        removed_count = self.metadata_backend.cleanup_expired(ttl_seconds)
+        removed_count = self.cleanup_expired(ttl_seconds)
 
         if removed_count > 0:
             logger.info(f"Cleaned up {removed_count} expired cache entries")

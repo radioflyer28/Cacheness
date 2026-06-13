@@ -943,7 +943,7 @@ class TestCacheness:
         )
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            evicted = []
+            evicted: list[tuple[str, str]] = []
 
             def on_evict(cache_key: str, reason: str) -> None:
                 evicted.append((cache_key, reason))
@@ -967,10 +967,13 @@ class TestCacheness:
             cache.put(np.array([1, 2, 3]), key="init_expired")
             cache_key = cache._create_cache_key({"key": "init_expired"})
             entry = cache.metadata_backend.get_entry(cache_key)
+            assert entry is not None
             actual_path = entry.get("actual_path") or entry.get("metadata", {}).get(
                 "actual_path"
             )
+            assert actual_path is not None
             blob_path = cache._resolve_actual_path(actual_path)
+            assert isinstance(blob_path, Path)
             assert blob_path.exists()
 
             created_at = datetime.now(timezone.utc) - timedelta(hours=2)
