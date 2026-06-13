@@ -118,7 +118,7 @@ Plans:
 **Goal:** Make TTL and eviction behavior coherent end-to-end across metadata backends, blob files, stats, and remote blob storage.
 **Requirements:** TTL-01, TTL-02, TTL-03, TTL-04
 **Source:** Backlog Phase 999.1, TASK-5 through TASK-8
-**Plans:** 0 plans
+**Plans:** 4 plans
 
 Success criteria:
 1. Stored `expires_at` controls per-entry expiry when present; global TTL applies only as fallback.
@@ -127,7 +127,10 @@ Success criteria:
 4. Eviction routes remote blob deletion through the blob backend and verifies S3/memory-style URI cleanup.
 
 Plans:
-- [ ] TBD via `$gsd-discuss-phase 29` / `$gsd-plan-phase 29`
+- [ ] 29-01-PLAN.md - TASK-5 stored expires_at read and cleanup semantics (TTL-01)
+- [ ] 29-02-PLAN.md - TASK-6 init cleanup through public cleanup path (TTL-02)
+- [ ] 29-03-PLAN.md - TASK-7 access-count, created_at, TTL field, and signature preservation (TTL-03)
+- [ ] 29-04-PLAN.md - TASK-8 remote URI blob deletion during size eviction (TTL-04)
 
 ### Phase 30: Multi-Process & Backend Parity
 
