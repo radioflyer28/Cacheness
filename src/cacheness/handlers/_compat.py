@@ -42,7 +42,7 @@ try:
     import blosc2
 
     BLOSC2_AVAILABLE = True
-except ImportError:
+except (ImportError, PermissionError):
     blosc2 = None  # type: ignore
     BLOSC2_AVAILABLE = False
 

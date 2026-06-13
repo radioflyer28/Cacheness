@@ -72,7 +72,7 @@ try:
     shuffle_obj = blosc.Filter.SHUFFLE
     BLOSC_AVAILABLE = True
     blosc_version = blosc.__version__
-except ImportError:
+except (ImportError, PermissionError):
     # Create mock blosc module to prevent import errors
     class MockBlosc:
         __version__ = "not available"

@@ -329,3 +329,4 @@ except ImportError:
 
     _ns_model_cache: Dict[str, tuple] = {}
     Base = None
+    _CORE_TABLES = frozenset()
