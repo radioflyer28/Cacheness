@@ -62,6 +62,8 @@ try:
         desc,
         func,
         text,
+        and_,
+        or_,
     )
     from sqlalchemy.dialects.postgresql import JSONB
     from sqlalchemy.orm import sessionmaker, declarative_base
@@ -1417,12 +1419,22 @@ class PostgresBackend(MetadataBackend):
 
     def cleanup_expired(self, ttl_seconds: float) -> int:
         """Remove expired entries and return count removed."""
-        if ttl_seconds <= 0:
-            return 0
-
-        cutoff = datetime.now(timezone.utc) - __import__("datetime").timedelta(
-            seconds=ttl_seconds
+        now = datetime.now(timezone.utc)
+        expired_stored = and_(
+            self._PgCacheEntry.expires_at.is_not(None),
+            self._PgCacheEntry.expires_at < now,
         )
+        if ttl_seconds and ttl_seconds > 0:
+            cutoff = now - timedelta(seconds=ttl_seconds)
+            expired_filter = or_(
+                expired_stored,
+                and_(
+                    self._PgCacheEntry.expires_at.is_(None),
+                    self._PgCacheEntry.created_at < cutoff,
+                ),
+            )
+        else:
+            expired_filter = expired_stored
 
         with self._lock:
             with self.SessionLocal() as session:
@@ -1432,16 +1444,14 @@ class PostgresBackend(MetadataBackend):
                         session.execute(
                             select(func.count())
                             .select_from(self._PgCacheEntry)
-                            .where(self._PgCacheEntry.created_at < cutoff)
+                            .where(expired_filter)
                         ).scalar()
                         or 0
                     )
 
                     if count > 0:
                         session.execute(
-                            delete(self._PgCacheEntry).where(
-                                self._PgCacheEntry.created_at < cutoff
-                            )
+                            delete(self._PgCacheEntry).where(expired_filter)
                         )
 
                         # Update last cleanup timestamp

@@ -392,14 +392,37 @@ class JsonBackend(MetadataBackend):
 
         with self._lock:
             expired_keys = []
-            cutoff_time = datetime.now(timezone.utc) - timedelta(seconds=ttl_seconds)
+            now = datetime.now(timezone.utc)
+            cutoff_time = (
+                now - timedelta(seconds=ttl_seconds)
+                if ttl_seconds and ttl_seconds > 0
+                else None
+            )
             entries = self._metadata.get("entries", {})
 
             for cache_key, entry in entries.items():
                 try:
+                    expires_at = entry.get("expires_at")
+                    if expires_at:
+                        expiry_time = datetime.fromisoformat(expires_at)
+                        if expiry_time.tzinfo is None:
+                            expiry_time = expiry_time.replace(tzinfo=timezone.utc)
+                        else:
+                            expiry_time = expiry_time.astimezone(timezone.utc)
+                        if expiry_time < now:
+                            expired_keys.append(cache_key)
+                        continue
+
+                    if cutoff_time is None:
+                        continue
+
                     creation_time_str = entry.get("created_at")
                     if creation_time_str:
                         creation_time = datetime.fromisoformat(creation_time_str)
+                        if creation_time.tzinfo is None:
+                            creation_time = creation_time.replace(tzinfo=timezone.utc)
+                        else:
+                            creation_time = creation_time.astimezone(timezone.utc)
                         if creation_time < cutoff_time:
                             expired_keys.append(cache_key)
                 except (ValueError, TypeError):

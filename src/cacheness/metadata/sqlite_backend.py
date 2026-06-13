@@ -14,6 +14,8 @@ from sqlalchemy import (
     func,
     text,
     case,
+    and_,
+    or_,
 )
 from sqlalchemy.orm import sessionmaker
 
@@ -1161,15 +1163,26 @@ class SqliteBackend(MetadataBackend):
     def cleanup_expired(self, ttl_seconds: float) -> int:
         """Remove expired entries and return count removed."""
 
-        cutoff_time = datetime.now(timezone.utc) - timedelta(seconds=ttl_seconds)
+        now = datetime.now(timezone.utc)
+        expired_stored = and_(
+            self._CacheEntry.expires_at.is_not(None),
+            self._CacheEntry.expires_at < now,
+        )
+        if ttl_seconds and ttl_seconds > 0:
+            cutoff_time = now - timedelta(seconds=ttl_seconds)
+            expired_filter = or_(
+                expired_stored,
+                and_(
+                    self._CacheEntry.expires_at.is_(None),
+                    self._CacheEntry.created_at < cutoff_time,
+                ),
+            )
+        else:
+            expired_filter = expired_stored
 
         with self._lock, self.SessionLocal() as session:
             # Delete expired entries
-            result = session.execute(
-                delete(self._CacheEntry).where(
-                    self._CacheEntry.created_at < cutoff_time
-                )
-            )
+            result = session.execute(delete(self._CacheEntry).where(expired_filter))
             deleted_count = result.rowcount
             session.commit()
             return deleted_count

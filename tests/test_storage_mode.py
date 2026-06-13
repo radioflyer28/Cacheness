@@ -126,6 +126,7 @@ class TestNoTTLExpiration:
         cache.put({"durable": True}, cache_key="ttl-bypass")
 
         entry = cache.metadata_backend.get_entry("ttl-bypass")
+        assert entry is not None
         entry["ttl_seconds"] = -1
         entry["expires_at"] = (
             datetime.now(timezone.utc) - timedelta(days=1)

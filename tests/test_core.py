@@ -7,6 +7,7 @@ Tests the main cacheness class and CacheConfig functionality.
 import pytest
 import tempfile
 import numpy as np
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -437,12 +438,12 @@ class TestCacheness:
         )
         import time
 
-        # Create cache with very short TTL (0.1 seconds)
+        # Create cache with a long TTL, then make stored expiry deterministic.
         storage_config = CacheStorageConfig(
             cache_dir=str(temp_cache_dir), cleanup_on_init=False
         )
         metadata_config = CacheMetadataConfig(
-            metadata_backend="json", default_ttl_seconds=0.1
+            metadata_backend="json", default_ttl_seconds=3600
         )
         compression_config = CompressionConfig()
         serialization_config = SerializationConfig()
@@ -465,8 +466,13 @@ class TestCacheness:
         # Verify it exists initially
         assert cache.exists(expired_test="entry") is True
 
-        # Wait for expiration (0.15 seconds > 0.1 second TTL)
-        time.sleep(0.15)
+        cache_key = cache._create_cache_key({"expired_test": "entry"})
+        entry = cache.metadata_backend.get_entry(cache_key)
+        entry["ttl_seconds"] = -1
+        entry["expires_at"] = (
+            datetime.now(timezone.utc) - timedelta(seconds=1)
+        ).isoformat()
+        cache.metadata_backend.put_entry(cache_key, entry)
 
         # Verify it no longer exists
         assert cache.exists(expired_test="entry") is False
@@ -684,7 +690,6 @@ class TestCacheness:
 
     def test_cleanup_expired_removes_entries(self):
         """Test that cleanup_expired() removes expired entries."""
-        import time
         from cacheness import cacheness
         from cacheness.config import (
             CacheConfig,
@@ -696,10 +701,10 @@ class TestCacheness:
         )
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            # Create cache with short TTL
+            # Create cache with long TTL, then make stored expiry deterministic.
             storage_config = CacheStorageConfig(cache_dir=temp_dir)
             metadata_config = CacheMetadataConfig(
-                metadata_backend="json", default_ttl_seconds=0.1
+                metadata_backend="json", default_ttl_seconds=3600
             )
             compression_config = CompressionConfig()
             serialization_config = SerializationConfig()
@@ -725,8 +730,14 @@ class TestCacheness:
             assert cache.exists(key="entry_2")
             assert cache.exists(key="entry_3")
 
-            # Wait for expiration
-            time.sleep(0.15)
+            now = datetime.now(timezone.utc)
+            for key in ("entry_1", "entry_2", "entry_3"):
+                cache_key = cache._create_cache_key({"key": key})
+                entry = cache.metadata_backend.get_entry(cache_key)
+                entry["created_at"] = now.isoformat()
+                entry["ttl_seconds"] = -1
+                entry["expires_at"] = (now - timedelta(seconds=1)).isoformat()
+                cache.metadata_backend.put_entry(cache_key, entry)
 
             # Cleanup expired entries
             removed = cache.cleanup_expired()
@@ -738,8 +749,6 @@ class TestCacheness:
             assert not cache.exists(key="entry_3")
 
     def test_cleanup_expired_with_custom_ttl(self):
-        import time
-
         """Test cleanup_expired() with custom TTL parameter."""
         from cacheness import cacheness
         from cacheness.config import (
@@ -776,8 +785,17 @@ class TestCacheness:
             cache.put({"value": 1}, key="test_1")
             cache.put({"value": 2}, key="test_2")
 
-            # Wait a bit
-            time.sleep(0.15)
+            # Custom TTL is a fallback only when no stored expires_at exists.
+            old_created_at = (
+                datetime.now(timezone.utc) - timedelta(seconds=1)
+            ).isoformat()
+            for key in ("test_1", "test_2"):
+                cache_key = cache._create_cache_key({"key": key})
+                entry = cache.metadata_backend.get_entry(cache_key)
+                entry.pop("expires_at", None)
+                entry.pop("ttl_seconds", None)
+                entry["created_at"] = old_created_at
+                cache.metadata_backend.put_entry(cache_key, entry)
 
             # Cleanup with very short custom TTL of 0.1 seconds
             # (shorter than default, so entries should be expired)
@@ -827,8 +845,14 @@ class TestCacheness:
             past_entry = cache.metadata_backend.get_entry(past_key)
             future_entry = cache.metadata_backend.get_entry(future_key)
 
-            past_path = cache._resolve_actual_path(past_entry["actual_path"])
-            future_path = cache._resolve_actual_path(future_entry["actual_path"])
+            past_path = cache._resolve_actual_path(
+                past_entry.get("actual_path")
+                or past_entry.get("metadata", {}).get("actual_path")
+            )
+            future_path = cache._resolve_actual_path(
+                future_entry.get("actual_path")
+                or future_entry.get("metadata", {}).get("actual_path")
+            )
             assert past_path.exists()
             assert future_path.exists()
 

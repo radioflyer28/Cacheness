@@ -38,6 +38,26 @@ if TYPE_CHECKING:
     from .interfaces import RotationResult
 
 logger = logging.getLogger(__name__)
+_DATETIME_CLASS = datetime
+
+
+def _parse_datetime_utc(value: Any) -> Optional[datetime]:
+    """Parse stored timestamp values and normalize naive datetimes to UTC."""
+    if value is None:
+        return None
+    try:
+        if isinstance(value, _DATETIME_CLASS):
+            parsed = value
+        elif isinstance(value, (int, float)):
+            parsed = _DATETIME_CLASS.fromtimestamp(value, tz=timezone.utc)
+        else:
+            parsed = _DATETIME_CLASS.fromisoformat(str(value))
+    except (TypeError, ValueError, OSError):
+        return None
+
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _normalize_function_args(
@@ -714,6 +734,13 @@ class UnifiedCache(
         if not entry:
             return True
 
+        expires_at = entry.get("expires_at")
+        if expires_at:
+            expiry_time = _parse_datetime_utc(expires_at)
+            if expiry_time is None:
+                return True
+            return datetime.now(timezone.utc) > expiry_time
+
         # Handle infinite TTL: if ttl_seconds is explicitly None, never expire
         if ttl_seconds is None:
             return False  # Never expires
@@ -732,17 +759,9 @@ class UnifiedCache(
             f"TTL must be numeric, got {type(ttl_seconds)}"
         )
 
-        creation_time_str = entry["created_at"]
-
-        # Handle timezone-aware datetime strings
-        if isinstance(creation_time_str, str):
-            creation_time = datetime.fromisoformat(creation_time_str)
-        else:
-            creation_time = creation_time_str
-
-        # Ensure both datetimes are timezone-aware
-        if creation_time.tzinfo is None:
-            creation_time = creation_time.replace(tzinfo=timezone.utc)
+        creation_time = _parse_datetime_utc(entry["created_at"])
+        if creation_time is None:
+            return True
 
         expiry_time = creation_time + timedelta(seconds=ttl_seconds)
         current_time = datetime.now(timezone.utc)
@@ -1245,36 +1264,35 @@ class UnifiedCache(
             # Use configured default TTL
             removed = cache.cleanup_expired()
         """
-        import time
-        from datetime import datetime
-
         with self._lock:
             # Determine TTL to use
             if ttl_seconds is None:
                 ttl_seconds = self.config.metadata.default_ttl_seconds
 
-            if not ttl_seconds:
-                logger.debug("cleanup_expired: no TTL configured, nothing to do")
-                return 0
-
             # Find expired entries by scanning metadata
-            cutoff_time = time.time() - ttl_seconds
+            now = datetime.now(timezone.utc)
+            cutoff_time = (
+                now - timedelta(seconds=ttl_seconds)
+                if ttl_seconds and ttl_seconds > 0
+                else None
+            )
             expired_entries = []
 
             for entry in self.metadata_backend.iter_entry_summaries():
+                expires_at = entry.get("expires_at")
+                if expires_at:
+                    expiry_time = _parse_datetime_utc(expires_at)
+                    if expiry_time is None or expiry_time < now:
+                        expired_entries.append(entry)
+                    continue
+
+                if cutoff_time is None:
+                    continue
+
                 created_at = entry.get("created_at")
                 if created_at:
-                    # Handle both raw timestamp and ISO format
-                    if isinstance(created_at, str):
-                        try:
-                            created_dt = datetime.fromisoformat(created_at)
-                            created_timestamp = created_dt.timestamp()
-                        except (ValueError, TypeError):
-                            continue
-                    else:
-                        created_timestamp = created_at
-
-                    if created_timestamp < cutoff_time:
+                    creation_time = _parse_datetime_utc(created_at)
+                    if creation_time is not None and creation_time < cutoff_time:
                         expired_entries.append(entry)
 
             # Delete blob files for expired entries
@@ -1295,7 +1313,7 @@ class UnifiedCache(
                             )
 
             # Remove metadata entries
-            removed_count = self.metadata_backend.cleanup_expired(ttl_seconds)
+            removed_count = self.metadata_backend.cleanup_expired(ttl_seconds or 0)
 
             if removed_count > 0:
                 logger.info(
