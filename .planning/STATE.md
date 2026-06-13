@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v0.12.0
 milestone_name: Reliability Remediation
 status: ready_to_execute
-last_updated: "2026-06-12T20:36:38.547Z"
-last_activity: 2026-06-12
+last_updated: "2026-06-13T20:45:58.442Z"
+last_activity: 2026-06-13 -- Phase 29 planning complete
 progress:
-  total_phases: 5
-  completed_phases: 0
-  total_plans: 5
-  completed_plans: 0
-  percent: 0
+  total_phases: 9
+  completed_phases: 1
+  total_plans: 9
+  completed_plans: 5
+  percent: 11
 ---
 
 # Project State
@@ -24,10 +24,10 @@ See: .planning/PROJECT.md (updated 2026-06-12)
 
 ## Current Position
 
-Phase: 28 — Silent Data-Loss Remediation
+Phase: 29 — TTL & Eviction Consistency
 Plan: —
 Status: Ready to execute
-Last activity: 2026-06-12 — Phase 28 planned with 5 Wave 1 remediation plans
+Last activity: 2026-06-13 -- Phase 29 planning complete
 
 ## Accumulated Context
 

@@ -127,9 +127,17 @@ Success criteria:
 4. Eviction routes remote blob deletion through the blob backend and verifies S3/memory-style URI cleanup.
 
 Plans:
+**Wave 1**
+
 - [ ] 29-01-PLAN.md - TASK-5 stored expires_at read and cleanup semantics (TTL-01)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [ ] 29-02-PLAN.md - TASK-6 init cleanup through public cleanup path (TTL-02)
 - [ ] 29-03-PLAN.md - TASK-7 access-count, created_at, TTL field, and signature preservation (TTL-03)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
 - [ ] 29-04-PLAN.md - TASK-8 remote URI blob deletion during size eviction (TTL-04)
 
 ### Phase 30: Multi-Process & Backend Parity
