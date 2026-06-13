@@ -12,6 +12,7 @@ wheels/
 # Test suite
 .pytest_cache/
 .hypothesis/
+.tmp/
 logs/
 
 # Cache system
