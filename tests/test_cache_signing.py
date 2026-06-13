@@ -94,6 +94,28 @@ class TestDeleteInvalidSignatures:
         retrieved_data2 = cache2.get(cache_key=cache_key2)
         assert retrieved_data2 == test_data2
 
+    def test_signed_entry_survives_metadata_only_update(
+        self, temp_cache_signing_enabled
+    ):
+        """Backend metadata-only updates must not invalidate entry signatures."""
+        cache, _temp_dir = temp_cache_signing_enabled
+        test_data = {"signed": "metadata update", "value": 29}
+        cache_key = cache.put(test_data, description="Signed metadata update")
+        before = cache.metadata_backend.get_entry(cache_key)
+        assert before is not None
+        created_before = before["created_at"]
+
+        assert cache.metadata_backend.update_entry_metadata(
+            cache_key=cache_key,
+            updates={"cacheness_version": "ttl-03-test"},
+        )
+
+        after = cache.metadata_backend.get_entry(cache_key)
+        assert after is not None
+        assert after["created_at"] == created_before
+
+        assert cache.get(cache_key=cache_key) == test_data
+
     def test_config_logging(self):
         """Test that the security configuration logs the delete_invalid_signatures setting."""
         import logging

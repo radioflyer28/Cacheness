@@ -249,6 +249,39 @@ class TestBackendParity:
         assert updated is not None
         assert updated["accessed_at"] >= original["accessed_at"]
 
+    def test_sqlite_overwrite_preserves_existing_access_count(self, sqlite_backend):
+        """Same-key overwrites must preserve existing access_count."""
+        entry_data = {
+            "cache_key": "hot_key",
+            "description": "hot entry",
+            "data_type": "object",
+            "file_size": 128,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "metadata": {"actual_path": "/tmp/hot_key.pkl"},
+        }
+        sqlite_backend.put_entry("hot_key", entry_data)
+
+        for _ in range(3):
+            sqlite_backend.update_access_time("hot_key")
+
+        before = sqlite_backend.get_entry("hot_key")
+        assert before["access_count"] >= 3
+
+        sqlite_backend.put_entry(
+            "hot_key",
+            {
+                **entry_data,
+                "description": "overwritten entry",
+                "file_size": 256,
+                "metadata": {"actual_path": "/tmp/hot_key_v2.pkl"},
+            },
+        )
+
+        after = sqlite_backend.get_entry("hot_key")
+        assert after["description"] == "overwritten entry"
+        assert after["file_size"] == 256
+        assert after["access_count"] >= before["access_count"]
+
     def test_stats_operations_parity(self, sqlite_backend):
         """Test that increment_hits, increment_misses, and get_stats work."""
         # Initial stats

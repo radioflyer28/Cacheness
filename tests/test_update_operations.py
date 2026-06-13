@@ -3,10 +3,12 @@ Test Management Operations: update_data() and update_entry_metadata()
 Phase 3: Sprint 1
 """
 
-import pytest
-import pandas as pd
-import numpy as np
 from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import pytest
+
 from cacheness import cacheness
 from cacheness.config import CacheConfig
 from cacheness.metadata import JsonBackend, SqliteBackend
@@ -134,6 +136,55 @@ class TestUpdateData:
 
 class TestUpdateEntryMetadataBackends:
     """Test update_entry_metadata() implementation in different backends."""
+
+    @pytest.mark.parametrize("backend_name", ["json", "sqlite"])
+    def test_metadata_only_update_preserves_provenance_and_ttl_fields(
+        self, cache_dir, backend_name
+    ):
+        """Metadata-only backend updates must not reset provenance or TTL fields."""
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        created_at = "2024-01-15T12:00:00+00:00"
+        expires_at = "2024-01-15T12:10:00+00:00"
+
+        if backend_name == "json":
+            backend = JsonBackend(cache_dir / "metadata.json")
+            expected_expires_at = expires_at
+        else:
+            backend = SqliteBackend(db_file=str(cache_dir / "cache.db"))
+            expected_expires_at = expires_at
+
+        backend.put_entry(
+            "ttl_metadata_key",
+            {
+                "description": "test",
+                "data_type": "dict",
+                "file_size": 100,
+                "created_at": created_at,
+                "ttl_seconds": 600,
+                "expires_at": expires_at,
+                "metadata": {"content_hash": "abc123"},
+            },
+        )
+        before = backend.get_entry("ttl_metadata_key")
+
+        success = backend.update_entry_metadata(
+            cache_key="ttl_metadata_key",
+            updates={
+                "file_size": 200,
+                "content_hash": "xyz789",
+                "storage_format": "pickle",
+                "serializer": "pickle",
+            },
+        )
+
+        assert success is True
+        after = backend.get_entry("ttl_metadata_key")
+        assert after["created_at"] == before["created_at"]
+        assert after["ttl_seconds"] == 600
+        assert after["expires_at"] == expected_expires_at
+
+        if hasattr(backend, "close"):
+            backend.close()
 
     def test_memory_backend_update(self, cache_dir):
         """Test SqliteBackend (in-memory) update_entry_metadata()."""
@@ -501,11 +552,13 @@ class TestPutBatch:
 
     def test_put_batch_basic(self, memory_cache):
         """Store multiple entries and verify all are retrievable."""
-        stored = memory_cache.put_batch([
-            ({"val": 1}, {"key": "k1"}),
-            ({"val": 2}, {"key": "k2"}),
-            ({"val": 3}, {"key": "k3"}),
-        ])
+        stored = memory_cache.put_batch(
+            [
+                ({"val": 1}, {"key": "k1"}),
+                ({"val": 2}, {"key": "k2"}),
+                ({"val": 3}, {"key": "k3"}),
+            ]
+        )
         assert stored == 3
         assert memory_cache.get(key="k1") == {"val": 1}
         assert memory_cache.get(key="k2") == {"val": 2}
@@ -517,10 +570,12 @@ class TestPutBatch:
 
     def test_put_batch_mixed_types(self, memory_cache):
         """Store different data types in one batch."""
-        stored = memory_cache.put_batch([
-            (np.array([1, 2, 3]), {"kind": "array"}),
-            ({"key": "value"}, {"kind": "dict"}),
-        ])
+        stored = memory_cache.put_batch(
+            [
+                (np.array([1, 2, 3]), {"kind": "array"}),
+                ({"key": "value"}, {"kind": "dict"}),
+            ]
+        )
         assert stored == 2
         np.testing.assert_array_equal(
             memory_cache.get(kind="array"), np.array([1, 2, 3])
@@ -530,9 +585,11 @@ class TestPutBatch:
     def test_put_batch_overwrites_existing(self, memory_cache):
         """Putting to an existing key overwrites the entry."""
         memory_cache.put({"old": True}, key="k1")
-        stored = memory_cache.put_batch([
-            ({"new": True}, {"key": "k1"}),
-        ])
+        stored = memory_cache.put_batch(
+            [
+                ({"new": True}, {"key": "k1"}),
+            ]
+        )
         assert stored == 1
         assert memory_cache.get(key="k1") == {"new": True}
 
@@ -542,20 +599,24 @@ class TestPutBatch:
     def test_put_batch_all_backends(self, cache_fixture, request):
         """put_batch works on every backend."""
         cache = request.getfixturevalue(cache_fixture)
-        stored = cache.put_batch([
-            (np.array([10]), {"idx": "i1"}),
-            (np.array([20]), {"idx": "i2"}),
-        ])
+        stored = cache.put_batch(
+            [
+                (np.array([10]), {"idx": "i1"}),
+                (np.array([20]), {"idx": "i2"}),
+            ]
+        )
         assert stored == 2
         for idx_val in ("i1", "i2"):
             assert cache.get(idx=idx_val) is not None
 
     def test_put_batch_roundtrip_with_get_batch(self, memory_cache):
         """put_batch entries are retrievable via get_batch."""
-        memory_cache.put_batch([
-            ({"a": 1}, {"exp": "e1"}),
-            ({"b": 2}, {"exp": "e2"}),
-        ])
+        memory_cache.put_batch(
+            [
+                ({"a": 1}, {"exp": "e1"}),
+                ({"b": 2}, {"exp": "e2"}),
+            ]
+        )
         results = memory_cache.get_batch([{"exp": "e1"}, {"exp": "e2"}])
         assert len(results) == 2
         vals = list(results.values())

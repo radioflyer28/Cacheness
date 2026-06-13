@@ -253,6 +253,39 @@ class TestPostgresBackendWithDatabase:
         # Access time should be updated
         assert updated["accessed_at"] >= original_time
 
+    def test_same_key_overwrite_preserves_access_count(self, backend):
+        """PostgreSQL same-key overwrites must preserve existing access_count."""
+        backend.put_entry(
+            "pg_hot_key",
+            {
+                "data_type": "test",
+                "file_size": 128,
+                "description": "hot entry",
+                "metadata": {"actual_path": "/tmp/pg_hot_key.pkl"},
+            },
+        )
+
+        for _ in range(3):
+            backend.update_access_time("pg_hot_key")
+
+        before = backend.get_entry("pg_hot_key")
+        assert before["access_count"] >= 3
+
+        backend.put_entry(
+            "pg_hot_key",
+            {
+                "data_type": "test",
+                "file_size": 256,
+                "description": "overwritten entry",
+                "metadata": {"actual_path": "/tmp/pg_hot_key_v2.pkl"},
+            },
+        )
+
+        after = backend.get_entry("pg_hot_key")
+        assert after["description"] == "overwritten entry"
+        assert after["file_size"] == 256
+        assert after["access_count"] >= before["access_count"]
+
     def test_stats_tracking(self, backend):
         """Test statistics tracking."""
         initial_stats = backend.get_stats()
