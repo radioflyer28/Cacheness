@@ -118,7 +118,7 @@ Plans:
 **Goal:** Make TTL and eviction behavior coherent end-to-end across metadata backends, blob files, stats, and remote blob storage.
 **Requirements:** TTL-01, TTL-02, TTL-03, TTL-04
 **Source:** Backlog Phase 999.1, TASK-5 through TASK-8
-**Plans:** 4 plans
+**Plans:** 1/4 plans executed
 
 Success criteria:
 1. Stored `expires_at` controls per-entry expiry when present; global TTL applies only as fallback.
@@ -129,7 +129,7 @@ Success criteria:
 Plans:
 **Wave 1**
 
-- [ ] 29-01-PLAN.md - TASK-5 stored expires_at read and cleanup semantics (TTL-01)
+- [x] 29-01-PLAN.md - TASK-5 stored expires_at read and cleanup semantics (TTL-01)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 

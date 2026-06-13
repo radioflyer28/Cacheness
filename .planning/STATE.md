@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v0.12.0
 milestone_name: Reliability Remediation
-status: ready_to_execute
-last_updated: "2026-06-13T20:45:58.442Z"
-last_activity: 2026-06-13 -- Phase 29 planning complete
+status: ready
+last_updated: "2026-06-13T21:50:22.716Z"
+last_activity: Completed Phase 29 Plan 01 on 2026-06-13; ready for 29-02
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 9
-  completed_plans: 5
+  completed_plans: 6
   percent: 11
 ---
 
@@ -25,9 +25,9 @@ See: .planning/PROJECT.md (updated 2026-06-12)
 ## Current Position
 
 Phase: 29 — TTL & Eviction Consistency
-Plan: —
-Status: Ready to execute
-Last activity: 2026-06-13 -- Phase 29 planning complete
+Plan: 02
+Status: ready
+Last activity: Completed Phase 29 Plan 01 on 2026-06-13; ready for 29-02
 
 ## Accumulated Context
 
@@ -49,3 +49,13 @@ Full review in `docs/CODE_REVIEW_FINDINGS.md`; execution specs in `docs/CODE_REV
 - Wave 1 (silent data loss) → pending todos above
 - Waves 2–4 + small fixes → backlog phases 999.1–999.4 in ROADMAP.md
 - Decision-gated items → seeds SEED-001…006 in .planning/seeds/
+
+## Performance Metrics
+
+| Phase | Plan | Duration | Notes |
+|-------|------|----------|-------|
+| Phase 29-ttl-eviction-consistency P01 | 38min | 2 tasks | 12 files |
+
+## Decisions
+
+- [Phase 29-ttl-eviction-consistency]: Stored expires_at is authoritative for cache-mode reads and cleanup; fallback TTL applies only when expires_at is absent. — Completed by Phase 29 Plan 01 / TTL-01.
