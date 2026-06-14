@@ -6,6 +6,7 @@ Tests the main cacheness class and CacheConfig functionality.
 
 import pytest
 import tempfile
+import time
 import numpy as np
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1388,7 +1389,7 @@ class TestCacheness:
         cache = cacheness(config)
         cache._blob_store.blob_backend = InMemoryBlobBackend()
 
-        cache.put({"payload": "old-" + ("x" * 1200)}, cache_key="old-uri-blob")
+        cache.put({"payload": bytes(range(256)) * 8}, cache_key="old-uri-blob")
         old_entry = cache.metadata_backend.get_entry("old-uri-blob")
         assert old_entry is not None
         old_path = old_entry["metadata"]["actual_path"]
@@ -1396,14 +1397,19 @@ class TestCacheness:
         assert old_path.startswith("memory://")
         assert cache._blob_store.blob_backend.exists(old_path)
 
-        cache.put({"payload": "new-" + ("y" * 1200)}, cache_key="new-uri-blob")
+        time.sleep(0.01)
+        cache.put(
+            {"payload": bytes(reversed(range(256))) * 8}, cache_key="new-uri-blob"
+        )
         new_entry = cache.metadata_backend.get_entry("new-uri-blob")
         assert new_entry is not None
         new_path = new_entry["metadata"]["actual_path"]
         assert isinstance(new_path, str)
         assert cache._blob_store.blob_backend.exists(new_path)
 
-        cache.config.storage.max_cache_size = 1800
+        total_size_bytes = cache.metadata_backend.get_stats()["total_size_bytes"]
+        cache.config.storage.max_cache_size = int(total_size_bytes * 0.75)
+        assert total_size_bytes > cache.config.storage.max_cache_size_bytes
         cache._enforce_size_limit()
 
         assert cache.metadata_backend.get_entry("old-uri-blob") is None
