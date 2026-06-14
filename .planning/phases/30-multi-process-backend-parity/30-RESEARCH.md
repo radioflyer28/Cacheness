@@ -350,17 +350,17 @@ def _skip_if_pg_unavailable(backend):
 | A1 | If a true multi-process stress test proves flaky on Windows, the minimum acceptable PAR-01 regression is sequential repeated same-blob writes plus source inspection that deterministic temp names are gone. [ASSUMED] | Validation Architecture | Planner may over- or under-invest in concurrency stress. |
 | A2 | PostgreSQL live service will usually be unavailable locally and should remain skip-gated. [ASSUMED] | Environment Availability | Planner might schedule PG live validation when the environment cannot satisfy it. |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Should TASK-9 include a true process-level race test?**
    - What we know: D-04 says include concurrency-style regression if practical, but sequential same-blob overwrite is minimum acceptable. [VERIFIED: .planning/phases/30-multi-process-backend-parity/30-CONTEXT.md]
    - What's unclear: Whether Windows process scheduling and xdist make a process-level race test stable enough for the suite. [ASSUMED]
-   - Recommendation: Plan a deterministic sequential test as required, and allow an optional stress test marked or bounded if it is stable. [VERIFIED: docs/CODE_REVIEW_ACTIONS.md]
+   - RESOLVED: TASK-9 will use a deterministic sequential same-blob write regression plus a direct failed-write cleanup regression. Phase 30 planning does not require a true process-level race test because D-04 explicitly allows the sequential same-blob acceptance path when a concurrency-style regression is not practical. [VERIFIED: docs/CODE_REVIEW_ACTIONS.md; VERIFIED: .planning/phases/30-multi-process-backend-parity/30-CONTEXT.md]
 
 2. **Where should TASK-10 public parity tests live?**
    - What we know: Context allows `tests/test_blob_store.py`, `tests/test_backend_parity.py`, or backend-specific files. [VERIFIED: .planning/phases/30-multi-process-backend-parity/30-CONTEXT.md]
    - What's unclear: Which location will keep the smallest fixtures and cleanest PostgreSQL skip behavior. [ASSUMED]
-   - Recommendation: Put backend-parametrized JSON/SQLite/PostgreSQL tests in `tests/test_backend_parity.py`, and add focused BlobStore SQLite regression only if needed. [VERIFIED: tests/test_backend_parity.py]
+   - RESOLVED: TASK-10 public parity coverage belongs in `tests/test_backend_parity.py`, with direct JSON and SQLite coverage and PostgreSQL coverage behind the existing availability skip gates. Do not require a local PostgreSQL service for Phase 30 planning. [VERIFIED: tests/test_backend_parity.py; VERIFIED: .planning/phases/30-multi-process-backend-parity/30-CONTEXT.md]
 
 ## Environment Availability
 
