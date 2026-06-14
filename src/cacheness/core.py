@@ -1133,7 +1133,15 @@ class UnifiedCache(
             entry_key = entry.get("cache_key", "unknown")
             self._invoke_hook("on_evict", entry_key, "size_limit")
             actual_path = entry.get("actual_path")
-            if actual_path and "://" not in actual_path:
+            if actual_path and "://" in actual_path:
+                try:
+                    if self._blob_store.blob_backend.delete_blob(actual_path):
+                        blobs_deleted += 1
+                except Exception as exc:  # backend cleanup must not crash eviction
+                    logger.warning(
+                        f"Failed to delete remote blob {actual_path} during size enforcement: {exc}"
+                    )
+            elif actual_path:
                 blob_file = self._resolve_actual_path(actual_path)
                 if isinstance(blob_file, Path) and blob_file.exists():
                     try:
