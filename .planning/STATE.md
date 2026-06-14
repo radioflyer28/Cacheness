@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v0.12.0
 milestone_name: Reliability Remediation
 status: ready
-last_updated: "2026-06-14T01:32:22.357Z"
-last_activity: Completed Phase 29 Plan 04 on 2026-06-14; Phase 29 complete, ready for Phase 30 planning
+last_updated: "2026-06-14T02:04:26.549Z"
+last_activity: 2026-06-14 -- Phase 29 verified complete; ready for Phase 30 planning
 progress:
   total_phases: 9
   completed_phases: 2
   total_plans: 9
   completed_plans: 9
-  percent: 100
+  percent: 22
 ---
 
 # Project State
@@ -24,10 +24,10 @@ See: .planning/PROJECT.md (updated 2026-06-12)
 
 ## Current Position
 
-Phase: 29 — TTL & Eviction Consistency
-Plan: 04
+Phase: 30 — Multi-Process & Backend Parity
+Plan: Not started
 Status: ready
-Last activity: Completed Phase 29 Plan 04 on 2026-06-14; Phase 29 complete, ready for Phase 30 planning
+Last activity: 2026-06-14 -- Phase 29 verified complete; ready for Phase 30 planning
 
 ## Accumulated Context
 
