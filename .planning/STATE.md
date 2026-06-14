@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v0.12.0
 milestone_name: Reliability Remediation
 status: ready
-last_updated: "2026-06-13T22:27:02.584Z"
-last_activity: Completed Phase 29 Plan 03 on 2026-06-13; ready for 29-04
+last_updated: "2026-06-14T01:32:22.357Z"
+last_activity: Completed Phase 29 Plan 04 on 2026-06-14; Phase 29 complete, ready for Phase 30 planning
 progress:
   total_phases: 9
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 9
-  completed_plans: 8
-  percent: 89
+  completed_plans: 9
+  percent: 100
 ---
 
 # Project State
@@ -27,7 +27,7 @@ See: .planning/PROJECT.md (updated 2026-06-12)
 Phase: 29 — TTL & Eviction Consistency
 Plan: 04
 Status: ready
-Last activity: Completed Phase 29 Plan 03 on 2026-06-13; ready for 29-04
+Last activity: Completed Phase 29 Plan 04 on 2026-06-14; Phase 29 complete, ready for Phase 30 planning
 
 ## Accumulated Context
 
@@ -57,6 +57,7 @@ Full review in `docs/CODE_REVIEW_FINDINGS.md`; execution specs in `docs/CODE_REV
 | Phase 29-ttl-eviction-consistency P01 | 38min | 2 tasks | 12 files |
 | Phase 29-ttl-eviction-consistency P02 | 8min | 2 tasks | 2 files |
 | Phase 29-ttl-eviction-consistency P03 | 17min | 2 tasks | 9 files |
+| Phase 29-ttl-eviction-consistency P04 | 2h 53m | 2 tasks | 2 files |
 
 ## Decisions
 
@@ -65,3 +66,4 @@ Full review in `docs/CODE_REVIEW_FINDINGS.md`; execution specs in `docs/CODE_REV
 - [Phase 29-ttl-eviction-consistency]: TTL-02 init cleanup delegates to public cleanup_expired so constructor cleanup deletes blobs and invokes on_evict.
 - [Phase 29-ttl-eviction-consistency]: TTL-03 metadata-only backend updates preserve created_at, ttl_seconds, and expires_at by default; content updates pass explicit timestamps. — Completed by Phase 29 Plan 03.
 - [Phase 29-ttl-eviction-consistency]: SQLite and PostgreSQL same-key overwrites preserve existing access_count. — Completed by Phase 29 Plan 03.
+- [Phase 29-ttl-eviction-consistency]: TTL-04 size eviction delegates URI actual_path deletion to self._blob_store.blob_backend.delete_blob(actual_path), and backend delete exceptions are warning-only. — Completed by Phase 29 Plan 04.

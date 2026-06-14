@@ -72,7 +72,7 @@
 <summary>🟡 v0.12.0 Reliability Remediation (Phases 28-32) — PLANNED 2026-06-12</summary>
 
 - [ ] Phase 28: Silent Data-Loss Remediation — Wave 1 fixes plus cache-key stability and property tests
-- [ ] Phase 29: TTL & Eviction Consistency — per-entry expiry, cleanup parity, counters/timestamps, remote eviction
+- [x] Phase 29: TTL & Eviction Consistency — per-entry expiry, cleanup parity, counters/timestamps, remote eviction (completed 2026-06-14)
 - [ ] Phase 30: Multi-Process & Backend Parity — temp files, metadata parity, non-destructive overwrites, blob enumeration
 - [ ] Phase 31: Security & Storage-Mode Posture — signatures, encrypted reads, key rotation, storage-mode guards, durability contract
 - [ ] Phase 32: Small Fixes & Release Polish — independent low-risk fixes and release/version polish
@@ -118,7 +118,7 @@ Plans:
 **Goal:** Make TTL and eviction behavior coherent end-to-end across metadata backends, blob files, stats, and remote blob storage.
 **Requirements:** TTL-01, TTL-02, TTL-03, TTL-04
 **Source:** Backlog Phase 999.1, TASK-5 through TASK-8
-**Plans:** 3/4 plans executed
+**Plans:** 4/4 plans complete
 
 Success criteria:
 1. Stored `expires_at` controls per-entry expiry when present; global TTL applies only as fallback.
@@ -138,7 +138,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 29-04-PLAN.md - TASK-8 remote URI blob deletion during size eviction (TTL-04)
+- [x] 29-04-PLAN.md - TASK-8 remote URI blob deletion during size eviction (TTL-04)
 
 ### Phase 30: Multi-Process & Backend Parity
 
