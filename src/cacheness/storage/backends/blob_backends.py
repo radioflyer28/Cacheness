@@ -41,10 +41,11 @@ Usage:
 
 import logging
 import os
+import tempfile
 from abc import ABC, abstractmethod
 from io import BytesIO
 from pathlib import Path
-from typing import BinaryIO, Dict, List, Type, Union
+from typing import Any, BinaryIO, Dict, List, Type, Union
 
 logger = logging.getLogger(__name__)
 
@@ -288,13 +289,16 @@ class FilesystemBlobBackend(BlobBackend):
         blob_path = self._get_blob_path(blob_id)
         blob_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Write atomically using temp file
-        temp_path = blob_path.with_suffix(blob_path.suffix + ".tmp")
+        # Write atomically using a unique temp file in the destination directory.
+        temp_path: Path | None = None
         try:
-            temp_path.write_bytes(data)
-            temp_path.replace(blob_path)
+            fd, temp_name = tempfile.mkstemp(dir=blob_path.parent, suffix=".tmp")
+            temp_path = Path(temp_name)
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+            os.replace(temp_path, blob_path)
         except Exception:  # intentionally broad — cleanup temp file on any failure
-            if temp_path.exists():
+            if temp_path is not None and temp_path.exists():
                 temp_path.unlink()
             raise
 
@@ -346,18 +350,20 @@ class FilesystemBlobBackend(BlobBackend):
         blob_path = self._get_blob_path(blob_id)
         blob_path.parent.mkdir(parents=True, exist_ok=True)
 
-        temp_path = blob_path.with_suffix(blob_path.suffix + ".tmp")
+        temp_path: Path | None = None
         try:
-            with open(temp_path, "wb") as f:
+            fd, temp_name = tempfile.mkstemp(dir=blob_path.parent, suffix=".tmp")
+            temp_path = Path(temp_name)
+            with os.fdopen(fd, "wb") as f:
                 # Read in chunks for memory efficiency
                 while True:
                     chunk = stream.read(8192)
                     if not chunk:
                         break
                     f.write(chunk)
-            temp_path.replace(blob_path)
+            os.replace(temp_path, blob_path)
         except Exception:  # intentionally broad — cleanup temp file on any failure
-            if temp_path.exists():
+            if temp_path is not None and temp_path.exists():
                 temp_path.unlink()
             raise
 
@@ -606,7 +612,7 @@ def get_blob_backend(name: str, **options) -> BlobBackend:
         )
 
 
-def list_blob_backends() -> List[Dict[str, any]]:
+def list_blob_backends() -> List[Dict[str, Any]]:
     """
     List all registered blob backends.
 
