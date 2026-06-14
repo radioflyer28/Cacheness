@@ -592,6 +592,31 @@ def _skip_if_pg_unavailable(backend):
 
 
 @pytest.mark.xdist_group("docker")
+class TestBlobStoreUserMetadataBackendParity:
+    """BlobStore custom metadata parity across metadata backends."""
+
+    @pytest.mark.parametrize("backend", ["json", "sqlite", "postgresql"])
+    def test_user_metadata_round_trips_and_filters(self, tmp_path, backend):
+        """User metadata is readable and filterable through the public API."""
+        _skip_if_pg_unavailable(backend)
+        backend_arg = backend
+        if backend == "postgresql":
+            backend_arg = PostgresBackend(connection_url=_get_pg_url())
+
+        store = BlobStore(cache_dir=tmp_path, backend=backend_arg)
+        blob_key = store.put(
+            b"payload",
+            key="meta-parity",
+            metadata={"experiment": "x42"},
+        )
+
+        entry = store.get_metadata(blob_key)
+        assert entry is not None
+        assert entry["metadata"]["experiment"] == "x42"
+        assert store.list(metadata_filter={"experiment": "x42"}) == ["meta-parity"]
+
+
+@pytest.mark.xdist_group("docker")
 class TestEncryptionBackendParity_BlobStore:
     """BlobStore encryption tests parametrized across all backends."""
 
