@@ -884,6 +884,12 @@ class UnifiedCache(
                     planned_blob_path = base_file_path.with_suffix(
                         handler.get_file_extension(self.config)
                     )
+                    if old_blob_path and "://" not in old_blob_path:
+                        old_resolved = self._resolve_actual_path(old_blob_path)
+                        if isinstance(old_resolved, Path) and old_resolved.resolve(
+                            strict=False
+                        ) == planned_blob_path.resolve(strict=False):
+                            cleanup.snapshot_previous_blob(old_resolved)
                     self._write_journal.record_intent(
                         cache_key, str(planned_blob_path.relative_to(self.cache_dir))
                     )
