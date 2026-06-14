@@ -124,6 +124,23 @@ class TestOrphanedBlobDetection:
 
         assert len(report["orphaned_blobs"]) == 1
 
+    def test_detects_custom_extension_orphan_and_ignores_temp_file(self, tmp_path):
+        cache = _make_cache(tmp_path)
+        cache.put("real data", test_key="real")
+
+        ns_dir = tmp_path / "default"
+        ns_dir.mkdir(exist_ok=True)
+        orphan = ns_dir / "orphan.custom"
+        orphan.write_bytes(b"custom handler data")
+        temp_artifact = ns_dir / "ignore.tmp"
+        temp_artifact.write_bytes(b"in-progress temp data")
+
+        report = cache.verify_integrity()
+
+        assert os.path.normpath(str(orphan)) in report["orphaned_blobs"]
+        assert os.path.normpath(str(temp_artifact)) not in report["orphaned_blobs"]
+        assert report["dangling_entries"] == []
+
     def test_detects_multiple_orphans(self, tmp_path):
         cache = _make_cache(tmp_path)
 
