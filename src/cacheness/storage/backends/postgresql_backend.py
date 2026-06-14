@@ -131,6 +131,33 @@ def _ensure_jsonb_value(value):
     return None
 
 
+def _metadata_dict_to_dict(value: Any) -> Dict[str, Any]:
+    """Return metadata_dict as a plain dict when possible."""
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value.copy()
+    if isinstance(value, str):
+        try:
+            parsed = json_loads(value)
+        except Exception:  # intentionally broad — JSON parsing fallback
+            return {}
+        return parsed.copy() if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _merge_user_metadata(
+    metadata_dict_value: Any, user_metadata: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    """Merge leftover user metadata, preserving existing metadata_dict keys."""
+    existing = _metadata_dict_to_dict(metadata_dict_value)
+    if user_metadata:
+        return {**user_metadata, **existing}
+    if existing:
+        return existing
+    return None
+
+
 if SQLALCHEMY_AVAILABLE:
     # Create a separate base for PostgreSQL to avoid conflicts with SQLite models
     PostgresBase = declarative_base()
@@ -973,6 +1000,7 @@ class PostgresBackend(MetadataBackend):
         encryption_algorithm = metadata.pop("encryption_algorithm", None)
         encryption_iv = metadata.pop("encryption_iv", None)
         cacheness_version = metadata.pop("cacheness_version", None)
+        metadata_dict_value = _merge_user_metadata(metadata_dict_value, metadata)
 
         # Handle timestamps - always use UTC
         created_at = entry_data.get("created_at")
@@ -1146,6 +1174,12 @@ class PostgresBackend(MetadataBackend):
             metadata["encryption_iv"] = entry.encryption_iv
         if getattr(entry, "cacheness_version", None):
             metadata["cacheness_version"] = entry.cacheness_version
+        metadata_dict = _metadata_dict_to_dict(getattr(entry, "metadata_dict", None))
+        if getattr(entry, "metadata_dict", None) is not None:
+            metadata["metadata_dict"] = metadata_dict or entry.metadata_dict
+        for key, value in metadata_dict.items():
+            metadata.setdefault(key, value)
+            result.setdefault(key, value)
 
         if metadata:
             result["metadata"] = metadata
@@ -1328,7 +1362,10 @@ class PostgresBackend(MetadataBackend):
                 if row[12] is not None:
                     flat["entry_signature"] = row[12]
                 if row[13] is not None:
-                    flat["metadata_dict"] = row[13]
+                    metadata_dict = _metadata_dict_to_dict(row[13])
+                    flat["metadata_dict"] = metadata_dict or row[13]
+                    for key, value in metadata_dict.items():
+                        flat.setdefault(key, value)
                 if row[14] is not None:
                     flat["s3_etag"] = row[14]
                 # Phase 1 columns

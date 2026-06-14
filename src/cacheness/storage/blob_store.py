@@ -937,8 +937,17 @@ class BlobStore:
                 # Apply metadata filter
                 if metadata_filter:
                     match = True
+                    nested_metadata = entry.get("metadata", {})
+                    metadata_dict = entry.get("metadata_dict")
+                    if metadata_dict is None and isinstance(nested_metadata, dict):
+                        metadata_dict = nested_metadata.get("metadata_dict")
                     for field, value in metadata_filter.items():
-                        if entry.get(field) != value:
+                        field_value = entry.get(field)
+                        if field_value is None and isinstance(nested_metadata, dict):
+                            field_value = nested_metadata.get(field)
+                        if field_value is None and isinstance(metadata_dict, dict):
+                            field_value = metadata_dict.get(field)
+                        if field_value != value:
                             match = False
                             break
                     if not match:

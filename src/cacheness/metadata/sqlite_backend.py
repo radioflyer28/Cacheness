@@ -38,6 +38,34 @@ from .base import MetadataBackend
 logger = logging.getLogger(__name__)
 
 
+def _metadata_dict_to_dict(value: Any) -> Dict[str, Any]:
+    """Return metadata_dict as a plain dict when possible."""
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value.copy()
+    if isinstance(value, str):
+        try:
+            parsed = json_loads(value)
+        except (ValueError, TypeError):
+            return {}
+        return parsed.copy() if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _merge_user_metadata(
+    metadata_dict_value: Any, user_metadata: Dict[str, Any]
+) -> Optional[str]:
+    """Serialize user metadata into metadata_dict, preserving existing keys."""
+    existing = _metadata_dict_to_dict(metadata_dict_value)
+    if user_metadata:
+        merged = {**user_metadata, **existing}
+        return json_dumps(merged)
+    if isinstance(metadata_dict_value, dict):
+        return json_dumps(metadata_dict_value)
+    return metadata_dict_value
+
+
 # ---------------------------------------------------------------------------
 # Schema migration functions (used by SqliteBackend._get_migrations)
 # ---------------------------------------------------------------------------
@@ -692,7 +720,10 @@ class SqliteBackend(MetadataBackend):
 
             # Include metadata_dict (user-facing kwargs) if stored
             if row.metadata_dict is not None:
-                metadata["metadata_dict"] = row.metadata_dict
+                metadata_dict = _metadata_dict_to_dict(row.metadata_dict)
+                metadata["metadata_dict"] = metadata_dict or row.metadata_dict
+                for key, value in metadata_dict.items():
+                    metadata.setdefault(key, value)
 
             # Only parse cache_key_params JSON if it exists (disabled by default)
             if row.cache_key_params is not None:
@@ -776,6 +807,7 @@ class SqliteBackend(MetadataBackend):
 
             # Remove redundant fields that are already stored as columns
             metadata.pop("data_type", None)  # Already stored in data_type column
+            metadata_dict_value = _merge_user_metadata(metadata_dict_value, metadata)
 
             # Handle timestamps with proper defaults
             created_at = entry_data.get("created_at")
@@ -1009,7 +1041,10 @@ class SqliteBackend(MetadataBackend):
                 if row[12] is not None:
                     flat["entry_signature"] = row[12]
                 if row[13] is not None:
-                    flat["metadata_dict"] = row[13]
+                    metadata_dict = _metadata_dict_to_dict(row[13])
+                    flat["metadata_dict"] = metadata_dict or row[13]
+                    for key, value in metadata_dict.items():
+                        flat.setdefault(key, value)
                 if row[14] is not None:
                     flat["s3_etag"] = row[14]
                 # Phase 1 columns
@@ -1063,6 +1098,7 @@ class SqliteBackend(MetadataBackend):
                     CE.entry_signature,
                     CE.s3_etag,
                     CE.cache_key_params,
+                    CE.metadata_dict,
                 ).order_by(desc(CE.created_at))
             ).fetchall()
 
@@ -1099,18 +1135,23 @@ class SqliteBackend(MetadataBackend):
                         )
                     except (ValueError, TypeError):
                         pass  # Skip malformed cache_key_params
+                metadata_dict = _metadata_dict_to_dict(row.metadata_dict)
+                if row.metadata_dict is not None:
+                    entry_metadata["metadata_dict"] = metadata_dict or row.metadata_dict
 
-                result.append(
-                    {
-                        "cache_key": row.cache_key,
-                        "data_type": row.data_type,
-                        "description": row.description,
-                        "metadata": entry_metadata,
-                        "created": row.created_at.isoformat(),
-                        "last_accessed": row.accessed_at.isoformat(),
-                        "size_mb": bytes_to_mb_display(row.file_size),
-                    }
-                )
+                list_entry = {
+                    "cache_key": row.cache_key,
+                    "data_type": row.data_type,
+                    "description": row.description,
+                    "metadata": entry_metadata,
+                    "created": row.created_at.isoformat(),
+                    "last_accessed": row.accessed_at.isoformat(),
+                    "size_mb": bytes_to_mb_display(row.file_size),
+                }
+                for key, value in metadata_dict.items():
+                    list_entry.setdefault(key, value)
+
+                result.append(list_entry)
 
             return result
 
