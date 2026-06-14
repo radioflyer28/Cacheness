@@ -49,6 +49,22 @@ from typing import Any, BinaryIO, Dict, List, Type, Union
 
 logger = logging.getLogger(__name__)
 
+RESERVED_BLOB_FILE_SUFFIXES = (".tmp", ".db", ".db-wal", ".db-shm")
+RESERVED_BLOB_METADATA_NAMES = {"cache_metadata.json"}
+
+
+def _is_reserved_blob_artifact(path: Path) -> bool:
+    """Return True for filesystem artifacts that are not cache blob payloads."""
+    if ".intents" in path.parts:
+        return True
+
+    name = path.name
+    if name.endswith(RESERVED_BLOB_FILE_SUFFIXES):
+        return True
+    if name in RESERVED_BLOB_METADATA_NAMES or name.endswith("_metadata.json"):
+        return True
+    return name == ".cache_signing_key" or name.startswith(".cache_signing_key.")
+
 
 # =============================================================================
 # Abstract Base Class
@@ -385,20 +401,11 @@ class FilesystemBlobBackend(BlobBackend):
 
     def list_blobs(self) -> List[str]:
         """List all blob files in the storage directory."""
-        import glob as _glob
-
-        blob_extensions = ["pkl", "npz", "b2nd", "b2tr", "parquet"]
-        pickle_codecs = ["lz4", "zstd", "gzip", "zst", "gz", "bz2", "xz"]
-
         results: set[str] = set()
-        for ext in blob_extensions:
-            for f in _glob.glob(str(self.base_dir / "**" / f"*.{ext}"), recursive=True):
-                results.add(os.path.normpath(f))
-        for codec in pickle_codecs:
-            for f in _glob.glob(
-                str(self.base_dir / "**" / f"*.pkl.{codec}"), recursive=True
-            ):
-                results.add(os.path.normpath(f))
+        for path in self.base_dir.rglob("*"):
+            if not path.is_file() or _is_reserved_blob_artifact(path):
+                continue
+            results.add(os.path.normpath(str(path)))
         return sorted(results)
 
     def _get_blob_path(self, blob_id: str) -> Path:

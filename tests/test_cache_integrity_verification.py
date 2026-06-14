@@ -297,6 +297,7 @@ class TestHashVerification:
         cache_key = cache.put("hash test data", test_key="hash_test")
 
         entry = cache.metadata_backend.get_entry(cache_key)
+        assert entry is not None
         actual_path = cache._resolve_actual_path(entry["metadata"]["actual_path"])
 
         # Corrupt the file without changing its size (overwrite some bytes)
