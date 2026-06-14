@@ -12,6 +12,7 @@ import time
 import pytest
 import numpy as np
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 from cacheness.config import CacheConfig, CacheMetadataConfig
 from cacheness.core import UnifiedCache
@@ -213,6 +214,29 @@ class TestNoAutoDelete:
         result = storage_cache.get(cache_key="corrupt")
         # Entry should still exist in metadata
         assert storage_cache.metadata_backend.get_entry("corrupt") is not None
+
+    def test_failed_same_key_overwrite_preserves_previous_blob(self, storage_cache):
+        """Metadata failure during overwrite preserves durable storage value."""
+        cache_key = "durable-overwrite"
+
+        storage_cache.put("value A", cache_key=cache_key)
+        entry = storage_cache.metadata_backend.get_entry(cache_key)
+        assert entry is not None
+        old_blob_path = storage_cache._resolve_actual_path(
+            entry["metadata"]["actual_path"]
+        )
+        assert old_blob_path.exists()
+
+        with patch.object(
+            storage_cache.metadata_backend,
+            "put_entry",
+            side_effect=RuntimeError("Simulated metadata write failure"),
+        ):
+            with pytest.raises(RuntimeError, match="Simulated metadata write failure"):
+                storage_cache.put("value B", cache_key=cache_key)
+
+        assert storage_cache.get(cache_key=cache_key) == "value A"
+        assert old_blob_path.exists()
 
 
 # ---------------------------------------------------------------------------

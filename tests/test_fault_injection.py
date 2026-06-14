@@ -111,6 +111,28 @@ class TestOrphanedBlobOnPutCrash:
             f"Orphaned blob files after metadata failure: {blob_files}"
         )
 
+    def test_failed_same_key_overwrite_preserves_previous_blob(self, tmp_path):
+        """A failed overwrite must leave the previous committed value readable."""
+        cache = _make_cache(tmp_path)
+        cache_key = "same-key-overwrite"
+
+        cache.put("value A", cache_key=cache_key)
+        entry = cache.metadata_backend.get_entry(cache_key)
+        assert entry is not None
+        old_blob_path = cache._resolve_actual_path(entry["metadata"]["actual_path"])
+        assert old_blob_path.exists()
+
+        with patch.object(
+            cache.metadata_backend,
+            "put_entry",
+            side_effect=RuntimeError("Simulated metadata write failure"),
+        ):
+            with pytest.raises(RuntimeError, match="Simulated metadata write failure"):
+                cache.put("value B", cache_key=cache_key)
+
+        assert cache.get(cache_key=cache_key) == "value A"
+        assert old_blob_path.exists()
+
 
 # ===========================================================================
 # 2. get() Behavior on Transient I/O Errors
