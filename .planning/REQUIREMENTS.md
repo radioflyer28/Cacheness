@@ -28,10 +28,10 @@
 
 ### Multi-Process and Backend Parity
 
-- [ ] **PAR-01**: User can write blobs from concurrent or repeated writers without deterministic temp-file collisions corrupting the final blob.
-- [ ] **PAR-02**: User can store and filter custom user metadata with SQLite and PostgreSQL backends the same way JSON already supports it.
-- [ ] **PAR-03**: User can retry or fail a same-key overwrite without losing the previous committed value in cache mode or storage mode.
-- [ ] **PAR-04**: User can run integrity checks and namespace cleanup over all backend-visible blobs, including custom handler extensions and inline fallback files.
+- [x] **PAR-01**: User can write blobs from concurrent or repeated writers without deterministic temp-file collisions corrupting the final blob.
+- [x] **PAR-02**: User can store and filter custom user metadata with SQLite and PostgreSQL backends the same way JSON already supports it.
+- [x] **PAR-03**: User can retry or fail a same-key overwrite without losing the previous committed value in cache mode or storage mode.
+- [x] **PAR-04**: User can run integrity checks and namespace cleanup over all backend-visible blobs, including custom handler extensions and inline fallback files.
 
 ### Security and Storage Mode
 
@@ -88,10 +88,10 @@
 | TTL-02 | Phase 29 | Complete |
 | TTL-03 | Phase 29 | Complete |
 | TTL-04 | Phase 29 | Complete |
-| PAR-01 | Phase 30 | Pending |
-| PAR-02 | Phase 30 | Pending |
-| PAR-03 | Phase 30 | Pending |
-| PAR-04 | Phase 30 | Pending |
+| PAR-01 | Phase 30 | Complete |
+| PAR-02 | Phase 30 | Complete |
+| PAR-03 | Phase 30 | Complete |
+| PAR-04 | Phase 30 | Complete |
 | SEC-01 | Phase 31 | Pending |
 | SEC-02 | Phase 31 | Pending |
 | SEC-03 | Phase 31 | Pending |

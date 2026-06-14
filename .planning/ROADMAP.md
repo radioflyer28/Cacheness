@@ -73,7 +73,7 @@
 
 - [ ] Phase 28: Silent Data-Loss Remediation — Wave 1 fixes plus cache-key stability and property tests
 - [x] Phase 29: TTL & Eviction Consistency — per-entry expiry, cleanup parity, counters/timestamps, remote eviction (completed 2026-06-14)
-- [ ] Phase 30: Multi-Process & Backend Parity — temp files, metadata parity, non-destructive overwrites, blob enumeration
+- [x] Phase 30: Multi-Process & Backend Parity — temp files, metadata parity, non-destructive overwrites, blob enumeration (completed 2026-06-14)
 - [ ] Phase 31: Security & Storage-Mode Posture — signatures, encrypted reads, key rotation, storage-mode guards, durability contract
 - [ ] Phase 32: Small Fixes & Release Polish — independent low-risk fixes and release/version polish
 
@@ -145,7 +145,7 @@ Plans:
 **Goal:** Ensure local and remote metadata/blob backends expose the same observable behavior under realistic overwrite, concurrency, and integrity-check paths.
 **Requirements:** PAR-01, PAR-02, PAR-03, PAR-04
 **Source:** Backlog Phase 999.2, TASK-9 through TASK-12
-**Plans:** 4 plans
+**Plans:** 4/4 plans complete
 
 Success criteria:
 1. Filesystem blob writes use unique temp files and avoid deterministic cross-process collisions.
@@ -156,13 +156,13 @@ Success criteria:
 Plans:
 **Wave 1**
 
-- [ ] 30-01-PLAN.md - TASK-9 unique temp filesystem blob writes (PAR-01)
-- [ ] 30-02-PLAN.md - TASK-10 SQLite/PostgreSQL user metadata parity (PAR-02)
+- [x] 30-01-PLAN.md - TASK-9 unique temp filesystem blob writes (PAR-01)
+- [x] 30-02-PLAN.md - TASK-10 SQLite/PostgreSQL user metadata parity (PAR-02)
 
 **Wave 2** *(blocked on 30-01 for temp-write behavior and suffix exclusions)*
 
-- [ ] 30-03-PLAN.md - TASK-11 non-destructive same-key overwrite rollback (PAR-03)
-- [ ] 30-04-PLAN.md - TASK-12 backend-driven blob enumeration (PAR-04)
+- [x] 30-03-PLAN.md - TASK-11 non-destructive same-key overwrite rollback (PAR-03)
+- [x] 30-04-PLAN.md - TASK-12 backend-driven blob enumeration (PAR-04)
 
 ### Phase 31: Security & Storage-Mode Posture
 
