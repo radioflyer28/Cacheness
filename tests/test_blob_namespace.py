@@ -8,12 +8,15 @@ Verifies that:
 - UnifiedCache wires namespace to BlobStore
 """
 
-import pytest
+import tempfile
 from pathlib import Path
+
+import pytest
 
 from cacheness.config import CacheConfig
 from cacheness.core import UnifiedCache
 from cacheness.metadata import DEFAULT_NAMESPACE
+from cacheness.storage.backends import blob_backends
 from cacheness.storage.backends.blob_backends import FilesystemBlobBackend
 from cacheness.storage.blob_store import BlobStore
 
@@ -62,6 +65,64 @@ class TestFilesystemBlobBackendNamespace:
         path = backend.write_blob("test_blob", b"hello default")
         assert Path(path).parent == tmp_path / "blobs" / "default"
         assert backend.read_blob(path) == b"hello default"
+
+    def test_same_blob_repeated_writes_use_unique_temp_files(
+        self, tmp_path, monkeypatch
+    ):
+        """Repeated writes to one blob use distinct temp files and last write wins."""
+        backend = FilesystemBlobBackend(tmp_path / "blobs", shard_chars=0)
+        created_temp_paths: list[Path] = []
+        real_mkstemp = tempfile.mkstemp
+
+        def recording_mkstemp(*args, **kwargs):
+            fd, temp_name = real_mkstemp(*args, **kwargs)
+            created_temp_paths.append(Path(temp_name))
+            return fd, temp_name
+
+        monkeypatch.setattr(tempfile, "mkstemp", recording_mkstemp)
+
+        first_path = backend.write_blob("same_blob", b"first payload")
+        second_path = backend.write_blob("same_blob", b"second payload")
+
+        assert first_path == second_path
+        assert len(created_temp_paths) == 2
+        assert created_temp_paths[0] != created_temp_paths[1]
+        assert all(path.suffix == ".tmp" for path in created_temp_paths)
+        assert backend.read_blob(second_path) == b"second payload"
+        assert list(backend.base_dir.rglob("*.tmp")) == []
+
+    def test_filesystem_blob_backend_failed_unique_temp_write_preserves_existing_blob(
+        self, tmp_path, monkeypatch
+    ):
+        """A failed publish removes only its temp file and keeps old content."""
+        backend = FilesystemBlobBackend(tmp_path / "blobs", shard_chars=0)
+        first_path = backend.write_blob("same_blob", b"original payload")
+        first_path_obj = Path(first_path)
+
+        assert backend.read_blob(first_path) == b"original payload"
+
+        created_temp_paths: list[Path] = []
+        real_mkstemp = tempfile.mkstemp
+
+        def recording_mkstemp(*args, **kwargs):
+            fd, temp_name = real_mkstemp(*args, **kwargs)
+            created_temp_paths.append(Path(temp_name))
+            return fd, temp_name
+
+        def fail_publish(src, dst):
+            raise RuntimeError("publish failed")
+
+        monkeypatch.setattr(tempfile, "mkstemp", recording_mkstemp)
+        monkeypatch.setattr(blob_backends.os, "replace", fail_publish)
+
+        with pytest.raises(RuntimeError, match="publish failed"):
+            backend.write_blob("same_blob", b"new payload")
+
+        assert backend.read_blob(first_path) == b"original payload"
+        assert first_path_obj.exists()
+        assert len(created_temp_paths) == 1
+        assert not created_temp_paths[0].exists()
+        assert list(backend.base_dir.rglob("*.tmp")) == []
 
     def test_blob_write_read_custom_namespace(self, tmp_path):
         """Write and read a blob in a custom namespace."""
