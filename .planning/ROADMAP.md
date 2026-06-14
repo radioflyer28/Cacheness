@@ -145,7 +145,7 @@ Plans:
 **Goal:** Ensure local and remote metadata/blob backends expose the same observable behavior under realistic overwrite, concurrency, and integrity-check paths.
 **Requirements:** PAR-01, PAR-02, PAR-03, PAR-04
 **Source:** Backlog Phase 999.2, TASK-9 through TASK-12
-**Plans:** 0 plans
+**Plans:** 4 plans
 
 Success criteria:
 1. Filesystem blob writes use unique temp files and avoid deterministic cross-process collisions.
@@ -154,7 +154,15 @@ Success criteria:
 4. Integrity and cleanup enumeration sees custom-handler blobs and excludes only reserved files.
 
 Plans:
-- [ ] TBD via `$gsd-discuss-phase 30` / `$gsd-plan-phase 30`
+**Wave 1**
+
+- [ ] 30-01-PLAN.md - TASK-9 unique temp filesystem blob writes (PAR-01)
+- [ ] 30-02-PLAN.md - TASK-10 SQLite/PostgreSQL user metadata parity (PAR-02)
+
+**Wave 2** *(blocked on 30-01 for temp-write behavior and suffix exclusions)*
+
+- [ ] 30-03-PLAN.md - TASK-11 non-destructive same-key overwrite rollback (PAR-03)
+- [ ] 30-04-PLAN.md - TASK-12 backend-driven blob enumeration (PAR-04)
 
 ### Phase 31: Security & Storage-Mode Posture
 
