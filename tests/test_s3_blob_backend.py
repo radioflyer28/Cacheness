@@ -4,13 +4,18 @@ Tests for Phase 2.10: S3 Blob Backend
 Tests the S3 blob storage backend using moto for AWS mocking.
 """
 
+import importlib
+
 import pytest
 from io import BytesIO
+from typing import Any
 
 # Check for moto availability
+mock_aws: Any
+
 try:
-    import moto
-    from moto import mock_aws
+    moto = importlib.import_module("moto")
+    mock_aws = moto.mock_aws
 
     MOTO_AVAILABLE = True
 except ImportError:
@@ -18,8 +23,10 @@ except ImportError:
     mock_aws = None
 
 # Check for boto3 availability
+boto3: Any
+
 try:
-    import boto3
+    boto3 = importlib.import_module("boto3")
 
     BOTO3_AVAILABLE = True
 except ImportError:
@@ -558,6 +565,65 @@ class TestS3BackendRegistration:
 
 class TestS3ErrorHandling:
     """Test error handling in S3 backend."""
+
+    def test_delete_namespace_blobs_reports_partial_failures(self, caplog):
+        """delete_namespace_blobs returns deleted/failed counts and logs failures."""
+        from cacheness.storage.backends.s3_backend import S3BlobBackend
+
+        class FakePaginator:
+            def paginate(self, **kwargs):
+                assert kwargs == {"Bucket": "test-bucket", "Prefix": "cache/ns/"}
+                return [
+                    {
+                        "Contents": [
+                            {"Key": "cache/ns/deleted.pkl"},
+                            {"Key": "cache/ns/failed.pkl"},
+                        ]
+                    }
+                ]
+
+        class FakeClient:
+            def __init__(self):
+                self.delete_request = None
+
+            def get_paginator(self, name):
+                assert name == "list_objects_v2"
+                return FakePaginator()
+
+            def delete_objects(self, **kwargs):
+                self.delete_request = kwargs
+                return {
+                    "Deleted": [{"Key": "cache/ns/deleted.pkl"}],
+                    "Errors": [
+                        {
+                            "Key": "cache/ns/failed.pkl",
+                            "Code": "AccessDenied",
+                            "Message": "denied",
+                        }
+                    ],
+                }
+
+        backend = S3BlobBackend.__new__(S3BlobBackend)
+        backend.bucket = "test-bucket"
+        backend._base_prefix = "cache/"
+        backend._client = FakeClient()
+
+        with caplog.at_level("ERROR", logger="cacheness.storage.backends.s3_backend"):
+            deleted, failed = backend.delete_namespace_blobs("ns")
+
+        assert (deleted, failed) == (1, 1)
+        assert backend._client.delete_request == {
+            "Bucket": "test-bucket",
+            "Delete": {
+                "Objects": [
+                    {"Key": "cache/ns/deleted.pkl"},
+                    {"Key": "cache/ns/failed.pkl"},
+                ]
+            },
+        }
+        assert "cache/ns/failed.pkl" in caplog.text
+        assert "AccessDenied" in caplog.text
+        assert "denied" in caplog.text
 
     def test_boto3_not_available_error(self):
         """Test error when boto3 is not available."""

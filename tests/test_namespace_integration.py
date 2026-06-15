@@ -558,8 +558,9 @@ class TestS3NamespacePrefixIsolation:
             keys = backend.list_keys()
             assert len(keys) == 2
 
-            deleted = backend.delete_namespace_blobs("to_delete")
+            deleted, failed = backend.delete_namespace_blobs("to_delete")
             assert deleted == 2
+            assert failed == 0
 
             # Verify blobs are gone
             keys_after = backend.list_keys()

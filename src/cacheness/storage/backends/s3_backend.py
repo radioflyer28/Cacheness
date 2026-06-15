@@ -49,8 +49,9 @@ Usage:
 
 import base64
 import hashlib
+import importlib
 import logging
-from typing import BinaryIO, Dict, List, Optional, Any
+from typing import Any, BinaryIO, Dict, List, Optional
 
 from .blob_backends import BlobBackend
 
@@ -71,9 +72,15 @@ class S3IntegrityError(Exception):
 
 
 # Check for boto3 availability
+boto3: Any
+ClientError: Any
+NoCredentialsError: Any
+
 try:
-    import boto3
-    from botocore.exceptions import ClientError, NoCredentialsError
+    boto3 = importlib.import_module("boto3")
+    botocore_exceptions = importlib.import_module("botocore.exceptions")
+    ClientError = botocore_exceptions.ClientError
+    NoCredentialsError = botocore_exceptions.NoCredentialsError
 
     BOTO3_AVAILABLE = True
 except ImportError:
@@ -624,7 +631,7 @@ class S3BlobBackend(BlobBackend):
         # Assume it's already a key
         return blob_path
 
-    def delete_namespace_blobs(self, namespace_id: str) -> int:
+    def delete_namespace_blobs(self, namespace_id: str) -> tuple[int, int]:
         """Delete all S3 objects under a namespace prefix.
 
         Used during :meth:`drop_namespace` to clean up blob storage for a
@@ -634,30 +641,52 @@ class S3BlobBackend(BlobBackend):
             namespace_id: The namespace whose blobs should be deleted.
 
         Returns:
-            Number of objects deleted.
+            Tuple of ``(deleted_count, failed_count)``.
         """
         ns_prefix = f"{self._base_prefix}{namespace_id}/"
         deleted = 0
+        failed = 0
         paginator = self._client.get_paginator("list_objects_v2")
 
         try:
             for page in paginator.paginate(Bucket=self.bucket, Prefix=ns_prefix):
                 objects = [{"Key": obj["Key"]} for obj in page.get("Contents", [])]
                 if objects:
-                    self._client.delete_objects(
-                        Bucket=self.bucket,
-                        Delete={"Objects": objects, "Quiet": True},
-                    )
-                    deleted += len(objects)
+                    try:
+                        response = self._client.delete_objects(
+                            Bucket=self.bucket,
+                            Delete={"Objects": objects},
+                        )
+                    except ClientError as e:
+                        failed += len(objects)
+                        logger.error(
+                            f"Failed to delete S3 object batch for namespace "
+                            f"{namespace_id!r} (prefix={ns_prefix}): {e}"
+                        )
+                        continue
+
+                    deleted_objects = response.get("Deleted", [])
+                    errors = response.get("Errors", [])
+                    deleted += len(deleted_objects)
+                    failed += len(errors)
+
+                    for error in errors:
+                        key = error.get("Key", "<unknown>")
+                        code = error.get("Code", "<unknown>")
+                        message = error.get("Message", "")
+                        logger.error(
+                            f"Failed to delete S3 object {key!r} for namespace "
+                            f"{namespace_id!r}: {code} {message}".rstrip()
+                        )
 
             logger.info(
                 f"Deleted {deleted} S3 objects for namespace {namespace_id!r} "
-                f"(prefix={ns_prefix})"
+                f"(prefix={ns_prefix}, failed={failed})"
             )
         except ClientError as e:
             logger.error(f"Failed to delete namespace blobs for {namespace_id!r}: {e}")
 
-        return deleted
+        return deleted, failed
 
     def close(self) -> None:
         """Close S3 client (boto3 handles connection pooling automatically)."""
