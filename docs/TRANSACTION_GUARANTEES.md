@@ -46,6 +46,14 @@ When `storage_mode=True`, Cacheness acts as a **persistent key-value store** rat
 
 Storage mode does not hard-refuse explicit destructive cache APIs by default. Calls such as `clear_all()`, `clear_all_namespaces()`, `cleanup_expired(ttl_seconds=...)`, and forced size-limit cleanup continue to perform their documented deletion behavior, but they emit both an operational warning log and a `RuntimeWarning` before deleting durable entries. Treat those warnings as a signal that the caller is using cache-oriented cleanup methods against durable storage-mode data. Ordinary storage-mode reads and writes still do not re-enable implicit TTL expiration, size eviction, or invalid-entry deletion.
 
+### Storage Mode Durability and `fsync_on_write`
+
+Storage mode uses the same local atomic rename patterns as cache mode: JSON metadata saves, filesystem blob writes, and write-intent files are written to local files and published with atomic rename where that path owns the local file. Atomic rename provides crash consistency for a completed rename, but it is not the same as power-loss durability. Without an explicit flush, the operating system may still have file contents or directory entries buffered when the machine loses power.
+
+`CacheStorageConfig.fsync_on_write` defaults to `False` so existing cache-mode and storage-mode writes keep their current performance profile. When set to `True`, local JSON metadata saves, filesystem blob writes, and write-intent files flush and fsync local file descriptors before publication where Cacheness owns the descriptor. Filesystem backends also make a best-effort attempt to fsync the parent directory after atomic rename so the renamed directory entry is more likely to survive power loss.
+
+This option is local-filesystem only. Remote blob stores such as S3 and database metadata backends such as SQLite or PostgreSQL rely on their own durability contracts and configuration. The tests for this policy verify that Cacheness invokes the local fsync hooks; they do not simulate or prove survival across real power-loss events.
+
 ## Architecture Overview
 
 Cacheness uses a **two-layer storage architecture**:

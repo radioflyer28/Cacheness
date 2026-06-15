@@ -7,6 +7,7 @@ Tests the metadata storage systems and their integration with the cache.
 import pytest
 import tempfile
 import shutil
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -154,6 +155,33 @@ class TestJsonBackendPersistenceFailures:
 
         assert metadata_file.exists()
         assert backend.get_entry("key") is not None
+
+    def test_put_entry_fsyncs_metadata_file_when_enabled(self, tmp_path, monkeypatch):
+        calls = []
+
+        def record_fsync(fd):
+            calls.append(fd)
+
+        monkeypatch.setattr(os, "fsync", record_fsync)
+        backend = JsonBackend(tmp_path / "metadata.json", fsync_on_write=True)
+
+        backend.put_entry("key", {"data_type": "pickle", "metadata": {}})
+
+        assert (tmp_path / "metadata.json").exists()
+        assert calls
+
+    def test_put_entry_does_not_fsync_by_default(self, tmp_path, monkeypatch):
+        calls = []
+
+        def record_fsync(fd):
+            calls.append(fd)
+
+        monkeypatch.setattr(os, "fsync", record_fsync)
+        backend = JsonBackend(tmp_path / "metadata.json")
+
+        backend.put_entry("key", {"data_type": "pickle", "metadata": {}})
+
+        assert calls == []
 
 
 class TestMetadataIntegration:

@@ -12,6 +12,7 @@ from pathlib import Path
 # Import configuration classes and functions
 from cacheness.config import (
     CacheConfig,
+    CacheStorageConfig,
     CacheMetadataConfig,
     CacheBlobConfig,
     ConfigValidationError,
@@ -83,6 +84,20 @@ class TestCacheBlobConfig:
         """Test that negative stream_threshold_bytes raises error."""
         with pytest.raises(ValueError, match="must be non-negative"):
             CacheBlobConfig(stream_threshold_bytes=-1)
+
+
+class TestCacheStorageConfig:
+    """Test cache storage durability configuration."""
+
+    def test_fsync_on_write_default_false(self):
+        """fsync_on_write defaults off for compatibility and performance."""
+        config = CacheStorageConfig()
+        assert config.fsync_on_write is False
+
+    def test_fsync_on_write_rejects_non_bool(self):
+        """fsync_on_write must be an explicit boolean."""
+        with pytest.raises(ValueError, match="fsync_on_write must be a boolean"):
+            CacheStorageConfig(fsync_on_write="yes")
 
 
 class TestCacheMetadataConfigExtensions:
@@ -192,6 +207,14 @@ class TestValidateConfig:
         assert len(errors) == 1
         assert errors[0].field == "storage.cache_dir"
         assert "must be a string" in errors[0].message
+
+    def test_invalid_storage_fsync_on_write_type(self):
+        """Test validation of fsync_on_write type."""
+        config = CacheConfig()
+        config.storage.fsync_on_write = "true"
+
+        errors = validate_config(config)
+        assert any(e.field == "storage.fsync_on_write" for e in errors)
 
     def test_invalid_max_cache_size(self):
         """Test validation of max_cache_size_mb."""
@@ -328,6 +351,7 @@ class TestLoadConfigFromDict:
             "cache_dir": "./cache",  # Use "./cache" which is preserved as-is
             "metadata_backend": "sqlite",
             "blob_backend": "memory",
+            "fsync_on_write": True,
         }
 
         config = load_config_from_dict(data)
@@ -335,6 +359,7 @@ class TestLoadConfigFromDict:
         assert config.storage.cache_dir == "./cache"
         assert config.metadata.metadata_backend == "sqlite"
         assert config.blob.blob_backend == "memory"
+        assert config.storage.fsync_on_write is True
 
     def test_nested_format(self):
         """Test loading nested dictionary format."""

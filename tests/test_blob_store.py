@@ -109,6 +109,22 @@ class TestBlobStoreBasic:
         # After close, directory still exists
         assert blob_dir.exists()
 
+    def test_put_fsyncs_local_blob_when_enabled(
+        self, blob_dir, monkeypatch
+    ):
+        calls = []
+
+        def record_fsync(fd):
+            calls.append(fd)
+
+        monkeypatch.setattr(os, "fsync", record_fsync)
+        config = CacheConfig(cache_dir=blob_dir, fsync_on_write=True)
+        store = BlobStore(cache_dir=blob_dir, backend="json", config=config)
+
+        store.put({"payload": "durable"}, key="fsync-blob")
+
+        assert calls
+
 
 # ── xxhash content-addressable keys ────────────────────────────────
 

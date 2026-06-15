@@ -1,6 +1,7 @@
 """Tests for write intent journal (crash-safe blob writes)."""
 
 import json
+import os
 import time
 from pathlib import Path
 
@@ -76,6 +77,33 @@ class TestWriteIntentJournal:
 
         journal.record_intent("key1", "/some/path")
         assert intents_dir.exists()
+
+    def test_record_intent_fsyncs_when_enabled(self, tmp_path, monkeypatch):
+        calls = []
+
+        def record_fsync(fd):
+            calls.append(fd)
+
+        monkeypatch.setattr(os, "fsync", record_fsync)
+        journal = WriteIntentJournal(tmp_path, fsync_on_write=True)
+
+        intent_path = journal.record_intent("key1", "/some/blob/path.pkl")
+
+        assert intent_path.exists()
+        assert calls
+
+    def test_record_intent_does_not_fsync_by_default(self, tmp_path, monkeypatch):
+        calls = []
+
+        def record_fsync(fd):
+            calls.append(fd)
+
+        monkeypatch.setattr(os, "fsync", record_fsync)
+        journal = WriteIntentJournal(tmp_path)
+
+        journal.record_intent("key1", "/some/blob/path.pkl")
+
+        assert calls == []
 
     def test_cleanup_handles_missing_blob(self, tmp_path):
         """Stale intent whose blob was already deleted — should still clean intent file."""

@@ -12,6 +12,7 @@ Covers TEST-02 (cross-platform atomic write verification).
 import shutil
 import tempfile
 import threading
+import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -19,6 +20,7 @@ import pytest
 
 from cacheness.config import CacheConfig
 from cacheness.core import UnifiedCache
+from cacheness.storage.backends.blob_backends import FilesystemBlobBackend
 
 
 class TestAtomicRename:
@@ -69,6 +71,56 @@ class TestAtomicRename:
 
         assert target.read_text() == "same-volume-data"
         assert not source.exists()
+
+
+class TestOptInFsync:
+    """Verify opt-in fsync hooks without simulating real power loss."""
+
+    def test_filesystem_blob_write_fsyncs_before_rename_when_enabled(
+        self, tmp_path, monkeypatch
+    ):
+        calls = []
+
+        def record_fsync(fd):
+            calls.append(fd)
+
+        monkeypatch.setattr(os, "fsync", record_fsync)
+        backend = FilesystemBlobBackend(
+            tmp_path, shard_chars=0, namespace="default", fsync_on_write=True
+        )
+
+        blob_path = backend.write_blob("durable.bin", b"durable")
+
+        assert Path(blob_path).read_bytes() == b"durable"
+        assert calls
+
+    def test_filesystem_blob_write_does_not_fsync_by_default(
+        self, tmp_path, monkeypatch
+    ):
+        calls = []
+
+        def record_fsync(fd):
+            calls.append(fd)
+
+        monkeypatch.setattr(os, "fsync", record_fsync)
+        backend = FilesystemBlobBackend(tmp_path, shard_chars=0, namespace="default")
+
+        backend.write_blob("fast.bin", b"fast")
+
+        assert calls == []
+
+
+class TestDurabilityDocumentation:
+    """Storage-mode docs distinguish atomicity from power-loss durability."""
+
+    def test_transaction_docs_describe_storage_mode_fsync_contract(self):
+        docs = Path("docs/TRANSACTION_GUARANTEES.md").read_text(encoding="utf-8")
+
+        assert "fsync_on_write" in docs
+        assert "power-loss" in docs
+        assert "atomic rename" in docs
+        assert "storage mode" in docs
+        assert "write-intent" in docs
 
 
 class TestConcurrentAtomicWrites:

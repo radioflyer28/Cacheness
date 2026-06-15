@@ -8,6 +8,7 @@ import pytest
 from pathlib import Path
 
 from cacheness import cacheness, CacheConfig
+from cacheness.config import CacheStorageConfig
 
 
 class TestPathHashingConfig:
@@ -131,6 +132,24 @@ class TestPathHashingConfig:
         """Test that the default configuration enables content hashing."""
         config = CacheConfig()
         assert config.hash_path_content
+
+
+class TestStorageDurabilityConfig:
+    """Test opt-in local fsync durability configuration."""
+
+    def test_fsync_on_write_defaults_false(self):
+        """fsync_on_write is opt-in to preserve default write performance."""
+        storage = CacheStorageConfig()
+        config = CacheConfig()
+
+        assert storage.fsync_on_write is False
+        assert config.storage.fsync_on_write is False
+
+    def test_fsync_on_write_flat_config_parameter(self):
+        """CacheConfig exposes fsync_on_write as a flat compatibility option."""
+        config = CacheConfig(fsync_on_write=True)
+
+        assert config.storage.fsync_on_write is True
 
 
 if __name__ == "__main__":
