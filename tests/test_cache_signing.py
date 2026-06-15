@@ -9,6 +9,7 @@ from pathlib import Path
 
 from cacheness.core import UnifiedCache
 from cacheness.config import CacheConfig, SecurityConfig
+from cacheness.security import CacheEntrySigner
 
 
 @pytest.fixture
@@ -61,6 +62,8 @@ class TestDeleteInvalidSignatures:
         # Test default config
         default_config = CacheConfig()
         assert default_config.security.delete_invalid_signatures
+        assert default_config.security.minimum_signature_version == 1
+        assert default_config.security.allow_unsigned_entries
 
         # Test explicit True
         config_true = CacheConfig(delete_invalid_signatures=True)
@@ -74,6 +77,64 @@ class TestDeleteInvalidSignatures:
         security_config = SecurityConfig(delete_invalid_signatures=False)
         config_via_security = CacheConfig(security=security_config)
         assert not config_via_security.security.delete_invalid_signatures
+
+    def test_minimum_signature_version_rejects_valid_legacy_v2_signature(
+        self, tmp_path
+    ):
+        """D-03: valid signatures below the configured minimum are rejected."""
+        key_file = tmp_path / "cache_signing_key.bin"
+        legacy_signer = CacheEntrySigner(
+            key_file,
+            use_hkdf_derivation=False,
+            minimum_signature_version=1,
+        )
+        strict_signer = CacheEntrySigner(
+            key_file,
+            use_hkdf_derivation=True,
+            minimum_signature_version=3,
+        )
+        entry_data = {
+            "cache_key": "legacy-entry",
+            "data_type": "object",
+            "file_size": 5,
+            "file_hash": "abc123",
+            "object_type": "str",
+            "storage_format": "pickle",
+            "serializer": "pickle",
+            "compression_codec": "zstd",
+            "created_at": "2026-06-14T12:00:00",
+        }
+        legacy_signature = legacy_signer.sign_entry(entry_data)
+        assert legacy_signature.startswith("v2:")
+        assert legacy_signer.verify_entry(entry_data, legacy_signature)
+
+        assert not strict_signer.verify_entry(entry_data, legacy_signature)
+
+    def test_downgraded_v3_signature_prefix_rejected_when_minimum_is_v3(
+        self, tmp_path
+    ):
+        """D-08: rewriting a v3 stored prefix to v2 fails under strict policy."""
+        signer = CacheEntrySigner(
+            tmp_path / "cache_signing_key.bin",
+            use_hkdf_derivation=True,
+            minimum_signature_version=3,
+        )
+        entry_data = {
+            "cache_key": "downgrade-entry",
+            "data_type": "object",
+            "file_size": 5,
+            "file_hash": "def456",
+            "object_type": "str",
+            "storage_format": "pickle",
+            "serializer": "pickle",
+            "compression_codec": "zstd",
+            "created_at": "2026-06-14T12:00:00",
+        }
+        signature = signer.sign_entry(entry_data)
+        assert signature.startswith("v3:")
+
+        downgraded_signature = signature.replace("v3:", "v2:", 1)
+        assert not signer.verify_entry(entry_data, downgraded_signature)
 
     def test_basic_signing_functionality(
         self, temp_cache_signing_enabled, temp_cache_delete_disabled

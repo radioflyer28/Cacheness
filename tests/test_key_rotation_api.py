@@ -109,6 +109,21 @@ class TestUnifiedCacheRotateKey:
         sig2 = entries2[0].get("entry_signature", "")
         assert sig2.startswith("v3:"), f"Expected v3 signature, got: {sig2[:10]}"
 
+    def test_minimum_signature_version_blocks_v2_cache_read(self, tmp_path):
+        """D-02/D-03: v2 stays readable by default but strict v3 policy rejects it."""
+        legacy_cache = _make_signed_cache(tmp_path, use_hkdf_derivation=False)
+        legacy_cache.put("legacy payload", test_key="legacy")
+        assert legacy_cache.get(test_key="legacy") == "legacy payload"
+
+        strict_cache = _make_signed_cache(
+            tmp_path,
+            use_hkdf_derivation=True,
+            minimum_signature_version=3,
+            delete_invalid_signatures=False,
+        )
+
+        assert strict_cache.get(test_key="legacy") is None
+
     def test_namespace_re_signed(self, tmp_path):
         """Namespace signature is updated during rotation."""
         cache = _make_signed_cache(tmp_path)
