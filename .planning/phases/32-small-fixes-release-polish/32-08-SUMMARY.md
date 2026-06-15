@@ -72,12 +72,12 @@ None - plan implementation executed exactly as written.
 - The default global uv cache path failed with `Cannot create a file when that file already exists`; verification used workspace-local `.uv-cache` and `.uv-python`.
 - Sandbox execution of uv commands failed with interpreter access errors, so uv verification commands were run outside the sandbox after approval.
 - `uv run ty check src/cacheness/__init__.py tests/test_core.py` reported pre-existing diagnostics throughout `tests/test_core.py`; none were introduced by this plan's changed lines.
-- The exact full-suite checkpoint failed outside POL-08 ownership:
+- The initial full-suite checkpoint failed outside POL-08 ownership:
   - `tests/test_decorators.py::TestCacheIfDecorator::test_cache_if_supports_ttl_parameter` expected `call_count == 2`, got `1`.
   - `tests/test_fault_injection.py::TestOrphanedBlobOnPutCrash::test_failed_same_key_overwrite_preserves_previous_blob` expected previous value preservation after metadata failure, got `None`.
   - `tests/test_dunder_methods.py::TestDunderMethods::test_contains_expired_key` expected an expired key to remain contained.
 
-Ownership triage: these failures are not caused by the POL-08 package-root export. `tests/test_decorators.py`, `tests/test_fault_injection.py`, `tests/test_dunder_methods.py`, `src/cacheness/core.py`, `src/cacheness/decorators.py`, and `src/cacheness/_put_cleanup.py` had no working-tree diff during this plan. Phase 32 is not release-ready until those checkpoint failures are resolved or accepted by the owner.
+Ownership triage: these failures were not caused by the POL-08 package-root export, but the full-suite checkpoint is a Phase 32 release criterion. They were resolved by follow-up commit `4d6e0d1` (`fix(32): resolve final checkpoint regressions`) before phase verification.
 
 ## Verification
 
@@ -89,7 +89,9 @@ Ownership triage: these failures are not caused by the POL-08 package-root expor
 - Focused regression: `uv run pytest -o addopts='' tests/test_core.py::TestCacheConfig::test_unified_cache_root_export_preserves_alias -x -q --ignore=tests/test_tensorflow_handler.py` passed, 1 passed.
 - Targeted test file: `uv run pytest -o addopts='' tests/test_core.py -x -q --ignore=tests/test_tensorflow_handler.py` passed, 65 passed.
 - Smoke: `uv run python -c "from cacheness import UnifiedCache, cacheness; assert UnifiedCache is cacheness; print(UnifiedCache.__name__)"` passed and printed `UnifiedCache`.
-- Final Phase 32 checkpoint: `uv run pytest tests/ -x -q --ignore=tests/test_tensorflow_handler.py` failed with 3 failed, 905 passed, 67 skipped in 100.20s.
+- Initial final Phase 32 checkpoint: `uv run pytest tests/ -x -q --ignore=tests/test_tensorflow_handler.py` failed with 3 failed, 905 passed, 67 skipped in 100.20s.
+- Checkpoint regression fix: `4d6e0d1` restored decorator/write-time TTL persistence, fractional per-entry TTL handling, explicit read-time TTL override behavior, and same-key overwrite rollback in cache and storage modes.
+- Final Phase 32 checkpoint rerun: `uv run pytest tests/ -x -q --ignore=tests/test_tensorflow_handler.py` passed with 1857 passed, 125 skipped, 27 warnings in 77.77s.
 
 ## Known Stubs
 
@@ -105,7 +107,7 @@ None - no external service configuration required.
 
 ## Next Phase Readiness
 
-POL-08 is complete. Phase 32 release completion remains blocked by the full-suite checkpoint failures listed above.
+POL-08 is complete. Phase 32 release completion is ready for verifier review after the final full-suite checkpoint passed.
 
 ## Self-Check
 
