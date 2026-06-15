@@ -11,6 +11,8 @@ Validates that:
 """
 
 import pickle
+import secrets
+import tempfile
 import pytest
 import numpy as np
 from pathlib import Path
@@ -18,7 +20,10 @@ from unittest.mock import MagicMock
 
 from cacheness.handlers import BytesHandler, ObjectHandler, ArrayHandler
 from cacheness.core import UnifiedCache, CacheConfig
+from cacheness.config import SecurityConfig
+from cacheness.encryption import encrypt_blob
 from cacheness.interfaces import CacheWriter, CacheReader, HandlerResult
+from cacheness.storage import BlobStore
 
 
 # ---------------------------------------------------------------------------
@@ -314,3 +319,84 @@ class TestFallback:
         recovered = cache.get(cache_key="df-fallback")
         assert recovered is not None
         pd.testing.assert_frame_equal(recovered, df)
+
+
+class TestEncryptedBlobReads:
+    """Encrypted blob reads prefer get_bytes before plaintext temp fallback."""
+
+    def _encrypted_store(self, tmp_path):
+        (tmp_path / "cache_signing_key.bin").write_bytes(secrets.token_bytes(32))
+        config = CacheConfig(
+            cache_dir=tmp_path,
+            security=SecurityConfig(
+                enable_entry_signing=True,
+                enable_content_encryption=True,
+                encryption_key_file="cache_signing_key.bin",
+                allow_unsigned_entries=True,
+            ),
+        )
+        return BlobStore(
+            cache_dir=tmp_path,
+            backend="json",
+            enable_signing=True,
+            config=config,
+        )
+
+    def _write_encrypted_blob(self, store, path, plaintext):
+        ciphertext, iv, algo = encrypt_blob(plaintext, store._encryption_key)
+        path.write_bytes(ciphertext)
+        return {
+            "encryption_algorithm": algo.decode(),
+            "encryption_iv": iv.hex(),
+            "storage_format": "pickle",
+            "serializer": "pickle",
+        }
+
+    def test_read_blob_tries_handler_get_bytes_before_temp_file(self, tmp_path):
+        store = self._encrypted_store(tmp_path)
+        blob_path = tmp_path / "encrypted.pkl"
+        metadata = self._write_encrypted_blob(
+            store, blob_path, pickle.dumps({"secure": "bytes"})
+        )
+
+        handler = MagicMock()
+        handler.get_bytes.return_value = {"secure": "bytes"}
+        handler.get.side_effect = AssertionError("temp-file fallback was used")
+        store.handlers.get_handler_by_type = MagicMock(return_value=handler)
+
+        assert store._read_blob(blob_path, "object", metadata) == {"secure": "bytes"}
+        handler.get_bytes.assert_called_once()
+        handler.get.assert_not_called()
+
+    def test_read_blob_temp_fallback_uses_mkstemp_and_unlinks(
+        self, tmp_path, monkeypatch
+    ):
+        store = self._encrypted_store(tmp_path)
+        blob_path = tmp_path / "encrypted.pkl"
+        metadata = self._write_encrypted_blob(store, blob_path, b"fallback-plaintext")
+        temp_paths = []
+
+        real_mkstemp = tempfile.mkstemp
+
+        def tracking_mkstemp(*args, **kwargs):
+            fd, name = real_mkstemp(*args, **kwargs)
+            temp_paths.append(Path(name))
+            return fd, name
+
+        monkeypatch.setattr(tempfile, "mkstemp", tracking_mkstemp)
+
+        class TempOnlyHandler:
+            def get_bytes(self, blob, metadata):
+                raise NotImplementedError
+
+            def get(self, file_path, metadata):
+                file_path = Path(file_path)
+                assert file_path.parent == tmp_path
+                assert file_path.read_bytes() == b"fallback-plaintext"
+                return "fallback-ok"
+
+        store.handlers.get_handler_by_type = MagicMock(return_value=TempOnlyHandler())
+
+        assert store._read_blob(blob_path, "temp-only", metadata) == "fallback-ok"
+        assert len(temp_paths) == 1
+        assert not temp_paths[0].exists()

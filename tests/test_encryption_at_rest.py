@@ -1,6 +1,7 @@
 """Tests for AES-256-GCM encryption at rest (Phase 18 / SEC-03)."""
 
 import secrets
+import tempfile
 import pytest
 
 cryptography = pytest.importorskip("cryptography")
@@ -202,6 +203,20 @@ class TestBlobStoreEncryption:
         meta = store.get_metadata(blob_key)
         nested = meta.get("metadata", {})
         assert "encryption_algorithm" not in nested
+
+    def test_encrypted_object_get_uses_in_memory_bytes_path(
+        self, tmp_path, monkeypatch
+    ):
+        """Encrypted object reads should not create plaintext temp files."""
+        store = _make_encrypted_blobstore(tmp_path)
+        blob_key = store.put({"secret": "payload"}, key="bytes-first")
+
+        def fail_named_tempfile(*args, **kwargs):
+            raise AssertionError("plaintext temp file should not be created")
+
+        monkeypatch.setattr(tempfile, "NamedTemporaryFile", fail_named_tempfile)
+
+        assert store.get(blob_key) == {"secret": "payload"}
 
 
 # ── UnifiedCache integration tests ─────────────────────────────────

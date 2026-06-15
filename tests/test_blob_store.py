@@ -11,12 +11,14 @@ Tests:
 """
 
 import os
+import secrets
 import threading
 from pathlib import Path
 
 import pytest
 import xxhash
 
+from cacheness.config import CacheConfig, SecurityConfig
 from cacheness.storage import BlobStore
 
 
@@ -520,3 +522,40 @@ class TestVerifyIntegrityNonLocal:
         report = memory_store.verify_integrity(verify_hashes=True)
         assert "hash_mismatches" in report
         assert len(report["hash_mismatches"]) == 1
+
+
+class TestEncryptedBackendReads:
+    """SEC-02 encrypted reads must go through the configured blob backend."""
+
+    def test_encrypted_memory_backend_round_trips_without_filesystem_read(
+        self, blob_dir, monkeypatch
+    ):
+        blob_dir.mkdir(parents=True, exist_ok=True)
+        (blob_dir / "cache_signing_key.bin").write_bytes(secrets.token_bytes(32))
+        config = CacheConfig(
+            cache_dir=blob_dir,
+            security=SecurityConfig(
+                enable_entry_signing=True,
+                enable_content_encryption=True,
+                encryption_key_file="cache_signing_key.bin",
+                allow_unsigned_entries=True,
+            ),
+        )
+        store = BlobStore(
+            cache_dir=blob_dir,
+            backend="json",
+            blob_backend="memory",
+            enable_signing=True,
+            config=config,
+        )
+        key = store.put({"msg": "encrypted memory"}, key="encrypted-memory")
+        meta = store.get_metadata(key)
+        actual_path = meta["metadata"]["actual_path"]
+        assert actual_path.startswith("memory://")
+
+        def fail_read_bytes(self):
+            raise AssertionError(f"direct filesystem read attempted for {self}")
+
+        monkeypatch.setattr(Path, "read_bytes", fail_read_bytes)
+
+        assert store.get(key) == {"msg": "encrypted memory"}
