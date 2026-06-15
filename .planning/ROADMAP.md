@@ -100,6 +100,7 @@
 **Plans:** 5 plans
 
 Success criteria:
+
 1. `clear_all()` and `clear_all_namespaces()` remove namespace blob files without deleting reserved metadata or key files.
 2. Stale write-intent cleanup resolves relative paths under `cache_dir`, preserves committed entries, and works in storage mode.
 3. JSON backend data-critical save failures surface to callers and corrupt metadata files are preserved.
@@ -107,6 +108,7 @@ Success criteria:
 5. Tier-1 tests from TASK-1 through TASK-4 pass with the TensorFlow tests ignored on Windows.
 
 Plans:
+
 - [ ] 28-01-PLAN.md - TASK-1 clear_all namespace blob cleanup (REL-01)
 - [ ] 28-02-PLAN.md - TASK-2 write-intent path resolution, committed-entry guard, storage-mode cleanup (REL-02, REL-03, REL-04)
 - [ ] 28-03-PLAN.md - SEED-006 record write intent before blob write follow-up (REL-02, REL-03, REL-04)
@@ -121,6 +123,7 @@ Plans:
 **Plans:** 4/4 plans complete
 
 Success criteria:
+
 1. Stored `expires_at` controls per-entry expiry when present; global TTL applies only as fallback.
 2. Init-time cleanup uses the public cleanup path and removes both metadata and blob files.
 3. Metadata-only updates preserve `created_at`, signatures, and access-count semantics.
@@ -148,6 +151,7 @@ Plans:
 **Plans:** 4/4 plans complete
 
 Success criteria:
+
 1. Filesystem blob writes use unique temp files and avoid deterministic cross-process collisions.
 2. SQLite and PostgreSQL preserve custom user metadata with parity against JSON.
 3. Failed same-key overwrites restore or preserve the previous committed value in cache and storage modes.
@@ -169,9 +173,10 @@ Plans:
 **Goal:** Strengthen signing, encryption, rotation, and storage-mode durability guarantees without silently changing public API semantics.
 **Requirements:** SEC-01, SEC-02, SEC-03, SEC-04, STRG-01, STRG-02, STRG-03
 **Source:** Backlog Phase 999.3, TASK-13 through TASK-15, SEED-001, SEED-004, SEED-005, SEED-006
-**Plans:** 7/7 plans executed
+**Plans:** 8/8 plans complete
 
 Success criteria:
+
 1. Signature downgrade hardening and unsigned-entry risk documentation are tested and documented.
 2. Encrypted reads use backend-routed reads and prefer in-memory handler paths over plaintext temp files.
 3. Key rotation is two-phase enough that interrupted rotation leaves the old key and entries usable.
@@ -201,6 +206,10 @@ Plans:
 
 - [x] 31-06-PLAN.md - SEED-005 transaction guarantees and opt-in fsync policy (STRG-02)
 
+**Wave 6** *(gap closure blocked on 31-03 and Phase 31 verification gap)*
+
+- [x] 31-08-PLAN.md - SEC-03 hard-interruption key-rotation gap closure (SEC-03)
+
 ### Phase 32: Small Fixes & Release Polish
 
 **Goal:** Land low-risk independent code-review fixes and polish the package surface for the v0.12.0 release.
@@ -209,12 +218,14 @@ Plans:
 **Plans:** 0 plans
 
 Success criteria:
+
 1. Each small fix is independently tested and committed with minimal blast radius.
 2. Package version metadata and root imports match user expectations.
 3. S3 and SQLite lifecycle/reporting fixes have targeted tests or explicit mocked verification.
 4. Full suite passes once before v0.12.0 completion.
 
 Plans:
+
 - [ ] TBD via `$gsd-discuss-phase 32` / `$gsd-plan-phase 32`
 
 ## Backlog
@@ -228,6 +239,7 @@ Items sourced from the 2026-06-12 code review (`docs/CODE_REVIEW_FINDINGS.md`). 
 **Plans:** 0 plans
 
 Plans:
+
 - [ ] TBD (promote with /gsd-review-backlog when ready)
 
 ### Phase 999.2: Multi-process & parity hardening (PROMOTED to Phase 30)
@@ -237,6 +249,7 @@ Plans:
 **Plans:** 0 plans
 
 Plans:
+
 - [ ] TBD (promote with /gsd-review-backlog when ready)
 
 ### Phase 999.3: Security posture hardening (PROMOTED to Phase 31)
@@ -246,6 +259,7 @@ Plans:
 **Plans:** 0 plans
 
 Plans:
+
 - [ ] TBD (promote with /gsd-review-backlog when ready)
 
 ### Phase 999.4: Code review small fixes (PROMOTED to Phase 32)
@@ -255,4 +269,5 @@ Plans:
 **Plans:** 0 plans
 
 Plans:
+
 - [ ] TBD (promote with /gsd-review-backlog when ready)

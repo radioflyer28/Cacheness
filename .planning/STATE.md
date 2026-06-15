@@ -1,16 +1,16 @@
 ---
 gsd_state_version: 1.0
 milestone: v0.12.0
-milestone_name: Reliability Remediation
+milestone_name: Phase Details
 status: executing
-last_updated: "2026-06-15T03:37:45.430Z"
-last_activity: 2026-06-15 -- Phase 31 Plan 06 complete
+last_updated: "2026-06-15T14:09:43.908Z"
+last_activity: 2026-06-15
 progress:
   total_phases: 9
   completed_phases: 4
-  total_plans: 20
-  completed_plans: 20
-  percent: 100
+  total_plans: 21
+  completed_plans: 21
+  percent: 44
 ---
 
 # Project State
@@ -20,14 +20,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-06-12)
 
 **Core value:** Improve reliability, security, and maintainability of Cacheness without changing public API semantics
-**Current focus:** v0.12.0 Reliability Remediation
+**Current focus:** Phase 31 — Security & Storage-Mode Posture
 
 ## Current Position
 
-Phase: 31 — Security & Storage-Mode Posture
-Plan: 31-01, 31-02, 31-03, 31-04, 31-05, 31-06, and 31-07 complete
-Status: Phase 31 complete
-Last activity: 2026-06-15 -- Phase 31 Plan 06 complete
+Phase: 31 (Security & Storage-Mode Posture) — COMPLETE
+Plan: 8 of 8
+Status: Phase 31 complete; ready for re-verification or Phase 32 planning
+Last activity: 2026-06-15 -- Phase 31 Plan 08 SEC-03 gap closure completed
 
 ## Accumulated Context
 
@@ -65,6 +65,7 @@ Full review in `docs/CODE_REVIEW_FINDINGS.md`; execution specs in `docs/CODE_REV
 | Phase 31-security-storage-mode-posture P04 | 8min | 2 tasks | 6 files |
 | Phase 31-security-storage-mode-posture P03 | 14min | 2 tasks | 8 files |
 | Phase 31-security-storage-mode-posture P06 | 11min | 2 tasks | 15 files |
+| Phase 31-security-storage-mode-posture P08 | 11min | 2 tasks | 6 files |
 
 ## Decisions
 
@@ -95,3 +96,6 @@ Full review in `docs/CODE_REVIEW_FINDINGS.md`; execution specs in `docs/CODE_REV
 - [Phase 31-security-storage-mode-posture]: STRG-02 keeps fsync_on_write defaulting to False so cache-mode and storage-mode write performance is unchanged unless users opt in.
 - [Phase 31-security-storage-mode-posture]: Local file fsync failures propagate when fsync_on_write is enabled; parent directory fsync is best-effort for Windows and filesystems that do not support it.
 - [Phase 31-security-storage-mode-posture]: The fsync policy is local-only; remote blob stores and database backends rely on their own durability contracts.
+- [Phase 31-security-storage-mode-posture]: Interrupted rotation fallback accepts staged signatures only while the protected sibling <keyfile>.new still exists. — Completed by Phase 31 Plan 08 / SEC-03 gap closure.
+- [Phase 31-security-storage-mode-posture]: Active signer and active encryption key remain the normal read path; staged signer/decryption are fallback-only. — Completed by Phase 31 Plan 08 / SEC-03 gap closure.
+- [Phase 31-security-storage-mode-posture]: Startup does not replace keys, delete <keyfile>.new, rewrite metadata, or complete rotation implicitly. — Completed by Phase 31 Plan 08 / SEC-03 gap closure.
