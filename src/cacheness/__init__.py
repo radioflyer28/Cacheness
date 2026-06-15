@@ -29,7 +29,7 @@ Quick Start:
     >>> stats = cache.get_stats()
 """
 
-from .core import CacheConfig, UnifiedCache as cacheness, get_cache
+from .core import CacheConfig, UnifiedCache, get_cache
 from .decorators import cached, cache_if
 from .handlers import ArrayHandler, HandlerRegistry, ObjectHandler
 from .metadata import (
@@ -95,6 +95,9 @@ except ImportError:
 __version__ = "0.12.0"
 __author__ = "radioflyer28"
 __email__ = "akgithub.2drwc@aleeas.com"
+
+# Backward-compatible public alias.
+cacheness = UnifiedCache
 
 # Import storage layer components for convenience
 # These are also available via `from cacheness.storage import ...`
@@ -218,6 +221,7 @@ except ImportError:
 
 __all__ = [
     # Core classes
+    "UnifiedCache",
     "cacheness",
     "CacheConfig",
     "get_cache",

@@ -18,6 +18,14 @@ from cacheness import CacheConfig, cacheness
 class TestCacheConfig:
     """Test CacheConfig class functionality."""
 
+    def test_unified_cache_root_export_preserves_alias(self):
+        """Root package exports both UnifiedCache and the legacy alias."""
+        from cacheness import UnifiedCache, cacheness
+
+        assert UnifiedCache is cacheness
+        assert "UnifiedCache" in __import__("cacheness").__all__
+        assert "cacheness" in __import__("cacheness").__all__
+
     def test_default_config(self):
         """Test default configuration values."""
         config = CacheConfig()
