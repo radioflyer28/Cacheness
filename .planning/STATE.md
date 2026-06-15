@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v0.12.0
 milestone_name: Reliability Remediation
 status: executing
-last_updated: "2026-06-15T03:22:02.422Z"
-last_activity: 2026-06-15 -- Phase 31 Plan 03 complete
+last_updated: "2026-06-15T03:37:45.430Z"
+last_activity: 2026-06-15 -- Phase 31 Plan 06 complete
 progress:
   total_phases: 9
-  completed_phases: 3
+  completed_phases: 4
   total_plans: 20
-  completed_plans: 19
-  percent: 95
+  completed_plans: 20
+  percent: 100
 ---
 
 # Project State
@@ -25,9 +25,9 @@ See: .planning/PROJECT.md (updated 2026-06-12)
 ## Current Position
 
 Phase: 31 — Security & Storage-Mode Posture
-Plan: 31-01, 31-02, 31-03, 31-04, 31-05, and 31-07 complete; 31-06 pending
-Status: Executing
-Last activity: 2026-06-15 -- Phase 31 Plan 03 complete
+Plan: 31-01, 31-02, 31-03, 31-04, 31-05, 31-06, and 31-07 complete
+Status: Phase 31 complete
+Last activity: 2026-06-15 -- Phase 31 Plan 06 complete
 
 ## Accumulated Context
 
@@ -64,6 +64,7 @@ Full review in `docs/CODE_REVIEW_FINDINGS.md`; execution specs in `docs/CODE_REV
 | Phase 31-security-storage-mode-posture P07 | 7min | 2 tasks | 2 files |
 | Phase 31-security-storage-mode-posture P04 | 8min | 2 tasks | 6 files |
 | Phase 31-security-storage-mode-posture P03 | 14min | 2 tasks | 8 files |
+| Phase 31-security-storage-mode-posture P06 | 11min | 2 tasks | 15 files |
 
 ## Decisions
 
@@ -91,3 +92,6 @@ Full review in `docs/CODE_REVIEW_FINDINGS.md`; execution specs in `docs/CODE_REV
 - [Phase 31-security-storage-mode-posture]: UnifiedCache and BlobStore verify existing signed entries with the old signer before re-signing with the staged signer.
 - [Phase 31-security-storage-mode-posture]: Local encrypted blob rotation writes ciphertext to <blob>.rotating and publishes with os.replace.
 - [Phase 31-security-storage-mode-posture]: Leftover <keyfile>.new files are logged as interrupted rotations on startup; full resume remains out of scope.
+- [Phase 31-security-storage-mode-posture]: STRG-02 keeps fsync_on_write defaulting to False so cache-mode and storage-mode write performance is unchanged unless users opt in.
+- [Phase 31-security-storage-mode-posture]: Local file fsync failures propagate when fsync_on_write is enabled; parent directory fsync is best-effort for Windows and filesystems that do not support it.
+- [Phase 31-security-storage-mode-posture]: The fsync policy is local-only; remote blob stores and database backends rely on their own durability contracts.

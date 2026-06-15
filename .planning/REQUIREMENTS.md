@@ -40,7 +40,7 @@
 - [x] **SEC-03**: User can rotate keys with a two-phase process that leaves the original key and entries usable if rotation is interrupted.
 - [x] **SEC-04**: User can rely on UnifiedCache and BlobStore signing the same canonical field set, with a documented compatibility path for existing signed entries.
 - [x] **STRG-01**: User can enable storage mode and be protected from accidental cache-eviction APIs through an explicit raise-or-warning policy.
-- [ ] **STRG-02**: User can understand and configure the storage-mode durability contract, including whether fsync is performed for JSON saves, blob writes, and intent files.
+- [x] **STRG-02**: User can understand and configure the storage-mode durability contract, including whether fsync is performed for JSON saves, blob writes, and intent files.
 - [x] **STRG-03**: User can rely on write intents being recorded before blob writes where needed so crash recovery covers the full uncommitted-blob window.
 
 ### Small Fixes and Release Polish
@@ -97,7 +97,7 @@
 | SEC-03 | Phase 31 | Complete |
 | SEC-04 | Phase 31 | Complete |
 | STRG-01 | Phase 31 | Complete |
-| STRG-02 | Phase 31 | Pending |
+| STRG-02 | Phase 31 | Complete |
 | STRG-03 | Phase 31 | Complete |
 | POL-01 | Phase 32 | Pending |
 | POL-02 | Phase 32 | Pending |

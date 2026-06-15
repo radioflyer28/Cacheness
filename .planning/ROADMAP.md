@@ -74,7 +74,7 @@
 - [ ] Phase 28: Silent Data-Loss Remediation — Wave 1 fixes plus cache-key stability and property tests
 - [x] Phase 29: TTL & Eviction Consistency — per-entry expiry, cleanup parity, counters/timestamps, remote eviction (completed 2026-06-14)
 - [x] Phase 30: Multi-Process & Backend Parity — temp files, metadata parity, non-destructive overwrites, blob enumeration (completed 2026-06-14)
-- [ ] Phase 31: Security & Storage-Mode Posture — signatures, encrypted reads, key rotation, storage-mode guards, durability contract
+- [x] Phase 31: Security & Storage-Mode Posture — signatures, encrypted reads, key rotation, storage-mode guards, durability contract (completed 2026-06-15)
 - [ ] Phase 32: Small Fixes & Release Polish — independent low-risk fixes and release/version polish
 
 </details>
@@ -169,7 +169,7 @@ Plans:
 **Goal:** Strengthen signing, encryption, rotation, and storage-mode durability guarantees without silently changing public API semantics.
 **Requirements:** SEC-01, SEC-02, SEC-03, SEC-04, STRG-01, STRG-02, STRG-03
 **Source:** Backlog Phase 999.3, TASK-13 through TASK-15, SEED-001, SEED-004, SEED-005, SEED-006
-**Plans:** 6/7 plans executed
+**Plans:** 7/7 plans executed
 
 Success criteria:
 1. Signature downgrade hardening and unsigned-entry risk documentation are tested and documented.
@@ -199,7 +199,7 @@ Plans:
 
 **Wave 5** *(blocked on 31-03, 31-05, and 31-07)*
 
-- [ ] 31-06-PLAN.md - SEED-005 transaction guarantees and opt-in fsync policy (STRG-02)
+- [x] 31-06-PLAN.md - SEED-005 transaction guarantees and opt-in fsync policy (STRG-02)
 
 ### Phase 32: Small Fixes & Release Polish
 
