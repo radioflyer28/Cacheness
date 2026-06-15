@@ -169,7 +169,7 @@ Plans:
 **Goal:** Strengthen signing, encryption, rotation, and storage-mode durability guarantees without silently changing public API semantics.
 **Requirements:** SEC-01, SEC-02, SEC-03, SEC-04, STRG-01, STRG-02, STRG-03
 **Source:** Backlog Phase 999.3, TASK-13 through TASK-15, SEED-001, SEED-004, SEED-005, SEED-006
-**Plans:** 1/7 plans executed
+**Plans:** 2/7 plans executed
 
 Success criteria:
 1. Signature downgrade hardening and unsigned-entry risk documentation are tested and documented.
@@ -182,7 +182,7 @@ Plans:
 **Wave 1**
 
 - [x] 31-01-PLAN.md - TASK-13 signature minimum version and unsigned-entry docs (SEC-01)
-- [ ] 31-05-PLAN.md - SEED-001 storage-mode destructive API warning policy (STRG-01)
+- [x] 31-05-PLAN.md - SEED-001 storage-mode destructive API warning policy (STRG-01)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 

@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v0.12.0
 milestone_name: Reliability Remediation
 status: executing
-last_updated: "2026-06-15T02:02:27.524Z"
-last_activity: 2026-06-15 -- Phase 31 Plan 01 complete
+last_updated: "2026-06-15T02:18:13.014Z"
+last_activity: 2026-06-15 -- Phase 31 Plan 05 complete
 progress:
   total_phases: 9
   completed_phases: 3
   total_plans: 20
-  completed_plans: 14
-  percent: 70
+  completed_plans: 15
+  percent: 75
 ---
 
 # Project State
@@ -25,9 +25,9 @@ See: .planning/PROJECT.md (updated 2026-06-12)
 ## Current Position
 
 Phase: 31 — Security & Storage-Mode Posture
-Plan: 31-01 complete; remaining Phase 31 plans pending
+Plan: 31-01 and 31-05 complete; remaining Phase 31 plans pending
 Status: Executing
-Last activity: 2026-06-15 -- Phase 31 Plan 01 complete
+Last activity: 2026-06-15 -- Phase 31 Plan 05 complete
 
 ## Accumulated Context
 
@@ -59,6 +59,7 @@ Full review in `docs/CODE_REVIEW_FINDINGS.md`; execution specs in `docs/CODE_REV
 | Phase 29-ttl-eviction-consistency P03 | 17min | 2 tasks | 9 files |
 | Phase 29-ttl-eviction-consistency P04 | 2h 53m | 2 tasks | 2 files |
 | Phase 31-security-storage-mode-posture P01 | 12min | 2 tasks | 8 files |
+| Phase 31-security-storage-mode-posture P05 | 9min | 2 tasks | 4 files |
 
 ## Decisions
 
@@ -71,3 +72,6 @@ Full review in `docs/CODE_REVIEW_FINDINGS.md`; execution specs in `docs/CODE_REV
 - [Phase 31-security-storage-mode-posture]: SEC-01 keeps minimum_signature_version defaulting to 1 for old-cache compatibility. — Completed by Phase 31 Plan 01.
 - [Phase 31-security-storage-mode-posture]: New deployments should use minimum_signature_version=3 with allow_unsigned_entries=False when metadata may be attacker-writable. — Completed by Phase 31 Plan 01.
 - [Phase 31-security-storage-mode-posture]: Minimum-version rejection is enforced in CacheEntrySigner.verify_entry so UnifiedCache and BlobStore share the policy. — Completed by Phase 31 Plan 01.
+- [Phase 31-security-storage-mode-posture]: STRG-01 keeps storage-mode destructive APIs warning-first by default rather than hard-refusal.
+- [Phase 31-security-storage-mode-posture]: Implicit storage-mode TTL, eviction, and invalid-entry deletion behavior remains disabled.
+- [Phase 31-security-storage-mode-posture]: Storage-mode destructive warnings use both cacheness.core logger.warning and RuntimeWarning.
