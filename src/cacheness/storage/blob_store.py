@@ -69,6 +69,10 @@ from .paths import resolve_actual_path, to_relative_path
 # Import CacheConfig for proper handler configuration
 from ..config import CacheConfig, CompressionConfig
 from ..interfaces import BlobReadContext, WriteBlobResult, IntegrityReport
+from ..signing_fields import (
+    extract_legacy_blobstore_signable_fields,
+    extract_signable_fields,
+)
 
 if TYPE_CHECKING:
     from ..interfaces import RotationResult
@@ -362,9 +366,10 @@ class BlobStore:
                         result.skipped += 1
                         continue
 
-                    # BlobStore flatten-for-signing pattern (matches put/get)
                     nested_meta = full_entry.get("metadata", {})
-                    signable = {**full_entry, **nested_meta, "cache_key": cache_key}
+                    signable = extract_signable_fields(
+                        cache_key, full_entry, nested_meta
+                    )
                     new_sig = new_signer.sign_entry(signable)
 
                     # Store in both top-level and nested metadata
@@ -426,7 +431,9 @@ class BlobStore:
                         full_entry["metadata"] = nested_meta
 
                         # Re-sign with new signer after re-encryption
-                        signable = {**full_entry, **nested_meta, "cache_key": cache_key}
+                        signable = extract_signable_fields(
+                            cache_key, full_entry, nested_meta
+                        )
                         new_sig = new_signer.sign_entry(signable)
                         full_entry["entry_signature"] = new_sig
                         nested_meta["entry_signature"] = new_sig
@@ -547,8 +554,9 @@ class BlobStore:
 
             # Sign entry if signer is available
             if self.signer is not None:
-                # Build signable data (flatten for signing)
-                signable = {**entry_data, **custom_metadata}
+                signable = extract_signable_fields(
+                    blob_key, entry_data, custom_metadata
+                )
                 signature = self.signer.sign_entry(signable)
                 entry_data["entry_signature"] = signature
                 # Also store in nested metadata so JsonBackend preserves it
@@ -563,6 +571,30 @@ class BlobStore:
             )
 
             return blob_key
+
+    def _verify_entry_signature(
+        self,
+        cache_key: str,
+        entry: Dict[str, Any],
+        metadata: Dict[str, Any],
+        stored_signature: str,
+    ) -> bool:
+        """Verify a BlobStore entry with canonical fields, then legacy fallback."""
+        if self.signer is None:
+            return True
+
+        canonical = extract_signable_fields(cache_key, entry, metadata)
+        if self.signer.verify_entry(canonical, stored_signature):
+            return True
+
+        legacy = extract_legacy_blobstore_signable_fields(cache_key, entry, metadata)
+        if legacy != canonical and self.signer.verify_entry(legacy, stored_signature):
+            logger.debug(
+                "Verified legacy flattened BlobStore signature for %s", cache_key
+            )
+            return True
+
+        return False
 
     def get(self, key: str) -> Optional[Any]:
         """
@@ -589,9 +621,9 @@ class BlobStore:
                     "entry_signature"
                 )
                 if stored_signature:
-                    # Reconstruct signable data matching what was signed on put()
-                    signable = {**entry, **nested_meta, "cache_key": key}
-                    if not self.signer.verify_entry(signable, stored_signature):
+                    if not self._verify_entry_signature(
+                        key, entry, nested_meta, stored_signature
+                    ):
                         logger.warning(f"Signature verification failed for blob {key}")
                         return None
 

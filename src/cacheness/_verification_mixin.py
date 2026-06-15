@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from .interfaces import IntegrityReport, SignableFields
+from .signing_fields import extract_signable_fields
 
 logger = logging.getLogger(__name__)
 
@@ -35,37 +36,7 @@ class VerificationMixin:
         Returns:
             SignableFields containing all fields that may be signed
         """
-        # Normalize created_at to ISO format string without timezone
-        # This ensures consistent signatures regardless of database format
-        created_at = entry_data.get("created_at")
-        if isinstance(created_at, datetime):
-            # Convert datetime to ISO string, removing timezone info for consistency
-            created_at = created_at.replace(tzinfo=None).isoformat()
-        elif isinstance(created_at, str):
-            # Parse and re-format to ensure consistency
-            try:
-                dt = datetime.fromisoformat(created_at)
-                created_at = dt.replace(tzinfo=None).isoformat()
-            except (ValueError, TypeError):
-                # If parsing fails, use as-is
-                pass
-
-        # Build complete entry data with all potentially-signable fields.
-        # The signer's version-based field list determines which are actually used.
-        signable_data: SignableFields = {
-            "cache_key": cache_key,
-            "data_type": entry_data.get("data_type"),
-            "file_size": entry_data.get("file_size", 0),
-            "created_at": created_at,
-            "actual_path": metadata.get("actual_path", ""),
-            "file_hash": metadata.get("file_hash"),
-            "object_type": metadata.get("object_type"),
-            "storage_format": metadata.get("storage_format"),
-            "serializer": metadata.get("serializer"),
-            "compression_codec": metadata.get("compression_codec"),
-        }
-
-        return signable_data
+        return extract_signable_fields(cache_key, entry_data, metadata)
 
     def _calculate_file_hash(self, file_path: Path) -> Optional[str]:
         """Calculate XXH3_64 hash of a cache file.
