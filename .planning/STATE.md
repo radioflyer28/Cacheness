@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v0.12.0
 milestone_name: Reliability Remediation
 status: executing
-last_updated: "2026-06-15T01:38:37.996Z"
-last_activity: 2026-06-15 -- Phase 31 planning complete
+last_updated: "2026-06-15T02:02:27.524Z"
+last_activity: 2026-06-15 -- Phase 31 Plan 01 complete
 progress:
   total_phases: 9
   completed_phases: 3
   total_plans: 20
-  completed_plans: 13
-  percent: 33
+  completed_plans: 14
+  percent: 70
 ---
 
 # Project State
@@ -25,9 +25,9 @@ See: .planning/PROJECT.md (updated 2026-06-12)
 ## Current Position
 
 Phase: 31 — Security & Storage-Mode Posture
-Plan: Not started
-Status: Ready to execute
-Last activity: 2026-06-15 -- Phase 31 planning complete
+Plan: 31-01 complete; remaining Phase 31 plans pending
+Status: Executing
+Last activity: 2026-06-15 -- Phase 31 Plan 01 complete
 
 ## Accumulated Context
 
@@ -58,6 +58,7 @@ Full review in `docs/CODE_REVIEW_FINDINGS.md`; execution specs in `docs/CODE_REV
 | Phase 29-ttl-eviction-consistency P02 | 8min | 2 tasks | 2 files |
 | Phase 29-ttl-eviction-consistency P03 | 17min | 2 tasks | 9 files |
 | Phase 29-ttl-eviction-consistency P04 | 2h 53m | 2 tasks | 2 files |
+| Phase 31-security-storage-mode-posture P01 | 12min | 2 tasks | 8 files |
 
 ## Decisions
 
@@ -67,3 +68,6 @@ Full review in `docs/CODE_REVIEW_FINDINGS.md`; execution specs in `docs/CODE_REV
 - [Phase 29-ttl-eviction-consistency]: TTL-03 metadata-only backend updates preserve created_at, ttl_seconds, and expires_at by default; content updates pass explicit timestamps. — Completed by Phase 29 Plan 03.
 - [Phase 29-ttl-eviction-consistency]: SQLite and PostgreSQL same-key overwrites preserve existing access_count. — Completed by Phase 29 Plan 03.
 - [Phase 29-ttl-eviction-consistency]: TTL-04 size eviction delegates URI actual_path deletion to self._blob_store.blob_backend.delete_blob(actual_path), and backend delete exceptions are warning-only. — Completed by Phase 29 Plan 04.
+- [Phase 31-security-storage-mode-posture]: SEC-01 keeps minimum_signature_version defaulting to 1 for old-cache compatibility. — Completed by Phase 31 Plan 01.
+- [Phase 31-security-storage-mode-posture]: New deployments should use minimum_signature_version=3 with allow_unsigned_entries=False when metadata may be attacker-writable. — Completed by Phase 31 Plan 01.
+- [Phase 31-security-storage-mode-posture]: Minimum-version rejection is enforced in CacheEntrySigner.verify_entry so UnifiedCache and BlobStore share the policy. — Completed by Phase 31 Plan 01.

@@ -35,7 +35,7 @@
 
 ### Security and Storage Mode
 
-- [ ] **SEC-01**: User can configure a minimum accepted signature version and reject downgraded signatures while receiving clear documentation for unsigned-entry risks.
+- [x] **SEC-01**: User can configure a minimum accepted signature version and reject downgraded signatures while receiving clear documentation for unsigned-entry risks.
 - [ ] **SEC-02**: User can read encrypted blobs through the blob backend abstraction without avoidable plaintext temp files on disk.
 - [ ] **SEC-03**: User can rotate keys with a two-phase process that leaves the original key and entries usable if rotation is interrupted.
 - [ ] **SEC-04**: User can rely on UnifiedCache and BlobStore signing the same canonical field set, with a documented compatibility path for existing signed entries.
@@ -92,7 +92,7 @@
 | PAR-02 | Phase 30 | Complete |
 | PAR-03 | Phase 30 | Complete |
 | PAR-04 | Phase 30 | Complete |
-| SEC-01 | Phase 31 | Pending |
+| SEC-01 | Phase 31 | Complete |
 | SEC-02 | Phase 31 | Pending |
 | SEC-03 | Phase 31 | Pending |
 | SEC-04 | Phase 31 | Pending |
