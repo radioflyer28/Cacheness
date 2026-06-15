@@ -172,7 +172,10 @@ class BlobStore:
 
         # Initialize metadata backend
         if backend is None or backend == "json":
-            self.backend = JsonBackend(self.cache_dir / "cache_metadata.json")
+            self.backend = JsonBackend(
+                self.cache_dir / "cache_metadata.json",
+                fsync_on_write=self.config.storage.fsync_on_write,
+            )
         elif backend == "sqlite":
             from .backends import SqliteBackend
 
@@ -188,7 +191,10 @@ class BlobStore:
         # Initialize blob backend for file operations (delete, exists)
         if blob_backend is None or blob_backend == "filesystem":
             self.blob_backend = FilesystemBlobBackend(
-                self.cache_dir, shard_chars=0, namespace=self._namespace
+                self.cache_dir,
+                shard_chars=0,
+                namespace=self._namespace,
+                fsync_on_write=self.config.storage.fsync_on_write,
             )
         elif isinstance(blob_backend, str):
             # Use registry to get backend by name

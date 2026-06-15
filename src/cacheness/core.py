@@ -168,6 +168,7 @@ class UnifiedCache(
         self._write_journal = WriteIntentJournal(
             self.cache_dir,
             self.config.storage.stale_intent_threshold_seconds,
+            fsync_on_write=self.config.storage.fsync_on_write,
         )
 
         # Clean up expired entries on initialization when enabled. Stale write
@@ -222,6 +223,7 @@ class UnifiedCache(
         base: Dict[str, Any] = {
             "config": self.config.metadata,
             "namespace": self.namespace,
+            "fsync_on_write": self.config.storage.fsync_on_write,
         }
 
         if requested == "json":
@@ -264,6 +266,7 @@ class UnifiedCache(
                     db_file=str(self.cache_dir / self.config.metadata.sqlite_db_file),
                     config=self.config.metadata,
                     namespace=self.namespace,
+                    fsync_on_write=self.config.storage.fsync_on_write,
                 )
                 self.actual_backend = "sqlite"
                 logger.info(
@@ -280,6 +283,7 @@ class UnifiedCache(
             metadata_file=self.cache_dir / "cache_metadata.json",
             config=self.config.metadata,
             namespace=self.namespace,
+            fsync_on_write=self.config.storage.fsync_on_write,
         )
         self.actual_backend = "json"
 

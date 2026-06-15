@@ -109,9 +109,7 @@ class TestBlobStoreBasic:
         # After close, directory still exists
         assert blob_dir.exists()
 
-    def test_put_fsyncs_local_blob_when_enabled(
-        self, blob_dir, monkeypatch
-    ):
+    def test_put_fsyncs_local_blob_when_enabled(self, blob_dir, monkeypatch):
         calls = []
 
         def record_fsync(fd):

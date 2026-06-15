@@ -97,7 +97,7 @@ class TestCacheStorageConfig:
     def test_fsync_on_write_rejects_non_bool(self):
         """fsync_on_write must be an explicit boolean."""
         with pytest.raises(ValueError, match="fsync_on_write must be a boolean"):
-            CacheStorageConfig(fsync_on_write="yes")
+            CacheStorageConfig(fsync_on_write="yes")  # type: ignore[arg-type]
 
 
 class TestCacheMetadataConfigExtensions:
@@ -211,7 +211,7 @@ class TestValidateConfig:
     def test_invalid_storage_fsync_on_write_type(self):
         """Test validation of fsync_on_write type."""
         config = CacheConfig()
-        config.storage.fsync_on_write = "true"
+        config.storage.fsync_on_write = "true"  # type: ignore[assignment]
 
         errors = validate_config(config)
         assert any(e.field == "storage.fsync_on_write" for e in errors)

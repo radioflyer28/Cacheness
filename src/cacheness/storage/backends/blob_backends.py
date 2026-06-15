@@ -47,6 +47,8 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any, BinaryIO, Dict, List, Type, Union
 
+from ..._durability import flush_and_fsync, fsync_parent_dir
+
 logger = logging.getLogger(__name__)
 
 RESERVED_BLOB_FILE_SUFFIXES = (".tmp", ".db", ".db-wal", ".db-shm")
@@ -280,6 +282,7 @@ class FilesystemBlobBackend(BlobBackend):
         base_dir: Union[str, Path],
         shard_chars: int = 2,
         namespace: str = "default",
+        fsync_on_write: bool = False,
     ):
         """
         Initialize filesystem blob backend.
@@ -294,6 +297,7 @@ class FilesystemBlobBackend(BlobBackend):
         self.base_dir = root / namespace
         self.shard_chars = shard_chars
         self._namespace = namespace
+        self.fsync_on_write = fsync_on_write
         self.base_dir.mkdir(parents=True, exist_ok=True)
         logger.debug(
             f"FilesystemBlobBackend initialized at {self.base_dir} "
@@ -312,7 +316,11 @@ class FilesystemBlobBackend(BlobBackend):
             temp_path = Path(temp_name)
             with os.fdopen(fd, "wb") as f:
                 f.write(data)
+                if self.fsync_on_write:
+                    flush_and_fsync(f)
             os.replace(temp_path, blob_path)
+            if self.fsync_on_write:
+                fsync_parent_dir(blob_path)
         except Exception:  # intentionally broad — cleanup temp file on any failure
             if temp_path is not None and temp_path.exists():
                 temp_path.unlink()
@@ -333,11 +341,19 @@ class FilesystemBlobBackend(BlobBackend):
 
         # Fast path: file already in the right place
         if source.resolve() == target.resolve():
+            if self.fsync_on_write:
+                with source.open("rb") as f:
+                    flush_and_fsync(f)
+                fsync_parent_dir(target)
             return str(target)
 
         # Move file to target (atomic on same filesystem)
         target.parent.mkdir(parents=True, exist_ok=True)
         source.replace(target)
+        if self.fsync_on_write:
+            with target.open("rb") as f:
+                flush_and_fsync(f)
+            fsync_parent_dir(target)
         logger.debug(f"Moved blob {source} -> {target}")
         return str(target)
 
@@ -377,7 +393,11 @@ class FilesystemBlobBackend(BlobBackend):
                     if not chunk:
                         break
                     f.write(chunk)
+                if self.fsync_on_write:
+                    flush_and_fsync(f)
             os.replace(temp_path, blob_path)
+            if self.fsync_on_write:
+                fsync_parent_dir(blob_path)
         except Exception:  # intentionally broad — cleanup temp file on any failure
             if temp_path is not None and temp_path.exists():
                 temp_path.unlink()

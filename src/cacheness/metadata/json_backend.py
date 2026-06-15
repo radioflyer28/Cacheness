@@ -11,6 +11,7 @@ from typing import Dict, Any, Optional, List
 from ..interfaces import EntrySummary
 from ..json_utils import dumps as json_dumps, loads as json_loads
 from ..size_utils import bytes_to_mb_display
+from .._durability import flush_and_fsync, fsync_parent_dir
 from ._compat import (
     DEFAULT_NAMESPACE,
     validate_namespace_id,
@@ -24,7 +25,12 @@ logger = logging.getLogger(__name__)
 class JsonBackend(MetadataBackend):
     """JSON file-based metadata backend with batching support."""
 
-    def __init__(self, metadata_file: Path, namespace: str = DEFAULT_NAMESPACE):
+    def __init__(
+        self,
+        metadata_file: Path,
+        namespace: str = DEFAULT_NAMESPACE,
+        fsync_on_write: bool = False,
+    ):
         """
         Initialize JSON metadata backend.
 
@@ -35,6 +41,7 @@ class JsonBackend(MetadataBackend):
             namespace: Active namespace for this backend instance
         """
         self._active_namespace = validate_namespace_id(namespace)
+        self.fsync_on_write = fsync_on_write
         # Store the root metadata file for _metadata_file_for_namespace()
         self._root_metadata_file = Path(metadata_file)
         # Resolve to the namespace-specific file (default → metadata_file as-is)
@@ -109,10 +116,14 @@ class JsonBackend(MetadataBackend):
             try:
                 with os.fdopen(fd, "w") as f:
                     f.write(json_dumps(self._metadata, default=str))
+                    if self.fsync_on_write:
+                        flush_and_fsync(f)
                 # Atomic rename (works on same filesystem)
                 import shutil
 
                 shutil.move(temp_path, self.metadata_file)
+                if self.fsync_on_write:
+                    fsync_parent_dir(self.metadata_file)
             except Exception:  # intentionally broad — cleanup temp on any write failure
                 # Clean up temp file on failure
                 try:
@@ -565,7 +576,11 @@ class JsonBackend(MetadataBackend):
             try:
                 with os.fdopen(fd, "w") as f:
                     f.write(json_dumps(registry, default=str))
+                    if self.fsync_on_write:
+                        flush_and_fsync(f)
                 shutil.move(temp_path, self._registry_file)
+                if self.fsync_on_write:
+                    fsync_parent_dir(self._registry_file)
             except Exception:  # intentionally broad — cleanup temp on any write failure
                 try:
                     os.remove(temp_path)

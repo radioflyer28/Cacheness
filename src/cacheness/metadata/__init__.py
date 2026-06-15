@@ -54,11 +54,14 @@ def create_metadata_backend(backend_type: str = "auto", **kwargs) -> MetadataBac
 
     # Extract namespace (defaults to 'default' for backward compatibility)
     namespace = kwargs.pop("namespace", DEFAULT_NAMESPACE)
+    fsync_on_write = kwargs.pop("fsync_on_write", False)
 
     # Create the base backend
     if backend_type == "json":
         metadata_file = kwargs.get("metadata_file", Path("cache_metadata.json"))
-        backend = JsonBackend(metadata_file, namespace=namespace)
+        backend = JsonBackend(
+            metadata_file, namespace=namespace, fsync_on_write=fsync_on_write
+        )
     elif backend_type == "sqlite":
         if not SQLALCHEMY_AVAILABLE:
             raise ImportError(
@@ -117,11 +120,17 @@ def create_metadata_backend(backend_type: str = "auto", **kwargs) -> MetadataBac
                     metadata_file = kwargs.get(
                         "metadata_file", Path("cache_metadata.json")
                     )
-                    backend = JsonBackend(metadata_file, namespace=namespace)
+                    backend = JsonBackend(
+                        metadata_file,
+                        namespace=namespace,
+                        fsync_on_write=fsync_on_write,
+                    )
         else:
             # SQLAlchemy not available, use JSON
             metadata_file = kwargs.get("metadata_file", Path("cache_metadata.json"))
-            backend = JsonBackend(metadata_file, namespace=namespace)
+            backend = JsonBackend(
+                metadata_file, namespace=namespace, fsync_on_write=fsync_on_write
+            )
     else:
         raise ValueError(
             f"Unknown backend type: {backend_type}. Supported: 'auto', 'json', 'sqlite', 'sqlite_memory', 'postgresql'"

@@ -47,6 +47,7 @@ class CacheStorageConfig:
         None  # Temporary directory for atomic writes (None = use cache_dir/tmp)
     )
     stale_intent_threshold_seconds: float = 300.0  # Threshold for orphan cleanup
+    fsync_on_write: bool = False  # Opt-in local fsync for stronger durability
 
     @property
     def max_cache_size_bytes(self) -> Optional[int]:
@@ -71,6 +72,9 @@ class CacheStorageConfig:
                 raise ValueError("max_cache_size must be positive")
         elif self.max_cache_size_mb is not None and self.max_cache_size_mb <= 0:
             raise ValueError("max_cache_size_mb must be positive")
+
+        if not isinstance(self.fsync_on_write, bool):
+            raise ValueError("fsync_on_write must be a boolean")
 
         # Convert relative path to absolute to avoid directory confusion, but preserve "./cache" and "./yaml_cache" as is for backwards compatibility
         if not Path(self.cache_dir).is_absolute() and self.cache_dir not in (
@@ -563,6 +567,7 @@ class CacheConfig:
         max_cache_size_mb: Optional[int] = None,
         max_cache_size: Optional[Union[str, int]] = None,
         cleanup_on_init: Optional[bool] = None,
+        fsync_on_write: Optional[bool] = None,
         store_cache_key_params: Optional[bool] = None,
         store_full_metadata: Optional[bool] = None,
         # Blob backend parameters
@@ -660,6 +665,8 @@ class CacheConfig:
             self.storage.max_cache_size = max_cache_size
         if cleanup_on_init is not None:
             self.storage.cleanup_on_init = cleanup_on_init
+        if fsync_on_write is not None:
+            self.storage.fsync_on_write = fsync_on_write
 
         # Backward compatibility: map old store_cache_key_params to store_full_metadata
         if store_cache_key_params is not None:
@@ -882,6 +889,11 @@ class CacheConfig:
         return self.blob.blob_backend_options
 
     @property
+    def fsync_on_write(self) -> bool:
+        """Get the local write fsync policy."""
+        return self.storage.fsync_on_write
+
+    @property
     def metadata_backend_options(self) -> Optional[dict]:
         """Get the metadata backend options."""
         return self.metadata.metadata_backend_options
@@ -1034,6 +1046,15 @@ def validate_config(config: CacheConfig) -> List["ConfigValidationError"]:
         errors.append(
             ConfigValidationError(
                 "storage.cache_dir", "must be a string", config.storage.cache_dir
+            )
+        )
+
+    if not isinstance(config.storage.fsync_on_write, bool):
+        errors.append(
+            ConfigValidationError(
+                "storage.fsync_on_write",
+                "must be a boolean",
+                config.storage.fsync_on_write,
             )
         )
 

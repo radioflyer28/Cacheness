@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
+from ._durability import flush_and_fsync, fsync_parent_dir
 from .json_utils import dumps as json_dumps
 from .json_utils import loads as json_loads
 
@@ -33,10 +34,16 @@ class WriteIntentJournal:
     the next cache init.
     """
 
-    def __init__(self, cache_dir: Path, stale_threshold_seconds: float = 300.0):
+    def __init__(
+        self,
+        cache_dir: Path,
+        stale_threshold_seconds: float = 300.0,
+        fsync_on_write: bool = False,
+    ):
         self._cache_dir = Path(cache_dir)
         self._intents_dir = self._cache_dir / ".intents"
         self._stale_threshold = stale_threshold_seconds
+        self._fsync_on_write = fsync_on_write
 
     def _ensure_dir(self) -> None:
         """Lazily create the intents directory on first write."""
@@ -56,7 +63,12 @@ class WriteIntentJournal:
                 "created_at": time.time(),
             }
         )
-        intent_path.write_text(payload, encoding="utf-8")
+        with intent_path.open("w", encoding="utf-8") as f:
+            f.write(payload)
+            if self._fsync_on_write:
+                flush_and_fsync(f)
+        if self._fsync_on_write:
+            fsync_parent_dir(intent_path)
         return intent_path
 
     def clear_intent(self, cache_key: str) -> None:
