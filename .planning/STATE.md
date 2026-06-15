@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v0.12.0
 milestone_name: Reliability Remediation
 status: executing
-last_updated: "2026-06-15T02:18:13.014Z"
-last_activity: 2026-06-15 -- Phase 31 Plan 05 complete
+last_updated: "2026-06-15T02:37:33.512Z"
+last_activity: 2026-06-15 -- Phase 31 Plan 02 complete
 progress:
   total_phases: 9
   completed_phases: 3
   total_plans: 20
-  completed_plans: 15
-  percent: 75
+  completed_plans: 16
+  percent: 80
 ---
 
 # Project State
@@ -25,9 +25,9 @@ See: .planning/PROJECT.md (updated 2026-06-12)
 ## Current Position
 
 Phase: 31 — Security & Storage-Mode Posture
-Plan: 31-01 and 31-05 complete; remaining Phase 31 plans pending
+Plan: 31-01, 31-02, and 31-05 complete; remaining Phase 31 plans pending
 Status: Executing
-Last activity: 2026-06-15 -- Phase 31 Plan 05 complete
+Last activity: 2026-06-15 -- Phase 31 Plan 02 complete
 
 ## Accumulated Context
 
@@ -60,6 +60,7 @@ Full review in `docs/CODE_REVIEW_FINDINGS.md`; execution specs in `docs/CODE_REV
 | Phase 29-ttl-eviction-consistency P04 | 2h 53m | 2 tasks | 2 files |
 | Phase 31-security-storage-mode-posture P01 | 12min | 2 tasks | 8 files |
 | Phase 31-security-storage-mode-posture P05 | 9min | 2 tasks | 4 files |
+| Phase 31-security-storage-mode-posture P02 | 12min | 2 tasks | 5 files |
 
 ## Decisions
 
@@ -75,3 +76,6 @@ Full review in `docs/CODE_REVIEW_FINDINGS.md`; execution specs in `docs/CODE_REV
 - [Phase 31-security-storage-mode-posture]: STRG-01 keeps storage-mode destructive APIs warning-first by default rather than hard-refusal.
 - [Phase 31-security-storage-mode-posture]: Implicit storage-mode TTL, eviction, and invalid-entry deletion behavior remains disabled.
 - [Phase 31-security-storage-mode-posture]: Storage-mode destructive warnings use both cacheness.core logger.warning and RuntimeWarning.
+- [Phase 31-security-storage-mode-posture]: Encrypted BlobStore reads preserve backend abstraction by using blob_backend.read_blob for ciphertext.
+- [Phase 31-security-storage-mode-posture]: Encrypted reads try handler.get_bytes on decrypted plaintext before any temp-file fallback.
+- [Phase 31-security-storage-mode-posture]: Temp fallback is limited to handlers that raise NotImplementedError and uses mkstemp under cache_dir with best-effort POSIX 0600 permissions.
