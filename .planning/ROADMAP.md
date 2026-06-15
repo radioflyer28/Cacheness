@@ -169,7 +169,7 @@ Plans:
 **Goal:** Strengthen signing, encryption, rotation, and storage-mode durability guarantees without silently changing public API semantics.
 **Requirements:** SEC-01, SEC-02, SEC-03, SEC-04, STRG-01, STRG-02, STRG-03
 **Source:** Backlog Phase 999.3, TASK-13 through TASK-15, SEED-001, SEED-004, SEED-005, SEED-006
-**Plans:** 0 plans
+**Plans:** 7 plans
 
 Success criteria:
 1. Signature downgrade hardening and unsigned-entry risk documentation are tested and documented.
@@ -179,7 +179,27 @@ Success criteria:
 5. Storage-mode destructive APIs and fsync/durability behavior are explicit, tested, and documented.
 
 Plans:
-- [ ] TBD via `$gsd-discuss-phase 31` / `$gsd-plan-phase 31`
+**Wave 1**
+
+- [ ] 31-01-PLAN.md - TASK-13 signature minimum version and unsigned-entry docs (SEC-01)
+- [ ] 31-05-PLAN.md - SEED-001 storage-mode destructive API warning policy (STRG-01)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 31-02-PLAN.md - TASK-14 encrypted backend-routed in-memory reads (SEC-02)
+- [ ] 31-07-PLAN.md - SEED-006 write intents before blob writes (STRG-03)
+
+**Wave 3** *(blocked on 31-01 and 31-02)*
+
+- [ ] 31-04-PLAN.md - SEED-004 shared canonical signing with compatibility (SEC-04)
+
+**Wave 4** *(blocked on 31-01, 31-02, and 31-04)*
+
+- [ ] 31-03-PLAN.md - TASK-15 two-phase key rotation (SEC-03)
+
+**Wave 5** *(blocked on 31-03, 31-05, and 31-07)*
+
+- [ ] 31-06-PLAN.md - SEED-005 transaction guarantees and opt-in fsync policy (STRG-02)
 
 ### Phase 32: Small Fixes & Release Polish
 
