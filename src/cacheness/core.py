@@ -841,15 +841,23 @@ class UnifiedCache(
         """
         return resolve_actual_path(actual_path_str, self.cache_dir)
 
-    def _is_expired(self, cache_key: str, ttl_seconds=_DEFAULT_TTL) -> bool:
+    def _is_expired(
+        self,
+        cache_key: str,
+        ttl_seconds=_DEFAULT_TTL,
+        entry: Optional[Dict[str, Any]] = None,
+    ) -> bool:
         """Check if cache entry is expired.
 
         Args:
             cache_key: The cache key to check
             ttl_seconds: TTL in seconds (numeric). None means never expire.
                 Use _DEFAULT_TTL sentinel to fall back to config default.
+            entry: Optional already-fetched metadata entry to avoid a second
+                backend lookup on hot cache-hit paths.
         """
-        entry = self.metadata_backend.get_entry(cache_key)
+        if entry is None:
+            entry = self.metadata_backend.get_entry(cache_key)
         if not entry:
             return True
 
@@ -1175,7 +1183,7 @@ class UnifiedCache(
 
             # Check if entry exists and is not expired
             entry = self.metadata_backend.get_entry(cache_key)
-            if not entry or self._is_expired(cache_key, resolved_ttl):
+            if not entry or self._is_expired(cache_key, resolved_ttl, entry=entry):
                 self._record_miss()
                 return None
 

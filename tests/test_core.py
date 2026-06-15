@@ -147,6 +147,23 @@ class TestCacheness:
 
         assert retrieved == test_data
 
+    def test_get_cache_hit_reads_metadata_entry_once(self, cache):
+        """Cache hit expiry checks reuse the entry already fetched by get()."""
+        test_data = {"key": "value", "number": 42}
+        cache_key_params = {"test": "single_metadata_read"}
+
+        cache.put(test_data, **cache_key_params)
+
+        with patch.object(
+            cache.metadata_backend,
+            "get_entry",
+            wraps=cache.metadata_backend.get_entry,
+        ) as get_entry:
+            retrieved = cache.get(**cache_key_params)
+
+        assert retrieved == test_data
+        assert get_entry.call_count == 1
+
     def test_put_and_get_numpy_array(self, cache):
         """Test caching numpy arrays."""
         test_array = np.random.rand(10, 5)
