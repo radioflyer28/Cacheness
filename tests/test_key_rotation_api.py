@@ -208,6 +208,41 @@ class TestUnifiedCacheRotateKey:
         # Entry should be readable — it was re-signed during rotation
         assert cache2.get(test_key="important") == "sensitive"
 
+    def test_interrupted_rotation_keeps_active_key_and_old_entries_readable(
+        self, tmp_path, monkeypatch
+    ):
+        """D-16/D-22: a mid-rotation metadata failure does not publish the new key."""
+        cache = _make_signed_cache(
+            tmp_path,
+            allow_unsigned_entries=False,
+            delete_invalid_signatures=False,
+        )
+        cache.put("alpha", test_key="a")
+        cache.put("beta", test_key="b")
+        assert cache.get(test_key="a") == "alpha"
+        assert cache.get(test_key="b") == "beta"
+
+        active_key = tmp_path / "cache_signing_key.bin"
+        old_key_bytes = active_key.read_bytes()
+        original_put_entry = cache.metadata_backend.put_entry
+        failed_once = False
+
+        def fail_once(cache_key, entry):
+            nonlocal failed_once
+            if not failed_once:
+                failed_once = True
+                raise RuntimeError("mid-rotation metadata failure")
+            return original_put_entry(cache_key, entry)
+
+        monkeypatch.setattr(cache.metadata_backend, "put_entry", fail_once)
+
+        result = cache.rotate_key(_generate_key_file(tmp_path / "new_key.bin"))
+
+        assert result.failed == 1
+        assert active_key.read_bytes() == old_key_bytes
+        assert cache.get(test_key="a") == "alpha"
+        assert cache.get(test_key="b") == "beta"
+
 
 class TestBlobStoreRotateKey:
     """Tests for BlobStore.rotate_key()."""
@@ -259,3 +294,39 @@ class TestBlobStoreRotateKey:
         # Blobs should be readable (signer was replaced)
         assert store.get("x") == "data_x"
         assert store.get("y") == "data_y"
+
+    def test_blob_store_interrupted_rotation_keeps_active_key_and_old_blobs_readable(
+        self, tmp_path, monkeypatch
+    ):
+        """D-16/D-22: BlobStore keeps the old key active if rotation cannot finish."""
+        blob_dir = tmp_path / "blobs"
+        store = BlobStore(
+            cache_dir=str(blob_dir),
+            backend="json",
+            enable_signing=True,
+        )
+        store.put("blob_a", key="a")
+        store.put("blob_b", key="b")
+        assert store.get("a") == "blob_a"
+        assert store.get("b") == "blob_b"
+
+        active_key = blob_dir / "cache_signing_key.bin"
+        old_key_bytes = active_key.read_bytes()
+        original_put_entry = store.backend.put_entry
+        failed_once = False
+
+        def fail_once(cache_key, entry):
+            nonlocal failed_once
+            if not failed_once:
+                failed_once = True
+                raise RuntimeError("mid-rotation metadata failure")
+            return original_put_entry(cache_key, entry)
+
+        monkeypatch.setattr(store.backend, "put_entry", fail_once)
+
+        result = store.rotate_key(_generate_key_file(tmp_path / "new_blob_key.bin"))
+
+        assert result.failed == 1
+        assert active_key.read_bytes() == old_key_bytes
+        assert store.get("a") == "blob_a"
+        assert store.get("b") == "blob_b"

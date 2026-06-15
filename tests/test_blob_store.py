@@ -635,3 +635,52 @@ class TestEncryptedBackendReads:
         monkeypatch.setattr(Path, "read_bytes", fail_read_bytes)
 
         assert store.get(key) == {"msg": "encrypted memory"}
+
+
+class TestBlobStoreEncryptedRotation:
+    """SEC-03 encrypted BlobStore rotation publication guarantees."""
+
+    def test_rotate_key_publishes_encrypted_blob_via_rotating_path(
+        self, blob_dir, monkeypatch
+    ):
+        """D-19: encrypted BlobStore rotation must not rewrite blobs in place."""
+        blob_dir.mkdir(parents=True, exist_ok=True)
+        (blob_dir / "cache_signing_key.bin").write_bytes(secrets.token_bytes(32))
+        config = CacheConfig(
+            cache_dir=blob_dir,
+            security=SecurityConfig(
+                enable_entry_signing=True,
+                enable_content_encryption=True,
+                encryption_key_file="cache_signing_key.bin",
+                allow_unsigned_entries=True,
+            ),
+        )
+        store = BlobStore(
+            cache_dir=blob_dir,
+            backend="json",
+            enable_signing=True,
+            config=config,
+        )
+        key = store.put({"secure": "blob"}, key="atomic-encrypted")
+        meta = store.get_metadata(key)
+        assert meta is not None
+        blob_path = Path(store._resolve_actual_path(meta["metadata"]["actual_path"]))
+        original_ciphertext = blob_path.read_bytes()
+        direct_blob_writes = []
+        original_write_bytes = Path.write_bytes
+
+        def record_direct_blob_write(path, data):
+            if path == blob_path and data != original_ciphertext:
+                direct_blob_writes.append(path)
+            return original_write_bytes(path, data)
+
+        monkeypatch.setattr(Path, "write_bytes", record_direct_blob_write)
+
+        new_key = blob_dir / "new_key.bin"
+        new_key.write_bytes(secrets.token_bytes(32))
+        result = store.rotate_key(new_key)
+
+        assert result.re_encrypted == 1
+        assert direct_blob_writes == []
+        assert not list(blob_path.parent.glob("*.rotating"))
+        assert store.get(key) == {"secure": "blob"}

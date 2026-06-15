@@ -157,3 +157,19 @@ class TestKeyRotation:
             key_fallback_policy="warn",
         )
         assert signer.secret_key is not None
+
+    def test_leftover_staged_key_logs_interrupted_rotation(self, tmp_path, caplog):
+        """D-21: startup warns when a previous rotation left keyfile.new behind."""
+        key_file = tmp_path / "cache_signing_key.bin"
+        key_file.write_bytes(b"a" * 32)
+        staged_key = tmp_path / "cache_signing_key.bin.new"
+        staged_key.write_bytes(b"b" * 32)
+
+        with caplog.at_level("ERROR", logger="cacheness.security"):
+            cache = _make_signed_cache(tmp_path)
+
+        assert cache.signer is not None
+        assert key_file.read_bytes() == b"a" * 32
+        assert staged_key.exists()
+        assert "interrupted key rotation" in caplog.text
+        assert str(staged_key) in caplog.text

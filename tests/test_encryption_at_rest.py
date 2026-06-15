@@ -2,6 +2,8 @@
 
 import secrets
 import tempfile
+from pathlib import Path
+
 import pytest
 
 cryptography = pytest.importorskip("cryptography")
@@ -338,3 +340,31 @@ class TestEncryptionKeyRotation:
 
         assert cache.get(on={"rot2": "a"}) == "alpha"
         assert cache.get(on={"rot2": "b"}) == "beta"
+
+    def test_rotate_key_publishes_encrypted_blob_via_rotating_path(
+        self, tmp_path, monkeypatch
+    ):
+        """D-19: encrypted local blob rotation must not rewrite the committed blob in place."""
+        cache = _make_encrypted_cache(tmp_path)
+        cache.put({"secret": "atomic"}, cache_key="atomic-encrypted")
+
+        entry = cache.metadata_backend.get_entry("atomic-encrypted")
+        assert entry is not None
+        blob_path = Path(cache._resolve_actual_path(entry["metadata"]["actual_path"]))
+        original_ciphertext = blob_path.read_bytes()
+        direct_blob_writes = []
+        original_write_bytes = Path.write_bytes
+
+        def record_direct_blob_write(path, data):
+            if path == blob_path and data != original_ciphertext:
+                direct_blob_writes.append(path)
+            return original_write_bytes(path, data)
+
+        monkeypatch.setattr(Path, "write_bytes", record_direct_blob_write)
+
+        result = cache.rotate_key(_generate_key_file(tmp_path / "new_key.bin"))
+
+        assert result.re_encrypted == 1
+        assert direct_blob_writes == []
+        assert not list(blob_path.parent.glob("*.rotating"))
+        assert cache.get(cache_key="atomic-encrypted") == {"secret": "atomic"}
