@@ -47,7 +47,7 @@
 
 - [x] **POL-01**: User metadata dictionaries passed to `BlobStore.put()` remain unchanged by Cacheness.
 - [x] **POL-02**: User blob keys that require sanitization cannot silently collide with distinct original keys.
-- [ ] **POL-03**: User hot-path `get()` calls avoid redundant metadata reads when checking expiry.
+- [x] **POL-03**: User hot-path `get()` calls avoid redundant metadata reads when checking expiry.
 - [ ] **POL-04**: User-visible package version metadata matches the shipped changelog/version line.
 - [ ] **POL-05**: User-provided absolute blob IDs are rejected before path construction.
 - [ ] **POL-06**: User SQLite connections apply PRAGMA behavior in the correct lifecycle location.
@@ -101,7 +101,7 @@
 | STRG-03 | Phase 31 | Complete |
 | POL-01 | Phase 32 | Complete |
 | POL-02 | Phase 32 | Complete |
-| POL-03 | Phase 32 | Pending |
+| POL-03 | Phase 32 | Complete |
 | POL-04 | Phase 32 | Pending |
 | POL-05 | Phase 32 | Pending |
 | POL-06 | Phase 32 | Pending |
