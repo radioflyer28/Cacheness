@@ -9,6 +9,7 @@ Validates that UnifiedCache with storage_mode=True:
 """
 
 import time
+import logging
 import pytest
 import numpy as np
 from datetime import datetime, timedelta, timezone
@@ -161,6 +162,111 @@ class TestNoSizeEviction:
         # Should not raise even though max_cache_size_mb is None
         storage_cache._enforce_size_limit()
         assert storage_cache.exists(cache_key="big")
+
+
+# ---------------------------------------------------------------------------
+# STRG-01 — destructive API warnings
+# ---------------------------------------------------------------------------
+
+
+class TestStorageModeDestructiveWarnings:
+    """Explicit destructive cache APIs warn before deleting storage-mode data."""
+
+    def _assert_storage_warning(self, caplog):
+        assert "storage mode" in caplog.text
+        assert "durable entries" in caplog.text
+
+    def test_cleanup_expired_with_explicit_ttl_warns_and_deletes(
+        self, storage_cache, caplog
+    ):
+        storage_cache.put("durable", cache_key="ttl-delete")
+
+        entry = storage_cache.metadata_backend.get_entry("ttl-delete")
+        assert entry is not None
+        entry.pop("expires_at", None)
+        entry.pop("ttl_seconds", None)
+        entry["created_at"] = (
+            datetime.now(timezone.utc) - timedelta(days=2)
+        ).isoformat()
+        storage_cache.metadata_backend.put_entry("ttl-delete", entry)
+
+        with (
+            caplog.at_level(logging.WARNING, logger="cacheness.core"),
+            pytest.warns(RuntimeWarning, match="storage mode.*durable entries"),
+        ):
+            removed = storage_cache.cleanup_expired(ttl_seconds=1)
+
+        assert removed == 1
+        assert storage_cache.metadata_backend.get_entry("ttl-delete") is None
+        self._assert_storage_warning(caplog)
+
+    def test_clear_all_warns_and_does_not_hard_raise(self, storage_cache, caplog):
+        storage_cache.put("durable", cache_key="clear-me")
+
+        with (
+            caplog.at_level(logging.WARNING, logger="cacheness.core"),
+            pytest.warns(RuntimeWarning, match="storage mode.*durable entries"),
+        ):
+            removed = storage_cache.clear_all()
+
+        assert removed == 1
+        assert storage_cache.metadata_backend.get_entry("clear-me") is None
+        self._assert_storage_warning(caplog)
+
+    def test_clear_all_namespaces_warns_and_does_not_hard_raise(
+        self, tmp_path, caplog
+    ):
+        config = CacheConfig(
+            cache_dir=str(tmp_path / "store"),
+            storage_mode=True,
+            metadata=CacheMetadataConfig(metadata_backend="json"),
+        )
+        cache = UnifiedCache(config=config)
+        cache.put("durable", cache_key="namespace-clear")
+
+        with (
+            caplog.at_level(logging.WARNING, logger="cacheness.core"),
+            pytest.warns(RuntimeWarning, match="storage mode.*durable entries"),
+        ):
+            results = cache.clear_all_namespaces()
+
+        assert results["default"] == 1
+        assert cache.metadata_backend.get_entry("namespace-clear") is None
+        self._assert_storage_warning(caplog)
+
+    def test_forced_size_limit_cleanup_warns_before_eviction(
+        self, storage_cache, caplog
+    ):
+        storage_cache.put("durable", cache_key="size-delete")
+        entry = storage_cache.metadata_backend.get_entry("size-delete")
+        assert entry is not None
+        actual_path = entry["metadata"]["actual_path"]
+        blob_path = storage_cache._resolve_actual_path(actual_path)
+        assert blob_path.exists()
+
+        storage_cache.config.storage.max_cache_size = 1
+        with (
+            patch.object(
+                storage_cache.metadata_backend,
+                "get_stats",
+                return_value={"total_size_bytes": 2},
+            ),
+            patch.object(
+                storage_cache.metadata_backend,
+                "cleanup_by_size",
+                return_value={
+                    "count": 1,
+                    "removed_entries": [
+                        {"cache_key": "size-delete", "actual_path": actual_path}
+                    ],
+                },
+            ),
+            caplog.at_level(logging.WARNING, logger="cacheness.core"),
+            pytest.warns(RuntimeWarning, match="storage mode.*durable entries"),
+        ):
+            storage_cache._enforce_size_limit()
+
+        self._assert_storage_warning(caplog)
 
 
 # ---------------------------------------------------------------------------
