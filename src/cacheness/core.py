@@ -154,6 +154,7 @@ class UnifiedCache(
 
         # Initialize entry signer for metadata integrity
         self._init_entry_signer()
+        self._init_interrupted_rotation_fallback()
 
         # Sign / verify the current namespace registry row
         self._sign_current_namespace()
@@ -363,6 +364,17 @@ class UnifiedCache(
             else:
                 # Verify existing signature
                 if not self.signer.verify_namespace(ns_data, ns_info.signature):
+                    staged_signer = self._rotation_staged_signer
+                    if (
+                        staged_signer is not None
+                        and Path(staged_signer.key_file_path).is_file()
+                        and staged_signer.verify_namespace(ns_data, ns_info.signature)
+                    ):
+                        logger.info(
+                            "Namespace %r verified with interrupted rotation staged signer",
+                            ns_info.namespace_id,
+                        )
+                        return
                     logger.warning(
                         f"⚠️  Namespace {ns_info.namespace_id!r} signature "
                         f"verification failed (key rotation or tampering?)"
@@ -650,6 +662,62 @@ class UnifiedCache(
         self._blob_store._lock = self._lock  # same reentrant lock
         self._blob_store.handlers = self.handlers  # same handler registry
         self._blob_store.signer = self.signer  # same signer (may be None)
+        self._blob_store._rotation_staged_signer = self._rotation_staged_signer
+        self._blob_store._rotation_staged_encryption_key = (
+            self._rotation_staged_encryption_key
+        )
+
+    def _init_interrupted_rotation_fallback(self) -> None:
+        """Initialize staged-key fallbacks left by interrupted rotation."""
+        self._rotation_staged_signer = None
+        self._rotation_staged_encryption_key: bytes | None = None
+        if self.signer is None or self.signer.use_in_memory_key:
+            return
+
+        from .encryption import derive_encryption_key
+        from .security import create_cache_signer, staged_key_file_path
+
+        active_key_path = Path(self.signer.key_file_path)
+        staged_key_path = staged_key_file_path(active_key_path)
+        if not active_key_path.is_file() or not staged_key_path.is_file():
+            return
+
+        try:
+            staged_key_bytes = staged_key_path.read_bytes()
+        except OSError as exc:
+            logger.warning(
+                "Failed to read staged rotation key %s: %s",
+                staged_key_path,
+                exc,
+            )
+            return
+
+        if len(staged_key_bytes) != 32:
+            logger.warning(
+                "Ignoring staged rotation key %s with invalid length %d",
+                staged_key_path,
+                len(staged_key_bytes),
+            )
+            return
+
+        self._rotation_staged_signer = create_cache_signer(
+            cache_dir=staged_key_path.parent,
+            key_file=staged_key_path.name,
+            use_in_memory_key=False,
+            key_fallback_policy=self.config.security.key_fallback_policy,
+            namespace_id=self.namespace,
+            use_hkdf_derivation=self.config.security.use_hkdf_derivation,
+            minimum_signature_version=self.config.security.minimum_signature_version,
+        )
+        if self.config.security.enable_content_encryption:
+            self._rotation_staged_encryption_key = derive_encryption_key(
+                staged_key_bytes,
+                self.namespace,
+            )
+        logger.info(
+            "Initialized interrupted rotation fallback from staged key %s",
+            staged_key_path,
+        )
 
     def _create_cache_key(self, params: Dict) -> str:
         """

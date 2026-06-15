@@ -118,6 +118,10 @@ class VerificationMixin:
                     metadata=metadata,
                 )
                 if not self.signer.verify_entry(verify_data, stored_signature):
+                    if self._verify_with_rotation_staged_signer(
+                        cache_key, verify_data, stored_signature
+                    ):
+                        return True
                     self._invoke_hook(
                         "on_integrity_failure",
                         cache_key,
@@ -165,6 +169,27 @@ class VerificationMixin:
                 return False
 
         return True
+
+    def _verify_with_rotation_staged_signer(
+        self,
+        cache_key: str,
+        verify_data: SignableFields,
+        stored_signature: str,
+    ) -> bool:
+        """Verify with a leftover staged rotation signer, if one is present."""
+        staged_signer = getattr(self, "_rotation_staged_signer", None)
+        if staged_signer is None:
+            return False
+        staged_key_path = Path(staged_signer.key_file_path)
+        if not staged_key_path.is_file():
+            return False
+        if staged_signer.verify_entry(verify_data, stored_signature):
+            logger.info(
+                "Entry %s verified with interrupted rotation staged signer",
+                cache_key,
+            )
+            return True
+        return False
 
     def _sign_entry_if_enabled(
         self,

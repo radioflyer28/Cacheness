@@ -215,6 +215,8 @@ class BlobStore:
 
         # Initialize entry signer for metadata integrity protection
         self.signer = None
+        self._rotation_staged_signer = None
+        self._rotation_staged_encryption_key: Optional[bytes] = None
         if enable_signing:
             self._init_signer(
                 signing_key_file,
@@ -230,6 +232,7 @@ class BlobStore:
         self._encryption_key: Optional[bytes] = None
         if config is not None and config.security.enable_content_encryption:
             self._init_encryptor(config.security, namespace)
+        self._init_interrupted_rotation_fallback()
 
         logger.debug(f"BlobStore initialized at {self.cache_dir}")
 
@@ -308,6 +311,58 @@ class BlobStore:
             return
         self._encryption_key = derive_encryption_key(master_key, namespace)
         logger.info("Content encryption enabled (AES-256-GCM)")
+
+    def _init_interrupted_rotation_fallback(self) -> None:
+        """Initialize staged-key fallbacks left by interrupted rotation."""
+        self._rotation_staged_signer = None
+        self._rotation_staged_encryption_key = None
+        if self.signer is None or self.signer.use_in_memory_key:
+            return
+
+        from ..encryption import derive_encryption_key
+        from ..security import create_cache_signer, staged_key_file_path
+
+        active_key_path = Path(self.signer.key_file_path)
+        staged_key_path = staged_key_file_path(active_key_path)
+        if not active_key_path.is_file() or not staged_key_path.is_file():
+            return
+
+        try:
+            staged_key_bytes = staged_key_path.read_bytes()
+        except OSError as exc:
+            logger.warning(
+                "Failed to read staged rotation key %s: %s",
+                staged_key_path,
+                exc,
+            )
+            return
+
+        if len(staged_key_bytes) != 32:
+            logger.warning(
+                "Ignoring staged rotation key %s with invalid length %d",
+                staged_key_path,
+                len(staged_key_bytes),
+            )
+            return
+
+        self._rotation_staged_signer = create_cache_signer(
+            cache_dir=staged_key_path.parent,
+            key_file=staged_key_path.name,
+            use_in_memory_key=False,
+            key_fallback_policy=self.signer.key_fallback_policy,
+            namespace_id=self._namespace,
+            use_hkdf_derivation=self.signer.use_hkdf_derivation,
+            minimum_signature_version=self.signer.minimum_signature_version,
+        )
+        if self._encryption_key is not None:
+            self._rotation_staged_encryption_key = derive_encryption_key(
+                staged_key_bytes,
+                self._namespace,
+            )
+        logger.info(
+            "Initialized interrupted rotation fallback from staged key %s",
+            staged_key_path,
+        )
 
     def rotate_key(self, new_key_file: "str | Path") -> "RotationResult":
         """Rotate the signing key and re-sign all blob entries.
@@ -623,12 +678,49 @@ class BlobStore:
         if self.signer is None:
             return True
 
+        if self._verify_entry_signature_with_signer(
+            self.signer,
+            cache_key,
+            entry,
+            metadata,
+            stored_signature,
+        ):
+            return True
+
+        staged_signer = self._rotation_staged_signer
+        if staged_signer is None or not Path(staged_signer.key_file_path).is_file():
+            return False
+
+        if self._verify_entry_signature_with_signer(
+            staged_signer,
+            cache_key,
+            entry,
+            metadata,
+            stored_signature,
+        ):
+            logger.info(
+                "Blob %s verified with interrupted rotation staged signer",
+                cache_key,
+            )
+            return True
+
+        return False
+
+    def _verify_entry_signature_with_signer(
+        self,
+        signer: "Any",
+        cache_key: str,
+        entry: Dict[str, Any],
+        metadata: Dict[str, Any],
+        stored_signature: str,
+    ) -> bool:
+        """Verify a BlobStore entry with one signer, including legacy fallback."""
         canonical = extract_signable_fields(cache_key, entry, metadata)
-        if self.signer.verify_entry(canonical, stored_signature):
+        if signer.verify_entry(canonical, stored_signature):
             return True
 
         legacy = extract_legacy_blobstore_signable_fields(cache_key, entry, metadata)
-        if legacy != canonical and self.signer.verify_entry(legacy, stored_signature):
+        if legacy != canonical and signer.verify_entry(legacy, stored_signature):
             logger.debug(
                 "Verified legacy flattened BlobStore signature for %s", cache_key
             )
@@ -1390,7 +1482,25 @@ class BlobStore:
         ciphertext = self.blob_backend.read_blob(backend_path)
         encryption_metadata = cast(dict[str, Any], handler_metadata)
         iv = bytes.fromhex(encryption_metadata["encryption_iv"])
-        plaintext = decrypt_blob(ciphertext, self._encryption_key, iv)
+        try:
+            plaintext = decrypt_blob(ciphertext, self._encryption_key, iv)
+        except Exception as active_exc:
+            staged_key = self._rotation_staged_encryption_key
+            staged_signer = self._rotation_staged_signer
+            if (
+                staged_key is None
+                or staged_signer is None
+                or not Path(staged_signer.key_file_path).is_file()
+            ):
+                raise
+            try:
+                plaintext = decrypt_blob(ciphertext, staged_key, iv)
+            except Exception:
+                raise active_exc
+            logger.info(
+                "Encrypted blob %s decrypted with interrupted rotation staged key",
+                display_path,
+            )
 
         handler = self.handlers.get_handler_by_type(data_type)
         if handler is not None:
