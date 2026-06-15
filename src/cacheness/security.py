@@ -35,6 +35,20 @@ from .interfaces import SignableFields
 logger = logging.getLogger(__name__)
 
 
+def staged_key_file_path(key_file_path: Path) -> Path:
+    """Return the staged rotation path for an active key file."""
+    return key_file_path.with_name(f"{key_file_path.name}.new")
+
+
+def write_staged_key_file(key_file_path: Path, key: bytes) -> Path:
+    """Write key bytes to ``<keyfile>.new`` with key-file permissions."""
+    staged_path = staged_key_file_path(key_file_path)
+    staged_path.parent.mkdir(parents=True, exist_ok=True)
+    staged_path.write_bytes(key)
+    CacheEntrySigner._set_key_file_permissions(staged_path)
+    return staged_path
+
+
 def _hkdf_sha256(ikm: bytes, info: bytes, length: int = 32, salt: bytes = b"") -> bytes:
     """HKDF-SHA256 key derivation (RFC 5869) using stdlib only."""
     # Extract: PRK = HMAC-SHA256(salt, IKM)
@@ -163,6 +177,16 @@ class CacheEntrySigner:
             return secrets.token_bytes(32)
 
         try:
+            staged_path = staged_key_file_path(self.key_file_path)
+            if staged_path.exists():
+                logger.error(
+                    "Detected interrupted key rotation: staged key file %s remains. "
+                    "The active key file %s was left unchanged; remove the staged "
+                    "file after verifying cache readability or retry rotation.",
+                    staged_path,
+                    self.key_file_path,
+                )
+
             if self.key_file_path.exists():
                 # Load existing key
                 key = self.key_file_path.read_bytes()

@@ -324,7 +324,10 @@ class BlobStore:
         """
         from ..error_handling import CacheSecurityError
         from ..interfaces import RotationResult
-        from ..security import create_cache_signer
+        import copy
+
+        from ..encryption import decrypt_blob, derive_encryption_key, encrypt_blob
+        from ..security import create_cache_signer, write_staged_key_file
 
         if self.signer is None:
             raise CacheSecurityError("Entry signing is not enabled — cannot rotate key")
@@ -339,14 +342,11 @@ class BlobStore:
             )
 
         with self._lock:
-            # Overwrite the current key file with the new key
             dest = Path(self.signer.key_file_path)
-            dest.write_bytes(new_key_bytes)
-
-            # Create a new signer using the replaced key file
+            staged_key_path = write_staged_key_file(dest, new_key_bytes)
             new_signer = create_cache_signer(
-                cache_dir=self.cache_dir,
-                key_file=dest.name,
+                cache_dir=staged_key_path.parent,
+                key_file=staged_key_path.name,
                 use_in_memory_key=False,
                 key_fallback_policy=self.signer.key_fallback_policy,
                 namespace_id=self._namespace,
@@ -357,108 +357,142 @@ class BlobStore:
             result = RotationResult()
             entries = self.backend.iter_entry_summaries()
             result.total = len(entries)
+            old_entries: dict[str, dict[str, Any]] = {}
+            old_blobs: dict[Path, bytes] = {}
+            current_cache_key: str | None = None
+            rotation_succeeded = False
+            old_enc_key: bytes | None = None
+            new_enc_key: bytes | None = None
 
-            for entry in entries:
-                cache_key = entry["cache_key"]
+            def rollback_rotation() -> None:
+                for blob_path, ciphertext in old_blobs.items():
+                    try:
+                        blob_path.write_bytes(ciphertext)
+                    except OSError as exc:
+                        logger.warning(
+                            f"Failed to restore blob {blob_path} after rotation failure: {exc}"
+                        )
+                for cache_key, old_entry in old_entries.items():
+                    try:
+                        self.backend.put_entry(cache_key, copy.deepcopy(old_entry))
+                    except (
+                        Exception
+                    ) as exc:  # intentionally broad — best-effort rollback
+                        logger.warning(
+                            f"Failed to restore metadata for {cache_key} after rotation failure: {exc}"
+                        )
+                for rotating_path in dest.parent.rglob("*.rotating"):
+                    try:
+                        rotating_path.unlink()
+                    except OSError:
+                        pass
                 try:
-                    full_entry = self.backend.get_entry(cache_key)
+                    staged_key_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+            try:
+                if self._encryption_key is not None:
+                    old_enc_key = self._encryption_key
+                    new_enc_key = derive_encryption_key(new_key_bytes, self._namespace)
+
+                for entry in entries:
+                    current_cache_key = entry["cache_key"]
+                    full_entry = self.backend.get_entry(current_cache_key)
                     if full_entry is None:
                         result.skipped += 1
                         continue
 
+                    old_entries[current_cache_key] = copy.deepcopy(full_entry)
                     nested_meta = full_entry.get("metadata", {})
-                    signable = extract_signable_fields(
-                        cache_key, full_entry, nested_meta
-                    )
-                    new_sig = new_signer.sign_entry(signable)
+                    stored_signature = full_entry.get(
+                        "entry_signature"
+                    ) or nested_meta.get("entry_signature")
+                    if stored_signature:
+                        if not self._verify_entry_signature(
+                            current_cache_key,
+                            full_entry,
+                            nested_meta,
+                            stored_signature,
+                        ):
+                            raise CacheSecurityError(
+                                f"Existing blob signature did not verify: {current_cache_key}"
+                            )
+                    elif not self.config.security.allow_unsigned_entries:
+                        raise CacheSecurityError(
+                            f"Unsigned blob entry cannot be rotated: {current_cache_key}"
+                        )
 
-                    # Store in both top-level and nested metadata
-                    full_entry["entry_signature"] = new_sig
-                    nested_meta["entry_signature"] = new_sig
-                    full_entry["metadata"] = nested_meta
-
-                    self.backend.put_entry(cache_key, full_entry)
-                    result.re_signed += 1
-                except Exception as e:  # intentionally broad — best-effort re-sign
-                    result.failed += 1
-                    result.failures.append({"cache_key": cache_key, "error": str(e)})
-                    logger.warning(f"Failed to re-sign blob entry {cache_key}: {e}")
-
-            # Re-encrypt entries if encryption is enabled
-            if self._encryption_key is not None:
-                from ..encryption import (
-                    decrypt_blob,
-                    encrypt_blob,
-                    derive_encryption_key,
-                )
-
-                old_enc_key = self._encryption_key
-                new_enc_key = derive_encryption_key(new_key_bytes, self._namespace)
-
-                for entry in entries:
-                    cache_key = entry["cache_key"]
-                    try:
-                        full_entry = self.backend.get_entry(cache_key)
-                        if full_entry is None:
-                            continue
-                        nested_meta = full_entry.get("metadata", {})
-                        if nested_meta.get("encryption_algorithm") is None:
-                            continue
-
-                        # Resolve blob path
+                    if new_enc_key is not None and nested_meta.get(
+                        "encryption_algorithm"
+                    ):
+                        assert old_enc_key is not None
                         actual_path_str = nested_meta.get("actual_path")
                         if not actual_path_str:
+                            result.skipped += 1
                             continue
                         resolved = self._resolve_actual_path(actual_path_str)
                         blob_path = Path(resolved)
                         if not blob_path.is_file():
+                            result.skipped += 1
                             continue
 
-                        # Decrypt with old key, re-encrypt with new key
                         old_iv = bytes.fromhex(nested_meta["encryption_iv"])
                         ciphertext = blob_path.read_bytes()
+                        old_blobs.setdefault(blob_path, ciphertext)
                         plaintext = decrypt_blob(ciphertext, old_enc_key, old_iv)
                         new_ciphertext, new_iv, _ = encrypt_blob(plaintext, new_enc_key)
-                        blob_path.write_bytes(new_ciphertext)
+                        rotating_path = blob_path.with_name(
+                            f"{blob_path.name}.rotating"
+                        )
+                        rotating_path.write_bytes(new_ciphertext)
+                        os.replace(rotating_path, blob_path)
 
-                        # Update metadata with new IV and file hash
                         nested_meta["encryption_iv"] = new_iv.hex()
                         file_hash = self._calculate_file_hash(blob_path)
                         if file_hash:
                             nested_meta["file_hash"] = file_hash
                             full_entry["file_hash"] = file_hash
                         full_entry["file_size"] = len(new_ciphertext)
-                        full_entry["metadata"] = nested_meta
-
-                        # Re-sign with new signer after re-encryption
-                        signable = extract_signable_fields(
-                            cache_key, full_entry, nested_meta
-                        )
-                        new_sig = new_signer.sign_entry(signable)
-                        full_entry["entry_signature"] = new_sig
-                        nested_meta["entry_signature"] = new_sig
-                        full_entry["metadata"] = nested_meta
-
-                        self.backend.put_entry(cache_key, full_entry)
                         result.re_encrypted += 1
-                    except (
-                        Exception
-                    ) as e:  # intentionally broad — best-effort re-encrypt
-                        result.failures.append(
-                            {"cache_key": cache_key, "error": f"re-encrypt: {e}"}
-                        )
-                        logger.warning(f"Failed to re-encrypt blob {cache_key}: {e}")
 
-                self._encryption_key = new_enc_key
+                    signable = extract_signable_fields(
+                        current_cache_key, full_entry, nested_meta
+                    )
+                    new_sig = new_signer.sign_entry(signable)
+                    full_entry["entry_signature"] = new_sig
+                    nested_meta["entry_signature"] = new_sig
+                    full_entry["metadata"] = nested_meta
+                    self.backend.put_entry(current_cache_key, full_entry)
+                    result.re_signed += 1
 
-            # Replace the signer instance
-            self.signer = new_signer
+                os.replace(staged_key_path, dest)
+                new_signer.key_file_path = dest
+                self.signer = new_signer
+                if new_enc_key is not None:
+                    self._encryption_key = new_enc_key
+                rotation_succeeded = True
+            except (
+                Exception
+            ) as e:  # intentionally broad — rollback keeps old key active
+                result.failed += 1
+                result.failures.append(
+                    {"cache_key": current_cache_key or "<rotation>", "error": str(e)}
+                )
+                logger.warning(
+                    "BlobStore key rotation failed before publishing new key; active key retained: %s",
+                    e,
+                )
+                rollback_rotation()
 
             logger.info(
                 f"BlobStore key rotation complete: {result.re_signed}/{result.total} "
                 f"entries re-signed, {result.failed} failed, "
                 f"{result.skipped} skipped"
             )
+
+            if not rotation_succeeded:
+                return result
 
         return result
 
