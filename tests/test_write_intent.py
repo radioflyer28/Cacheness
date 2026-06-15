@@ -1,5 +1,6 @@
 """Tests for write intent journal (crash-safe blob writes)."""
 
+import json
 import time
 from pathlib import Path
 
@@ -122,6 +123,29 @@ class TestWriteIntentJournal:
         assert blob_file.exists()
         assert not intent_path.exists()
 
+    def test_cleanup_preserves_committed_blob_when_planned_blob_missing(self, tmp_path):
+        """Failure before blob creation clears only the stale intent for committed keys."""
+        journal = WriteIntentJournal(tmp_path, stale_threshold_seconds=0)
+        committed_blob = tmp_path / "default" / "committed_blob.pkl"
+        committed_blob.parent.mkdir()
+        committed_blob.write_bytes(b"committed data")
+
+        missing_planned_blob = tmp_path / "default" / "planned_blob.pkl"
+        intent_path = journal.record_intent(
+            "committed_key",
+            str(missing_planned_blob.relative_to(tmp_path)),
+        )
+        time.sleep(0.05)
+
+        cleaned = journal.cleanup_stale_intents(
+            entry_exists=lambda key: key == "committed_key"
+        )
+
+        assert cleaned == 1
+        assert committed_blob.exists()
+        assert not missing_planned_blob.exists()
+        assert not intent_path.exists()
+
 
 class TestWriteIntentIntegration:
     """Integration tests with UnifiedCache."""
@@ -203,15 +227,27 @@ class TestWriteIntentIntegration:
         """Non-inline cache writes record an intent before blob I/O starts."""
         cache = _make_cache(tmp_path)
         intents_dir = tmp_path / ".intents"
+        data = {"payload": "not-inline"}
+        cache_key = "pre-write-cache"
+        handler = cache._blob_store.handlers.get_handler(data)
+        expected_blob_path = cache._get_cache_file_path(cache_key).with_suffix(
+            handler.get_file_extension(cache.config)
+        )
+        expected_relative_path = str(expected_blob_path.relative_to(tmp_path))
 
         def fail_after_check(*args, **kwargs):
-            assert list(intents_dir.glob("*.intent"))
+            intent_files = list(intents_dir.glob("*.intent"))
+            assert len(intent_files) == 1
+            payload = json.loads(intent_files[0].read_text(encoding="utf-8"))
+            assert payload["cache_key"] == cache_key
+            assert payload["blob_path"] == expected_relative_path
+            assert not expected_blob_path.exists()
             raise RuntimeError("blob write interrupted")
 
         monkeypatch.setattr(cache._blob_store, "_write_blob", fail_after_check)
 
         with pytest.raises(RuntimeError, match="blob write interrupted"):
-            cache.put({"payload": "not-inline"}, cache_key="pre-write-cache")
+            cache.put(data, cache_key=cache_key)
 
         assert not list(intents_dir.glob("*.intent"))
 
@@ -278,14 +314,50 @@ class TestStorageModeWriteIntentCleanup:
     def test_storage_mode_records_intent_before_blob_write(self, tmp_path, monkeypatch):
         cache = self._make_storage_cache(tmp_path)
         intents_dir = tmp_path / ".intents"
+        data = {"payload": "not-inline"}
+        cache_key = "pre-write-storage"
+        handler = cache._blob_store.handlers.get_handler(data)
+        expected_blob_path = cache._get_cache_file_path(cache_key).with_suffix(
+            handler.get_file_extension(cache.config)
+        )
+        expected_relative_path = str(expected_blob_path.relative_to(tmp_path))
 
         def fail_after_check(*args, **kwargs):
-            assert list(intents_dir.glob("*.intent"))
+            intent_files = list(intents_dir.glob("*.intent"))
+            assert len(intent_files) == 1
+            payload = json.loads(intent_files[0].read_text(encoding="utf-8"))
+            assert payload["cache_key"] == cache_key
+            assert payload["blob_path"] == expected_relative_path
+            assert not expected_blob_path.exists()
             raise RuntimeError("blob write interrupted")
 
         monkeypatch.setattr(cache._blob_store, "_write_blob", fail_after_check)
 
         with pytest.raises(RuntimeError, match="blob write interrupted"):
-            cache.put({"payload": "not-inline"}, cache_key="pre-write-storage")
+            cache.put(data, cache_key=cache_key)
 
         assert not list(intents_dir.glob("*.intent"))
+
+    def test_storage_mode_failed_pre_blob_overwrite_keeps_committed_data(
+        self, tmp_path, monkeypatch
+    ):
+        cache = self._make_storage_cache(tmp_path)
+        cache_key = "pre-blob-overwrite"
+        cache.put({"payload": "committed"}, cache_key=cache_key)
+        entry = cache.metadata_backend.get_entry(cache_key)
+        assert entry is not None
+        committed_blob = cache._resolve_actual_path(entry["metadata"]["actual_path"])
+        assert committed_blob.exists()
+
+        def fail_before_blob_created(*args, **kwargs):
+            assert list((tmp_path / ".intents").glob("*.intent"))
+            raise RuntimeError("handler failed before blob creation")
+
+        monkeypatch.setattr(cache._blob_store, "_write_blob", fail_before_blob_created)
+
+        with pytest.raises(RuntimeError, match="handler failed before blob creation"):
+            cache.put({"payload": "replacement"}, cache_key=cache_key)
+
+        assert cache.get(cache_key=cache_key) == {"payload": "committed"}
+        assert committed_blob.exists()
+        assert not list((tmp_path / ".intents").glob("*.intent"))
