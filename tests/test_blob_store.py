@@ -205,6 +205,81 @@ class TestEntrySigning:
         result = signed_store.get(key)
         assert result == {"x": 1}
 
+    def test_old_flattened_signature_shape_remains_readable(self, signed_store):
+        """D-26/D-27: old BlobStore flattened signatures use explicit fallback."""
+        from cacheness.signing_fields import extract_signable_fields
+
+        key = signed_store.put(
+            "legacy-compatible",
+            key="legacy-flat",
+            metadata={
+                "data_type": "legacy-shadow-type",
+                "file_size": 999999,
+                "created_at": "2000-01-01T00:00:00",
+            },
+        )
+        entry = signed_store.backend.get_entry(key)
+        assert entry is not None
+        nested = entry.get("metadata", {})
+        assert signed_store.signer is not None
+
+        legacy_signable = {**entry, **nested, "cache_key": key}
+        legacy_signature = signed_store.signer.sign_entry(legacy_signable)
+        entry["entry_signature"] = legacy_signature
+        nested["entry_signature"] = legacy_signature
+        entry["metadata"] = nested
+        signed_store.backend.put_entry(key, entry)
+
+        canonical_signable = extract_signable_fields(key, entry, nested)
+        assert canonical_signable["data_type"] == entry["data_type"]
+        assert legacy_signable["data_type"] == "legacy-shadow-type"
+        assert not signed_store.signer.verify_entry(
+            canonical_signable, legacy_signature
+        )
+        assert signed_store.signer.verify_entry(legacy_signable, legacy_signature)
+
+        assert signed_store.get(key) == "legacy-compatible"
+
+    def test_compatible_legacy_v2_signature_honors_minimum_version(self, blob_dir):
+        """D-28: legacy-compatible signatures work unless minimum is stricter."""
+        legacy_config = CacheConfig(
+            cache_dir=blob_dir,
+            security=SecurityConfig(
+                enable_entry_signing=True,
+                minimum_signature_version=1,
+            ),
+        )
+        legacy_store = BlobStore(
+            cache_dir=blob_dir,
+            backend="json",
+            enable_signing=True,
+            config=legacy_config,
+            use_hkdf_derivation=False,
+        )
+        key = legacy_store.put("legacy-v2", key="legacy-v2")
+        entry = legacy_store.backend.get_entry(key)
+        assert entry is not None
+        nested = entry.get("metadata", {})
+        legacy_signature = entry.get("entry_signature") or nested.get("entry_signature")
+        assert legacy_signature is not None
+        assert legacy_signature.startswith("v2:")
+        assert legacy_store.get(key) == "legacy-v2"
+
+        strict_config = CacheConfig(
+            cache_dir=blob_dir,
+            security=SecurityConfig(
+                enable_entry_signing=True,
+                minimum_signature_version=3,
+            ),
+        )
+        strict_store = BlobStore(
+            cache_dir=blob_dir,
+            backend="json",
+            enable_signing=True,
+            config=strict_config,
+        )
+        assert strict_store.get(key) is None
+
     def test_tampered_entry_returns_none(self, signed_store):
         """Tampering with metadata causes get() to return None."""
         key = signed_store.put("tamper-test", key="tamper")

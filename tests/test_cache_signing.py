@@ -176,6 +176,67 @@ class TestDeleteInvalidSignatures:
 
         assert cache.get(cache_key=cache_key) == test_data
 
+    def test_unified_cache_and_blob_store_share_canonical_signing_field_set(
+        self, tmp_path
+    ):
+        """D-25: equivalent new entries expose the same canonical signing fields."""
+        from cacheness.signing_fields import extract_signable_fields
+        from cacheness.storage import BlobStore
+
+        cache_config = CacheConfig(
+            cache_dir=str(tmp_path / "cache"),
+            security=SecurityConfig(
+                enable_entry_signing=True,
+                use_in_memory_key=True,
+            ),
+        )
+        cache = UnifiedCache(cache_config)
+        blob_store = BlobStore(
+            cache_dir=tmp_path / "blobs",
+            backend="json",
+            enable_signing=True,
+            use_in_memory_key=True,
+        )
+
+        try:
+            cache_key = "canonical-shared"
+            cache.put({"value": 31}, cache_key=cache_key)
+            blob_store.put({"value": 31}, key=cache_key)
+
+            cache_entry = cache.metadata_backend.get_entry(cache_key)
+            blob_entry = blob_store.backend.get_entry(cache_key)
+            assert cache_entry is not None
+            assert blob_entry is not None
+
+            cache_fields = extract_signable_fields(
+                cache_key,
+                cache_entry,
+                cache_entry.get("metadata", {}),
+            )
+            blob_fields = extract_signable_fields(
+                cache_key,
+                blob_entry,
+                blob_entry.get("metadata", {}),
+            )
+
+            assert set(blob_fields) == set(cache_fields)
+            assert set(blob_fields) == {
+                "cache_key",
+                "data_type",
+                "file_size",
+                "created_at",
+                "actual_path",
+                "file_hash",
+                "object_type",
+                "storage_format",
+                "serializer",
+                "compression_codec",
+            }
+            assert "access_count" not in blob_fields
+            assert "metadata_dict" not in blob_fields
+        finally:
+            cache.close()
+
     def test_config_logging(self):
         """Test that the security configuration logs the delete_invalid_signatures setting."""
         import logging
