@@ -9,6 +9,7 @@ from pathlib import Path
 
 from cacheness.core import UnifiedCache
 from cacheness.config import CacheConfig, SecurityConfig
+from cacheness.interfaces import SignableFields
 from cacheness.security import CacheEntrySigner
 
 
@@ -93,7 +94,7 @@ class TestDeleteInvalidSignatures:
             use_hkdf_derivation=True,
             minimum_signature_version=3,
         )
-        entry_data = {
+        entry_data: SignableFields = {
             "cache_key": "legacy-entry",
             "data_type": "object",
             "file_size": 5,
@@ -110,16 +111,14 @@ class TestDeleteInvalidSignatures:
 
         assert not strict_signer.verify_entry(entry_data, legacy_signature)
 
-    def test_downgraded_v3_signature_prefix_rejected_when_minimum_is_v3(
-        self, tmp_path
-    ):
+    def test_downgraded_v3_signature_prefix_rejected_when_minimum_is_v3(self, tmp_path):
         """D-08: rewriting a v3 stored prefix to v2 fails under strict policy."""
         signer = CacheEntrySigner(
             tmp_path / "cache_signing_key.bin",
             use_hkdf_derivation=True,
             minimum_signature_version=3,
         )
-        entry_data = {
+        entry_data: SignableFields = {
             "cache_key": "downgrade-entry",
             "data_type": "object",
             "file_size": 5,

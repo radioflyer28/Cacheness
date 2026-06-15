@@ -311,6 +311,9 @@ class UnifiedCache(
                     key_fallback_policy=self.config.security.key_fallback_policy,
                     namespace_id=self.namespace,
                     use_hkdf_derivation=self.config.security.use_hkdf_derivation,
+                    minimum_signature_version=(
+                        self.config.security.minimum_signature_version
+                    ),
                 )
 
                 info = self.signer.get_field_info()
@@ -422,6 +425,9 @@ class UnifiedCache(
                 key_fallback_policy=self.config.security.key_fallback_policy,
                 namespace_id=self.namespace,
                 use_hkdf_derivation=self.config.security.use_hkdf_derivation,
+                minimum_signature_version=(
+                    self.config.security.minimum_signature_version
+                ),
             )
 
             result = RotationResult()

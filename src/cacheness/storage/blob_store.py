@@ -209,6 +209,9 @@ class BlobStore:
                 use_in_memory_key,
                 key_fallback_policy,
                 use_hkdf_derivation=use_hkdf_derivation,
+                minimum_signature_version=(
+                    self.config.security.minimum_signature_version
+                ),
             )
 
         # Initialize encryption (requires config with SecurityConfig)
@@ -242,6 +245,7 @@ class BlobStore:
         use_in_memory_key: bool,
         key_fallback_policy: str = "warn",
         use_hkdf_derivation: bool = True,
+        minimum_signature_version: int = 1,
     ) -> None:
         """Initialize the cache entry signer."""
         try:
@@ -254,6 +258,7 @@ class BlobStore:
                 key_fallback_policy=key_fallback_policy,
                 namespace_id=self._namespace,
                 use_hkdf_derivation=use_hkdf_derivation,
+                minimum_signature_version=minimum_signature_version,
             )
             info = self.signer.get_field_info()
             logger.info(
@@ -340,6 +345,7 @@ class BlobStore:
                 key_fallback_policy=self.signer.key_fallback_policy,
                 namespace_id=self._namespace,
                 use_hkdf_derivation=self.signer.use_hkdf_derivation,
+                minimum_signature_version=self.signer.minimum_signature_version,
             )
 
             result = RotationResult()

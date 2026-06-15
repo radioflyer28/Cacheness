@@ -107,6 +107,7 @@ class CacheEntrySigner:
         key_fallback_policy: str = "warn",
         namespace_id: str = "default",
         use_hkdf_derivation: bool = True,
+        minimum_signature_version: int = 1,
     ):
         """
         Initialize the cache entry signer.
@@ -120,12 +121,19 @@ class CacheEntrySigner:
                 'fallback' = silently use in-memory key
             namespace_id: Namespace identifier for HKDF key derivation
             use_hkdf_derivation: If True, derive per-namespace keys via HKDF-SHA256
+            minimum_signature_version: Lowest accepted entry signature version.
         """
+        if not isinstance(minimum_signature_version, int):
+            raise ValueError("minimum_signature_version must be an integer")
+        if minimum_signature_version < 1:
+            raise ValueError("minimum_signature_version must be at least 1")
+
         self.key_file_path = key_file_path
         self.use_in_memory_key = use_in_memory_key
         self.key_fallback_policy = key_fallback_policy
         self.namespace_id = namespace_id
         self.use_hkdf_derivation = use_hkdf_derivation
+        self.minimum_signature_version = minimum_signature_version
         self.secret_key = self._load_or_generate_key()
 
         # Store master key and derive per-namespace key
@@ -143,7 +151,8 @@ class CacheEntrySigner:
         logger.debug(
             f"Cache signer initialized: version={self.CURRENT_SIGNATURE_VERSION}, "
             f"fields={current_fields}, key_type={key_type}, "
-            f"hkdf={use_hkdf_derivation}, namespace={namespace_id}"
+            f"hkdf={use_hkdf_derivation}, namespace={namespace_id}, "
+            f"minimum_signature_version={minimum_signature_version}"
         )
 
     def _load_or_generate_key(self) -> bytes:
@@ -368,6 +377,15 @@ class CacheEntrySigner:
             True if signature is valid, False otherwise
         """
         version, hex_sig = self.parse_versioned_signature(stored_signature)
+        if version < self.minimum_signature_version:
+            logger.warning(
+                f"Rejected signature for entry "
+                f"{entry_data.get('cache_key', 'unknown')}: "
+                f"signature version v{version} is below configured minimum "
+                f"v{self.minimum_signature_version}"
+            )
+            return False
+
         try:
             payload = self._create_signature_payload(entry_data, version)
             # v1/v2 used the master key; v3+ uses the HKDF-derived key
@@ -503,6 +521,7 @@ class CacheEntrySigner:
             else False,
             "use_in_memory_key": self.use_in_memory_key,
             "use_hkdf_derivation": self.use_hkdf_derivation,
+            "minimum_signature_version": self.minimum_signature_version,
             "namespace_id": self.namespace_id,
         }
 
@@ -514,6 +533,7 @@ def create_cache_signer(
     key_fallback_policy: str = "warn",
     namespace_id: str = "default",
     use_hkdf_derivation: bool = True,
+    minimum_signature_version: int = 1,
 ) -> CacheEntrySigner:
     """
     Factory function to create a cache entry signer.
@@ -527,6 +547,7 @@ def create_cache_signer(
             'fallback' = silently use in-memory key
         namespace_id: Namespace identifier for HKDF key derivation
         use_hkdf_derivation: If True, derive per-namespace keys via HKDF-SHA256
+        minimum_signature_version: Lowest accepted entry signature version.
 
     Returns:
         Configured CacheEntrySigner instance
@@ -538,4 +559,5 @@ def create_cache_signer(
         key_fallback_policy,
         namespace_id=namespace_id,
         use_hkdf_derivation=use_hkdf_derivation,
+        minimum_signature_version=minimum_signature_version,
     )

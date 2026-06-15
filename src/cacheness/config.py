@@ -398,6 +398,7 @@ class SecurityConfig:
 
     # Backward compatibility and key rotation
     allow_unsigned_entries: bool = True  # Allow entries without signatures
+    minimum_signature_version: int = 1  # Minimum accepted entry signature version
 
     # Cleanup behavior for invalid signatures
     delete_invalid_signatures: bool = (
@@ -435,6 +436,11 @@ class SecurityConfig:
                 f"key_fallback_policy must be one of {valid_policies}, "
                 f"got {self.key_fallback_policy!r}"
             )
+
+        if not isinstance(self.minimum_signature_version, int):
+            raise ValueError("minimum_signature_version must be an integer")
+        if self.minimum_signature_version < 1:
+            raise ValueError("minimum_signature_version must be at least 1")
 
         # Validate encryption dependency
         if self.enable_content_encryption:
@@ -482,6 +488,7 @@ class SecurityConfig:
             f"Security configured: signing={self.enable_entry_signing}, "
             f"in_memory_key={self.use_in_memory_key}, "
             f"allow_unsigned={self.allow_unsigned_entries}, "
+            f"minimum_signature_version={self.minimum_signature_version}, "
             f"delete_invalid={self.delete_invalid_signatures}, "
             f"key_fallback_policy={self.key_fallback_policy}, "
             f"hkdf={self.use_hkdf_derivation}, "
@@ -579,6 +586,7 @@ class CacheConfig:
         # Security parameters
         delete_invalid_signatures: Optional[bool] = None,
         use_in_memory_key: Optional[bool] = None,
+        minimum_signature_version: Optional[int] = None,
         # Error handling
         delete_on_error: Optional[bool] = None,
         # Lifecycle hooks (flat convenience — prefer HooksConfig object)
@@ -710,6 +718,8 @@ class CacheConfig:
             self.security.delete_invalid_signatures = delete_invalid_signatures
         if use_in_memory_key is not None:
             self.security.use_in_memory_key = use_in_memory_key
+        if minimum_signature_version is not None:
+            self.security.minimum_signature_version = minimum_signature_version
 
         # Map error handling configuration parameters
         if delete_on_error is not None:
@@ -794,10 +804,7 @@ class CacheConfig:
         self._validate_backend_compatibility()
 
         # Combo 5: JSON backend + inline blobs (HARD-01)
-        if (
-            self.metadata.metadata_backend == "json"
-            and self.blob.max_inline_size > 0
-        ):
+        if self.metadata.metadata_backend == "json" and self.blob.max_inline_size > 0:
             from .error_handling import CacheConfigurationError
 
             raise CacheConfigurationError(

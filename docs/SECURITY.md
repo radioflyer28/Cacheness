@@ -21,6 +21,7 @@ secure_config = CacheConfig(
         use_in_memory_key=True,           # No key persistence
         delete_invalid_signatures=True,   # Auto-cleanup (default)
         allow_unsigned_entries=False,      # Reject unsigned entries
+        minimum_signature_version=3,       # Require HKDF-derived v3 signatures
     )
 )
 cache = cacheness(secure_config)
@@ -60,6 +61,24 @@ Signed fields are managed via version-based field lists. The current version is 
 v1 includes all v2 fields **plus** `actual_path`.
 
 > **Note:** Field selection is not configurable. The signer uses the version-appropriate field list automatically. This design prevents misconfiguration and ensures consistent verification.
+
+### Minimum Signature Version
+
+`SecurityConfig.minimum_signature_version` controls the oldest signature version accepted during verification.
+
+```python
+from cacheness import CacheConfig, SecurityConfig, cacheness
+
+strict_config = CacheConfig(
+    security=SecurityConfig(
+        allow_unsigned_entries=False,
+        minimum_signature_version=3,
+    )
+)
+cache = cacheness(strict_config)
+```
+
+The default is `minimum_signature_version=1` for compatibility with existing caches, including legacy bare-hex signatures and v2 shared-key signatures. New deployments should use `minimum_signature_version=3` together with HKDF key derivation so stored signatures cannot be downgraded to older verification modes.
 
 ## Key Management
 
@@ -434,6 +453,8 @@ Controls handling of entries that have **no** signature (e.g., created before si
 | `True` (default) | ✅ Accepted | Depends on `delete_invalid_signatures` |
 | `False` | ❌ Rejected (deleted) | Depends on `delete_invalid_signatures` |
 
+If `allow_unsigned_entries=True`, an attacker with write access to the metadata store can strip `entry_signature` from an entry and bypass signature verification. For any threat model where metadata is attacker-writable, set `allow_unsigned_entries=False`; otherwise the metadata signature layer should be treated as compatibility-only for unsigned entries.
+
 ## Security Best Practices
 
 ### Production Environments
@@ -446,6 +467,7 @@ production_config = CacheConfig(
         use_in_memory_key=True,             # No key persistence
         delete_invalid_signatures=True,     # Auto-cleanup
         allow_unsigned_entries=False,        # Strict mode
+        minimum_signature_version=3,         # Reject v1/v2 downgrade paths
     )
 )
 ```
@@ -460,6 +482,7 @@ dev_config = CacheConfig(
         use_in_memory_key=False,            # Persistent across restarts
         delete_invalid_signatures=False,    # Keep for debugging
         allow_unsigned_entries=True,         # Backward compatibility
+        minimum_signature_version=1,         # Accept old signatures
     )
 )
 ```
@@ -539,6 +562,7 @@ Cacheness uses `pickle` and (optionally) `dill` for serializing Python objects. 
 **Important:** This defense requires both signing AND hash verification to be enabled (both are on by default since v0.7.0). Disabling either creates a gap:
 - `enable_entry_signing=False` → attacker can modify both blob and `file_hash` in metadata
 - `verify_cache_integrity=False` → `file_hash` is not checked on read, tampered blob is deserialized
+- `allow_unsigned_entries=True` → a metadata-write attacker can remove `entry_signature` and skip signature verification for that entry
 
 **Residual risks:**
 - An attacker with OS-level access could replace the signing key file AND the metadata AND the blob, achieving a complete cache substitution. Mitigation: use `use_in_memory_key=True` in high-security environments
@@ -552,6 +576,7 @@ Cacheness uses `pickle` and (optionally) `dill` for serializing Python objects. 
 | Default (`enable_entry_signing=True`) | High | ~0.1ms per op | **Recommended** |
 | `use_in_memory_key=True` | Very High | None | Production/containers |
 | `allow_unsigned_entries=False` | Very High | None | Strict environments |
+| `minimum_signature_version=3` | Very High | None | New deployments using HKDF-derived signatures |
 
 ## Performance Impact
 
@@ -700,6 +725,7 @@ ml_config = CacheConfig(
         use_in_memory_key=True,             # No key persistence
         delete_invalid_signatures=True,     # Auto-cleanup
         allow_unsigned_entries=False,        # Strict mode
+        minimum_signature_version=3,         # Reject old signature versions
     )
 )
 
@@ -730,6 +756,7 @@ def create_tenant_cache(tenant_id: str):
             enable_entry_signing=True,
             allow_unsigned_entries=False,
             delete_invalid_signatures=True,
+            minimum_signature_version=3,
         )
     ))
 

@@ -1,6 +1,8 @@
 """Tests for rotate_key() API on UnifiedCache and BlobStore."""
 
 import secrets
+from typing import Any
+
 import pytest
 
 from cacheness.core import UnifiedCache as cacheness
@@ -18,7 +20,7 @@ from cacheness.storage.blob_store import BlobStore
 
 def _make_signed_cache(tmp_path, **security_overrides):
     """Create a cache with entry signing enabled."""
-    defaults = {
+    defaults: dict[str, Any] = {
         "enable_entry_signing": True,
         "allow_unsigned_entries": True,
         "delete_invalid_signatures": False,
@@ -119,7 +121,7 @@ class TestUnifiedCacheRotateKey:
             tmp_path,
             use_hkdf_derivation=True,
             minimum_signature_version=3,
-            delete_invalid_signatures=False,
+            delete_invalid_signatures=True,
         )
 
         assert strict_cache.get(test_key="legacy") is None
