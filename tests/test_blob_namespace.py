@@ -66,6 +66,25 @@ class TestFilesystemBlobBackendNamespace:
         assert Path(path).parent == tmp_path / "blobs" / "default"
         assert backend.read_blob(path) == b"hello default"
 
+    def test_absolute_blob_id_is_rejected_before_filesystem_write(self, tmp_path):
+        """Absolute blob IDs must not escape the backend base directory."""
+        backend = FilesystemBlobBackend(tmp_path / "blobs", shard_chars=0)
+        absolute_blob_id = tmp_path / "escape.bin"
+
+        with pytest.raises(ValueError, match="absolute blob IDs are not allowed"):
+            backend.write_blob(str(absolute_blob_id), b"escape")
+
+        assert not absolute_blob_id.exists()
+
+    def test_relative_traversal_blob_id_is_still_neutralized(self, tmp_path):
+        """Relative traversal-looking IDs remain sanitized under base_dir."""
+        backend = FilesystemBlobBackend(tmp_path / "blobs", shard_chars=0)
+
+        path = Path(backend.write_blob("../escape.bin", b"neutralized"))
+
+        assert path == backend.base_dir / "__" / "escape.bin"
+        assert backend.read_blob(str(path)) == b"neutralized"
+
     def test_same_blob_repeated_writes_use_unique_temp_files(
         self, tmp_path, monkeypatch
     ):

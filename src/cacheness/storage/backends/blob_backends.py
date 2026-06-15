@@ -438,6 +438,9 @@ class FilesystemBlobBackend(BlobBackend):
         With shard_chars=0 (disabled):
             "abc123def456" -> base_dir/abc123def456
         """
+        if Path(blob_id).is_absolute():
+            raise ValueError("absolute blob IDs are not allowed")
+
         # Sanitize blob_id to prevent path traversal
         safe_id = blob_id.replace("..", "__").replace("/", os.sep).replace("\\", os.sep)
 
