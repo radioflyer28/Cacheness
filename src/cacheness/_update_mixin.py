@@ -55,7 +55,7 @@ class UpdateMixin:
                 return False
 
             # Check expiration if requested
-            if check_expiration and self._is_expired(cache_key):
+            if check_expiration and self._is_expired(cache_key, entry=entry):
                 return False
 
             return True

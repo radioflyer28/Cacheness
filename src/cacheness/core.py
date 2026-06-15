@@ -846,6 +846,7 @@ class UnifiedCache(
         cache_key: str,
         ttl_seconds=_DEFAULT_TTL,
         entry: Optional[Dict[str, Any]] = None,
+        use_stored_expires_at: bool = True,
     ) -> bool:
         """Check if cache entry is expired.
 
@@ -855,6 +856,8 @@ class UnifiedCache(
                 Use _DEFAULT_TTL sentinel to fall back to config default.
             entry: Optional already-fetched metadata entry to avoid a second
                 backend lookup on hot cache-hit paths.
+            use_stored_expires_at: When True, stored expires_at is authoritative.
+                Set False only for explicit read-time TTL overrides.
         """
         if entry is None:
             entry = self.metadata_backend.get_entry(cache_key)
@@ -862,7 +865,7 @@ class UnifiedCache(
             return True
 
         expires_at = entry.get("expires_at")
-        if expires_at:
+        if use_stored_expires_at and expires_at:
             expiry_time = _parse_datetime_utc(expires_at)
             if expiry_time is None:
                 return True
@@ -872,7 +875,9 @@ class UnifiedCache(
         if ttl_seconds is None:
             return False  # Never expires
         elif ttl_seconds is _DEFAULT_TTL:
-            ttl_seconds = self.config.metadata.default_ttl_seconds
+            ttl_seconds = entry.get(
+                "ttl_seconds", self.config.metadata.default_ttl_seconds
+            )
             if ttl_seconds is None:
                 return False  # Config says never expire
 
@@ -950,6 +955,7 @@ class UnifiedCache(
         description: str = "",
         custom_metadata=None,
         hash_key: Optional[str] = None,
+        ttl_seconds=_DEFAULT_TTL,
         **kwargs,
     ):
         """
@@ -969,6 +975,8 @@ class UnifiedCache(
                            - List of objects: [experiment_metadata, performance_metadata]
                            - Tuple of objects: (experiment_metadata, performance_metadata)
                            - Dictionary (legacy): {"experiments": experiment_metadata}
+            ttl_seconds: Optional per-entry TTL in seconds. Uses config default
+                         when omitted; None means this entry never expires.
             **kwargs: Parameters identifying this data (legacy, use 'on' instead)
 
         Examples:
@@ -998,6 +1006,10 @@ class UnifiedCache(
             if existing:
                 old_meta = existing.get("metadata", {})
                 old_blob_path = old_meta.get("actual_path")
+                if old_blob_path and "://" not in old_blob_path:
+                    old_resolved = self._resolve_actual_path(old_blob_path)
+                    if isinstance(old_resolved, Path):
+                        cleanup.snapshot_previous_blob(old_resolved)
 
             try:
                 # Try zero-disk inline serialization (no file I/O at all)
@@ -1023,12 +1035,6 @@ class UnifiedCache(
                     planned_blob_path = base_file_path.with_suffix(
                         handler.get_file_extension(self.config)
                     )
-                    if old_blob_path and "://" not in old_blob_path:
-                        old_resolved = self._resolve_actual_path(old_blob_path)
-                        if isinstance(old_resolved, Path) and old_resolved.resolve(
-                            strict=False
-                        ) == planned_blob_path.resolve(strict=False):
-                            cleanup.snapshot_previous_blob(old_resolved)
                     self._write_journal.record_intent(
                         cache_key, str(planned_blob_path.relative_to(self.cache_dir))
                     )
@@ -1101,10 +1107,15 @@ class UnifiedCache(
                         if inline["file_hash"] is not None:
                             metadata_dict["file_hash"] = inline["file_hash"]
 
-                # Populate per-entry TTL from config default (if set)
-                default_ttl = self.config.metadata.default_ttl_seconds
-                if default_ttl is not None:
-                    entry_data["ttl_seconds"] = int(default_ttl)
+                # Populate per-entry TTL from explicit write TTL or config default.
+                if ttl_seconds is _DEFAULT_TTL:
+                    entry_ttl = self.config.metadata.default_ttl_seconds
+                else:
+                    entry_ttl = resolve_ttl(
+                        None, ttl_seconds, _param_owner="UnifiedCache.put"
+                    )
+                if entry_ttl is not None:
+                    entry_data["ttl_seconds"] = entry_ttl
                     # expires_at is computed by the backend from created_at + ttl_seconds
 
                 # Sign the entry if signing is enabled
@@ -1172,9 +1183,13 @@ class UnifiedCache(
             Cached data or None if not found/expired
         """
         with self._lock:
-            resolved_ttl = resolve_ttl(
-                ttl, ttl_seconds, _param_owner="UnifiedCache.get"
-            )
+            has_ttl_override = ttl is not None or ttl_seconds is not None
+            if has_ttl_override:
+                resolved_ttl = resolve_ttl(
+                    ttl, ttl_seconds, _param_owner="UnifiedCache.get"
+                )
+            else:
+                resolved_ttl = _DEFAULT_TTL
             cache_key = self._resolve_hash_key_alias(cache_key, hash_key)
             cache_key = self._resolve_cache_key(cache_key, on, kwargs)
 
@@ -1183,7 +1198,12 @@ class UnifiedCache(
 
             # Check if entry exists and is not expired
             entry = self.metadata_backend.get_entry(cache_key)
-            if not entry or self._is_expired(cache_key, resolved_ttl, entry=entry):
+            if not entry or self._is_expired(
+                cache_key,
+                resolved_ttl,
+                entry=entry,
+                use_stored_expires_at=not has_ttl_override,
+            ):
                 self._record_miss()
                 return None
 

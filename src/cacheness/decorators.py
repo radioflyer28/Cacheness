@@ -213,11 +213,13 @@ class cached:
             # Store result in cache using the explicit cache_key parameter
             try:
                 cache_instance = cast(UnifiedCache, self.cache_instance)
-                cache_instance.put(
-                    result,
-                    cache_key=cache_key,
-                    description=f"Cached result for {cache_key}",
-                )
+                put_kwargs: dict[str, Any] = {
+                    "cache_key": cache_key,
+                    "description": f"Cached result for {cache_key}",
+                }
+                if self.ttl_seconds is not None:
+                    put_kwargs["ttl_seconds"] = self.ttl_seconds
+                cache_instance.put(result, **put_kwargs)
                 # Track the cache key for later cleanup
                 with self._lock:
                     self._cache_keys.add(cache_key)
@@ -490,11 +492,13 @@ class cache_if:
             if should_cache:
                 try:
                     cache_instance = cast(UnifiedCache, self.cache_instance)
-                    cache_instance.put(
-                        result,
-                        cache_key=cache_key,
-                        description=f"Cached result for {cache_key}",
-                    )
+                    put_kwargs: dict[str, Any] = {
+                        "cache_key": cache_key,
+                        "description": f"Cached result for {cache_key}",
+                    }
+                    if self.ttl_seconds is not None:
+                        put_kwargs["ttl_seconds"] = self.ttl_seconds
+                    cache_instance.put(result, **put_kwargs)
                     # Track the cache key for later cleanup
                     with self._lock:
                         self._cache_keys.add(cache_key)
