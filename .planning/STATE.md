@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v0.12.0
 milestone_name: Phase Details
-status: executing
-last_updated: "2026-06-15T20:31:43Z"
-last_activity: 2026-06-15 -- Phase 32 Plan 08 complete; full-suite checkpoint has non-POL-08 failures
+status: completed
+last_updated: "2026-06-15T21:01:18.228Z"
+last_activity: 2026-06-15
 progress:
   total_phases: 9
-  completed_phases: 4
+  completed_phases: 5
   total_plans: 29
-  completed_plans: 28
-  percent: 44
+  completed_plans: 29
+  percent: 56
 ---
 
 # Project State
@@ -20,14 +20,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-06-12)
 
 **Core value:** Improve reliability, security, and maintainability of Cacheness without changing public API semantics
-**Current focus:** Phase 32 — Small Fixes & Release Polish
+**Current focus:** v0.12.0 completion review after Phase 32
 
 ## Current Position
 
-Phase: 32
-Plan: 08
-Status: Plan 08 complete; Phase 32 release checkpoint needs follow-up
-Last activity: 2026-06-15 -- Phase 32 Plan 08 complete; full-suite checkpoint has non-POL-08 failures
+Phase: 999.1
+Plan: Not started
+Status: Phase 32 complete and verified; review remaining v0.12.0 roadmap/backlog routing
+Last activity: 2026-06-15 -- Phase 32 verification passed; full suite passed
 
 ## Accumulated Context
 

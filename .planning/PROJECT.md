@@ -14,6 +14,8 @@ Encryption at rest now works with all metadata backends (JSON, SQLite, PostgreSQ
 
 The next milestone is sourced from the 2026-06-12 code review, pending todos, planted seeds, and backlog phase buckets. It focuses on silent data-loss fixes first, then TTL/eviction consistency, multi-process/backend parity, security posture, storage-mode durability decisions, and small independent polish fixes.
 
+Phases 29-32 have landed TTL/eviction consistency, backend parity, security/storage-mode hardening, and small release-polish fixes. Phase 32 finished with formal verification and a full-suite checkpoint: 1,857 passed, 125 skipped.
+
 **Previous:** v0.10.0 Security & Architecture (shipped 2026-04-06) — full security infrastructure, core decomposition, thread safety verification. 1727 tests.
 
 ## Current Milestone: v0.12.0 Reliability Remediation
@@ -83,6 +85,7 @@ Improve reliability, security, and maintainability of Cacheness without changing
 - ✓ Further core.py decomposition (2874 → 1422 lines) — v0.10.0
 - ✓ Thread safety under concurrent access (verified) — v0.10.0
 - ✓ Cross-platform atomic write verification — v0.10.0
+- ✓ Low-risk code review polish: BlobStore metadata immutability, sanitized-key collision prevention, get() metadata read reuse, absolute blob ID rejection, SQLite close-time optimize, S3 namespace delete failure reporting, v0.12.0 version alignment, and root `UnifiedCache` export — v0.12.0 Phase 32
 
 ### Active
 
