@@ -51,9 +51,11 @@ Usage:
 """
 
 import logging
+import os
+import tempfile
 import threading
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union, cast
 from datetime import datetime, timezone
 
 import xxhash
@@ -599,7 +601,11 @@ class BlobStore:
 
             if actual_path_str:
                 resolved = self._resolve_actual_path(actual_path_str)
-                actual_path = Path(resolved)
+                backend_path = str(resolved)
+                if "://" in backend_path:
+                    actual_path = self.cache_dir / Path(actual_path_str).name
+                else:
+                    actual_path = Path(resolved)
             else:
                 # Fallback: try common extensions
                 for ext in [".pkl", ".b2nd", ".parquet", ".npz", ""]:
@@ -609,68 +615,45 @@ class BlobStore:
                         break
                 else:
                     actual_path = self.cache_dir / key
+                backend_path = str(actual_path)
 
-            if not self.blob_backend.exists(str(actual_path)):
+            if not self.blob_backend.exists(backend_path):
                 logger.warning(f"Blob file missing: {actual_path}")
                 return None
 
-            # Decrypt if entry was encrypted
+            # Get the handler based on data type
+            data_type = entry.get("data_type", "object")
+            handler = self.handlers.get_handler_by_type(data_type)
+
+            # Build handler metadata by merging entry with nested metadata
             nested_meta = entry.get("metadata", {})
-            enc_algo = nested_meta.get("encryption_algorithm")
-            temp_path = None
-            read_path = actual_path
-            if enc_algo:
-                if self._encryption_key is None:
-                    logger.warning(
-                        f"Encrypted entry {key} but no encryption key configured"
-                    )
-                    return None
-                import tempfile
-                from ..encryption import decrypt_blob
-
-                ciphertext = actual_path.read_bytes()
-                iv = bytes.fromhex(nested_meta["encryption_iv"])
-                plaintext = decrypt_blob(ciphertext, self._encryption_key, iv)
-                # Write decrypted content to temp file for handler to read
-                tmp_fd = tempfile.NamedTemporaryFile(
-                    dir=actual_path.parent,
-                    delete=False,
-                    suffix=actual_path.suffix,
-                )
-                tmp_fd.write(plaintext)
-                tmp_fd.close()
-                temp_path = Path(tmp_fd.name)
-                read_path = temp_path
-
-            try:
-                # Get the handler based on data type
-                data_type = entry.get("data_type", "object")
-                handler = self.handlers.get_handler_by_type(data_type)
-
-                # Build handler metadata by merging entry with nested metadata
-                nested_meta = entry.get("metadata", {})
-                handler_metadata = {
+            handler_metadata = cast(
+                BlobReadContext,
+                {
                     **entry,
                     **nested_meta,  # Flatten nested metadata to top level
-                }
+                },
+            )
 
-                if handler is None:
-                    # Fall back to generic read
-                    return read_file(read_path)
+            if nested_meta.get("encryption_algorithm"):
+                data = self._read_encrypted_blob(
+                    backend_path,
+                    actual_path,
+                    data_type,
+                    handler_metadata,
+                    missing_key_message=(
+                        f"Encrypted entry {key} but no encryption key configured"
+                    ),
+                )
+            elif handler is None:
+                data = read_file(actual_path)
+            else:
+                data = handler.get(actual_path, handler_metadata)
 
-                # Read using handler
-                data = handler.get(read_path, handler_metadata)
+            # Update access time
+            self.backend.update_access_time(key)
 
-                # Update access time
-                self.backend.update_access_time(key)
-
-                return data
-            finally:
-                if temp_path is not None:
-                    try:
-                        temp_path.unlink()
-                    except OSError:
-                        pass
+            return data
 
     def get_metadata(self, key: str) -> Optional[Dict[str, Any]]:
         """
@@ -1295,36 +1278,76 @@ class BlobStore:
         """
         # Check if blob is encrypted
         enc_algo = handler_metadata.get("encryption_algorithm")
-        temp_path = None
-        read_path = path
         if enc_algo:
-            if self._encryption_key is None:
-                logger.warning(
-                    f"Encrypted blob at {path} but no encryption key configured"
-                )
-                return None
-            import tempfile
-            from ..encryption import decrypt_blob
-
-            ciphertext = path.read_bytes()
-            iv = bytes.fromhex(handler_metadata["encryption_iv"])
-            plaintext = decrypt_blob(ciphertext, self._encryption_key, iv)
-            tmp_fd = tempfile.NamedTemporaryFile(
-                dir=path.parent,
-                delete=False,
-                suffix=path.suffix,
+            actual_path = handler_metadata.get("actual_path")
+            backend_path = (
+                str(self._resolve_actual_path(actual_path))
+                if isinstance(actual_path, str)
+                else str(path)
             )
-            tmp_fd.write(plaintext)
-            tmp_fd.close()
-            temp_path = Path(tmp_fd.name)
-            read_path = temp_path
+            return self._read_encrypted_blob(
+                backend_path,
+                path,
+                data_type,
+                handler_metadata,
+                missing_key_message=(
+                    f"Encrypted blob at {path} but no encryption key configured"
+                ),
+            )
 
+        handler = self.handlers.get_handler_by_type(data_type)
+        if handler is None:
+            return read_file(path)
+        return handler.get(path, handler_metadata)
+
+    def _read_encrypted_blob(
+        self,
+        backend_path: str,
+        display_path: Path,
+        data_type: str,
+        handler_metadata: BlobReadContext,
+        missing_key_message: str,
+    ) -> Any:
+        """Decrypt a blob read through the configured backend."""
+        if self._encryption_key is None:
+            logger.warning(missing_key_message)
+            return None
+
+        from ..encryption import decrypt_blob
+
+        ciphertext = self.blob_backend.read_blob(backend_path)
+        encryption_metadata = cast(dict[str, Any], handler_metadata)
+        iv = bytes.fromhex(encryption_metadata["encryption_iv"])
+        plaintext = decrypt_blob(ciphertext, self._encryption_key, iv)
+
+        handler = self.handlers.get_handler_by_type(data_type)
+        if handler is not None:
+            try:
+                return handler.get_bytes(plaintext, handler_metadata)
+            except NotImplementedError:
+                pass
+
+        suffix = display_path.suffix
+        fd = -1
+        temp_path: Optional[Path] = None
         try:
-            handler = self.handlers.get_handler_by_type(data_type)
+            fd, temp_name = tempfile.mkstemp(dir=self.cache_dir, suffix=suffix)
+            temp_path = Path(temp_name)
+            if os.name != "nt":
+                os.chmod(temp_path, 0o600)
+            with os.fdopen(fd, "wb") as tmp_file:
+                fd = -1
+                tmp_file.write(plaintext)
+
             if handler is None:
-                return read_file(read_path)
-            return handler.get(read_path, handler_metadata)
+                return read_file(temp_path)
+            return handler.get(temp_path, handler_metadata)
         finally:
+            if fd != -1:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
             if temp_path is not None:
                 try:
                     temp_path.unlink()

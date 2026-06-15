@@ -6,7 +6,13 @@ import pytest
 
 cryptography = pytest.importorskip("cryptography")
 
-from cacheness.config import CacheConfig, CacheMetadataConfig, CacheStorageConfig, CompressionConfig, SecurityConfig  # noqa: E402
+from cacheness.config import (  # noqa: E402
+    CacheConfig,
+    CacheMetadataConfig,
+    CacheStorageConfig,
+    CompressionConfig,
+    SecurityConfig,
+)
 from cacheness.core import UnifiedCache as cacheness  # noqa: E402
 from cacheness.encryption import decrypt_blob, derive_encryption_key, encrypt_blob  # noqa: E402
 from cacheness.error_handling import CacheIntegrityError  # noqa: E402

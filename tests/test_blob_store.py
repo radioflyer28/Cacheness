@@ -550,6 +550,7 @@ class TestEncryptedBackendReads:
         )
         key = store.put({"msg": "encrypted memory"}, key="encrypted-memory")
         meta = store.get_metadata(key)
+        assert meta is not None
         actual_path = meta["metadata"]["actual_path"]
         assert actual_path.startswith("memory://")
 
