@@ -15,3 +15,8 @@
 - `uv run ty check src/cacheness/storage/blob_store.py tests/test_blob_store.py` still reports the same two pre-existing `invalid-argument-type` diagnostics in `src/cacheness/storage/blob_store.py` constructor setup. They are unrelated to the POL-02 `_sanitize_key()` change.
 - Including `tests/test_blob_namespace.py` in the full plan ty command also reports pre-existing `possibly-missing-attribute` warnings for tests that access filesystem-backend-only `_namespace` and `base_dir` attributes through the generic `BlobBackend` type.
 - The initial RED pytest command with repository addopts collected unrelated tests instead of only the requested node IDs. The POL-02 regressions were therefore also verified with `-o addopts=''` for scoped evidence.
+
+## 32-05
+
+- `uv run ty check src/cacheness/metadata/sqlite_backend.py tests/test_sqlite_schema_versioning.py tests/test_metadata.py` reports pre-existing SQLAlchemy dynamic-model diagnostics in `src/cacheness/metadata/sqlite_backend.py` plus a pre-existing `pytest.fail(...)` typing false positive in `tests/test_metadata.py`. These are unrelated to the SQLite PRAGMA lifecycle change.
+- Running the plan pytest command without `-o addopts=''` collected the broader suite and surfaced unrelated existing failures in `tests/test_decorators.py::TestCacheIfDecorator::test_cache_if_supports_ttl_parameter`, `tests/test_dunder_methods.py::TestDunderMethods::test_contains_expired_key`, and `tests/test_fault_injection.py::TestOrphanedBlobOnPutCrash::test_failed_same_key_overwrite_preserves_previous_blob`. The POL-06 verification passed with the scoped command documented in the summary.

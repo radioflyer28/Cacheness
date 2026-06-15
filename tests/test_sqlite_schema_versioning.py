@@ -86,6 +86,66 @@ class TestSqliteSchemaVersioning:
         sqlite_backend._run_migrations()
 
 
+class TestSqliteLifecyclePragmas:
+    """Test SQLite connection and close lifecycle PRAGMAs."""
+
+    class _Connection:
+        def __init__(self, calls, fail_optimize=False):
+            self.calls = calls
+            self.fail_optimize = fail_optimize
+
+        def __enter__(self):
+            self.calls.append("enter")
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            self.calls.append("exit")
+            return False
+
+        def execute(self, statement):
+            self.calls.append(f"execute:{statement}")
+            if self.fail_optimize:
+                raise RuntimeError("simulated optimize failure")
+
+    class _Engine:
+        def __init__(self, fail_optimize=False):
+            self.calls = []
+            self.fail_optimize = fail_optimize
+
+        def connect(self):
+            self.calls.append("connect")
+            return TestSqliteLifecyclePragmas._Connection(
+                self.calls, fail_optimize=self.fail_optimize
+            )
+
+        def dispose(self):
+            self.calls.append("dispose")
+
+    def test_close_runs_optimize_before_dispose(self):
+        """close() should run PRAGMA optimize before disposing the engine."""
+        backend = SqliteBackend.__new__(SqliteBackend)
+        engine = self._Engine()
+        backend.engine = engine
+
+        backend.close()
+
+        assert "execute:PRAGMA optimize" in engine.calls
+        assert engine.calls.index("execute:PRAGMA optimize") < engine.calls.index(
+            "dispose"
+        )
+
+    def test_close_disposes_engine_when_optimize_fails(self):
+        """close() should still dispose the engine if optimize is best-effort."""
+        backend = SqliteBackend.__new__(SqliteBackend)
+        engine = self._Engine(fail_optimize=True)
+        backend.engine = engine
+
+        backend.close()
+
+        assert "execute:PRAGMA optimize" in engine.calls
+        assert "dispose" in engine.calls
+
+
 class TestSqliteNamespaceRegistry:
     """Test namespace registry on SqliteBackend."""
 
@@ -1029,8 +1089,12 @@ class TestSqliteV3ToV4RealDataMigration:
         assert custom is not None
         assert custom["description"] == "entry with custom metadata"
         meta = custom.get("metadata", {})
-        # Custom metadata is inside metadata_dict as JSON string
-        metadata_dict = json.loads(meta.get("metadata_dict", "{}"))
+        metadata_value = meta.get("metadata_dict", {})
+        metadata_dict = (
+            metadata_value
+            if isinstance(metadata_value, dict)
+            else json.loads(metadata_value)
+        )
         assert metadata_dict.get("user_tag") == "experiment_42"
         assert metadata_dict.get("model_version") == "v2.1"
 
@@ -1131,7 +1195,12 @@ class TestSqliteV3ToV4RealDataMigration:
             assert entry is not None, f"Entry batch_{i:03d} lost during migration"
             assert entry["description"] == f"batch entry {i}"
             meta = entry.get("metadata", {})
-            metadata_dict = json.loads(meta.get("metadata_dict", "{}"))
+            metadata_value = meta.get("metadata_dict", {})
+            metadata_dict = (
+                metadata_value
+                if isinstance(metadata_value, dict)
+                else json.loads(metadata_value)
+            )
             assert metadata_dict.get("batch_id") == i
             assert metadata_dict.get("run_name") == f"run_{i}"
 

@@ -277,10 +277,8 @@ class SqliteBackend(MetadataBackend):
             cursor.execute(
                 "PRAGMA mmap_size=536870912"
             )  # 512MB memory mapped I/O (doubled)
-            cursor.execute("PRAGMA page_size=32768")  # Larger page size for better I/O
 
             # Query optimization pragmas
-            cursor.execute("PRAGMA optimize")  # Enable query planner optimizations
             cursor.execute("PRAGMA analysis_limit=1000")  # Better statistics
 
             # Concurrent access optimizations
@@ -1344,13 +1342,20 @@ class SqliteBackend(MetadataBackend):
     def close(self):
         """Close all database connections and clean up resources."""
         if hasattr(self, "engine") and self.engine:
-            # Close all connections in the pool
-            self.engine.dispose()
-            # On Windows, we need to be more aggressive
-            import gc
+            try:
+                with self.engine.connect() as connection:
+                    connection.execute(text("PRAGMA optimize"))
+            except Exception as exc:
+                # close() cleanup is best effort; disposal must still happen.
+                logger.debug("SQLite PRAGMA optimize during close failed: %s", exc)
+            finally:
+                # Close all connections in the pool
+                self.engine.dispose()
+                # On Windows, we need to be more aggressive
+                import gc
 
-            gc.collect()  # Force garbage collection to release file handles
-            logger.debug("SQLite engine disposed and connections closed")
+                gc.collect()  # Force garbage collection to release file handles
+                logger.debug("SQLite engine disposed and connections closed")
 
     def __del__(self):
         """Ensure connections are closed when the backend is garbage collected."""
