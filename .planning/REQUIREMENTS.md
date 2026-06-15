@@ -51,7 +51,7 @@
 - [ ] **POL-04**: User-visible package version metadata matches the shipped changelog/version line.
 - [x] **POL-05**: User-provided absolute blob IDs are rejected before path construction.
 - [x] **POL-06**: User SQLite connections apply PRAGMA behavior in the correct lifecycle location.
-- [ ] **POL-07**: User S3 namespace deletion reports per-object failures instead of hiding them.
+- [x] **POL-07**: User S3 namespace deletion reports per-object failures instead of hiding them.
 - [ ] **POL-08**: User can import `UnifiedCache` from the package root without a recurring foot-gun.
 
 ## Future Requirements
@@ -105,7 +105,7 @@
 | POL-04 | Phase 32 | Pending |
 | POL-05 | Phase 32 | Complete |
 | POL-06 | Phase 32 | Complete |
-| POL-07 | Phase 32 | Pending |
+| POL-07 | Phase 32 | Complete |
 | POL-08 | Phase 32 | Pending |
 
 **Coverage:**
