@@ -213,9 +213,7 @@ class TestStorageModeDestructiveWarnings:
         assert storage_cache.metadata_backend.get_entry("clear-me") is None
         self._assert_storage_warning(caplog)
 
-    def test_clear_all_namespaces_warns_and_does_not_hard_raise(
-        self, tmp_path, caplog
-    ):
+    def test_clear_all_namespaces_warns_and_does_not_hard_raise(self, tmp_path, caplog):
         config = CacheConfig(
             cache_dir=str(tmp_path / "store"),
             storage_mode=True,

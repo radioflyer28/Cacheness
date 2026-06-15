@@ -10,6 +10,7 @@ operations to specialized handlers.
 import inspect
 import threading
 import logging
+import warnings
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Optional, Dict, Any, Callable, Tuple
@@ -805,6 +806,18 @@ class UnifiedCache(
         if cleaned > 0:
             logger.info(f"Cleaned up {cleaned} stale write intents")
 
+    def _warn_storage_mode_destructive_api(self, operation: str) -> None:
+        """Warn when explicit cache cleanup APIs can delete storage-mode entries."""
+        if not self.config.storage_mode:
+            return
+
+        message = (
+            f"storage mode destructive API {operation} may delete durable entries; "
+            "continuing because storage mode uses a warning-first policy by default"
+        )
+        logger.warning(message)
+        warnings.warn(message, RuntimeWarning, stacklevel=2)
+
     # ── Shared put helpers ────────────────────────────────────────────
     # Extracted from _storage_mode_put() and put() to eliminate duplicated
     # metadata construction, signing, and stale-blob cleanup logic.
@@ -1125,6 +1138,8 @@ class UnifiedCache(
         if max_size_bytes is None:
             return  # No size limit configured
 
+        self._warn_storage_mode_destructive_api("_enforce_size_limit()")
+
         # Get current total size from metadata backend
         stats = self.metadata_backend.get_stats()
         total_size_bytes = stats.get("total_size_bytes", 0)
@@ -1204,6 +1219,7 @@ class UnifiedCache(
         Delegates blob file cleanup and metadata clearing to BlobStore.clear().
         """
         with self._lock:
+            self._warn_storage_mode_destructive_api("clear_all()")
             removed_count = self._blob_store.clear()
             logger.info(f"Cleared {removed_count} cache entries and cache files")
             return removed_count
@@ -1233,6 +1249,7 @@ class UnifiedCache(
         import shutil
 
         with self._lock:
+            self._warn_storage_mode_destructive_api("clear_all_namespaces()")
             cache_root = Path(self.config.storage.cache_dir)
 
             # Discover namespace blob directories *before* metadata drop
@@ -1288,6 +1305,8 @@ class UnifiedCache(
             # Determine TTL to use
             if ttl_seconds is None:
                 ttl_seconds = self.config.metadata.default_ttl_seconds
+            if ttl_seconds is not None:
+                self._warn_storage_mode_destructive_api("cleanup_expired()")
 
             # Find expired entries by scanning metadata
             now = datetime.now(timezone.utc)

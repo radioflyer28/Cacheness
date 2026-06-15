@@ -44,6 +44,8 @@ When `storage_mode=True`, Cacheness acts as a **persistent key-value store** rat
 
 **Why it matters:** In cache mode, the source of truth is the original computation — losing a cache entry just means recomputing. In storage mode, the cached data *is* the source of truth, so auto-deletion on errors would cause data loss. Storage mode preserves entries on all failures, leaving repair decisions to the caller or `verify_integrity`.
 
+Storage mode does not hard-refuse explicit destructive cache APIs by default. Calls such as `clear_all()`, `clear_all_namespaces()`, `cleanup_expired(ttl_seconds=...)`, and forced size-limit cleanup continue to perform their documented deletion behavior, but they emit both an operational warning log and a `RuntimeWarning` before deleting durable entries. Treat those warnings as a signal that the caller is using cache-oriented cleanup methods against durable storage-mode data. Ordinary storage-mode reads and writes still do not re-enable implicit TTL expiration, size eviction, or invalid-entry deletion.
+
 ## Architecture Overview
 
 Cacheness uses a **two-layer storage architecture**:
