@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v0.12.0
 milestone_name: Phase Details
 status: executing
-last_updated: "2026-06-15T18:22:58.225Z"
-last_activity: 2026-06-15 -- Phase 32 planning complete
+last_updated: "2026-06-15T18:36:45.015Z"
+last_activity: 2026-06-15 -- Phase 32 Plan 02 complete
 progress:
   total_phases: 9
   completed_phases: 4
   total_plans: 29
-  completed_plans: 22
+  completed_plans: 23
   percent: 44
 ---
 
@@ -20,14 +20,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-06-12)
 
 **Core value:** Improve reliability, security, and maintainability of Cacheness without changing public API semantics
-**Current focus:** Phase 31 — Security & Storage-Mode Posture
+**Current focus:** Phase 32 — Small Fixes & Release Polish
 
 ## Current Position
 
 Phase: 32
-Plan: Not started
-Status: Ready to execute
-Last activity: 2026-06-15 -- Phase 32 planning complete
+Plan: 03
+Status: Ready to execute next plan
+Last activity: 2026-06-15 -- Phase 32 Plan 02 complete
 
 ## Accumulated Context
 
@@ -67,6 +67,7 @@ Full review in `docs/CODE_REVIEW_FINDINGS.md`; execution specs in `docs/CODE_REV
 | Phase 31-security-storage-mode-posture P06 | 11min | 2 tasks | 15 files |
 | Phase 31-security-storage-mode-posture P08 | 11min | 2 tasks | 6 files |
 | Phase 32 P01 | 9min | 1 tasks | 2 files |
+| Phase 32 P02 | 8min | 1 tasks | 2 files |
 
 ## Decisions
 
@@ -101,3 +102,4 @@ Full review in `docs/CODE_REVIEW_FINDINGS.md`; execution specs in `docs/CODE_REV
 - [Phase 31-security-storage-mode-posture]: Active signer and active encryption key remain the normal read path; staged signer/decryption are fallback-only. — Completed by Phase 31 Plan 08 / SEC-03 gap closure.
 - [Phase 31-security-storage-mode-posture]: Startup does not replace keys, delete <keyfile>.new, rewrite metadata, or complete rotation implicitly. — Completed by Phase 31 Plan 08 / SEC-03 gap closure.
 - [Phase 32]: BlobStore.put preserves the existing nested metadata contract by copying metadata with dict(metadata or {}) before adding internal fields. — POL-01 requires caller-owned metadata dictionaries to remain unchanged while stored metadata still carries Cacheness internal fields and signatures.
+- [Phase 32]: BlobStore._sanitize_key remains the single key-normalization point; safe keys stay unchanged and transformed keys receive a stable original-key xxh3_64 suffix. — Completed by Phase 32 Plan 02 / POL-02.
