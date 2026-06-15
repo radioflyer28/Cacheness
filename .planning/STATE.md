@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v0.12.0
 milestone_name: Reliability Remediation
 status: executing
-last_updated: "2026-06-15T02:50:27.330Z"
-last_activity: 2026-06-15 -- Phase 31 Plan 07 complete
+last_updated: "2026-06-15T03:04:42.668Z"
+last_activity: 2026-06-15 -- Phase 31 Plan 04 complete
 progress:
   total_phases: 9
   completed_phases: 3
   total_plans: 20
-  completed_plans: 17
-  percent: 85
+  completed_plans: 18
+  percent: 90
 ---
 
 # Project State
@@ -25,9 +25,9 @@ See: .planning/PROJECT.md (updated 2026-06-12)
 ## Current Position
 
 Phase: 31 — Security & Storage-Mode Posture
-Plan: 31-01, 31-02, 31-05, and 31-07 complete; remaining Phase 31 plans pending
+Plan: 31-01, 31-02, 31-04, 31-05, and 31-07 complete; remaining Phase 31 plans pending
 Status: Executing
-Last activity: 2026-06-15 -- Phase 31 Plan 07 complete
+Last activity: 2026-06-15 -- Phase 31 Plan 04 complete
 
 ## Accumulated Context
 
@@ -62,6 +62,7 @@ Full review in `docs/CODE_REVIEW_FINDINGS.md`; execution specs in `docs/CODE_REV
 | Phase 31-security-storage-mode-posture P05 | 9min | 2 tasks | 4 files |
 | Phase 31-security-storage-mode-posture P02 | 12min | 2 tasks | 5 files |
 | Phase 31-security-storage-mode-posture P07 | 7min | 2 tasks | 2 files |
+| Phase 31-security-storage-mode-posture P04 | 8min | 2 tasks | 6 files |
 
 ## Decisions
 
@@ -82,3 +83,6 @@ Full review in `docs/CODE_REVIEW_FINDINGS.md`; execution specs in `docs/CODE_REV
 - [Phase 31-security-storage-mode-posture]: Temp fallback is limited to handlers that raise NotImplementedError and uses mkstemp under cache_dir with best-effort POSIX 0600 permissions.
 - [Phase 31-security-storage-mode-posture]: STRG-03 production code remained unchanged because regressions passed against the existing pre-blob write-intent implementation.
 - [Phase 31-security-storage-mode-posture]: Task 2 was recorded with an empty verification commit to preserve the plan's per-task commit trail without source churn.
+- [Phase 31-security-storage-mode-posture]: Minimum signature-version policy remains signer-level, so legacy compatibility cannot bypass a stricter configured minimum.
+- [Phase 31-security-storage-mode-posture]: BlobStore new writes use canonical fields; old flattened BlobStore signatures are accepted only through an explicit legacy verifier.
+- [Phase 31-security-storage-mode-posture]: SEC-04 canonical signing fields live in src/cacheness/signing_fields.py and are shared by UnifiedCache and BlobStore.
