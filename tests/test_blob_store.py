@@ -72,6 +72,19 @@ class TestBlobStoreBasic:
         result = store.get(key)
         assert result == data
 
+    def test_put_does_not_mutate_caller_metadata(self, store):
+        metadata = {"experiment": "x42"}
+
+        key = store.put({"value": 1}, key="sample", metadata=metadata)
+
+        assert metadata == {"experiment": "x42"}
+        stored = store.get_metadata(key)
+        nested = stored.get("metadata", {})
+        assert nested["experiment"] == "x42"
+        assert nested["actual_path"] == "default/sample.pkl"
+        assert nested["storage_format"] == "pickle"
+        assert nested["file_hash"]
+
     def test_put_get_auto_key(self, store):
         key = store.put(42)
         assert len(key) == 16  # uuid hex[:16]

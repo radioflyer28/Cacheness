@@ -629,7 +629,7 @@ class BlobStore:
             # Note: JsonBackend stores custom fields in nested 'metadata' dict
             # We store file_hash and entry_signature in nested metadata too so
             # JsonBackend preserves them (it only keeps specific top-level fields).
-            custom_metadata = metadata or {}
+            custom_metadata = dict(metadata or {})
             custom_metadata["actual_path"] = self._to_relative_path(final_path)
             custom_metadata["storage_format"] = result.storage_format
             custom_metadata["compression_codec"] = self.compression
