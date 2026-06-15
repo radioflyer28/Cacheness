@@ -268,10 +268,10 @@ Storage mode preserves entries on read/verification failures and disables implic
 Use `uv` only. On Windows include the TensorFlow ignore flag:
 
 ```powershell
-uv run --python 3.12 pytest tests/test_security.py tests/test_cache_signing.py -x -q --ignore=tests/test_tensorflow_handler.py
+uv run --python 3.12 pytest tests/test_cache_signing.py tests/test_key_rotation.py tests/test_key_rotation_api.py tests/test_encryption_at_rest.py -x -q --ignore=tests/test_tensorflow_handler.py
 ```
 
-`tests/test_security.py` is referenced by Phase 31 validation but is absent in the current tree; map those checks to `tests/test_cache_signing.py`, `tests/test_key_rotation.py`, `tests/test_key_rotation_api.py`, `tests/test_encryption_at_rest.py`, and targeted new tests unless the planner creates `tests/test_security.py`.
+`tests/test_security.py` appears in the source review's suggested commands but is absent in the current tree; map those checks to `tests/test_cache_signing.py`, `tests/test_key_rotation.py`, `tests/test_key_rotation_api.py`, `tests/test_encryption_at_rest.py`, and targeted new tests unless the planner intentionally creates a new security test file.
 
 ## No Analog Found
 

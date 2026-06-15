@@ -155,12 +155,14 @@ Downstream agents MUST read these before planning or implementing.
 ### Testing Guidance
 
 - `.planning/codebase/TESTING.md` - Test commands, Windows TensorFlow exclusion, backend skip patterns, and quality gates.
-- `tests/test_security.py` - signature verification, downgrade, unsigned-entry docs-adjacent behavior, key rotation, encryption/security coverage.
+- `tests/test_cache_signing.py` - signature verification, downgrade, and unsigned-entry/security-config coverage.
 - `tests/test_blob_store.py` - BlobStore encrypted reads, backend-routed reads, signing, metadata, and rotation behavior.
 - `tests/test_core.py` - `UnifiedCache` put/get, cleanup, rotation, and end-to-end behavior.
+- `tests/test_key_rotation.py` and `tests/test_key_rotation_api.py` - key rotation API and failure/compatibility coverage.
 - `tests/test_storage_mode.py` - storage-mode durable behavior, destructive API warnings, and write-intent behavior.
 - `tests/test_atomic_writes.py` - write-intent journal and crash-recovery regression patterns.
 - `tests/test_encryption_at_rest.py` - encryption round-trip coverage if present/applicable.
+- `tests/test_handler_bytes_protocol.py` - handler byte-path coverage for in-memory decrypted reads.
 - `tests/test_cache_integrity.py` and `tests/test_cache_integrity_verification.py` - integrity verification compatibility if signing changes touch read/verify paths.
 
 </canonical_refs>
@@ -169,9 +171,10 @@ Downstream agents MUST read these before planning or implementing.
 
 ## Specific Ideas
 
-- TASK-13 tier-1 hint: `uv run pytest tests/test_security.py -x -q --ignore=tests/test_tensorflow_handler.py`.
-- TASK-14 tier-1 hint: `uv run pytest tests/test_blob_store.py tests/test_security.py tests/test_core.py -x -q --ignore=tests/test_tensorflow_handler.py`, plus encryption tests if present.
-- TASK-15 tier-1 hint: `uv run pytest tests/test_security.py tests/test_core.py -x -q --ignore=tests/test_tensorflow_handler.py`.
+- `docs/CODE_REVIEW_ACTIONS.md` names `tests/test_security.py`, but that file is absent in the current tree; map those checks to the live files above instead of planning commands that cannot collect.
+- TASK-13 tier-1 hint, adjusted to live tests: `uv run pytest tests/test_cache_signing.py tests/test_key_rotation_api.py -x -q --ignore=tests/test_tensorflow_handler.py`.
+- TASK-14 tier-1 hint, adjusted to live tests: `uv run pytest tests/test_blob_store.py tests/test_encryption_at_rest.py tests/test_handler_bytes_protocol.py tests/test_core.py -x -q --ignore=tests/test_tensorflow_handler.py`.
+- TASK-15 tier-1 hint, adjusted to live tests: `uv run pytest tests/test_key_rotation.py tests/test_key_rotation_api.py tests/test_core.py tests/test_encryption_at_rest.py -x -q --ignore=tests/test_tensorflow_handler.py`.
 - Storage-mode warning tests should include `tests/test_storage_mode.py` in Tier 1 because `CODE_REVIEW_ACTIONS.md` says any storage-mode deletion/cleanup path must include it.
 - SEC-04 tests should create or mutate equivalent entries through `UnifiedCache` and `BlobStore`, verify both use the shared canonical signing fields for new writes, and include old-shape compatibility coverage.
 - STRG-02 docs should distinguish atomic rename crash consistency from power-loss durability; tests should not pretend to simulate power loss.
