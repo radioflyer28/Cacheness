@@ -49,7 +49,7 @@
 - [x] **POL-02**: User blob keys that require sanitization cannot silently collide with distinct original keys.
 - [x] **POL-03**: User hot-path `get()` calls avoid redundant metadata reads when checking expiry.
 - [ ] **POL-04**: User-visible package version metadata matches the shipped changelog/version line.
-- [ ] **POL-05**: User-provided absolute blob IDs are rejected before path construction.
+- [x] **POL-05**: User-provided absolute blob IDs are rejected before path construction.
 - [ ] **POL-06**: User SQLite connections apply PRAGMA behavior in the correct lifecycle location.
 - [ ] **POL-07**: User S3 namespace deletion reports per-object failures instead of hiding them.
 - [ ] **POL-08**: User can import `UnifiedCache` from the package root without a recurring foot-gun.
@@ -103,7 +103,7 @@
 | POL-02 | Phase 32 | Complete |
 | POL-03 | Phase 32 | Complete |
 | POL-04 | Phase 32 | Pending |
-| POL-05 | Phase 32 | Pending |
+| POL-05 | Phase 32 | Complete |
 | POL-06 | Phase 32 | Pending |
 | POL-07 | Phase 32 | Pending |
 | POL-08 | Phase 32 | Pending |

@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v0.12.0
 milestone_name: Phase Details
 status: executing
-last_updated: "2026-06-15T18:47:00.464Z"
-last_activity: 2026-06-15 -- Phase 32 Plan 03 complete
+last_updated: "2026-06-15T18:56:24Z"
+last_activity: 2026-06-15 -- Phase 32 Plan 04 complete
 progress:
   total_phases: 9
   completed_phases: 4
   total_plans: 29
-  completed_plans: 24
-  percent: 44
+  completed_plans: 25
+  percent: 46
 ---
 
 # Project State
@@ -25,9 +25,9 @@ See: .planning/PROJECT.md (updated 2026-06-12)
 ## Current Position
 
 Phase: 32
-Plan: 04
+Plan: 05
 Status: Ready to execute next plan
-Last activity: 2026-06-15 -- Phase 32 Plan 03 complete
+Last activity: 2026-06-15 -- Phase 32 Plan 04 complete
 
 ## Accumulated Context
 
@@ -69,6 +69,7 @@ Full review in `docs/CODE_REVIEW_FINDINGS.md`; execution specs in `docs/CODE_REV
 | Phase 32 P01 | 9min | 1 tasks | 2 files |
 | Phase 32 P02 | 8min | 1 tasks | 2 files |
 | Phase 32 P03 | 6 min | 1 tasks | 2 files |
+| Phase 32 P04 | 6 min | 1 tasks | 2 files |
 
 ## Decisions
 
@@ -105,3 +106,4 @@ Full review in `docs/CODE_REVIEW_FINDINGS.md`; execution specs in `docs/CODE_REV
 - [Phase 32]: BlobStore.put preserves the existing nested metadata contract by copying metadata with dict(metadata or {}) before adding internal fields. — POL-01 requires caller-owned metadata dictionaries to remain unchanged while stored metadata still carries Cacheness internal fields and signatures.
 - [Phase 32]: BlobStore._sanitize_key remains the single key-normalization point; safe keys stay unchanged and transformed keys receive a stable original-key xxh3_64 suffix. — Completed by Phase 32 Plan 02 / POL-02.
 - [Phase 32]: POL-03 keeps _is_expired() backward compatible by fetching metadata when no entry is provided, while UnifiedCache.get() passes its already-fetched entry on the cache-hit path. — Completed by Phase 32 Plan 03.
+- [Phase 32]: POL-05 rejects absolute raw blob IDs in FilesystemBlobBackend._get_blob_path before separator replacement and base_dir path construction. — Completed by Phase 32 Plan 04.
