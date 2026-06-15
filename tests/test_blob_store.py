@@ -85,6 +85,40 @@ class TestBlobStoreBasic:
         assert nested["storage_format"] == "pickle"
         assert nested["file_hash"]
 
+    def test_sanitized_key_collision_gets_stable_hash_suffix(self, store):
+        transformed_key = store.put("colon value", key="a:b")
+        safe_key = store.put("plain value", key="ab")
+
+        expected_digest = xxhash.xxh3_64("a:b".encode()).hexdigest()[:16]
+        assert safe_key == "ab"
+        assert transformed_key == f"ab_{expected_digest}"
+        assert transformed_key != safe_key
+        assert store.get(transformed_key) == "colon value"
+        assert store.get(safe_key) == "plain value"
+
+    def test_truncated_key_collision_gets_stable_hash_suffix(self, store):
+        first_original = ("x" * 64) + "a"
+        second_original = ("x" * 64) + "b"
+
+        first_key = store.put("first long value", key=first_original)
+        second_key = store.put("second long value", key=second_original)
+
+        first_digest = xxhash.xxh3_64(first_original.encode()).hexdigest()[:16]
+        second_digest = xxhash.xxh3_64(second_original.encode()).hexdigest()[:16]
+        assert first_key == f"{'x' * 48}_{first_digest}"
+        assert second_key == f"{'x' * 48}_{second_digest}"
+        assert first_key != second_key
+        assert store.get(first_key) == "first long value"
+        assert store.get(second_key) == "second long value"
+
+    def test_safe_key_identity_is_preserved(self, store):
+        key = "safe-Key_1.2"
+
+        stored_key = store.put("safe value", key=key)
+
+        assert stored_key == key
+        assert store.get(key) == "safe value"
+
     def test_put_get_auto_key(self, store):
         key = store.put(42)
         assert len(key) == 16  # uuid hex[:16]

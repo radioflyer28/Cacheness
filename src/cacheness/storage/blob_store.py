@@ -1640,9 +1640,12 @@ class BlobStore:
 
     def _sanitize_key(self, key: str) -> str:
         """Sanitize a user-provided key."""
-        # Remove problematic characters
         safe_key = "".join(c for c in key if c.isalnum() or c in "-_.")
-        return safe_key[:64] or self._generate_unique_key()
+        if safe_key == key and len(safe_key) <= 64:
+            return safe_key
+
+        digest = xxhash.xxh3_64(key.encode("utf-8", errors="surrogatepass")).hexdigest()
+        return f"{safe_key[:48]}_{digest[:16]}"
 
     def _generate_unique_key(self) -> str:
         """Generate a unique blob key."""
