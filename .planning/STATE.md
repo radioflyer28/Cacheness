@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v0.12.0
 milestone_name: Reliability Remediation
 status: executing
-last_updated: "2026-06-15T03:04:42.668Z"
-last_activity: 2026-06-15 -- Phase 31 Plan 04 complete
+last_updated: "2026-06-15T03:22:02.422Z"
+last_activity: 2026-06-15 -- Phase 31 Plan 03 complete
 progress:
   total_phases: 9
   completed_phases: 3
   total_plans: 20
-  completed_plans: 18
-  percent: 90
+  completed_plans: 19
+  percent: 95
 ---
 
 # Project State
@@ -25,9 +25,9 @@ See: .planning/PROJECT.md (updated 2026-06-12)
 ## Current Position
 
 Phase: 31 — Security & Storage-Mode Posture
-Plan: 31-01, 31-02, 31-04, 31-05, and 31-07 complete; remaining Phase 31 plans pending
+Plan: 31-01, 31-02, 31-03, 31-04, 31-05, and 31-07 complete; 31-06 pending
 Status: Executing
-Last activity: 2026-06-15 -- Phase 31 Plan 04 complete
+Last activity: 2026-06-15 -- Phase 31 Plan 03 complete
 
 ## Accumulated Context
 
@@ -63,6 +63,7 @@ Full review in `docs/CODE_REVIEW_FINDINGS.md`; execution specs in `docs/CODE_REV
 | Phase 31-security-storage-mode-posture P02 | 12min | 2 tasks | 5 files |
 | Phase 31-security-storage-mode-posture P07 | 7min | 2 tasks | 2 files |
 | Phase 31-security-storage-mode-posture P04 | 8min | 2 tasks | 6 files |
+| Phase 31-security-storage-mode-posture P03 | 14min | 2 tasks | 8 files |
 
 ## Decisions
 
@@ -86,3 +87,7 @@ Full review in `docs/CODE_REVIEW_FINDINGS.md`; execution specs in `docs/CODE_REV
 - [Phase 31-security-storage-mode-posture]: Minimum signature-version policy remains signer-level, so legacy compatibility cannot bypass a stricter configured minimum.
 - [Phase 31-security-storage-mode-posture]: BlobStore new writes use canonical fields; old flattened BlobStore signatures are accepted only through an explicit legacy verifier.
 - [Phase 31-security-storage-mode-posture]: SEC-04 canonical signing fields live in src/cacheness/signing_fields.py and are shared by UnifiedCache and BlobStore.
+- [Phase 31-security-storage-mode-posture]: SEC-03 writes new key bytes to <keyfile>.new and replaces the active key only after rotation succeeds.
+- [Phase 31-security-storage-mode-posture]: UnifiedCache and BlobStore verify existing signed entries with the old signer before re-signing with the staged signer.
+- [Phase 31-security-storage-mode-posture]: Local encrypted blob rotation writes ciphertext to <blob>.rotating and publishes with os.replace.
+- [Phase 31-security-storage-mode-posture]: Leftover <keyfile>.new files are logged as interrupted rotations on startup; full resume remains out of scope.
