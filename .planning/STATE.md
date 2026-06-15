@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v0.12.0
 milestone_name: Phase Details
 status: executing
-last_updated: "2026-06-15T20:16:00Z"
-last_activity: 2026-06-15 -- Phase 32 Plan 07 complete
+last_updated: "2026-06-15T20:31:43Z"
+last_activity: 2026-06-15 -- Phase 32 Plan 08 complete; full-suite checkpoint has non-POL-08 failures
 progress:
   total_phases: 9
   completed_phases: 4
@@ -26,8 +26,8 @@ See: .planning/PROJECT.md (updated 2026-06-12)
 
 Phase: 32
 Plan: 08
-Status: Ready to execute next plan
-Last activity: 2026-06-15 -- Phase 32 Plan 07 complete
+Status: Plan 08 complete; Phase 32 release checkpoint needs follow-up
+Last activity: 2026-06-15 -- Phase 32 Plan 08 complete; full-suite checkpoint has non-POL-08 failures
 
 ## Accumulated Context
 
@@ -73,6 +73,7 @@ Full review in `docs/CODE_REVIEW_FINDINGS.md`; execution specs in `docs/CODE_REV
 | Phase 32 P05 | approx. 35 min | 1 tasks | 3 files |
 | Phase 32 P06 | approx. 35 min | 1 tasks | 3 files |
 | Phase 32 P07 | approx. 30 min | 1 tasks | 3 files |
+| Phase 32 P08 | 15 min | 2 tasks | 3 files |
 
 ## Decisions
 
@@ -114,3 +115,4 @@ Full review in `docs/CODE_REVIEW_FINDINGS.md`; execution specs in `docs/CODE_REV
 - [Phase 32]: S3 namespace deletion reports actual bulk-delete Deleted and Errors counts and logs failed keys. — Completed by Phase 32 Plan 06 / POL-07.
 - [Phase 32]: Package metadata and runtime __version__ are aligned to 0.12.0 while CHANGELOG.md remains marked Unreleased. — Completed by Phase 32 Plan 07 / POL-04.
 - [Phase 32]: uv.lock editable package metadata is kept synchronized with the pyproject/runtime version when uv refreshes it. — Completed by Phase 32 Plan 07 / POL-04.
+- [Phase 32]: UnifiedCache is exported from the package root while cacheness remains a compatibility alias to the same class. — Completed by Phase 32 Plan 08 / POL-08.

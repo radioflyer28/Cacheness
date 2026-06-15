@@ -75,7 +75,7 @@
 - [x] Phase 29: TTL & Eviction Consistency — per-entry expiry, cleanup parity, counters/timestamps, remote eviction (completed 2026-06-14)
 - [x] Phase 30: Multi-Process & Backend Parity — temp files, metadata parity, non-destructive overwrites, blob enumeration (completed 2026-06-14)
 - [x] Phase 31: Security & Storage-Mode Posture — signatures, encrypted reads, key rotation, storage-mode guards, durability contract (completed 2026-06-15)
-- [ ] Phase 32: Small Fixes & Release Polish — independent low-risk fixes and release/version polish
+- [ ] Phase 32: Small Fixes & Release Polish — independent low-risk fixes and release/version polish; final full-suite checkpoint has non-POL-08 failures
 
 </details>
 
@@ -215,7 +215,7 @@ Plans:
 **Goal:** Land low-risk independent code-review fixes and polish the package surface for the v0.12.0 release.
 **Requirements:** POL-01, POL-02, POL-03, POL-04, POL-05, POL-06, POL-07, POL-08
 **Source:** Backlog Phase 999.4, TASK-16 through TASK-23
-**Plans:** 7/8 plans executed
+**Plans:** 8/8 plans executed; final full-suite checkpoint has non-POL-08 failures pending follow-up
 
 Success criteria:
 
