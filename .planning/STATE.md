@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v0.12.0
 milestone_name: Phase Details
-status: planning
-last_updated: "2026-06-15T14:18:29.394Z"
-last_activity: 2026-06-15
+status: executing
+last_updated: "2026-06-15T18:22:58.225Z"
+last_activity: 2026-06-15 -- Phase 32 planning complete
 progress:
   total_phases: 9
   completed_phases: 4
-  total_plans: 21
-  completed_plans: 21
+  total_plans: 29
+  completed_plans: 22
   percent: 44
 ---
 
@@ -26,8 +26,8 @@ See: .planning/PROJECT.md (updated 2026-06-12)
 
 Phase: 32
 Plan: Not started
-Status: Phase 31 complete; ready for re-verification or Phase 32 planning
-Last activity: 2026-06-15
+Status: Ready to execute
+Last activity: 2026-06-15 -- Phase 32 planning complete
 
 ## Accumulated Context
 
@@ -66,6 +66,7 @@ Full review in `docs/CODE_REVIEW_FINDINGS.md`; execution specs in `docs/CODE_REV
 | Phase 31-security-storage-mode-posture P03 | 14min | 2 tasks | 8 files |
 | Phase 31-security-storage-mode-posture P06 | 11min | 2 tasks | 15 files |
 | Phase 31-security-storage-mode-posture P08 | 11min | 2 tasks | 6 files |
+| Phase 32 P01 | 9min | 1 tasks | 2 files |
 
 ## Decisions
 
@@ -99,3 +100,4 @@ Full review in `docs/CODE_REVIEW_FINDINGS.md`; execution specs in `docs/CODE_REV
 - [Phase 31-security-storage-mode-posture]: Interrupted rotation fallback accepts staged signatures only while the protected sibling <keyfile>.new still exists. — Completed by Phase 31 Plan 08 / SEC-03 gap closure.
 - [Phase 31-security-storage-mode-posture]: Active signer and active encryption key remain the normal read path; staged signer/decryption are fallback-only. — Completed by Phase 31 Plan 08 / SEC-03 gap closure.
 - [Phase 31-security-storage-mode-posture]: Startup does not replace keys, delete <keyfile>.new, rewrite metadata, or complete rotation implicitly. — Completed by Phase 31 Plan 08 / SEC-03 gap closure.
+- [Phase 32]: BlobStore.put preserves the existing nested metadata contract by copying metadata with dict(metadata or {}) before adding internal fields. — POL-01 requires caller-owned metadata dictionaries to remain unchanged while stored metadata still carries Cacheness internal fields and signatures.
