@@ -1,5 +1,6 @@
 """Tests for AES-256-GCM encryption at rest (Phase 18 / SEC-03)."""
 
+import os
 import secrets
 import tempfile
 from pathlib import Path
@@ -20,6 +21,10 @@ from cacheness.encryption import decrypt_blob, derive_encryption_key, encrypt_bl
 from cacheness.error_handling import CacheIntegrityError  # noqa: E402
 from cacheness.interfaces import RotationResult  # noqa: E402
 from cacheness.storage.blob_store import BlobStore  # noqa: E402
+
+
+class HardInterruption(BaseException):
+    """Simulate process death after encrypted metadata commit but before key publish."""
 
 
 def _generate_key_file(path):
@@ -77,6 +82,19 @@ def _make_encrypted_blobstore(tmp_path, **overrides):
         config=config,
         namespace="default",
     )
+
+
+def _interrupt_key_publication(monkeypatch, active_key_path: Path) -> None:
+    """Interrupt only ``<keyfile>.new`` publication; allow blob replacements."""
+    staged_key_path = active_key_path.with_name(f"{active_key_path.name}.new")
+    original_replace = os.replace
+
+    def replace_or_interrupt(src, dst):
+        if Path(src) == staged_key_path and Path(dst) == active_key_path:
+            raise HardInterruption("process stopped before active key replacement")
+        return original_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", replace_or_interrupt)
 
 
 # ── Unit tests for encrypt/decrypt module ──────────────────────────
@@ -368,3 +386,35 @@ class TestEncryptionKeyRotation:
         assert direct_blob_writes == []
         assert not list(blob_path.parent.glob("*.rotating"))
         assert cache.get(cache_key="atomic-encrypted") == {"secret": "atomic"}
+
+    def test_hard_interruption_after_staged_encryption_keeps_old_key_entry_readable(
+        self, tmp_path, monkeypatch
+    ):
+        """Fresh encrypted cache readers use staged key fallback after interruption."""
+        cache = _make_encrypted_cache(
+            tmp_path,
+            allow_unsigned_entries=False,
+            delete_invalid_signatures=True,
+        )
+        cache.put({"secret": "alpha"}, cache_key="hard-encrypted-a")
+        cache.put({"secret": "beta"}, cache_key="hard-encrypted-b")
+
+        active_key = tmp_path / "cache_signing_key.bin"
+        old_key_bytes = active_key.read_bytes()
+        staged_key = active_key.with_name(f"{active_key.name}.new")
+        _interrupt_key_publication(monkeypatch, active_key)
+
+        with pytest.raises(HardInterruption):
+            cache.rotate_key(_generate_key_file(tmp_path / "new_key.bin"))
+
+        assert staged_key.exists()
+        assert active_key.read_bytes() == old_key_bytes
+
+        reopened = _make_encrypted_cache(
+            tmp_path,
+            allow_unsigned_entries=False,
+            delete_invalid_signatures=True,
+        )
+
+        assert reopened.get(cache_key="hard-encrypted-a") == {"secret": "alpha"}
+        assert reopened.metadata_backend.get_entry("hard-encrypted-a") is not None

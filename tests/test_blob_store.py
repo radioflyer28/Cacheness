@@ -22,6 +22,10 @@ from cacheness.config import CacheConfig, SecurityConfig
 from cacheness.storage import BlobStore
 
 
+class HardInterruption(BaseException):
+    """Simulate process death after encrypted metadata commit but before key publish."""
+
+
 @pytest.fixture
 def blob_dir(tmp_path):
     """Return a temporary directory for blob storage."""
@@ -654,6 +658,17 @@ class TestEncryptedBackendReads:
 class TestBlobStoreEncryptedRotation:
     """SEC-03 encrypted BlobStore rotation publication guarantees."""
 
+    def _interrupt_key_publication(self, monkeypatch, active_key_path: Path) -> None:
+        staged_key_path = active_key_path.with_name(f"{active_key_path.name}.new")
+        original_replace = os.replace
+
+        def replace_or_interrupt(src, dst):
+            if Path(src) == staged_key_path and Path(dst) == active_key_path:
+                raise HardInterruption("process stopped before active key replacement")
+            return original_replace(src, dst)
+
+        monkeypatch.setattr(os, "replace", replace_or_interrupt)
+
     def test_rotate_key_publishes_encrypted_blob_via_rotating_path(
         self, blob_dir, monkeypatch
     ):
@@ -698,3 +713,51 @@ class TestBlobStoreEncryptedRotation:
         assert direct_blob_writes == []
         assert not list(blob_path.parent.glob("*.rotating"))
         assert store.get(key) == {"secure": "blob"}
+
+    def test_hard_interruption_after_staged_encryption_keeps_old_key_blob_readable(
+        self, blob_dir, monkeypatch
+    ):
+        """Fresh encrypted BlobStore readers use staged key fallback after interruption."""
+        blob_dir.mkdir(parents=True, exist_ok=True)
+        active_key = blob_dir / "cache_signing_key.bin"
+        active_key.write_bytes(secrets.token_bytes(32))
+        config = CacheConfig(
+            cache_dir=blob_dir,
+            security=SecurityConfig(
+                enable_entry_signing=True,
+                enable_content_encryption=True,
+                encryption_key_file="cache_signing_key.bin",
+                allow_unsigned_entries=False,
+                delete_invalid_signatures=True,
+            ),
+        )
+        store = BlobStore(
+            cache_dir=blob_dir,
+            backend="json",
+            enable_signing=True,
+            config=config,
+        )
+        store.put({"secure": "alpha"}, key="hard-encrypted-a")
+        store.put({"secure": "beta"}, key="hard-encrypted-b")
+
+        old_key_bytes = active_key.read_bytes()
+        staged_key = active_key.with_name(f"{active_key.name}.new")
+        self._interrupt_key_publication(monkeypatch, active_key)
+
+        new_key = blob_dir / "new_key.bin"
+        new_key.write_bytes(secrets.token_bytes(32))
+        with pytest.raises(HardInterruption):
+            store.rotate_key(new_key)
+
+        assert staged_key.exists()
+        assert active_key.read_bytes() == old_key_bytes
+
+        reopened = BlobStore(
+            cache_dir=blob_dir,
+            backend="json",
+            enable_signing=True,
+            config=config,
+        )
+
+        assert reopened.get("hard-encrypted-a") == {"secure": "alpha"}
+        assert reopened.get_metadata("hard-encrypted-a") is not None

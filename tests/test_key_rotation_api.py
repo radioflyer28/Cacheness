@@ -1,6 +1,8 @@
 """Tests for rotate_key() API on UnifiedCache and BlobStore."""
 
+import os
 import secrets
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -16,6 +18,10 @@ from cacheness.config import (
 from cacheness.error_handling import CacheSecurityError
 from cacheness.interfaces import RotationResult
 from cacheness.storage.blob_store import BlobStore
+
+
+class HardInterruption(BaseException):
+    """Simulate process death after metadata commit but before key publication."""
 
 
 def _make_signed_cache(tmp_path, **security_overrides):
@@ -40,6 +46,19 @@ def _generate_key_file(path):
     """Write 32 random bytes to a file and return the path."""
     path.write_bytes(secrets.token_bytes(32))
     return path
+
+
+def _interrupt_key_publication(monkeypatch, active_key_path: Path) -> None:
+    """Interrupt only ``<keyfile>.new`` publication; allow blob replacements."""
+    staged_key_path = active_key_path.with_name(f"{active_key_path.name}.new")
+    original_replace = os.replace
+
+    def replace_or_interrupt(src, dst):
+        if Path(src) == staged_key_path and Path(dst) == active_key_path:
+            raise HardInterruption("process stopped before active key replacement")
+        return original_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", replace_or_interrupt)
 
 
 class TestUnifiedCacheRotateKey:
@@ -243,6 +262,38 @@ class TestUnifiedCacheRotateKey:
         assert cache.get(test_key="a") == "alpha"
         assert cache.get(test_key="b") == "beta"
 
+    def test_hard_interruption_after_staged_signature_keeps_old_key_entry_readable(
+        self, tmp_path, monkeypatch
+    ):
+        """A hard interruption after staged signatures keeps old-key reads working."""
+        cache = _make_signed_cache(
+            tmp_path,
+            allow_unsigned_entries=False,
+            delete_invalid_signatures=True,
+        )
+        cache.put("alpha", cache_key="hard-a")
+        cache.put("beta", cache_key="hard-b")
+
+        active_key = tmp_path / "cache_signing_key.bin"
+        old_key_bytes = active_key.read_bytes()
+        staged_key = active_key.with_name(f"{active_key.name}.new")
+        _interrupt_key_publication(monkeypatch, active_key)
+
+        with pytest.raises(HardInterruption):
+            cache.rotate_key(_generate_key_file(tmp_path / "new_key.bin"))
+
+        assert staged_key.exists()
+        assert active_key.read_bytes() == old_key_bytes
+
+        reopened = _make_signed_cache(
+            tmp_path,
+            allow_unsigned_entries=False,
+            delete_invalid_signatures=True,
+        )
+
+        assert reopened.get(cache_key="hard-a") == "alpha"
+        assert reopened.metadata_backend.get_entry("hard-a") is not None
+
 
 class TestBlobStoreRotateKey:
     """Tests for BlobStore.rotate_key()."""
@@ -330,3 +381,52 @@ class TestBlobStoreRotateKey:
         assert active_key.read_bytes() == old_key_bytes
         assert store.get("a") == "blob_a"
         assert store.get("b") == "blob_b"
+
+    def test_blob_store_hard_interruption_after_staged_signature_keeps_old_key_blob_readable(
+        self, tmp_path, monkeypatch
+    ):
+        """BlobStore uses staged signatures after hard interruption before key publish."""
+        blob_dir = tmp_path / "blobs"
+        store = BlobStore(
+            cache_dir=str(blob_dir),
+            backend="json",
+            enable_signing=True,
+            config=CacheConfig(
+                cache_dir=blob_dir,
+                security=SecurityConfig(
+                    enable_entry_signing=True,
+                    allow_unsigned_entries=False,
+                    delete_invalid_signatures=True,
+                ),
+            ),
+        )
+        store.put("blob_a", key="hard-a")
+        store.put("blob_b", key="hard-b")
+
+        active_key = blob_dir / "cache_signing_key.bin"
+        old_key_bytes = active_key.read_bytes()
+        staged_key = active_key.with_name(f"{active_key.name}.new")
+        _interrupt_key_publication(monkeypatch, active_key)
+
+        with pytest.raises(HardInterruption):
+            store.rotate_key(_generate_key_file(tmp_path / "new_blob_key.bin"))
+
+        assert staged_key.exists()
+        assert active_key.read_bytes() == old_key_bytes
+
+        reopened = BlobStore(
+            cache_dir=str(blob_dir),
+            backend="json",
+            enable_signing=True,
+            config=CacheConfig(
+                cache_dir=blob_dir,
+                security=SecurityConfig(
+                    enable_entry_signing=True,
+                    allow_unsigned_entries=False,
+                    delete_invalid_signatures=True,
+                ),
+            ),
+        )
+
+        assert reopened.get("hard-a") == "blob_a"
+        assert reopened.get_metadata("hard-a") is not None
