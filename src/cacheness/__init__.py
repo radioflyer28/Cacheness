@@ -92,7 +92,7 @@ try:
 except ImportError:
     _has_metadata_backends = False
 
-__version__ = "0.6.0"
+__version__ = "0.12.0"
 __author__ = "radioflyer28"
 __email__ = "akgithub.2drwc@aleeas.com"
 
