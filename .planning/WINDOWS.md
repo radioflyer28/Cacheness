@@ -2,9 +2,9 @@
 schema_version: 1
 open_count: 0
 waived_count: 0
-fixed_count: 7
-total_count: 7
-last_updated: 2026-08-29T23:03:46.861Z
+fixed_count: 8
+total_count: 8
+last_updated: 2026-08-29T23:08:07.482Z
 ---
 
 # Broken Windows Ledger
@@ -22,6 +22,7 @@ last_updated: 2026-08-29T23:03:46.861Z
 | 5 | 01 | deviation | tests/test_stored_compatibility.py |  | Decorator fixture startup cleanup is disabled so strict generic locator preflight remains intact and the exact guarded fallback owns in-memory rebasing. | fixed |  | 2026-08-29T23:03:37.544Z | 2026-08-29T23:03:46.637Z |
 | 6 | 01 | deviation | src/cacheness/core.py |  | Invalid current signatures remain fail-closed unless the exact signed split-map discriminator selects the documented legacy verifier. | fixed |  | 2026-08-29T23:03:43.045Z | 2026-08-29T23:03:46.749Z |
 | 7 | 01 | deviation | tests/test_stored_compatibility.py |  | Phase-owned compatibility tests use named local invariance helpers and pass their zero-findings Ruff gate. | fixed |  | 2026-08-29T23:03:43.152Z | 2026-08-29T23:03:46.861Z |
+| 8 | 01 | deviation | src/cacheness/core.py |  | Unrecognized legacy-signature metadata now rejects before unsigned policy and cannot reach a handler. | fixed |  | 2026-08-29T23:08:02.399Z | 2026-08-29T23:08:07.482Z |
 
 ````json
 [
@@ -108,6 +109,18 @@ last_updated: 2026-08-29T23:03:46.861Z
     "reason": "",
     "recorded_at": "2026-08-29T23:03:43.152Z",
     "resolved_at": "2026-08-29T23:03:46.861Z"
+  },
+  {
+    "id": 8,
+    "kind": "deviation",
+    "phase": "01",
+    "file": "src/cacheness/core.py",
+    "line": null,
+    "description": "Unrecognized legacy-signature metadata now rejects before unsigned policy and cannot reach a handler.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-08-29T23:08:02.399Z",
+    "resolved_at": "2026-08-29T23:08:07.482Z"
   }
 ]
 ````

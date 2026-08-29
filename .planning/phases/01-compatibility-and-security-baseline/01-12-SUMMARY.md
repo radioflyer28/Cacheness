@@ -16,9 +16,9 @@ provides:
   - A one-candidate pre-unified decorator lookup with no metadata enumeration
 affects: [phase-02, migration-inputs, metadata-backends, UnifiedCache, decorators]
 actuals:
-  tokens: 22735.5
+  tokens: 23198.5
   tasks: 2
-  commits: 4
+  commits: 5
 tech-stack:
   added: []
   patterns:
@@ -66,7 +66,7 @@ coverage:
         ref: tests/test_stored_compatibility.py#test_decorator_tries_one_historical_candidate_after_current_miss_without_scan
         status: pass
     human_judgment: false
-duration: 35min
+duration: 40min
 completed: 2026-08-29
 status: complete
 ---
@@ -77,9 +77,9 @@ status: complete
 
 ## Performance
 
-- **Duration:** 35min
+- **Duration:** 40min
 - **Started:** 2026-08-29T22:27:35Z
-- **Completed:** 2026-08-29T23:02:20Z
+- **Completed:** 2026-08-29T23:07:10Z
 - **Tasks:** 2/2
 - **Files modified:** 5
 
@@ -100,6 +100,8 @@ Each TDD task was committed atomically:
 2. **Task 2: Add exact signature/decorator adapters and prove all eight production reads**
    - `2b64832` `test(01-12): specify signature and decorator compatibility`
    - `cbf471b` `feat(01-12): add production signature and decorator adapters`
+3. **Wave 6 integration correction: Reject unrecognized legacy-signature metadata**
+   - `ff4b84f` `fix(01-12): reject unrecognized legacy signatures`
 
 ## Files Created/Modified
 
@@ -143,9 +145,17 @@ Each TDD task was committed atomically:
 - **Verification:** `uv run ruff check tests/test_stored_compatibility.py` passed.
 - **Committed in:** `cbf471b`
 
+**4. [Rule 1 - Security] Rejected unknown legacy-signature-shaped metadata**
+- **Found during:** Wave 6 full-suite integration gate
+- **Issue:** An entry with `legacy_entry_signature` but no exact compatibility discriminator could fall through to the unsigned-entry policy.
+- **Fix:** Reject every unrecognized legacy-signature-shaped entry before current-signature or unsigned authorization and add a no-handler regression.
+- **Files modified:** `src/cacheness/core.py`, `tests/test_stored_compatibility.py`
+- **Verification:** The reported containment regression, focused signature tests, corpus validator, required Plan 12 suite, and phase-owned Ruff check passed.
+- **Committed in:** `ff4b84f`
+
 ---
 
-**Total deviations:** 3 auto-fixed (2 Rule 1, 1 Rule 2)
+**Total deviations:** 4 auto-fixed (3 Rule 1, 1 Rule 2)
 **Impact on plan:** The corrections preserve strict locator/signature security and phase-owned test quality without broadening supported formats or storage behavior.
 
 ## Issues Encountered
@@ -164,7 +174,7 @@ None - no external service configuration required.
 ## Self-Check: PASSED
 
 - `01-12-SUMMARY.md` exists at the phase output path.
-- All four Task 1/Task 2 TDD commits (`a1dedbc`, `b109517`, `2b64832`, and `cbf471b`) are present in git history.
+- All five Plan 01-12 commits (`a1dedbc`, `b109517`, `2b64832`, `cbf471b`, and `ff4b84f`) are present in git history.
 
 ---
 *Phase: 01-compatibility-and-security-baseline*
