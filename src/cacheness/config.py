@@ -244,6 +244,7 @@ class HandlerConfig:
     """Configuration for data type handlers."""
 
     handler_priority: Optional[List[str]] = None
+    allow_trusted_object_arrays: bool = False
 
     # Individual handler enable/disable flags
     enable_pandas_dataframes: bool = True
@@ -380,6 +381,7 @@ class CacheConfig:
         enable_polars_series: Optional[bool] = None,
         enable_numpy_arrays: Optional[bool] = None,
         enable_object_pickle: Optional[bool] = None,
+        allow_trusted_object_arrays: Optional[bool] = None,
         enable_tensorflow_tensors: Optional[bool] = None,
         enable_dill_fallback: Optional[bool] = None,
         # Additional useful parameters
@@ -460,6 +462,8 @@ class CacheConfig:
             self.handlers.enable_numpy_arrays = enable_numpy_arrays
         if enable_object_pickle is not None:
             self.handlers.enable_object_pickle = enable_object_pickle
+        if allow_trusted_object_arrays is not None:
+            self.handlers.allow_trusted_object_arrays = allow_trusted_object_arrays
         if enable_tensorflow_tensors is not None:
             self.handlers.enable_tensorflow_tensors = enable_tensorflow_tensors
         if enable_dill_fallback is not None:
@@ -542,6 +546,7 @@ class CacheConfig:
         """Validate overall configuration consistency."""
         # Validate backend compatibility
         self._validate_backend_compatibility()
+        self._validate_trusted_object_array_configuration()
         
         logger.info("Cache configuration initialized with focused sub-configurations")
     
@@ -580,6 +585,33 @@ class CacheConfig:
                 f"Incompatible backend combination: ephemeral metadata backend '{metadata_backend}' "
                 f"should not be used with remote blob backend '{blob_backend}'. "
                 f"Memory metadata would be lost on restart while blobs persist in '{blob_backend}'."
+            )
+
+    def _validate_trusted_object_array_configuration(self) -> None:
+        """Require complete authenticity policy before enabling object arrays.
+
+        Object-dtype NumPy arrays require pickle semantics. They may therefore
+        cross the executable ObjectHandler boundary only after their payload and
+        metadata are authenticated by the normal cache read gate.
+        """
+        if not self.handlers.allow_trusted_object_arrays:
+            return
+
+        if not self.handlers.enable_object_pickle:
+            raise ValueError(
+                "allow_trusted_object_arrays requires enable_object_pickle=True"
+            )
+        if not self.security.enable_entry_signing:
+            raise ValueError(
+                "allow_trusted_object_arrays requires enable_entry_signing=True"
+            )
+        if not self.metadata.verify_cache_integrity:
+            raise ValueError(
+                "allow_trusted_object_arrays requires verify_cache_integrity=True"
+            )
+        if self.security.allow_unsigned_entries:
+            raise ValueError(
+                "allow_trusted_object_arrays requires allow_unsigned_entries=False"
             )
 
     # Add property accessors for backwards compatibility

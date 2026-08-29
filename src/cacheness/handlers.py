@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 import logging
 import sys
+import warnings
 
 # Import focused interfaces
 from .interfaces import (
@@ -206,6 +207,18 @@ def _legacy_array_nbytes(shape: tuple[int, ...], dtype: np.dtype[Any]) -> int:
     if dtype.itemsize <= 0 or element_count > sys.maxsize // dtype.itemsize:
         _invalid_legacy_array("Legacy array byte count overflows checked arithmetic")
     return element_count * dtype.itemsize
+
+
+def _contains_object_dtype_array(data: Any) -> bool:
+    """Return whether an array payload would require pickle semantics."""
+    if isinstance(data, np.ndarray):
+        return bool(data.dtype.hasobject)
+    if isinstance(data, dict):
+        return any(
+            isinstance(value, np.ndarray) and value.dtype.hasobject
+            for value in data.values()
+        )
+    return False
 
 # Log DataFrame backend availability with debug info
 if POLARS_AVAILABLE and PANDAS_AVAILABLE:
@@ -531,7 +544,7 @@ class PandasDataFrameHandler(CacheHandler):
 
 
 class ArrayHandler(CacheHandler):
-    """Handler for NumPy arrays using blosc2 or NPZ format."""
+    """Handler for native NPZ arrays and read-only legacy Blosc2 payloads."""
 
     def can_handle(self, data: Any) -> bool:
         """Check if data is a NumPy array or dict of arrays."""
@@ -543,6 +556,11 @@ class ArrayHandler(CacheHandler):
 
     def put(self, data: Any, file_path: Path, config: Any) -> Dict[str, Any]:
         """Store array(s) using optimal format."""
+        if _contains_object_dtype_array(data):
+            raise CacheLegacyFormatError(
+                "Object-dtype arrays require explicit trusted ObjectHandler routing",
+                reason=CacheReason.UNSAFE_OBJECT_ARRAY,
+            )
         if isinstance(data, np.ndarray):
             return self._put_single_array(data, file_path, config)
         elif isinstance(data, dict):
@@ -555,29 +573,14 @@ class ArrayHandler(CacheHandler):
     def _put_single_array(
         self, data: np.ndarray, file_path: Path, config: Any
     ) -> Dict[str, Any]:
-        """Store a single numpy array, trying blosc2 first, then NPZ fallback."""
-        # Try blosc2 compression first if enabled
-        if config.compression.use_blosc2_arrays and BLOSC2_AVAILABLE:
-            try:
-                # Update file path for blosc2 format
-                blosc2_path = file_path.with_suffix("").with_suffix(".b2nd")
-                self._write_blosc2_array(data, blosc2_path, config)
+        """Store a single ordinary array in NumPy's native NPZ container."""
+        if config.compression.use_blosc2_arrays:
+            warnings.warn(
+                "Blosc2 raw-array writes are deprecated; new arrays use native NPZ",
+                DeprecationWarning,
+                stacklevel=2,
+            )
 
-                return {
-                    "storage_format": "blosc2",
-                    "file_size": blosc2_path.stat().st_size,
-                    "actual_path": str(blosc2_path),
-                    "metadata": {
-                        "shape": data.shape,
-                        "dtype": str(data.dtype),
-                        "storage_format": "blosc2",
-                        "compression": config.compression.blosc2_array_codec,
-                    },
-                }
-            except Exception as e:
-                logger.warning(f"blosc2 compression failed, falling back to NPZ: {e}")
-
-        # Fallback to NPZ format
         npz_path = file_path.with_suffix("").with_suffix(".npz")
         if config.compression.npz_compression:
             np.savez_compressed(npz_path, data=data)
@@ -603,6 +606,13 @@ class ArrayHandler(CacheHandler):
         # Filter to only numpy arrays
         array_data = {k: v for k, v in data.items() if isinstance(v, np.ndarray)}
 
+        if config.compression.use_blosc2_arrays:
+            warnings.warn(
+                "Blosc2 raw-array writes are deprecated; new arrays use native NPZ",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
         npz_path = file_path.with_suffix("").with_suffix(".npz")
         if config.compression.npz_compression:
             np.savez_compressed(npz_path, **array_data)
@@ -622,42 +632,6 @@ class ArrayHandler(CacheHandler):
                 "compression": "zlib" if config.compression.npz_compression else "none",
             },
         }
-
-    def _write_blosc2_array(
-        self, data: np.ndarray, file_path: Path, config: Any
-    ) -> None:
-        """Write numpy array to file using blosc2 compression with metadata."""
-        if not BLOSC2_AVAILABLE:
-            raise ImportError(
-                "blosc2 is required for array compression but is not available"
-            )
-
-        # Compress the array data using blosc2.compress2 (no 2GB limit)
-        compressed_data = blosc2.compress2(
-            data,
-            cparams={
-                'typesize': data.dtype.itemsize,
-                'clevel': config.compression.blosc2_array_clevel,
-                'codec': getattr(
-                    blosc2.Codec,
-                    config.compression.blosc2_array_codec.upper(),
-                    blosc2.Codec.LZ4,
-                ),
-            },
-        )
-
-        # Write compressed data and metadata to file
-        with open(file_path, "wb") as f:
-            # Write shape and dtype info first
-            shape_bytes = str(data.shape).encode("utf-8")
-            dtype_bytes = str(data.dtype).encode("utf-8")
-
-            # Write metadata lengths and data
-            f.write(len(shape_bytes).to_bytes(4, "little"))
-            f.write(shape_bytes)
-            f.write(len(dtype_bytes).to_bytes(4, "little"))
-            f.write(dtype_bytes)
-            f.write(compressed_data)
 
     def _read_blosc2_array(self, file_path: Path) -> np.ndarray:
         """Read a bounded, read-only historical Blosc2 raw-array payload."""
@@ -742,10 +716,8 @@ class ArrayHandler(CacheHandler):
             npz_path = file_path.with_suffix("").with_suffix(".npz")
             if not npz_path.exists():
                 raise FileNotFoundError(f"Declared array payload is missing: {file_path}")
-            data = np.load(npz_path, allow_pickle=True)
-
-            # Return single array if only one, otherwise return dict
-            arrays = {key: data[key] for key in data.files}
+            with np.load(npz_path, allow_pickle=False) as data:
+                arrays = {key: data[key] for key in data.files}
             if len(arrays) == 1:
                 return list(arrays.values())[0]
             return arrays
@@ -756,9 +728,7 @@ class ArrayHandler(CacheHandler):
         )
 
     def get_file_extension(self, config: Any) -> str:
-        """Get file extension for arrays (determined dynamically)."""
-        if config.compression.use_blosc2_arrays and BLOSC2_AVAILABLE:
-            return ".b2nd"
+        """Get the native extension used by all new ordinary array writes."""
         return ".npz"
 
     @property
@@ -1343,6 +1313,9 @@ class HandlerRegistry:
 
     def get_handler(self, data: Any) -> CacheHandler:
         """Get the appropriate handler for the given data."""
+        if _contains_object_dtype_array(data):
+            return self._get_trusted_object_array_handler()
+
         for handler in self.handlers:
             # Try to pass config to can_handle if the method supports it
             try:
@@ -1354,6 +1327,41 @@ class HandlerRegistry:
                     return handler
 
         raise ValueError(f"No handler available for data type: {type(data)}")
+
+    def _get_trusted_object_array_handler(self) -> CacheHandler:
+        """Return ObjectHandler only for the complete trusted-array policy."""
+        config = self.config
+        handlers = getattr(config, "handlers", None)
+        security = getattr(config, "security", None)
+        metadata = getattr(config, "metadata", None)
+        enabled = bool(
+            handlers
+            and handlers.allow_trusted_object_arrays
+            and handlers.enable_object_pickle
+            and security
+            and security.enable_entry_signing
+            and not security.allow_unsigned_entries
+            and metadata
+            and metadata.verify_cache_integrity
+        )
+        if not enabled:
+            raise CacheLegacyFormatError(
+                "Object-dtype arrays require explicit trusted ObjectHandler routing",
+                reason=CacheReason.UNSAFE_OBJECT_ARRAY,
+            )
+
+        for handler in self.handlers:
+            if isinstance(handler, ObjectHandler):
+                logger.warning(
+                    "Routing object-dtype array through trusted ObjectHandler",
+                    extra={"handler": "object", "trust_boundary": "object_array"},
+                )
+                return handler
+
+        raise CacheLegacyFormatError(
+            "Trusted object-array routing requires the ObjectHandler",
+            reason=CacheReason.UNSAFE_OBJECT_ARRAY,
+        )
 
     def get_handler_by_type(self, data_type: str) -> CacheHandler:
         """Get handler by data type string."""

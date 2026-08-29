@@ -228,6 +228,28 @@ def test_new_numeric_arrays_always_use_native_npz_with_pickle_disabled(
     with np.load(result["actual_path"], allow_pickle=False) as archive:
         np.testing.assert_array_equal(archive["data"], np.arange(6, dtype=np.int32))
 
+    assert not hasattr(handler, "_write_blosc2_array")
+
+
+def test_new_array_dictionaries_warn_and_use_native_npz(tmp_path: Path) -> None:
+    """The deprecated raw-array flag has identical behavior for array mappings."""
+    config = CacheConfig(compression=CompressionConfig(use_blosc2_arrays=True))
+    handler = ArrayHandler()
+
+    with pytest.warns(DeprecationWarning, match="Blosc2"):
+        result = handler.put(
+            {"left": np.array([1]), "right": np.array([2])},
+            tmp_path / "array-dict.bin",
+            config,
+        )
+
+    assert result["storage_format"] == "npz"
+    assert Path(result["actual_path"]).suffix == ".npz"
+    assert not (tmp_path / "array-dict.b2nd").exists()
+    with np.load(result["actual_path"], allow_pickle=False) as archive:
+        np.testing.assert_array_equal(archive["left"], np.array([1]))
+        np.testing.assert_array_equal(archive["right"], np.array([2]))
+
 
 @pytest.mark.parametrize(
     "factory",
@@ -334,7 +356,7 @@ def test_untrusted_object_arrays_never_reach_object_handler(
         entry = cache.metadata_backend.get_entry(key)
         assert entry is not None
         metadata = entry["metadata"]
-        evidence_path = Path(entry["actual_path"])
+        evidence_path = Path(metadata["actual_path"])
 
         if rejection == "signature":
             metadata["entry_signature"] = "wrong-signature"
