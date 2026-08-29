@@ -6,6 +6,67 @@ This guide covers cache entry signing, integrity protection, and security best p
 
 Cacheness provides cryptographic signing for cache metadata entries to prevent tampering with the SQLite database or JSON metadata files. This ensures cache integrity and detects unauthorized modifications.
 
+## Trusted Payload and Executable Serializer Boundary
+
+Cacheness treats application payloads and cache control data differently. Cache
+metadata, persisted locators, and legacy headers are untrusted inputs: they are
+validated and malformed metadata or a malformed legacy header fails closed.
+Application payloads are trusted only when they come from a producer that your
+application trusts.
+
+### Pickle and dill are executable serialization
+
+`pickle` and `dill` can execute arbitrary code while deserializing. Do not load
+them from an untrusted producer, even when a cache entry has a valid signature,
+HMAC, or content digest. Those integrity controls detect unauthorized changes
+and establish authenticity for the configured trust boundary; they do not
+sandbox deserialization or make hostile executable serialization safe.
+
+Treat a missing key, an invalid signature, or a failed integrity check as a
+failed cache entry. Retaining invalid evidence for debugging never authorizes
+its payload for deserialization.
+
+### Safe array defaults and explicit object-array opt-in
+
+Ordinary NumPy arrays use native NPZ and load with `allow_pickle=False`.
+Object-dtype arrays need pickle semantics, so they cross into `ObjectHandler`
+only for trusted application payloads and only when every predicate below is
+set together:
+
+```python
+from cacheness import (
+    CacheConfig,
+    CacheMetadataConfig,
+    HandlerConfig,
+    SecurityConfig,
+)
+
+trusted_object_array_config = CacheConfig(
+    handlers=HandlerConfig(
+        allow_trusted_object_arrays=True,
+        enable_object_pickle=True,
+    ),
+    metadata=CacheMetadataConfig(verify_cache_integrity=True),
+    security=SecurityConfig(
+        enable_entry_signing=True,
+        allow_unsigned_entries=False,
+    ),
+)
+```
+
+This opt-in preserves an authenticity and integrity gate for trusted payloads;
+it is not a safe-unpickling mode for hostile data. Keep the default
+`allow_trusted_object_arrays=False` unless your application controls every
+payload producer and key-management boundary.
+
+### Native formats and legacy compatibility
+
+Native handlers are the format owners for new payloads. The former
+Cacheness raw-array header is a read-only compatibility artifact, not a
+format for new writes. A declared malformed or unsafe legacy header is rejected
+instead of guessing another sidecar or enabling pickle. This guide does not
+promise a replacement container or a stored-data migration workflow.
+
 ## Quick Start
 
 ```python
@@ -48,7 +109,7 @@ Cacheness signs **11 fields** by default for enhanced security:
 | `file_hash` | Content integrity | Detects file tampering |
 | `object_type` | Original object type | Prevents type spoofing |
 | `storage_format` | Serialization format | Detects format tampering |
-| `serializer` | Serializer used | Prevents deserialize attacks |
+| `serializer` | Serializer used | Binds the declared serializer metadata |
 | `compression_codec` | Compression method | Detects compression tampering |
 | `actual_path` | File location | Prevents path substitution |
 | `created_at` | Timestamp | Prevents replay attacks |
@@ -153,8 +214,8 @@ cache.put({"results": [1, 2, 3]}, experiment="exp_001")
 data = cache.get(experiment="exp_001")  # ✅ Signature valid
 
 # If signature verification fails:
-# - delete_invalid_signatures=True → Entry deleted, returns None
-# - delete_invalid_signatures=False → Warning logged, data returned
+# - delete_invalid_signatures=True → Entry removed, returns None
+# - delete_invalid_signatures=False → Evidence retained, returns None
 ```
 
 ### Handling Invalid Signatures
@@ -220,12 +281,12 @@ container_config = CacheConfig(
 )
 ```
 
-## Backward Compatibility
+## Unsigned Entry Compatibility
 
-### Migration from Unsigned Caches
+### Allowing Existing Unsigned Entries
 
 ```python
-# Gradual migration - allows both signed and unsigned entries
+# Compatibility setting - allows both signed and unsigned entries
 migration_config = CacheConfig(
     security=SecurityConfig(
         enable_entry_signing=True,
@@ -234,6 +295,9 @@ migration_config = CacheConfig(
     )
 )
 ```
+
+This setting does not make untrusted executable payloads safe and does not
+perform stored-data migration.
 
 ### Disabling Signing
 

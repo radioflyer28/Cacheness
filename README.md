@@ -1,6 +1,6 @@
 # Cacheness
 
-Fast Python disk cache with key-value store hashing and a "cachetools-like" decorator. Caches NumPy/Pandas/Polars natively; other objects use pickle. Uses Blosc2 for fast compression.
+Fast Python disk cache with key-value store hashing and a "cachetools-like" decorator. Caches NumPy/Pandas/Polars natively; trusted application objects can use pickle. Uses Blosc2 for fast compression.
 
 **Key Features:**
 - **Function decorators** for automatic caching with `@cached`
@@ -423,6 +423,15 @@ See [API_REFERENCE.md](docs/API_REFERENCE.md) for full `BlobStore` documentation
 
 ## Security and Integrity
 
+### Serializer Trust Boundary
+
+`pickle` and `dill` can execute arbitrary code during deserialization. Use them
+only for trusted application payloads; a signature, HMAC, or integrity digest
+can detect unauthorized changes but does not sandbox hostile payloads. Ordinary
+NumPy arrays use native NPZ with pickle disabled. Object-dtype arrays require
+the explicit trusted-object configuration described in the canonical
+[Security Guide](docs/SECURITY.md#trusted-payload-and-executable-serializer-boundary).
+
 ### Cache Entry Signing
 
 Protect cache metadata from tampering with HMAC-SHA256 signatures:
@@ -502,7 +511,7 @@ data = cache.get(model="xgboost", dataset="training")
 
 # Invalid signatures are handled based on configuration:
 # delete_invalid_signatures=True  → Entry deleted, cache miss returned
-# delete_invalid_signatures=False → Warning logged, data still returned
+# delete_invalid_signatures=False → Evidence retained, cache miss returned
 ```
 
 **Use Cases:**
