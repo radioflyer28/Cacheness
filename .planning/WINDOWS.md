@@ -2,9 +2,9 @@
 schema_version: 1
 open_count: 0
 waived_count: 0
-fixed_count: 4
-total_count: 4
-last_updated: 2026-08-29T22:17:14.936Z
+fixed_count: 7
+total_count: 7
+last_updated: 2026-08-29T23:03:46.861Z
 ---
 
 # Broken Windows Ledger
@@ -19,6 +19,9 @@ last_updated: 2026-08-29T22:17:14.936Z
 | 2 | 01 | deviation | src/cacheness/sql_cache.py |  | Removed duplicate best-effort gap failure logging so each unresolved condition emits one structured record. | fixed |  | 2026-08-29T20:34:13.738Z | 2026-08-29T20:35:05.358Z |
 | 3 | 01 | deviation | tests/fixtures/compat/validate_corpus.py |  | Added direct verification for the declared 0.3.14 unified JSON key and signed entry. | fixed |  | 2026-08-29T22:17:11.298Z | 2026-08-29T22:17:14.838Z |
 | 4 | 01 | deviation | tests/fixtures/compat/validate_corpus.py |  | Added read-only provenance verification for the 0.3.14 SQLite schema and data_version. | fixed |  | 2026-08-29T22:17:11.407Z | 2026-08-29T22:17:14.936Z |
+| 5 | 01 | deviation | tests/test_stored_compatibility.py |  | Decorator fixture startup cleanup is disabled so strict generic locator preflight remains intact and the exact guarded fallback owns in-memory rebasing. | fixed |  | 2026-08-29T23:03:37.544Z | 2026-08-29T23:03:46.637Z |
+| 6 | 01 | deviation | src/cacheness/core.py |  | Invalid current signatures remain fail-closed unless the exact signed split-map discriminator selects the documented legacy verifier. | fixed |  | 2026-08-29T23:03:43.045Z | 2026-08-29T23:03:46.749Z |
+| 7 | 01 | deviation | tests/test_stored_compatibility.py |  | Phase-owned compatibility tests use named local invariance helpers and pass their zero-findings Ruff gate. | fixed |  | 2026-08-29T23:03:43.152Z | 2026-08-29T23:03:46.861Z |
 
 ````json
 [
@@ -69,6 +72,42 @@ last_updated: 2026-08-29T22:17:14.936Z
     "reason": "",
     "recorded_at": "2026-08-29T22:17:11.407Z",
     "resolved_at": "2026-08-29T22:17:14.936Z"
+  },
+  {
+    "id": 5,
+    "kind": "deviation",
+    "phase": "01",
+    "file": "tests/test_stored_compatibility.py",
+    "line": null,
+    "description": "Decorator fixture startup cleanup is disabled so strict generic locator preflight remains intact and the exact guarded fallback owns in-memory rebasing.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-08-29T23:03:37.544Z",
+    "resolved_at": "2026-08-29T23:03:46.637Z"
+  },
+  {
+    "id": 6,
+    "kind": "deviation",
+    "phase": "01",
+    "file": "src/cacheness/core.py",
+    "line": null,
+    "description": "Invalid current signatures remain fail-closed unless the exact signed split-map discriminator selects the documented legacy verifier.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-08-29T23:03:43.045Z",
+    "resolved_at": "2026-08-29T23:03:46.749Z"
+  },
+  {
+    "id": 7,
+    "kind": "deviation",
+    "phase": "01",
+    "file": "tests/test_stored_compatibility.py",
+    "line": null,
+    "description": "Phase-owned compatibility tests use named local invariance helpers and pass their zero-findings Ruff gate.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-08-29T23:03:43.152Z",
+    "resolved_at": "2026-08-29T23:03:46.861Z"
   }
 ]
 ````

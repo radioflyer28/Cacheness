@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 01
 current_phase_name: Compatibility and Security Baseline
 status: executing
-stopped_at: Completed 01-11-PLAN.md
-last_updated: "2026-08-29T22:17:24.973Z"
+stopped_at: Completed 01-12-PLAN.md
+last_updated: "2026-08-29T23:03:59.717Z"
 last_activity: 2026-08-29
 last_activity_desc: Phase 01 execution started
-state_head: c6301a68a3ca2bba25d34a6307db4776476828c7
+state_head: cbf471b21173cf5b20dcd101c98a31803496071e
 progress:
   total_phases: 8
   completed_phases: 0
   total_plans: 12
-  completed_plans: 10
+  completed_plans: 11
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-08-29)
 ## Current Position
 
 Phase: 01 (Compatibility and Security Baseline) — EXECUTING
-Plan: 11 of 12
+Plan: 12 of 12
 Status: Ready to execute
 Last activity: 2026-08-29 — Phase 01 execution started
 
@@ -69,6 +69,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P05 | 6min | 2 tasks | 4 files |
 | Phase 01 P10 | 5min | 2 tasks | 8 files |
 | Phase 01 P11 | 4min | 2 tasks | 8 files |
+| Phase 01 P12 | 35min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -107,6 +108,9 @@ Recent decisions affecting current work:
 - [Phase 01]: The 0.3.13 decorator compatibility path accepts one recorded candidate and derived storage key; it never scans metadata.
 - [Phase 01]: Current JSON fixture provenance records one exact unified key that the independent validator recomputes and looks up directly.
 - [Phase 01]: Current SQLite control provenance records the exact denormalized schema, metadata_json absence, and read-only data_version through a copied read-only URI.
+- [Phase 01]: Exact legacy metadata layouts are read-only; successful reads use process-local counters only.
+- [Phase 01]: Current signature verification remains first; only the signed split-map discriminator enables the exact six-field legacy HMAC fallback.
+- [Phase 01]: Decorator compatibility derives one 0.3.13 candidate after a current-key miss and never scans metadata.
 
 ### Pending Todos
 
@@ -130,6 +134,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-29T22:17:24.963Z
-Stopped at: Completed 01-11-PLAN.md
+Last session: 2026-08-29T23:03:59.707Z
+Stopped at: Completed 01-12-PLAN.md
 Resume file: None
