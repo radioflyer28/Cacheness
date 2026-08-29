@@ -365,13 +365,11 @@ class TestSQLCache:
 
 def test_import_availability():
     """Test that imports work correctly from main package"""
-    try:
-        from cacheness import SqlCache, SqlCacheAdapter
-        assert SqlCache is not None
-        assert SqlCacheAdapter is not None
-    except ImportError:
-        # This is expected if SQLAlchemy is not installed
-        pass
+    from cacheness import SqlCache as PublicSqlCache
+    from cacheness import SqlCacheAdapter as PublicSqlCacheAdapter
+
+    assert PublicSqlCache is SqlCache
+    assert PublicSqlCacheAdapter is SqlCacheAdapter
 
 
 def test_backend_selection_integration():
