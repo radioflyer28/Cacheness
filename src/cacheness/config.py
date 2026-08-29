@@ -33,9 +33,8 @@ class CacheStorageConfig:
         if self.max_cache_size_mb is not None and self.max_cache_size_mb <= 0:
             raise ValueError("max_cache_size_mb must be positive")
 
-        # Convert relative path to absolute to avoid directory confusion, but preserve "./cache" as is for backwards compatibility
-        if not Path(self.cache_dir).is_absolute() and self.cache_dir != "./cache":
-            self.cache_dir = str(Path.cwd() / self.cache_dir)
+        # Preserve the authored path for configuration serialization. Filesystem
+        # boundaries resolve it when performing runtime storage operations.
 
         logger.debug(
             f"Storage configured: dir={self.cache_dir}, max_size={self.max_cache_size_mb}MB"
