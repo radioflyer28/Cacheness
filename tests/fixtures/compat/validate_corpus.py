@@ -45,6 +45,7 @@ PROVENANCE_KEYS = {
 }
 DECORATOR_PROVENANCE_KEYS = PROVENANCE_KEYS | {"decorator_key"}
 CURRENT_JSON_PROVENANCE_KEYS = PROVENANCE_KEYS | {"unified_key"}
+CURRENT_SQLITE_PROVENANCE_KEYS = PROVENANCE_KEYS | {"sqlite_inspection"}
 DECORATOR_KEY_KEYS = {
     "module",
     "qualname",
@@ -57,6 +58,13 @@ DECORATOR_KEY_KEYS = {
     "cache_entry_key",
 }
 UNIFIED_KEY_KEYS = {"params", "serialized_params", "cache_entry_key"}
+SQLITE_INSPECTION_KEYS = {
+    "table",
+    "columns",
+    "metadata_json_present",
+    "source_read_only_data_version_before",
+    "source_read_only_data_version_after",
+}
 MANIFEST_KEYS = {"schema_version", "fixtures"}
 MANIFEST_RECORD_KEYS = {
     "source_commit",
@@ -479,18 +487,77 @@ def validate_current_json_key_provenance(
         fail("json-nested-v0314 exact unified entry lacks its signature")
 
 
+def validate_current_sqlite_provenance(
+    fixture_dir: Path, provenance: dict[str, Any]
+) -> None:
+    """Recheck recorded current SQLite inspection through a read-only copy."""
+    inspection = provenance["sqlite_inspection"]
+    if not isinstance(inspection, dict):
+        fail("sqlite-columns-v0314 sqlite_inspection must be an object")
+    require_exact_keys(
+        inspection,
+        SQLITE_INSPECTION_KEYS,
+        "sqlite-columns-v0314 sqlite_inspection",
+    )
+    if inspection["table"] != "cache_entries":
+        fail("sqlite-columns-v0314 inspection table differs")
+    if inspection["columns"] != CURRENT_SQLITE_COLUMNS:
+        fail("sqlite-columns-v0314 inspection column inventory differs")
+    if inspection["metadata_json_present"] is not False:
+        fail("sqlite-columns-v0314 inspection permits metadata_json")
+    expected_versions = (
+        inspection["source_read_only_data_version_before"],
+        inspection["source_read_only_data_version_after"],
+    )
+    if (
+        not all(isinstance(version, int) and version >= 0 for version in expected_versions)
+        or expected_versions[0] != expected_versions[1]
+    ):
+        fail("sqlite-columns-v0314 recorded data_version is not stable")
+
+    source = fixture_dir / "metadata.sqlite3"
+    source_digest_before = sha256(source)
+    with tempfile.TemporaryDirectory(prefix="cacheness-compat-") as temporary_dir:
+        copy = Path(temporary_dir) / "metadata.sqlite3"
+        shutil.copy2(source, copy)
+        copy_digest_before = sha256(copy)
+        if source_digest_before != copy_digest_before:
+            fail("sqlite-columns-v0314 SQLite inspection copy differs from source")
+        uri = f"file:{copy.as_posix()}?mode=ro"
+        try:
+            connection = sqlite3.connect(uri, uri=True)
+            try:
+                data_version_before = connection.execute("PRAGMA data_version").fetchone()[0]
+                columns = [
+                    row[1]
+                    for row in connection.execute("PRAGMA table_info(cache_entries)").fetchall()
+                ]
+                data_version_after = connection.execute("PRAGMA data_version").fetchone()[0]
+            finally:
+                connection.close()
+        except sqlite3.Error as exc:
+            fail(f"sqlite-columns-v0314 SQLite inspection failed: {exc}")
+        if columns != CURRENT_SQLITE_COLUMNS:
+            fail("sqlite-columns-v0314 SQLite schema is incomplete, reordered, or mixed")
+        if (data_version_before, data_version_after) != expected_versions:
+            fail("sqlite-columns-v0314 recorded data_version differs from read-only inspection")
+        if sha256(copy) != copy_digest_before or sha256(source) != source_digest_before:
+            fail("sqlite-columns-v0314 SQLite source or inspection copy mutated")
+
+
 def validate_provenance(
     fixture_dir: Path, manifest_record: dict[str, Any], expected: dict[str, Any]
 ) -> None:
     fixture_id = expected["id"]
     provenance = read_json(fixture_dir / "provenance.json")
-    provenance_keys = (
-        DECORATOR_PROVENANCE_KEYS
-        if fixture_id == "decorator-key-v0313"
-        else CURRENT_JSON_PROVENANCE_KEYS
-        if fixture_id == "json-nested-v0314"
-        else PROVENANCE_KEYS
-    )
+    if fixture_id == "decorator-key-v0313":
+        provenance_keys = DECORATOR_PROVENANCE_KEYS
+    elif fixture_id == "json-nested-v0314":
+        provenance_keys = CURRENT_JSON_PROVENANCE_KEYS
+    elif fixture_id == "sqlite-columns-v0314":
+        provenance_keys = CURRENT_SQLITE_PROVENANCE_KEYS
+    else:
+        provenance_keys = PROVENANCE_KEYS
     require_exact_keys(provenance, provenance_keys, f"{fixture_id} provenance")
     if provenance["schema_version"] != FIXTURE_SCHEMA_VERSION:
         fail(f"{fixture_id} provenance schema_version is unsupported")
@@ -540,6 +607,8 @@ def validate_provenance(
         validate_decorator_key_provenance(fixture_dir, provenance)
     if fixture_id == "json-nested-v0314":
         validate_current_json_key_provenance(fixture_dir, provenance)
+    if fixture_id == "sqlite-columns-v0314":
+        validate_current_sqlite_provenance(fixture_dir, provenance)
 
 
 def validate_raw_fixture(fixture_dir: Path, expected: dict[str, Any]) -> None:

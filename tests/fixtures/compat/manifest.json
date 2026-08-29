@@ -229,6 +229,50 @@
         }
       },
       "production_reader": "current_json_metadata"
+    },
+    "sqlite-columns-v0314": {
+      "source_commit": "a22f4b4575cb8213d9783ed388d2a70727563db1",
+      "source_version": "0.3.14",
+      "variant": "sqlite-columns-npz",
+      "logical_input": {
+        "dtype": "int32",
+        "shape": [2, 3],
+        "values": [0, 1, 2, 3, 4, 5]
+      },
+      "discriminators": {
+        "metadata_kind": "sqlite",
+        "table": "cache_entries",
+        "sqlite_columns": [
+          "cache_key",
+          "description",
+          "data_type",
+          "prefix",
+          "created_at",
+          "accessed_at",
+          "file_size",
+          "file_hash",
+          "entry_signature",
+          "object_type",
+          "storage_format",
+          "serializer",
+          "compression_codec",
+          "actual_path",
+          "cache_key_params"
+        ],
+        "signature_state": "column_present"
+      },
+      "files": {
+        "metadata.sqlite3": {
+          "sha256": "a236b3ad7d00f5121bc5d12a170dc0af26516b5126c7f4bd238c7c57d27f0379"
+        },
+        "payload.npz": {
+          "sha256": "400fa42d786ab1e6924e051bbaa61238627909af333de87aab176c280c71fe2f"
+        },
+        "provenance.json": {
+          "sha256": "ee95c6288298a2b55c58858d0eed39518713408580dbeee615ce39bcdb6cda75"
+        }
+      },
+      "production_reader": "current_sqlite_columns"
     }
   }
 }
