@@ -29,7 +29,9 @@ Usage:
 """
 
 import os
+import sqlite3
 import threading
+import warnings
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -38,8 +40,72 @@ from typing import Dict, Any, Optional, List, Union
 import logging
 
 from .json_utils import dumps as json_dumps, loads as json_loads
+from .error_handling import CacheLegacyFormatError, CacheReason
 
 logger = logging.getLogger(__name__)
+
+
+_LEGACY_SPLIT_JSON_KEYS = frozenset(
+    {
+        "entries",
+        "access_times",
+        "creation_times",
+        "file_sizes",
+        "data_types",
+        "cache_key_params",
+        "cache_hits",
+        "cache_misses",
+    }
+)
+_LEGACY_SIGNED_SPLIT_JSON_KEYS = _LEGACY_SPLIT_JSON_KEYS | {"entry_signature"}
+_LEGACY_SQLITE_COLUMNS = (
+    "cache_key",
+    "description",
+    "data_type",
+    "prefix",
+    "created_at",
+    "accessed_at",
+    "file_size",
+    "file_hash",
+    "entry_signature",
+    "cache_key_params",
+    "metadata_json",
+)
+_CURRENT_SQLITE_COLUMNS = (
+    "cache_key",
+    "description",
+    "data_type",
+    "prefix",
+    "created_at",
+    "accessed_at",
+    "file_size",
+    "file_hash",
+    "entry_signature",
+    "object_type",
+    "storage_format",
+    "serializer",
+    "compression_codec",
+    "actual_path",
+    "cache_key_params",
+)
+
+
+def _legacy_layout_error(reason: CacheReason) -> CacheLegacyFormatError:
+    """Create the typed result shared by exact read-only adapters."""
+    return CacheLegacyFormatError(
+        "Legacy metadata layout is read-only",
+        reason=reason,
+    )
+
+
+def _compat_payload_path(root: Path, persisted_path: Any) -> str:
+    """Map an exact historical payload basename into the copied store root."""
+    if not isinstance(persisted_path, str):
+        raise _legacy_layout_error(CacheReason.UNSUPPORTED_LEGACY_LAYOUT)
+    filename = Path(persisted_path).name
+    if not filename or filename in {".", ".."}:
+        raise _legacy_layout_error(CacheReason.UNSUPPORTED_LEGACY_LAYOUT)
+    return str(root / filename)
 
 # Try to import cachetools for entry caching
 try:
@@ -432,6 +498,13 @@ class CachedMetadataBackend(MetadataBackend):
     
     def increment_misses(self):
         return self.backend.increment_misses()
+
+    def record_legacy_read(self, cache_key: str):
+        """Delegate optional read-only compatibility bookkeeping unchanged."""
+        recorder = getattr(self.backend, "record_legacy_read", None)
+        if callable(recorder):
+            return recorder(cache_key)
+        return None
     
     def cleanup_expired(self, ttl_hours: int) -> int:
         count = self.backend.cleanup_expired(ttl_hours)
@@ -442,6 +515,14 @@ class CachedMetadataBackend(MetadataBackend):
                 self._memory_cache.clear()
                 logger.debug("Memory cache cleared after expired cleanup")
         
+        return count
+
+    def cleanup_by_size(self, target_size_mb: float) -> int:
+        """Delegate size cleanup without retaining metadata that may have changed."""
+        count = self.backend.cleanup_by_size(target_size_mb)
+        if self._memory_cache is not None and count > 0:
+            with self._lock:
+                self._memory_cache.clear()
         return count
 
     def close(self):
@@ -663,70 +744,207 @@ class InMemoryBackend(MetadataBackend):
 
 
 class JsonBackend(MetadataBackend):
-    """JSON file-based metadata backend with batching support."""
+    """JSON metadata backend, including one exact deprecated split-map reader."""
+
+    _split_indicators = frozenset(
+        {
+            "access_times",
+            "creation_times",
+            "file_sizes",
+            "data_types",
+            "cache_key_params",
+            "entry_signature",
+        }
+    )
 
     def __init__(self, metadata_file: Path):
-        """
-        Initialize JSON metadata backend.
-
-        Args:
-            metadata_file: Path to JSON metadata file
-        """
-        self.metadata_file = metadata_file
+        self.metadata_file = Path(metadata_file)
         self._lock = threading.Lock()
+        self._legacy_layout: Optional[str] = None
+        self.legacy_compat_hits = 0
+        self.legacy_compat_access_times: Dict[str, str] = {}
         self._metadata = self._load_from_disk()
-        self._pending_writes = {}
-        self._batch_size = 10  # Write after 10 operations
+        self._pending_writes: Dict[str, Any] = {}
+        self._batch_size = 10
         self._write_count = 0
 
     def _load_from_disk(self) -> Dict[str, Any]:
-        """Load metadata from JSON file."""
+        """Load current metadata or normalize only the complete historical map."""
         if self.metadata_file.exists():
             try:
-                with open(self.metadata_file, "r") as f:
-                    return json_loads(f.read())
+                with open(self.metadata_file, "r", encoding="utf-8") as metadata_file:
+                    document = json_loads(metadata_file.read())
+                return self._normalize_legacy_split_map(document)
+            except CacheLegacyFormatError:
+                raise
             except Exception:
                 logger.warning("JSON metadata corrupted, starting fresh")
+        return {"entries": {}, "cache_hits": 0, "cache_misses": 0}
 
+    def _normalize_legacy_split_map(self, document: Any) -> Dict[str, Any]:
+        """Recognize the complete 0.3.7/0.3.8 split-map schema only."""
+        if not isinstance(document, dict):
+            raise _legacy_layout_error(CacheReason.UNSUPPORTED_LEGACY_LAYOUT)
+        keys = set(document)
+        signed = keys == _LEGACY_SIGNED_SPLIT_JSON_KEYS
+        unsigned = keys == _LEGACY_SPLIT_JSON_KEYS
+        if not (signed or unsigned):
+            if keys & self._split_indicators:
+                raise _legacy_layout_error(CacheReason.UNSUPPORTED_LEGACY_LAYOUT)
+            return document
+
+        maps = (
+            "entries",
+            "access_times",
+            "creation_times",
+            "file_sizes",
+            "data_types",
+            "cache_key_params",
+        )
+        if any(not isinstance(document[name], dict) for name in maps):
+            raise _legacy_layout_error(CacheReason.UNSUPPORTED_LEGACY_LAYOUT)
+        if signed and not isinstance(document["entry_signature"], dict):
+            raise _legacy_layout_error(CacheReason.UNSUPPORTED_LEGACY_LAYOUT)
+
+        cache_keys = set(document["entries"])
+        if any(set(document[name]) != cache_keys for name in maps[1:]):
+            raise _legacy_layout_error(CacheReason.UNSUPPORTED_LEGACY_LAYOUT)
+        if signed and set(document["entry_signature"]) != cache_keys:
+            raise _legacy_layout_error(CacheReason.UNSUPPORTED_LEGACY_LAYOUT)
+
+        normalized_entries = {}
+        required_entry_keys = {
+            "shape",
+            "dtype",
+            "storage_format",
+            "compression",
+            "prefix",
+            "actual_path",
+            "file_hash",
+            "description",
+        }
+        if signed:
+            required_entry_keys.add("entry_signature")
+
+        for cache_key in cache_keys:
+            legacy_entry = document["entries"][cache_key]
+            if (
+                not isinstance(cache_key, str)
+                or not isinstance(legacy_entry, dict)
+                or set(legacy_entry) != required_entry_keys
+                or not isinstance(document["cache_key_params"][cache_key], dict)
+                or not isinstance(legacy_entry["shape"], list)
+                or not all(
+                    isinstance(dimension, int) and not isinstance(dimension, bool)
+                    for dimension in legacy_entry["shape"]
+                )
+                or not all(
+                    isinstance(legacy_entry[field], str)
+                    for field in (
+                        "dtype",
+                        "storage_format",
+                        "compression",
+                        "prefix",
+                        "actual_path",
+                        "file_hash",
+                        "description",
+                    )
+                )
+                or not isinstance(document["access_times"][cache_key], str)
+                or not isinstance(document["creation_times"][cache_key], str)
+                or not isinstance(document["file_sizes"][cache_key], int)
+                or isinstance(document["file_sizes"][cache_key], bool)
+                or not isinstance(document["data_types"][cache_key], str)
+            ):
+                raise _legacy_layout_error(CacheReason.UNSUPPORTED_LEGACY_LAYOUT)
+            if signed:
+                signature = document["entry_signature"][cache_key]
+                if (
+                    not isinstance(signature, str)
+                    or legacy_entry["entry_signature"] != signature
+                ):
+                    raise _legacy_layout_error(CacheReason.UNSUPPORTED_LEGACY_LAYOUT)
+
+            metadata = {
+                "shape": legacy_entry["shape"],
+                "dtype": legacy_entry["dtype"],
+                "storage_format": legacy_entry["storage_format"],
+                "compression": legacy_entry["compression"],
+                "prefix": legacy_entry["prefix"],
+                "actual_path": _compat_payload_path(
+                    self.metadata_file.parent, legacy_entry["actual_path"]
+                ),
+                "file_hash": legacy_entry["file_hash"],
+                "cache_key_params": document["cache_key_params"][cache_key],
+            }
+            if signed:
+                metadata["legacy_entry_signature"] = signature
+                metadata["legacy_compat_layout"] = "json_split_v038_signed"
+
+            normalized_entries[cache_key] = {
+                "description": legacy_entry["description"],
+                "data_type": document["data_types"][cache_key],
+                "prefix": legacy_entry["prefix"],
+                "created_at": document["creation_times"][cache_key],
+                "accessed_at": document["access_times"][cache_key],
+                "file_size": document["file_sizes"][cache_key],
+                "metadata": metadata,
+            }
+
+        if not all(
+            isinstance(document[counter], int) and not isinstance(document[counter], bool)
+            for counter in ("cache_hits", "cache_misses")
+        ):
+            raise _legacy_layout_error(CacheReason.UNSUPPORTED_LEGACY_LAYOUT)
+        self._legacy_layout = "json_split_v038_signed" if signed else "json_split_v037"
+        warnings.warn(
+            "Reading legacy split-map JSON metadata is deprecated and read-only.",
+            DeprecationWarning,
+            stacklevel=3,
+        )
         return {
-            "entries": {},  # cache_key -> complete entry dict (with structured fields)
-            "cache_hits": 0,
-            "cache_misses": 0,
+            "entries": normalized_entries,
+            "cache_hits": document["cache_hits"],
+            "cache_misses": document["cache_misses"],
         }
 
-    def _save_to_disk(self):
-        """Save metadata to JSON file using atomic write pattern to prevent corruption."""
+    def _ensure_writable(self) -> None:
+        if self._legacy_layout is not None:
+            raise _legacy_layout_error(CacheReason.READ_ONLY_LEGACY_STORE)
+
+    def _save_to_disk(self) -> None:
+        """Persist current JSON metadata with the existing atomic replace flow."""
         import tempfile
+
+        self._ensure_writable()
         try:
-            # Check if parent directory exists (may have been deleted during cleanup)
             if not self.metadata_file.parent.exists():
-                logger.debug(f"Metadata directory no longer exists: {self.metadata_file.parent}")
+                logger.debug("Metadata directory no longer exists: %s", self.metadata_file.parent)
                 return
-                
-            # Write to temp file first, then rename for atomicity
             fd, temp_path = tempfile.mkstemp(
-                suffix='.json.tmp', 
+                suffix=".json.tmp",
                 dir=self.metadata_file.parent,
-                prefix='cache_metadata_'
+                prefix="cache_metadata_",
             )
             try:
-                with os.fdopen(fd, 'w') as f:
-                    f.write(json_dumps(self._metadata, default=str))
-                # Atomic rename (works on same filesystem)
+                with os.fdopen(fd, "w", encoding="utf-8") as metadata_file:
+                    metadata_file.write(json_dumps(self._metadata, default=str))
                 import shutil
+
                 shutil.move(temp_path, self.metadata_file)
             except Exception:
-                # Clean up temp file on failure
                 try:
                     os.remove(temp_path)
                 except OSError:
                     pass
                 raise
-        except Exception as e:
-            logger.error(f"Failed to save JSON metadata: {e}")
+        except CacheLegacyFormatError:
+            raise
+        except Exception as exc:
+            logger.error("Failed to save JSON metadata: %s", exc)
 
-    def _flush_pending_writes(self):
-        """Flush pending writes to disk."""
+    def _flush_pending_writes(self) -> None:
+        self._ensure_writable()
         if self._pending_writes:
             self._metadata.update(self._pending_writes)
             self._pending_writes.clear()
@@ -734,233 +952,179 @@ class JsonBackend(MetadataBackend):
             self._write_count = 0
 
     def load_metadata(self) -> Dict[str, Any]:
-        """Load complete metadata structure."""
         with self._lock:
             return self._metadata.copy()
 
-    def save_metadata(self, metadata: Dict[str, Any]):
-        """Save complete metadata structure."""
+    def save_metadata(self, metadata: Dict[str, Any]) -> None:
         with self._lock:
+            self._ensure_writable()
             self._metadata = metadata
             self._save_to_disk()
 
     def get_entry(self, cache_key: str) -> Optional[Dict[str, Any]]:
-        """Get specific cache entry metadata (simple entry lookup)."""
         with self._lock:
-            # Simple lookup - entry contains all structured fields
-            entry = self._metadata.get("entries", {}).get(cache_key)
-            if entry is None:
-                return None
-            
-            # Entry already contains the structured fields matching SQLite schema
-            return entry
+            return self._metadata.get("entries", {}).get(cache_key)
 
-    def put_entry(self, cache_key: str, entry_data: Dict[str, Any]):
-        """Store cache entry metadata as complete entry (matching SQLite schema structure)."""
+    def put_entry(self, cache_key: str, entry_data: Dict[str, Any]) -> None:
         with self._lock:
+            self._ensure_writable()
             now = datetime.now(timezone.utc).isoformat()
-
-            # Extract and restructure metadata to match SQLite schema
-            metadata = entry_data.get("metadata", {}).copy()
-            
-            # Build complete entry with structured fields (matching SQLite columns)
-            entry = {
+            self._metadata["entries"][cache_key] = {
                 "description": entry_data.get("description", ""),
                 "data_type": entry_data.get("data_type", "unknown"),
                 "prefix": entry_data.get("prefix", ""),
                 "created_at": entry_data.get("created_at", now),
                 "accessed_at": entry_data.get("accessed_at", now),
                 "file_size": entry_data.get("file_size", 0),
-                "metadata": metadata,  # Include all metadata as nested structure
+                "metadata": entry_data.get("metadata", {}).copy(),
             }
-            
-            # Store complete entry - simple and efficient
-            self._metadata["entries"][cache_key] = entry
-
-            # Batch writes for better performance
             self._write_count += 1
+            self._save_to_disk()
             if self._write_count >= self._batch_size:
-                self._save_to_disk()
                 self._write_count = 0
-            else:
-                # For immediate consistency, still save to disk
-                self._save_to_disk()
 
-    def remove_entry(self, cache_key: str):
-        """Remove cache entry metadata."""
+    def remove_entry(self, cache_key: str) -> None:
         with self._lock:
-            if cache_key in self._metadata.get("entries", {}):
-                del self._metadata["entries"][cache_key]
+            self._ensure_writable()
+            self._metadata.get("entries", {}).pop(cache_key, None)
             self._save_to_disk()
 
     def list_entries(self) -> List[Dict[str, Any]]:
-        """List all cache entries with metadata (simple entries iteration)."""
         with self._lock:
             entries = []
-
-            # Simple iteration over entries dict
             for cache_key, entry in self._metadata.get("entries", {}).items():
-                # Ensure timestamps are timezone-aware when returned
-                creation_time = entry.get("created_at")
-                access_time = entry.get("accessed_at")
-                
-                if creation_time and isinstance(creation_time, str):
-                    try:
-                        # Parse ISO format string back to timezone-aware datetime
-                        creation_time = datetime.fromisoformat(creation_time)
-                        if creation_time.tzinfo is None:
-                            # If somehow it's naive, make it UTC
-                            creation_time = creation_time.replace(tzinfo=timezone.utc)
-                        creation_time = creation_time.isoformat()
-                    except (ValueError, TypeError):
-                        pass
-
-                if access_time and isinstance(access_time, str):
-                    try:
-                        # Parse ISO format string back to timezone-aware datetime
-                        access_time = datetime.fromisoformat(access_time)
-                        if access_time.tzinfo is None:
-                            # If somehow it's naive, make it UTC
-                            access_time = access_time.replace(tzinfo=timezone.utc)
-                        access_time = access_time.isoformat()
-                    except (ValueError, TypeError):
-                        pass
-
-                # Build entry for list output
-                list_entry = {
-                    "cache_key": cache_key,
-                    "data_type": entry.get("data_type", "unknown"),
-                    "description": entry.get("description", ""),
-                    "metadata": entry.get("metadata", {}),
-                    "created": creation_time,
-                    "last_accessed": access_time,
-                    "size_mb": round(entry.get("file_size", 0) / (1024 * 1024), 3),
-                }
-
-                entries.append(list_entry)
-
-            # Sort by creation time (newest first)
-            entries.sort(key=lambda x: x["created"] or "", reverse=True)
+                created = self._normalized_list_timestamp(entry.get("created_at"))
+                accessed = self._normalized_list_timestamp(entry.get("accessed_at"))
+                entries.append(
+                    {
+                        "cache_key": cache_key,
+                        "data_type": entry.get("data_type", "unknown"),
+                        "description": entry.get("description", ""),
+                        "metadata": entry.get("metadata", {}),
+                        "created": created,
+                        "last_accessed": accessed,
+                        "size_mb": round(entry.get("file_size", 0) / (1024 * 1024), 3),
+                    }
+                )
+            entries.sort(key=lambda item: item["created"] or "", reverse=True)
             return entries
 
+    @staticmethod
+    def _normalized_list_timestamp(timestamp: Any) -> Any:
+        """Keep the established JSON list API timezone-aware without rewriting it."""
+        if not isinstance(timestamp, str):
+            return timestamp
+        try:
+            parsed = datetime.fromisoformat(timestamp)
+        except ValueError:
+            return timestamp
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.isoformat()
+
     def get_stats(self) -> Dict[str, Any]:
-        """Get cache statistics (simple entries-based counting)."""
         with self._lock:
             entries = self._metadata.get("entries", {})
-            
-            # Count total entries
-            total_entries = len(entries)
-            
-            # Calculate total size
-            total_size_mb = sum(entry.get("file_size", 0) for entry in entries.values()) / (1024 * 1024)
-
-            # Count by data type
-            dataframe_count = sum(
-                1
-                for entry in entries.values()
-                if entry.get("data_type") == "dataframe"
-            )
-            array_count = sum(
-                1
-                for entry in entries.values()
-                if entry.get("data_type") == "array"
-            )
-
-            # Cache hit rate
             hits = self._metadata.get("cache_hits", 0)
             misses = self._metadata.get("cache_misses", 0)
-            hit_rate = hits / (hits + misses) if (hits + misses) > 0 else 0.0
-
+            total = hits + misses
             return {
-                "total_entries": total_entries,
-                "dataframe_entries": dataframe_count,
-                "array_entries": array_count,
-                "total_size_mb": round(total_size_mb, 2),
+                "total_entries": len(entries),
+                "dataframe_entries": sum(
+                    entry.get("data_type") == "dataframe" for entry in entries.values()
+                ),
+                "array_entries": sum(
+                    entry.get("data_type") == "array" for entry in entries.values()
+                ),
+                "total_size_mb": round(
+                    sum(entry.get("file_size", 0) for entry in entries.values())
+                    / (1024 * 1024),
+                    2,
+                ),
                 "cache_hits": hits,
                 "cache_misses": misses,
-                "hit_rate": round(hit_rate, 3),
+                "hit_rate": round(hits / total, 3) if total else 0.0,
             }
 
-    def update_access_time(self, cache_key: str):
-        """Update last access time for cache entry (simple entries structure)."""
+    def update_access_time(self, cache_key: str) -> None:
         with self._lock:
-            entries = self._metadata.get("entries", {})
-            if cache_key in entries:
-                entries[cache_key]["accessed_at"] = datetime.now(timezone.utc).isoformat()
+            self._ensure_writable()
+            entry = self._metadata.get("entries", {}).get(cache_key)
+            if entry is not None:
+                entry["accessed_at"] = datetime.now(timezone.utc).isoformat()
                 self._save_to_disk()
 
-    def increment_hits(self):
-        """Increment cache hits counter."""
+    def increment_hits(self) -> None:
         with self._lock:
+            self._ensure_writable()
             self._metadata["cache_hits"] = self._metadata.get("cache_hits", 0) + 1
             self._save_to_disk()
 
-    def increment_misses(self):
-        """Increment cache misses counter."""
+    def increment_misses(self) -> None:
         with self._lock:
+            self._ensure_writable()
             self._metadata["cache_misses"] = self._metadata.get("cache_misses", 0) + 1
             self._save_to_disk()
 
     def cleanup_expired(self, ttl_hours: int) -> int:
-        """Remove expired entries and return count removed (simple entries structure)."""
-        from datetime import timedelta
-
         with self._lock:
-            expired_keys = []
-            cutoff_time = datetime.now(timezone.utc) - timedelta(hours=ttl_hours)
+            self._ensure_writable()
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=ttl_hours)
             entries = self._metadata.get("entries", {})
-
+            expired = []
             for cache_key, entry in entries.items():
                 try:
-                    creation_time_str = entry.get("created_at")
-                    if creation_time_str:
-                        creation_time = datetime.fromisoformat(creation_time_str)
-                        if creation_time < cutoff_time:
-                            expired_keys.append(cache_key)
-                except (ValueError, TypeError):
-                    # Invalid timestamp, consider expired
-                    expired_keys.append(cache_key)
-
-            # Remove expired entries
-            for cache_key in expired_keys:
+                    created = datetime.fromisoformat(entry.get("created_at", ""))
+                    if created.tzinfo is None:
+                        created = created.replace(tzinfo=timezone.utc)
+                    if created < cutoff:
+                        expired.append(cache_key)
+                except (TypeError, ValueError):
+                    expired.append(cache_key)
+            for cache_key in expired:
                 entries.pop(cache_key, None)
-
-            if expired_keys:
+            if expired:
                 self._save_to_disk()
+            return len(expired)
 
-            return len(expired_keys)
+    def cleanup_by_size(self, target_size_mb: float) -> int:
+        with self._lock:
+            self._ensure_writable()
+            entries = self._metadata.get("entries", {})
+            total = sum(entry.get("file_size", 0) for entry in entries.values())
+            target = target_size_mb * 1024 * 1024
+            removed = 0
+            for cache_key, entry in sorted(
+                entries.items(), key=lambda item: item[1].get("created_at", "")
+            ):
+                if total <= target:
+                    break
+                total -= entry.get("file_size", 0)
+                del entries[cache_key]
+                removed += 1
+            if removed:
+                self._save_to_disk()
+            return removed
 
     def clear_all(self) -> int:
-        """Remove all cache entries and return count removed (simple entries structure)."""
         with self._lock:
-            # Count entries from the entries dict
-            entry_count = len(self._metadata.get("entries", {}))
-            
-            # Reset to simple structure
-            self._metadata = {
-                "entries": {},
-                "cache_hits": 0,
-                "cache_misses": 0,
-            }
-            
+            self._ensure_writable()
+            count = len(self._metadata.get("entries", {}))
+            self._metadata = {"entries": {}, "cache_hits": 0, "cache_misses": 0}
             self._save_to_disk()
-            return entry_count
+            return count
 
-    def load_metadata(self) -> Dict[str, Any]:
-        """Load complete metadata structure."""
+    def record_legacy_read(self, cache_key: str) -> None:
+        if self._legacy_layout is None:
+            return
         with self._lock:
-            return self._metadata.copy()
+            self.legacy_compat_hits += 1
+            self.legacy_compat_access_times[cache_key] = datetime.now(timezone.utc).isoformat()
 
-    def save_metadata(self, metadata: Dict[str, Any]):
-        """Save complete metadata structure."""
+    def close(self) -> None:
+        if self._legacy_layout is not None:
+            return
         with self._lock:
-            self._metadata = metadata
-            self._save_to_disk()
-
-    def close(self):
-        """Close and clean up resources (JSON backend saves any pending changes)."""
-        with self._lock:
-            # Ensure any pending changes are saved to disk
             self._save_to_disk()
 
 
@@ -975,12 +1139,26 @@ class SqliteBackend(MetadataBackend):
             db_file: Path to SQLite database file
             echo: Whether to echo SQL queries (for debugging)
         """
+        self.db_file = str(db_file)
+        self._lock = threading.Lock()
+        self._legacy_layout: Optional[str] = None
+        self.legacy_compat_hits = 0
+        self.legacy_compat_access_times: Dict[str, str] = {}
+        self.engine = None
+        self.SessionLocal = None
+        self._legacy_layout = self._detect_legacy_layout()
+        if self._legacy_layout is not None:
+            warnings.warn(
+                "Reading legacy metadata_json SQLite metadata is deprecated and read-only.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            return
+
         if not SQLALCHEMY_AVAILABLE:
             raise ImportError(
                 "SQLAlchemy is required for SQLite backend. Install with: pip install sqlalchemy"
             )
-
-        self.db_file = db_file
         
         # Configure SQLite engine with appropriate optimizations
         # Note: SQLite uses SingletonThreadPool which doesn't support pool_size/max_overflow
@@ -1029,8 +1207,6 @@ class SqliteBackend(MetadataBackend):
         self.SessionLocal = sessionmaker(
             autocommit=False, autoflush=False, bind=self.engine
         )
-        self._lock = threading.Lock()
-
         # Create tables
         Base.metadata.create_all(self.engine)
 
@@ -1038,6 +1214,99 @@ class SqliteBackend(MetadataBackend):
         self._init_stats()
 
         logger.info(f"✅ SQLAlchemy metadata backend initialized: {db_file}")
+
+    def _legacy_database_uri(self) -> Optional[str]:
+        """Return an immutable read-only URI only for a pre-existing database."""
+        if self.db_file == ":memory:":
+            return None
+        database = Path(self.db_file)
+        if not database.exists():
+            return None
+        return f"{database.resolve().as_uri()}?mode=ro&immutable=1"
+
+    def _detect_legacy_layout(self) -> Optional[str]:
+        """Inspect a pre-existing schema before any ORM engine can mutate it."""
+        uri = self._legacy_database_uri()
+        if uri is None:
+            return None
+        with sqlite3.connect(uri, uri=True) as connection:
+            exists = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'cache_entries'"
+            ).fetchone()
+            if exists is None:
+                return None
+            columns = tuple(
+                row[1]
+                for row in connection.execute("PRAGMA table_info(cache_entries)").fetchall()
+            )
+        if columns == _LEGACY_SQLITE_COLUMNS:
+            return "sqlite_metadata_json_v039"
+        if columns != _CURRENT_SQLITE_COLUMNS:
+            raise _legacy_layout_error(CacheReason.UNSUPPORTED_LEGACY_LAYOUT)
+        return None
+
+    def _ensure_writable(self) -> None:
+        if self._legacy_layout is not None:
+            raise _legacy_layout_error(CacheReason.READ_ONLY_LEGACY_STORE)
+
+    def _read_legacy_entry(self, cache_key: str) -> Optional[Dict[str, Any]]:
+        """Read the one supported historical row shape through JSON only."""
+        uri = self._legacy_database_uri()
+        if uri is None:
+            raise _legacy_layout_error(CacheReason.UNSUPPORTED_LEGACY_LAYOUT)
+        columns = ", ".join(_LEGACY_SQLITE_COLUMNS)
+        with sqlite3.connect(uri, uri=True) as connection:
+            row = connection.execute(
+                f"SELECT {columns} FROM cache_entries WHERE cache_key = ?", (cache_key,)
+            ).fetchone()
+        if row is None:
+            return None
+        legacy = dict(zip(_LEGACY_SQLITE_COLUMNS, row, strict=True))
+        try:
+            metadata = json_loads(legacy["metadata_json"])
+            params = json_loads(legacy["cache_key_params"])
+        except (TypeError, ValueError):
+            raise _legacy_layout_error(CacheReason.UNSUPPORTED_LEGACY_LAYOUT) from None
+        expected_metadata = {
+            "shape",
+            "dtype",
+            "storage_format",
+            "compression",
+            "prefix",
+            "actual_path",
+        }
+        if (
+            not isinstance(metadata, dict)
+            or set(metadata) != expected_metadata
+            or not isinstance(params, dict)
+            or not all(
+                isinstance(legacy[name], str)
+                for name in ("description", "data_type", "prefix", "created_at", "accessed_at")
+            )
+            or not isinstance(legacy["file_size"], int)
+            or isinstance(legacy["file_size"], bool)
+            or not isinstance(legacy["file_hash"], str)
+        ):
+            raise _legacy_layout_error(CacheReason.UNSUPPORTED_LEGACY_LAYOUT)
+        metadata["actual_path"] = _compat_payload_path(
+            Path(self.db_file).parent, metadata["actual_path"]
+        )
+        metadata["file_hash"] = legacy["file_hash"]
+        metadata["cache_key_params"] = params
+        if legacy["entry_signature"] is not None:
+            if not isinstance(legacy["entry_signature"], str):
+                raise _legacy_layout_error(CacheReason.UNSUPPORTED_LEGACY_LAYOUT)
+            metadata["legacy_entry_signature"] = legacy["entry_signature"]
+            metadata["legacy_compat_layout"] = self._legacy_layout
+        return {
+            "description": legacy["description"],
+            "data_type": legacy["data_type"],
+            "prefix": legacy["prefix"],
+            "created_at": legacy["created_at"],
+            "accessed_at": legacy["accessed_at"],
+            "file_size": legacy["file_size"],
+            "metadata": metadata,
+        }
 
     def _init_stats(self):
         """Initialize cache stats if not exists."""
@@ -1065,6 +1334,8 @@ class SqliteBackend(MetadataBackend):
 
     def get_entry(self, cache_key: str) -> Optional[Dict[str, Any]]:
         """Get specific cache entry metadata using columns directly - zero JSON parsing."""
+        if self._legacy_layout is not None:
+            return self._read_legacy_entry(cache_key)
         with self.SessionLocal() as session:
             # Single optimized query - get entry using columns only
             entry = session.execute(
@@ -1114,6 +1385,7 @@ class SqliteBackend(MetadataBackend):
 
     def put_entry(self, cache_key: str, entry_data: Dict[str, Any]):
         """Store cache entry metadata using dedicated columns - zero JSON overhead for backend data."""
+        self._ensure_writable()
         with self._lock, self.SessionLocal() as session:
             # Extract and process metadata fields efficiently
             metadata = entry_data.get("metadata", {}).copy()
@@ -1200,6 +1472,7 @@ class SqliteBackend(MetadataBackend):
 
     def remove_entry(self, cache_key: str):
         """Remove cache entry metadata and associated custom metadata links."""
+        self._ensure_writable()
         with self._lock, self.SessionLocal() as session:
             # Delete cache entry (this will cascade to metadata links due to foreign key constraint)
             session.execute(delete(CacheEntry).where(CacheEntry.cache_key == cache_key))
@@ -1227,6 +1500,34 @@ class SqliteBackend(MetadataBackend):
 
     def list_entries(self) -> List[Dict[str, Any]]:
         """List all cache entries using columns directly - zero JSON parsing overhead for backend data."""
+        if self._legacy_layout is not None:
+            uri = self._legacy_database_uri()
+            if uri is None:
+                raise _legacy_layout_error(CacheReason.UNSUPPORTED_LEGACY_LAYOUT)
+            with sqlite3.connect(uri, uri=True) as connection:
+                cache_keys = [
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT cache_key FROM cache_entries ORDER BY created_at DESC"
+                    ).fetchall()
+                ]
+            result = []
+            for cache_key in cache_keys:
+                entry = self._read_legacy_entry(cache_key)
+                if entry is None:
+                    continue
+                result.append(
+                    {
+                        "cache_key": cache_key,
+                        "data_type": entry["data_type"],
+                        "description": entry["description"],
+                        "metadata": entry["metadata"],
+                        "created": entry["created_at"],
+                        "last_accessed": entry["accessed_at"],
+                        "size_mb": round(entry["file_size"] / (1024 * 1024), 3),
+                    }
+                )
+            return result
         with self.SessionLocal() as session:
             # Use a single optimized query to get all data at once
             entries = (
@@ -1283,6 +1584,19 @@ class SqliteBackend(MetadataBackend):
 
     def get_stats(self) -> Dict[str, Any]:
         """Get cache statistics."""
+        if self._legacy_layout is not None:
+            entries = self.list_entries()
+            hits = self.legacy_compat_hits
+            total = sum(entry["size_mb"] for entry in entries)
+            return {
+                "total_entries": len(entries),
+                "dataframe_entries": sum(entry["data_type"] == "dataframe" for entry in entries),
+                "array_entries": sum(entry["data_type"] == "array" for entry in entries),
+                "total_size_mb": round(total, 2),
+                "cache_hits": hits,
+                "cache_misses": 0,
+                "hit_rate": 1.0 if hits else 0.0,
+            }
         with self.SessionLocal() as session:
             # Get counts by data type
             total_entries = session.execute(select(CacheEntry)).scalars().all()
@@ -1313,6 +1627,7 @@ class SqliteBackend(MetadataBackend):
 
     def update_access_time(self, cache_key: str):
         """Update last access time for cache entry."""
+        self._ensure_writable()
         with self._lock, self.SessionLocal() as session:
             session.execute(
                 update(CacheEntry)
@@ -1323,6 +1638,7 @@ class SqliteBackend(MetadataBackend):
 
     def increment_hits(self):
         """Increment cache hits counter."""
+        self._ensure_writable()
         with self._lock, self.SessionLocal() as session:
             session.execute(
                 update(CacheStats)
@@ -1336,6 +1652,7 @@ class SqliteBackend(MetadataBackend):
 
     def increment_misses(self):
         """Increment cache misses counter."""
+        self._ensure_writable()
         with self._lock, self.SessionLocal() as session:
             session.execute(
                 update(CacheStats)
@@ -1351,6 +1668,7 @@ class SqliteBackend(MetadataBackend):
         """Remove expired entries and return count removed."""
         from datetime import timedelta
 
+        self._ensure_writable()
         cutoff_time = datetime.now(timezone.utc) - timedelta(hours=ttl_hours)
 
         with self._lock, self.SessionLocal() as session:
@@ -1362,8 +1680,31 @@ class SqliteBackend(MetadataBackend):
             session.commit()
             return deleted_count
 
+    def cleanup_by_size(self, target_size_mb: float) -> int:
+        """Trim oldest current entries until their size is under the target."""
+        self._ensure_writable()
+        target_bytes = target_size_mb * 1024 * 1024
+        with self._lock, self.SessionLocal() as session:
+            entries = (
+                session.execute(select(CacheEntry).order_by(CacheEntry.created_at))
+                .scalars()
+                .all()
+            )
+            total_size = sum(entry.file_size for entry in entries)
+            removed = 0
+            for entry in entries:
+                if total_size <= target_bytes:
+                    break
+                total_size -= entry.file_size
+                session.delete(entry)
+                removed += 1
+            if removed:
+                session.commit()
+            return removed
+
     def clear_all(self) -> int:
         """Remove all cache entries and return count removed."""
+        self._ensure_writable()
         with self._lock, self.SessionLocal() as session:
             # Count existing entries
             result = session.execute(select(func.count(CacheEntry.cache_key)))
@@ -1392,7 +1733,16 @@ class SqliteBackend(MetadataBackend):
     def save_metadata(self, metadata: Dict[str, Any]):
         """Save complete metadata structure (SQLite backend operates on individual entries)."""
         # SQLite backend doesn't use bulk metadata operations - no-op
+        self._ensure_writable()
         pass
+
+    def record_legacy_read(self, cache_key: str) -> None:
+        """Record compatibility reads in process memory without changing SQLite."""
+        if self._legacy_layout is None:
+            return
+        with self._lock:
+            self.legacy_compat_hits += 1
+            self.legacy_compat_access_times[cache_key] = datetime.now(timezone.utc).isoformat()
 
     def close(self):
         """Close all database connections and clean up resources."""

@@ -113,6 +113,9 @@ def test_split_map_json_normalizes_exact_entry_and_rejects_mutation(tmp_path: Pa
             "prefix": "compat",
             "actual_path": str(cache_dir / f"compat_{cache_key}.npz"),
             "file_hash": "cbc8742be97aa09e",
+            "cache_key_params": {
+                "fixture_id": "str:json-split-unsigned-v037",
+            },
         },
     }
     with pytest.raises(CacheLegacyFormatError) as error:
@@ -188,6 +191,40 @@ def test_split_map_mixed_layout_fails_typed_without_rewriting(tmp_path: Path) ->
     mutated = json.loads(metadata_path.read_text(encoding="utf-8"))
     mutated.pop("file_sizes")
     metadata_path.write_text(json.dumps(mutated), encoding="utf-8")
+    before = _sha256(metadata_path)
+
+    with pytest.raises(CacheLegacyFormatError) as error:
+        JsonBackend(metadata_path)
+
+    assert error.value.context["reason"] == CacheReason.UNSUPPORTED_LEGACY_LAYOUT.value
+    assert _sha256(metadata_path) == before
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda document, cache_key: document["entries"][cache_key].__setitem__(
+            "shape", "not-a-list"
+        ),
+        lambda document, cache_key: document["file_sizes"].__setitem__(
+            cache_key, "219"
+        ),
+        lambda document, cache_key: document["access_times"].__setitem__(
+            cache_key, 0
+        ),
+    ],
+    ids=("field-type", "map-type", "timestamp-map-type"),
+)
+def test_split_map_complete_but_malformed_values_fail_typed_without_rewriting(
+    tmp_path: Path,
+    mutate,
+) -> None:
+    """Matching keys alone must not make a split map a compatibility candidate."""
+    cache_dir, cache_key = _copy_split_map_fixture(tmp_path, "json-split-unsigned-v037")
+    metadata_path = cache_dir / "cache_metadata.json"
+    malformed = json.loads(metadata_path.read_text(encoding="utf-8"))
+    mutate(malformed, cache_key)
+    metadata_path.write_text(json.dumps(malformed), encoding="utf-8")
     before = _sha256(metadata_path)
 
     with pytest.raises(CacheLegacyFormatError) as error:

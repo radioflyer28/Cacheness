@@ -11,13 +11,16 @@ import xxhash
 import inspect
 import threading
 import logging
+import warnings
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List, Callable, Tuple
 
 from .config import CacheConfig, _DEFAULT_TTL, create_cache_config
 from .error_handling import (
+    CacheLegacyFormatError,
     CacheQueryValidationError,
+    CacheReason,
     CacheUnsafePathError,
 )
 from .handlers import HandlerRegistry
@@ -872,15 +875,66 @@ class UnifiedCache:
 
     def _cleanup_expired(self):
         """Remove expired cache entries."""
-        self._preflight_entries(
-            self.metadata_backend.list_entries(),
-            operation="cleanup_expired",
-        )
-        ttl = self.config.metadata.default_ttl_hours
-        removed_count = self.metadata_backend.cleanup_expired(ttl)
+        try:
+            self._preflight_entries(
+                self.metadata_backend.list_entries(),
+                operation="cleanup_expired",
+            )
+            ttl = self.config.metadata.default_ttl_hours
+            removed_count = self.metadata_backend.cleanup_expired(ttl)
+        except CacheLegacyFormatError as exc:
+            if not self._is_legacy_read_only_error(exc):
+                raise
+            warnings.warn(
+                "Legacy metadata cleanup is deprecated and remains read-only.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            return
 
         if removed_count > 0:
             logger.info(f"Cleaned up {removed_count} expired cache entries")
+
+    def _recognized_legacy_backend(self):
+        """Return only one of the exact metadata compatibility adapters."""
+        backend = self.metadata_backend
+        while backend is not None:
+            layout = getattr(backend, "_legacy_layout", None)
+            if layout in {
+                "json_split_v037",
+                "json_split_v038_signed",
+                "sqlite_metadata_json_v039",
+            }:
+                return backend
+            wrapped = getattr(backend, "backend", None)
+            if wrapped is backend:
+                break
+            backend = wrapped
+        return None
+
+    def _is_legacy_read_only_error(self, exc: CacheLegacyFormatError) -> bool:
+        """Identify the only compatibility error that permits no-op bookkeeping."""
+        return (
+            self._recognized_legacy_backend() is not None
+            and exc.context.get("reason") == CacheReason.READ_ONLY_LEGACY_STORE.value
+        )
+
+    def _record_successful_read(self, cache_key: str, entry: Dict[str, Any]) -> None:
+        """Persist normal reads or record exact legacy reads in process memory only."""
+        try:
+            self.metadata_backend.update_access_time(cache_key)
+            self.metadata_backend.increment_hits()
+        except CacheLegacyFormatError as exc:
+            if not self._is_legacy_read_only_error(exc):
+                raise
+            recorder = getattr(self.metadata_backend, "record_legacy_read", None)
+            if callable(recorder):
+                recorder(cache_key)
+            warnings.warn(
+                "Legacy metadata access bookkeeping is deprecated and read-only.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
 
     def put(
         self,
@@ -1122,11 +1176,6 @@ class UnifiedCache:
 
                 data = handler.get(snapshot.path, snapshot.metadata)
 
-            self.metadata_backend.update_access_time(cache_key)
-            self.metadata_backend.increment_hits()
-            logger.debug(f"Cache hit ({data_type}): {cache_key}")
-            return data
-
         except CacheUnsafePathError:
             # No unsafe locator becomes a miss, cleanup, or evidence mutation.
             raise
@@ -1140,6 +1189,9 @@ class UnifiedCache:
             self.metadata_backend.remove_entry(cache_key)
             self.metadata_backend.increment_misses()
             return None
+        except CacheLegacyFormatError:
+            # Typed compatibility failures must never be converted into mutation.
+            raise
         except Exception as e:
             logger.warning(
                 f"Failed to load cached {data_type} {cache_key}: {type(e).__name__}: {e}"
@@ -1147,6 +1199,10 @@ class UnifiedCache:
             self.metadata_backend.remove_entry(cache_key)
             self.metadata_backend.increment_misses()
             return None
+
+        self._record_successful_read(cache_key, entry)
+        logger.debug(f"Cache hit ({data_type}): {cache_key}")
+        return data
 
     def _enforce_size_limit(self):
         """Enforce cache size limits using LRU eviction."""
