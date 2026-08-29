@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 01
 current_phase_name: Compatibility and Security Baseline
 status: executing
-stopped_at: Completed 01-06-PLAN.md
-last_updated: "2026-08-29T20:34:33.771Z"
+stopped_at: Completed 01-08-PLAN.md
+last_updated: "2026-08-29T20:47:15.150Z"
 last_activity: 2026-08-29
 last_activity_desc: Phase 01 execution started
-state_head: 678ecbab47b621f2ca4229388013ffb821527262
+state_head: dfcaece2226f95b0ab20763e0fcec7ff4ef5cae9
 progress:
   total_phases: 8
   completed_phases: 0
   total_plans: 12
-  completed_plans: 3
+  completed_plans: 4
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-08-29)
 ## Current Position
 
 Phase: 01 (Compatibility and Security Baseline) — EXECUTING
-Plan: 4 of 12
+Plan: 5 of 12
 Status: Ready to execute
 Last activity: 2026-08-29 — Phase 01 execution started
 
@@ -62,6 +62,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01-compatibility-and-security-baseline P01 | 5min | 2 tasks | 6 files |
 | Phase 01-compatibility-and-security-baseline P02 | 14min | 2 tasks | 5 files |
 | Phase 01 P06 | 8min | 2 tasks | 3 files |
+| Phase 01-compatibility-and-security-baseline P08 | 3min | 3 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -83,6 +84,9 @@ Recent decisions affecting current work:
 - [Phase 01]: SqlCache strict mode stages all missing-range frames and raises one typed completeness error before storage if any range fails or is empty.
 - [Phase 01]: SqlCache best-effort mode is explicit and returns SqlCacheResult with immutable ordered failure records.
 - [Phase 01]: Custom gap fallback is best-effort-only, while bulk-to-row upsert uses an observable savepoint-backed fallback.
+- [Phase 01]: The independent corpus validator owns the exact eight-fixture matrix and accepts only staged manifest prefixes.
+- [Phase 01]: Legacy raw fixtures are verified through bounded framing and direct decompressed-byte comparison without historical readers or metadata evaluation.
+- [Phase 01]: Generated evidence records equal source/copy SHA-256 values plus an independent manifest digest for provenance.
 
 ### Pending Todos
 
@@ -106,6 +110,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-29T20:34:33.763Z
-Stopped at: Completed 01-06-PLAN.md
+Last session: 2026-08-29T20:47:15.141Z
+Stopped at: Completed 01-08-PLAN.md
 Resume file: None
