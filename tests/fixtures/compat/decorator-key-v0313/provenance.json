@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "fixture_id": "decorator-key-v0313",
+  "source_commit": "76a469f3e090a99d9f9c119c3190a97b11a5e68a",
+  "source_version": "0.3.13",
+  "generator_command": "Writer-only detached-worktree generation at 76a469f3e090a99d9f9c119c3190a97b11a5e68a with the stable compat_fixture_v0313.fixture_array(6, offset=0) call, JSON metadata, use_blosc2_arrays=False, and entry signing disabled. The historical decorator key helper and writer path generated exactly one candidate; no historical reader or metadata enumeration was invoked.",
+  "environment": {
+    "cacheness": "0.3.13",
+    "python": "3.13.3",
+    "numpy": "2.3.2",
+    "blosc2": "3.7.0"
+  },
+  "logical_input": {
+    "dtype": "int32",
+    "shape": [2, 3],
+    "values": [0, 1, 2, 3, 4, 5]
+  },
+  "discriminators": {
+    "metadata_kind": "json_nested",
+    "json_top_level_keys": [
+      "entries",
+      "cache_hits",
+      "cache_misses"
+    ],
+    "signature_state": "entry_present",
+    "key_scheme": "decorator_pre_unified"
+  },
+  "files": {
+    "metadata.json": {
+      "source_sha256": "73a9bfb8e36c1f846d6dd7d3a26e74131a4175112ea9ef202f80757adefc35fb",
+      "copied_sha256": "73a9bfb8e36c1f846d6dd7d3a26e74131a4175112ea9ef202f80757adefc35fb"
+    },
+    "payload.npz": {
+      "source_sha256": "400fa42d786ab1e6924e051bbaa61238627909af333de87aab176c280c71fe2f",
+      "copied_sha256": "400fa42d786ab1e6924e051bbaa61238627909af333de87aab176c280c71fe2f"
+    }
+  },
+  "decorator_key": {
+    "module": "compat_fixture_v0313",
+    "qualname": "fixture_array",
+    "args": [6],
+    "kwargs": {
+      "offset": 0
+    },
+    "key_prefix": "compat-v0313",
+    "serialized_args": "tuple:[int:6]",
+    "serialized_kwargs": "dict:[str:offset:int:0]",
+    "xxh3_64": "74188289e0a58bd2",
+    "cache_entry_key": "369201742db756c2"
+  }
+}

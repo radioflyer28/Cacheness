@@ -22,6 +22,7 @@ from typing import Any
 
 import blosc2
 import numpy as np
+import xxhash
 
 
 CORPUS_ROOT = Path(__file__).resolve().parent
@@ -41,6 +42,18 @@ PROVENANCE_KEYS = {
     "logical_input",
     "discriminators",
     "files",
+}
+DECORATOR_PROVENANCE_KEYS = PROVENANCE_KEYS | {"decorator_key"}
+DECORATOR_KEY_KEYS = {
+    "module",
+    "qualname",
+    "args",
+    "kwargs",
+    "key_prefix",
+    "serialized_args",
+    "serialized_kwargs",
+    "xxh3_64",
+    "cache_entry_key",
 }
 MANIFEST_KEYS = {"schema_version", "fixtures"}
 MANIFEST_RECORD_KEYS = {
@@ -369,12 +382,68 @@ def validate_manifest_record(
     return fixture_dir, files_on_disk
 
 
+def validate_decorator_key_provenance(
+    fixture_dir: Path, provenance: dict[str, Any]
+) -> None:
+    """Recompute the sole allowed legacy decorator candidate without scanning."""
+    decorator_key = provenance["decorator_key"]
+    if not isinstance(decorator_key, dict):
+        fail("decorator-key-v0313 decorator_key must be an object")
+    require_exact_keys(
+        decorator_key,
+        DECORATOR_KEY_KEYS,
+        "decorator-key-v0313 decorator_key",
+    )
+    expected_values = {
+        "module": "compat_fixture_v0313",
+        "qualname": "fixture_array",
+        "args": [6],
+        "kwargs": {"offset": 0},
+        "key_prefix": "compat-v0313",
+        "serialized_args": "tuple:[int:6]",
+        "serialized_kwargs": "dict:[str:offset:int:0]",
+    }
+    for name, value in expected_values.items():
+        if decorator_key[name] != value:
+            fail(f"decorator-key-v0313 decorator_key {name} differs")
+
+    function_id = f"{decorator_key['module']}.{decorator_key['qualname']}"
+    candidate_base = (
+        f"{decorator_key['key_prefix']}:{function_id}:"
+        f"args:{decorator_key['serialized_args']}:"
+        f"kwargs:{decorator_key['serialized_kwargs']}"
+    )
+    candidate = xxhash.xxh3_64(candidate_base.encode()).hexdigest()
+    if decorator_key["xxh3_64"] != candidate:
+        fail("decorator-key-v0313 decorator candidate digest differs")
+
+    storage_base = f"__decorator_cache_key:str:{candidate}"
+    storage_key = xxhash.xxh3_64(storage_base.encode()).hexdigest()[:16]
+    if decorator_key["cache_entry_key"] != storage_key:
+        fail("decorator-key-v0313 cache entry key differs")
+
+    metadata = read_json(fixture_dir / "metadata.json")
+    entries = metadata.get("entries")
+    if not isinstance(entries, dict):
+        fail("decorator-key-v0313 metadata entries must be an object")
+    entry = entries.get(storage_key)
+    if not isinstance(entry, dict):
+        fail("decorator-key-v0313 exact candidate is absent from metadata")
+    if entry.get("description") != f"Cached result for {candidate}":
+        fail("decorator-key-v0313 candidate entry description differs")
+
+
 def validate_provenance(
     fixture_dir: Path, manifest_record: dict[str, Any], expected: dict[str, Any]
 ) -> None:
     fixture_id = expected["id"]
     provenance = read_json(fixture_dir / "provenance.json")
-    require_exact_keys(provenance, PROVENANCE_KEYS, f"{fixture_id} provenance")
+    provenance_keys = (
+        DECORATOR_PROVENANCE_KEYS
+        if fixture_id == "decorator-key-v0313"
+        else PROVENANCE_KEYS
+    )
+    require_exact_keys(provenance, provenance_keys, f"{fixture_id} provenance")
     if provenance["schema_version"] != FIXTURE_SCHEMA_VERSION:
         fail(f"{fixture_id} provenance schema_version is unsupported")
     for key, expected_value in (
@@ -419,6 +488,8 @@ def validate_provenance(
     provenance_digest = sha256(fixture_dir / "provenance.json")
     if manifest_record["files"]["provenance.json"]["sha256"] != provenance_digest:
         fail(f"{fixture_id} provenance digest is not independently recorded in manifest")
+    if fixture_id == "decorator-key-v0313":
+        validate_decorator_key_provenance(fixture_dir, provenance)
 
 
 def validate_raw_fixture(fixture_dir: Path, expected: dict[str, Any]) -> None:

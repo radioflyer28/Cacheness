@@ -165,6 +165,38 @@
         }
       },
       "production_reader": "legacy_sqlite_metadata_json"
+    },
+    "decorator-key-v0313": {
+      "source_commit": "76a469f3e090a99d9f9c119c3190a97b11a5e68a",
+      "source_version": "0.3.13",
+      "variant": "decorator-key-json-npz",
+      "logical_input": {
+        "dtype": "int32",
+        "shape": [2, 3],
+        "values": [0, 1, 2, 3, 4, 5]
+      },
+      "discriminators": {
+        "metadata_kind": "json_nested",
+        "json_top_level_keys": [
+          "entries",
+          "cache_hits",
+          "cache_misses"
+        ],
+        "signature_state": "entry_present",
+        "key_scheme": "decorator_pre_unified"
+      },
+      "files": {
+        "metadata.json": {
+          "sha256": "73a9bfb8e36c1f846d6dd7d3a26e74131a4175112ea9ef202f80757adefc35fb"
+        },
+        "payload.npz": {
+          "sha256": "400fa42d786ab1e6924e051bbaa61238627909af333de87aab176c280c71fe2f"
+        },
+        "provenance.json": {
+          "sha256": "eb1319074752d15b117bc49cbe8ee2fea38253ef257dc74a25be1edd774812d6"
+        }
+      },
+      "production_reader": "legacy_decorator_key"
     }
   }
 }
