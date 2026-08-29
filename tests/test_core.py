@@ -314,9 +314,9 @@ class TestCacheness:
         file_path = cache._get_cache_file_path(cache_key, prefix)
 
         assert isinstance(file_path, Path)
-        assert cache_key in str(file_path)
-        if prefix:
-            assert prefix in str(file_path)
+        assert file_path.name == cache._storage_id_for_cache_key(cache_key, prefix)
+        assert cache_key not in str(file_path)
+        assert prefix not in str(file_path)
         assert str(cache.config.storage.cache_dir) in str(file_path)
 
     def test_ttl_expiration(self, cache):

@@ -43,9 +43,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 from datetime import datetime, timezone
 
-from .backends import MetadataBackend, JsonBackend, create_metadata_backend
+from .backends import MetadataBackend, JsonBackend
+from .guarded_handler_io import GuardedHandlerIO
 from .handlers import HandlerRegistry
-from .compression import write_file, read_file
+from .path_security import encode_physical_name, resolve_managed_locator
 
 # Import CacheConfig for proper handler configuration
 from ..config import CacheConfig, CompressionConfig
@@ -94,6 +95,7 @@ class BlobStore:
         """
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.guarded_handler_io = GuardedHandlerIO(self.cache_dir)
         
         self.compression = compression
         self.compression_level = compression_level
@@ -147,24 +149,28 @@ class BlobStore:
         if self.content_addressable:
             # Use content hash as key
             blob_key = self._compute_content_hash(data)
-        elif key:
-            blob_key = self._sanitize_key(key)
+        elif key is not None:
+            blob_key = key
         else:
             blob_key = self._generate_unique_key()
+
+        storage_id = self._storage_id_for_key(blob_key)
+        existing = self.backend.get_entry(blob_key)
+        if existing is not None:
+            # Refuse to overwrite a record whose evidence points outside this
+            # store before serializing or publishing a replacement payload.
+            self._entry_locator(existing, blob_key, operation="overwrite")
         
         # Get appropriate handler
         handler = self.handlers.get_handler(data)
         
-        # Determine file path
-        base_path = self.cache_dir / blob_key
-        
-        # Store the data using the handler
-        result = handler.put(data, base_path, self.config)
+        # Store through the private handler stage and guarded publication seam.
+        result = self.guarded_handler_io.put(handler, data, storage_id, self.config)
         
         # Build entry metadata
         # Note: JsonBackend stores custom fields in nested 'metadata' dict
-        custom_metadata = metadata or {}
-        custom_metadata["actual_path"] = str(result.get("actual_path", base_path))
+        custom_metadata = dict(metadata or {})
+        custom_metadata["actual_path"] = result["actual_path"]
         custom_metadata["storage_format"] = result.get("storage_format", "pickle")
         custom_metadata["compression_codec"] = self.compression
         
@@ -198,23 +204,8 @@ class BlobStore:
             logger.debug(f"Blob not found: {key}")
             return None
         
-        # Get the file path - may be in top-level or nested metadata
-        nested_meta = entry.get("metadata", {})
-        actual_path_str = entry.get("actual_path") or nested_meta.get("actual_path")
-        
-        if actual_path_str:
-            actual_path = Path(actual_path_str)
-        else:
-            # Fallback: try common extensions
-            for ext in [".pkl", ".b2nd", ".parquet", ".npz", ""]:
-                candidate = self.cache_dir / f"{key}{ext}"
-                if candidate.exists():
-                    actual_path = candidate
-                    break
-            else:
-                actual_path = self.cache_dir / key
-        
-        if not actual_path.exists():
+        actual_path = self._entry_locator(entry, key, operation="get")
+        if not self.guarded_handler_io.file_ops.exists(actual_path):
             logger.warning(f"Blob file missing: {actual_path}")
             return None
         
@@ -229,12 +220,12 @@ class BlobStore:
             **nested_meta,  # Flatten nested metadata to top level
         }
         
-        if handler is None:
-            # Fall back to generic read
-            return read_file(actual_path)
-        
-        # Read using handler
-        data = handler.get(actual_path, handler_metadata)
+        # The handler is intentionally called only on the still-live private
+        # snapshot, never on a metadata-controlled managed path.
+        with self.guarded_handler_io.open_snapshot(
+            actual_path, handler_metadata
+        ) as snapshot:
+            data = handler.get(snapshot.path, snapshot.metadata)
         
         # Update access time
         self.backend.update_access_time(key)
@@ -251,7 +242,11 @@ class BlobStore:
         Returns:
             Metadata dictionary, or None if not found
         """
-        return self.backend.get_entry(key)
+        entry = self.backend.get_entry(key)
+        if entry is None:
+            return None
+        self._entry_locator(entry, key, operation="get_metadata")
+        return {**entry, "cache_key": entry.get("cache_key", key)}
     
     def update_metadata(self, key: str, metadata: Dict[str, Any]) -> bool:
         """
@@ -268,16 +263,21 @@ class BlobStore:
         if existing is None:
             return False
         
-        # Get or create nested metadata dict
+        # Validate both the existing and prospective record before a metadata
+        # write. A metadata patch cannot introduce an unsafe locator.
+        self._entry_locator(existing, key, operation="update_metadata")
         nested_meta = existing.get("metadata", {})
         if not isinstance(nested_meta, dict):
             nested_meta = {}
+        else:
+            nested_meta = dict(nested_meta)
         
         # Merge user metadata into nested dict
         nested_meta.update(metadata)
         
         # Update the entry
         updated = {**existing, "metadata": nested_meta}
+        self._entry_locator(updated, key, operation="update_metadata")
         
         self.backend.put_entry(key, updated)
         return True
@@ -296,10 +296,8 @@ class BlobStore:
         if entry is None:
             return False
         
-        # Delete the file
-        actual_path = Path(entry.get("actual_path", self.cache_dir / key))
-        if actual_path.exists():
-            actual_path.unlink()
+        actual_path = self._entry_locator(entry, key, operation="delete")
+        self.guarded_handler_io.file_ops.delete(actual_path)
         
         # Remove metadata
         self.backend.remove_entry(key)
@@ -321,9 +319,8 @@ class BlobStore:
         if entry is None:
             return False
         
-        # Also verify the file exists
-        actual_path = Path(entry.get("actual_path", self.cache_dir / key))
-        return actual_path.exists()
+        actual_path = self._entry_locator(entry, key, operation="exists")
+        return self.guarded_handler_io.file_ops.exists(actual_path)
     
     def list(
         self,
@@ -341,6 +338,7 @@ class BlobStore:
             List of matching blob keys
         """
         entries = self.backend.list_entries()
+        self._preflight_entries(entries, operation="list")
         keys = []
         
         for entry in entries:
@@ -371,10 +369,13 @@ class BlobStore:
         Returns:
             Number of blobs removed
         """
+        entries = self.backend.list_entries()
+        self._preflight_entries(entries, operation="clear")
         return self.backend.clear_all()
     
     def close(self):
         """Close the blob store and release resources."""
+        self.guarded_handler_io.close()
         self.backend.close()
     
     def __enter__(self):
@@ -396,11 +397,53 @@ class BlobStore:
             serialized = repr(data).encode()
         return hashlib.sha256(serialized).hexdigest()[:16]
     
-    def _sanitize_key(self, key: str) -> str:
-        """Sanitize a user-provided key."""
-        # Remove problematic characters
-        safe_key = "".join(c for c in key if c.isalnum() or c in "-_.")
-        return safe_key[:64] or self._generate_unique_key()
+    def _storage_id_for_key(self, key: str) -> str:
+        """Map one public logical key to a backend-safe physical ID."""
+        return encode_physical_name(key, namespace="blob-store")
+
+    def _entry_locator(
+        self,
+        entry: Dict[str, Any],
+        logical_key: str,
+        *,
+        operation: str,
+    ) -> Path:
+        """Validate every persisted locator before consuming an entry.
+
+        Older backends can surface ``actual_path`` at the entry top level or
+        inside ``metadata``. Every supplied form is validated even though the
+        first form keeps the historical precedence for the actual operation.
+        """
+        nested_metadata = entry.get("metadata", {})
+        nested_path = (
+            nested_metadata.get("actual_path")
+            if isinstance(nested_metadata, dict)
+            else None
+        )
+        locator_values = [entry.get("actual_path"), nested_path]
+        validated = []
+        for locator in locator_values:
+            if locator is not None:
+                validated.append(
+                    resolve_managed_locator(
+                        self.guarded_handler_io.root,
+                        locator,
+                        operation=operation,
+                    )
+                )
+        if validated:
+            return validated[0]
+        return self.guarded_handler_io.file_ops.blob_locator(
+            self._storage_id_for_key(logical_key), shard_chars=0
+        )
+
+    def _preflight_entries(
+        self, entries: List[Dict[str, Any]], *, operation: str
+    ) -> None:
+        """Fail before list/clear can expose or mutate any safe sibling."""
+        for entry in entries:
+            logical_key = entry.get("cache_key")
+            self._entry_locator(entry, logical_key, operation=operation)
     
     def _generate_unique_key(self) -> str:
         """Generate a unique blob key."""

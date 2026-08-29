@@ -16,8 +16,11 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List, Callable, Tuple
 
 from .config import CacheConfig, _DEFAULT_TTL, create_cache_config
+from .error_handling import CacheUnsafePathError
 from .handlers import HandlerRegistry
 from .serialization import create_unified_cache_key
+from .storage.guarded_handler_io import GuardedHandlerIO
+from .storage.path_security import encode_physical_name, resolve_managed_locator
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +85,7 @@ class UnifiedCache:
 
         self.cache_dir = Path(self.config.storage.cache_dir)
         self.cache_dir.mkdir(exist_ok=True, parents=True)
+        self.guarded_handler_io = GuardedHandlerIO(self.cache_dir)
 
         # Thread safety
         self._lock = threading.Lock()
@@ -689,13 +693,58 @@ class UnifiedCache:
         return create_unified_cache_key(params, self.config)
 
     def _get_cache_file_path(self, cache_key: str, prefix: str = "") -> Path:
-        """Get base cache file path (without extension)."""
-        if prefix:
-            filename_base = f"{prefix}_{cache_key}"
-        else:
-            filename_base = cache_key
+        """Get an opaque managed base path without exposing a logical prefix."""
+        return self.cache_dir / self._storage_id_for_cache_key(cache_key, prefix)
 
-        return self.cache_dir / filename_base
+    @staticmethod
+    def _storage_id_for_cache_key(cache_key: str, prefix: str = "") -> str:
+        """Translate public cache identity into one backend-safe physical ID."""
+        return encode_physical_name(
+            cache_key,
+            prefix,
+            namespace="unified-cache",
+        )
+
+    def _entry_locator(
+        self,
+        entry: Dict[str, Any],
+        cache_key: str,
+        *,
+        operation: str,
+        prefix: str = "",
+    ) -> Path:
+        """Validate every supported persisted locator shape before use.
+
+        Metadata backends may surface ``actual_path`` at the entry top level or
+        within nested metadata. Both forms are validated before returning the
+        historical top-level-first value, preventing a dormant hostile sibling
+        field from becoming an unsafe later operation.
+        """
+        metadata = entry.get("metadata", {})
+        nested_path = metadata.get("actual_path") if isinstance(metadata, dict) else None
+        locator_values = [entry.get("actual_path"), nested_path]
+        validated = []
+        for locator in locator_values:
+            if locator is not None:
+                validated.append(
+                    resolve_managed_locator(
+                        self.guarded_handler_io.root,
+                        locator,
+                        operation=operation,
+                    )
+                )
+        if validated:
+            return validated[0]
+
+        stored_prefix = entry.get("prefix", prefix)
+        return self._get_cache_file_path(cache_key, stored_prefix)
+
+    def _preflight_entries(
+        self, entries: List[Dict[str, Any]], *, operation: str
+    ) -> None:
+        """Validate an entire affected set before exposing or mutating it."""
+        for entry in entries:
+            self._entry_locator(entry, entry.get("cache_key"), operation=operation)
 
     def _is_expired(self, cache_key: str, ttl_hours=_DEFAULT_TTL) -> bool:
         """Check if cache entry is expired."""
@@ -777,19 +826,13 @@ class UnifiedCache:
         return signable_data
 
     def _calculate_file_hash(self, file_path: Path) -> Optional[str]:
-        """
-        Calculate XXH3_64 hash of a cache file for integrity verification.
+        """Calculate XXH3_64 for a caller-owned private snapshot.
 
-        Args:
-            file_path: Path to the cache file
-
-        Returns:
-            Hex string of the file hash, or None if file doesn't exist or error
+        Managed payloads must first be copied through ``GuardedHandlerIO``;
+        callers of this helper therefore hash a stable private path rather than
+        reopening a metadata-controlled managed locator.
         """
         try:
-            if not file_path.exists():
-                return None
-
             hasher = xxhash.xxh3_64()
             with open(file_path, "rb") as f:
                 # Read in chunks to handle large files efficiently
@@ -802,6 +845,10 @@ class UnifiedCache:
 
     def _cleanup_expired(self):
         """Remove expired cache entries."""
+        self._preflight_entries(
+            self.metadata_backend.list_entries(),
+            operation="cleanup_expired",
+        )
         ttl = self.config.metadata.default_ttl_hours
         removed_count = self.metadata_backend.cleanup_expired(ttl)
 
@@ -833,23 +880,40 @@ class UnifiedCache:
         # Get appropriate handler
         handler = self.handlers.get_handler(data)
         cache_key = self._create_cache_key(kwargs)
-        base_file_path = self._get_cache_file_path(cache_key, prefix)
+        storage_id = self._storage_id_for_cache_key(cache_key, prefix)
+
+        # A put can overwrite an entry or trigger the backend's conservative
+        # size cleanup. Validate the complete visible set before publishing a
+        # byte or writing replacement metadata.
+        self._preflight_entries(
+            self.metadata_backend.list_entries(),
+            operation="put",
+        )
 
         try:
-            # Use handler to store the data
-            result = handler.put(data, base_file_path, self.config)
+            # Handler serialization happens only in a private stage. The
+            # adapter publishes a guarded opaque physical name.
+            result = self.guarded_handler_io.put(
+                handler,
+                data,
+                storage_id,
+                self.config,
+            )
 
             # Calculate file hash for integrity verification (if enabled)
             file_hash = None
             if self.config.metadata.verify_cache_integrity:
-                actual_path = result.get("actual_path", str(base_file_path))
-                file_hash = self._calculate_file_hash(Path(actual_path))
+                with self.guarded_handler_io.open_snapshot(
+                    result["actual_path"],
+                    {},
+                ) as snapshot:
+                    file_hash = self._calculate_file_hash(snapshot.path)
 
             # Update metadata
             metadata_dict = {
                 **result["metadata"],
                 "prefix": prefix,
-                "actual_path": result.get("actual_path", str(base_file_path)),
+                "actual_path": result["actual_path"],
                 "file_hash": file_hash,  # Store file hash for verification
             }
 
@@ -912,6 +976,9 @@ class UnifiedCache:
             
             return cache_key
 
+        except CacheUnsafePathError:
+            # Unsafe locators never become a generic storage failure.
+            raise
         except (OSError, IOError) as e:
             # I/O errors (disk full, permissions, etc.)
             logger.error(f"Failed to cache {handler.data_type} (I/O error): {e}")
@@ -921,6 +988,53 @@ class UnifiedCache:
             logger.error(f"Failed to cache {handler.data_type}: {type(e).__name__}: {e}")
             raise
 
+    def _verify_legacy_entry_signature(
+        self,
+        _cache_key: str,
+        _entry: Dict[str, Any],
+        _metadata: Dict[str, Any],
+    ) -> bool:
+        """Reserved compatibility verifier hook for the legacy-format plan.
+
+        Phase 1 has no legacy signature format to authorize. Returning false
+        makes an unrecognized compatibility signature fail closed until Plan 12
+        supplies its exact verifier through this seam.
+        """
+        return False
+
+    def _is_signature_authorized(
+        self,
+        cache_key: str,
+        entry: Dict[str, Any],
+        metadata: Dict[str, Any],
+    ) -> bool:
+        """Verify current/legacy signatures before handler deserialization."""
+        if not (self.signer and self.config.security.enable_entry_signing):
+            return True
+
+        stored_signature = metadata.get("entry_signature")
+        if stored_signature is not None:
+            cache_key_params = metadata.get("cache_key_params")
+            verify_entry_data = self._extract_signable_fields(
+                cache_key=cache_key,
+                entry_data=entry,
+                metadata=metadata,
+                cache_key_params=cache_key_params,
+            )
+            return self.signer.verify_entry(verify_entry_data, stored_signature)
+
+        if metadata.get("legacy_entry_signature") is not None:
+            return self._verify_legacy_entry_signature(cache_key, entry, metadata)
+
+        return self.config.security.allow_unsigned_entries
+
+    def _reject_untrusted_entry(self, cache_key: str, *, reason: str) -> None:
+        """Record a safe miss and optionally remove verified-bad evidence."""
+        logger.warning("Cache entry %s was rejected before deserialization: %s", cache_key, reason)
+        if self.config.security.delete_invalid_signatures:
+            self.metadata_backend.remove_entry(cache_key)
+        self.metadata_backend.increment_misses()
+
     def get(
         self,
         cache_key: Optional[str] = None,
@@ -928,123 +1042,78 @@ class UnifiedCache:
         prefix: str = "",
         **kwargs,
     ) -> Optional[Any]:
-        """
-        Retrieve any supported data type from cache.
-
-        Args:
-            cache_key: Direct cache key (if provided, **kwargs are ignored)
-            ttl_hours: Custom TTL (overrides default)
-            prefix: Descriptive prefix prepended to the cache filename
-            **kwargs: Parameters identifying the cached data (used if cache_key is None)
-
-        Returns:
-            Cached data or None if not found/expired
-        """
+        """Retrieve a cached value only after guarded snapshot verification."""
         if cache_key is None:
             cache_key = self._create_cache_key(kwargs)
 
-        # Check if entry exists and is not expired
         entry = self.metadata_backend.get_entry(cache_key)
-        if not entry or self._is_expired(cache_key, ttl_hours):
+        if not entry:
             self.metadata_backend.increment_misses()
             return None
 
-        # Get appropriate handler
+        # Validate before expiration checks, miss accounting, handler lookup, or
+        # any cleanup policy can alter unsafe evidence.
+        file_path = self._entry_locator(
+            entry,
+            cache_key,
+            operation="get",
+            prefix=prefix,
+        )
+        if self._is_expired(cache_key, ttl_hours):
+            self.metadata_backend.increment_misses()
+            return None
+
         data_type = entry.get("data_type")
         if not data_type:
             self.metadata_backend.increment_misses()
             return None
 
+        metadata = entry.get("metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+
         try:
             handler = self.handlers.get_handler_by_type(data_type)
-            base_file_path = self._get_cache_file_path(cache_key, prefix)
-
-            # Use actual path from metadata if available, otherwise use base path
-            metadata = entry.get("metadata", {})
-            actual_path = metadata.get("actual_path")
-            if actual_path:
-                file_path = Path(actual_path)
-            else:
-                file_path = base_file_path
-
-            # Verify cache file integrity if enabled and hash is available
-            if self.config.metadata.verify_cache_integrity:
-                stored_hash = metadata.get("file_hash")
-                if stored_hash is not None:
-                    current_hash = self._calculate_file_hash(file_path)
-                    if current_hash != stored_hash:
-                        logger.warning(
-                            f"Cache integrity verification failed for {cache_key}: "
-                            f"stored hash {stored_hash} != current hash {current_hash}. "
-                            f"Removing corrupted cache entry."
-                        )
-                        self.metadata_backend.remove_entry(cache_key)
-                        self.metadata_backend.increment_misses()
-                        return None
-
-            # Verify entry signature if signing is enabled
-            if self.signer and self.config.security.enable_entry_signing:
-                stored_signature = metadata.get("entry_signature")
-                
-                if stored_signature is not None:
-                    # Use helper method for consistent field extraction
-                    cache_key_params = metadata.get("cache_key_params")
-                    verify_entry_data = self._extract_signable_fields(
-                        cache_key=cache_key,
-                        entry_data=entry,
-                        metadata=metadata,
-                        cache_key_params=cache_key_params
-                    )
-                    
-                    if not self.signer.verify_entry(verify_entry_data, stored_signature):
-                        if self.config.security.delete_invalid_signatures:
-                            logger.warning(
-                                f"Entry signature verification failed for {cache_key}. "
-                                f"Removing potentially tampered cache entry."
+            with self.guarded_handler_io.open_snapshot(file_path, metadata) as snapshot:
+                if self.config.metadata.verify_cache_integrity:
+                    stored_hash = metadata.get("file_hash")
+                    if stored_hash is not None:
+                        current_hash = self._calculate_file_hash(snapshot.path)
+                        if current_hash != stored_hash:
+                            self._reject_untrusted_entry(
+                                cache_key,
+                                reason="payload integrity hash mismatch",
                             )
-                            self.metadata_backend.remove_entry(cache_key)
-                            self.metadata_backend.increment_misses()
                             return None
-                        else:
-                            logger.warning(
-                                f"Entry signature verification failed for {cache_key}. "
-                                f"Entry retained due to delete_invalid_signatures=False."
-                            )
-                            # Continue with loading despite invalid signature
-                        
-                elif not self.config.security.allow_unsigned_entries:
-                    logger.warning(
-                        f"Entry {cache_key} has no signature but unsigned entries are not allowed. "
-                        f"Removing entry."
+
+                if not self._is_signature_authorized(cache_key, entry, metadata):
+                    self._reject_untrusted_entry(
+                        cache_key,
+                        reason="missing or invalid entry signature",
                     )
-                    self.metadata_backend.remove_entry(cache_key)
-                    self.metadata_backend.increment_misses()
                     return None
 
-            # Use handler to load the data
-            data = handler.get(file_path, metadata)
+                data = handler.get(snapshot.path, snapshot.metadata)
 
-            # Update access time
             self.metadata_backend.update_access_time(cache_key)
             self.metadata_backend.increment_hits()
-
             logger.debug(f"Cache hit ({data_type}): {cache_key}")
             return data
 
+        except CacheUnsafePathError:
+            # No unsafe locator becomes a miss, cleanup, or evidence mutation.
+            raise
         except FileNotFoundError as e:
-            # Cache file was deleted externally
             logger.warning(f"Cache file missing for {cache_key}: {e}")
             self.metadata_backend.remove_entry(cache_key)
             self.metadata_backend.increment_misses()
             return None
         except (OSError, IOError) as e:
-            # I/O errors (disk full, permissions, etc.)
             logger.warning(f"I/O error loading cached {data_type} {cache_key}: {e}")
             self.metadata_backend.remove_entry(cache_key)
             self.metadata_backend.increment_misses()
             return None
         except Exception as e:
-            # Unexpected errors - log with more detail for debugging
             logger.warning(
                 f"Failed to load cached {data_type} {cache_key}: {type(e).__name__}: {e}"
             )
@@ -1054,6 +1123,10 @@ class UnifiedCache:
 
     def _enforce_size_limit(self):
         """Enforce cache size limits using LRU eviction."""
+        self._preflight_entries(
+            self.metadata_backend.list_entries(),
+            operation="cleanup_by_size",
+        )
         # Get current total size from metadata backend
         stats = self.metadata_backend.get_stats()
         total_size_mb = stats.get("total_size_mb", 0)
@@ -1082,53 +1155,34 @@ class UnifiedCache:
         if cache_key is None:
             cache_key = self._create_cache_key(kwargs)
 
-        # Remove from metadata backend (handles file cleanup)
-        if self.metadata_backend.remove_entry(cache_key):
+        entry = self.metadata_backend.get_entry(cache_key)
+        if entry is not None:
+            self._entry_locator(entry, cache_key, operation="invalidate", prefix=prefix)
+            self.metadata_backend.remove_entry(cache_key)
             logger.info(f"Invalidated cache entry {cache_key}")
         else:
             logger.debug(f"Cache entry {cache_key} not found for invalidation")
 
     def clear_all(self):
         """Clear all cache entries and remove cache files."""
-        import os
-        import glob
-        
-        # Clear metadata first and get count
-        removed_count = self.metadata_backend.clear_all()
-        
-        # Remove all cache files - comprehensive pattern matching
-        # Primary extensions
-        cache_patterns = [
-            str(self.cache_dir / "*.pkl"),      # Uncompressed pickle
-            str(self.cache_dir / "*.npz"),      # NumPy arrays
-            str(self.cache_dir / "*.b2nd"),     # Blosc2 arrays  
-            str(self.cache_dir / "*.b2tr"),     # TensorFlow tensors with blosc2
-            str(self.cache_dir / "*.parquet"),  # DataFrame files
-        ]
-        
-        # Compressed pickle files with valid compression codecs
-        pickle_codecs = ["lz4", "zstd", "gzip", "zst", "gz", "bz2", "xz"]
-        for codec in pickle_codecs:
-            cache_patterns.append(str(self.cache_dir / f"*.pkl.{codec}"))
-        
-        # Additional patterns for any other compression extensions user might use
-        # This catches any .pkl.* pattern that might not be in our known list
-        cache_patterns.append(str(self.cache_dir / "*.pkl.*"))
-        
+        entries = self.metadata_backend.list_entries()
+        self._preflight_entries(entries, operation="clear_all")
+
+        # Known payload deletion remains guarded. Orphan reconciliation is a
+        # later lifecycle concern, so this does not glob arbitrary paths.
         files_removed = 0
-        processed_files = set()  # Avoid double-counting due to overlapping patterns
-        
-        for pattern in cache_patterns:
-            for file_path in glob.glob(pattern):
-                if file_path not in processed_files:
-                    try:
-                        os.remove(file_path)
-                        files_removed += 1
-                        processed_files.add(file_path)
-                    except OSError as e:
-                        logger.warning(f"Failed to remove cache file {file_path}: {e}")
-        
-        logger.info(f"Cleared {removed_count} cache entries and removed {files_removed} cache files")
+        for entry in entries:
+            locator = self._entry_locator(
+                entry,
+                entry.get("cache_key"),
+                operation="clear_all",
+            )
+            files_removed += int(self.guarded_handler_io.file_ops.delete(locator))
+
+        removed_count = self.metadata_backend.clear_all()
+        logger.info(
+            f"Cleared {removed_count} cache entries and removed {files_removed} cache files"
+        )
         return removed_count
 
     def get_stats(self) -> Dict[str, Any]:
@@ -1150,6 +1204,7 @@ class UnifiedCache:
     def list_entries(self) -> List[Dict[str, Any]]:
         """List all cache entries with metadata."""
         entries = self.metadata_backend.list_entries()
+        self._preflight_entries(entries, operation="list_entries")
 
         # Add expiration status for each entry
         for entry in entries:
@@ -1159,6 +1214,8 @@ class UnifiedCache:
 
     def close(self):
         """Close all resources (database connections, etc.)."""
+        if hasattr(self, "guarded_handler_io") and self.guarded_handler_io:
+            self.guarded_handler_io.close()
         if hasattr(self, 'metadata_backend') and self.metadata_backend:
             if hasattr(self.metadata_backend, 'close'):
                 self.metadata_backend.close()

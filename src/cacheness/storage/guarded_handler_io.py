@@ -91,6 +91,18 @@ class GuardedHandlerIO:
             artifact.relative_to(stage_root)
         except ValueError:
             _raise_invalid_stage_artifact()
+        current = stage_root
+        for component in artifact.relative_to(stage_root).parts:
+            current = current / component
+            try:
+                component_stat = os.lstat(current)
+            except OSError as exc:
+                raise CacheUnsafePathError(
+                    "Handler staging artifact is unavailable",
+                    reason=CacheReason.PATH_RACE,
+                ) from exc
+            if stat.S_ISLNK(component_stat.st_mode):
+                _raise_invalid_stage_artifact()
         try:
             artifact_stat = os.lstat(artifact)
         except OSError as exc:

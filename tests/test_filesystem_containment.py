@@ -392,6 +392,7 @@ class _InstrumentedHandler:
         self.put_paths: list[Path] = []
         self.get_paths: list[Path] = []
         self.get_paths_alive: list[bool] = []
+        self.events: list[str] = []
 
     def put(self, data: Any, file_path: Path, _config: Any) -> dict[str, Any]:
         self.put_paths.append(file_path)
@@ -407,6 +408,7 @@ class _InstrumentedHandler:
     def get(self, file_path: Path, _metadata: dict[str, Any]) -> str:
         self.get_paths.append(file_path)
         self.get_paths_alive.append(file_path.exists())
+        self.events.append("handler")
         return file_path.read_text(encoding="utf-8")
 
 
@@ -566,3 +568,160 @@ def test_guarded_handler_io_copies_one_private_snapshot_without_deserializing(tm
             assert handler.get_paths == []
     finally:
         io.close()
+
+
+def test_guarded_handler_io_rejects_handler_created_symlink_ancestor(tmp_path):
+    """A returned stage artifact cannot tunnel through a handler-created link."""
+    from cacheness.storage.guarded_handler_io import GuardedHandlerIO
+
+    root = tmp_path / "root"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside_artifact = outside / "payload.guarded"
+    outside_artifact.write_text("outside", encoding="utf-8")
+
+    class SymlinkStageHandler:
+        data_type = "symlink-stage"
+
+        def put(self, _data: Any, file_path: Path, _config: Any) -> dict[str, Any]:
+            alias = file_path.parent / "alias"
+            alias.symlink_to(outside, target_is_directory=True)
+            return {
+                "storage_format": "guarded",
+                "file_size": outside_artifact.stat().st_size,
+                "actual_path": str(alias / outside_artifact.name),
+                "metadata": {},
+            }
+
+    io = GuardedHandlerIO(root)
+    try:
+        with pytest.raises(CacheUnsafePathError):
+            io.put(
+                SymlinkStageHandler(),
+                "payload",
+                "b" * 64,
+                CacheConfig(cache_dir=str(root)),
+            )
+        assert list(root.iterdir()) == []
+        assert outside_artifact.read_text(encoding="utf-8") == "outside"
+    finally:
+        io.close()
+
+
+def _instrumented_cache(tmp_path, *, delete_invalid_signatures: bool = True):
+    """Build a cache whose handler makes guarded ordering observable."""
+    root = tmp_path / "cache"
+    handler = _InstrumentedHandler()
+    cache = UnifiedCache(
+        CacheConfig(
+            cache_dir=str(root),
+            metadata_backend="memory",
+            cleanup_on_init=False,
+            delete_invalid_signatures=delete_invalid_signatures,
+        )
+    )
+    cache.handlers = _SingleHandlerRegistry(handler)
+    return cache, handler
+
+
+def test_high_level_handler_io_verifies_private_snapshot_before_handler(tmp_path):
+    """Digest and signature verification precede deserialization on one snapshot."""
+    cache, handler = _instrumented_cache(tmp_path)
+    key = cache.put("payload", identity="ordered")
+    events: list[str] = []
+    original_hash = cache._calculate_file_hash
+    original_verify = cache.signer.verify_entry
+
+    def record_hash(path: Path):
+        events.append("hash")
+        assert not _is_descendant(path, cache.cache_dir)
+        return original_hash(path)
+
+    def record_verify(entry_data: dict[str, Any], signature: str):
+        events.append("signature")
+        return original_verify(entry_data, signature)
+
+    cache._calculate_file_hash = record_hash
+    cache.signer.verify_entry = record_verify
+
+    assert cache.get(cache_key=key) == "payload"
+    assert events == ["hash", "signature"]
+    assert handler.events == ["handler"]
+    assert handler.get_paths_alive == [True]
+
+
+@pytest.mark.parametrize("rejection", ["hash", "signature", "legacy", "unsigned"])
+def test_high_level_handler_io_rejects_untrusted_entries_before_deserialization(
+    tmp_path, rejection
+):
+    """Bad integrity/current-or-legacy signatures never reach a handler."""
+    cache, handler = _instrumented_cache(tmp_path, delete_invalid_signatures=False)
+    key = cache.put("payload", identity=rejection)
+    entry = cache.metadata_backend.get_entry(key)
+    assert entry is not None
+    metadata = entry["metadata"]
+
+    if rejection == "hash":
+        metadata["file_hash"] = "not-the-payload-hash"
+    elif rejection == "signature":
+        metadata["entry_signature"] = "not-a-valid-signature"
+    elif rejection == "legacy":
+        metadata.pop("entry_signature")
+        metadata["legacy_entry_signature"] = "not-a-valid-legacy-signature"
+    else:
+        metadata.pop("entry_signature")
+        cache.config.security.allow_unsigned_entries = False
+
+    assert cache.get(cache_key=key) is None
+    assert handler.events == []
+    assert cache.metadata_backend.get_entry(key) is entry
+
+
+def test_high_level_locator_preflight_blocks_multi_entry_mutation(tmp_path):
+    """One hostile locator prevents list/clear/cleanup from touching safe siblings."""
+    outside = tmp_path / "outside"
+    outside.write_text("outside", encoding="utf-8")
+
+    blob_handler = _InstrumentedHandler()
+    store = BlobStore(tmp_path / "blobs")
+    store.handlers = _SingleHandlerRegistry(blob_handler)
+    try:
+        safe_key = store.put("safe", key="safe")
+        unsafe_key = store.put("unsafe", key="unsafe")
+        unsafe_entry = store.backend.get_entry(unsafe_key)
+        assert unsafe_entry is not None
+        unsafe_entry["metadata"]["actual_path"] = str(outside)
+        store.backend.put_entry(unsafe_key, unsafe_entry)
+
+        with pytest.raises(CacheUnsafePathError):
+            store.list()
+        with pytest.raises(CacheUnsafePathError):
+            store.clear()
+        assert store.get(safe_key) == "safe"
+        assert store.get_metadata(safe_key) is not None
+    finally:
+        store.close()
+
+    cache, cache_handler = _instrumented_cache(tmp_path / "unified")
+    safe_key = cache.put("safe", identity="safe")
+    unsafe_key = cache.put("unsafe", identity="unsafe")
+    unsafe_entry = cache.metadata_backend.get_entry(unsafe_key)
+    assert unsafe_entry is not None
+    unsafe_entry["metadata"]["actual_path"] = str(outside)
+
+    stats_before = cache.metadata_backend.get_stats()
+    with pytest.raises(CacheUnsafePathError):
+        cache.list_entries()
+    with pytest.raises(CacheUnsafePathError):
+        cache.clear_all()
+    with pytest.raises(CacheUnsafePathError):
+        cache._cleanup_expired()
+    with pytest.raises(CacheUnsafePathError):
+        cache._enforce_size_limit()
+    with pytest.raises(CacheUnsafePathError):
+        cache.get(cache_key=unsafe_key)
+    assert cache.metadata_backend.get_stats() == stats_before
+    assert cache.get(cache_key=safe_key) == "safe"
+    assert cache_handler.events == ["handler"]
+    assert outside.read_text(encoding="utf-8") == "outside"
