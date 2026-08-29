@@ -14,6 +14,7 @@ from datetime import datetime
 
 from cacheness.core import UnifiedCache
 from cacheness.config import CacheConfig
+from cacheness.error_handling import CacheQueryValidationError, CacheReason
 
 
 @pytest.fixture
@@ -81,7 +82,7 @@ class TestQueryMeta:
         cache.put("model_3", experiment="exp_003", model_type="xgboost", version="v2")
         
         # Query by model_type
-        xgb_entries = cache.query_meta(model_type="str:xgboost")
+        xgb_entries = cache.query_meta(model_type="xgboost")
         assert xgb_entries is not None
         assert len(xgb_entries) == 2
         
@@ -90,13 +91,13 @@ class TestQueryMeta:
             assert params['model_type'] == "str:xgboost"
         
         # Query by experiment
-        exp_entries = cache.query_meta(experiment="str:exp_001")
+        exp_entries = cache.query_meta(experiment="exp_001")
         assert exp_entries is not None
         assert len(exp_entries) == 1
         assert exp_entries[0]['cache_key_params']['experiment'] == "str:exp_001"
         
         # Query by version
-        v1_entries = cache.query_meta(version="str:v1")
+        v1_entries = cache.query_meta(version="v1")
         assert v1_entries is not None
         assert len(v1_entries) == 2
 
@@ -109,17 +110,29 @@ class TestQueryMeta:
         cache.put("model_2", experiment="exp_002", accuracy=0.88, epochs=50)
         cache.put("model_3", experiment="exp_003", accuracy=0.92, epochs=75)
         
-        # Query by exact accuracy
-        high_acc = cache.query_meta(accuracy="float:0.95")
+        # Raw numeric filters use a threshold comparison.
+        high_acc = cache.query_meta(accuracy=0.95)
         assert high_acc is not None
         assert len(high_acc) == 1
         assert high_acc[0]['cache_key_params']['accuracy'] == "float:0.95"
         
         # Query by epochs (should work with >= comparison)
-        many_epochs = cache.query_meta(epochs="int:75")
+        many_epochs = cache.query_meta(epochs=75)
         assert many_epochs is not None
         # Should find entries with epochs >= 75 (entries with 75 and 100)
-        assert len(many_epochs) >= 1
+        assert len(many_epochs) == 2
+
+    def test_query_meta_raw_filter_types_preserve_comparison_semantics(self, temp_cache):
+        """Raw strings and bools are exact while raw numeric values are thresholds."""
+        cache = temp_cache
+        cache.put("negative", model="linear", score=-3, active=True)
+        cache.put("decimal", model="linear-v2", score=1.5, active=False)
+        cache.put("integer", model="linear", score=3, active=True)
+
+        assert len(cache.query_meta(score=-3)) == 3
+        assert len(cache.query_meta(score=1.5)) == 2
+        assert len(cache.query_meta(model="linear")) == 2
+        assert len(cache.query_meta(active=True)) == 2
 
     def test_query_meta_multiple_filters(self, temp_cache):
         """Test query_meta with multiple parameter filters."""
@@ -132,8 +145,8 @@ class TestQueryMeta:
         
         # Query with multiple filters
         filtered_entries = cache.query_meta(
-            model_type="str:xgboost",
-            active="bool:True"
+            model_type="xgboost",
+            active=True,
         )
         assert filtered_entries is not None
         # Should find only the first entry (xgboost + active=True)
@@ -557,20 +570,14 @@ class TestQueryMetaIntegration:
         assert entries is not None
         assert len(entries) == 1
         
-        # Simulate database corruption by corrupting the session
-        # We can't easily corrupt the actual database, but we can test
-        # that the error handling in the try/except block works
-        
-        # Test with a malformed query parameter that might cause issues
-        try:
-            # This should not crash even with unusual parameter types
-            # We can't use None as a key directly, so test other edge cases
-            result = temp_cache.query_meta(**{"": "test"})  # Empty string key
-            # Should handle gracefully
-            assert result is None or isinstance(result, list)
-        except Exception:
-            # Should not raise unhandled exceptions
-            pass
+        # Caller field names are syntax, not recoverable query failures.
+        with pytest.raises(CacheQueryValidationError) as error:
+            temp_cache.query_meta(**{"": "test"})
+
+        assert error.value.context == {
+            "field": "",
+            "reason": CacheReason.INVALID_QUERY_FIELD.value,
+        }
 
     def test_query_meta_memory_stress(self, temp_cache):
         """Test query_meta behavior under memory stress conditions."""
