@@ -79,7 +79,9 @@ class GuardedHandlerIO:
         return suffix
 
     @staticmethod
-    def _staged_artifact(stage_root: Path, stage_base: Path, result: Dict[str, Any]) -> Path:
+    def _staged_artifact(
+        stage_root: Path, stage_base: Path, result: Dict[str, Any]
+    ) -> Path:
         """Validate that a handler result identifies one ordinary stage file."""
         actual_path = result.get("actual_path")
         if not isinstance(actual_path, (str, Path)):
@@ -88,11 +90,13 @@ class GuardedHandlerIO:
         if not artifact.is_absolute():
             artifact = stage_root / artifact
         try:
-            artifact.relative_to(stage_root)
+            relative_parts = artifact.relative_to(stage_root).parts
         except ValueError:
             _raise_invalid_stage_artifact()
+        if ".." in relative_parts:
+            _raise_invalid_stage_artifact()
         current = stage_root
-        for component in artifact.relative_to(stage_root).parts:
+        for component in relative_parts:
             current = current / component
             try:
                 component_stat = os.lstat(current)
@@ -112,7 +116,102 @@ class GuardedHandlerIO:
             ) from exc
         if not stat.S_ISREG(artifact_stat.st_mode):
             _raise_invalid_stage_artifact()
-        return artifact
+        try:
+            resolved_root = stage_root.resolve(strict=True)
+            resolved_artifact = artifact.resolve(strict=True)
+            resolved_artifact.relative_to(resolved_root)
+        except (OSError, ValueError) as exc:
+            raise CacheUnsafePathError(
+                "Handler staging artifact is unavailable",
+                reason=CacheReason.PATH_RACE,
+            ) from exc
+        return resolved_artifact
+
+    @staticmethod
+    @contextmanager
+    def _open_staged_artifact(
+        stage_root: Path, artifact: Path
+    ) -> Iterator[tuple[Any, int]]:
+        """Yield one regular stage descriptor anchored below the private root."""
+        descriptor: int | None = None
+        source = None
+        try:
+            try:
+                resolved_root = stage_root.resolve(strict=True)
+                relative_parts = artifact.relative_to(resolved_root).parts
+                if not relative_parts or ".." in relative_parts:
+                    _raise_invalid_stage_artifact()
+
+                supports_descriptor_walk = (
+                    os.open in os.supports_dir_fd
+                    and hasattr(os, "O_DIRECTORY")
+                    and hasattr(os, "O_NOFOLLOW")
+                )
+                if supports_descriptor_walk:
+                    directory_flags = (
+                        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                    )
+                    root_descriptor = os.open(resolved_root, directory_flags)
+                    parent_descriptor = root_descriptor
+                    try:
+                        for component in relative_parts[:-1]:
+                            next_descriptor = os.open(
+                                component,
+                                directory_flags,
+                                dir_fd=parent_descriptor,
+                            )
+                            if parent_descriptor != root_descriptor:
+                                os.close(parent_descriptor)
+                            parent_descriptor = next_descriptor
+                        descriptor = os.open(
+                            relative_parts[-1],
+                            os.O_RDONLY | os.O_NOFOLLOW,
+                            dir_fd=parent_descriptor,
+                        )
+                    finally:
+                        if parent_descriptor != root_descriptor:
+                            os.close(parent_descriptor)
+                        os.close(root_descriptor)
+                else:
+                    descriptor = os.open(
+                        artifact,
+                        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                    )
+            except OSError as exc:
+                raise CacheUnsafePathError(
+                    "Handler staging artifact is unavailable",
+                    reason=CacheReason.PATH_RACE,
+                ) from exc
+
+            descriptor_stat = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(descriptor_stat.st_mode)
+                or descriptor_stat.st_nlink != 1
+            ):
+                _raise_invalid_stage_artifact()
+            if not supports_descriptor_walk:
+                try:
+                    pathname_stat = os.lstat(artifact)
+                except OSError as exc:
+                    raise CacheUnsafePathError(
+                        "Handler staging artifact is unavailable",
+                        reason=CacheReason.PATH_RACE,
+                    ) from exc
+                if (
+                    stat.S_ISLNK(pathname_stat.st_mode)
+                    or pathname_stat.st_dev != descriptor_stat.st_dev
+                    or pathname_stat.st_ino != descriptor_stat.st_ino
+                ):
+                    _raise_invalid_stage_artifact()
+
+            source = os.fdopen(descriptor, "rb")
+            descriptor = None
+            yield source, descriptor_stat.st_size
+        finally:
+            if source is not None:
+                source.close()
+            elif descriptor is not None:
+                os.close(descriptor)
 
     def put(
         self,
@@ -132,12 +231,14 @@ class GuardedHandlerIO:
             suffix = self._safe_suffix(stage_base, artifact)
             final_id = validate_blob_id(f"{safe_storage_id}{suffix}")
 
-            with artifact.open("rb") as source:
+            with self._open_staged_artifact(
+                stage_root, artifact
+            ) as (source, file_size):
                 final_path = self.file_ops.write_stream(final_id, source, shard_chars=0)
 
             result: GuardedWriteResult = dict(raw_result)
             result["actual_path"] = str(final_path)
-            result["file_size"] = artifact.stat().st_size
+            result["file_size"] = file_size
             metadata = result.get("metadata")
             result["metadata"] = dict(metadata) if isinstance(metadata, dict) else {}
             return result

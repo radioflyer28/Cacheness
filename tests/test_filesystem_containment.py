@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import threading
 from io import BytesIO
@@ -660,6 +661,178 @@ def test_guarded_handler_io_rejects_handler_created_symlink_ancestor(tmp_path):
             )
         assert list(root.iterdir()) == []
         assert outside_artifact.read_text(encoding="utf-8") == "outside"
+    finally:
+        io.close()
+
+
+@pytest.mark.parametrize("path_kind", ["relative", "absolute"])
+def test_guarded_handler_io_rejects_stage_parent_traversal(tmp_path, path_kind):
+    """Handler artifacts cannot escape the private stage through ``..`` spelling."""
+    from cacheness.storage.guarded_handler_io import GuardedHandlerIO
+
+    root = tmp_path / "root"
+    root.mkdir()
+
+    class ParentTraversalHandler:
+        data_type = "parent-traversal"
+
+        def __init__(self):
+            self.outside_artifact: Path | None = None
+
+        def put(self, _data: Any, file_path: Path, _config: Any) -> dict[str, Any]:
+            outside_artifact = file_path.parent.parent / "payload.guarded"
+            outside_artifact.write_text("outside", encoding="utf-8")
+            self.outside_artifact = outside_artifact
+            actual_path: Path | str
+            if path_kind == "relative":
+                actual_path = Path("..") / outside_artifact.name
+            else:
+                actual_path = file_path.parent / ".." / outside_artifact.name
+            return {
+                "storage_format": "guarded",
+                "file_size": outside_artifact.stat().st_size,
+                "actual_path": actual_path,
+                "metadata": {},
+            }
+
+    handler = ParentTraversalHandler()
+    io = GuardedHandlerIO(root)
+    try:
+        with pytest.raises(CacheUnsafePathError):
+            io.put(handler, "payload", "c" * 64, CacheConfig(cache_dir=str(root)))
+        assert handler.outside_artifact is not None
+        assert handler.outside_artifact.read_text(encoding="utf-8") == "outside"
+        assert list(root.iterdir()) == []
+    finally:
+        io.close()
+
+
+def test_guarded_handler_io_rejects_stage_artifact_swapped_after_validation(
+    tmp_path, monkeypatch
+):
+    """Publication reads the verified descriptor, not a handler-swapped pathname."""
+    from cacheness.storage.guarded_handler_io import GuardedHandlerIO
+
+    root = tmp_path / "root"
+    root.mkdir()
+    outside = tmp_path / "outside.guarded"
+    outside.write_text("outside", encoding="utf-8")
+    handler = _InstrumentedHandler()
+    io = GuardedHandlerIO(root)
+    original_staged_artifact = GuardedHandlerIO._staged_artifact
+
+    def swap_after_validation(
+        stage_root: Path, stage_base: Path, result: dict[str, Any]
+    ) -> Path:
+        artifact = original_staged_artifact(stage_root, stage_base, result)
+        artifact.unlink()
+        artifact.symlink_to(outside)
+        return artifact
+
+    monkeypatch.setattr(
+        GuardedHandlerIO,
+        "_staged_artifact",
+        staticmethod(swap_after_validation),
+    )
+    try:
+        with pytest.raises(CacheUnsafePathError):
+            io.put(handler, "payload", "d" * 64, CacheConfig(cache_dir=str(root)))
+        assert outside.read_text(encoding="utf-8") == "outside"
+        assert list(root.iterdir()) == []
+    finally:
+        io.close()
+
+
+def test_guarded_handler_io_rejects_hard_linked_external_stage_artifact(tmp_path):
+    """A stage path may not alias external bytes through a hard link."""
+    from cacheness.storage.guarded_handler_io import GuardedHandlerIO
+
+    root = tmp_path / "root"
+    root.mkdir()
+    outside = tmp_path / "outside.guarded"
+    outside.write_text("outside", encoding="utf-8")
+
+    class HardLinkStageHandler:
+        data_type = "hard-link-stage"
+
+        def put(self, _data: Any, file_path: Path, _config: Any) -> dict[str, Any]:
+            artifact = file_path.with_suffix(".guarded")
+            os.link(outside, artifact)
+            return {
+                "storage_format": "guarded",
+                "file_size": artifact.stat().st_size,
+                "actual_path": artifact,
+                "metadata": {},
+            }
+
+    io = GuardedHandlerIO(root)
+    try:
+        with pytest.raises(CacheUnsafePathError):
+            io.put(
+                HardLinkStageHandler(),
+                "payload",
+                "e" * 64,
+                CacheConfig(cache_dir=str(root)),
+            )
+        assert outside.read_text(encoding="utf-8") == "outside"
+        assert list(root.iterdir()) == []
+    finally:
+        io.close()
+
+
+def test_guarded_handler_io_rejects_stage_ancestor_swapped_after_validation(
+    tmp_path, monkeypatch
+):
+    """A swapped stage directory cannot redirect an absolute artifact path."""
+    from cacheness.storage.guarded_handler_io import GuardedHandlerIO
+
+    root = tmp_path / "root"
+    root.mkdir()
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    outside_payload = outside_dir / "payload.guarded"
+    outside_payload.write_text("outside", encoding="utf-8")
+
+    class NestedStageHandler:
+        data_type = "nested-stage"
+
+        def put(self, _data: Any, file_path: Path, _config: Any) -> dict[str, Any]:
+            artifact = file_path.parent / "nested" / "payload.guarded"
+            artifact.parent.mkdir()
+            artifact.write_text("inside", encoding="utf-8")
+            return {
+                "storage_format": "guarded",
+                "file_size": artifact.stat().st_size,
+                "actual_path": artifact,
+                "metadata": {},
+            }
+
+    io = GuardedHandlerIO(root)
+    original_staged_artifact = GuardedHandlerIO._staged_artifact
+
+    def swap_ancestor_after_validation(
+        stage_root: Path, stage_base: Path, result: dict[str, Any]
+    ) -> Path:
+        artifact = original_staged_artifact(stage_root, stage_base, result)
+        shutil.rmtree(artifact.parent)
+        artifact.parent.symlink_to(outside_dir, target_is_directory=True)
+        return artifact
+
+    monkeypatch.setattr(
+        GuardedHandlerIO,
+        "_staged_artifact",
+        staticmethod(swap_ancestor_after_validation),
+    )
+    try:
+        with pytest.raises(CacheUnsafePathError):
+            io.put(
+                NestedStageHandler(),
+                "payload",
+                "f" * 64,
+                CacheConfig(cache_dir=str(root)),
+            )
+        assert outside_payload.read_text(encoding="utf-8") == "outside"
+        assert list(root.iterdir()) == []
     finally:
         io.close()
 
