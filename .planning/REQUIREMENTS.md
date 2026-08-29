@@ -89,16 +89,57 @@ Deferred to future releases and not included in the current roadmap.
 
 ## Traceability
 
-Roadmap phase mappings are populated during roadmap creation.
-
 | Requirement | Phase | Status |
 |-------------|-------|--------|
+| STOR-01 | Phase 2 | Pending |
+| STOR-02 | Phase 2 | Pending |
+| STOR-03 | Phase 3 | Pending |
+| STOR-04 | Phase 3 | Pending |
+| STOR-05 | Phase 3 | Pending |
+| STOR-06 | Phase 3 | Pending |
+| STOR-07 | Phase 3 | Pending |
+| STOR-08 | Phase 2 | Pending |
+| BACK-01 | Phase 5 | Pending |
+| BACK-02 | Phase 4 | Pending |
+| BACK-03 | Phase 4 | Pending |
+| BACK-04 | Phase 5 | Pending |
+| BACK-05 | Phase 5 | Pending |
+| BACK-06 | Phase 4 | Pending |
+| CACH-01 | Phase 6 | Pending |
+| CACH-02 | Phase 6 | Pending |
+| CACH-03 | Phase 6 | Pending |
+| CACH-04 | Phase 6 | Pending |
+| CACH-05 | Phase 6 | Pending |
+| CACH-06 | Phase 6 | Pending |
+| CACH-07 | Phase 1 | Pending |
+| SECU-01 | Phase 1 | Pending |
+| SECU-02 | Phase 1 | Pending |
+| SECU-03 | Phase 2 | Pending |
+| SECU-04 | Phase 2 | Pending |
+| SECU-05 | Phase 2 | Pending |
+| SECU-06 | Phase 1 | Pending |
+| SECU-07 | Phase 1 | Pending |
+| SECU-08 | Phase 2 | Pending |
+| MIGR-01 | Phase 1 | Pending |
+| MIGR-02 | Phase 2 | Pending |
+| MIGR-03 | Phase 7 | Pending |
+| MIGR-04 | Phase 7 | Pending |
+| MIGR-05 | Phase 7 | Pending |
+| MIGR-06 | Phase 7 | Pending |
+| MIGR-07 | Phase 2 | Pending |
+| QUAL-01 | Phase 8 | Pending |
+| QUAL-02 | Phase 8 | Pending |
+| QUAL-03 | Phase 8 | Pending |
+| QUAL-04 | Phase 8 | Pending |
+| QUAL-05 | Phase 8 | Pending |
+| QUAL-06 | Phase 8 | Pending |
+| QUAL-07 | Phase 8 | Pending |
 
 **Coverage:**
 - v1 requirements: 43 total
-- Mapped to phases: 0
-- Unmapped: 43 ⚠️
+- Mapped to phases: 43
+- Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-08-29*
-*Last updated: 2026-08-29 after initial definition*
+*Last updated: 2026-08-29 after roadmap creation*
