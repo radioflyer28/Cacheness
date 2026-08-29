@@ -43,8 +43,25 @@ Example Usage:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone, date
-from typing import Any, Dict, List, Optional, Union, Callable, TYPE_CHECKING
+import logging
+from types import MappingProxyType
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    List,
+    Literal,
+    Mapping,
+    Optional,
+    Union,
+)
+
+from .error_handling import CacheError, CacheReason
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -70,14 +87,99 @@ except ImportError:
     HAS_PANDAS = False
 
 
-class SQLCacheError(Exception):
-    """Base exception for SQL cache operations"""
-    pass
+class SQLCacheError(CacheError):
+    """Base exception for SQL cache operations."""
+
+
+@dataclass(frozen=True)
+class SqlCacheFailure:
+    """An immutable record of one unresolved pull-through operation."""
+
+    range_params: Mapping[str, Any]
+    operation: str
+    error_type: str
+    message: str
+    cause: BaseException | None = field(default=None, compare=False, repr=False)
+
+    def __post_init__(self):
+        object.__setattr__(
+            self, "range_params", MappingProxyType(dict(self.range_params))
+        )
+
+
+@dataclass(frozen=True)
+class SqlCacheResult:
+    """An opt-in result that exposes incomplete best-effort pull-through data."""
+
+    data: "pd.DataFrame"
+    is_partial: bool
+    failures: tuple[SqlCacheFailure, ...] = ()
+
+    def __post_init__(self):
+        object.__setattr__(self, "failures", tuple(self.failures))
+
+
+class SqlCacheFetchError(SQLCacheError):
+    """Raised when parsing or fetching cannot produce a complete result."""
+
+    def __init__(self, message: str, failures: List[SqlCacheFailure]):
+        self.failures = tuple(failures)
+        super().__init__(
+            message,
+            {
+                "reason": CacheReason.SQL_CACHE_FETCH_FAILED.value,
+                "operation": "fetch",
+                "failed_ranges": [
+                    dict(failure.range_params) for failure in self.failures
+                ],
+                "failure_count": len(self.failures),
+            },
+        )
+
+
+class SqlCacheGapDetectionError(SQLCacheError):
+    """Raised when a caller-provided gap detector cannot determine completeness."""
+
+    def __init__(
+        self, message: str, query_params: Mapping[str, Any], cause: BaseException
+    ):
+        self.query_params = MappingProxyType(dict(query_params))
+        self.cause = cause
+        super().__init__(
+            message,
+            {
+                "reason": CacheReason.SQL_CACHE_GAP_DETECTION_FAILED.value,
+                "operation": "gap_detection",
+                "query_params": dict(self.query_params),
+            },
+        )
+
+
+class SqlCacheWriteError(SQLCacheError):
+    """Raised when bulk and equivalent row-level writes both fail."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        bulk_error: BaseException,
+        row_error: BaseException,
+    ):
+        self.bulk_error = bulk_error
+        self.row_error = row_error
+        super().__init__(
+            message,
+            {
+                "reason": CacheReason.SQL_CACHE_UPSERT_FAILED.value,
+                "operation": "upsert",
+                "bulk_error_type": type(bulk_error).__name__,
+                "row_error_type": type(row_error).__name__,
+            },
+        )
 
 
 class MissingDependencyError(SQLCacheError):
-    """Raised when required dependencies are not available"""
-    pass
+    """Raised when required dependencies are not available."""
 
 
 def check_dependencies():
@@ -485,50 +587,180 @@ class SqlCache:
             if col.name not in ('cached_at', 'expires_at')
         ]
     
-    def get_data(self, **query_params) -> 'pd.DataFrame':
-        """
-        Main pull-through cache method.
-        
-        Checks the cache first, fetches missing data from the external source,
-        and returns the complete dataset.
-        
+    def get_data(
+        self,
+        *,
+        failure_mode: Literal["strict", "best_effort"] = "strict",
+        **query_params,
+    ) -> "pd.DataFrame | SqlCacheResult":
+        """Return complete data by default or an explicit partial-result report.
+
         Args:
-            **query_params: Query parameters for data retrieval
-            
+            failure_mode: ``"strict"`` returns a DataFrame only when every missing
+                range resolves. ``"best_effort"`` returns a SqlCacheResult with
+                failed ranges made explicit.
+            **query_params: Query parameters for data retrieval.
+
         Returns:
-            pd.DataFrame: Complete dataset from cache
-            
-        Raises:
-            SQLCacheError: If there's an error with cache operations
+            pd.DataFrame: Complete data in strict mode.
+            SqlCacheResult: Opt-in data and failure report in best-effort mode.
         """
-        try:
-            parsed_params = self.data_adapter.parse_query_params(**query_params)
-            
-            with self.Session() as session:
-                # Check cache first
+        if failure_mode not in ("strict", "best_effort"):
+            raise SQLCacheError(
+                "failure_mode must be 'strict' or 'best_effort'",
+                {"operation": "get_data", "failure_mode": failure_mode},
+            )
+
+        parsed_params = self._parse_query_params(query_params)
+        with self.Session() as session:
+            try:
                 cached_data = self._get_cached_data(session, parsed_params)
-                
-                # Find missing data ranges
-                missing_ranges = self._find_missing_data(parsed_params, cached_data)
-                
-                # Fetch and store missing data
+                missing_ranges, gap_failures = self._resolve_missing_ranges(
+                    parsed_params, cached_data, failure_mode
+                )
+                staged_frames, fetch_failures = self._fetch_missing_ranges(
+                    missing_ranges
+                )
+                failures = [*gap_failures, *fetch_failures]
+
+                if fetch_failures and failure_mode == "strict":
+                    session.rollback()
+                    self._raise_fetch_error(fetch_failures)
+
+                if failure_mode == "best_effort":
+                    # A gap-detector fallback is logged at the decision point so
+                    # callers can see the built-in fallback. Fetch failures log here.
+                    for failure in fetch_failures:
+                        self._log_best_effort_failure(failure)
+
+                for fresh_data in staged_frames:
+                    self._store_in_cache(session, fresh_data)
+
                 if missing_ranges:
-                    for missing_params in missing_ranges:
-                        try:
-                            fresh_data = self.data_adapter.fetch_data(**missing_params)
-                            if not fresh_data.empty:
-                                self._store_in_cache(session, fresh_data)
-                        except Exception as e:
-                            # Log the error but continue with other ranges
-                            print(f"Warning: Failed to fetch data for {missing_params}: {e}")
-                    
                     session.commit()
-                
-                # Return complete dataset from cache
-                return self._get_cached_data(session, parsed_params)
-                
-        except Exception as e:
-            raise SQLCacheError(f"Error in get_data: {e}") from e
+
+                data = self._get_cached_data(session, parsed_params)
+                if failure_mode == "best_effort":
+                    return SqlCacheResult(
+                        data=data,
+                        is_partial=bool(failures),
+                        failures=tuple(failures),
+                    )
+                return data
+            except SQLCacheError:
+                raise
+            except Exception as exc:
+                session.rollback()
+                raise SQLCacheError(
+                    f"Error in get_data: {exc}", {"operation": "get_data"}
+                ) from exc
+
+    def _parse_query_params(self, query_params: Mapping[str, Any]) -> Dict[str, Any]:
+        """Run caller parsing before opening a transaction and preserve its cause."""
+        try:
+            return self.data_adapter.parse_query_params(**query_params)
+        except SQLCacheError:
+            raise
+        except Exception as exc:
+            failure = SqlCacheFailure(
+                range_params=query_params,
+                operation="parse_query_params",
+                error_type=type(exc).__name__,
+                message=str(exc),
+                cause=exc,
+            )
+            error = SqlCacheFetchError("Failed to parse query parameters", [failure])
+            raise error from exc
+
+    def _resolve_missing_ranges(
+        self,
+        query_params: Dict[str, Any],
+        cached_data: "pd.DataFrame",
+        failure_mode: Literal["strict", "best_effort"],
+    ) -> tuple[List[Dict[str, Any]], List[SqlCacheFailure]]:
+        """Find ranges, allowing custom-detector fallback only when requested."""
+        try:
+            return self._find_missing_data(query_params, cached_data), []
+        except SqlCacheGapDetectionError as error:
+            if failure_mode == "strict":
+                raise
+
+            failure = SqlCacheFailure(
+                range_params=query_params,
+                operation="gap_detection",
+                error_type=type(error.cause).__name__,
+                message=str(error.cause),
+                cause=error.cause,
+            )
+            logger.warning(
+                "SqlCache custom gap detector failed; using built-in gap detection",
+                extra={
+                    "operation": "gap_detection",
+                    "range_params": dict(query_params),
+                    "failure_mode": "best_effort",
+                    "fallback": "built_in_gap_detection",
+                    "failure_type": failure.error_type,
+                },
+            )
+            return self._find_missing_data_builtin(query_params, cached_data), [failure]
+
+    def _fetch_missing_ranges(
+        self, missing_ranges: List[Dict[str, Any]]
+    ) -> tuple[List["pd.DataFrame"], List[SqlCacheFailure]]:
+        """Fetch every range in memory before any range is written to storage."""
+        staged_frames = []
+        failures = []
+        for missing_params in missing_ranges:
+            try:
+                fresh_data = self.data_adapter.fetch_data(**missing_params)
+            except Exception as exc:
+                failures.append(
+                    SqlCacheFailure(
+                        range_params=missing_params,
+                        operation="fetch",
+                        error_type=type(exc).__name__,
+                        message=str(exc),
+                        cause=exc,
+                    )
+                )
+                continue
+
+            if fresh_data is None or fresh_data.empty:
+                failures.append(
+                    SqlCacheFailure(
+                        range_params=missing_params,
+                        operation="fetch",
+                        error_type="empty_response",
+                        message="Fetch returned no rows for a missing range",
+                    )
+                )
+                continue
+            staged_frames.append(fresh_data)
+        return staged_frames, failures
+
+    def _raise_fetch_error(self, failures: List[SqlCacheFailure]) -> None:
+        """Raise one strict completeness error with every failed range attached."""
+        error = SqlCacheFetchError(
+            "Failed to fetch every missing range; no partial result was stored", failures
+        )
+        first_cause = next(
+            (failure.cause for failure in failures if failure.cause is not None), None
+        )
+        if first_cause is None:
+            raise error
+        raise error from first_cause
+
+    def _log_best_effort_failure(self, failure: SqlCacheFailure) -> None:
+        """Emit an inspectable warning for an explicitly allowed incomplete range."""
+        logger.warning(
+            "SqlCache best-effort range remained incomplete",
+            extra={
+                "operation": failure.operation,
+                "range_params": dict(failure.range_params),
+                "failure_mode": "best_effort",
+                "failure_type": failure.error_type,
+            },
+        )
     
     def _get_cached_data(self, session: "Session", query_params: Dict[str, Any]) -> "pd.DataFrame":
         """Retrieve data from cache based on query parameters"""
@@ -619,13 +851,29 @@ class SqlCache:
         # Convert to records for insertion
         records = data_filtered.to_dict('records')
         
-        # Attempt upsert operation
+        # Attempt the equivalent bulk path inside a savepoint. A failed bulk
+        # statement must not poison the outer transaction before row fallback.
         try:
-            self._upsert_records(session, records)
-        except Exception as e:
-            # Fallback to individual row operations
-            print(f"Upsert failed, using fallback method: {e}")
-            self._fallback_upsert(session, records)
+            with session.begin_nested():
+                self._upsert_records(session, records)
+        except Exception as bulk_error:
+            logger.warning(
+                "SqlCache bulk upsert failed; using row-level fallback",
+                extra={
+                    "operation": "upsert_fallback",
+                    "bulk_error_type": type(bulk_error).__name__,
+                },
+            )
+            try:
+                self._fallback_upsert(session, records)
+            except Exception as row_error:
+                session.rollback()
+                error = SqlCacheWriteError(
+                    "Bulk and row-level upserts both failed",
+                    bulk_error=bulk_error,
+                    row_error=row_error,
+                )
+                raise error from row_error
     
     def _upsert_records(self, session: Session, records: List[Dict]):
         """Perform bulk upsert operation"""
@@ -735,15 +983,23 @@ class SqlCache:
         Returns:
             List of parameter dictionaries for fetching missing data ranges
         """
-        # Use custom gap detector if provided
+        # Caller-controlled detectors must be strict by default. Best-effort
+        # fallback is selected in _resolve_missing_ranges.
         if self.gap_detector is not None:
             try:
                 return self.gap_detector(query_params, cached_data, self)
-            except Exception as e:
-                # Fallback to built-in logic if custom detector fails
-                print(f"Warning: Custom gap detector failed ({e}), using built-in logic")
-        
-        # Use built-in intelligent gap detection
+            except Exception as exc:
+                error = SqlCacheGapDetectionError(
+                    "Custom gap detector failed", query_params, exc
+                )
+                raise error from exc
+
+        return self._find_missing_data_builtin(query_params, cached_data)
+
+    def _find_missing_data_builtin(
+        self, query_params: Dict[str, Any], cached_data: "pd.DataFrame"
+    ) -> List[Dict[str, Any]]:
+        """Use built-in gap detection without invoking a caller-supplied detector."""
         if cached_data.empty:
             # No cached data - fetch everything
             return [self._convert_query_to_fetch_params(query_params)]

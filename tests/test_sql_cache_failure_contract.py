@@ -11,7 +11,6 @@ from sqlalchemy import Column, Date, Float, MetaData, String, Table, func, selec
 from cacheness.sql_cache import (
     SqlCache,
     SqlCacheAdapter,
-    SqlCacheFailure,
     SqlCacheFetchError,
     SqlCacheGapDetectionError,
     SqlCacheResult,
