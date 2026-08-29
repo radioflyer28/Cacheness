@@ -477,6 +477,61 @@ def test_blob_store_keeps_logical_key_while_handlers_only_see_private_paths(tmp_
         store.close()
 
 
+def test_blob_store_clear_removes_guarded_payloads_before_metadata(tmp_path):
+    """A successful clear leaves neither reachable metadata nor orphan payload bytes."""
+    root = tmp_path / "blob-root"
+    handler = _InstrumentedHandler()
+    store = BlobStore(root)
+    store.handlers = _SingleHandlerRegistry(handler)
+
+    try:
+        first_key = store.put("first", key="first")
+        second_key = store.put("second", key="second")
+        payload_paths = [
+            Path(store.get_metadata(key)["metadata"]["actual_path"])
+            for key in (first_key, second_key)
+        ]
+
+        assert all(path.exists() for path in payload_paths)
+        assert store.clear() == 2
+
+        assert all(not path.exists() for path in payload_paths)
+        assert store.backend.list_entries() == []
+        assert store.get(first_key) is None
+        assert store.get(second_key) is None
+    finally:
+        store.close()
+
+
+def test_blob_store_clear_surfaces_metadata_failure_after_payload_cleanup(
+    tmp_path, monkeypatch
+):
+    """A metadata failure is visible and cannot retain payload bytes as orphans."""
+    root = tmp_path / "blob-root"
+    handler = _InstrumentedHandler()
+    store = BlobStore(root)
+    store.handlers = _SingleHandlerRegistry(handler)
+
+    try:
+        key = store.put("payload", key="entry")
+        entry = store.get_metadata(key)
+        assert entry is not None
+        payload_path = Path(entry["metadata"]["actual_path"])
+
+        def fail_metadata_clear() -> int:
+            raise RuntimeError("metadata unavailable")
+
+        monkeypatch.setattr(store.backend, "clear_all", fail_metadata_clear)
+
+        with pytest.raises(RuntimeError, match="metadata unavailable"):
+            store.clear()
+
+        assert not payload_path.exists()
+        assert store.backend.get_entry(key) is not None
+    finally:
+        store.close()
+
+
 def test_persisted_locator_raises_before_deserialization(tmp_path):
     """Unsafe persisted locators remain typed errors, not reads or cache misses."""
     outside = tmp_path / "outside"

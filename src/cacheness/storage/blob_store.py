@@ -364,14 +364,29 @@ class BlobStore:
     
     def clear(self) -> int:
         """
-        Remove all blobs.
-        
+        Remove every managed payload and then its metadata.
+
         Returns:
             Number of blobs removed
         """
         entries = self.backend.list_entries()
         self._preflight_entries(entries, operation="clear")
-        return self.backend.clear_all()
+        for entry in entries:
+            logical_key = entry.get("cache_key", "")
+            actual_path = self._entry_locator(
+                entry,
+                logical_key,
+                operation="clear",
+            )
+            self.guarded_handler_io.file_ops.delete(actual_path)
+
+        try:
+            return self.backend.clear_all()
+        except Exception:
+            # Files have already been deleted, so propagating this failure is
+            # preferable to falsely reporting a complete metadata cleanup.
+            logger.exception("Blob payloads were deleted but metadata clear failed")
+            raise
     
     def close(self):
         """Close the blob store and release resources."""
