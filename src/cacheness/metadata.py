@@ -878,6 +878,10 @@ class JsonBackend(MetadataBackend):
                 "cache_key_params": document["cache_key_params"][cache_key],
             }
             if signed:
+                # Expose the historical signature to the current verifier first.
+                # Core then considers the exact layout discriminator for its one
+                # documented six-field compatibility candidate.
+                metadata["entry_signature"] = signature
                 metadata["legacy_entry_signature"] = signature
                 metadata["legacy_compat_layout"] = "json_split_v038_signed"
 

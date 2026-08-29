@@ -30,6 +30,47 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 
+_LEGACY_V038_SIGNED_FIELDS = (
+    "cache_key",
+    "created_at",
+    "data_type",
+    "file_hash",
+    "file_size",
+    "prefix",
+)
+
+
+def verify_legacy_v038_entry(
+    secret_key: bytes, entry_data: Dict[str, Any], stored_signature: str
+) -> bool:
+    """Verify the one historical 0.3.8 six-field HMAC payload.
+
+    This is deliberately separate from the current signer contract.  Values
+    retain the historical empty/datetime/string normalization and comparison
+    stays constant-time, but no other stored layout is a candidate here.
+    """
+    if not isinstance(secret_key, bytes) or not isinstance(stored_signature, str):
+        return False
+    try:
+        values = []
+        for field in _LEGACY_V038_SIGNED_FIELDS:
+            value = entry_data.get(field)
+            if value is None:
+                value = ""
+            elif isinstance(value, datetime):
+                value = value.isoformat()
+            else:
+                value = str(value)
+            values.append(f"{field}:{value}")
+        payload = "|".join(values)
+        expected_signature = hmac.new(
+            secret_key, payload.encode("utf-8"), hashlib.sha256
+        ).hexdigest()
+        return hmac.compare_digest(expected_signature, stored_signature)
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
 class CacheEntrySigner:
     """
     HMAC-based cache entry signer for metadata integrity protection.

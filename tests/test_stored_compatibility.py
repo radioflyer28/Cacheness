@@ -241,13 +241,18 @@ def test_split_map_and_metadata_json_backends_reject_every_mutating_operation(
         before = _sha256(metadata_path)
         with pytest.warns(DeprecationWarning, match="legacy"):
             backend = JsonBackend(metadata_path)
-        unchanged = lambda: _sha256(metadata_path) == before
+
+        def unchanged() -> bool:
+            return _sha256(metadata_path) == before
+
     else:
         cache_dir, cache_key, database = _copy_metadata_json_fixture(tmp_path)
         before = _sqlite_snapshot(database)
         with pytest.warns(DeprecationWarning, match="legacy"):
             backend = SqliteBackend(str(database))
-        unchanged = lambda: _sqlite_snapshot(database) == before
+
+        def unchanged() -> bool:
+            return _sqlite_snapshot(database) == before
 
     try:
         with pytest.raises(CacheLegacyFormatError) as error:
@@ -672,6 +677,7 @@ def test_decorator_tries_one_historical_candidate_after_current_miss_without_sca
         CacheConfig(
             cache_dir=str(cache_dir),
             metadata_backend="json",
+            cleanup_on_init=False,
             compression=CompressionConfig(use_blosc2_arrays=False),
             security=SecurityConfig(enable_entry_signing=False),
         )

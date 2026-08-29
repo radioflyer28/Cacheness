@@ -776,9 +776,15 @@ class UnifiedCache:
         for entry in entries:
             self._entry_locator(entry, entry.get("cache_key"), operation=operation)
 
-    def _is_expired(self, cache_key: str, ttl_hours=_DEFAULT_TTL) -> bool:
+    def _is_expired(
+        self,
+        cache_key: str,
+        ttl_hours=_DEFAULT_TTL,
+        entry: Optional[Dict[str, Any]] = None,
+    ) -> bool:
         """Check if cache entry is expired."""
-        entry = self.metadata_backend.get_entry(cache_key)
+        if entry is None:
+            entry = self.metadata_backend.get_entry(cache_key)
         if not entry:
             return True
 
@@ -1071,17 +1077,75 @@ class UnifiedCache:
 
     def _verify_legacy_entry_signature(
         self,
-        _cache_key: str,
-        _entry: Dict[str, Any],
-        _metadata: Dict[str, Any],
+        cache_key: str,
+        entry: Dict[str, Any],
+        metadata: Dict[str, Any],
     ) -> bool:
-        """Reserved compatibility verifier hook for the legacy-format plan.
+        """Verify only the normalized 0.3.8 six-field signature payload."""
+        if metadata.get("legacy_compat_layout") != "json_split_v038_signed":
+            return False
 
-        Phase 1 has no legacy signature format to authorize. Returning false
-        makes an unrecognized compatibility signature fail closed until Plan 12
-        supplies its exact verifier through this seam.
-        """
-        return False
+        stored_signature = metadata.get("legacy_entry_signature")
+        if not isinstance(stored_signature, str) or self.signer is None:
+            return False
+
+        from .security import verify_legacy_v038_entry
+
+        verified = verify_legacy_v038_entry(
+            self.signer.secret_key,
+            {
+                "cache_key": cache_key,
+                "created_at": entry.get("created_at"),
+                "data_type": entry.get("data_type"),
+                "file_hash": metadata.get("file_hash"),
+                "file_size": entry.get("file_size"),
+                "prefix": entry.get("prefix"),
+            },
+            stored_signature,
+        )
+        if verified:
+            warnings.warn(
+                "Reading a legacy 0.3.8 signed cache entry is deprecated.",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+        return verified
+
+    @staticmethod
+    def _is_exact_legacy_signature_entry(metadata: Dict[str, Any]) -> bool:
+        """Identify the sole historical signature failure that must propagate."""
+        return (
+            metadata.get("legacy_compat_layout") == "json_split_v038_signed"
+            and isinstance(metadata.get("legacy_entry_signature"), str)
+        )
+
+    def _legacy_decorator_entry(self, entry: Dict[str, Any]) -> Dict[str, Any]:
+        """Rebase the one historical decorator payload without changing evidence."""
+        metadata = entry.get("metadata")
+        if not isinstance(metadata, dict):
+            raise CacheLegacyFormatError(
+                "Unsupported legacy decorator metadata",
+                reason=CacheReason.UNSUPPORTED_LEGACY_LAYOUT,
+            )
+        actual_path = metadata.get("actual_path")
+        if not isinstance(actual_path, str):
+            raise CacheLegacyFormatError(
+                "Unsupported legacy decorator payload locator",
+                reason=CacheReason.UNSUPPORTED_LEGACY_LAYOUT,
+            )
+
+        payload_name = Path(actual_path).name
+        if payload_name in {"", ".", ".."}:
+            raise CacheLegacyFormatError(
+                "Unsupported legacy decorator payload locator",
+                reason=CacheReason.UNSUPPORTED_LEGACY_LAYOUT,
+            )
+
+        compatibility_entry = entry.copy()
+        compatibility_metadata = metadata.copy()
+        compatibility_metadata["actual_path"] = str(self.cache_dir / payload_name)
+        compatibility_entry["metadata"] = compatibility_metadata
+        return compatibility_entry
 
     def _is_signature_authorized(
         self,
@@ -1102,9 +1166,12 @@ class UnifiedCache:
                 metadata=metadata,
                 cache_key_params=cache_key_params,
             )
-            return self.signer.verify_entry(verify_entry_data, stored_signature)
+            if self.signer.verify_entry(verify_entry_data, stored_signature):
+                return True
+            if not self._is_exact_legacy_signature_entry(metadata):
+                return False
 
-        if metadata.get("legacy_entry_signature") is not None:
+        if self._is_exact_legacy_signature_entry(metadata):
             return self._verify_legacy_entry_signature(cache_key, entry, metadata)
 
         return self.config.security.allow_unsigned_entries
@@ -1121,6 +1188,7 @@ class UnifiedCache:
         cache_key: Optional[str] = None,
         ttl_hours: Optional[int] = None,
         prefix: str = "",
+        _legacy_decorator_v0313: bool = False,
         **kwargs,
     ) -> Optional[Any]:
         """Retrieve a cached value only after guarded snapshot verification."""
@@ -1129,8 +1197,12 @@ class UnifiedCache:
 
         entry = self.metadata_backend.get_entry(cache_key)
         if not entry:
-            self.metadata_backend.increment_misses()
+            if not _legacy_decorator_v0313:
+                self.metadata_backend.increment_misses()
             return None
+
+        if _legacy_decorator_v0313:
+            entry = self._legacy_decorator_entry(entry)
 
         # Validate before expiration checks, miss accounting, handler lookup, or
         # any cleanup policy can alter unsafe evidence.
@@ -1140,13 +1212,20 @@ class UnifiedCache:
             operation="get",
             prefix=prefix,
         )
-        if self._is_expired(cache_key, ttl_hours):
-            self.metadata_backend.increment_misses()
+        is_expired = (
+            self._is_expired(cache_key, ttl_hours, entry)
+            if _legacy_decorator_v0313
+            else self._is_expired(cache_key, ttl_hours)
+        )
+        if is_expired:
+            if not _legacy_decorator_v0313:
+                self.metadata_backend.increment_misses()
             return None
 
         data_type = entry.get("data_type")
         if not data_type:
-            self.metadata_backend.increment_misses()
+            if not _legacy_decorator_v0313:
+                self.metadata_backend.increment_misses()
             return None
 
         metadata = entry.get("metadata", {})
@@ -1168,6 +1247,11 @@ class UnifiedCache:
                             return None
 
                 if not self._is_signature_authorized(cache_key, entry, metadata):
+                    if self._is_exact_legacy_signature_entry(metadata):
+                        raise CacheLegacyFormatError(
+                            "Invalid legacy entry signature",
+                            reason=CacheReason.INVALID_LEGACY_SIGNATURE,
+                        )
                     self._reject_untrusted_entry(
                         cache_key,
                         reason="missing or invalid entry signature",
@@ -1200,7 +1284,8 @@ class UnifiedCache:
             self.metadata_backend.increment_misses()
             return None
 
-        self._record_successful_read(cache_key, entry)
+        if not _legacy_decorator_v0313:
+            self._record_successful_read(cache_key, entry)
         logger.debug(f"Cache hit ({data_type}): {cache_key}")
         return data
 
