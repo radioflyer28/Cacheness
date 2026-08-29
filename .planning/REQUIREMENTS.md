@@ -48,7 +48,7 @@
 
 ### Migration and Compatibility
 
-- [ ] **MIGR-01**: Public imports, constructors, configuration names, registries, decorators, aliases, exceptions, and result behavior have characterization tests before ownership changes.
+- [x] **MIGR-01**: Public imports, constructors, configuration names, registries, decorators, aliases, exceptions, and result behavior have characterization tests before ownership changes.
 - [ ] **MIGR-02**: Stored metadata schemas and payload formats have explicit, independently versioned identifiers.
 - [ ] **MIGR-03**: Migration begins with a non-mutating inventory and produces both human-readable and machine-readable plans.
 - [ ] **MIGR-04**: Same-backend format and schema migrations use resumable copy-verify-switch semantics.
@@ -120,7 +120,7 @@ Deferred to future releases and not included in the current roadmap.
 | SECU-06 | Phase 1 | Pending |
 | SECU-07 | Phase 1 | Pending |
 | SECU-08 | Phase 2 | Pending |
-| MIGR-01 | Phase 1 | Pending |
+| MIGR-01 | Phase 1 | Complete |
 | MIGR-02 | Phase 2 | Pending |
 | MIGR-03 | Phase 7 | Pending |
 | MIGR-04 | Phase 7 | Pending |
@@ -136,6 +136,7 @@ Deferred to future releases and not included in the current roadmap.
 | QUAL-07 | Phase 8 | Pending |
 
 **Coverage:**
+
 - v1 requirements: 43 total
 - Mapped to phases: 43
 - Unmapped: 0 ✓
