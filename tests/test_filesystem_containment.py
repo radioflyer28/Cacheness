@@ -7,11 +7,16 @@ import subprocess
 import threading
 from io import BytesIO
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from cacheness.config import CacheConfig
+from cacheness.core import UnifiedCache
 from cacheness.error_handling import CacheReason, CacheUnsafePathError
+from cacheness.storage.blob_store import BlobStore
 from cacheness.storage.backends.blob_backends import FilesystemBlobBackend
+from cacheness.storage import path_security
 from cacheness.storage.path_security import (
     ManagedFileOps,
     resolve_managed_locator,
@@ -371,3 +376,167 @@ def test_backend_preserves_valid_sharded_atomic_stream_lifecycle(tmp_path):
     assert backend.delete_blob(second_locator)
     assert not backend.exists(second_locator)
     assert not list(backend.base_dir.rglob("*.tmp"))
+
+
+# =============================================================================
+# High-level guarded handler I/O (Plan 01-03)
+# =============================================================================
+
+
+class _InstrumentedHandler:
+    """Small handler that records every path the high-level APIs expose."""
+
+    data_type = "instrumented"
+
+    def __init__(self):
+        self.put_paths: list[Path] = []
+        self.get_paths: list[Path] = []
+
+    def put(self, data: Any, file_path: Path, _config: Any) -> dict[str, Any]:
+        self.put_paths.append(file_path)
+        artifact = file_path.with_suffix(".guarded")
+        artifact.write_text(str(data), encoding="utf-8")
+        return {
+            "storage_format": "guarded",
+            "file_size": artifact.stat().st_size,
+            "actual_path": str(artifact),
+            "metadata": {"instrumented": True},
+        }
+
+    def get(self, file_path: Path, _metadata: dict[str, Any]) -> str:
+        self.get_paths.append(file_path)
+        return file_path.read_text(encoding="utf-8")
+
+
+class _SingleHandlerRegistry:
+    """Registry double selecting one instrumented handler for all test data."""
+
+    def __init__(self, handler: _InstrumentedHandler):
+        self.handler = handler
+
+    def get_handler(self, _data: Any) -> _InstrumentedHandler:
+        return self.handler
+
+    def get_handler_by_type(self, data_type: str) -> _InstrumentedHandler:
+        assert data_type == self.handler.data_type
+        return self.handler
+
+
+def _is_descendant(path: Path, root: Path) -> bool:
+    """Return whether a path is contained by root without trusting its spelling."""
+    try:
+        path.resolve().relative_to(root.resolve())
+    except ValueError:
+        return False
+    return True
+
+
+def test_high_level_physical_name_encoder_is_stable_domain_separated_and_backend_safe():
+    """Logical values never become managed path components at the backend boundary."""
+    encoder = path_security.encode_physical_name
+    ordinary = encoder("key", "prefix", namespace="blob-store")
+
+    assert ordinary == encoder("key", "prefix", namespace="blob-store")
+    assert ordinary != encoder("keyprefix", "", namespace="blob-store")
+    assert ordinary != encoder("key", "prefix", namespace="unified-cache")
+    assert ordinary != encoder("key", "prefix ", namespace="blob-store")
+    assert len(ordinary) == 64
+    assert ordinary == ordinary.lower()
+    assert all(character in "0123456789abcdef" for character in ordinary)
+    assert validate_blob_id(ordinary) == ordinary
+
+
+def test_high_level_blob_store_keeps_logical_key_while_handlers_only_see_private_paths(tmp_path):
+    """BlobStore keeps the public key exact and never passes cache-root paths to handlers."""
+    root = tmp_path / "blob-root"
+    handler = _InstrumentedHandler()
+    store = BlobStore(root)
+    store.handlers = _SingleHandlerRegistry(handler)
+    logical_key = "../tenant/key with spaces"
+
+    try:
+        stored_key = store.put("payload", key=logical_key)
+        entry = store.get_metadata(logical_key)
+
+        assert stored_key == logical_key
+        assert entry is not None
+        assert entry["cache_key"] == logical_key
+        assert store.list(prefix="../tenant") == [logical_key]
+        assert store.get(logical_key) == "payload"
+        assert all(not _is_descendant(path, root) for path in handler.put_paths)
+        assert all(not _is_descendant(path, root) for path in handler.get_paths)
+        assert all(path.exists() for path in handler.get_paths)
+        actual_path = Path(entry["metadata"]["actual_path"])
+        assert _is_descendant(actual_path, root)
+        assert logical_key not in str(actual_path)
+    finally:
+        store.close()
+
+
+def test_high_level_persisted_locator_raises_before_deserialization(tmp_path):
+    """Unsafe persisted locators remain typed errors, not reads or cache misses."""
+    outside = tmp_path / "outside"
+    outside.write_text("outside", encoding="utf-8")
+
+    blob_handler = _InstrumentedHandler()
+    store = BlobStore(tmp_path / "blobs")
+    store.handlers = _SingleHandlerRegistry(blob_handler)
+    try:
+        key = store.put("inside", key="safe")
+        entry = store.backend.get_entry(key)
+        assert entry is not None
+        entry["metadata"]["actual_path"] = str(outside)
+        store.backend.put_entry(key, entry)
+
+        with pytest.raises(CacheUnsafePathError):
+            store.get(key)
+        assert blob_handler.get_paths == []
+        assert outside.read_text(encoding="utf-8") == "outside"
+    finally:
+        store.close()
+
+    cache_handler = _InstrumentedHandler()
+    config = CacheConfig(
+        cache_dir=str(tmp_path / "cache"),
+        metadata_backend="memory",
+        cleanup_on_init=False,
+        verify_cache_integrity=False,
+    )
+    cache = UnifiedCache(config)
+    cache.handlers = _SingleHandlerRegistry(cache_handler)
+    key = cache.put("inside", identity="safe")
+    entry = cache.metadata_backend.get_entry(key)
+    assert entry is not None
+    entry["metadata"]["actual_path"] = str(outside)
+
+    with pytest.raises(CacheUnsafePathError):
+        cache.get(cache_key=key)
+    assert cache_handler.get_paths == []
+    assert outside.read_text(encoding="utf-8") == "outside"
+
+
+def test_unified_cache_encodes_hostile_prefix_without_mutating_outside_target(tmp_path):
+    """An authored prefix remains metadata while only its encoded physical name is used."""
+    root = tmp_path / "cache"
+    handler = _InstrumentedHandler()
+    cache = UnifiedCache(
+        CacheConfig(
+            cache_dir=str(root),
+            metadata_backend="memory",
+            cleanup_on_init=False,
+        )
+    )
+    cache.handlers = _SingleHandlerRegistry(handler)
+    prefix = "../outside prefix"
+
+    key = cache.put("payload", prefix=prefix, identity="prefix")
+    entry = cache.metadata_backend.get_entry(key)
+
+    assert entry is not None
+    assert entry["prefix"] == prefix
+    actual_path = Path(entry["metadata"]["actual_path"])
+    assert _is_descendant(actual_path, root)
+    assert prefix not in str(actual_path)
+    assert cache.get(cache_key=key) == "payload"
+    assert all(not _is_descendant(path, root) for path in handler.put_paths)
+    assert all(not _is_descendant(path, root) for path in handler.get_paths)
