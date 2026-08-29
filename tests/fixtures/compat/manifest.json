@@ -125,6 +125,46 @@
         }
       },
       "production_reader": "legacy_split_json_metadata"
+    },
+    "sqlite-metadata-json-v039": {
+      "source_commit": "6e2f9933a9aa66fb6629aec0125f84a0c114c35f",
+      "source_version": "0.3.9",
+      "variant": "sqlite-metadata-json-npz",
+      "logical_input": {
+        "dtype": "int32",
+        "shape": [2, 3],
+        "values": [0, 1, 2, 3, 4, 5]
+      },
+      "discriminators": {
+        "metadata_kind": "sqlite",
+        "table": "cache_entries",
+        "sqlite_columns": [
+          "cache_key",
+          "description",
+          "data_type",
+          "prefix",
+          "created_at",
+          "accessed_at",
+          "file_size",
+          "file_hash",
+          "entry_signature",
+          "cache_key_params",
+          "metadata_json"
+        ],
+        "signature_state": "column_present"
+      },
+      "files": {
+        "metadata.sqlite3": {
+          "sha256": "913ce4d06825544637ff5f44985518ef5cc8cb07a63505f3e76831ec71572734"
+        },
+        "payload.npz": {
+          "sha256": "400fa42d786ab1e6924e051bbaa61238627909af333de87aab176c280c71fe2f"
+        },
+        "provenance.json": {
+          "sha256": "225a337377a1d9e64249e46b205feaa42d5885a26473ce31f77cd41a4488bfb2"
+        }
+      },
+      "production_reader": "legacy_sqlite_metadata_json"
     }
   }
 }
