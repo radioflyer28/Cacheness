@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "fixture_id": "json-split-unsigned-v037",
+  "source_commit": "a756d70c858cec13ff1c885e2316c0fe725c4949",
+  "source_version": "0.3.7",
+  "generator_command": "Writer-only detached-worktree generation with np.arange(6, dtype=np.int32).reshape(2, 3), JSON metadata, and use_blosc2_arrays=False; no historical reader invoked.",
+  "environment": {
+    "cacheness": "0.3.7",
+    "python": "3.13.3",
+    "numpy": "2.3.2",
+    "blosc2": "3.7.0"
+  },
+  "logical_input": {
+    "dtype": "int32",
+    "shape": [2, 3],
+    "values": [0, 1, 2, 3, 4, 5]
+  },
+  "discriminators": {
+    "metadata_kind": "json_split",
+    "json_top_level_keys": [
+      "entries",
+      "access_times",
+      "creation_times",
+      "file_sizes",
+      "data_types",
+      "cache_key_params",
+      "cache_hits",
+      "cache_misses"
+    ],
+    "signature_state": "absent"
+  },
+  "files": {
+    "metadata.json": {
+      "source_sha256": "0f1c7c772b0768c6287e63e82185cf0803f7e10e83243e685ed3bf537b9fd315",
+      "copied_sha256": "0f1c7c772b0768c6287e63e82185cf0803f7e10e83243e685ed3bf537b9fd315"
+    },
+    "payload.npz": {
+      "source_sha256": "400fa42d786ab1e6924e051bbaa61238627909af333de87aab176c280c71fe2f",
+      "copied_sha256": "400fa42d786ab1e6924e051bbaa61238627909af333de87aab176c280c71fe2f"
+    }
+  }
+}
