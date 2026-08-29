@@ -30,7 +30,7 @@ Cacheness will move from overlapping cache and storage paths to one production-g
   4. Structured metadata and query fields are parsed and constructed without metadata-controlled `eval` or interpolated backend query fragments.
   5. Users can identify the trusted-application-payload boundary and the risks and required configuration for unsafe serializers from project documentation.
 
-**Plans**: 2/12 plans executed
+**Plans**: 3/12 plans executed
 
 Plans:
 **Wave 1**
@@ -40,7 +40,7 @@ Plans:
 **Wave 2** *(blocked on Wave 1 completion)*
 
 - [x] 01-02-PLAN.md — Enforce low-level filesystem containment and no-follow operations.
-- [ ] 01-06-PLAN.md — Make SqlCache strict-by-default and explicit about partial results.
+- [x] 01-06-PLAN.md — Make SqlCache strict-by-default and explicit about partial results.
 - [ ] 01-08-PLAN.md — Generate and verify both legacy raw-array compatibility variants.
 
 **Wave 3** *(blocked on Wave 2 completion)*
@@ -172,7 +172,7 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Compatibility and Security Baseline | 2/12 | In Progress|  |
+| 1. Compatibility and Security Baseline | 3/12 | In Progress|  |
 | 2. Canonical Storage and Integrity Contract | 0/TBD | Not started | - |
 | 3. Atomic Lifecycle and Recovery Engine | 0/TBD | Not started | - |
 | 4. Metadata Composition and Topology Contracts | 0/TBD | Not started | - |

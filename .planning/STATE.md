@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 01
 current_phase_name: Compatibility and Security Baseline
 status: executing
-stopped_at: Completed 01-02-PLAN.md
-last_updated: "2026-08-29T20:21:45.032Z"
+stopped_at: Completed 01-06-PLAN.md
+last_updated: "2026-08-29T20:34:33.771Z"
 last_activity: 2026-08-29
 last_activity_desc: Phase 01 execution started
-state_head: 553ace6f01862c30d3cdb95afe7c43975f393aea
+state_head: 678ecbab47b621f2ca4229388013ffb821527262
 progress:
   total_phases: 8
   completed_phases: 0
   total_plans: 12
-  completed_plans: 2
+  completed_plans: 3
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-08-29)
 ## Current Position
 
 Phase: 01 (Compatibility and Security Baseline) — EXECUTING
-Plan: 3 of 12
+Plan: 4 of 12
 Status: Ready to execute
 Last activity: 2026-08-29 — Phase 01 execution started
 
@@ -61,6 +61,7 @@ Progress: [░░░░░░░░░░] 0%
 |------|----------|-------|-------|
 | Phase 01-compatibility-and-security-baseline P01 | 5min | 2 tasks | 6 files |
 | Phase 01-compatibility-and-security-baseline P02 | 14min | 2 tasks | 5 files |
+| Phase 01 P06 | 8min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -79,6 +80,9 @@ Recent decisions affecting current work:
 - [Phase 01]: CacheStorageConfig preserves authored paths; storage boundaries resolve them at runtime.
 - [Phase 01]: FilesystemBlobBackend accepts only strict opaque IDs; Plan 03 owns logical-key encoding.
 - [Phase 01]: Resolved storage roots are anchored once and managed descendants are revalidated per operation.
+- [Phase 01]: SqlCache strict mode stages all missing-range frames and raises one typed completeness error before storage if any range fails or is empty.
+- [Phase 01]: SqlCache best-effort mode is explicit and returns SqlCacheResult with immutable ordered failure records.
+- [Phase 01]: Custom gap fallback is best-effort-only, while bulk-to-row upsert uses an observable savepoint-backed fallback.
 
 ### Pending Todos
 
@@ -102,6 +106,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-29T20:21:45.023Z
-Stopped at: Completed 01-02-PLAN.md
+Last session: 2026-08-29T20:34:33.763Z
+Stopped at: Completed 01-06-PLAN.md
 Resume file: None

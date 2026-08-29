@@ -33,7 +33,7 @@
 - [ ] **CACH-04**: A cached `None` value remains distinguishable from a cache miss.
 - [ ] **CACH-05**: Cache statistics distinguish absent, expired, corrupt, conflict, and backend-error outcomes while preserving compatible aggregate counters.
 - [ ] **CACH-06**: Existing supported public cache imports, constructors, aliases, configuration names, decorators, and result behavior remain callable through compatibility adapters.
-- [ ] **CACH-07**: `SqlCache` remains a separate subsystem and retains representative import and behavioral regression coverage.
+- [x] **CACH-07**: `SqlCache` remains a separate subsystem and retains representative import and behavioral regression coverage.
 
 ### Security and Integrity
 
@@ -111,7 +111,7 @@ Deferred to future releases and not included in the current roadmap.
 | CACH-04 | Phase 6 | Pending |
 | CACH-05 | Phase 6 | Pending |
 | CACH-06 | Phase 6 | Pending |
-| CACH-07 | Phase 1 | Pending |
+| CACH-07 | Phase 1 | Complete |
 | SECU-01 | Phase 1 | Complete |
 | SECU-02 | Phase 1 | Pending |
 | SECU-03 | Phase 2 | Pending |
