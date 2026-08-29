@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 01
 current_phase_name: Compatibility and Security Baseline
 status: executing
-stopped_at: Completed 01-09-PLAN.md
-last_updated: "2026-08-29T21:19:10.256Z"
+stopped_at: Completed 01-04-PLAN.md
+last_updated: "2026-08-29T21:38:02.229Z"
 last_activity: 2026-08-29
 last_activity_desc: Phase 01 execution started
-state_head: d0fda8ea2a05f8862664c5237366775eaf58e14b
+state_head: 1c80d4a2090c7c77e10f247f5b23c3863456c19f
 progress:
   total_phases: 8
   completed_phases: 0
   total_plans: 12
-  completed_plans: 6
+  completed_plans: 7
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-08-29)
 ## Current Position
 
 Phase: 01 (Compatibility and Security Baseline) — EXECUTING
-Plan: 7 of 12
+Plan: 8 of 12
 Status: Ready to execute
 Last activity: 2026-08-29 — Phase 01 execution started
 
@@ -65,6 +65,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01-compatibility-and-security-baseline P08 | 3min | 3 tasks | 7 files |
 | Phase 01 P03 | 12min | 3 tasks | 7 files |
 | Phase 01-compatibility-and-security-baseline P09 | 8min | 2 tasks | 7 files |
+| Phase 01-compatibility-and-security-baseline P04 | 14min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -94,6 +95,9 @@ Recent decisions affecting current work:
 - [Phase 01]: Unsafe locator preflight covers complete high-level operation sets before reads, cleanup, metadata mutation, or result exposure.
 - [Phase 01]: The independent validator, rather than fixture discovery, owns the exact signed and unsigned split-map schema and accumulated corpus prefix.
 - [Phase 01]: Signed split-map evidence uses a fixed, disclosed test-only 32-byte HMAC input and records a distinct wrong-key verification failure expectation in provenance.
+- [Phase 01]: Legacy raw-array frames remain read-only compatibility input and are parsed through bounded tuple metadata plus exact byte validation.
+- [Phase 01]: New ordinary arrays use native NPZ with pickle disabled; no Cacheness raw-array writer remains.
+- [Phase 01]: Object arrays require explicit signing, integrity verification, unsigned-entry rejection, and snapshot authorization before ObjectHandler.
 
 ### Pending Todos
 
@@ -117,6 +121,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-29T21:19:10.246Z
-Stopped at: Completed 01-09-PLAN.md
+Last session: 2026-08-29T21:38:02.219Z
+Stopped at: Completed 01-04-PLAN.md
 Resume file: None

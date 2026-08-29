@@ -38,7 +38,7 @@
 ### Security and Integrity
 
 - [x] **SECU-01**: Filesystem reads, writes, deletes, and listings reject traversal, absolute-path, drive, UNC, and symlink escapes from the configured root.
-- [ ] **SECU-02**: Structured metadata uses typed safe parsers, and metadata-controlled `eval` is eliminated.
+- [x] **SECU-02**: Structured metadata uses typed safe parsers, and metadata-controlled `eval` is eliminated.
 - [ ] **SECU-03**: Configured manifest authenticity and payload integrity are verified before deserialization.
 - [ ] **SECU-04**: Required signing fails closed when keys, signatures, permissions, or signer configuration are missing or invalid.
 - [ ] **SECU-05**: Signed manifests bind critical locator, handler/type, format, and lifecycle-generation fields.
@@ -113,7 +113,7 @@ Deferred to future releases and not included in the current roadmap.
 | CACH-06 | Phase 6 | Pending |
 | CACH-07 | Phase 1 | Complete |
 | SECU-01 | Phase 1 | Complete |
-| SECU-02 | Phase 1 | Pending |
+| SECU-02 | Phase 1 | Complete |
 | SECU-03 | Phase 2 | Pending |
 | SECU-04 | Phase 2 | Pending |
 | SECU-05 | Phase 2 | Pending |
