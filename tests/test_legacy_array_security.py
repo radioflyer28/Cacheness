@@ -285,6 +285,49 @@ def test_trusted_object_array_opt_in_requires_all_integrity_predicates(factory) 
         factory()
 
 
+_TRUSTED_OBJECT_ARRAY_SIGNED_FIELDS = {
+    "cache_key",
+    "file_hash",
+    "data_type",
+    "actual_path",
+    "storage_format",
+    "serializer",
+    "compression_codec",
+}
+
+
+@pytest.mark.parametrize("missing_field", sorted(_TRUSTED_OBJECT_ARRAY_SIGNED_FIELDS))
+def test_trusted_object_array_opt_in_requires_signed_payload_identity_fields(
+    missing_field: str,
+) -> None:
+    """Custom HMAC field lists cannot omit a deserialization control field."""
+    signed_fields = sorted(_TRUSTED_OBJECT_ARRAY_SIGNED_FIELDS - {missing_field})
+
+    with pytest.raises(ValueError, match="custom_signed_fields"):
+        CacheConfig(
+            handlers=HandlerConfig(allow_trusted_object_arrays=True),
+            security=SecurityConfig(
+                allow_unsigned_entries=False,
+                custom_signed_fields=signed_fields,
+            ),
+        )
+
+
+def test_trusted_object_array_opt_in_allows_complete_custom_signature_coverage() -> None:
+    """Applications may extend no contract by spelling the required field core."""
+    config = CacheConfig(
+        handlers=HandlerConfig(allow_trusted_object_arrays=True),
+        security=SecurityConfig(
+            allow_unsigned_entries=False,
+            custom_signed_fields=sorted(_TRUSTED_OBJECT_ARRAY_SIGNED_FIELDS),
+        ),
+    )
+
+    assert set(config.security.custom_signed_fields or []) == (
+        _TRUSTED_OBJECT_ARRAY_SIGNED_FIELDS
+    )
+
+
 def test_object_arrays_reject_by_default_and_route_only_to_object_handler() -> None:
     """Object dtype cannot accidentally use the ordinary NumPy handler."""
     data = {"items": np.array([{"safe": True}], dtype=object)}

@@ -13,6 +13,19 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+
+_TRUSTED_OBJECT_ARRAY_SIGNED_FIELDS = frozenset(
+    {
+        "cache_key",
+        "file_hash",
+        "data_type",
+        "actual_path",
+        "storage_format",
+        "serializer",
+        "compression_codec",
+    }
+)
+
 # Sentinel value to distinguish between None (infinite TTL) and unspecified (use default)
 _DEFAULT_TTL = object()
 
@@ -613,6 +626,16 @@ class CacheConfig:
             raise ValueError(
                 "allow_trusted_object_arrays requires allow_unsigned_entries=False"
             )
+        if self.security.custom_signed_fields is not None:
+            missing_fields = _TRUSTED_OBJECT_ARRAY_SIGNED_FIELDS - set(
+                self.security.custom_signed_fields
+            )
+            if missing_fields:
+                raise ValueError(
+                    "allow_trusted_object_arrays requires custom_signed_fields "
+                    "to include every payload identity field; missing "
+                    f"{sorted(missing_fields)}"
+                )
 
     # Add property accessors for backwards compatibility
     @property
