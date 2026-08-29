@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 01
 current_phase_name: Compatibility and Security Baseline
 status: executing
-stopped_at: Completed 01-05-PLAN.md
-last_updated: "2026-08-29T21:51:57.419Z"
+stopped_at: Completed 01-10-PLAN.md
+last_updated: "2026-08-29T22:04:02.910Z"
 last_activity: 2026-08-29
 last_activity_desc: Phase 01 execution started
-state_head: a38e17fa0f0d2dd8a716aec4f9cfd4aa9b1794ed
+state_head: b8da05891105feffadbf65351c38046a9c252d4f
 progress:
   total_phases: 8
   completed_phases: 0
   total_plans: 12
-  completed_plans: 8
+  completed_plans: 9
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-08-29)
 ## Current Position
 
 Phase: 01 (Compatibility and Security Baseline) — EXECUTING
-Plan: 9 of 12
+Plan: 10 of 12
 Status: Ready to execute
 Last activity: 2026-08-29 — Phase 01 execution started
 
@@ -67,6 +67,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01-compatibility-and-security-baseline P09 | 8min | 2 tasks | 7 files |
 | Phase 01-compatibility-and-security-baseline P04 | 14min | 2 tasks | 3 files |
 | Phase 01 P05 | 6min | 2 tasks | 4 files |
+| Phase 01 P10 | 5min | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -101,6 +102,8 @@ Recent decisions affecting current work:
 - [Phase 01]: Object arrays require explicit signing, integrity verification, unsigned-entry rejection, and snapshot authorization before ObjectHandler.
 - [Phase 01]: query_meta validates the complete filter-key set before any backend/session access and exposes invalid fields as typed errors.
 - [Phase 01]: query_meta binds SQLite JSON paths and values separately while retaining raw filters and legacy serialized-string compatibility.
+- [Phase 01]: Historical SQLite fixture inspection is read-only and records the exact legacy schema, data-version invariant, and source/copy digests.
+- [Phase 01]: The 0.3.13 decorator compatibility path accepts one recorded candidate and derived storage key; it never scans metadata.
 
 ### Pending Todos
 
@@ -124,6 +127,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-29T21:51:57.410Z
-Stopped at: Completed 01-05-PLAN.md
+Last session: 2026-08-29T22:04:02.901Z
+Stopped at: Completed 01-10-PLAN.md
 Resume file: None
