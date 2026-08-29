@@ -3,17 +3,17 @@ gsd_state_version: 1.0
 milestone: v1.0
 current_phase: 01
 current_phase_name: Compatibility and Security Baseline
-status: executing
-stopped_at: Completed 01-12-PLAN.md with Wave 6 signature correction
-last_updated: "2026-08-29T23:08:07.616Z"
+status: verifying
+stopped_at: Completed 01-07-PLAN.md
+last_updated: "2026-08-29T23:28:32.630Z"
 last_activity: 2026-08-29
 last_activity_desc: Phase 01 execution started
-state_head: ff4b84fca2f3f5538b3ebed19748a878d407d95f
+state_head: 5ac9e0b3e17932be8557d207fbce3a40cc2a3655
 progress:
   total_phases: 8
   completed_phases: 0
   total_plans: 12
-  completed_plans: 11
+  completed_plans: 12
 milestone_name: milestone
 ---
 
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-08-29)
 
 Phase: 01 (Compatibility and Security Baseline) — EXECUTING
 Plan: 12 of 12
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-08-29 — Phase 01 execution started
 
 Progress: [░░░░░░░░░░] 0%
@@ -70,6 +70,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P10 | 5min | 2 tasks | 8 files |
 | Phase 01 P11 | 4min | 2 tasks | 8 files |
 | Phase 01 P12 | 35min | 2 tasks | 5 files |
+| Phase 01 P07 | 15min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -111,6 +112,8 @@ Recent decisions affecting current work:
 - [Phase 01]: Exact legacy metadata layouts are read-only; successful reads use process-local counters only.
 - [Phase 01]: Current signature verification remains first; only the signed split-map discriminator enables the exact six-field legacy HMAC fallback.
 - [Phase 01]: Decorator compatibility derives one 0.3.13 candidate after a current-key miss and never scans metadata.
+- [Phase 01]: Integrity, HMAC, and content digests establish authenticity or tamper evidence; they never sandbox pickle or dill.
+- [Phase 01]: Phase quality evidence caps the existing Ruff baseline and requires every Phase 1-created Python file to be clean.
 
 ### Pending Todos
 
@@ -134,6 +137,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-29T23:08:07.598Z
-Stopped at: Completed 01-12-PLAN.md with Wave 6 signature correction
+Last session: 2026-08-29T23:28:32.620Z
+Stopped at: Completed 01-07-PLAN.md
 Resume file: None

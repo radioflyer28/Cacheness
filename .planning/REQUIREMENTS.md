@@ -43,7 +43,7 @@
 - [ ] **SECU-04**: Required signing fails closed when keys, signatures, permissions, or signer configuration are missing or invalid.
 - [ ] **SECU-05**: Signed manifests bind critical locator, handler/type, format, and lifecycle-generation fields.
 - [x] **SECU-06**: Metadata query fields are validated and safely constructed rather than interpolated into backend queries.
-- [ ] **SECU-07**: Documentation states the trusted-application-payload boundary and the risks and configuration requirements of unsafe serializers.
+- [x] **SECU-07**: Documentation states the trusted-application-payload boundary and the risks and configuration requirements of unsafe serializers.
 - [ ] **SECU-08**: `BlobStore` raises a typed integrity exception for corrupt or invalidly signed entries, while `UnifiedCache` may translate it into a separately recorded cache miss.
 
 ### Migration and Compatibility
@@ -118,7 +118,7 @@ Deferred to future releases and not included in the current roadmap.
 | SECU-04 | Phase 2 | Pending |
 | SECU-05 | Phase 2 | Pending |
 | SECU-06 | Phase 1 | Complete |
-| SECU-07 | Phase 1 | Pending |
+| SECU-07 | Phase 1 | Complete |
 | SECU-08 | Phase 2 | Pending |
 | MIGR-01 | Phase 1 | Complete |
 | MIGR-02 | Phase 2 | Pending |
