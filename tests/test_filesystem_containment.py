@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -146,3 +148,129 @@ def test_managed_operations_reject_a_deterministic_between_check_retarget(tmp_pa
     assert (outside / "entry").read_bytes() == b"outside"
     if os.name != "nt":
         assert (root / "managed-before-swap" / "entry").read_bytes() == b"inside"
+
+
+def test_managed_operations_revalidate_a_stale_locator_before_access(tmp_path):
+    """Validation from a prior operation is never reused after an ancestor swap."""
+    root = tmp_path / "root"
+    managed = root / "managed"
+    managed.mkdir(parents=True)
+    locator = managed / "entry"
+    locator.write_bytes(b"inside")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "entry").write_bytes(b"outside")
+
+    anchored_root = resolve_storage_root(root)
+    assert resolve_managed_locator(anchored_root, locator, operation="read") == locator
+    managed.rename(root / "managed-before-swap")
+    managed.symlink_to(outside, target_is_directory=True)
+
+    operations = ManagedFileOps(anchored_root)
+    try:
+        with pytest.raises(CacheUnsafePathError) as exc_info:
+            operations.read_bytes(locator)
+    finally:
+        operations.close()
+
+    assert exc_info.value.context["reason"] == CacheReason.PATH_RACE.value
+    assert (outside / "entry").read_bytes() == b"outside"
+
+
+def test_anchored_operations_ignore_later_root_alias_retargeting(tmp_path):
+    """An instance retains its initialization target while a new root resolves anew."""
+    first_target = tmp_path / "first"
+    second_target = tmp_path / "second"
+    first_target.mkdir()
+    second_target.mkdir()
+    root_alias = tmp_path / "root-alias"
+    root_alias.symlink_to(first_target, target_is_directory=True)
+
+    operations = ManagedFileOps(resolve_storage_root(root_alias))
+    try:
+        root_alias.unlink()
+        root_alias.symlink_to(second_target, target_is_directory=True)
+        locator = operations.write_bytes("anchored", b"first", shard_chars=0)
+    finally:
+        operations.close()
+
+    assert locator == first_target / "anchored"
+    assert (first_target / "anchored").read_bytes() == b"first"
+    assert not (second_target / "anchored").exists()
+    assert resolve_storage_root(root_alias) == second_target.resolve()
+
+
+def test_descriptor_mode_never_reads_outside_during_pathname_swap_stress(tmp_path):
+    """Descriptor-capable Unix reads stay inside during concurrent name swapping."""
+    root = tmp_path / "root"
+    managed = root / "managed"
+    managed.mkdir(parents=True)
+    (managed / "entry").write_bytes(b"inside")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside_entry = outside / "entry"
+    outside_entry.write_bytes(b"outside")
+
+    operations = ManagedFileOps(resolve_storage_root(root))
+    if not operations.descriptor_mode:
+        operations.close()
+        pytest.skip("descriptor-relative no-follow operations unavailable")
+
+    failures: list[BaseException] = []
+
+    def swap_managed_path() -> None:
+        parked = root / "parked"
+        try:
+            for _ in range(20):
+                if managed.is_symlink():
+                    managed.unlink()
+                    os.rename(parked, managed)
+                else:
+                    os.rename(managed, parked)
+                    candidate_link = root / "candidate-link"
+                    candidate_link.symlink_to(outside, target_is_directory=True)
+                    os.rename(candidate_link, managed)
+        except BaseException as exc:  # pragma: no cover - test thread reporting
+            failures.append(exc)
+
+    thread = threading.Thread(target=swap_managed_path)
+    thread.start()
+    results: list[bytes] = []
+    try:
+        for _ in range(40):
+            try:
+                results.append(operations.read_bytes(root / "managed" / "entry"))
+            except (CacheUnsafePathError, FileNotFoundError):
+                pass
+    finally:
+        thread.join()
+        operations.close()
+
+    assert not failures
+    assert all(result == b"inside" for result in results)
+    assert outside_entry.read_bytes() == b"outside"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction fixture")
+def test_windows_junction_is_rejected_as_a_managed_reparse_component(tmp_path):
+    """Windows exercises a junction even when privileged symlinks are unavailable."""
+    root = tmp_path / "root"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "entry").write_bytes(b"outside")
+    junction = root / "junction"
+
+    result = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(junction), str(outside)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+    with pytest.raises(CacheUnsafePathError) as exc_info:
+        resolve_managed_locator(root, junction / "entry", operation="read")
+
+    assert exc_info.value.context["reason"] == CacheReason.PATH_RACE.value
+    assert (outside / "entry").read_bytes() == b"outside"
