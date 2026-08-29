@@ -1157,6 +1157,12 @@ class UnifiedCache:
         if not (self.signer and self.config.security.enable_entry_signing):
             return True
 
+        if (
+            metadata.get("legacy_entry_signature") is not None
+            and not self._is_exact_legacy_signature_entry(metadata)
+        ):
+            return False
+
         stored_signature = metadata.get("entry_signature")
         if stored_signature is not None:
             cache_key_params = metadata.get("cache_key_params")

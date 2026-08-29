@@ -664,6 +664,42 @@ def test_wrong_signed_split_key_fails_typed_before_handler_or_deletion(
     assert _sha256(payload_path) == payload_before
 
 
+def test_unrecognized_legacy_signature_metadata_is_not_treated_as_unsigned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the exact signed split-map discriminator can select legacy HMAC."""
+    cache = UnifiedCache(
+        CacheConfig(
+            cache_dir=str(tmp_path / "cache"),
+            metadata_backend="memory",
+            cleanup_on_init=False,
+            compression=CompressionConfig(use_blosc2_arrays=False),
+            security=SecurityConfig(
+                use_in_memory_key=True,
+                allow_unsigned_entries=True,
+                delete_invalid_signatures=False,
+            ),
+        )
+    )
+    cache_key = cache.put(np.arange(6, dtype=np.int32).reshape(2, 3))
+    entry = cache.metadata_backend.get_entry(cache_key)
+    assert entry is not None
+    metadata = entry["metadata"]
+    metadata.pop("entry_signature")
+    metadata["legacy_entry_signature"] = "unrecognized-legacy-signature"
+
+    handler = cache.handlers.get_handler_by_type("array")
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("handler must not run for an unknown legacy signature")
+
+    monkeypatch.setattr(handler, "get", fail_if_called)
+    try:
+        assert cache.get(cache_key=cache_key, ttl_hours=None) is None
+    finally:
+        cache.close()
+
+
 def test_decorator_tries_one_historical_candidate_after_current_miss_without_scan(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
