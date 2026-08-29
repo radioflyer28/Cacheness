@@ -18,6 +18,7 @@ from typing import Optional, Dict, Any, List, Callable, Tuple
 
 from .config import CacheConfig, _DEFAULT_TTL, create_cache_config
 from .error_handling import (
+    CacheIntegrityError,
     CacheLegacyFormatError,
     CacheQueryValidationError,
     CacheReason,
@@ -879,6 +880,15 @@ class UnifiedCache:
             logger.warning(f"Failed to calculate hash for {file_path}: {e}")
             return None
 
+    @staticmethod
+    def _is_valid_file_hash(file_hash: Any) -> bool:
+        """Return whether ``file_hash`` is one complete XXH3_64 digest."""
+        return (
+            isinstance(file_hash, str)
+            and len(file_hash) == 16
+            and all(character in "0123456789abcdef" for character in file_hash)
+        )
+
     def _cleanup_expired(self):
         """Remove expired cache entries."""
         try:
@@ -995,6 +1005,15 @@ class UnifiedCache:
                     {},
                 ) as snapshot:
                     file_hash = self._calculate_file_hash(snapshot.path)
+                if not self._is_valid_file_hash(file_hash):
+                    # Integrity-enabled entries are not allowed to fall back to
+                    # the same missing-digest representation used when the
+                    # feature is explicitly disabled. Remove the just-published
+                    # payload before refusing the metadata commit.
+                    self.guarded_handler_io.file_ops.delete(result["actual_path"])
+                    raise CacheIntegrityError(
+                        "Unable to calculate a complete payload integrity digest"
+                    )
 
             # Update metadata
             metadata_dict = {
@@ -1243,14 +1262,19 @@ class UnifiedCache:
             with self.guarded_handler_io.open_snapshot(file_path, metadata) as snapshot:
                 if self.config.metadata.verify_cache_integrity:
                     stored_hash = metadata.get("file_hash")
-                    if stored_hash is not None:
-                        current_hash = self._calculate_file_hash(snapshot.path)
-                        if current_hash != stored_hash:
-                            self._reject_untrusted_entry(
-                                cache_key,
-                                reason="payload integrity hash mismatch",
-                            )
-                            return None
+                    if not self._is_valid_file_hash(stored_hash):
+                        self._reject_untrusted_entry(
+                            cache_key,
+                            reason="missing or malformed payload integrity digest",
+                        )
+                        return None
+                    current_hash = self._calculate_file_hash(snapshot.path)
+                    if current_hash != stored_hash:
+                        self._reject_untrusted_entry(
+                            cache_key,
+                            reason="payload integrity hash mismatch",
+                        )
+                        return None
 
                 if not self._is_signature_authorized(cache_key, entry, metadata):
                     if self._is_exact_legacy_signature_entry(metadata):

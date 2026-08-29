@@ -339,7 +339,9 @@ def _trusted_object_array_cache(
     )
 
 
-@pytest.mark.parametrize("rejection", ["signature", "hash", "unsigned"])
+@pytest.mark.parametrize(
+    "rejection", ["signature", "hash", "missing_hash", "unsigned"]
+)
 @pytest.mark.parametrize("delete_invalid_signatures", [True, False])
 def test_untrusted_object_arrays_never_reach_object_handler(
     tmp_path: Path,
@@ -362,6 +364,8 @@ def test_untrusted_object_arrays_never_reach_object_handler(
             metadata["entry_signature"] = "wrong-signature"
         elif rejection == "hash":
             evidence_path.write_bytes(evidence_path.read_bytes() + b"tampered")
+        elif rejection == "missing_hash":
+            metadata.pop("file_hash")
         else:
             metadata.pop("entry_signature")
 

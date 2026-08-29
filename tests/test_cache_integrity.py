@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 
 from cacheness import cacheness, CacheConfig
+from cacheness.error_handling import CacheIntegrityError
 
 
 @pytest.fixture
@@ -133,8 +134,8 @@ class TestCacheIntegrity:
         entry_after = cache.metadata_backend.get_entry(cache_key)
         assert entry_after is None
 
-    def test_missing_file_hash_allows_retrieval(self):
-        """Test that missing file hash (legacy entries) still allows retrieval."""
+    def test_missing_file_hash_rejects_retrieval_when_verification_is_enabled(self):
+        """An enabled integrity gate never treats a missing digest as legacy-safe."""
         with tempfile.TemporaryDirectory() as temp_dir:
             # Disable entry signing for this legacy compatibility test
             from cacheness.config import SecurityConfig
@@ -166,12 +167,25 @@ class TestCacheIntegrity:
             }
             cache.metadata_backend.put_entry(cache_key, entry_data)
 
-            # Should still be able to retrieve the data (no verification for legacy entries)
+            # A missing digest cannot disable an explicitly enabled integrity gate.
             retrieved_data = cache.get(test_key="value")
-            assert retrieved_data is not None
-            assert retrieved_data == test_data
+            assert retrieved_data is None
+            assert cache.metadata_backend.get_entry(cache_key) is None
             
             cache.close()
+
+    def test_unavailable_digest_fails_put_without_committing_metadata(
+        self, temp_cache, monkeypatch
+    ):
+        """Write-time integrity failures cannot create an unsigned/unverified entry."""
+        cache = temp_cache
+        monkeypatch.setattr(cache, "_calculate_file_hash", lambda _path: None)
+
+        with pytest.raises(CacheIntegrityError, match="digest"):
+            cache.put({"message": "unverified"}, test_key="unverified")
+
+        cache_key = cache._create_cache_key({"test_key": "unverified"})
+        assert cache.metadata_backend.get_entry(cache_key) is None
 
     def test_integrity_verification_disabled_skips_check(self):
         """Test that disabling verification skips integrity check completely."""
