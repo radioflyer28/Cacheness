@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+from hashlib import sha256
 from pathlib import Path
+import shutil
 
 import numpy as np
 import pytest
 
 from cacheness.error_handling import CacheLegacyFormatError, CacheReason
 from cacheness.handlers import ArrayHandler, _parse_legacy_array_shape
+
+
+FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "compat"
 
 
 def _legacy_payload(
@@ -62,8 +67,10 @@ def test_parse_legacy_array_shape_accepts_only_bounded_tuple_grammar(
         b"(2, 3) trailing",
         b"(-1,)",
         b"(1,,2)",
+        b"\xff",
         b"(1" + b",1" * 32 + b")",
         b"(999999999999999999999999999999999999999999,)",
+        b"(" + b"1" * 4097 + b",)",
     ],
 )
 def test_parse_legacy_array_shape_rejects_unsafe_or_invalid_grammar(raw: bytes) -> None:
@@ -72,6 +79,32 @@ def test_parse_legacy_array_shape_rejects_unsafe_or_invalid_grammar(raw: bytes) 
         _parse_legacy_array_shape(raw)
 
     assert error.value.context["reason"] == CacheReason.INVALID_LEGACY_ARRAY.value
+
+
+@pytest.mark.parametrize(
+    "fixture_id",
+    ["array-raw-v035-compress", "array-raw-v037-compress2"],
+)
+def test_legacy_reader_loads_immutable_historical_raw_frames(
+    tmp_path: Path, fixture_id: str
+) -> None:
+    """Both pinned Blosc2 frame variants load without mutating their evidence."""
+    source = FIXTURE_ROOT / fixture_id / "payload.b2nd"
+    source_digest = sha256(source.read_bytes()).hexdigest()
+    copied = tmp_path / fixture_id / "payload.b2nd"
+    copied.parent.mkdir()
+    shutil.copy2(source, copied)
+    copied_digest = sha256(copied.read_bytes()).hexdigest()
+
+    actual = ArrayHandler()._read_blosc2_array(copied)
+
+    np.testing.assert_array_equal(
+        actual, np.arange(6, dtype=np.int32).reshape(2, 3)
+    )
+    assert actual.dtype == np.dtype("int32")
+    assert actual.nbytes == 24
+    assert sha256(source.read_bytes()).hexdigest() == source_digest
+    assert sha256(copied.read_bytes()).hexdigest() == copied_digest == source_digest
 
 
 @pytest.mark.parametrize(
@@ -93,6 +126,15 @@ def test_legacy_reader_reconstructs_checked_scalar_vector_and_matrix(
 
     np.testing.assert_array_equal(actual, array)
     assert actual.dtype == array.dtype
+
+
+def test_legacy_reader_does_not_apply_a_payload_size_ceiling(tmp_path: Path) -> None:
+    """Metadata framing limits do not reject an otherwise valid payload."""
+    path = tmp_path / "payload.b2nd"
+    array = np.arange(2048, dtype=np.int32)
+    _legacy_payload(path, array)
+
+    np.testing.assert_array_equal(ArrayHandler()._read_blosc2_array(path), array)
 
 
 def test_legacy_reader_rejects_byte_mismatch_before_array_reconstruction(
@@ -117,6 +159,30 @@ def test_legacy_reader_rejects_object_dtype_before_deserialization(tmp_path: Pat
         ArrayHandler()._read_blosc2_array(path)
 
     assert error.value.context["reason"] == CacheReason.UNSAFE_OBJECT_ARRAY.value
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"\x01",
+        (4097).to_bytes(4, "little"),
+        (1).to_bytes(4, "little") + b"\xff",
+        (2).to_bytes(4, "little") + b"()" + (257).to_bytes(4, "little"),
+        (2).to_bytes(4, "little") + b"()" + (1).to_bytes(4, "little") + b"\xff",
+        (2).to_bytes(4, "little") + b"()" + (5).to_bytes(4, "little") + b"int32",
+    ],
+)
+def test_legacy_reader_rejects_truncated_oversized_and_invalid_frames(
+    tmp_path: Path, payload: bytes
+) -> None:
+    """Framing, text, and compression failures never reach reconstruction."""
+    path = tmp_path / "payload.b2nd"
+    path.write_bytes(payload)
+
+    with pytest.raises(CacheLegacyFormatError) as error:
+        ArrayHandler()._read_blosc2_array(path)
+
+    assert error.value.context["reason"] == CacheReason.INVALID_LEGACY_ARRAY.value
 
 
 def test_declared_blosc2_failure_never_probes_valid_npz_sidecar(tmp_path: Path) -> None:

@@ -10,6 +10,7 @@ import numpy as np
 from pathlib import Path
 from typing import Any, Dict, Optional
 import logging
+import sys
 
 # Import focused interfaces
 from .interfaces import (
@@ -19,7 +20,11 @@ from .interfaces import (
     CacheReadError,
     CacheFormatError,
 )
-from .error_handling import cache_operation_context
+from .error_handling import (
+    CacheLegacyFormatError,
+    CacheReason,
+    cache_operation_context,
+)
 
 # DataFrame libraries with fallback
 try:
@@ -99,6 +104,108 @@ def _lazy_import_tensorflow():
     return tf, TENSORFLOW_AVAILABLE
 
 logger = logging.getLogger(__name__)
+
+
+def _invalid_legacy_array(message: str, *, cause: Exception | None = None) -> None:
+    """Raise the stable error used for unsafe historical array metadata."""
+    error = CacheLegacyFormatError(
+        message,
+        reason=CacheReason.INVALID_LEGACY_ARRAY,
+    )
+    if cause is not None:
+        raise error from cause
+    raise error
+
+
+def _parse_legacy_array_shape(
+    raw: bytes,
+    *,
+    max_header_bytes: int = 4096,
+    max_rank: int = 32,
+) -> tuple[int, ...]:
+    """Decode a historical array shape with a bounded non-evaluating grammar.
+
+    The legacy raw-array format stored ``str(array.shape)``. This parser accepts
+    only the tuple subset Cacheness historically emitted; it intentionally never
+    evaluates metadata or allocates based on the declared dimensions.
+    """
+    if len(raw) > max_header_bytes:
+        _invalid_legacy_array("Legacy array shape metadata exceeds its framing limit")
+
+    try:
+        text = raw.decode("ascii")
+    except UnicodeDecodeError as exc:
+        _invalid_legacy_array("Legacy array shape metadata is not ASCII", cause=exc)
+
+    position = 0
+
+    def skip_whitespace() -> None:
+        nonlocal position
+        while position < len(text) and text[position].isspace():
+            position += 1
+
+    skip_whitespace()
+    if position >= len(text) or text[position] != "(":
+        _invalid_legacy_array("Legacy array shape is not a tuple")
+    position += 1
+    skip_whitespace()
+
+    if position < len(text) and text[position] == ")":
+        position += 1
+        skip_whitespace()
+        if position != len(text):
+            _invalid_legacy_array("Legacy array shape has trailing tokens")
+        return ()
+
+    dimensions: list[int] = []
+    while True:
+        skip_whitespace()
+        if position >= len(text) or not text[position].isdigit():
+            _invalid_legacy_array("Legacy array shape contains an invalid dimension")
+
+        value = 0
+        while position < len(text) and text[position].isdigit():
+            digit = ord(text[position]) - ord("0")
+            if value > (sys.maxsize - digit) // 10:
+                _invalid_legacy_array("Legacy array dimension exceeds platform bounds")
+            value = value * 10 + digit
+            position += 1
+
+        dimensions.append(value)
+        if len(dimensions) > max_rank:
+            _invalid_legacy_array("Legacy array rank exceeds the supported bound")
+
+        skip_whitespace()
+        if position < len(text) and text[position] == ")":
+            if len(dimensions) == 1:
+                _invalid_legacy_array("Legacy scalar shape must use tuple framing")
+            position += 1
+            break
+        if position >= len(text) or text[position] != ",":
+            _invalid_legacy_array("Legacy array shape must use tuple framing")
+        position += 1
+        skip_whitespace()
+        if position < len(text) and text[position] == ")":
+            position += 1
+            break
+
+    skip_whitespace()
+    if position != len(text):
+        _invalid_legacy_array("Legacy array shape has trailing tokens")
+    return tuple(dimensions)
+
+
+def _legacy_array_nbytes(shape: tuple[int, ...], dtype: np.dtype[Any]) -> int:
+    """Calculate legacy payload size with checked shape arithmetic."""
+    element_count = 1
+    for dimension in shape:
+        if dimension < 0 or (dimension and element_count > sys.maxsize // dimension):
+            _invalid_legacy_array("Legacy array shape overflows checked arithmetic")
+        element_count *= dimension
+
+    if dtype.itemsize <= 0 or element_count > sys.maxsize // dtype.itemsize:
+        _invalid_legacy_array("Legacy array byte count overflows checked arithmetic")
+    return element_count * dtype.itemsize
 
 # Log DataFrame backend availability with debug info
 if POLARS_AVAILABLE and PANDAS_AVAILABLE:
@@ -553,46 +660,88 @@ class ArrayHandler(CacheHandler):
             f.write(compressed_data)
 
     def _read_blosc2_array(self, file_path: Path) -> np.ndarray:
-        """Read numpy array from blosc2 compressed file with metadata."""
+        """Read a bounded, read-only historical Blosc2 raw-array payload."""
         if not BLOSC2_AVAILABLE:
             raise ImportError(
                 "blosc2 is required for array decompression but is not available"
             )
 
-        with open(file_path, "rb") as f:
-            # Read shape and dtype metadata
-            shape_len = int.from_bytes(f.read(4), "little")
-            shape_str = f.read(shape_len).decode("utf-8")
-            dtype_len = int.from_bytes(f.read(4), "little")
-            dtype_str = f.read(dtype_len).decode("utf-8")
+        try:
+            with open(file_path, "rb") as payload:
+                raw_shape_length = payload.read(4)
+                if len(raw_shape_length) != 4:
+                    _invalid_legacy_array("Legacy array shape length is truncated")
+                shape_length = int.from_bytes(raw_shape_length, "little")
+                if shape_length > 4096:
+                    _invalid_legacy_array(
+                        "Legacy array shape metadata exceeds its framing limit"
+                    )
+                raw_shape = payload.read(shape_length)
+                if len(raw_shape) != shape_length:
+                    _invalid_legacy_array("Legacy array shape metadata is truncated")
+                shape = _parse_legacy_array_shape(raw_shape)
 
-            # Read compressed data
-            compressed_data = f.read()
+                raw_dtype_length = payload.read(4)
+                if len(raw_dtype_length) != 4:
+                    _invalid_legacy_array("Legacy array dtype length is truncated")
+                dtype_length = int.from_bytes(raw_dtype_length, "little")
+                if dtype_length > 256:
+                    _invalid_legacy_array(
+                        "Legacy array dtype metadata exceeds its framing limit"
+                    )
+                raw_dtype = payload.read(dtype_length)
+                if len(raw_dtype) != dtype_length:
+                    _invalid_legacy_array("Legacy array dtype metadata is truncated")
+                try:
+                    dtype = np.dtype(raw_dtype.decode("utf-8"))
+                except (TypeError, UnicodeDecodeError, ValueError) as exc:
+                    _invalid_legacy_array("Legacy array dtype is invalid", cause=exc)
+                if dtype.hasobject:
+                    raise CacheLegacyFormatError(
+                        "Legacy object arrays require explicit trusted routing",
+                        reason=CacheReason.UNSAFE_OBJECT_ARRAY,
+                    )
 
-            # Decompress and reconstruct array
-            # Decompress the data using blosc2.decompress2 (no 2GB limit)
+                compressed_data = payload.read()
+        except CacheLegacyFormatError:
+            raise
+        except OSError as exc:
+            _invalid_legacy_array("Legacy array payload cannot be read", cause=exc)
+
+        try:
             decompressed = blosc2.decompress2(compressed_data)
-            shape = eval(shape_str)  # Convert string tuple back to tuple
-            dtype = np.dtype(dtype_str)
+        except Exception:
+            try:
+                decompressed = blosc2.decompress(compressed_data)
+            except Exception as exc:
+                _invalid_legacy_array(
+                    "Legacy array payload cannot be decompressed", cause=exc
+                )
+
+        expected_nbytes = _legacy_array_nbytes(shape, dtype)
+        if len(decompressed) != expected_nbytes:
+            _invalid_legacy_array(
+                "Legacy array payload bytes do not match declared shape and dtype"
+            )
+        try:
             return np.frombuffer(decompressed, dtype=dtype).reshape(shape)
+        except (TypeError, ValueError) as exc:
+            _invalid_legacy_array("Legacy array payload cannot be reconstructed", cause=exc)
 
     def get(self, file_path: Path, metadata: Dict[str, Any]) -> Any:
         """Load array(s) from file with format detection."""
         storage_format = metadata.get("storage_format", "npz")
 
-        # Try the expected format first
         if storage_format == "blosc2":
-            try:
-                # Try blosc2 format
-                blosc2_path = file_path.with_suffix("").with_suffix(".b2nd")
-                if blosc2_path.exists():
-                    return self._read_blosc2_array(blosc2_path)
-            except Exception as e:
-                logger.debug(f"Failed to read blosc2 file: {e}")
+            blosc2_path = file_path.with_suffix("").with_suffix(".b2nd")
+            if not blosc2_path.exists():
+                raise FileNotFoundError(f"Declared legacy array payload is missing: {file_path}")
+            return self._read_blosc2_array(blosc2_path)
 
-        # Try NPZ format (fallback or primary)
-        npz_path = file_path.with_suffix("").with_suffix(".npz")
-        if npz_path.exists():
+        if storage_format == "npz":
+            npz_path = file_path.with_suffix("").with_suffix(".npz")
+            if not npz_path.exists():
+                raise FileNotFoundError(f"Declared array payload is missing: {file_path}")
             data = np.load(npz_path, allow_pickle=True)
 
             # Return single array if only one, otherwise return dict
@@ -601,7 +750,10 @@ class ArrayHandler(CacheHandler):
                 return list(arrays.values())[0]
             return arrays
 
-        raise FileNotFoundError(f"No valid array file found for {file_path}")
+        raise CacheLegacyFormatError(
+            f"Unsupported declared array storage format: {storage_format}",
+            reason=CacheReason.INVALID_LEGACY_ARRAY,
+        )
 
     def get_file_extension(self, config: Any) -> str:
         """Get file extension for arrays (determined dynamically)."""
@@ -1346,4 +1498,3 @@ class HandlerRegistry:
                 f"Handler {handler.__class__.__name__} missing required: {', '.join(missing)}. "
                 f"Handlers must implement the CacheHandler interface."
             )
-
