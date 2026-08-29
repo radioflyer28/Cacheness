@@ -134,6 +134,22 @@ class TestQueryMeta:
         assert len(cache.query_meta(model="linear")) == 2
         assert len(cache.query_meta(active=True)) == 2
 
+    def test_query_meta_numeric_filters_exclude_nonnumeric_serialized_values(
+        self, temp_cache
+    ):
+        """SQLite numeric casts must not turn strings such as ``str:oops`` into zero."""
+        cache = temp_cache
+        cache.put("string", score="oops")
+        cache.put("below-threshold", score=-2)
+        cache.put("above-threshold", score=1.5)
+
+        entries = cache.query_meta(score=-1)
+
+        assert entries is not None
+        assert [entry["cache_key_params"]["score"] for entry in entries] == [
+            "float:1.5"
+        ]
+
     def test_query_meta_multiple_filters(self, temp_cache):
         """Test query_meta with multiple parameter filters."""
         cache = temp_cache

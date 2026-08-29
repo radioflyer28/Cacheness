@@ -593,7 +593,7 @@ class UnifiedCache:
                 logger.warning("SQLAlchemy session not available for query_meta()")
                 return None
 
-            from sqlalchemy import Float, bindparam, cast, func, select
+            from sqlalchemy import Float, bindparam, cast, func, or_, select
 
             from .metadata import CacheEntry
             from .serialization import serialize_for_cache_key
@@ -633,13 +633,24 @@ class UnifiedCache:
                             )
                         )
                     elif isinstance(value, (int, float)):
+                        numeric_type = or_(
+                            func.substr(json_value, 1, 4)
+                            == bindparam(
+                                f"query_meta_int_prefix_{index}", value="int:"
+                            ),
+                            func.substr(json_value, 1, 6)
+                            == bindparam(
+                                f"query_meta_float_prefix_{index}", value="float:"
+                            ),
+                        )
                         numeric_value = func.substr(
                             json_value,
                             func.instr(json_value, ":") + 1,
                         )
                         query = query.where(
+                            numeric_type,
                             cast(numeric_value, Float)
-                            >= bindparam(value_parameter, value=value)
+                            >= bindparam(value_parameter, value=value),
                         )
                     else:
                         serialized_value = None if value is None else value
