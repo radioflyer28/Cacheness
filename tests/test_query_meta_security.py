@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from cacheness.config import CacheConfig
 from cacheness.core import UnifiedCache
 from cacheness.error_handling import CacheQueryValidationError, CacheReason
 from cacheness.query_validation import to_sqlite_json_path, validate_query_fields
@@ -98,6 +99,72 @@ def _sqlite_cache_with_session_spy(session_spy: _SessionSpy) -> UnifiedCache:
     )
     cache.metadata_backend = SimpleNamespace(SessionLocal=session_spy)
     return cache
+
+
+@pytest.fixture
+def sqlite_query_cache(tmp_path):
+    """Create a SQLite cache whose metadata filter values are persisted."""
+    cache = UnifiedCache(
+        CacheConfig(
+            cache_dir=str(tmp_path / "cache"),
+            metadata_backend="sqlite",
+            store_cache_key_params=True,
+        )
+    )
+    try:
+        yield cache
+    finally:
+        cache.close()
+
+
+class _RecordingSession:
+    """Delegate session execution while retaining the SQLAlchemy statement."""
+
+    def __init__(self, session: object, statements: list[object]) -> None:
+        self._session = session
+        self._statements = statements
+
+    def __enter__(self) -> _RecordingSession:
+        self._session.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> bool:
+        return self._session.__exit__(exc_type, exc_value, traceback)
+
+    def execute(self, statement: object, *args: object, **kwargs: object):
+        self._statements.append(statement)
+        return self._session.execute(statement, *args, **kwargs)
+
+
+def test_query_meta_binds_validated_paths_and_values(
+    sqlite_query_cache, monkeypatch
+) -> None:
+    """Caller paths and values stay in bound parameters, never SQL text."""
+    sqlite_query_cache.put("record", experiment="bound-value", score=1.5)
+    statements: list[object] = []
+    session_factory = sqlite_query_cache.metadata_backend.SessionLocal
+
+    def recording_session_factory() -> _RecordingSession:
+        return _RecordingSession(session_factory(), statements)
+
+    monkeypatch.setattr(
+        sqlite_query_cache.metadata_backend,
+        "SessionLocal",
+        recording_session_factory,
+    )
+
+    entries = sqlite_query_cache.query_meta(experiment="bound-value", score=1.5)
+
+    assert len(entries) == 1
+    statement = statements[-1]
+    compiled = statement.compile()
+    assert "$.experiment" not in str(compiled)
+    assert "$.score" not in str(compiled)
+    assert "bound-value" not in str(compiled)
+    assert compiled.params["query_meta_path_0"] == "$.experiment"
+    assert compiled.params["query_meta_value_0"] == "str:bound-value"
+    assert compiled.params["query_meta_path_1"] == "$.score"
+    assert compiled.params["query_meta_value_1"] == 1.5
 
 
 @pytest.mark.parametrize("position", ["first", "middle", "last"])

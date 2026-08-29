@@ -16,7 +16,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List, Callable, Tuple
 
 from .config import CacheConfig, _DEFAULT_TTL, create_cache_config
-from .error_handling import CacheUnsafePathError
+from .error_handling import (
+    CacheQueryValidationError,
+    CacheUnsafePathError,
+)
 from .handlers import HandlerRegistry
 from .serialization import create_unified_cache_key
 from .storage.guarded_handler_io import GuardedHandlerIO
@@ -564,68 +567,90 @@ class UnifiedCache:
             high_accuracy = cache.query_meta(accuracy=0.9)  # >= comparison
             specific_exp = cache.query_meta(experiment="exp_001")
         """
-        if self.actual_backend != "sqlite":
-            logger.warning("query_meta() requires SQLite backend")
-            return None
-
-        if not self.config.metadata.store_cache_key_params:
-            logger.warning(
-                "query_meta() requires store_cache_key_params=True in cache configuration"
-            )
-            return None
-
-        if not hasattr(self.metadata_backend, "SessionLocal"):
-            logger.warning("SQLAlchemy session not available for query_meta()")
-            return None
-
         try:
-            from sqlalchemy import text
-            
+            from .query_validation import to_sqlite_json_path, validate_query_fields
+
+            validated_fields = validate_query_fields(filters)
+            sqlite_paths = tuple(
+                to_sqlite_json_path(field) for field in validated_fields
+            )
+
+            if self.actual_backend != "sqlite":
+                logger.warning("query_meta() requires SQLite backend")
+                return None
+
+            if not self.config.metadata.store_cache_key_params:
+                logger.warning(
+                    "query_meta() requires store_cache_key_params=True in cache configuration"
+                )
+                return None
+
+            if not hasattr(self.metadata_backend, "SessionLocal"):
+                logger.warning("SQLAlchemy session not available for query_meta()")
+                return None
+
+            from sqlalchemy import Float, bindparam, cast, func, select
+
+            from .metadata import CacheEntry
+            from .serialization import serialize_for_cache_key
+
             with self.metadata_backend.SessionLocal() as session:
-                # Build WHERE conditions using SQLite JSON1 extension
-                where_conditions = []
-                params = {}
-                
-                for key, value in filters.items():
-                    # Use JSON_EXTRACT for querying JSON fields
-                    param_name = f"param_{len(params)}"
-                    
-                    if isinstance(value, (int, float)):
-                        # For numeric values, try both direct match and >= comparison
-                        where_conditions.append(
-                            f"(JSON_EXTRACT(cache_key_params, '$.{key}') = :{param_name} OR "
-                            f"CAST(JSON_EXTRACT(cache_key_params, '$.{key}') AS REAL) >= :{param_name})"
+                query = (
+                    select(
+                        CacheEntry.cache_key,
+                        CacheEntry.description,
+                        CacheEntry.data_type,
+                        CacheEntry.created_at,
+                        CacheEntry.accessed_at,
+                        CacheEntry.file_size,
+                        CacheEntry.cache_key_params,
+                    )
+                    .where(CacheEntry.cache_key_params.is_not(None))
+                    .order_by(CacheEntry.created_at.desc())
+                )
+
+                for index, ((_, value), sqlite_path) in enumerate(
+                    zip(filters.items(), sqlite_paths)
+                ):
+                    path_parameter = bindparam(
+                        f"query_meta_path_{index}", value=sqlite_path
+                    )
+                    json_value = func.json_extract(
+                        CacheEntry.cache_key_params, path_parameter
+                    )
+                    value_parameter = f"query_meta_value_{index}"
+
+                    if isinstance(value, bool):
+                        query = query.where(
+                            json_value
+                            == bindparam(
+                                value_parameter,
+                                value=serialize_for_cache_key(value),
+                            )
+                        )
+                    elif isinstance(value, (int, float)):
+                        numeric_value = func.substr(
+                            json_value,
+                            func.instr(json_value, ":") + 1,
+                        )
+                        query = query.where(
+                            cast(numeric_value, Float)
+                            >= bindparam(value_parameter, value=value)
                         )
                     else:
-                        # For string values, exact match
-                        where_conditions.append(
-                            f"JSON_EXTRACT(cache_key_params, '$.{key}') = :{param_name}"
+                        serialized_value = None if value is None else value
+                        if value is not None and not (
+                            isinstance(value, str)
+                            and value.startswith(("str:", "int:", "float:", "bool:"))
+                        ):
+                            serialized_value = serialize_for_cache_key(value)
+                        query = query.where(
+                            json_value
+                            == bindparam(value_parameter, value=serialized_value)
                         )
-                    
-                    params[param_name] = value
 
-                # Build the query
-                if where_conditions:
-                    where_clause = " AND ".join(where_conditions)
-                    query = f"""
-                        SELECT cache_key, description, data_type, created_at, accessed_at, 
-                               file_size, cache_key_params
-                        FROM cache_entries 
-                        WHERE cache_key_params IS NOT NULL AND ({where_clause})
-                        ORDER BY created_at DESC
-                    """
-                else:
-                    # No filters - return all entries with cache_key_params
-                    query = """
-                        SELECT cache_key, description, data_type, created_at, accessed_at,
-                               file_size, cache_key_params  
-                        FROM cache_entries
-                        WHERE cache_key_params IS NOT NULL
-                        ORDER BY created_at DESC
-                    """
+                result = session.execute(query)
 
-                result = session.execute(text(query), params)
-                
                 # Convert results to dictionaries
                 entries = []
                 for row in result:
@@ -649,7 +674,9 @@ class UnifiedCache:
                     entries.append(entry)
                 
                 return entries
-                
+
+        except CacheQueryValidationError:
+            raise
         except Exception as e:
             logger.error(f"Failed to query metadata: {e}")
             return None
