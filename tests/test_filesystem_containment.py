@@ -391,6 +391,7 @@ class _InstrumentedHandler:
     def __init__(self):
         self.put_paths: list[Path] = []
         self.get_paths: list[Path] = []
+        self.get_paths_alive: list[bool] = []
 
     def put(self, data: Any, file_path: Path, _config: Any) -> dict[str, Any]:
         self.put_paths.append(file_path)
@@ -405,6 +406,7 @@ class _InstrumentedHandler:
 
     def get(self, file_path: Path, _metadata: dict[str, Any]) -> str:
         self.get_paths.append(file_path)
+        self.get_paths_alive.append(file_path.exists())
         return file_path.read_text(encoding="utf-8")
 
 
@@ -431,7 +433,7 @@ def _is_descendant(path: Path, root: Path) -> bool:
     return True
 
 
-def test_high_level_physical_name_encoder_is_stable_domain_separated_and_backend_safe():
+def test_physical_name_encoder_is_stable_domain_separated_and_backend_safe():
     """Logical values never become managed path components at the backend boundary."""
     encoder = path_security.encode_physical_name
     ordinary = encoder("key", "prefix", namespace="blob-store")
@@ -446,7 +448,7 @@ def test_high_level_physical_name_encoder_is_stable_domain_separated_and_backend
     assert validate_blob_id(ordinary) == ordinary
 
 
-def test_high_level_blob_store_keeps_logical_key_while_handlers_only_see_private_paths(tmp_path):
+def test_blob_store_keeps_logical_key_while_handlers_only_see_private_paths(tmp_path):
     """BlobStore keeps the public key exact and never passes cache-root paths to handlers."""
     root = tmp_path / "blob-root"
     handler = _InstrumentedHandler()
@@ -465,7 +467,7 @@ def test_high_level_blob_store_keeps_logical_key_while_handlers_only_see_private
         assert store.get(logical_key) == "payload"
         assert all(not _is_descendant(path, root) for path in handler.put_paths)
         assert all(not _is_descendant(path, root) for path in handler.get_paths)
-        assert all(path.exists() for path in handler.get_paths)
+        assert all(handler.get_paths_alive)
         actual_path = Path(entry["metadata"]["actual_path"])
         assert _is_descendant(actual_path, root)
         assert logical_key not in str(actual_path)
@@ -473,7 +475,7 @@ def test_high_level_blob_store_keeps_logical_key_while_handlers_only_see_private
         store.close()
 
 
-def test_high_level_persisted_locator_raises_before_deserialization(tmp_path):
+def test_persisted_locator_raises_before_deserialization(tmp_path):
     """Unsafe persisted locators remain typed errors, not reads or cache misses."""
     outside = tmp_path / "outside"
     outside.write_text("outside", encoding="utf-8")
@@ -540,3 +542,27 @@ def test_unified_cache_encodes_hostile_prefix_without_mutating_outside_target(tm
     assert cache.get(cache_key=key) == "payload"
     assert all(not _is_descendant(path, root) for path in handler.put_paths)
     assert all(not _is_descendant(path, root) for path in handler.get_paths)
+    assert all(handler.get_paths_alive)
+
+
+def test_guarded_handler_io_copies_one_private_snapshot_without_deserializing(tmp_path):
+    """The adapter owns the managed open/copy and yields a live private artifact."""
+    from cacheness.storage.guarded_handler_io import GuardedHandlerIO
+
+    root = tmp_path / "root"
+    root.mkdir()
+    handler = _InstrumentedHandler()
+    io = GuardedHandlerIO(root)
+    try:
+        result = io.put(handler, "payload", "a" * 64, CacheConfig(cache_dir=str(root)))
+        final_path = Path(result["actual_path"])
+
+        assert _is_descendant(final_path, root)
+        assert not _is_descendant(handler.put_paths[0], root)
+        with io.open_snapshot(final_path, result["metadata"]) as snapshot:
+            assert snapshot.path.exists()
+            assert not _is_descendant(snapshot.path, root)
+            assert snapshot.path.read_text(encoding="utf-8") == "payload"
+            assert handler.get_paths == []
+    finally:
+        io.close()

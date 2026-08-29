@@ -7,9 +7,10 @@ Each interface is responsible for a specific aspect of cache handling.
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional
+from dataclasses import dataclass
 from pathlib import Path
 import logging
+from typing import Any, ContextManager, Dict, Optional, Protocol, TypedDict
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +116,57 @@ class CacheHandler(CacheabilityChecker, CacheWriter, CacheReader, FormatProvider
     """
 
     pass
+
+
+class GuardedWriteResult(TypedDict, total=False):
+    """Handler result after private staging is published into managed storage.
+
+    The shape matches the existing ``CacheWriter.put`` result while making the
+    containment guarantee explicit: ``actual_path`` is always the final
+    managed locator, never a private staging file.
+    """
+
+    storage_format: str
+    file_size: int
+    actual_path: str
+    metadata: Dict[str, Any]
+
+
+@dataclass(frozen=True)
+class GuardedReadSnapshot:
+    """A context-owned private copy of one managed payload.
+
+    Callers may invoke a handler only with ``path`` while the context returned
+    by ``GuardedHandlerIO.open_snapshot`` remains entered. ``metadata`` has an
+    adjusted ``actual_path`` that points to this private copy, so handlers do
+    not need the managed locator.
+    """
+
+    path: Path
+    metadata: Dict[str, Any]
+
+
+class GuardedHandlerIO(Protocol):
+    """Containment adapter contract around the unchanged handler Path API.
+
+    Implementations stage writes privately before a guarded publish and expose
+    guarded reads only as a live private snapshot. They never deserialize
+    payloads or expose a managed-root path to a handler.
+    """
+
+    def put(
+        self,
+        handler: CacheHandler,
+        data: Any,
+        storage_id: str,
+        config: Any,
+    ) -> GuardedWriteResult:
+        """Serialize privately, then publish a final managed artifact."""
+
+    def open_snapshot(
+        self, locator: Path, metadata: Dict[str, Any]
+    ) -> ContextManager[GuardedReadSnapshot]:
+        """Yield one private snapshot without invoking ``handler.get``."""
 
 
 # Specific handler interfaces for different data categories

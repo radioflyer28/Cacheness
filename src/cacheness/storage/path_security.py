@@ -17,6 +17,7 @@ descriptor-capable Unix filesystem.
 from __future__ import annotations
 
 import errno
+import hashlib
 import os
 import re
 import stat
@@ -32,6 +33,7 @@ from cacheness.error_handling import CacheReason, CacheUnsafePathError
 
 _BLOB_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}\Z")
 _MAX_BLOB_ID_LENGTH = 256
+_PHYSICAL_NAME_DOMAIN = b"cacheness.physical-name.v1\x00"
 
 
 def _unsafe_path(reason: CacheReason) -> NoReturn:
@@ -81,6 +83,33 @@ def validate_blob_id(blob_id: str) -> str:
     if len(blob_id) > _MAX_BLOB_ID_LENGTH or not _BLOB_ID_PATTERN.fullmatch(blob_id):
         _unsafe_path(CacheReason.INVALID_IDENTIFIER)
     return blob_id
+
+
+def encode_physical_name(
+    logical_key: str,
+    prefix: str = "",
+    *,
+    namespace: str,
+) -> str:
+    """Return a deterministic opaque ID without treating caller values as paths.
+
+    Each component is length framed in UTF-8 and bound to a versioned namespace
+    before SHA-256 hashing. This keeps ``("ab", "c")`` distinct from
+    ``("a", "bc")``, prevents cross-component collisions, and preserves
+    Unicode byte-level distinctions without using any user value as a pathname.
+    """
+    if not all(isinstance(value, str) for value in (logical_key, prefix, namespace)):
+        _unsafe_path(CacheReason.INVALID_IDENTIFIER)
+
+    digest = hashlib.sha256()
+    digest.update(_PHYSICAL_NAME_DOMAIN)
+    for value in (namespace, prefix, logical_key):
+        value_bytes = value.encode("utf-8")
+        digest.update(len(value_bytes).to_bytes(8, byteorder="big"))
+        digest.update(value_bytes)
+
+    physical_name = digest.hexdigest()
+    return validate_blob_id(physical_name)
 
 
 def resolve_storage_root(root: Union[str, Path]) -> Path:
@@ -561,6 +590,26 @@ class ManagedFileOps:
         with self._lock:
             prepared = self._prepare_locator(locator, operation="read_stream")
             return self._fallback_open_read(prepared)
+
+    def copy_to_stream(
+        self,
+        locator: Union[str, Path],
+        destination: BinaryIO,
+        *,
+        chunk_size: int = 8192,
+    ) -> int:
+        """Copy one no-follow managed read into an already-open private stream.
+
+        This is intentionally the only high-level snapshot primitive: it opens
+        the managed file once through ``open_read`` and never exposes that
+        descriptor or locator to callers that deserialize payloads.
+        """
+        copied = 0
+        with self.open_read(locator) as source:
+            while chunk := source.read(chunk_size):
+                destination.write(chunk)
+                copied += len(chunk)
+        return copied
 
     def delete(self, locator: Union[str, Path]) -> bool:
         """Delete a contained locator; a missing safe leaf remains a normal miss."""
