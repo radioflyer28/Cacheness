@@ -40,14 +40,16 @@ Task and wave assignments are finalized by the planner. Every requirement alread
 
 | Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
-| TBD | TBD | 0+ | MIGR-01 | — | Supported exports, aliases, signatures, configs, registries, decorators, errors, and selected `0.3.x` artifacts remain executable | characterization + fixture integration | `uv run pytest -q -o log_cli=false tests/test_public_api_contract.py tests/test_stored_compatibility.py -x` | ❌ W0 | ⬜ pending |
-| TBD | TBD | 0+ | CACH-07 | T-01-07 | `SqlCache` stays independent; fetch/gap failures are strict unless explicit best effort; equivalent internal fallback remains observable | unit + SQLite integration | `uv run pytest -q -o log_cli=false tests/test_sql_cache.py tests/test_sql_cache_failure_contract.py -x` | partial + ❌ W0 | ⬜ pending |
-| TBD | TBD | 0+ | SECU-01 | T-01-01, T-01-02, T-01-03 | Every filesystem operation rejects escape forms without mutating rejected metadata or payload evidence | unit + filesystem integration | `uv run pytest -q -o log_cli=false tests/test_filesystem_containment.py -x` | ❌ W0 | ⬜ pending |
-| TBD | TBD | 0+ | SECU-02 | T-01-04, T-01-05 | Legacy headers use bounded non-executing parsing; ordinary NPZ loading disallows pickle; declared invalid artifacts fail closed | unit + stored fixture | `uv run pytest -q -o log_cli=false tests/test_legacy_array_security.py -x` | ❌ W0 | ⬜ pending |
-| TBD | TBD | 0+ | SECU-06 | T-01-06 | Query fields prevalidate before database access while documented numeric/string semantics remain intact | unit + SQLite integration | `uv run pytest -q -o log_cli=false tests/test_query_meta.py tests/test_query_meta_security.py -x` | partial + ❌ W0 | ⬜ pending |
-| TBD | TBD | 0+ | SECU-07 | T-01-05 | Documentation states trusted-payload limits, unsafe serializer risks, object-array opt-in, integrity limitations, and safe defaults | documentation contract | `uv run pytest -q -o log_cli=false tests/test_security_documentation.py -x` | ❌ W0 | ⬜ pending |
+| TBD | TBD | 0+ | MIGR-01 | T-01-09..T-01-11, T-01-28..T-01-36 | Supported exports, aliases, signatures, configs, registries, decorators, errors, and selected `0.3.x` artifacts remain executable | characterization + fixture integration | `uv run pytest -q -o log_cli=false tests/test_public_api_contract.py tests/test_stored_compatibility.py -x` | ❌ W0 | ⬜ pending |
+| TBD | TBD | 0+ | CACH-07 | T-01-20..23 | `SqlCache` stays independent; fetch/gap failures are strict unless explicit best effort; equivalent internal fallback remains observable | unit + SQLite integration | `uv run pytest -q -o log_cli=false tests/test_sql_cache.py tests/test_sql_cache_failure_contract.py -x` | partial + ❌ W0 | ⬜ pending |
+| TBD | TBD | 0+ | SECU-01 | T-01-01..T-01-07, T-01-12, T-01-37 | Every filesystem operation rejects escape forms without mutating rejected metadata or payload evidence | unit + filesystem integration | `uv run pytest -q -o log_cli=false tests/test_filesystem_containment.py -x` | ❌ W0 | ⬜ pending |
+| TBD | TBD | 0+ | SECU-02 | T-01-13..16 | Legacy headers use bounded non-executing parsing; ordinary NPZ loading disallows pickle; declared invalid artifacts fail closed | unit + stored fixture | `uv run pytest -q -o log_cli=false tests/test_legacy_array_security.py -x` | ❌ W0 | ⬜ pending |
+| TBD | TBD | 0+ | SECU-06 | T-01-17..19 | Query fields prevalidate before database access while documented numeric/string semantics remain intact | unit + SQLite integration | `uv run pytest -q -o log_cli=false tests/test_query_meta.py tests/test_query_meta_security.py -x` | partial + ❌ W0 | ⬜ pending |
+| TBD | TBD | 0+ | SECU-07 | T-01-24 | Documentation states trusted-payload limits, unsafe serializer risks, object-array opt-in, integrity limitations, and safe defaults | documentation contract | `uv run pytest -q -o log_cli=false tests/test_security_documentation.py -x` | ❌ W0 | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
+
+Phase-gate threats T-01-25..T-01-27 cover validation sign-off, unsafe-construct regression, and Ruff-baseline integrity; they are tracked by Plan 01-07's final gate rather than attributed to a single phase requirement.
 
 ---
 

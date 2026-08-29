@@ -18,96 +18,154 @@ Cacheness will move from overlapping cache and storage paths to one production-g
 ## Phase Details
 
 ### Phase 1: Compatibility and Security Baseline
+
 **Goal**: Users have a frozen compatibility baseline and safe boundary behavior before lifecycle ownership changes.
 **Depends on**: Nothing (first phase)
 **Requirements**: MIGR-01, CACH-07, SECU-01, SECU-02, SECU-06, SECU-07
 **Success Criteria** (what must be TRUE):
+
   1. Users can run the supported public imports, constructors, configuration names, registries, aliases, decorators, exceptions, and representative result behaviors against an executable compatibility baseline.
   2. Existing `SqlCache` imports and representative pull-through workflows continue to operate independently of the object-storage refactor.
   3. Filesystem operations reject traversal, absolute-path, drive, UNC, and symlink escapes for reads, writes, deletes, and listings.
   4. Structured metadata and query fields are parsed and constructed without metadata-controlled `eval` or interpolated backend query fragments.
   5. Users can identify the trusted-application-payload boundary and the risks and required configuration for unsafe serializers from project documentation.
-**Plans**: TBD
+
+**Plans**: 12 plans
+
+Plans:
+**Wave 1**
+
+- [ ] 01-01-PLAN.md — Freeze corrected public/error/configuration compatibility contracts.
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 01-02-PLAN.md — Enforce low-level filesystem containment and no-follow operations.
+- [ ] 01-06-PLAN.md — Make SqlCache strict-by-default and explicit about partial results.
+- [ ] 01-08-PLAN.md — Generate and verify both legacy raw-array compatibility variants.
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 01-03-PLAN.md — Carry containment through guarded high-level handler I/O and safe physical names.
+- [ ] 01-09-PLAN.md — Add unsigned and signed split-map JSON compatibility fixtures.
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [ ] 01-04-PLAN.md — Replace unsafe legacy array parsing and ordinary pickle-enabled array loading.
+- [ ] 01-05-PLAN.md — Validate and bind metadata query fields without changing documented semantics.
+- [ ] 01-10-PLAN.md — Add legacy SQLite and pre-unified decorator-key fixtures.
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [ ] 01-11-PLAN.md — Complete the corpus with current JSON and SQLite controls.
+
+**Wave 6** *(blocked on Wave 5 completion)*
+
+- [ ] 01-12-PLAN.md — Implement exact production metadata/signature/decorator compatibility adapters.
+
+**Wave 7** *(blocked on Wave 6 completion)*
+
+- [ ] 01-07-PLAN.md — Publish the serializer trust boundary and seal phase quality gates.
 
 ### Phase 2: Canonical Storage and Integrity Contract
+
 **Goal**: Direct `BlobStore` users interact with one versioned, backend-neutral record and deterministic fail-closed read contract.
 **Depends on**: Phase 1
 **Requirements**: STOR-01, STOR-02, STOR-08, SECU-03, SECU-04, SECU-05, SECU-08, MIGR-02, MIGR-07
 **Success Criteria** (what must be TRUE):
+
   1. Every stored object exposes one canonical versioned manifest with independently versioned metadata and payload formats, regardless of backend.
   2. Normal reads expose only committed generations and distinguish missing, corrupt, conflict, and backend failures through typed `BlobStore` results or exceptions.
   3. Manifest authenticity and payload integrity are verified before deserialization, and required signing fails closed when its key, signature, permissions, or configuration is invalid.
   4. Signatures bind the critical locator, handler/type, format, digest, size, and lifecycle-generation fields rather than an incomplete metadata subset.
   5. Unknown future metadata or payload versions fail explicitly, while `UnifiedCache` has a defined seam for translating typed integrity failures into separately recorded cache misses later.
+
 **Plans**: TBD
 
 ### Phase 3: Atomic Lifecycle and Recovery Engine
+
 **Goal**: Object lifecycle operations preserve an old or new complete generation and leave every incomplete outcome recoverable.
 **Depends on**: Phase 2
 **Requirements**: STOR-03, STOR-04, STOR-05, STOR-06, STOR-07
 **Success Criteria** (what must be TRUE):
+
   1. A write or overwrite exposes either the previous complete generation or the new complete generation, never mixed payload and metadata state.
   2. Failures at serialization, payload publication, metadata commit, or old-generation cleanup preserve the last valid generation and leave all residue detectable.
   3. Repeated overwrite, delete, clear, and close operations converge safely while cleaning both payload and metadata state.
   4. Operators can dry-run and resume reconciliation to repair, quarantine, or report inconsistent entries without guessing their provenance.
   5. Forced same-key write, delete, and read races have deterministic outcomes without globally serializing operations on distinct keys.
+
 **Plans**: TBD
 
 ### Phase 4: Metadata Composition and Topology Contracts
+
 **Goal**: Users can select any advertised metadata backend through one composition root and receive only guarantees that the chosen topology can provide.
 **Depends on**: Phase 3
 **Requirements**: BACK-02, BACK-03, BACK-06
 **Success Criteria** (what must be TRUE):
+
   1. JSON, memory, SQLite, and PostgreSQL round-trip the same canonical entries and expose the same revision, conflict, tombstone, listing, and lifecycle semantics.
   2. A caller-injected backend instance remains the selected instance, and a registered backend name resolves through the same construction path used by direct and composed storage.
   3. Users can inspect durability, process/host sharing, compare-and-swap, streaming, and listing capabilities for the active backend pair.
   4. Invalid topology claims, such as durable multi-host storage backed by process-local payloads or unsupported coordination, fail during configuration rather than during a write.
+
 **Plans**: TBD
 
 ### Phase 5: Payload Backends and Full Matrix Parity
+
 **Goal**: Every advertised payload backend works end to end with every supported metadata backend under the canonical lifecycle.
 **Depends on**: Phase 4
 **Requirements**: BACK-01, BACK-04, BACK-05
 **Success Criteria** (what must be TRUE):
+
   1. Filesystem, memory, and S3 payload backends pass the same immutable-generation, read, delete, list, integrity, resource-cleanup, and reconciliation contract.
   2. Every allowed combination in the three-payload by four-metadata matrix completes storage lifecycle workflows with no backend-specific behavior leaking to callers.
   3. PostgreSQL concurrency and transaction behavior is verified against a real PostgreSQL service, including conflicts and cleanup after partial failure.
   4. AWS S3 is the authoritative remote-object test target for conditional operations, checksums, streaming, pagination, retries, and cleanup; compatible services are claimed only where explicitly verified.
+
 **Plans**: TBD
 
 ### Phase 6: UnifiedCache Policy Composition
+
 **Goal**: Cache users retain their public workflows while all payload-plus-metadata lifecycle work is delegated to `BlobStore`.
 **Depends on**: Phase 5
 **Requirements**: CACH-01, CACH-02, CACH-03, CACH-04, CACH-05, CACH-06
 **Success Criteria** (what must be TRUE):
+
   1. Existing cache imports, constructors, aliases, configuration names, decorators, and result behavior remain callable through compatibility adapters.
   2. Cache puts, reads, invalidations, and clears reach payload and metadata only through `BlobStore`; TTL, eviction, keying, statistics, and decorators remain policy owned by `UnifiedCache`.
   3. TTL expiry, size eviction, predicate invalidation, decorator clearing, single-key deletion, and global clear remove complete stored entries through one lifecycle primitive.
   4. Cached `None` values are returned as hits rather than recomputed as misses, and decorator clear reports the entries it actually removed.
   5. Statistics preserve compatible aggregate counters while separately identifying absent, expired, corrupt, conflict, and backend-error outcomes.
+
 **Plans**: TBD
 
 ### Phase 7: Explicit Migration and Rebuild Cutover
+
 **Goal**: Existing users can adopt the canonical format without silent mutation or losing the only valid copy of stored data.
 **Depends on**: Phase 6
 **Requirements**: MIGR-03, MIGR-04, MIGR-05, MIGR-06
 **Success Criteria** (what must be TRUE):
+
   1. Users can inspect a store without mutation and receive human-readable and machine-readable migration plans with entry counts, bytes, incompatibilities, and intended actions.
   2. Supported same-backend metadata and payload format migrations use copy-verify-switch semantics and retire the prior copy only after verified publication.
   3. An interrupted migration can resume idempotently from its journal without losing or replacing the only valid generation.
   4. Incompatible formats and cross-backend moves offer an explicit, scoped, confirmed rebuild path rather than implicit deletion or a promise of universal physical migration.
+
 **Plans**: TBD
 
 ### Phase 8: Production Gates and Performance Stabilization
+
 **Goal**: Users can rely on reproducible release evidence across supported installations, Python versions, backends, failures, and operational scale.
 **Depends on**: Phase 7
 **Requirements**: QUAL-01, QUAL-02, QUAL-03, QUAL-04, QUAL-05, QUAL-06, QUAL-07
 **Success Criteria** (what must be TRUE):
+
   1. A clean minimal wheel imports every guaranteed public symbol and completes a memory-backed round trip, while each advertised extra installs and imports independently.
   2. Required CI passes across supported Python versions, backend contracts, lint and coverage policy, packaging, PostgreSQL, and authoritative AWS S3 integration.
   3. Deterministic fault, race, and crash-recovery suites verify every lifecycle commit boundary, and lifecycle/cache-policy modules meet the project’s statement and branch coverage gates.
   4. Checked-in benchmarks establish reviewed correctness-aware latency and throughput budgets after lifecycle behavior stabilizes.
   5. Inventory, reconciliation, statistics, clear, and aggregate operations demonstrate bounded memory and backend-call behavior without accidental N+1 access patterns.
+
 **Plans**: TBD
 
 ## Progress
