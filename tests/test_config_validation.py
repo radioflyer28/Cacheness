@@ -430,6 +430,25 @@ class TestLoadConfigFromJson:
 
 class TestSaveConfigToJson:
     """Test the save_config_to_json function."""
+
+    @pytest.mark.parametrize(
+        "cache_dir",
+        ["./cache", "./yaml_cache", "relative/cache", "../parent-cache"],
+    )
+    def test_authored_relative_cache_dir_round_trips_exactly(self, temp_dir, cache_dir):
+        """Serialized configuration retains the caller's original path string."""
+        original = CacheConfig(cache_dir=cache_dir)
+        config_file = temp_dir / "relative-path.json"
+
+        save_config_to_json(original, config_file)
+        loaded = load_config_from_json(config_file)
+
+        with config_file.open(encoding="utf-8") as config_handle:
+            serialized = json.load(config_handle)
+
+        assert original.storage.cache_dir == cache_dir
+        assert serialized["storage"]["cache_dir"] == cache_dir
+        assert loaded.storage.cache_dir == cache_dir
     
     def test_save_and_reload(self, temp_dir):
         """Test saving and reloading config."""
@@ -656,3 +675,21 @@ blob:
         
         assert loaded.storage.cache_dir == original.storage.cache_dir
         assert loaded.metadata.metadata_backend == original.metadata.metadata_backend
+
+    @pytest.mark.parametrize(
+        "cache_dir", ["./yaml_cache", "relative/yaml_cache", "../yaml-parent"]
+    )
+    def test_authored_relative_cache_dir_yaml_round_trips_exactly(
+        self, temp_dir, yaml_available, cache_dir
+    ):
+        """YAML round trips preserve the authored storage string without resolution."""
+        from cacheness.config import load_config_from_yaml, save_config_to_yaml
+
+        original = CacheConfig(cache_dir=cache_dir)
+        config_file = temp_dir / "relative-path.yaml"
+
+        save_config_to_yaml(original, config_file)
+        loaded = load_config_from_yaml(config_file)
+
+        assert original.storage.cache_dir == cache_dir
+        assert loaded.storage.cache_dir == cache_dir
