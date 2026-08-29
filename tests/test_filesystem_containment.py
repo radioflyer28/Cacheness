@@ -5,11 +5,13 @@ from __future__ import annotations
 import os
 import subprocess
 import threading
+from io import BytesIO
 from pathlib import Path
 
 import pytest
 
 from cacheness.error_handling import CacheReason, CacheUnsafePathError
+from cacheness.storage.backends.blob_backends import FilesystemBlobBackend
 from cacheness.storage.path_security import (
     ManagedFileOps,
     resolve_managed_locator,
@@ -274,3 +276,98 @@ def test_windows_junction_is_rejected_as_a_managed_reparse_component(tmp_path):
 
     assert exc_info.value.context["reason"] == CacheReason.PATH_RACE.value
     assert (outside / "entry").read_bytes() == b"outside"
+
+
+@pytest.mark.parametrize(
+    "blob_id",
+    [
+        "../escape",
+        "/tmp/escape",
+        "C:\\escape",
+        "\\\\server\\share\\escape",
+        "\\rooted",
+        "safe/mixed\\escape",
+    ],
+)
+@pytest.mark.parametrize("streaming", [False, True])
+def test_backend_rejects_hostile_ids_before_creating_shards(tmp_path, blob_id, streaming):
+    """Both write entry points reject direct unsafe IDs without creating residue."""
+    backend = FilesystemBlobBackend(tmp_path / "root")
+
+    with pytest.raises(CacheUnsafePathError):
+        if streaming:
+            backend.write_blob_stream(blob_id, BytesIO(b"payload"))
+        else:
+            backend.write_blob(blob_id, b"payload")
+
+    assert list(backend.base_dir.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "operation", ["read", "delete", "exists", "read_stream", "size"]
+)
+@pytest.mark.parametrize("locator_kind", ["outside", "ancestor_link", "leaf_link"])
+def test_backend_rejects_unsafe_locators_for_every_direct_operation(
+    tmp_path, operation, locator_kind
+):
+    """Unsafe locators never become a miss-like result or touch outside bytes."""
+    root = tmp_path / "root"
+    backend = FilesystemBlobBackend(root)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "sentinel"
+    sentinel.write_bytes(b"outside")
+
+    if locator_kind == "outside":
+        locator = sentinel
+    elif locator_kind == "ancestor_link":
+        (root / "managed").symlink_to(outside, target_is_directory=True)
+        locator = root / "managed" / "sentinel"
+    else:
+        (root / "leaf").symlink_to(sentinel)
+        locator = root / "leaf"
+
+    with pytest.raises(CacheUnsafePathError):
+        if operation == "read":
+            backend.read_blob(str(locator))
+        elif operation == "delete":
+            backend.delete_blob(str(locator))
+        elif operation == "exists":
+            backend.exists(str(locator))
+        elif operation == "read_stream":
+            stream = backend.read_blob_stream(str(locator))
+            stream.close()
+        else:
+            backend.get_size(str(locator))
+
+    assert sentinel.read_bytes() == b"outside"
+
+
+@pytest.mark.parametrize(
+    "locator",
+    ["../escape", "/tmp/escape", "C:\\escape", "\\\\server\\share\\escape", "\\rooted"],
+)
+def test_backend_rejects_cross_platform_direct_locator_shapes(tmp_path, locator):
+    """Direct locators apply the same host-independent path-shape policy."""
+    backend = FilesystemBlobBackend(tmp_path / "root")
+
+    with pytest.raises(CacheUnsafePathError):
+        backend.exists(locator)
+
+
+def test_backend_preserves_valid_sharded_atomic_stream_lifecycle(tmp_path):
+    """Guarded writes retain compatible paths, streams, size, and deletion behavior."""
+    backend = FilesystemBlobBackend(tmp_path / "root", shard_chars=2)
+    first_locator = backend.write_blob("ab-entry", b"first")
+    second_locator = backend.write_blob_stream("ab-entry", BytesIO(b"second"))
+
+    assert first_locator == second_locator
+    assert Path(second_locator).parent == backend.base_dir / "ab"
+    assert backend.read_blob(second_locator) == b"second"
+    with backend.read_blob_stream(second_locator) as stream:
+        assert stream.read() == b"second"
+    assert backend.exists(second_locator)
+    assert backend.get_size(second_locator) == len(b"second")
+    assert backend.delete_blob(second_locator)
+    assert not backend.exists(second_locator)
+    assert not list(backend.base_dir.rglob("*.tmp"))

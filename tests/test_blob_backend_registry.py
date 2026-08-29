@@ -470,15 +470,14 @@ class TestFilesystemBlobBackend:
         
         assert result == data
     
-    def test_nested_blob_id(self, temp_dir):
-        """Test blob ID with path separators."""
+    def test_nested_blob_id_rejected(self, temp_dir):
+        """Direct filesystem IDs must stay opaque rather than encode a path."""
         backend = FilesystemBlobBackend(temp_dir)
         
-        data = b"nested data"
-        blob_path = backend.write_blob("folder/subfolder/key", data)
-        
-        assert backend.exists(blob_path)
-        assert backend.read_blob(blob_path) == data
+        from cacheness.error_handling import CacheUnsafePathError
+
+        with pytest.raises(CacheUnsafePathError):
+            backend.write_blob("folder/subfolder/key", b"nested data")
 
 
 class TestInMemoryBlobBackend:

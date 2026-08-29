@@ -116,7 +116,16 @@ def _lexically_contained(root: Path, candidate: Path) -> Path:
     try:
         absolute_candidate.relative_to(root)
     except ValueError:
-        _unsafe_path(CacheReason.PATH_OUTSIDE_ROOT)
+        # macOS commonly exposes the same temporary directory through both
+        # ``/var`` and its resolved ``/private/var`` target.  Accept aliases
+        # only after their resolved destination proves contained; subsequent
+        # operations use the canonical descendant, never the alias path.
+        resolved_candidate = absolute_candidate.resolve(strict=False)
+        try:
+            resolved_candidate.relative_to(root)
+        except ValueError:
+            _unsafe_path(CacheReason.PATH_OUTSIDE_ROOT)
+        return resolved_candidate
     return absolute_candidate
 
 
@@ -345,7 +354,7 @@ class ManagedFileOps:
     @staticmethod
     def _raise_descriptor_path_error(exc: OSError) -> NoReturn:
         """Translate no-follow traversal failures to the public typed contract."""
-        if exc.errno in {errno.ELOOP, errno.ENOTDIR, errno.ENOENT}:
+        if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
             raise CacheUnsafePathError(
                 "Managed storage path changed during operation",
                 reason=CacheReason.PATH_RACE,
@@ -358,6 +367,8 @@ class ManagedFileOps:
             with self._descriptor_parent(parts, create=False) as (parent_fd, name):
                 try:
                     return os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+                except FileNotFoundError:
+                    raise
                 except OSError as exc:
                     self._raise_descriptor_path_error(exc)
         except FileNotFoundError:

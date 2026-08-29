@@ -40,11 +40,12 @@ Usage:
 """
 
 import logging
-import os
 from abc import ABC, abstractmethod
 from io import BytesIO
 from pathlib import Path
-from typing import BinaryIO, Dict, List, Optional, Type, Union
+from typing import BinaryIO, Dict, List, Type, Union
+
+from cacheness.storage.path_security import ManagedFileOps, resolve_storage_root
 
 logger = logging.getLogger(__name__)
 
@@ -224,84 +225,49 @@ class FilesystemBlobBackend(BlobBackend):
             base_dir: Directory where blobs will be stored
             shard_chars: Number of leading chars for Git-style sharding (default: 2)
         """
-        self.base_dir = Path(base_dir)
+        configured_root = Path(base_dir)
+        configured_root.mkdir(parents=True, exist_ok=True)
+        self.base_dir = resolve_storage_root(configured_root)
         self.shard_chars = shard_chars
-        self.base_dir.mkdir(parents=True, exist_ok=True)
+        self._file_ops = ManagedFileOps(self.base_dir)
         logger.debug(f"FilesystemBlobBackend initialized at {self.base_dir} (shard_chars={shard_chars})")
 
     def write_blob(self, blob_id: str, data: bytes) -> str:
         """Write blob to filesystem."""
-        blob_path = self._get_blob_path(blob_id)
-        blob_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Write atomically using temp file
-        temp_path = blob_path.with_suffix(blob_path.suffix + ".tmp")
-        try:
-            temp_path.write_bytes(data)
-            temp_path.replace(blob_path)
-        except Exception:
-            if temp_path.exists():
-                temp_path.unlink()
-            raise
-        
+        blob_path = self._file_ops.write_bytes(
+            blob_id, data, shard_chars=self.shard_chars
+        )
         logger.debug(f"Wrote blob {blob_id} ({len(data)} bytes) to {blob_path}")
         return str(blob_path)
 
     def read_blob(self, blob_path: str) -> bytes:
         """Read blob from filesystem."""
-        path = Path(blob_path)
-        if not path.exists():
-            raise FileNotFoundError(f"Blob not found: {blob_path}")
-        return path.read_bytes()
+        return self._file_ops.read_bytes(blob_path)
 
     def delete_blob(self, blob_path: str) -> bool:
         """Delete blob from filesystem."""
-        path = Path(blob_path)
-        if path.exists():
-            path.unlink()
+        if self._file_ops.delete(blob_path):
             logger.debug(f"Deleted blob: {blob_path}")
             return True
         return False
 
     def exists(self, blob_path: str) -> bool:
         """Check if blob exists on filesystem."""
-        return Path(blob_path).exists()
+        return self._file_ops.exists(blob_path)
 
     def write_blob_stream(self, blob_id: str, stream: BinaryIO) -> str:
         """Write blob from stream to filesystem."""
-        blob_path = self._get_blob_path(blob_id)
-        blob_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        temp_path = blob_path.with_suffix(blob_path.suffix + ".tmp")
-        try:
-            with open(temp_path, "wb") as f:
-                # Read in chunks for memory efficiency
-                while True:
-                    chunk = stream.read(8192)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-            temp_path.replace(blob_path)
-        except Exception:
-            if temp_path.exists():
-                temp_path.unlink()
-            raise
-        
-        return str(blob_path)
+        return str(
+            self._file_ops.write_stream(blob_id, stream, shard_chars=self.shard_chars)
+        )
 
     def read_blob_stream(self, blob_path: str) -> BinaryIO:
         """Read blob from filesystem as stream."""
-        path = Path(blob_path)
-        if not path.exists():
-            raise FileNotFoundError(f"Blob not found: {blob_path}")
-        return open(path, "rb")
+        return self._file_ops.open_read(blob_path)
 
     def get_size(self, blob_path: str) -> int:
         """Get blob size from filesystem."""
-        path = Path(blob_path)
-        if path.exists():
-            return path.stat().st_size
-        return -1
+        return self._file_ops.get_size(blob_path)
 
     def _get_blob_path(self, blob_id: str) -> Path:
         """
@@ -313,15 +279,11 @@ class FilesystemBlobBackend(BlobBackend):
         With shard_chars=0 (disabled):
             "abc123def456" -> base_dir/abc123def456
         """
-        # Sanitize blob_id to prevent path traversal
-        safe_id = blob_id.replace("..", "__").replace("/", os.sep).replace("\\", os.sep)
-        
-        # Apply Git-style sharding if enabled
-        if self.shard_chars > 0 and len(safe_id) >= self.shard_chars:
-            shard_dir = safe_id[:self.shard_chars]
-            return self.base_dir / shard_dir / safe_id
-        
-        return self.base_dir / safe_id
+        return self._file_ops.blob_locator(blob_id, self.shard_chars)
+
+    def close(self) -> None:
+        """Release the managed root descriptor when this backend is closed."""
+        self._file_ops.close()
 
 
 # =============================================================================

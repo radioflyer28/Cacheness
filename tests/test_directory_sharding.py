@@ -8,6 +8,7 @@ import pytest
 import tempfile
 from pathlib import Path
 
+from cacheness.error_handling import CacheUnsafePathError
 from cacheness.storage.backends.blob_backends import (
     FilesystemBlobBackend,
     InMemoryBlobBackend,
@@ -87,7 +88,7 @@ class TestFilesystemSharding:
         
         # Should be directly in base_dir, not in a subdirectory
         path = Path(blob_path)
-        assert path.parent == temp_dir
+        assert path.parent == backend.base_dir
         assert path.name == blob_id
     
     def test_shard_chars_two_creates_subdirectory(self, temp_dir):
@@ -101,7 +102,7 @@ class TestFilesystemSharding:
         # Should be in ab/ subdirectory
         path = Path(blob_path)
         assert path.parent.name == "ab"
-        assert path.parent.parent == temp_dir
+        assert path.parent.parent == backend.base_dir
         assert path.name == blob_id
     
     def test_shard_chars_three_creates_subdirectory(self, temp_dir):
@@ -197,7 +198,7 @@ class TestFilesystemSharding:
         
         # Should be directly in base_dir
         path = Path(blob_path)
-        assert path.parent == temp_dir
+        assert path.parent == backend.base_dir
         assert path.name == blob_id
     
     def test_blob_id_equal_to_shard_chars(self, temp_dir):
@@ -272,20 +273,13 @@ class TestShardingEdgeCases:
             yield Path(tmpdir)
     
     def test_path_traversal_safe_with_sharding(self, temp_dir):
-        """Path traversal attempts should be sanitized even with sharding."""
+        """Path traversal attempts should reject rather than be rewritten."""
         backend = FilesystemBlobBackend(temp_dir, shard_chars=2)
         
-        # Attempt path traversal
-        blob_id = "../escape"
-        data = b"attempt escape"
-        blob_path = backend.write_blob(blob_id, data)
-        
-        # Should be safely contained in temp_dir
-        path = Path(blob_path)
-        # The ".." should be sanitized to "__"
-        assert temp_dir in path.parents or path.parent == temp_dir or path.parent.parent == temp_dir
-        # Should not escape temp_dir
-        assert str(blob_path).startswith(str(temp_dir))
+        with pytest.raises(CacheUnsafePathError):
+            backend.write_blob("../escape", b"attempt escape")
+
+        assert list(temp_dir.iterdir()) == []
     
     def test_various_shard_chars_values(self, temp_dir):
         """Test various shard_chars values work correctly."""
