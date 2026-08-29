@@ -88,6 +88,43 @@
         }
       },
       "production_reader": "legacy_split_json_metadata"
+    },
+    "json-split-signed-v038": {
+      "source_commit": "71e4ba04cbcd7dfbcf74e5651f131213b7d45ab9",
+      "source_version": "0.3.8",
+      "variant": "json-split-npz",
+      "logical_input": {
+        "dtype": "int32",
+        "shape": [2, 3],
+        "values": [0, 1, 2, 3, 4, 5]
+      },
+      "discriminators": {
+        "metadata_kind": "json_split",
+        "json_top_level_keys": [
+          "entries",
+          "access_times",
+          "creation_times",
+          "file_sizes",
+          "data_types",
+          "cache_key_params",
+          "cache_hits",
+          "cache_misses",
+          "entry_signature"
+        ],
+        "signature_state": "present"
+      },
+      "files": {
+        "metadata.json": {
+          "sha256": "b8ebfb9bcc52b72a90e333dc2093273863cdad3c83fe5b3e50a9e5e032a2cb30"
+        },
+        "payload.npz": {
+          "sha256": "400fa42d786ab1e6924e051bbaa61238627909af333de87aab176c280c71fe2f"
+        },
+        "provenance.json": {
+          "sha256": "870f24839abc70f7d265cf9ea84aea48949d6403fcc3f593458f3a2bf458f172"
+        }
+      },
+      "production_reader": "legacy_split_json_metadata"
     }
   }
 }
