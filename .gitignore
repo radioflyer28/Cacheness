@@ -14,6 +14,7 @@ wheels/
 *.db-shm
 *.db-wal
 *.json
+!.planning/config.json
 *.pkl
 *.pkl.*
 *.b2nd
