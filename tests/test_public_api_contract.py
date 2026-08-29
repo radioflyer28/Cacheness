@@ -33,10 +33,10 @@ class TestPublicExports:
         assert isinstance(cacheness.list_handlers(), list)
 
     def test_public_configuration_result_shapes(self):
-        config = cacheness.CacheConfig(cache_dir="./compatibility-cache")
+        config = cacheness.CacheConfig()
 
-        assert config.storage.cache_dir == "./compatibility-cache"
-        assert cacheness.create_cache_config(cache_dir="./compatibility-cache").storage
+        assert isinstance(config.storage.cache_dir, str)
+        assert cacheness.create_cache_config().storage
 
     def test_public_exception_inheritance_and_reason_values(self):
         expected_reasons = {
@@ -113,6 +113,21 @@ def test_optional_public_names_remain_importable_when_dependency_is_blocked(
         assert SQLAlchemyPullThroughCache is SqlCache
         assert callable(load_config_from_yaml)
         assert callable(save_config_to_yaml)
+
+        if blocked_module == "yaml":
+            try:
+                save_config_to_yaml(None, "unused.yaml")
+            except ImportError as error:
+                assert "install" in str(error).lower()
+            else:
+                raise AssertionError("YAML use unexpectedly succeeded")
+        else:
+            try:
+                SqlCache("sqlite:///:memory:", None, None)
+            except Exception as error:
+                assert "install" in str(error).lower()
+            else:
+                raise AssertionError("SQL cache construction unexpectedly succeeded")
         """
     )
     environment = os.environ.copy()

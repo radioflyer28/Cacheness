@@ -34,6 +34,19 @@ from .decorators import cached
 from .handlers import ArrayHandler, HandlerRegistry, ObjectHandler
 from .metadata import JsonBackend, create_metadata_backend
 from .interfaces import CacheHandler  # Export interface for custom handlers
+from .error_handling import (
+    CacheError,
+    CacheConfigurationError,
+    CacheHandlerError,
+    CacheIntegrityError,
+    CacheLegacyFormatError,
+    CacheMetadataError,
+    CacheQueryValidationError,
+    CacheReason,
+    CacheSerializationError,
+    CacheStorageError,
+    CacheUnsafePathError,
+)
 
 # Import config validation and file loading (Phase 2.4)
 from .config import (
@@ -77,6 +90,7 @@ try:
     _has_sql_cache = True
     # Backward compatibility aliases  
     SQLAlchemyPullThroughCache = SqlCache
+    SQLAlchemyDataAdapter = SqlCacheAdapter
     SQLAlchemySqlCacheAdapter = SqlCacheAdapter
 except ImportError:
     _has_sql_cache = False
@@ -239,6 +253,18 @@ __all__ = [
     "create_metadata_backend",
     # Decorators
     "cached",
+    # Error contracts
+    "CacheError",
+    "CacheConfigurationError",
+    "CacheStorageError",
+    "CacheSerializationError",
+    "CacheHandlerError",
+    "CacheIntegrityError",
+    "CacheMetadataError",
+    "CacheReason",
+    "CacheUnsafePathError",
+    "CacheQueryValidationError",
+    "CacheLegacyFormatError",
     # Version info
     "__version__",
 ]
@@ -287,5 +313,7 @@ if _has_metadata_backends:
 if _has_sql_cache:
     __all__.extend([
         "SqlCache", "SqlCacheAdapter",  # New simple names
-        "SQLAlchemyPullThroughCache", "SQLAlchemyDataAdapter"  # Backward compatibility
+        "SQLAlchemyPullThroughCache",  # Backward compatibility
+        "SQLAlchemyDataAdapter",
+        "SQLAlchemySqlCacheAdapter",
     ])

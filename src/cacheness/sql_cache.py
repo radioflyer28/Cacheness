@@ -40,6 +40,8 @@ Example Usage:
     >>> data = cache.get_data(symbol="AAPL", start_date="2024-01-01", end_date="2024-01-31")
 """
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta, timezone, date
 from typing import Any, Dict, List, Optional, Union, Callable, TYPE_CHECKING
