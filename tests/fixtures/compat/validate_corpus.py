@@ -44,6 +44,7 @@ PROVENANCE_KEYS = {
     "files",
 }
 DECORATOR_PROVENANCE_KEYS = PROVENANCE_KEYS | {"decorator_key"}
+CURRENT_JSON_PROVENANCE_KEYS = PROVENANCE_KEYS | {"unified_key"}
 DECORATOR_KEY_KEYS = {
     "module",
     "qualname",
@@ -55,6 +56,7 @@ DECORATOR_KEY_KEYS = {
     "xxh3_64",
     "cache_entry_key",
 }
+UNIFIED_KEY_KEYS = {"params", "serialized_params", "cache_entry_key"}
 MANIFEST_KEYS = {"schema_version", "fixtures"}
 MANIFEST_RECORD_KEYS = {
     "source_commit",
@@ -433,6 +435,50 @@ def validate_decorator_key_provenance(
         fail("decorator-key-v0313 candidate entry description differs")
 
 
+def validate_current_json_key_provenance(
+    fixture_dir: Path, provenance: dict[str, Any]
+) -> None:
+    """Recompute the sole current JSON key without scanning fixture metadata."""
+    unified_key = provenance["unified_key"]
+    if not isinstance(unified_key, dict):
+        fail("json-nested-v0314 unified_key must be an object")
+    require_exact_keys(
+        unified_key,
+        UNIFIED_KEY_KEYS,
+        "json-nested-v0314 unified_key",
+    )
+    expected_params = {"fixture_id": "json-nested-v0314"}
+    expected_serialized_params = "fixture_id:str:json-nested-v0314"
+    if unified_key["params"] != expected_params:
+        fail("json-nested-v0314 unified key parameters differ")
+    if unified_key["serialized_params"] != expected_serialized_params:
+        fail("json-nested-v0314 unified serialized parameters differ")
+    expected_key = xxhash.xxh3_64(expected_serialized_params.encode()).hexdigest()[:16]
+    if unified_key["cache_entry_key"] != expected_key:
+        fail("json-nested-v0314 unified cache entry key differs")
+
+    metadata = read_json(fixture_dir / "metadata.json")
+    if list(metadata) != NESTED_JSON_KEYS:
+        fail("json-nested-v0314 JSON top-level key order differs")
+    entries = metadata.get("entries")
+    if not isinstance(entries, dict):
+        fail("json-nested-v0314 metadata entries must be an object")
+    entry = entries.get(expected_key)
+    if not isinstance(entry, dict):
+        fail("json-nested-v0314 exact unified candidate is absent from metadata")
+    if (
+        entry.get("description") != "Current 0.3.14 JSON control"
+        or entry.get("data_type") != "array"
+        or entry.get("prefix") != ""
+    ):
+        fail("json-nested-v0314 exact unified entry fields differ")
+    entry_metadata = entry.get("metadata")
+    if not isinstance(entry_metadata, dict) or not isinstance(
+        entry_metadata.get("entry_signature"), str
+    ):
+        fail("json-nested-v0314 exact unified entry lacks its signature")
+
+
 def validate_provenance(
     fixture_dir: Path, manifest_record: dict[str, Any], expected: dict[str, Any]
 ) -> None:
@@ -441,6 +487,8 @@ def validate_provenance(
     provenance_keys = (
         DECORATOR_PROVENANCE_KEYS
         if fixture_id == "decorator-key-v0313"
+        else CURRENT_JSON_PROVENANCE_KEYS
+        if fixture_id == "json-nested-v0314"
         else PROVENANCE_KEYS
     )
     require_exact_keys(provenance, provenance_keys, f"{fixture_id} provenance")
@@ -490,6 +538,8 @@ def validate_provenance(
         fail(f"{fixture_id} provenance digest is not independently recorded in manifest")
     if fixture_id == "decorator-key-v0313":
         validate_decorator_key_provenance(fixture_dir, provenance)
+    if fixture_id == "json-nested-v0314":
+        validate_current_json_key_provenance(fixture_dir, provenance)
 
 
 def validate_raw_fixture(fixture_dir: Path, expected: dict[str, Any]) -> None:
