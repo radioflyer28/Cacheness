@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 
 from cacheness import CacheConfig, SecurityConfig, cacheness
-from cacheness.error_handling import CacheIntegrityError
+from cacheness.error_handling import CacheIntegrityError, CacheStorageError
 
 
 @pytest.fixture
@@ -45,6 +45,31 @@ def _cache_with_signing_policy(tmp_path: Path, *, allow_unsigned: bool):
             ),
         )
     )
+
+
+class _SnapshotOpenFailure:
+    """Context manager double that fails before a candidate digest is calculated."""
+
+    def __enter__(self):
+        """Raise at the snapshot-open boundary."""
+        raise RuntimeError("snapshot unavailable")
+
+    def __exit__(self, _exc_type, _exc_value, _traceback):
+        """Do not suppress failures from the simulated snapshot boundary."""
+        return False
+
+
+def _candidate_paths(cache) -> set[Path]:
+    """Return all private candidate payloads currently owned by one cache root."""
+    return set(Path(cache.cache_dir).glob("*candidate-*"))
+
+
+def _overwrite_evidence(cache, cache_key: str) -> tuple[dict, Path, bytes, set[Path]]:
+    """Capture every committed fact a failed replacement must preserve exactly."""
+    entry = deepcopy(cache.metadata_backend.get_entry(cache_key))
+    assert entry is not None
+    payload_path = Path(entry["metadata"]["actual_path"])
+    return entry, payload_path, payload_path.read_bytes(), _candidate_paths(cache)
 
 
 class TestCacheIntegrity:
@@ -361,3 +386,167 @@ class TestCacheIntegrity:
         non_existent_file = Path(cache.cache_dir) / "does_not_exist.txt"
         hash_result = cache._calculate_file_hash(non_existent_file)
         assert hash_result is None
+
+
+@pytest.mark.parametrize(
+    ("boundary", "expected_error"),
+    (
+        ("snapshot_open", RuntimeError),
+        ("digest_exception", RuntimeError),
+        ("missing_digest", CacheIntegrityError),
+        ("signer_missing", CacheIntegrityError),
+        ("signer_exception", CacheIntegrityError),
+        ("empty_signature", CacheIntegrityError),
+        ("metadata_publication", RuntimeError),
+    ),
+)
+def test_unified_cache_precommit_failures_preserve_exact_overwrite_evidence(
+    tmp_path, monkeypatch, boundary, expected_error
+):
+    """Every candidate boundary preserves the committed overwrite on failure."""
+    cache = _cache_with_signing_policy(tmp_path, allow_unsigned=False)
+    cache_key_params = {"candidate_boundary": boundary}
+
+    def fail_snapshot_open(*_args, **_kwargs):
+        return _SnapshotOpenFailure()
+
+    def fail_digest(_path):
+        raise RuntimeError("digest unavailable")
+
+    def fail_signer(_entry_data):
+        raise RuntimeError("signer unavailable")
+
+    def empty_signature(_entry_data):
+        return ""
+
+    def fail_metadata_publication(_cache_key, _entry_data):
+        raise RuntimeError("metadata unavailable")
+
+    try:
+        cache.put({"value": "committed"}, **cache_key_params)
+        cache_key = cache._create_cache_key(cache_key_params)
+        entry_before, payload_before, bytes_before, candidates_before = _overwrite_evidence(
+            cache,
+            cache_key,
+        )
+
+        if boundary == "snapshot_open":
+            monkeypatch.setattr(
+                cache.guarded_handler_io,
+                "open_snapshot",
+                fail_snapshot_open,
+            )
+        elif boundary == "digest_exception":
+            monkeypatch.setattr(cache, "_calculate_file_hash", fail_digest)
+        elif boundary == "missing_digest":
+            monkeypatch.setattr(cache, "_calculate_file_hash", lambda _path: None)
+        elif boundary == "signer_missing":
+            monkeypatch.setattr(cache, "signer", None)
+        elif boundary == "signer_exception":
+            monkeypatch.setattr(cache.signer, "sign_entry", fail_signer)
+        elif boundary == "empty_signature":
+            monkeypatch.setattr(cache.signer, "sign_entry", empty_signature)
+        else:
+            monkeypatch.setattr(
+                cache.metadata_backend,
+                "put_entry",
+                fail_metadata_publication,
+            )
+
+        with pytest.raises(expected_error):
+            cache.put({"value": "replacement"}, **cache_key_params)
+
+        # The evidence assertions must run against the normal read path, not
+        # against a fault still injected into hashing or signature checks.
+        monkeypatch.undo()
+        assert cache.metadata_backend.get_entry(cache_key) == entry_before
+        assert payload_before.read_bytes() == bytes_before
+        assert _candidate_paths(cache) == candidates_before
+        assert cache.get(**cache_key_params) == {"value": "committed"}
+    finally:
+        cache.close()
+
+
+@pytest.mark.parametrize("cleanup_outcome", ("false", "raise"))
+def test_unified_cache_unresolved_candidate_cleanup_is_chained(
+    tmp_path, monkeypatch, cleanup_outcome
+):
+    """A failed candidate deletion is explicit and leaves prior evidence untouched."""
+    cache = _cache_with_signing_policy(tmp_path, allow_unsigned=False)
+    cache_key_params = {"candidate_cleanup": cleanup_outcome}
+    cleanup_attempts: list[Path] = []
+
+    def fail_metadata_publication(_cache_key, _entry_data):
+        raise RuntimeError("metadata unavailable")
+
+    def cannot_prove_cleanup(locator):
+        cleanup_attempts.append(Path(locator))
+        if cleanup_outcome == "raise":
+            raise OSError("candidate cleanup unavailable")
+        return False
+
+    try:
+        cache.put({"value": "committed"}, **cache_key_params)
+        cache_key = cache._create_cache_key(cache_key_params)
+        entry_before, payload_before, bytes_before, _ = _overwrite_evidence(
+            cache,
+            cache_key,
+        )
+        monkeypatch.setattr(
+            cache.metadata_backend,
+            "put_entry",
+            fail_metadata_publication,
+        )
+        monkeypatch.setattr(
+            cache.guarded_handler_io.file_ops,
+            "delete",
+            cannot_prove_cleanup,
+        )
+
+        with pytest.raises(CacheStorageError) as exc_info:
+            cache.put({"value": "replacement"}, **cache_key_params)
+
+        assert isinstance(exc_info.value.__cause__, RuntimeError)
+        assert "metadata unavailable" in str(exc_info.value.__cause__)
+        assert len(cleanup_attempts) == 1
+        assert cache.metadata_backend.get_entry(cache_key) == entry_before
+        assert payload_before.read_bytes() == bytes_before
+    finally:
+        cache.close()
+
+
+def test_unified_cache_postcommit_cleanup_keeps_new_entry_authoritative(
+    tmp_path, monkeypatch
+):
+    """A failed old-payload deletion cannot undo successful candidate publication."""
+    cache = _cache_with_signing_policy(tmp_path, allow_unsigned=False)
+    cache_key_params = {"postcommit_cleanup": "key"}
+
+    try:
+        cache.put({"value": "committed"}, **cache_key_params)
+        cache_key = cache._create_cache_key(cache_key_params)
+        entry_before, payload_before, _, _ = _overwrite_evidence(cache, cache_key)
+        delete = cache.guarded_handler_io.file_ops.delete
+
+        def fail_prior_cleanup(locator):
+            if Path(locator) == payload_before:
+                return False
+            return delete(locator)
+
+        monkeypatch.setattr(
+            cache.guarded_handler_io.file_ops,
+            "delete",
+            fail_prior_cleanup,
+        )
+
+        with pytest.raises(CacheStorageError, match="cleanup"):
+            cache.put({"value": "replacement"}, **cache_key_params)
+
+        entry_after = cache.metadata_backend.get_entry(cache_key)
+        assert entry_after is not None
+        assert entry_after != entry_before
+        assert Path(entry_after["metadata"]["actual_path"]) != payload_before
+        assert payload_before.exists()
+        assert cache.get(**cache_key_params) == {"value": "replacement"}
+    finally:
+        cache.close()

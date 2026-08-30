@@ -10,6 +10,7 @@ import threading
 
 import pytest
 
+from cacheness import CacheConfig, cacheness
 import cacheness.metadata as metadata_module
 import cacheness.storage.clear_recovery as clear_recovery
 from cacheness.error_handling import CacheStorageError
@@ -303,6 +304,300 @@ def _write_untrusted_journal(store: BlobStore, journal: dict[str, object]) -> No
     coordinator = store._clear_recovery
     assert coordinator is not None
     coordinator.journal_path.write_text(json.dumps(journal), encoding="utf-8")
+
+
+def _unified_cache(root: Path, backend_name: str):
+    """Construct one production-selected UnifiedCache metadata topology."""
+    return cacheness(
+        CacheConfig(
+            cache_dir=str(root),
+            metadata_backend=backend_name,
+            cleanup_on_init=False,
+        )
+    )
+
+
+def _put_unified_payloads(cache) -> tuple[list[str], dict[Path, bytes]]:
+    """Store two UnifiedCache values and retain their exact payload evidence."""
+    keys = [
+        cache.put({"value": "first"}, clear_case="first"),
+        cache.put({"value": "second"}, clear_case="second"),
+    ]
+    payloads = {}
+    for key in keys:
+        entry = cache.metadata_backend.get_entry(key)
+        assert entry is not None
+        payload_path = Path(entry["metadata"]["actual_path"])
+        payloads[payload_path] = payload_path.read_bytes()
+    return keys, payloads
+
+
+@pytest.mark.parametrize("backend_name", ("json", "sqlite", "memory"))
+@pytest.mark.parametrize(
+    "failure_point",
+    (
+        "tombstone_1",
+        "tombstone_2",
+        "original_1",
+        "original_2",
+        "metadata",
+    ),
+)
+def test_unified_cache_clear_rolls_back_every_precommit_failure(
+    tmp_path, monkeypatch, backend_name, failure_point
+):
+    """Every clear pre-commit fault restores exact entries, counters, and bytes."""
+    root = tmp_path / f"unified-{backend_name}-{failure_point}"
+    cache = _unified_cache(root, backend_name)
+
+    try:
+        keys, payloads = _put_unified_payloads(cache)
+        cache.metadata_backend.increment_hits()
+        cache.metadata_backend.increment_hits()
+        cache.metadata_backend.increment_misses()
+        before = _backend_snapshot(cache.metadata_backend, keys)
+
+        if failure_point.startswith("tombstone"):
+            expected_position = int(failure_point.rsplit("_", maxsplit=1)[1])
+            write_stream = cache.guarded_handler_io.file_ops.write_stream_to_locator
+            write_count = 0
+
+            def fail_one_tombstone_stage(locator, source):
+                nonlocal write_count
+                if Path(locator).name.startswith("clear-tombstone-"):
+                    write_count += 1
+                    if write_count == expected_position:
+                        raise RuntimeError("tombstone staging unavailable")
+                return write_stream(locator, source)
+
+            monkeypatch.setattr(
+                cache.guarded_handler_io.file_ops,
+                "write_stream_to_locator",
+                fail_one_tombstone_stage,
+            )
+        elif failure_point.startswith("original"):
+            expected_position = int(failure_point.rsplit("_", maxsplit=1)[1])
+            delete = cache.guarded_handler_io.file_ops.delete
+            delete_durable = cache.guarded_handler_io.file_ops.delete_durable
+            delete_count = 0
+            durable_delete_in_progress = False
+
+            def fail_one_original_delete(locator, delete_operation):
+                nonlocal delete_count
+                if Path(locator) in payloads:
+                    delete_count += 1
+                    if delete_count == expected_position:
+                        raise RuntimeError("original deletion unavailable")
+                return delete_operation(locator)
+
+            def fail_one_legacy_original_delete(locator):
+                if durable_delete_in_progress:
+                    return delete(locator)
+                return fail_one_original_delete(locator, delete)
+
+            def fail_one_durable_original_delete(locator):
+                nonlocal durable_delete_in_progress
+                durable_delete_in_progress = True
+                try:
+                    return fail_one_original_delete(locator, delete_durable)
+                finally:
+                    durable_delete_in_progress = False
+
+            monkeypatch.setattr(
+                cache.guarded_handler_io.file_ops,
+                "delete",
+                fail_one_legacy_original_delete,
+            )
+            monkeypatch.setattr(
+                cache.guarded_handler_io.file_ops,
+                "delete_durable",
+                fail_one_durable_original_delete,
+            )
+        else:
+            clear_metadata = cache.metadata_backend.clear_all
+
+            def clear_metadata_then_raise():
+                clear_metadata()
+                raise RuntimeError("metadata clear unavailable")
+
+            monkeypatch.setattr(
+                cache.metadata_backend,
+                "clear_all",
+                clear_metadata_then_raise,
+            )
+
+        with pytest.raises(RuntimeError):
+            cache.clear_all()
+
+        if failure_point.startswith("original"):
+            assert delete_count == expected_position
+        assert _backend_snapshot(cache.metadata_backend, keys) == before
+        assert {path: path.read_bytes() for path in payloads} == payloads
+        assert not list(root.glob("clear-tombstone-*"))
+    finally:
+        cache.close()
+
+
+@pytest.mark.parametrize("backend_name", ("json", "sqlite"))
+def test_unified_cache_prepared_base_exception_reopens_to_exact_rollback(
+    tmp_path, monkeypatch, backend_name
+):
+    """A prepared BaseException rollback is exact and idempotent across reopens."""
+    root = tmp_path / f"unified-prepared-{backend_name}"
+    cache = _unified_cache(root, backend_name)
+    keys, payloads = _put_unified_payloads(cache)
+    cache.metadata_backend.increment_hits()
+    cache.metadata_backend.increment_hits()
+    cache.metadata_backend.increment_misses()
+    before = _backend_snapshot(cache.metadata_backend, keys)
+    clear_metadata = cache.metadata_backend.clear_all
+
+    def clear_metadata_then_interrupt():
+        clear_metadata()
+        raise _SimulatedClearInterruption("prepared metadata interruption")
+
+    monkeypatch.setattr(
+        cache.metadata_backend,
+        "clear_all",
+        clear_metadata_then_interrupt,
+    )
+    with pytest.raises(_SimulatedClearInterruption):
+        cache.clear_all()
+    assert (root / ".cacheness-clear-journal-v1.json").exists()
+    cache.close()
+
+    reopened = _unified_cache(root, backend_name)
+    try:
+        assert _backend_snapshot(reopened.metadata_backend, keys) == before
+        assert {path: path.read_bytes() for path in payloads} == payloads
+        assert not (root / ".cacheness-clear-journal-v1.json").exists()
+    finally:
+        reopened.close()
+
+    reopened_again = _unified_cache(root, backend_name)
+    try:
+        assert _backend_snapshot(reopened_again.metadata_backend, keys) == before
+        assert {path: path.read_bytes() for path in payloads} == payloads
+        assert not (root / ".cacheness-clear-journal-v1.json").exists()
+    finally:
+        reopened_again.close()
+
+
+@pytest.mark.parametrize("backend_name", ("json", "sqlite", "memory"))
+def test_unified_cache_successful_clear_returns_exact_backend_count(
+    tmp_path, backend_name
+):
+    """Production-selected local backends clear through one exact return contract."""
+    root = tmp_path / f"unified-success-{backend_name}"
+    cache = _unified_cache(root, backend_name)
+
+    try:
+        keys, payloads = _put_unified_payloads(cache)
+
+        assert cache.clear_all() == len(keys)
+        assert all(cache.metadata_backend.get_entry(key) is None for key in keys)
+        assert all(not path.exists() for path in payloads)
+        assert not list(root.glob("clear-tombstone-*"))
+    finally:
+        cache.close()
+
+
+@pytest.mark.parametrize("backend_name", ("json", "sqlite"))
+def test_unified_cache_committed_clear_recovers_after_two_persistent_reopens(
+    tmp_path, monkeypatch, backend_name
+):
+    """Committed local clear evidence rolls forward once and then reopens idempotently."""
+    root = tmp_path / f"unified-committed-{backend_name}"
+    cache = _unified_cache(root, backend_name)
+    keys, payloads = _put_unified_payloads(cache)
+    clear_metadata = cache.metadata_backend.clear_all
+    metadata_cleared = False
+    delete = cache.guarded_handler_io.file_ops.delete
+
+    def clear_then_mark_committed():
+        nonlocal metadata_cleared
+        count = clear_metadata()
+        metadata_cleared = True
+        return count
+
+    def interrupt_committed_finalization(locator):
+        if metadata_cleared:
+            raise _SimulatedClearInterruption("committed final deletion interrupted")
+        return delete(locator)
+
+    monkeypatch.setattr(cache.metadata_backend, "clear_all", clear_then_mark_committed)
+    monkeypatch.setattr(
+        cache.guarded_handler_io.file_ops,
+        "delete",
+        interrupt_committed_finalization,
+    )
+
+    with pytest.raises(_SimulatedClearInterruption):
+        cache.clear_all()
+    assert (root / ".cacheness-clear-journal-v1.json").exists()
+    cache.close()
+
+    reopened = _unified_cache(root, backend_name)
+    try:
+        assert all(reopened.metadata_backend.get_entry(key) is None for key in keys)
+        assert all(not path.exists() for path in payloads)
+        assert not list(root.glob("clear-tombstone-*"))
+    finally:
+        reopened.close()
+
+    reopened_again = _unified_cache(root, backend_name)
+    try:
+        assert all(
+            reopened_again.metadata_backend.get_entry(key) is None for key in keys
+        )
+        assert all(not path.exists() for path in payloads)
+        assert not list(root.glob("clear-tombstone-*"))
+    finally:
+        reopened_again.close()
+
+
+class _UnifiedCustomMetadataBackend(InMemoryBackend):
+    """An unsupported injection seam that must not acquire clear ownership."""
+
+
+@pytest.mark.parametrize("topology", ("custom", "postgres"))
+def test_unified_cache_rejects_unsupported_clear_topology_before_callbacks(
+    tmp_path, topology
+):
+    """Custom and PostgreSQL clear requests fail before list, journal, or staging."""
+    root = tmp_path / f"unified-unsupported-{topology}"
+    cache = _unified_cache(root, "memory")
+    original_backend = cache.metadata_backend
+    original_actual_backend = cache.actual_backend
+    callbacks: list[str] = []
+
+    def forbidden_callback(*_args, **_kwargs):
+        callbacks.append("callback")
+        raise AssertionError("unsupported topology reached a clear callback")
+
+    if topology == "custom":
+        backend = _UnifiedCustomMetadataBackend()
+        cache.actual_backend = "custom"
+    else:
+        backend = object.__new__(PostgresBackend)
+        backend.engine = _NoopPostgresEngine()
+        cache.actual_backend = "postgresql"
+    backend.list_entries = forbidden_callback
+    backend.load_metadata = forbidden_callback
+    backend.clear_all = forbidden_callback
+    cache.metadata_backend = backend
+
+    try:
+        with pytest.raises(CacheStorageError):
+            cache.clear_all()
+
+        assert callbacks == []
+        assert not list(root.glob(".cacheness-clear-journal-*.json"))
+        assert not list(root.glob("clear-tombstone-*"))
+    finally:
+        cache.metadata_backend = original_backend
+        cache.actual_backend = original_actual_backend
+        cache.close()
 
 
 def test_sqlite_prepared_recovery_uses_database_identity_not_wal_sidecars(
