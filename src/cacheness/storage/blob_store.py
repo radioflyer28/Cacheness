@@ -61,6 +61,7 @@ from ..error_handling import (
 )
 from .backends import MetadataBackend, JsonBackend
 from .clear_recovery import ClearRecoveryCoordinator
+from .coordination import StoreAdmissionBarrier
 from .guarded_handler_io import GuardedHandlerIO
 from .handlers import HandlerRegistry
 from .integrity import (
@@ -146,6 +147,18 @@ def _clear_read_coordinated(method: Callable) -> Callable:
                 return method(self, *args, **kwargs)
         except CacheStorageError as exc:
             _raise_translated_recovery_failure(coordinator, exc)
+
+    return wrapped
+
+
+def _ordinary_admitted(method: Callable) -> Callable:
+    """Admit ordinary BlobStore work outside a finite clear snapshot boundary."""
+
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self._admission_barrier.ordinary_admission():
+            self._refresh_metadata_view_for_lifecycle()
+            return method(self, *args, **kwargs)
 
     return wrapped
 
@@ -279,6 +292,9 @@ class BlobStore:
             else config
         )
         self.lifecycle_limits = self.config.lifecycle_limits
+        self._admission_barrier = StoreAdmissionBarrier.for_root(
+            self.guarded_handler_io.root
+        )
         
         # Initialize metadata backend
         if self._legacy_identity is not None:
@@ -298,7 +314,10 @@ class BlobStore:
         
         # Initialize handler registry
         self.handlers = HandlerRegistry()
-        self.manifest_repository = create_manifest_repository(self.backend)
+        self.manifest_repository = create_manifest_repository(
+            self.backend,
+            lifecycle_limits=self.lifecycle_limits,
+        )
         self._manifest_key_provider = ManifestKeyProvider(
             self.cache_dir / "blob_manifest_hmac_key.bin"
         )
@@ -350,6 +369,7 @@ class BlobStore:
         """
         return recognize_legacy_fixture_tree(root)
     
+    @_ordinary_admitted
     def put(
         self,
         data: Any,
@@ -369,7 +389,6 @@ class BlobStore:
             The blob key (can be used to retrieve the blob)
         """
         self._require_canonical_store()
-        self._refresh_metadata_view_for_lifecycle()
         # Generate key
         if self.content_addressable:
             # Use content hash as key
@@ -383,7 +402,7 @@ class BlobStore:
         logger.debug(f"Stored blob {stored_key} through the lifecycle engine")
         return stored_key
     
-    @_clear_read_coordinated
+    @_ordinary_admitted
     def get(self, key: str) -> Optional[Any]:
         """
         Retrieve a blob by key.
@@ -435,7 +454,7 @@ class BlobStore:
         
         return data
     
-    @_clear_read_coordinated
+    @_ordinary_admitted
     def get_metadata(self, key: str) -> Optional[Dict[str, Any]]:
         """
         Get blob metadata without loading the blob content.
@@ -457,7 +476,7 @@ class BlobStore:
         manifest, _handler, _locator = authenticated
         return self._manifest_entry_data(manifest)
     
-    @_clear_coordinated
+    @_ordinary_admitted
     def update_metadata(self, key: str, metadata: Dict[str, Any]) -> bool:
         """
         Update metadata for an existing blob.
@@ -515,6 +534,7 @@ class BlobStore:
         )
         return True
     
+    @_ordinary_admitted
     def delete(self, key: str) -> bool:
         """
         Delete a blob and its metadata.
@@ -531,7 +551,7 @@ class BlobStore:
             logger.debug(f"Deleted blob {key} through the lifecycle engine")
         return deleted
     
-    @_clear_read_coordinated
+    @_ordinary_admitted
     def exists(self, key: str) -> bool:
         """
         Check if a blob exists.
@@ -572,7 +592,7 @@ class BlobStore:
             ) from exc
         return True
     
-    @_clear_read_coordinated
+    @_ordinary_admitted
     def list(
         self,
         prefix: Optional[str] = None,
@@ -623,7 +643,6 @@ class BlobStore:
         self._preflight_entries(entries, operation="list")
         return keys
     
-    @_clear_coordinated
     def clear(self) -> int:
         """
         Remove every managed payload with recoverable clear tombstones.
@@ -632,32 +651,9 @@ class BlobStore:
             Number of blobs removed
         """
         self._require_canonical_store()
-        if self._clear_recovery is None:
-            error = ClearRecoveryCoordinator.unsupported_error(self.backend)
-            raise CacheBlobBackendError(str(error), context=error.context) from error
-
-        mappings = self._preflight_clear_manifests()
-        try:
-            cleared = self._clear_recovery.clear(mappings)
-        except (CacheBlobBackendError, CacheBlobLifecycleConflictError):
-            raise
-        except CacheStorageError as exc:
-            if ClearRecoveryCoordinator.is_lifecycle_conflict(exc):
-                raise CacheBlobLifecycleConflictError(
-                    str(exc), context=exc.context
-                ) from exc
-            raise CacheBlobBackendError(str(exc), context=exc.context) from exc
-        except Exception as exc:
-            raise CacheBlobBackendError(
-                "BlobStore clear transaction failed",
-                context={
-                    "operation": "clear",
-                    "backend": type(self.backend).__name__,
-                },
-            ) from exc
-        if type(self.backend) is SqliteBackend:
-            for cache_key, _ in mappings:
-                self.manifest_repository.remove(cache_key)
+        self._refresh_metadata_view_for_lifecycle()
+        cleared = self.lifecycle.clear()
+        logger.debug("Cleared %s BlobStore targets through the lifecycle engine", cleared)
         return cleared
 
     def _reconcile_sqlite_manifest_records_after_clear(self) -> None:

@@ -20,8 +20,11 @@ from cacheness.error_handling import (
 
 from .integrity import sha256_and_size, sign_hmac_sha256, verify_hmac_sha256
 from .manifest import BlobManifestV1
-from .manifest_repository import ManifestExpectation
+from .manifest_repository import ManifestCursor, ManifestExpectation
 from .operation_record import (
+    ClearTarget,
+    ClearTargetCheckpoint,
+    ClearTargetPage,
     LifecycleOperationRecord,
     OperationCheckpoint,
     OperationKind,
@@ -93,6 +96,356 @@ class LifecycleEngine:
         self.operation_repository.retire_if_exact(
             record, expected_raw=record.canonical_bytes()
         )
+
+    def _signed_clear_target_page(
+        self, page: ClearTargetPage
+    ) -> ClearTargetPage:
+        """Authenticate one bounded clear inventory before it becomes control data."""
+        return page.with_signature(
+            sign_hmac_sha256(page.signing_bytes(), self.store._manifest_key())
+        )
+
+    def _signed_clear_target_checkpoint(
+        self, checkpoint: ClearTargetCheckpoint
+    ) -> ClearTargetCheckpoint:
+        """Authenticate monotonic clear progress independently of manifest bytes."""
+        return checkpoint.with_signature(
+            sign_hmac_sha256(checkpoint.signing_bytes(), self.store._manifest_key())
+        )
+
+    def _clear_page_id(self, operation_id: str, source_cursor: str | None) -> str:
+        """Derive a resumable opaque page identifier from its exact source cursor."""
+        source = "" if source_cursor is None else source_cursor
+        return hashlib.sha256(
+            f"{operation_id}\x00{source}".encode("utf-8")
+        ).hexdigest()[:32]
+
+    def _authenticated_clear_target_page(
+        self,
+        raw_page: bytes,
+        *,
+        operation_id: str,
+        page_id: str,
+        source_cursor: str | None,
+    ) -> ClearTargetPage:
+        """Decode one exact page only after its signature and identity agree."""
+        page = ClearTargetPage.from_canonical_bytes(raw_page)
+        if page.canonical_bytes() != raw_page:
+            raise CacheManifestIntegrityError("Clear target page bytes are not canonical")
+        if (
+            page.operation_id != operation_id
+            or page.page_id != page_id
+            or page.source_cursor != source_cursor
+        ):
+            raise CacheManifestIntegrityError("Clear target page identity is inconsistent")
+        if not verify_hmac_sha256(
+            page.signing_bytes(), page.signature, self.store._manifest_key()
+        ):
+            raise CacheManifestIntegrityError("Clear target page signature is invalid")
+        return page
+
+    def _authenticated_clear_target_checkpoint(
+        self,
+        raw_checkpoint: bytes,
+        *,
+        page: ClearTargetPage,
+    ) -> ClearTargetCheckpoint:
+        """Decode page-bound progress only after exact control-data authentication."""
+        checkpoint = ClearTargetCheckpoint.from_canonical_bytes(raw_checkpoint)
+        if checkpoint.canonical_bytes() != raw_checkpoint:
+            raise CacheManifestIntegrityError(
+                "Clear target checkpoint bytes are not canonical"
+            )
+        if (
+            checkpoint.operation_id != page.operation_id
+            or checkpoint.page_id != page.page_id
+            or checkpoint.page_record_digest
+            != hashlib.sha256(page.canonical_bytes()).hexdigest()
+        ):
+            raise CacheManifestIntegrityError("Clear target checkpoint is not page-bound")
+        if not verify_hmac_sha256(
+            checkpoint.signing_bytes(),
+            checkpoint.signature,
+            self.store._manifest_key(),
+        ):
+            raise CacheManifestIntegrityError("Clear target checkpoint signature is invalid")
+        if any(index >= len(page.targets) for index in checkpoint.completed_target_indices):
+            raise CacheManifestIntegrityError("Clear target checkpoint exceeds its page")
+        if checkpoint.page_complete and checkpoint.completed_target_indices != tuple(
+            range(len(page.targets))
+        ):
+            raise CacheManifestIntegrityError("Clear target page completion is incomplete")
+        return checkpoint
+
+    def _authenticated_clear_target(self, target: ClearTarget) -> None:
+        """Validate snapshot manifest authority without deriving a payload path."""
+        manifest = BlobManifestV1.from_canonical_bytes(target.raw_record)
+        if manifest.canonical_bytes() != target.raw_record:
+            raise CacheManifestIntegrityError("Clear target manifest bytes are not canonical")
+        if (
+            manifest.key != target.key
+            or manifest.generation != target.generation
+            or manifest.state != "committed"
+        ):
+            raise CacheManifestIntegrityError("Clear target manifest identity is invalid")
+        if not verify_hmac_sha256(
+            manifest.signing_bytes(), manifest.signature, self.store._manifest_key()
+        ):
+            raise CacheManifestIntegrityError("Clear target manifest signature is invalid")
+        resolve_managed_locator(
+            self.store.guarded_handler_io.root,
+            manifest.locator,
+            operation="clear_snapshot",
+        )
+
+    def _new_clear_record(self) -> LifecycleOperationRecord:
+        """Create signed control evidence before a bounded clear snapshot begins."""
+        operation_id = uuid.uuid4().hex
+        root = self.store.guarded_handler_io.root
+        timestamp = datetime.now(timezone.utc).isoformat()
+        record = LifecycleOperationRecord(
+            schema_version=2,
+            operation_id=operation_id,
+            kind=OperationKind.CLEAR,
+            key="clear",
+            owner=OPERATION_RECORD_OWNER,
+            store_id=store_identity(str(root)),
+            topology={
+                "backend": type(self.store.backend).__name__,
+                "root": store_identity(str(root)),
+            },
+            expected_generation=None,
+            expected_record_digest=None,
+            generation=uuid.uuid4().hex,
+            candidate_locator=str(
+                self.operation_repository.locator_for(operation_id).relative_to(root)
+            ),
+            previous_locator=None,
+            transition=OperationTransition.CLEAR,
+            checkpoint=OperationCheckpoint.PREPARED,
+            created_at=timestamp,
+            updated_at=timestamp,
+        )
+        return self._signed_record(record)
+
+    def _load_or_create_clear_checkpoint(
+        self, page: ClearTargetPage
+    ) -> tuple[ClearTargetCheckpoint, bytes]:
+        """Persist zero progress before a page can reclaim any target payload."""
+        raw_checkpoint = self.operation_repository.get_clear_target_checkpoint_raw(
+            page.operation_id, page.page_id
+        )
+        if raw_checkpoint is None:
+            checkpoint = self._signed_clear_target_checkpoint(
+                ClearTargetCheckpoint.initial_for(page)
+            )
+            raw_checkpoint = checkpoint.canonical_bytes()
+            try:
+                self.operation_repository.create_clear_target_checkpoint_exclusive(
+                    page.operation_id, page.page_id, raw_checkpoint
+                )
+            except CacheBlobLifecycleConflictError:
+                raw_checkpoint = (
+                    self.operation_repository.get_clear_target_checkpoint_raw(
+                        page.operation_id, page.page_id
+                    )
+                )
+                if raw_checkpoint is None:
+                    raise
+        checkpoint = self._authenticated_clear_target_checkpoint(
+            raw_checkpoint, page=page
+        )
+        return checkpoint, raw_checkpoint
+
+    def _snapshot_clear_targets(
+        self, record: LifecycleOperationRecord
+    ) -> LifecycleOperationRecord:
+        """Write every bounded authenticated page before releasing admission."""
+        source_cursor: str | None = None
+        while True:
+            page_id = self._clear_page_id(record.operation_id, source_cursor)
+            raw_page = self.operation_repository.get_clear_target_page_raw(
+                record.operation_id, page_id
+            )
+            if raw_page is None:
+                page = self.store.manifest_repository.list_page(
+                    None if source_cursor is None else ManifestCursor(source_cursor),
+                    page_size=self.lifecycle_limits.manifest_page_size,
+                )
+                if not page.entries:
+                    if page.next_cursor is not None:
+                        raise CacheManifestIntegrityError(
+                            "Clear manifest page has an empty non-terminal cursor"
+                        )
+                    break
+                targets = []
+                for key, raw_manifest in page.entries:
+                    manifest = BlobManifestV1.from_canonical_bytes(raw_manifest)
+                    target = ClearTarget.from_raw(
+                        key, manifest.generation, raw_manifest
+                    )
+                    self._authenticated_clear_target(target)
+                    targets.append(target)
+                page = self._signed_clear_target_page(
+                    ClearTargetPage(
+                        operation_id=record.operation_id,
+                        page_id=page_id,
+                        source_cursor=source_cursor,
+                        next_cursor=(
+                            None
+                            if page.next_cursor is None
+                            else page.next_cursor.key
+                        ),
+                        targets=tuple(targets),
+                    )
+                )
+                raw_page = page.canonical_bytes()
+                try:
+                    self.operation_repository.create_clear_target_page_exclusive(
+                        record.operation_id, page_id, raw_page
+                    )
+                except CacheBlobLifecycleConflictError:
+                    raw_page = self.operation_repository.get_clear_target_page_raw(
+                        record.operation_id, page_id
+                    )
+                    if raw_page is None:
+                        raise
+                page = self._authenticated_clear_target_page(
+                    raw_page,
+                    operation_id=record.operation_id,
+                    page_id=page_id,
+                    source_cursor=source_cursor,
+                )
+            else:
+                page = self._authenticated_clear_target_page(
+                    raw_page,
+                    operation_id=record.operation_id,
+                    page_id=page_id,
+                    source_cursor=source_cursor,
+                )
+            self._load_or_create_clear_checkpoint(page)
+            if page.next_cursor is None:
+                break
+            source_cursor = page.next_cursor
+        if record.checkpoint is OperationCheckpoint.PREPARED:
+            record = self._advance_to(record, OperationCheckpoint.CANDIDATE_PUBLISHED)
+        return record
+
+    def _checkpoint_clear_target(
+        self,
+        page: ClearTargetPage,
+        checkpoint: ClearTargetCheckpoint,
+        raw_checkpoint: bytes,
+        *,
+        index: int | None = None,
+        complete_page: bool = False,
+    ) -> tuple[ClearTargetCheckpoint, bytes]:
+        """CAS-persist one monotonic target/page progress transition."""
+        updated = checkpoint
+        if index is not None:
+            updated = updated.with_completed_target(index)
+        if complete_page:
+            updated = updated.complete_page(len(page.targets))
+        updated = self._signed_clear_target_checkpoint(updated)
+        updated_raw = updated.canonical_bytes()
+        self.operation_repository.checkpoint_clear_target_if_exact(
+            page.operation_id,
+            page.page_id,
+            expected_raw=raw_checkpoint,
+            raw_record=updated_raw,
+        )
+        return updated, updated_raw
+
+    def _delete_clear_target(self, target: ClearTarget) -> bool:
+        """Delete only a still-exact snapshot generation through tombstone flow."""
+        raw_manifest = self.store.manifest_repository.get_raw(target.key)
+        if raw_manifest is None:
+            # Missing authority never authorizes a filename or provenance guess.
+            return False
+        if raw_manifest != target.raw_record:
+            raise CacheBlobLifecycleConflictError(
+                "BlobStore clear target authority changed after snapshot",
+                context={"key": target.key, "operation": "clear"},
+            )
+        return self.delete(
+            key=target.key,
+            expected_raw=target.raw_record,
+            expected_generation=target.generation,
+        )
+
+    def _continue_clear(self, record: LifecycleOperationRecord) -> int:
+        """Reclaim exact snapshot targets after aggregate admission is released."""
+        if record.checkpoint is OperationCheckpoint.CANDIDATE_PUBLISHED:
+            record = self._advance_to(record, OperationCheckpoint.AUTHORITY_PUBLISHED)
+        if record.checkpoint is OperationCheckpoint.AUTHORITY_PUBLISHED:
+            record = self._advance_to(record, OperationCheckpoint.RECLAIMING)
+
+        cleared = 0
+        source_cursor: str | None = None
+        while True:
+            page_id = self._clear_page_id(record.operation_id, source_cursor)
+            raw_page = self.operation_repository.get_clear_target_page_raw(
+                record.operation_id, page_id
+            )
+            if raw_page is None:
+                if source_cursor is None:
+                    break
+                raise CacheManifestIntegrityError("Clear target page is missing")
+            page = self._authenticated_clear_target_page(
+                raw_page,
+                operation_id=record.operation_id,
+                page_id=page_id,
+                source_cursor=source_cursor,
+            )
+            checkpoint, raw_checkpoint = self._load_or_create_clear_checkpoint(page)
+            for index, target in enumerate(page.targets):
+                if index in checkpoint.completed_target_indices:
+                    continue
+                self._fault("clear_target_delete", record)
+                try:
+                    if self._delete_clear_target(target):
+                        cleared += 1
+                except CacheBlobLifecycleConflictError:
+                    # A newer manifest generation is outside this clear target.
+                    self._emit("clear_target_conflicted", record)
+                checkpoint, raw_checkpoint = self._checkpoint_clear_target(
+                    page,
+                    checkpoint,
+                    raw_checkpoint,
+                    index=index,
+                )
+                self._fault("clear_target_checkpoint", record)
+            if not checkpoint.page_complete:
+                checkpoint, raw_checkpoint = self._checkpoint_clear_target(
+                    page,
+                    checkpoint,
+                    raw_checkpoint,
+                    complete_page=True,
+                )
+            if page.next_cursor is None:
+                break
+            source_cursor = page.next_cursor
+        if record.checkpoint is not OperationCheckpoint.TERMINAL:
+            record = self._advance_to(record, OperationCheckpoint.TERMINAL)
+        self._retire(record)
+        return cleared
+
+    def _recover_clear(self, record: LifecycleOperationRecord) -> None:
+        """Resume a retained clear from authenticated snapshot/progress evidence."""
+        if record.checkpoint is OperationCheckpoint.PREPARED:
+            with self.store._admission_barrier.aggregate_admission():
+                record = self._snapshot_clear_targets(record)
+        if record.checkpoint is not OperationCheckpoint.PREPARED:
+            self._continue_clear(record)
+
+    def clear(self) -> int:
+        """Clear one authenticated finite target snapshot through tombstone deletion."""
+        record = self._new_clear_record()
+        with self.store._admission_barrier.aggregate_admission():
+            self.operation_repository.create_exclusive(record, record.canonical_bytes())
+            record = self._snapshot_clear_targets(record)
+            self._fault("clear_snapshot_complete", record)
+        return self._continue_clear(record)
 
     def is_pre_authority_candidate_eligible(
         self,
@@ -192,6 +545,9 @@ class LifecycleEngine:
         previous_locator: Path | None,
     ) -> None:
         """Converge one authenticated record without guessing manifest authority."""
+        if record.transition is OperationTransition.CLEAR:
+            self._recover_clear(record)
+            return
         if record.transition is OperationTransition.TOMBSTONE:
             self._recover_tombstone(record, candidate_locator)
             return
@@ -558,8 +914,16 @@ class LifecycleEngine:
                 ) from exc
         return key
 
-    def delete(self, *, key: str) -> bool:
+    def delete(
+        self,
+        *,
+        key: str,
+        expected_raw: bytes | None = None,
+        expected_generation: str | None = None,
+    ) -> bool:
         """Publish signed deletion intent before reclaiming one payload generation."""
+        if (expected_raw is None) != (expected_generation is None):
+            raise ValueError("Clear deletion expectations require bytes and generation")
         current = self.store._load_authenticated_manifest(
             key,
             operation="delete",
@@ -570,6 +934,17 @@ class LifecycleEngine:
             return False
         manifest, _handler, payload_locator = current
         assert payload_locator is not None
+
+        if expected_raw is not None:
+            observed_raw = self.store.manifest_repository.get_raw(key)
+            if (
+                observed_raw != expected_raw
+                or manifest.generation != expected_generation
+            ):
+                raise CacheBlobLifecycleConflictError(
+                    "BlobStore clear target authority changed before tombstone publication",
+                    context={"key": key, "operation": "clear"},
+                )
 
         if manifest.state == "tombstoned":
             existing_record = self._find_tombstone_record(key, manifest.generation)

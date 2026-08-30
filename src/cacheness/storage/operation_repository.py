@@ -437,6 +437,13 @@ class FileOperationRecordRepository:
                 operation_id = name.removesuffix(".json")
                 if cursor is not None and operation_id <= cursor.operation_id:
                     continue
+                if len(operation_id) != 32 or any(
+                    character not in "0123456789abcdef"
+                    for character in operation_id
+                ):
+                    # Page/checkpoint control evidence lives beside operation
+                    # records but must not consume bounded recovery admission.
+                    continue
                 try:
                     validate_blob_id(operation_id)
                 except CacheUnsafePathError:

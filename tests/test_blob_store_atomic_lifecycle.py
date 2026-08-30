@@ -572,7 +572,12 @@ def test_clear_resume_does_not_repeat_completed_targets_after_reopen(
 ) -> None:
     """Durable page checkpoints let recovery resume only the unfinished target."""
     root = tmp_path / "clear-resume"
-    store = BlobStore(root, backend="json")
+    limits = LifecycleLimits(manifest_page_size=1)
+    store = BlobStore(
+        root,
+        backend="json",
+        config=CacheConfig(cache_dir=str(root), lifecycle_limits=limits),
+    )
     completed_once = False
     try:
         store.put({"generation": "first"}, key="first")
