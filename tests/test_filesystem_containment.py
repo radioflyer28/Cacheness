@@ -16,6 +16,7 @@ import pytest
 from cacheness.config import CacheConfig
 from cacheness.core import UnifiedCache
 from cacheness.error_handling import (
+    CacheBlobBackendError,
     CacheReason,
     CacheStorageError,
     CacheUnsafePathError,
@@ -777,9 +778,11 @@ def test_blob_store_clear_rolls_back_every_payload_when_staging_delete_fails(
 
         monkeypatch.setattr(store.guarded_handler_io.file_ops, "delete", fail_one_payload_delete)
 
-        with pytest.raises(RuntimeError, match="payload delete unavailable"):
+        with pytest.raises(CacheBlobBackendError) as error:
             store.clear()
 
+        assert isinstance(error.value.__cause__, RuntimeError)
+        assert str(error.value.__cause__) == "payload delete unavailable"
         assert [store.get_metadata(key) for key in keys] == entries_before
         assert {path: path.read_bytes() for path in payload_paths} == payload_bytes
         assert [store.get(key) for key in keys] == ["first", "second"]
@@ -816,9 +819,11 @@ def test_blob_store_clear_rolls_back_payloads_when_metadata_clear_fails(
 
         monkeypatch.setattr(store.backend, "clear_all", fail_metadata_clear)
 
-        with pytest.raises(RuntimeError, match="metadata unavailable after partial clear"):
+        with pytest.raises(CacheBlobBackendError) as error:
             store.clear()
 
+        assert isinstance(error.value.__cause__, RuntimeError)
+        assert str(error.value.__cause__) == "metadata unavailable after partial clear"
         assert [store.get_metadata(key) for key in keys] == entries_before
         assert {path: path.read_bytes() for path in payload_paths} == payload_bytes
         assert [store.get(key) for key in keys] == ["first", "second"]
@@ -854,9 +859,11 @@ def test_blob_store_clear_discards_tombstone_if_staging_copy_raises(
             write_tombstone_then_raise,
         )
 
-        with pytest.raises(RuntimeError, match="tombstone staging unavailable"):
+        with pytest.raises(CacheBlobBackendError) as error:
             store.clear()
 
+        assert isinstance(error.value.__cause__, RuntimeError)
+        assert str(error.value.__cause__) == "tombstone staging unavailable"
         assert store.get_metadata(key) == entry_before
         assert payload_path.read_bytes() == payload_bytes
         assert not list(root.glob("clear-tombstone-*"))
@@ -888,9 +895,11 @@ def test_blob_store_clear_leaves_only_recoverable_tombstones_when_final_delete_f
 
         monkeypatch.setattr(store.guarded_handler_io.file_ops, "delete", fail_tombstone_delete)
 
-        with pytest.raises(RuntimeError, match="tombstone delete unavailable"):
+        with pytest.raises(CacheBlobBackendError) as error:
             store.clear()
 
+        assert isinstance(error.value.__cause__, RuntimeError)
+        assert str(error.value.__cause__) == "tombstone delete unavailable"
         assert store.backend.list_entries() == []
         assert [store.get(key) for key in keys] == [None, None]
         assert all(not path.exists() for path in payload_paths)
