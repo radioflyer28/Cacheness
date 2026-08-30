@@ -1,27 +1,59 @@
-"""Bounded authenticated evidence for one BlobStore lifecycle mutation."""
+"""Bounded authenticated evidence for one BlobStore lifecycle mutation.
+
+Operation records are control metadata, never an alternate payload format or
+normal-read authority. They are stricter than manifests because recovery may
+use them to authorize cleanup after a process interruption.
+"""
 
 from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, replace
+from datetime import datetime
 from enum import Enum
+from pathlib import PurePath
+from types import MappingProxyType
 from typing import Any, Mapping
 
-from cacheness.error_handling import CacheManifestIntegrityError, CacheReason
+from cacheness.error_handling import (
+    CacheManifestIntegrityError,
+    CacheManifestUnsupportedVersionError,
+    CacheReason,
+)
 
 
-OPERATION_RECORD_SCHEMA_VERSION = 1
+OPERATION_RECORD_SCHEMA_VERSION = 2
+OPERATION_RECORD_OWNER = "cacheness.blob-store.lifecycle"
 OPERATION_SIGNATURE_ALGORITHM = "hmac-sha256"
-OPERATION_SIGNING_DOMAIN = b"cacheness.operation-record.v1\x00"
+OPERATION_SIGNING_DOMAIN = b"cacheness.operation-record.v2\x00"
 MAX_OPERATION_RECORD_BYTES = 1_048_576
 MAX_OPERATION_FIELD_BYTES = 8_192
+MAX_OPERATION_TOPOLOGY_FIELDS = 8
+MAX_OPERATION_NESTING_DEPTH = 4
+MAX_OPERATION_NODES = 64
+MIN_SIGNED_64 = -(2**63)
+MAX_SIGNED_64 = 2**63 - 1
+_HEX_SHA256 = re.compile(r"[0-9a-f]{64}")
+_HEX_UUID = re.compile(r"[0-9a-f]{32}")
 
 
 class OperationKind(str, Enum):
     """Lifecycle mutations represented by durable operation evidence."""
 
     PUT = "put"
+    DELETE = "delete"
+    CLEAR = "clear"
+
+
+class OperationTransition(str, Enum):
+    """The intended authority transition encoded before managed side effects."""
+
+    CREATE = "create"
+    REPLACE = "replace"
+    TOMBSTONE = "tombstone"
+    CLEAR = "clear"
 
 
 class OperationCheckpoint(str, Enum):
@@ -30,35 +62,76 @@ class OperationCheckpoint(str, Enum):
     PREPARED = "prepared"
     CANDIDATE_PUBLISHED = "candidate_published"
     AUTHORITY_PUBLISHED = "authority_published"
-    CLEANUP_COMPLETED = "cleanup_completed"
+    RECLAIMING = "reclaiming"
+    TERMINAL = "terminal"
+    CLEANUP_COMPLETED = "terminal"
 
 
-_CHECKPOINT_INDEX = {checkpoint: index for index, checkpoint in enumerate(OperationCheckpoint)}
+_CHECKPOINT_TRANSITIONS = {
+    OperationCheckpoint.PREPARED: frozenset({OperationCheckpoint.CANDIDATE_PUBLISHED}),
+    OperationCheckpoint.CANDIDATE_PUBLISHED: frozenset(
+        {OperationCheckpoint.AUTHORITY_PUBLISHED}
+    ),
+    OperationCheckpoint.AUTHORITY_PUBLISHED: frozenset({OperationCheckpoint.RECLAIMING}),
+    OperationCheckpoint.RECLAIMING: frozenset({OperationCheckpoint.TERMINAL}),
+    OperationCheckpoint.TERMINAL: frozenset(),
+}
 _RECORD_FIELDS = frozenset(
     {
         "candidate_locator",
         "checkpoint",
+        "created_at",
         "expected_generation",
+        "expected_record_digest",
         "generation",
         "key",
         "kind",
         "operation_id",
+        "owner",
         "previous_locator",
         "schema_version",
         "signature",
         "signature_algorithm",
         "store_id",
+        "topology",
+        "transition",
+        "updated_at",
     }
 )
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Build one JSON mapping while rejecting ambiguous duplicate keys."""
     record: dict[str, Any] = {}
     for key, value in pairs:
         if key in record:
             raise CacheManifestIntegrityError("Duplicate operation record key")
         record[key] = value
     return record
+
+
+def _reject_float(_value: str) -> None:
+    """Reject floats, including non-finite values, from control evidence."""
+    raise CacheManifestIntegrityError("Operation record values cannot be floating point")
+
+
+def _reject_constant(_value: str) -> None:
+    """Reject JSON's non-standard NaN and infinity constants."""
+    raise CacheManifestIntegrityError("Operation record values cannot be non-finite")
+
+
+def _parse_signed_64(value: str) -> int:
+    """Parse an integer without accepting an unbounded Python integer."""
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise CacheManifestIntegrityError("Operation record integer is invalid") from exc
+    if not MIN_SIGNED_64 <= parsed <= MAX_SIGNED_64:
+        raise CacheManifestIntegrityError(
+            "Operation record integer exceeds the signed-64 range",
+            reason=CacheReason.MANIFEST_BOUNDS,
+        )
+    return parsed
 
 
 def _bounded_string(
@@ -68,6 +141,7 @@ def _bounded_string(
     allow_none: bool = False,
     allow_empty: bool = False,
 ) -> str | None:
+    """Validate one bounded string field before semantic interpretation."""
     if value is None and allow_none:
         return None
     if not isinstance(value, str) or (not value and not allow_empty):
@@ -80,7 +154,47 @@ def _bounded_string(
     return value
 
 
+def _validate_json_value(value: Any, *, depth: int, nodes: list[int]) -> None:
+    """Reject unbounded or non-canonical nested control values before use."""
+    if depth > MAX_OPERATION_NESTING_DEPTH:
+        raise CacheManifestIntegrityError(
+            "Operation record nesting limit exceeded", reason=CacheReason.MANIFEST_BOUNDS
+        )
+    nodes[0] += 1
+    if nodes[0] > MAX_OPERATION_NODES:
+        raise CacheManifestIntegrityError(
+            "Operation record total nodes limit exceeded", reason=CacheReason.MANIFEST_BOUNDS
+        )
+    if value is None or isinstance(value, bool):
+        return
+    if isinstance(value, int):
+        if not MIN_SIGNED_64 <= value <= MAX_SIGNED_64:
+            raise CacheManifestIntegrityError(
+                "Operation record integer exceeds the signed-64 range",
+                reason=CacheReason.MANIFEST_BOUNDS,
+            )
+        return
+    if isinstance(value, str):
+        _bounded_string(value, "value")
+        return
+    if isinstance(value, Mapping):
+        if len(value) > len(_RECORD_FIELDS):
+            raise CacheManifestIntegrityError(
+                "Operation record collection field limit exceeded",
+                reason=CacheReason.MANIFEST_BOUNDS,
+            )
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise CacheManifestIntegrityError("Operation record topology keys must be strings")
+            _validate_json_value(key, depth=depth + 1, nodes=nodes)
+            _validate_json_value(item, depth=depth + 1, nodes=nodes)
+        return
+    raise CacheManifestIntegrityError("Operation record is not JSON-compatible")
+
+
 def _canonical_bytes(record: Mapping[str, Any]) -> bytes:
+    """Encode the exact bounded evidence projection deterministically."""
+    _validate_json_value(record, depth=1, nodes=[0])
     try:
         encoded = json.dumps(
             record,
@@ -99,108 +213,210 @@ def _canonical_bytes(record: Mapping[str, Any]) -> bytes:
     return encoded
 
 
+def _validated_locator(value: object, field: str, *, allow_none: bool) -> str | None:
+    """Require a relative, traversal-free locator before recovery can resolve it."""
+    locator = _bounded_string(value, field, allow_none=allow_none)
+    if locator is None:
+        return None
+    path = PurePath(locator)
+    if path.is_absolute() or not path.parts or any(part in {"", ".", ".."} for part in path.parts):
+        raise CacheManifestIntegrityError(f"Operation record {field} is not contained")
+    return locator
+
+
+def _validated_hex(
+    value: object,
+    field: str,
+    *,
+    allow_none: bool,
+    pattern: re.Pattern[str],
+) -> str | None:
+    """Require an exact opaque identifier, never a permissive filename token."""
+    identifier = _bounded_string(value, field, allow_none=allow_none)
+    if identifier is None:
+        return None
+    if not pattern.fullmatch(identifier):
+        raise CacheManifestIntegrityError(f"Operation record {field} is invalid")
+    return identifier
+
+
+def _validated_topology(value: object) -> Mapping[str, str]:
+    """Freeze a small exact topology map that binds evidence to one store shape."""
+    if (
+        not isinstance(value, Mapping)
+        or len(value) > MAX_OPERATION_TOPOLOGY_FIELDS
+        or set(value) != {"backend", "root"}
+    ):
+        raise CacheManifestIntegrityError("Operation record topology is invalid")
+    _validate_json_value(value, depth=2, nodes=[0])
+    backend = _bounded_string(value["backend"], "topology.backend")
+    root = _validated_hex(value["root"], "topology.root", allow_none=False, pattern=_HEX_SHA256)
+    assert backend is not None and root is not None
+    return MappingProxyType({"backend": backend, "root": root})
+
+
+def _validate_timestamp(value: object, field: str) -> str:
+    """Require one bounded timezone-aware ISO timestamp for durable evidence."""
+    timestamp = _bounded_string(value, field)
+    assert timestamp is not None
+    try:
+        parsed = datetime.fromisoformat(timestamp)
+    except ValueError as exc:
+        raise CacheManifestIntegrityError(f"Operation record {field} is invalid") from exc
+    if parsed.tzinfo is None:
+        raise CacheManifestIntegrityError(f"Operation record {field} requires a timezone")
+    return timestamp
+
+
 @dataclass(frozen=True)
 class LifecycleOperationRecord:
-    """The authenticated, replay-safe description of one immutable generation."""
+    """The complete authenticated description of one lifecycle mutation.
+
+    The record holds only authority and provenance metadata. It deliberately
+    excludes payload bytes, handler data, and deserialization-derived fields.
+    """
 
     schema_version: int
     operation_id: str
     kind: OperationKind
     key: str
+    owner: str
     store_id: str
+    topology: Mapping[str, str]
     expected_generation: str | None
+    expected_record_digest: str | None
     generation: str
     candidate_locator: str
     previous_locator: str | None
-    checkpoint: OperationCheckpoint = OperationCheckpoint.PREPARED
+    transition: OperationTransition
+    checkpoint: OperationCheckpoint
+    created_at: str
+    updated_at: str
     signature_algorithm: str = OPERATION_SIGNATURE_ALGORITHM
     signature: str = ""
 
     def __post_init__(self) -> None:
-        """Reject malformed or oversized evidence before it reaches storage."""
+        """Reject malformed, incomplete, or unsafe evidence before persistence."""
+        if type(self.schema_version) is not int:
+            raise CacheManifestIntegrityError("Operation record schema version must be an integer")
         if self.schema_version != OPERATION_RECORD_SCHEMA_VERSION:
-            raise CacheManifestIntegrityError("Unsupported operation record schema version")
+            raise CacheManifestUnsupportedVersionError(
+                f"Unsupported operation record schema version: {self.schema_version}"
+            )
         if not isinstance(self.kind, OperationKind):
             raise CacheManifestIntegrityError("Operation record kind is invalid")
+        if not isinstance(self.transition, OperationTransition):
+            raise CacheManifestIntegrityError("Operation record transition is invalid")
         if not isinstance(self.checkpoint, OperationCheckpoint):
             raise CacheManifestIntegrityError("Operation record checkpoint is invalid")
-        for field, value, allow_none in (
-            ("operation_id", self.operation_id, False),
-            ("key", self.key, False),
-            ("store_id", self.store_id, False),
-            ("expected_generation", self.expected_generation, True),
-            ("generation", self.generation, False),
-            ("candidate_locator", self.candidate_locator, False),
-            ("previous_locator", self.previous_locator, True),
-            ("signature_algorithm", self.signature_algorithm, False),
-            ("signature", self.signature, False),
-        ):
-            _bounded_string(
-                value,
-                field,
-                allow_none=allow_none,
-                allow_empty=field == "signature",
+        if self.owner != OPERATION_RECORD_OWNER:
+            raise CacheManifestIntegrityError("Operation record owner is invalid")
+        _validated_hex(self.operation_id, "operation_id", allow_none=False, pattern=_HEX_UUID)
+        _bounded_string(self.key, "key")
+        _validated_hex(self.store_id, "store_id", allow_none=False, pattern=_HEX_SHA256)
+        topology = _validated_topology(self.topology)
+        if topology["root"] != self.store_id:
+            raise CacheManifestIntegrityError("Operation record topology does not match store")
+        expected_generation = _validated_hex(
+            self.expected_generation,
+            "expected_generation",
+            allow_none=True,
+            pattern=_HEX_UUID,
+        )
+        expected_digest = _validated_hex(
+            self.expected_record_digest,
+            "expected_record_digest",
+            allow_none=True,
+            pattern=_HEX_SHA256,
+        )
+        if (expected_generation is None) != (expected_digest is None):
+            raise CacheManifestIntegrityError(
+                "Operation record expectation requires generation and exact digest together"
             )
-        if self.signature and not _is_sha256_hex(self.signature):
-            raise CacheManifestIntegrityError("Operation record signature is invalid")
+        _validated_hex(self.generation, "generation", allow_none=False, pattern=_HEX_UUID)
+        _validated_locator(self.candidate_locator, "candidate_locator", allow_none=False)
+        _validated_locator(self.previous_locator, "previous_locator", allow_none=True)
+        created = _validate_timestamp(self.created_at, "created_at")
+        updated = _validate_timestamp(self.updated_at, "updated_at")
+        if datetime.fromisoformat(updated) < datetime.fromisoformat(created):
+            raise CacheManifestIntegrityError("Operation record updated_at regressed")
+        _bounded_string(self.signature_algorithm, "signature_algorithm")
+        _bounded_string(self.signature, "signature", allow_empty=True)
         if self.signature_algorithm != OPERATION_SIGNATURE_ALGORITHM:
             raise CacheManifestIntegrityError("Unsupported operation record signature algorithm")
+        if self.signature and not _HEX_SHA256.fullmatch(self.signature):
+            raise CacheManifestIntegrityError("Operation record signature is invalid")
+        object.__setattr__(self, "topology", topology)
 
     def to_mapping(self, *, include_signature: bool = True) -> dict[str, Any]:
         """Return the exact canonical operation-record projection."""
         result = {
             "candidate_locator": self.candidate_locator,
             "checkpoint": self.checkpoint.value,
+            "created_at": self.created_at,
             "expected_generation": self.expected_generation,
+            "expected_record_digest": self.expected_record_digest,
             "generation": self.generation,
             "key": self.key,
             "kind": self.kind.value,
             "operation_id": self.operation_id,
+            "owner": self.owner,
             "previous_locator": self.previous_locator,
             "schema_version": self.schema_version,
             "signature_algorithm": self.signature_algorithm,
             "store_id": self.store_id,
+            "topology": dict(self.topology),
+            "transition": self.transition.value,
+            "updated_at": self.updated_at,
         }
         if include_signature:
             result["signature"] = self.signature
         return result
 
-    def canonical_bytes(self) -> bytes:
-        """Encode bounded persisted operation evidence."""
-        return _canonical_bytes(self.to_mapping())
+    def canonical_bytes(self, *, include_signature: bool = True) -> bytes:
+        """Encode bounded persisted operation evidence deterministically."""
+        return _canonical_bytes(self.to_mapping(include_signature=include_signature))
 
     def signing_bytes(self) -> bytes:
-        """Domain-separate evidence signatures from canonical manifest signatures."""
-        return OPERATION_SIGNING_DOMAIN + _canonical_bytes(
-            self.to_mapping(include_signature=False)
-        )
+        """Domain-separate evidence signatures from all manifest signatures."""
+        return OPERATION_SIGNING_DOMAIN + self.canonical_bytes(include_signature=False)
 
     def with_signature(self, signature: str) -> "LifecycleOperationRecord":
-        """Return a signed copy without mutating persisted evidence."""
+        """Return a signed copy without mutating durable evidence."""
         return replace(self, signature=signature)
 
     def at_checkpoint(
-        self, checkpoint: OperationCheckpoint
+        self,
+        checkpoint: OperationCheckpoint,
+        *,
+        updated_at: str | None = None,
     ) -> "LifecycleOperationRecord":
-        """Return a monotonic progress transition for durable checkpointing."""
-        if _CHECKPOINT_INDEX[checkpoint] < _CHECKPOINT_INDEX[self.checkpoint]:
-            raise CacheManifestIntegrityError("Operation record checkpoint regressed")
-        return replace(self, checkpoint=checkpoint, signature="")
+        """Advance one legal checkpoint without allowing rollback or skips."""
+        if not isinstance(checkpoint, OperationCheckpoint):
+            raise CacheManifestIntegrityError("Operation record checkpoint is invalid")
+        if checkpoint == self.checkpoint:
+            return self
+        if checkpoint not in _CHECKPOINT_TRANSITIONS[self.checkpoint]:
+            raise CacheManifestIntegrityError("Operation record checkpoint regressed or skipped")
+        next_timestamp = self.updated_at if updated_at is None else updated_at
+        return replace(self, checkpoint=checkpoint, updated_at=next_timestamp, signature="")
 
     @classmethod
     def from_canonical_bytes(cls, raw: bytes) -> "LifecycleOperationRecord":
-        """Decode bounded evidence without treating it as authority."""
+        """Decode one bounded, exact-schema record without assigning authority."""
         if not isinstance(raw, bytes) or not raw:
             raise CacheManifestIntegrityError("Operation record bytes must be non-empty")
         if len(raw) > MAX_OPERATION_RECORD_BYTES:
             raise CacheManifestIntegrityError(
-                "Operation record exceeds the byte limit",
-                reason=CacheReason.MANIFEST_BOUNDS,
+                "Operation record exceeds the byte limit", reason=CacheReason.MANIFEST_BOUNDS
             )
         try:
             decoded = json.loads(
                 raw.decode("utf-8"),
                 object_pairs_hook=_reject_duplicate_keys,
+                parse_int=_parse_signed_64,
+                parse_float=_reject_float,
+                parse_constant=_reject_constant,
             )
         except (UnicodeDecodeError, TypeError, ValueError, json.JSONDecodeError) as exc:
             if isinstance(exc, CacheManifestIntegrityError):
@@ -208,27 +424,30 @@ class LifecycleOperationRecord:
             raise CacheManifestIntegrityError("Operation record is not valid JSON") from exc
         if not isinstance(decoded, dict) or set(decoded) != _RECORD_FIELDS:
             raise CacheManifestIntegrityError("Operation record has an unknown or missing field")
+        _validate_json_value(decoded, depth=1, nodes=[0])
         try:
             return cls(
                 schema_version=decoded["schema_version"],
                 operation_id=decoded["operation_id"],
                 kind=OperationKind(decoded["kind"]),
                 key=decoded["key"],
+                owner=decoded["owner"],
                 store_id=decoded["store_id"],
+                topology=decoded["topology"],
                 expected_generation=decoded["expected_generation"],
+                expected_record_digest=decoded["expected_record_digest"],
                 generation=decoded["generation"],
                 candidate_locator=decoded["candidate_locator"],
                 previous_locator=decoded["previous_locator"],
+                transition=OperationTransition(decoded["transition"]),
                 checkpoint=OperationCheckpoint(decoded["checkpoint"]),
+                created_at=decoded["created_at"],
+                updated_at=decoded["updated_at"],
                 signature_algorithm=decoded["signature_algorithm"],
                 signature=decoded["signature"],
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise CacheManifestIntegrityError("Operation record fields are invalid") from exc
-
-
-def _is_sha256_hex(value: str) -> bool:
-    return len(value) == 64 and all(character in "0123456789abcdef" for character in value)
 
 
 def store_identity(root: str) -> str:
@@ -240,8 +459,10 @@ __all__ = [
     "LifecycleOperationRecord",
     "MAX_OPERATION_FIELD_BYTES",
     "MAX_OPERATION_RECORD_BYTES",
+    "OPERATION_RECORD_OWNER",
     "OPERATION_RECORD_SCHEMA_VERSION",
     "OperationCheckpoint",
     "OperationKind",
+    "OperationTransition",
     "store_identity",
 ]

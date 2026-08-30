@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +22,8 @@ from .operation_record import (
     LifecycleOperationRecord,
     OperationCheckpoint,
     OperationKind,
+    OperationTransition,
+    OPERATION_RECORD_OWNER,
     store_identity,
 )
 from .operation_repository import FileOperationRecordRepository
@@ -73,6 +76,25 @@ class LifecycleEngine:
         self.operation_repository.checkpoint(updated, updated.canonical_bytes())
         return updated
 
+    def _advance_to(
+        self,
+        record: LifecycleOperationRecord,
+        checkpoint: OperationCheckpoint,
+    ) -> LifecycleOperationRecord:
+        """Persist each legal monotonic checkpoint through one target state."""
+        sequence = (
+            OperationCheckpoint.PREPARED,
+            OperationCheckpoint.CANDIDATE_PUBLISHED,
+            OperationCheckpoint.AUTHORITY_PUBLISHED,
+            OperationCheckpoint.RECLAIMING,
+            OperationCheckpoint.TERMINAL,
+        )
+        current_index = sequence.index(record.checkpoint)
+        target_index = sequence.index(checkpoint)
+        for next_checkpoint in sequence[current_index + 1 : target_index + 1]:
+            record = self._checkpoint(record, next_checkpoint)
+        return record
+
     def _recoverable_record(
         self,
         operation_id: str,
@@ -88,6 +110,13 @@ class LifecycleEngine:
         if record.canonical_bytes() != raw:
             return None
         if record.store_id != store_identity(str(self.store.guarded_handler_io.root)):
+            return None
+        if record.owner != OPERATION_RECORD_OWNER:
+            return None
+        if record.topology != {
+            "backend": type(self.store.backend).__name__,
+            "root": store_identity(str(self.store.guarded_handler_io.root)),
+        }:
             return None
         if not verify_hmac_sha256(
             record.signing_bytes(),
@@ -140,14 +169,13 @@ class LifecycleEngine:
                 # The same generation must retain the exact operation-owned
                 # locator; deleting either side would be speculative.
                 return
-            if (
-                record.checkpoint != OperationCheckpoint.CLEANUP_COMPLETED
-                and previous_locator is not None
-                and previous_locator != candidate_locator
-            ):
+            record = self._advance_to(record, OperationCheckpoint.AUTHORITY_PUBLISHED)
+            if record.checkpoint != OperationCheckpoint.TERMINAL:
+                record = self._advance_to(record, OperationCheckpoint.RECLAIMING)
+            if previous_locator is not None and previous_locator != candidate_locator:
                 self.store._delete_or_prove_absent(previous_locator)
-            if record.checkpoint != OperationCheckpoint.CLEANUP_COMPLETED:
-                record = self._checkpoint(record, OperationCheckpoint.CLEANUP_COMPLETED)
+            if record.checkpoint != OperationCheckpoint.TERMINAL:
+                record = self._advance_to(record, OperationCheckpoint.TERMINAL)
             self.operation_repository.retire(record)
             return
 
@@ -223,20 +251,42 @@ class LifecycleEngine:
                 candidate_id,
                 shard_chars=0,
             )
+            root = self.store.guarded_handler_io.root
+            timestamp = datetime.now(timezone.utc).isoformat()
             record = LifecycleOperationRecord(
-                schema_version=1,
+                schema_version=2,
                 operation_id=operation_id,
                 kind=OperationKind.PUT,
                 key=key,
+                owner=OPERATION_RECORD_OWNER,
                 store_id=store_identity(str(self.store.guarded_handler_io.root)),
+                topology={
+                    "backend": type(self.store.backend).__name__,
+                    "root": store_identity(str(root)),
+                },
                 expected_generation=(
                     None if previous_manifest is None else previous_manifest.generation
                 ),
-                generation=generation,
-                candidate_locator=str(candidate_locator),
-                previous_locator=(
-                    None if previous_locator is None else str(previous_locator)
+                expected_record_digest=(
+                    None
+                    if raw_expected is None
+                    else hashlib.sha256(raw_expected).hexdigest()
                 ),
+                generation=generation,
+                candidate_locator=str(candidate_locator.relative_to(root)),
+                previous_locator=(
+                    None
+                    if previous_locator is None
+                    else str(previous_locator.relative_to(root))
+                ),
+                transition=(
+                    OperationTransition.CREATE
+                    if previous_manifest is None
+                    else OperationTransition.REPLACE
+                ),
+                checkpoint=OperationCheckpoint.PREPARED,
+                created_at=timestamp,
+                updated_at=timestamp,
             )
             record = self._signed_record(
                 record,
@@ -307,10 +357,11 @@ class LifecycleEngine:
             self._emit("authority_published", record)
 
             try:
+                record = self._checkpoint(record, OperationCheckpoint.RECLAIMING)
                 if previous_locator is not None and previous_locator != candidate_locator:
                     self._fault("payload_cleanup", record)
                     self.store._delete_or_prove_absent(previous_locator)
-                record = self._checkpoint(record, OperationCheckpoint.CLEANUP_COMPLETED)
+                record = self._checkpoint(record, OperationCheckpoint.TERMINAL)
                 self._emit("cleanup_completed", record)
                 self._fault("evidence_retire", record)
                 self.operation_repository.retire(record)

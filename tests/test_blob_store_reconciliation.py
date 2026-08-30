@@ -11,10 +11,14 @@ from cacheness.error_handling import CacheManifestIntegrityError
 from cacheness.storage import BlobStore
 from cacheness.storage.integrity import sign_hmac_sha256, verify_hmac_sha256
 from cacheness.storage.operation_record import (
+    MAX_OPERATION_FIELD_BYTES,
+    MAX_OPERATION_RECORD_BYTES,
+    OPERATION_SIGNING_DOMAIN,
     OPERATION_RECORD_SCHEMA_VERSION,
     LifecycleOperationRecord,
     OperationCheckpoint,
     OperationKind,
+    OperationTransition,
     store_identity,
 )
 
@@ -32,9 +36,9 @@ def _record(root: Path, **overrides: object) -> LifecycleOperationRecord:
         "expected_generation": "b" * 32,
         "expected_record_digest": "c" * 64,
         "generation": "d" * 32,
-        "candidate_locator": str(root / "payload-generation-a"),
-        "previous_locator": str(root / "payload-generation-b"),
-        "transition": "replace",
+        "candidate_locator": "payload-generation-a",
+        "previous_locator": "payload-generation-b",
+        "transition": OperationTransition.REPLACE,
         "checkpoint": OperationCheckpoint.PREPARED,
         "created_at": "2026-08-30T00:00:00+00:00",
         "updated_at": "2026-08-30T00:00:00+00:00",
@@ -52,7 +56,7 @@ def test_operation_evidence_binds_provenance_transition_and_domain_signature(
     tmp_path: Path,
 ) -> None:
     """Recovery evidence has complete authenticated control provenance, not payload bytes."""
-    key = b"operation-evidence-test-key-00001"
+    key = b"0123456789abcdef0123456789abcdef"
     record = _signed_record(tmp_path, key)
 
     assert LifecycleOperationRecord.from_canonical_bytes(record.canonical_bytes()) == record
@@ -117,6 +121,84 @@ def test_oversized_or_forged_evidence_is_preserved_without_recovery_mutation(
         store.lifecycle.recover()
 
         assert evidence_path.read_bytes() == forged_raw
+        assert evidence_path.stat().st_mtime_ns == before_mtime
+        assert mutation_calls == []
+    finally:
+        store.close()
+
+
+def test_operation_record_field_and_raw_byte_bounds_are_checked_before_use(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Control metadata rejects one byte beyond each explicit evidence boundary."""
+    accepted = _record(tmp_path, key="k" * MAX_OPERATION_FIELD_BYTES)
+    assert accepted.key == "k" * MAX_OPERATION_FIELD_BYTES
+    with pytest.raises(CacheManifestIntegrityError, match="key exceeds"):
+        _record(tmp_path, key="k" * (MAX_OPERATION_FIELD_BYTES + 1))
+
+    parser_called = False
+
+    def reject_parser(*_args: object, **_kwargs: object) -> object:
+        nonlocal parser_called
+        parser_called = True
+        raise AssertionError("oversized evidence must not reach JSON parsing")
+
+    import cacheness.storage.operation_record as operation_record
+
+    monkeypatch.setattr(operation_record.json, "loads", reject_parser)
+    with pytest.raises(CacheManifestIntegrityError, match="byte limit"):
+        LifecycleOperationRecord.from_canonical_bytes(b"x" * (MAX_OPERATION_RECORD_BYTES + 1))
+    assert not parser_called
+
+
+@pytest.mark.parametrize("defect", ("wrong_owner", "wrong_store", "wrong_operation", "escape"))
+def test_invalid_evidence_never_reaches_a_recovery_delete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    defect: str,
+) -> None:
+    """Every provenance failure is retained exactly and remains non-destructive."""
+    root = tmp_path / defect
+    store = BlobStore(root, backend="json")
+    try:
+        key = store._manifest_key(initialize_new_store=True)
+        record = _signed_record(root, key)
+        mapping = record.to_mapping()
+        filename = record.operation_id
+        if defect == "wrong_owner":
+            mapping["owner"] = "attacker"
+        elif defect == "wrong_store":
+            foreign_store = store_identity("foreign-root")
+            mapping["store_id"] = foreign_store
+            mapping["topology"] = {"backend": "JsonBackend", "root": foreign_store}
+        elif defect == "wrong_operation":
+            filename = "b" * 32
+        else:
+            mapping["candidate_locator"] = "../outside"
+        unsigned = dict(mapping)
+        unsigned.pop("signature", None)
+        signing_bytes = OPERATION_SIGNING_DOMAIN + json.dumps(
+            unsigned, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
+        mapping["signature"] = sign_hmac_sha256(signing_bytes, key)
+        raw = json.dumps(
+            mapping, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
+        evidence_path = root / "operations" / f"{filename}.json"
+        evidence_path.parent.mkdir(exist_ok=True)
+        evidence_path.write_bytes(raw)
+        before_mtime = evidence_path.stat().st_mtime_ns
+        mutation_calls: list[Path] = []
+        monkeypatch.setattr(
+            store,
+            "_delete_or_prove_absent",
+            lambda locator: mutation_calls.append(locator),
+        )
+
+        store.lifecycle.recover()
+
+        assert evidence_path.read_bytes() == raw
         assert evidence_path.stat().st_mtime_ns == before_mtime
         assert mutation_calls == []
     finally:
