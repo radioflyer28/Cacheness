@@ -14,6 +14,7 @@ import logging
 import sys
 import uuid
 import warnings
+from contextlib import contextmanager
 from functools import wraps
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
@@ -56,13 +57,25 @@ def _clear_read_coordinated(method: Callable) -> Callable:
 
     @wraps(method)
     def wrapped(self, *args, **kwargs):
-        coordinator = self._clear_recovery
-        if coordinator is None:
-            return method(self, *args, **kwargs)
-        with coordinator.read_admission():
+        with _clear_read_admission(self):
             return method(self, *args, **kwargs)
 
     return wrapped
+
+
+@contextmanager
+def _clear_read_admission(cache: "UnifiedCache"):
+    """Hold the root read boundary for one public read or query lifetime."""
+    # Query validation tests and narrowly constructed compatibility callers
+    # may initialize only the query dependencies. They have no local storage
+    # topology to coordinate, so preserve their established no-coordinator
+    # behavior rather than requiring a full UnifiedCache constructor.
+    coordinator = getattr(cache, "_clear_recovery", None)
+    if coordinator is None:
+        yield
+        return
+    with coordinator.read_admission():
+        yield
 
 
 def _normalize_function_args(func: Callable, args: Tuple, kwargs: Dict[str, Any]) -> Dict[str, Any]:
@@ -488,6 +501,7 @@ class UnifiedCache:
         except ImportError:
             return {}
 
+    @_clear_read_coordinated
     def query_custom(self, schema_name: str, filters: Optional[Dict[str, Any]] = None) -> List[Any]:
         """
         Query custom metadata for a specific schema with automatic session cleanup.
@@ -573,27 +587,29 @@ class UnifiedCache:
                     MLExperimentMetadata.model_type == "xgboost"
                 ).order_by(MLExperimentMetadata.accuracy.desc()).limit(10).all()
         """
-        from contextlib import contextmanager
-        
         @contextmanager
         def _session_context():
-            if not self._supports_custom_metadata():
-                raise ValueError("Custom metadata querying not supported - requires SQLite or PostgreSQL backend")
+            # A decorator would admit only construction of the context
+            # manager. Hold admission through the caller's full ``with``
+            # lifetime so a clear cannot interleave with the query it yields.
+            with _clear_read_admission(self):
+                if not self._supports_custom_metadata():
+                    raise ValueError("Custom metadata querying not supported - requires SQLite or PostgreSQL backend")
 
-            from .custom_metadata import get_custom_metadata_model
+                from .custom_metadata import get_custom_metadata_model
 
-            model_class = get_custom_metadata_model(schema_name)
-            if not model_class:
-                raise ValueError(f"Unknown custom metadata schema: {schema_name}")
+                model_class = get_custom_metadata_model(schema_name)
+                if not model_class:
+                    raise ValueError(f"Unknown custom metadata schema: {schema_name}")
 
-            if not hasattr(self.metadata_backend, "SessionLocal"):
-                raise ValueError("SQLAlchemy session not available")
+                if not hasattr(self.metadata_backend, "SessionLocal"):
+                    raise ValueError("SQLAlchemy session not available")
 
-            session = self.metadata_backend.SessionLocal()
-            try:
-                yield session.query(model_class)
-            finally:
-                session.close()
+                session = self.metadata_backend.SessionLocal()
+                try:
+                    yield session.query(model_class)
+                finally:
+                    session.close()
         
         return _session_context()
 
@@ -613,6 +629,7 @@ class UnifiedCache:
         logger.warning("query_custom_metadata() is deprecated, use query_custom() instead")
         return self.query_custom(schema_name, filters)
 
+    @_clear_read_coordinated
     def query_meta(self, **filters):
         """
         Query built-in cache metadata using SQLite JSON1 extension.
@@ -794,6 +811,7 @@ class UnifiedCache:
             logger.error(f"Failed to query metadata: {e}")
             return None
 
+    @_clear_read_coordinated
     def get_custom_metadata_for_entry(
         self, cache_key: Optional[str] = None, **kwargs
     ) -> Dict[str, Any]:

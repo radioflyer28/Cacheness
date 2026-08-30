@@ -1325,10 +1325,16 @@ class JsonBackend(MetadataBackend):
             self.legacy_compat_access_times[cache_key] = datetime.now(timezone.utc).isoformat()
 
     def close(self) -> None:
+        """Release JSON backend resources without republishing cached metadata.
+
+        Every writable operation persists its candidate synchronously. A
+        second preconstructed backend can therefore hold an older in-memory
+        document after another instance clears the shared root. Writing that
+        snapshot during close would resurrect entries the clear already made
+        non-authoritative, so close intentionally performs no publication.
+        """
         if self._legacy_layout is not None:
             return
-        with self._lock:
-            self._save_to_disk()
 
 
 class SqliteBackend(MetadataBackend):

@@ -696,6 +696,243 @@ def test_unified_cache_live_put_waits_for_clear_then_publishes_linearly(
         owner.close()
 
 
+def test_preconstructed_json_blobstore_close_cannot_resurrect_cleared_metadata(
+    tmp_path,
+):
+    """A non-mutating close cannot republish another store's stale JSON view."""
+    root = tmp_path / "blob-close-after-clear"
+    owner = BlobStore(root, backend="json")
+    contender = None
+    reopened = None
+    try:
+        key = owner.put("owned by the first store", key="before-clear")
+        entry = owner.get_metadata(key)
+        assert entry is not None
+        payload_path = Path(entry["metadata"]["actual_path"])
+        contender = BlobStore(root, backend="json")
+
+        assert owner.clear() == 1
+        assert not payload_path.exists()
+        contender.close()
+        contender = None
+
+        reopened = BlobStore(root, backend="json")
+        assert reopened.get_metadata(key) is None
+        assert reopened.list() == []
+    finally:
+        if reopened is not None:
+            reopened.close()
+        if contender is not None:
+            contender.close()
+        owner.close()
+
+
+def test_preconstructed_json_unified_cache_close_cannot_resurrect_cleared_metadata(
+    tmp_path,
+):
+    """UnifiedCache close inherits the non-resurrecting JSON close contract."""
+    root = tmp_path / "unified-close-after-clear"
+    owner = _unified_cache(root, "json")
+    contender = None
+    reopened = None
+    try:
+        key = owner.put({"value": "owned"}, close_case="before-clear")
+        entry = owner.metadata_backend.get_entry(key)
+        assert entry is not None
+        payload_path = Path(entry["metadata"]["actual_path"])
+        contender = _unified_cache(root, "json")
+
+        assert owner.clear_all() == 1
+        assert not payload_path.exists()
+        contender.close()
+        contender = None
+
+        reopened = _unified_cache(root, "json")
+        assert reopened.metadata_backend.get_entry(key) is None
+        assert reopened.list_entries() == []
+    finally:
+        if reopened is not None:
+            reopened.close()
+        if contender is not None:
+            contender.close()
+        owner.close()
+
+
+@pytest.mark.parametrize(
+    "reader",
+    (
+        "query_meta",
+        "query_custom",
+        "query_custom_metadata",
+        "query_custom_session",
+        "get_custom_metadata_for_entry",
+    ),
+)
+def test_prepared_sqlite_clear_rejects_every_public_unified_query_read(
+    tmp_path, monkeypatch, reader
+):
+    """A preconstructed SQLite reader cannot observe prepared-clear state."""
+    root = tmp_path / f"prepared-query-read-{reader}"
+    owner = _unified_cache(root, "sqlite", store_cache_key_params=True)
+    contender = None
+    try:
+        keys, _ = _put_unified_payloads(owner)
+        contender = _unified_cache(root, "sqlite", store_cache_key_params=True)
+        _interrupted_clear(owner.metadata_backend, monkeypatch)
+
+        with pytest.raises(_SimulatedClearInterruption):
+            owner.clear_all()
+
+        with pytest.raises(CacheStorageError, match="prepared clear journal"):
+            if reader == "query_meta":
+                contender.query_meta(clear_case="first")
+            elif reader == "query_custom":
+                contender.query_custom("not_reached")
+            elif reader == "query_custom_metadata":
+                contender.query_custom_metadata("not_reached")
+            elif reader == "query_custom_session":
+                with contender.query_custom_session("not_reached"):
+                    pass
+            else:
+                contender.get_custom_metadata_for_entry(cache_key=keys[0])
+    finally:
+        if contender is not None:
+            contender.close()
+        owner.close()
+
+
+@pytest.mark.parametrize(
+    "reader",
+    (
+        "query_meta",
+        "query_custom",
+        "query_custom_metadata",
+        "query_custom_session",
+        "get_custom_metadata_for_entry",
+    ),
+)
+def test_poisoned_sqlite_clear_rejects_every_public_unified_query_read(
+    tmp_path, monkeypatch, reader
+):
+    """Publication uncertainty fails closed before each public query API runs."""
+    root = tmp_path / f"poisoned-query-read-{reader}"
+    cache = _unified_cache(root, "sqlite", store_cache_key_params=True)
+    try:
+        keys, _ = _put_unified_payloads(cache)
+        coordinator = cache._clear_recovery
+        assert coordinator is not None
+
+        def interrupt_committed_publication(_journal):
+            raise _SimulatedClearInterruption("interrupted committed publication")
+
+        monkeypatch.setattr(
+            coordinator,
+            "_replace_journal",
+            interrupt_committed_publication,
+        )
+        with pytest.raises(_SimulatedClearInterruption):
+            cache.clear_all()
+
+        with pytest.raises(CacheStorageError, match="terminal reconciliation"):
+            if reader == "query_meta":
+                cache.query_meta(clear_case="first")
+            elif reader == "query_custom":
+                cache.query_custom("not_reached")
+            elif reader == "query_custom_metadata":
+                cache.query_custom_metadata("not_reached")
+            elif reader == "query_custom_session":
+                with cache.query_custom_session("not_reached"):
+                    pass
+            else:
+                cache.get_custom_metadata_for_entry(cache_key=keys[0])
+    finally:
+        cache.close()
+
+
+def test_unified_query_meta_reads_committed_sqlite_clear_authority(
+    tmp_path, monkeypatch
+):
+    """A committed clear exposes its empty authority even before cleanup retries."""
+    cache = _unified_cache(
+        tmp_path / "committed-query-read",
+        "sqlite",
+        store_cache_key_params=True,
+    )
+    try:
+        _put_unified_payloads(cache)
+        coordinator = cache._clear_recovery
+        assert coordinator is not None
+
+        def fail_tombstone_reclamation(_journal, *, wrap_errors):
+            del wrap_errors
+            raise RuntimeError("committed tombstone reclamation unavailable")
+
+        monkeypatch.setattr(
+            coordinator,
+            "_roll_forward_committed",
+            fail_tombstone_reclamation,
+        )
+        with pytest.raises(RuntimeError, match="tombstone reclamation"):
+            cache.clear_all()
+
+        assert coordinator.journal_path.exists()
+        assert cache.query_meta(clear_case="first") == []
+    finally:
+        cache.close()
+
+
+def test_query_custom_session_holds_read_admission_for_its_with_lifetime(tmp_path):
+    """A clear waits until a public custom-query context has finished using it."""
+    from uuid import uuid4
+
+    from sqlalchemy import Column, String
+
+    from cacheness.custom_metadata import (
+        CustomMetadataBase,
+        _reset_registry,
+        custom_metadata_model,
+    )
+    from cacheness.metadata import Base
+
+    suffix = uuid4().hex
+    schema_name = f"clear_query_{suffix}"
+
+    @custom_metadata_model(schema_name)
+    class QueryMetadata(Base, CustomMetadataBase):
+        __tablename__ = f"custom_clear_query_{suffix}"
+
+        value = Column(String(20), nullable=False)
+
+    cache = _unified_cache(tmp_path / "query-session-admission", "sqlite")
+    clear_started = threading.Event()
+    clear_finished = threading.Event()
+    clear_errors: list[BaseException] = []
+    try:
+        _put_unified_payloads(cache)
+
+        def run_clear():
+            clear_started.set()
+            try:
+                cache.clear_all()
+            except BaseException as exc:
+                clear_errors.append(exc)
+            finally:
+                clear_finished.set()
+
+        with cache.query_custom_session(schema_name):
+            clear_thread = threading.Thread(target=run_clear)
+            clear_thread.start()
+            assert clear_started.wait(timeout=5)
+            assert not clear_finished.wait(timeout=0.2)
+
+        clear_thread.join(timeout=5)
+        assert not clear_thread.is_alive()
+        assert clear_errors == []
+    finally:
+        cache.close()
+        _reset_registry()
+
+
 def _backend_snapshot(backend, keys: list[str]) -> dict[str, object]:
     """Capture both entries and aggregate counters for exact recovery assertions."""
     return {
@@ -736,13 +973,16 @@ def _write_untrusted_journal(store: BlobStore, journal: dict[str, object]) -> No
     coordinator.journal_path.write_text(json.dumps(journal), encoding="utf-8")
 
 
-def _unified_cache(root: Path, backend_name: str):
+def _unified_cache(
+    root: Path, backend_name: str, *, store_cache_key_params: bool = False
+):
     """Construct one production-selected UnifiedCache metadata topology."""
     return cacheness(
         CacheConfig(
             cache_dir=str(root),
             metadata_backend=backend_name,
             cleanup_on_init=False,
+            store_cache_key_params=store_cache_key_params,
         )
     )
 
