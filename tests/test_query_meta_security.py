@@ -10,7 +10,11 @@ import pytest
 from cacheness.config import CacheConfig
 from cacheness.core import UnifiedCache
 from cacheness.error_handling import CacheQueryValidationError, CacheReason
-from cacheness.query_validation import to_sqlite_json_path, validate_query_fields
+from cacheness.query_validation import (
+    to_sqlite_json_path,
+    validate_query_fields,
+    validate_query_numeric_filters,
+)
 
 
 @pytest.mark.parametrize(
@@ -89,6 +93,33 @@ class _SessionSpy:
     def execute(self, *args: object, **kwargs: object) -> list[object]:
         self.execute_calls += 1
         return []
+
+
+class _BoundaryAccessCache(UnifiedCache):
+    """Expose every query_meta state boundary for pre-session validation tests."""
+
+    def __init__(self) -> None:
+        self.actual_backend_calls = 0
+        self.config_calls = 0
+        self.metadata_backend_calls = 0
+        self.session_spy = _SessionSpy()
+
+    @property
+    def actual_backend(self) -> str:
+        self.actual_backend_calls += 1
+        return "sqlite"
+
+    @property
+    def config(self) -> SimpleNamespace:
+        self.config_calls += 1
+        return SimpleNamespace(
+            metadata=SimpleNamespace(store_cache_key_params=True)
+        )
+
+    @property
+    def metadata_backend(self) -> SimpleNamespace:
+        self.metadata_backend_calls += 1
+        return SimpleNamespace(SessionLocal=self.session_spy)
 
 
 def _sqlite_cache_with_session_spy(session_spy: _SessionSpy) -> UnifiedCache:
@@ -210,3 +241,38 @@ def test_nonfinite_numeric_filters_fail_before_session_or_execute(value: float) 
     }
     assert session_spy.session_calls == 0
     assert session_spy.execute_calls == 0
+
+
+@pytest.mark.parametrize("endpoint", (-(2**63), 2**63 - 1))
+def test_signed_64_bit_numeric_endpoints_are_valid(endpoint: int) -> None:
+    """The SQLite signed-64 threshold domain includes both endpoint values."""
+    validate_query_numeric_filters({"score": endpoint, "active": True})
+
+
+@pytest.mark.parametrize(
+    "value",
+    (-(2**63) - 1, 2**63, -(10**100), 10**100),
+)
+@pytest.mark.parametrize("position", ("first", "middle", "last"))
+def test_out_of_domain_integers_fail_before_every_query_state_boundary(
+    value: int, position: str
+) -> None:
+    """Every unsafe Python integer is rejected before backend or session access."""
+    cache = _BoundaryAccessCache()
+    filter_items = [("before", "safe"), ("after", 1.5)]
+    insertion_index = {"first": 0, "middle": 1, "last": 2}[position]
+    filter_items.insert(insertion_index, ("score", value))
+
+    with pytest.raises(CacheQueryValidationError) as error:
+        cache.query_meta(**dict(filter_items))
+
+    assert error.value.context == {
+        "field": "score",
+        "value": repr(value),
+        "reason": CacheReason.INVALID_QUERY_VALUE.value,
+    }
+    assert cache.actual_backend_calls == 0
+    assert cache.config_calls == 0
+    assert cache.metadata_backend_calls == 0
+    assert cache.session_spy.session_calls == 0
+    assert cache.session_spy.execute_calls == 0

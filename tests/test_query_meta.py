@@ -124,6 +124,34 @@ class TestQueryMeta:
         # Should find entries with epochs >= 75 (entries with 75 and 100)
         assert len(many_epochs) == 2
 
+    @pytest.mark.parametrize("endpoint", (-(2**63), 2**63 - 1))
+    def test_query_meta_binds_signed_64_bit_integer_endpoints(
+        self, temp_cache, endpoint
+    ):
+        """SQLite-safe integer endpoints remain valid numeric thresholds."""
+        temp_cache.put("endpoint", score=endpoint)
+
+        entries = temp_cache.query_meta(score=endpoint)
+
+        assert entries is not None
+        assert [entry["cache_key_params"]["score"] for entry in entries] == [
+            f"int:{endpoint}"
+        ]
+
+    def test_query_meta_mixes_signed_64_bit_and_float_thresholds(self, temp_cache):
+        """Valid integer endpoints and finite floats retain threshold semantics."""
+        minimum = -(2**63)
+        maximum = 2**63 - 1
+        temp_cache.put("minimum", score=minimum, ratio=1.0)
+        temp_cache.put("maximum", score=maximum, ratio=2.0)
+
+        entries = temp_cache.query_meta(score=minimum, ratio=1.5)
+
+        assert entries is not None
+        assert [entry["cache_key_params"]["score"] for entry in entries] == [
+            f"int:{maximum}"
+        ]
+
     def test_query_meta_raw_filter_types_preserve_comparison_semantics(self, temp_cache):
         """Raw strings and bools are exact while raw numeric values are thresholds."""
         cache = temp_cache
