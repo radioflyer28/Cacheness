@@ -352,6 +352,7 @@ class BlobStore:
             The blob key (can be used to retrieve the blob)
         """
         self._require_canonical_store()
+        self._refresh_metadata_view_for_lifecycle()
         # Generate key
         if self.content_addressable:
             # Use content hash as key
@@ -781,6 +782,25 @@ class BlobStore:
         """Reject every public operation on exact read-only legacy evidence."""
         if self._legacy_identity is not None:
             self._legacy_identity.require_explicit_migration()
+
+    def _refresh_metadata_view_for_lifecycle(self) -> None:
+        """Refresh a live JSON view without reacquiring global clear admission.
+
+        The Phase 1 clear coordinator used one exclusive admission lock around
+        every ordinary operation.  Lifecycle publication now relies on exact
+        manifest CAS instead, but a JSON writer must still fail closed rather
+        than overwriting malformed or stale metadata from its in-memory view.
+        """
+        coordinator = self._clear_recovery
+        if coordinator is None:
+            return
+        try:
+            coordinator._refresh_backend_view()
+        except CacheStorageError as exc:
+            raise CacheBlobBackendError(
+                "BlobStore lifecycle could not refresh metadata state",
+                context={"operation": "put", "backend": coordinator.kind},
+            ) from exc
     
     def _storage_id_for_key(self, key: str) -> str:
         """Map one public logical key to a backend-safe physical ID."""
