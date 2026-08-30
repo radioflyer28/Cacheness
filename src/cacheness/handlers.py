@@ -16,10 +16,8 @@ import warnings
 # Import focused interfaces
 from .interfaces import (
     CacheHandler,
-    CacheHandlerError,
     CacheWriteError,
     CacheReadError,
-    CacheFormatError,
 )
 from .error_handling import (
     CacheLegacyFormatError,
@@ -51,7 +49,6 @@ from .compress_pickle import (
     read_file as read_compressed_pickle,
     is_pickleable,
     is_dill_serializable,
-    verify_dill_serializable,
     BLOSC_AVAILABLE,
     DILL_AVAILABLE,
     optimize_compression_params,
