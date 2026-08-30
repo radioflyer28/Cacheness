@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import threading
+from copy import deepcopy
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -14,7 +15,11 @@ import pytest
 
 from cacheness.config import CacheConfig
 from cacheness.core import UnifiedCache
-from cacheness.error_handling import CacheReason, CacheUnsafePathError
+from cacheness.error_handling import (
+    CacheReason,
+    CacheStorageError,
+    CacheUnsafePathError,
+)
 from cacheness.storage.blob_store import BlobStore
 from cacheness.storage.backends.blob_backends import FilesystemBlobBackend
 from cacheness.storage import path_security
@@ -427,6 +432,73 @@ class _SingleHandlerRegistry:
         return self.handler
 
 
+class _FormatHandler:
+    """Handler double whose suffix and serialized format identify one payload."""
+
+    def __init__(
+        self,
+        data_type: str,
+        suffix: str,
+        storage_format: str,
+        serializer: str,
+        compression: str,
+    ) -> None:
+        self.data_type = data_type
+        self.suffix = suffix
+        self.storage_format = storage_format
+        self.serializer = serializer
+        self.compression = compression
+
+    def put(self, data: Any, file_path: Path, _config: Any) -> dict[str, Any]:
+        """Write an exact, format-marked private staging artifact."""
+        artifact = file_path.with_suffix(self.suffix)
+        artifact.write_text(str(data), encoding="utf-8")
+        return {
+            "storage_format": self.storage_format,
+            "file_size": artifact.stat().st_size,
+            "actual_path": str(artifact),
+            "metadata": {
+                "serializer": self.serializer,
+                "compression": self.compression,
+            },
+        }
+
+    def get(self, file_path: Path, metadata: dict[str, Any]) -> str:
+        """Read only a matching format, making stale metadata observable."""
+        assert metadata["storage_format"] == self.storage_format
+        return file_path.read_text(encoding="utf-8")
+
+
+class _SwitchingHandlerRegistry:
+    """Registry double that writes through a selected handler and reads by type."""
+
+    def __init__(self, *handlers: _FormatHandler) -> None:
+        self.current = handlers[0]
+        self._handlers = {handler.data_type: handler for handler in handlers}
+
+    def get_handler(self, _data: Any) -> _FormatHandler:
+        """Return the handler selected for the next write."""
+        return self.current
+
+    def get_handler_by_type(self, data_type: str) -> _FormatHandler:
+        """Resolve persisted metadata through its recorded handler type."""
+        return self._handlers[data_type]
+
+
+def _format_handlers() -> tuple[_FormatHandler, _FormatHandler]:
+    """Return two incompatible handler formats for overwrite preservation tests."""
+    return (
+        _FormatHandler("text_v1", ".v1", "plain-v1", "json", "none"),
+        _FormatHandler("text_v2", ".v2", "plain-v2", "msgpack", "zstd"),
+    )
+
+
+def _payloads_for_key(store: BlobStore, key: str) -> list[Path]:
+    """Return all managed payloads sharing a logical key's physical base."""
+    storage_id = store._storage_id_for_key(key)
+    return sorted(store.cache_dir.glob(f"{storage_id}*"))
+
+
 def _is_descendant(path: Path, root: Path) -> bool:
     """Return whether a path is contained by root without trusting its spelling."""
     try:
@@ -474,6 +546,172 @@ def test_blob_store_keeps_logical_key_while_handlers_only_see_private_paths(tmp_
         actual_path = Path(entry["metadata"]["actual_path"])
         assert _is_descendant(actual_path, root)
         assert logical_key not in str(actual_path)
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("handler_index", [0, 1])
+def test_blob_store_first_write_metadata_failure_removes_candidate(
+    tmp_path, monkeypatch, handler_index
+):
+    """A first-write metadata failure leaves no entry or unowned payload bytes."""
+    root = tmp_path / "blob-root"
+    handlers = _format_handlers()
+    registry = _SwitchingHandlerRegistry(*handlers)
+    registry.current = handlers[handler_index]
+    store = BlobStore(root)
+    store.handlers = registry
+
+    def fail_metadata_write(_key: str, _entry: dict[str, Any]) -> None:
+        raise RuntimeError("metadata unavailable")
+
+    try:
+        monkeypatch.setattr(store.backend, "put_entry", fail_metadata_write)
+
+        with pytest.raises(RuntimeError, match="metadata unavailable"):
+            store.put("replacement", key="first-write")
+
+        assert store.get_metadata("first-write") is None
+        assert _payloads_for_key(store, "first-write") == []
+    finally:
+        store.close()
+
+
+def test_blob_store_cross_format_overwrite_metadata_failure_preserves_prior_evidence(
+    tmp_path, monkeypatch
+):
+    """A failed replacement preserves exact old metadata, bytes, and readability."""
+    root = tmp_path / "blob-root"
+    old_handler, replacement_handler = _format_handlers()
+    registry = _SwitchingHandlerRegistry(old_handler, replacement_handler)
+    store = BlobStore(root)
+    store.handlers = registry
+    key = "cross-format"
+    initial_metadata = {
+        "serializer": old_handler.serializer,
+        "handler_compression": old_handler.compression,
+    }
+
+    def fail_metadata_write(_key: str, _entry: dict[str, Any]) -> None:
+        raise RuntimeError("metadata unavailable")
+
+    try:
+        store.put("old value", key=key, metadata=initial_metadata)
+        entry_before = deepcopy(store.get_metadata(key))
+        assert entry_before is not None
+        old_path = Path(entry_before["metadata"]["actual_path"])
+        old_bytes = old_path.read_bytes()
+        assert old_path.suffix == old_handler.suffix
+        assert entry_before["data_type"] == old_handler.data_type
+        assert entry_before["metadata"]["storage_format"] == old_handler.storage_format
+        assert entry_before["metadata"]["serializer"] == old_handler.serializer
+        assert (
+            entry_before["metadata"]["handler_compression"]
+            == old_handler.compression
+        )
+
+        registry.current = replacement_handler
+        monkeypatch.setattr(store.backend, "put_entry", fail_metadata_write)
+
+        with pytest.raises(RuntimeError, match="metadata unavailable"):
+            store.put(
+                "replacement value",
+                key=key,
+                metadata={
+                    "serializer": replacement_handler.serializer,
+                    "handler_compression": replacement_handler.compression,
+                },
+            )
+
+        assert store.get_metadata(key) == entry_before
+        assert old_path.read_bytes() == old_bytes
+        assert _payloads_for_key(store, key) == [old_path]
+        assert store.get(key) == "old value"
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("cleanup_outcome", ["false", "raise"])
+def test_blob_store_candidate_cleanup_failure_is_explicit_and_chained(
+    tmp_path, monkeypatch, cleanup_outcome
+):
+    """An unprovable candidate deletion is never silently converted to a miss."""
+    root = tmp_path / "blob-root"
+    handler, _ = _format_handlers()
+    store = BlobStore(root)
+    store.handlers = _SwitchingHandlerRegistry(handler)
+    cleanup_attempts: list[Path] = []
+
+    def fail_metadata_write(_key: str, _entry: dict[str, Any]) -> None:
+        raise RuntimeError("metadata unavailable")
+
+    def cannot_prove_cleanup(locator: Path | str) -> bool:
+        cleanup_attempts.append(Path(locator))
+        if cleanup_outcome == "raise":
+            raise OSError("candidate cleanup unavailable")
+        return False
+
+    try:
+        monkeypatch.setattr(store.backend, "put_entry", fail_metadata_write)
+        monkeypatch.setattr(
+            store.guarded_handler_io.file_ops,
+            "delete",
+            cannot_prove_cleanup,
+        )
+
+        with pytest.raises(CacheStorageError) as exc_info:
+            store.put("replacement", key="cleanup-proof")
+
+        assert isinstance(exc_info.value.__cause__, RuntimeError)
+        assert "metadata unavailable" in str(exc_info.value.__cause__)
+        assert len(cleanup_attempts) == 1
+        assert store.get_metadata("cleanup-proof") is None
+    finally:
+        store.close()
+
+
+def test_blob_store_post_commit_prior_cleanup_keeps_new_metadata_authoritative(
+    tmp_path, monkeypatch
+):
+    """A failed old-payload cleanup cannot restore stale replacement metadata."""
+    root = tmp_path / "blob-root"
+    old_handler, replacement_handler = _format_handlers()
+    registry = _SwitchingHandlerRegistry(old_handler, replacement_handler)
+    store = BlobStore(root)
+    store.handlers = registry
+    key = "post-commit"
+
+    try:
+        store.put("old value", key=key)
+        entry_before = store.get_metadata(key)
+        assert entry_before is not None
+        old_path = Path(entry_before["metadata"]["actual_path"])
+        delete = store.guarded_handler_io.file_ops.delete
+
+        def fail_old_payload_cleanup(locator: Path | str) -> bool:
+            if Path(locator) == old_path:
+                return False
+            return delete(locator)
+
+        registry.current = replacement_handler
+        monkeypatch.setattr(
+            store.guarded_handler_io.file_ops,
+            "delete",
+            fail_old_payload_cleanup,
+        )
+
+        with pytest.raises(CacheStorageError, match="cleanup"):
+            store.put("replacement value", key=key)
+
+        entry_after = store.get_metadata(key)
+        assert entry_after is not None
+        new_path = Path(entry_after["metadata"]["actual_path"])
+        assert entry_after["data_type"] == replacement_handler.data_type
+        assert entry_after["metadata"]["storage_format"] == replacement_handler.storage_format
+        assert new_path != old_path
+        assert new_path.exists()
+        assert old_path.exists()
+        assert store.get(key) == "replacement value"
     finally:
         store.close()
 
