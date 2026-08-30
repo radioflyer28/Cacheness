@@ -124,8 +124,11 @@ def _clear_coordinated(method: Callable) -> Callable:
         coordinator = self._clear_recovery
         if coordinator is None:
             return method(self, *args, **kwargs)
-        with coordinator.mutation_admission():
-            return method(self, *args, **kwargs)
+        try:
+            with coordinator.mutation_admission():
+                return method(self, *args, **kwargs)
+        except CacheStorageError as exc:
+            _raise_translated_recovery_failure(coordinator, exc)
 
     return wrapped
 
@@ -138,10 +141,35 @@ def _clear_read_coordinated(method: Callable) -> Callable:
         coordinator = self._clear_recovery
         if coordinator is None:
             return method(self, *args, **kwargs)
-        with coordinator.read_admission():
-            return method(self, *args, **kwargs)
+        try:
+            with coordinator.read_admission():
+                return method(self, *args, **kwargs)
+        except CacheStorageError as exc:
+            _raise_translated_recovery_failure(coordinator, exc)
 
     return wrapped
+
+
+def _raise_translated_recovery_failure(
+    coordinator: ClearRecoveryCoordinator, error: CacheStorageError
+) -> None:
+    """Map tagged recovery-admission failures into the direct BlobStore API."""
+    if not ClearRecoveryCoordinator.is_lifecycle_conflict(error) and (
+        "clear_recovery_failure" not in error.context
+    ):
+        raise error
+
+    if ClearRecoveryCoordinator.is_lifecycle_conflict(error):
+        translated_type = CacheBlobLifecycleConflictError
+    else:
+        translated_type = CacheBlobBackendError
+    raise translated_type(
+        str(error),
+        context={
+            **error.context,
+            "backend": error.context.get("backend", coordinator.kind),
+        },
+    ) from error
 
 
 class BlobStore:
@@ -186,6 +214,7 @@ class BlobStore:
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.guarded_handler_io = GuardedHandlerIO(self.cache_dir)
+        self._owns_backend = False
         try:
             self._initialize_after_guarded_io(
                 backend,
@@ -194,9 +223,7 @@ class BlobStore:
                 content_addressable,
             )
         except Exception:
-            # GuardedHandlerIO owns a retained managed-root descriptor.  No
-            # partially initialized BlobStore can transfer that ownership.
-            self.guarded_handler_io.close()
+            self._close_failed_initialization_resources()
             raise
 
         logger.debug(f"BlobStore initialized at {self.cache_dir}")
@@ -234,11 +261,14 @@ class BlobStore:
         # Initialize metadata backend
         if self._legacy_identity is not None:
             self.backend = InMemoryBackend()
+            self._owns_backend = True
         elif backend is None or backend == "json":
             self.backend = JsonBackend(self.cache_dir / "cache_metadata.json")
+            self._owns_backend = True
         elif backend == "sqlite":
             from .backends import SqliteBackend
             self.backend = SqliteBackend(self.cache_dir / "cache_metadata.db")
+            self._owns_backend = True
         elif isinstance(backend, (MetadataBackend, CoreMetadataBackend)):
             self.backend = backend
         else:
@@ -269,6 +299,18 @@ class BlobStore:
                     self._reconcile_sqlite_manifest_records_after_clear()
             except Exception:
                 raise
+
+    def _close_failed_initialization_resources(self) -> None:
+        """Release only resources this incomplete store has taken ownership of."""
+        if self._owns_backend and hasattr(self, "backend"):
+            try:
+                self.backend.close()
+            except Exception:
+                logger.exception("Failed to close internally created BlobStore backend")
+        try:
+            self.guarded_handler_io.close()
+        except Exception:
+            logger.exception("Failed to close BlobStore managed-root descriptor")
 
     @property
     def legacy_identity(self) -> LegacyManifestIdentity | None:
@@ -672,10 +714,18 @@ class BlobStore:
         """
         self._require_canonical_store()
         if self._clear_recovery is None:
-            raise ClearRecoveryCoordinator.unsupported_error(self.backend)
+            error = ClearRecoveryCoordinator.unsupported_error(self.backend)
+            raise CacheBlobBackendError(str(error), context=error.context) from error
 
         mappings = self._preflight_clear_manifests()
-        cleared = self._clear_recovery.clear(mappings)
+        try:
+            cleared = self._clear_recovery.clear(mappings)
+        except CacheStorageError as exc:
+            if ClearRecoveryCoordinator.is_lifecycle_conflict(exc):
+                raise CacheBlobLifecycleConflictError(
+                    str(exc), context=exc.context
+                ) from exc
+            raise CacheBlobBackendError(str(exc), context=exc.context) from exc
         if type(self.backend) is SqliteBackend:
             for cache_key, _ in mappings:
                 self.manifest_repository.remove(cache_key)

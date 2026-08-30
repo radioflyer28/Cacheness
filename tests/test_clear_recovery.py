@@ -1480,13 +1480,17 @@ def test_unsupported_manifest_topologies_fail_before_any_mutation(
     try:
         if name == "sqlite_memory":
             store = BlobStore(root, backend=backend)
-            with pytest.raises(CacheStorageError) as error:
+            with pytest.raises(CacheBlobBackendError) as error:
                 store.clear()
-            assert error.value.context == {
+            assert {
+                key: error.value.context[key]
+                for key in ("operation", "backend", "supported_local_kinds")
+            } == {
                 "operation": "clear",
                 "backend": "SqliteBackend",
                 "supported_local_kinds": ["json", "sqlite", "memory"],
             }
+            assert error.value.context["reason"] == "blob_backend_failure"
             assert not list(root.glob(".cacheness-clear-journal-*.json"))
             assert not list(root.glob("*candidate-*"))
             return

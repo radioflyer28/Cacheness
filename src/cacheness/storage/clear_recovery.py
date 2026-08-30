@@ -62,6 +62,9 @@ _SNAPSHOT_ENTRY_FIELDS = {
 _HANDLER_SUFFIX = re.compile(r"(?:\.[A-Za-z0-9_-]+){0,4}\Z")
 _MAX_HANDLER_SUFFIX_LENGTH = 96
 _CANDIDATE_PREFIX = re.compile(r"-candidate-[0-9a-f]{32}")
+_FAILURE_CONTEXT_KEY = "clear_recovery_failure"
+_BACKEND_FAILURE = "backend_failure"
+_LIFECYCLE_CONFLICT = "lifecycle_conflict"
 
 _PROCESS_LOCKS_GUARD = threading.Lock()
 _PROCESS_LOCKS: dict[tuple[str, int, int], threading.Lock] = {}
@@ -128,6 +131,11 @@ class ClearRecoveryCoordinator:
             },
         )
 
+    @classmethod
+    def is_lifecycle_conflict(cls, error: CacheStorageError) -> bool:
+        """Return whether tagged recovery evidence blocks normal lifecycle work."""
+        return error.context.get(_FAILURE_CONTEXT_KEY) == _LIFECYCLE_CONFLICT
+
     @staticmethod
     def _backend_kind(backend: object) -> str:
         if type(backend) is JsonBackend:
@@ -146,13 +154,24 @@ class ClearRecoveryCoordinator:
         if not _advisory_lock_available(self.file_ops.root):
             raise self._admission_error("Reliable advisory locking is unavailable")
 
-        process_lock, identity = self._process_lock()
+        try:
+            process_lock, identity = self._process_lock()
+        except OSError as exc:
+            raise self._admission_error(
+                "Unable to inspect the clear admission root"
+            ) from exc
         owner_thread = threading.get_ident()
         with _PROCESS_LOCKS_GUARD:
             if _PROCESS_LOCK_OWNERS.get(identity) == owner_thread:
-                raise self._admission_error("A same-root clear owner is already active")
+                raise self._admission_error(
+                    "A same-root clear owner is already active",
+                    lifecycle_conflict=True,
+                )
         if not process_lock.acquire(blocking=blocking):
-            raise self._admission_error("A same-root clear owner is already active")
+            raise self._admission_error(
+                "A same-root clear owner is already active",
+                lifecycle_conflict=True,
+            )
 
         lock_descriptor: int | None = None
         try:
@@ -161,11 +180,19 @@ class ClearRecoveryCoordinator:
             lock_descriptor = self._acquire_advisory_lock(blocking=blocking)
             yield
         finally:
+            release_error: OSError | None = None
             if lock_descriptor is not None:
-                self._release_advisory_lock(lock_descriptor)
+                try:
+                    self._release_advisory_lock(lock_descriptor)
+                except OSError as exc:
+                    release_error = exc
             with _PROCESS_LOCKS_GUARD:
                 _PROCESS_LOCK_OWNERS.pop(identity, None)
             process_lock.release()
+            if release_error is not None:
+                raise self._admission_error(
+                    "Unable to release the clear admission lock"
+                ) from release_error
 
     @contextmanager
     def mutation_admission(self) -> Iterator[None]:
@@ -176,8 +203,15 @@ class ClearRecoveryCoordinator:
         makes the clear snapshot and ordinary publication boundary linearizable.
         """
         with self.admission(blocking=True):
-            self.recover()
-            self._refresh_backend_view()
+            try:
+                self.recover()
+                self._refresh_backend_view()
+            except CacheStorageError as exc:
+                self._raise_tagged_backend_failure(exc)
+            except OSError as exc:
+                raise self._admission_error(
+                    "Clear recovery admission could not refresh backend state"
+                ) from exc
             yield
 
     @contextmanager
@@ -190,14 +224,22 @@ class ClearRecoveryCoordinator:
         the cleared view while terminal tombstone reclamation is retried.
         """
         with self.admission(blocking=True):
-            if self.file_ops.exists(self.journal_path):
-                journal = self._read_journal()
-                self._validate_journal(journal, allow_memory_nonce_mismatch=True)
-                if journal["state"] == "prepared":
-                    raise self._admission_error(
-                        "A prepared clear journal requires recovery before reads"
-                    )
-            self._refresh_backend_view()
+            try:
+                if self.file_ops.exists(self.journal_path):
+                    journal = self._read_journal()
+                    self._validate_journal(journal, allow_memory_nonce_mismatch=True)
+                    if journal["state"] == "prepared":
+                        raise self._admission_error(
+                            "A prepared clear journal requires recovery before reads",
+                            lifecycle_conflict=True,
+                        )
+                self._refresh_backend_view()
+            except CacheStorageError as exc:
+                self._raise_tagged_backend_failure(exc)
+            except OSError as exc:
+                raise self._admission_error(
+                    "Clear recovery admission could not refresh backend state"
+                ) from exc
             yield
 
     def _refresh_backend_view(self) -> None:
@@ -253,17 +295,39 @@ class ClearRecoveryCoordinator:
         finally:
             os.close(descriptor)
 
-    def _admission_error(self, message: str) -> CacheStorageError:
+    def _admission_error(
+        self,
+        message: str,
+        *,
+        lifecycle_conflict: bool = False,
+        context: dict[str, Any] | None = None,
+    ) -> CacheStorageError:
         return CacheStorageError(
             message,
-            context={"operation": "clear", "backend": self.kind},
+            context={
+                "operation": "clear",
+                "backend": self.kind,
+                **(context or {}),
+                _FAILURE_CONTEXT_KEY: (
+                    _LIFECYCLE_CONFLICT if lifecycle_conflict else _BACKEND_FAILURE
+                ),
+            },
         )
 
     def _poisoned_error(self) -> CacheStorageError:
-        return CacheStorageError(
+        return self._admission_error(
             "BlobStore clear recovery requires terminal reconciliation before normal operations",
-            context={"operation": "clear", "backend": self.kind},
+            lifecycle_conflict=True,
         )
+
+    def _raise_tagged_backend_failure(self, error: CacheStorageError) -> None:
+        """Mark an admission-time recovery failure without changing its cause."""
+        if error.context.get(_FAILURE_CONTEXT_KEY) is not None:
+            raise error
+        raise CacheStorageError(
+            str(error),
+            context={**error.context, _FAILURE_CONTEXT_KEY: _BACKEND_FAILURE},
+        ) from error
 
     def _poison(self) -> None:
         """Fail closed after evidence cannot prove one terminal outcome."""
@@ -289,9 +353,9 @@ class ClearRecoveryCoordinator:
                     self._rollback_prepared(journal)
                 except Exception as rollback_exc:
                     self._poison()
-                    raise CacheStorageError(
+                    raise self._admission_error(
                         "BlobStore clear failed and prepared recovery could not complete",
-                        context={"operation": "clear", "backend": self.kind},
+                        lifecycle_conflict=True,
                     ) from rollback_exc
             raise exc
 
@@ -320,20 +384,17 @@ class ClearRecoveryCoordinator:
                     self._rollback_prepared(prepared_journal)
                 except Exception as rollback_exc:
                     self._poison()
-                    raise CacheStorageError(
+                    raise self._admission_error(
                         "Committed clear journal publication failed and rollback could not complete",
-                        context={"operation": "clear", "backend": self.kind},
+                        lifecycle_conflict=True,
                     ) from rollback_exc
                 raise
 
             self._poison()
-            raise CacheStorageError(
+            raise self._admission_error(
                 "Committed clear journal publication has an unresolved recovery outcome",
-                context={
-                    "operation": "clear",
-                    "backend": self.kind,
-                    "publication_state": publication_state,
-                },
+                lifecycle_conflict=True,
+                context={"publication_state": publication_state},
             ) from exc
         try:
             self._roll_forward_committed(journal, wrap_errors=False)
@@ -455,9 +516,9 @@ class ClearRecoveryCoordinator:
                 self.journal_path, self._encode_journal(journal)
             )
         except FileExistsError as exc:
-            raise CacheStorageError(
+            raise self._admission_error(
                 "A prior BlobStore clear journal requires recovery",
-                context={"operation": "clear", "backend": self.kind},
+                lifecycle_conflict=True,
             ) from exc
         except CacheStorageError:
             raise

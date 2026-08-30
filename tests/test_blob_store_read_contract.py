@@ -15,13 +15,19 @@ from cacheness.error_handling import (
     CacheBlobManifestUnauthenticatedError,
     CacheBlobManifestUnsupportedVersionError,
     CacheBlobPayloadTamperedError,
+    CacheStorageError,
     CacheUnsafePathError,
 )
-from cacheness.metadata import InMemoryBackend
+from cacheness.metadata import InMemoryBackend, SqliteBackend
 from cacheness.storage import BlobStore
+from cacheness.storage import blob_store as blob_store_module
 from cacheness.storage.guarded_handler_io import GuardedHandlerIO
 from cacheness.storage.integrity import sign_hmac_sha256
 from cacheness.storage.manifest import BlobManifestV1
+from cacheness.storage.read_contract import (
+    CacheReadFailureCategory,
+    classify_cache_read_failure,
+)
 
 
 class _TracingHandler:
@@ -104,6 +110,153 @@ def test_constructor_failure_closes_managed_root_descriptor(
             BlobStore(cache_dir, backend=_UnsupportedBackend())
 
     assert len(closed) == 1
+
+
+def test_failed_initialization_closes_only_internally_owned_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A retained constructor exception cannot defer owned SQLite cleanup to GC."""
+    created: list[SqliteBackend] = []
+    closed: list[SqliteBackend] = []
+    original_init = SqliteBackend.__init__
+    original_close = SqliteBackend.close
+
+    def tracked_init(backend: SqliteBackend, *args: Any, **kwargs: Any) -> None:
+        original_init(backend, *args, **kwargs)
+        created.append(backend)
+
+    def tracked_close(backend: SqliteBackend) -> None:
+        if backend in created:
+            closed.append(backend)
+        original_close(backend)
+
+    monkeypatch.setattr(SqliteBackend, "__init__", tracked_init)
+    monkeypatch.setattr(SqliteBackend, "close", tracked_close)
+    monkeypatch.setattr(
+        blob_store_module,
+        "create_manifest_repository",
+        lambda _backend: (_ for _ in ()).throw(RuntimeError("repository setup failed")),
+    )
+
+    with pytest.raises(RuntimeError) as failure:
+        BlobStore(tmp_path / "owned-sqlite", backend="sqlite")
+
+    retained_failure = failure.value
+    assert retained_failure.args == ("repository setup failed",)
+    assert len(created) == 1
+    assert closed == created
+
+
+def test_failed_initialization_does_not_close_caller_injected_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An injected backend remains owned by its caller when setup fails later."""
+    backend = InMemoryBackend()
+    closed: list[InMemoryBackend] = []
+    original_close = InMemoryBackend.close
+
+    def tracked_close(candidate: InMemoryBackend) -> None:
+        if candidate is backend:
+            closed.append(candidate)
+        original_close(candidate)
+
+    monkeypatch.setattr(InMemoryBackend, "close", tracked_close)
+    monkeypatch.setattr(
+        blob_store_module,
+        "HandlerRegistry",
+        lambda: (_ for _ in ()).throw(RuntimeError("handler setup failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="handler setup failed"):
+        BlobStore(tmp_path / "injected-backend", backend=backend)
+
+    assert closed == []
+
+
+def _call_direct_operation(store: BlobStore, operation: str, key: str) -> object:
+    """Invoke one direct public API after its recovery admission boundary."""
+    operations = {
+        "get": lambda: store.get(key),
+        "get_metadata": lambda: store.get_metadata(key),
+        "exists": lambda: store.exists(key),
+        "list": store.list,
+        "put": lambda: store.put("admission payload", key=key),
+        "update_metadata": lambda: store.update_metadata(key, {"tag": "value"}),
+        "delete": lambda: store.delete(key),
+        "clear": store.clear,
+    }
+    return operations[operation]()
+
+
+@pytest.mark.parametrize(
+    ("operation", "is_read"),
+    (
+        ("get", True),
+        ("get_metadata", True),
+        ("exists", True),
+        ("list", True),
+        ("put", False),
+        ("update_metadata", False),
+        ("delete", False),
+        ("clear", False),
+    ),
+)
+def test_all_direct_operations_translate_json_admission_refresh_failures(
+    tmp_path: Path, operation: str, is_read: bool
+) -> None:
+    """Corrupt admission-time JSON state is a typed backend failure everywhere."""
+    root = tmp_path / operation
+    key = "admission-key"
+    initial = BlobStore(root, backend="json")
+    try:
+        initial.put("stored", key=key)
+    finally:
+        initial.close()
+    (root / "cache_metadata.json").write_bytes(b"{")
+
+    store = BlobStore(root, backend="json")
+    try:
+        with pytest.raises(CacheBlobBackendError) as error:
+            _call_direct_operation(store, operation, key)
+        assert isinstance(error.value.__cause__, CacheStorageError)
+        if is_read:
+            assert (
+                classify_cache_read_failure(error.value)
+                is CacheReadFailureCategory.BACKEND_FAILURE
+            )
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("state", ("active", "prepared", "poisoned"))
+def test_recovery_conflicts_translate_to_lifecycle_failures(
+    tmp_path: Path, state: str
+) -> None:
+    """Active, prepared, and poisoned recovery evidence blocks direct reads stably."""
+    store = BlobStore(tmp_path / state, backend="json")
+    coordinator = store._clear_recovery
+    assert coordinator is not None
+    try:
+        if state == "active":
+            with coordinator.admission(blocking=True):
+                with pytest.raises(CacheBlobLifecycleConflictError) as error:
+                    store.get("blocked")
+        elif state == "prepared":
+            coordinator._create_journal(coordinator._new_prepared_journal([]))
+            with pytest.raises(CacheBlobLifecycleConflictError) as error:
+                store.get("blocked")
+        else:
+            coordinator._poisoned = True
+            with pytest.raises(CacheBlobLifecycleConflictError) as error:
+                store.get("blocked")
+
+        assert isinstance(error.value.__cause__, CacheStorageError)
+        assert (
+            classify_cache_read_failure(error.value)
+            is CacheReadFailureCategory.LIFECYCLE_CONFLICT
+        )
+    finally:
+        store.close()
 
 
 @pytest.mark.parametrize("backend_name", ("json", "sqlite"))
