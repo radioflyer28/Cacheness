@@ -10,6 +10,7 @@ from typing import Any, Callable
 
 from cacheness.config import LifecycleLimits
 from cacheness.error_handling import (
+    CacheBlobLifecycleConflictError,
     CacheBlobRecoverableCleanupError,
     CacheManifestIntegrityError,
     CacheStorageError,
@@ -407,12 +408,30 @@ class LifecycleEngine:
                 )
             )
             self._fault("manifest_publish", record)
-            self.store.manifest_repository.publish_if_expected(
-                key,
-                expected,
-                signed_manifest.canonical_bytes(),
-                entry_data=self.store._manifest_entry_data(signed_manifest),
-            )
+            try:
+                self.store.manifest_repository.publish_if_expected(
+                    key,
+                    expected,
+                    signed_manifest.canonical_bytes(),
+                    entry_data=self.store._manifest_entry_data(signed_manifest),
+                )
+            except CacheBlobLifecycleConflictError:
+                # A failed CAS proves this operation did not become authority.
+                # Its immutable locator is evidence-bound to this operation, so
+                # it is the only residue this stale contender may reclaim.
+                try:
+                    self.store._delete_or_prove_absent(candidate_locator)
+                    self._retire(record)
+                except (CacheStorageError, OSError) as cleanup_error:
+                    raise CacheBlobRecoverableCleanupError(
+                        "BlobStore stale contender needs candidate cleanup recovery",
+                        context={
+                            "operation_id": record.operation_id,
+                            "generation": record.generation,
+                            "key": record.key,
+                        },
+                    ) from cleanup_error
+                raise
             self._fault("authority_checkpoint", record)
             record = self._checkpoint(record, OperationCheckpoint.AUTHORITY_PUBLISHED)
             self._emit("authority_published", record)
