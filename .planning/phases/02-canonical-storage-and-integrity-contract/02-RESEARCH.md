@@ -376,22 +376,13 @@ The 1 MiB chunk in this example is an implementation buffer, not a payload-size 
 | A14 | `get`, `get_metadata`, `exists`, `list`, `update_metadata`, `delete`, and `clear` should follow the operation integrity matrix, with structural/handler/user metadata separated and reads non-mutating. | Pattern 6 / Runtime Inventory / Security Domain | Compatibility or performance may require explicit adapters, but silent corruption/mutation is forbidden. |
 | A15 | Required-key initialization, adversarial/golden tests, and the same-snapshot hashing example are the recommended enforcement details. | Pitfalls / Code Examples / Validation Architecture | Platform semantics, buffering, and empty-store detection need focused tests before API freeze. |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **What exact bounded-manifest limits should become v1 wire-policy constants?**
-   - What we know: D-07 requires bounded parsing, and limits must be separate from payload filesize.
-   - What's unclear: Current public custom-metadata size/depth usage has no checked-in contract. [ASSUMED]
-   - Recommendation: characterize existing tests/examples, then freeze generous byte/depth/collection/string bounds with boundary tests; do not add a payload filesize ceiling.
+1. **Bounded-manifest constants.** The schema-1 codec freezes `MAX_MANIFEST_BYTES = 1_048_576`, `MAX_NESTING_DEPTH = 16`, `MAX_COLLECTION_ITEMS = 4_096` per map/list, `MAX_TOTAL_NODES = 16_384`, `MAX_STRING_UTF8_BYTES = 262_144`, and integer range `[-(2**63), 2**63 - 1]`; `byte_size` is further restricted to `[0, 2**63 - 1]`. Boundary values are accepted and the next value is rejected. These limits govern only manifest parsing; payload size remains unrestricted by this policy. [ASSUMED]
 
-2. **What is the exact direct `exists()` integrity promise?**
-   - What we know: it must not report corrupt content as healthy, and STOR-08 distinguishes corrupt from absent.
-   - What's unclear: full SHA-256 verification makes `exists()` O(payload bytes).
-   - Recommendation: define `exists()` as “valid committed readable record” and verify digest/size; a later explicit lightweight metadata-presence API can have weaker semantics. [ASSUMED]
+2. **Direct `exists()` semantics.** `BlobStore.exists(key)` means “a valid authenticated committed record whose declared handler/format/version is supported and whose one guarded payload snapshot matches the recorded SHA-256 and byte size.” It returns `False` only when the authoritative manifest record is absent. Malformed, unauthenticated, non-committed, unsupported-version, missing-payload, digest/size mismatch, and backend failures raise their typed outcomes. It verifies bytes but does not deserialize the payload. [ASSUMED]
 
-3. **How should callers supply required signing keys on non-POSIX systems?**
-   - What we know: Python documents that Windows `chmod()` can only set/clear the read-only flag, not establish POSIX owner/mode guarantees. [CITED: https://docs.python.org/3.11/library/os.html]
-   - What's unclear: no current cross-platform secret-provider interface exists.
-   - Recommendation: accept exact 32-byte application-provided key material or a narrow key-provider protocol; reject required file mode when its permission policy cannot be attested. [ASSUMED]
+3. **Required keys on non-POSIX systems.** Required signing accepts exact 32-byte application-supplied key material or a narrow provider that returns those bytes. File-backed required mode is supported only where the implementation can attest no-follow regular-file identity plus owner and restrictive permission policy. A platform that cannot attest those properties returns a typed unsupported-configuration result and requires supplied/provider key material; it never weakens the check, creates a fallback key, or accepts unsigned manifests. [ASSUMED] Python's Windows permission limitation remains documented. [CITED: https://docs.python.org/3.11/library/os.html]
 
 ## Environment Availability
 
