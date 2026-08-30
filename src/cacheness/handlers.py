@@ -750,8 +750,10 @@ class ArrayHandler(CacheHandler):
             _invalid_legacy_array("Legacy array payload cannot be reconstructed", cause=exc)
 
     def get(self, file_path: Path, metadata: Dict[str, Any]) -> Any:
-        """Load array(s) from file with format detection."""
-        storage_format = metadata.get("storage_format", "npz")
+        """Load array(s) using the declared native payload contract."""
+        storage_format = metadata.get(
+            "payload_format", metadata.get("storage_format", "npz")
+        )
 
         if storage_format == "blosc2":
             blosc2_path = file_path.with_suffix("").with_suffix(".b2nd")

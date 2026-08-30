@@ -392,7 +392,8 @@ def test_native_dill_payload_remains_a_dill_stream_when_selected(tmp_path):
         cache_dir=str(tmp_path),
         compression=CompressionConfig(pickle_compression_codec="none"),
     )
-    callback = lambda value: value + 1
+    def callback(value):
+        return value + 1
 
     result = ObjectHandler().put(callback, tmp_path / "native-dill", config)
     payload = Path(result["actual_path"]).read_bytes()
