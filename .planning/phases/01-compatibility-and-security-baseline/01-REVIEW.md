@@ -1,150 +1,154 @@
 ---
 phase: 01-compatibility-and-security-baseline
-reviewed: 2026-08-30T00:32:17Z
-depth: standard
-files_reviewed: 56
+reviewed: 2026-08-30T03:35:34Z
+depth: deep
+files_reviewed: 13
 files_reviewed_list:
-  - README.md
-  - docs/SECURITY.md
-  - src/cacheness/__init__.py
-  - src/cacheness/config.py
   - src/cacheness/core.py
-  - src/cacheness/decorators.py
-  - src/cacheness/error_handling.py
-  - src/cacheness/handlers.py
-  - src/cacheness/interfaces.py
   - src/cacheness/metadata.py
   - src/cacheness/query_validation.py
-  - src/cacheness/security.py
-  - src/cacheness/sql_cache.py
-  - src/cacheness/storage/backends/blob_backends.py
   - src/cacheness/storage/blob_store.py
+  - src/cacheness/storage/clear_recovery.py
   - src/cacheness/storage/guarded_handler_io.py
   - src/cacheness/storage/path_security.py
-  - tests/fixtures/compat/README.md
-  - tests/fixtures/compat/array-raw-v035-compress/payload.b2nd
-  - tests/fixtures/compat/array-raw-v037-compress2/payload.b2nd
-  - tests/fixtures/compat/decorator-key-v0313/metadata.json
-  - tests/fixtures/compat/decorator-key-v0313/payload.npz
-  - tests/fixtures/compat/decorator-key-v0313/provenance.json
-  - tests/fixtures/compat/json-nested-v0314/metadata.json
-  - tests/fixtures/compat/json-nested-v0314/payload.npz
-  - tests/fixtures/compat/json-nested-v0314/provenance.json
-  - tests/fixtures/compat/json-split-signed-v038/metadata.json
-  - tests/fixtures/compat/json-split-signed-v038/payload.npz
-  - tests/fixtures/compat/json-split-signed-v038/provenance.json
-  - tests/fixtures/compat/json-split-unsigned-v037/metadata.json
-  - tests/fixtures/compat/json-split-unsigned-v037/payload.npz
-  - tests/fixtures/compat/json-split-unsigned-v037/provenance.json
-  - tests/fixtures/compat/manifest.json
-  - tests/fixtures/compat/sqlite-columns-v0314/metadata.sqlite3
-  - tests/fixtures/compat/sqlite-columns-v0314/payload.npz
-  - tests/fixtures/compat/sqlite-columns-v0314/provenance.json
-  - tests/fixtures/compat/sqlite-metadata-json-v039/metadata.sqlite3
-  - tests/fixtures/compat/sqlite-metadata-json-v039/payload.npz
-  - tests/fixtures/compat/sqlite-metadata-json-v039/provenance.json
-  - tests/fixtures/compat/validate_corpus.py
-  - tests/test_blob_backend_registry.py
   - tests/test_cache_integrity.py
-  - tests/test_config_validation.py
-  - tests/test_core.py
-  - tests/test_directory_sharding.py
+  - tests/test_clear_recovery.py
   - tests/test_filesystem_containment.py
-  - tests/test_handlers.py
-  - tests/test_legacy_array_security.py
   - tests/test_phase1_quality_gates.py
-  - tests/test_public_api_contract.py
   - tests/test_query_meta.py
   - tests/test_query_meta_security.py
-  - tests/test_security_documentation.py
-  - tests/test_sql_cache.py
-  - tests/test_sql_cache_failure_contract.py
-  - tests/test_stored_compatibility.py
 findings:
-  critical: 6
+  critical: 3
   warning: 0
   info: 0
-  total: 6
+  total: 3
 status: issues_found
 ---
 
-# Phase 1: Code Review Report
+# Phase 1: Renewed Code Review Report
 
-**Reviewed:** 2026-08-30T00:32:17Z
-**Depth:** standard
-**Files Reviewed:** 56
+**Reviewed:** 2026-08-30T03:35:34Z
+**Depth:** deep
+**Files Reviewed:** 13
+**Range:** `494d661..a73d880`
 **Status:** issues_found
 
 ## Summary
 
-The prior two fix iterations close their exact reported reproductions: failed overwrite digests and strict signing preserve the committed entry, finite-value validation excludes stored NaN/infinities, and pre-commit `BlobStore.clear()` failures restore the tested state. The final pass still found six release-blocking lifecycle and boundary failures. Three are direct regressions or incomplete variants of the new fixes: regular-file staging swaps are published, candidate payloads survive metadata-commit failure, and final clear tombstones are not durably recoverable. The remaining failures are deterministic state corruption in `BlobStore.put()` and `UnifiedCache.clear_all()`, plus an unhandled valid-integer query boundary.
+The gap plans close the exact CR-01 staged-inode substitution and CR-06 signed-64
+query-boundary reproductions, and candidate naming avoids directly overwriting the
+prior committed locator. The renewed review still found three release-blocking
+lifecycle failures. One reopens candidate ownership specifically for durable JSON
+metadata. Two make the new clear protocol unsafe in the live process: failure to
+publish the committed journal is not rolled back, and admission excludes only other
+clear/recovery callers rather than normal writes. All three were reproduced against
+the current implementation. Validation must remain draft/pending.
+
+The explicitly deferred `STOR-03..STOR-06`, `CACH-03`, `BACK-03`, and `BACK-06`
+generalizations were not treated as findings. The findings below are failures of
+the narrower Phase 1 candidate and global-clear contracts themselves.
 
 ## Narrative Findings (AI reviewer)
 
 ## Critical Issues
 
-### CR-01: Descriptor-mode staging publishes a regular file swapped in after validation
+### CR-R1: A durably committed JSON entry is misclassified as uncommitted and its payload is deleted
 
 **Classification:** BLOCKER
 
-**File:** `src/cacheness/storage/guarded_handler_io.py:82-128,130-209`
+**Files:** `src/cacheness/metadata.py:1080-1089`, `src/cacheness/storage/blob_store.py:230-235`, `src/cacheness/core.py:1208-1213`
 
-**Issue:** `_staged_artifact()` validates an inode but returns only its resolved pathname. `_open_staged_artifact()` then opens that pathname later and checks only that the newly opened inode is a regular single-link file; descriptor mode never compares it with the inode validated earlier. Replacing the validated artifact with another ordinary file between those calls therefore succeeds. A direct reproduction replaced the validated `good` artifact with an ordinary file containing `swapped`; `GuardedHandlerIO.put()` published `b"swapped"`. The new tests cover a symlink leaf and symlink ancestor, but not an ordinary-file or ordinary-directory replacement. This defeats the claimed validation/open binding for handler-controlled publication.
+**Issue:** `JsonBackend._save_to_disk()` has already replaced and directory-fsynced
+the live metadata document before it removes the rollback backup. If backup unlink
+or the following directory fsync fails, lines 1080-1089 re-read the new live
+document and raise. Both high-level writers set `metadata_committed` only after
+`put_entry()` returns, so they interpret this post-authority exception as a failed
+metadata commit and delete the candidate now referenced by the authoritative JSON
+document. A direct overwrite reproduction failed the third metadata-directory
+fsync: `put()` raised, `get_entry("k")` pointed to the replacement candidate, and
+that candidate no longer existed. The prior payload remained as an unowned file.
+The operation leaves durable metadata/payload disagreement and makes the key
+unreadable after a reported failure.
 
-**Fix:** Open the staged artifact during validation and carry that descriptor (or its recorded `st_dev`/`st_ino` identity) into publication. If reopening is unavoidable, compare the opened descriptor with the exact validated identity after the descriptor-relative walk and reject any mismatch. Add leaf regular-file and ancestor ordinary-directory replacement regressions in both descriptor and fallback modes.
+**Fix:** Make metadata publication return an explicit outcome that distinguishes
+`not_committed`, `committed`, and `uncertain`, or make cleanup after the durable
+commit non-throwing/recoverable without reporting publication failure. High-level
+candidate ownership must end as soon as the new live JSON document is authoritative,
+not only when every backup-retirement barrier returns. For an uncertain outcome,
+re-read the authoritative entry and delete only a candidate proven not to be
+referenced. Add first-write and cross-format overwrite tests that inject backup
+unlink and post-unlink directory-fsync failures through both `BlobStore.put()` and
+`UnifiedCache.put()`.
 
-### CR-02: `BlobStore.put()` corrupts an existing value when metadata commit fails
-
-**Classification:** BLOCKER
-
-**File:** `src/cacheness/storage/blob_store.py:159-188`
-
-**Issue:** `BlobStore.put()` publishes an overwrite to the deterministic live `storage_id` before calling `backend.put_entry()`. If metadata publication raises, the old metadata remains but its locator now contains the replacement bytes. A direct reproduction wrote `{"v": "old"}`, forced `put_entry()` to fail during replacement, observed the exception and unchanged metadata, then `get("k")` returned `{"v": "new"}`. The operation reports failure while silently changing committed data, and a changed handler type/format can instead make the old entry unreadable.
-
-**Fix:** Give `BlobStore.put()` a private-candidate protocol: serialize to a unique candidate, complete validation, then atomically publish metadata/locator ownership. Preserve the prior payload and metadata until commit succeeds, discard only the candidate on failure, and delete the prior payload only after the new record is authoritative. Add first-write and overwrite metadata-failure tests with differing handler formats.
-
-### CR-03: `UnifiedCache.put()` leaks arbitrary candidate payloads when metadata commit fails
-
-**Classification:** BLOCKER
-
-**File:** `src/cacheness/core.py:1064-1163`
-
-**Issue:** The candidate fix cleans up only the explicit invalid-digest and strict-signing branches. `metadata_backend.put_entry()` is outside any rollback handler, so a commit exception leaves the already-published candidate in managed storage with no metadata owner. A direct reproduction forced `put_entry()` to raise and found a complete `*-candidate-*.pkl` payload afterward. These candidates may contain sensitive or executable serialized application data, are not discoverable through normal cache cleanup, and accumulate on retries. The same gap applies to exceptions after guarded publication but before the two explicit cleanup branches.
-
-**Fix:** Track candidate ownership around the entire pre-commit region. In one `try/finally`, delete the candidate on every path until metadata commit has definitely succeeded; treat a false/failed delete as an explicit reconciliation error. Add injected failures for snapshot opening, digesting, signing, and metadata publication, asserting no candidate residue and exact preservation of an overwritten entry.
-
-### CR-04: `UnifiedCache.clear_all()` still performs irreversible prefix deletion
+### CR-R2: Failure to publish the committed clear journal leaves a prepared transaction live and later recovery destroys successful writes
 
 **Classification:** BLOCKER
 
-**File:** `src/cacheness/core.py:1466-1482`
+**Files:** `src/cacheness/storage/clear_recovery.py:206-235`, `src/cacheness/storage/blob_store.py:420-440`, `src/cacheness/core.py:1499-1527`
 
-**Issue:** `clear_all()` deletes payloads sequentially and clears metadata only afterward. If any later delete raises, earlier payloads are gone while all metadata records remain. A two-entry reproduction failed the second deletion and left one payload missing with both metadata rows still committed. This is the same deterministic partial-data-loss pattern that the second iteration fixed only in `BlobStore.clear()`.
+**Issue:** The rollback guard ends immediately after `_clear_backend()` returns.
+`_replace_journal()` is outside that guard. If the metadata clear succeeds but the
+durable `prepared -> committed` journal replacement fails, `clear()` raises while
+all metadata is cleared, originals are absent, tombstones and a prepared journal
+remain, and the live store is still usable. A reproduced JSON case then completed
+`put("new")` successfully. Recovering the retained prepared journal restored the
+old exact metadata snapshot, erased the successful new entry, and left its
+candidate payload orphaned. Even without the intervening write, a normal
+`Exception` at committed-state publication violates the pre-commit contract because
+the failed call does not restore the exact prior visible state.
 
-**Fix:** Route `UnifiedCache.clear_all()` through a transactional/reconciliation protocol: stage every payload into durable same-root tombstones, clear metadata only after staging succeeds, restore all payloads on any pre-commit failure, and durably journal post-commit finalization. Inject failures at every payload position, during metadata clear, and during finalization.
+**Fix:** Treat durable committed-journal publication as part of the pre-commit
+region. If `_replace_journal()` fails, immediately run `_rollback_prepared()` and
+return only after exact rollback; if rollback cannot complete, mark the coordinator
+and owning store poisoned and reject every normal operation until recovery reaches
+a terminal state. Add JSON, SQLite, and memory fault tests at committed-journal
+serialization, candidate write, replace, and directory-fsync boundaries, plus a
+test proving no intervening operation can be accepted while prepared evidence
+remains unresolved.
 
-### CR-05: Finalization-failed clear tombstones have no durable recovery identity
+### CR-R3: Normal writes bypass clear admission and can return success while clear deletes their metadata and strands their payload
 
 **Classification:** BLOCKER
 
-**File:** `src/cacheness/storage/blob_store.py:401-415,419-490`
+**Files:** `src/cacheness/storage/clear_recovery.py:136-159`, `src/cacheness/storage/blob_store.py:151-245,420-440`, `src/cacheness/core.py:1084-1230,1499-1527`
 
-**Issue:** After metadata is successfully cleared, a tombstone-delete failure raises and deliberately leaves `clear-tombstone-<uuid>` files. The only mapping from those random names to their original payload locators is the local `staged_payloads` list, which is discarded when `clear()` returns. There is no persisted journal, encoded original identity, startup reconciliation, or public recovery operation. The new test labels these files “recoverable” but asserts only that they remain; after close/restart they are anonymous retained copies. Thus `clear()` can remove all records, return failure, and indefinitely retain the supposedly deleted payload bytes—an erasure/confidentiality and deterministic-reconciliation failure.
+**Issue:** The process/advisory admission lock is acquired only by constructor
+recovery and `clear`; neither `put()` implementation participates. Consequently a
+clear snapshots its mappings, publishes `prepared`, and can pause before staging
+while a same-root `put()` commits a new entry. The clear then stages only its old
+snapshot and `clear_all()` deletes the newly committed metadata. A deterministic
+threaded reproduction had `BlobStore.put(..., key="raced")` return `"raced"`, the
+clear return successfully, `get("raced")` return `None`, and the raced candidate
+remain in the root without an owner. The same ordering exists in `UnifiedCache`.
+This is not the deferred general generation/CAS model: it is a data-loss hole in
+the newly claimed atomic global-clear boundary.
 
-**Fix:** Persist an atomic clear journal mapping each tombstone to its original locator and operation state before deleting live payloads. On startup or an explicit recovery call, deterministically roll forward committed clears (remove tombstones) or roll back uncommitted clears. Test close/reopen after every final-delete failure and prove the journal drives a terminal state.
+**Fix:** Coordinate every metadata/payload mutation with the clear state machine.
+Use a root-scoped reader/writer protocol in-process and a compatible shared/exclusive
+OS admission protocol across processes: ordinary puts hold shared admission from
+preflight through metadata authority and prior-payload cleanup; clear/recovery holds
+exclusive admission for the full transaction. Recheck for unresolved journal state
+after admission and before publication. Add deterministic same-instance, two-instance,
+and subprocess put-vs-clear tests for JSON and SQLite, asserting a linearizable
+outcome with no orphan payload and no successful write that is silently discarded.
 
-### CR-06: Valid large Python integer filters collapse into an untyped query miss
+## Prior Review History (preserved)
 
-**Classification:** BLOCKER
+The previous standard review at `2026-08-30T00:32:17Z` reported six blockers:
 
-**File:** `src/cacheness/query_validation.py:58-67`; `src/cacheness/core.py:642-683,723-727`
+1. **CR-01:** descriptor-mode staging did not bind publication to the validated regular-file inode.
+2. **CR-02:** `BlobStore.put()` overwrote the live deterministic payload before metadata commit.
+3. **CR-03:** `UnifiedCache.put()` left candidates after metadata-publication failure.
+4. **CR-04:** `UnifiedCache.clear_all()` irreversibly deleted a prefix before metadata clear.
+5. **CR-05:** failed clear finalization retained anonymous tombstones without durable recovery identity.
+6. **CR-06:** Python integers outside SQLite's signed 64-bit bind range collapsed into an untyped miss.
 
-**Issue:** Numeric validation rejects only non-finite floats. Python integers outside SQLite's signed 64-bit bind range are accepted, then passed directly as bind values. SQLite raises `OverflowError: Python int too large to convert to SQLite INTEGER`; the broad query catch logs it and returns `None`. A direct reproduction stored `score=10**100` and queried `score=10**99`; instead of returning the matching entry or a typed validation error, `query_meta()` returned `None`. These are valid Python values under the documented raw numeric threshold contract, and `None` is indistinguishable from unsupported backend/configuration.
-
-**Fix:** Define and enforce a numeric domain before opening the session. Either preserve arbitrary integer ordering with a decimal-safe representation/comparison, or reject values outside the supported backend range with `CacheQueryValidationError(reason=invalid_query_value)`. Never swallow numeric-domain failures into `None`. Add values at and beyond `-(2**63)`/`2**63-1`, very large positive/negative integers, and mixed int/float boundary tests.
+Plans 01-13 through 01-15 were reviewed as attempted closure of that set. The
+renewed findings above supersede the prior release decision but do not erase that
+iteration history.
 
 ---
 
-_Reviewed: 2026-08-30T00:32:17Z_
+_Reviewed: 2026-08-30T03:35:34Z_
 _Reviewer: the agent (gsd-code-reviewer)_
-_Depth: standard_
+_Depth: deep_
