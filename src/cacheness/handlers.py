@@ -23,6 +23,7 @@ from .interfaces import (
 )
 from .error_handling import (
     CacheLegacyFormatError,
+    CacheManifestUnsupportedVersionError,
     CacheReason,
     cache_operation_context,
 )
@@ -236,6 +237,11 @@ else:
 class PolarsDataFrameHandler(CacheHandler):
     """Handler for Polars DataFrames using Parquet format."""
 
+    @property
+    def payload_format(self) -> str:
+        """Return the native container declared in canonical manifests."""
+        return "parquet"
+
     def can_handle(self, data: Any) -> bool:
         """Check if data is a Polars DataFrame that can be saved to Parquet."""
         if not POLARS_AVAILABLE or pl is None:
@@ -279,6 +285,8 @@ class PolarsDataFrameHandler(CacheHandler):
 
                 return {
                     "storage_format": "parquet",
+                    "payload_format": self.payload_format,
+                    "payload_format_version": self.payload_format_version,
                     "file_size": file_size,
                     "actual_path": str(parquet_path),
                     "metadata": {
@@ -334,6 +342,11 @@ class PolarsDataFrameHandler(CacheHandler):
 class PandasSeriesHandler(CacheHandler):
     """Handler for Pandas Series using Parquet format."""
 
+    @property
+    def payload_format(self) -> str:
+        """Return the native container declared in canonical manifests."""
+        return "parquet"
+
     def can_handle(self, data: Any) -> bool:
         """Check if data is a Pandas Series."""
         if not PANDAS_AVAILABLE or pd is None:
@@ -372,6 +385,8 @@ class PandasSeriesHandler(CacheHandler):
             "file_size": file_size,
             "actual_path": str(parquet_path),
             "storage_format": "parquet",
+            "payload_format": self.payload_format,
+            "payload_format_version": self.payload_format_version,
             "metadata": {
                 "shape": list(df.shape),
                 "columns": list(df.columns),
@@ -413,6 +428,11 @@ class PandasSeriesHandler(CacheHandler):
 class PolarsSeriesHandler(CacheHandler):
     """Handler for Polars Series using Parquet format."""
 
+    @property
+    def payload_format(self) -> str:
+        """Return the native container declared in canonical manifests."""
+        return "parquet"
+
     def can_handle(self, data: Any) -> bool:
         """Check if data is a Polars Series."""
         if not POLARS_AVAILABLE or pl is None:
@@ -447,6 +467,8 @@ class PolarsSeriesHandler(CacheHandler):
             "file_size": file_size,
             "actual_path": str(parquet_path),
             "storage_format": "parquet",
+            "payload_format": self.payload_format,
+            "payload_format_version": self.payload_format_version,
             "metadata": {
                 "shape": list(df.shape),
                 "columns": list(df.columns),
@@ -488,6 +510,11 @@ class PolarsSeriesHandler(CacheHandler):
 class PandasDataFrameHandler(CacheHandler):
     """Handler for Pandas DataFrames using Parquet format."""
 
+    @property
+    def payload_format(self) -> str:
+        """Return the native container declared in canonical manifests."""
+        return "parquet"
+
     def can_handle(self, data: Any) -> bool:
         """Check if data is a Pandas DataFrame."""
         if not PANDAS_AVAILABLE or pd is None:
@@ -516,6 +543,8 @@ class PandasDataFrameHandler(CacheHandler):
 
         return {
             "storage_format": "parquet",
+            "payload_format": self.payload_format,
+            "payload_format_version": self.payload_format_version,
             "file_size": parquet_path.stat().st_size,
             "actual_path": str(parquet_path),
             "metadata": {
@@ -545,6 +574,20 @@ class PandasDataFrameHandler(CacheHandler):
 
 class ArrayHandler(CacheHandler):
     """Handler for native NPZ arrays and read-only legacy Blosc2 payloads."""
+
+    @property
+    def payload_format(self) -> str:
+        """Return the native container used for all new ordinary arrays."""
+        return "npz"
+
+    def supports_payload_contract(
+        self, payload_format: str, payload_format_version: int
+    ) -> bool:
+        """Recognize native NPZ and the explicit read-only legacy Blosc2 path."""
+        return payload_format_version == self.payload_format_version and payload_format in {
+            "npz",
+            "blosc2",
+        }
 
     def can_handle(self, data: Any) -> bool:
         """Check if data is a NumPy array or dict of arrays."""
@@ -589,6 +632,8 @@ class ArrayHandler(CacheHandler):
 
         return {
             "storage_format": "npz",
+            "payload_format": self.payload_format,
+            "payload_format_version": self.payload_format_version,
             "file_size": npz_path.stat().st_size,
             "actual_path": str(npz_path),
             "metadata": {
@@ -621,6 +666,8 @@ class ArrayHandler(CacheHandler):
 
         return {
             "storage_format": "npz",
+            "payload_format": self.payload_format,
+            "payload_format_version": self.payload_format_version,
             "file_size": npz_path.stat().st_size,
             "actual_path": str(npz_path),
             "metadata": {
@@ -739,6 +786,11 @@ class ArrayHandler(CacheHandler):
 class TensorFlowTensorHandler(CacheHandler):
     """Handler for TensorFlow tensors using blosc2.save_tensor/load_tensor."""
 
+    @property
+    def payload_format(self) -> str:
+        """Return the native Blosc2 tensor container identifier."""
+        return "blosc2_tensor"
+
     def can_handle(self, data: Any) -> bool:
         """Check if data is a TensorFlow tensor that can be cached."""
         # Quick check for obviously non-tensor types before importing TensorFlow
@@ -812,6 +864,8 @@ class TensorFlowTensorHandler(CacheHandler):
 
                 return {
                     "storage_format": "blosc2_tensor",
+                    "payload_format": self.payload_format,
+                    "payload_format_version": self.payload_format_version,
                     "file_size": file_size,
                     "actual_path": str(b2tr_path),
                     "metadata": {
@@ -881,6 +935,22 @@ class TensorFlowTensorHandler(CacheHandler):
 
 class ObjectHandler(CacheHandler):
     """Handler for general Python objects using compressed pickle."""
+
+    @property
+    def payload_format(self) -> str:
+        """Return the default native object payload format."""
+        return "compressed_pickle"
+
+    def supports_payload_contract(
+        self, payload_format: str, payload_format_version: int
+    ) -> bool:
+        """Recognize the exact pickle/dill containers this handler owns."""
+        return payload_format_version == self.payload_format_version and payload_format in {
+            "pickle",
+            "dill",
+            "compressed_pickle",
+            "compressed_dill",
+        }
 
     def can_handle(self, data: Any, config: Any = None) -> bool:
         """Check if data can be pickled or dill-serialized (and isn't handled by other handlers)."""
@@ -1066,6 +1136,8 @@ class ObjectHandler(CacheHandler):
 
         return {
             "storage_format": storage_format,
+            "payload_format": storage_format,
+            "payload_format_version": self.payload_format_version,
             "file_size": pickle_path.stat().st_size,
             "actual_path": str(pickle_path),
             "metadata": metadata,
@@ -1370,6 +1442,36 @@ class HandlerRegistry:
                 return handler
 
         raise ValueError(f"No handler found for data type: {data_type}")
+
+    def resolve_payload_contract(
+        self,
+        handler_type: str,
+        payload_format: str,
+        payload_format_version: int,
+    ) -> CacheHandler:
+        """Resolve a declared native handler contract without opening payload bytes."""
+        context = {
+            "handler_type": handler_type,
+            "payload_format": payload_format,
+            "payload_format_version": payload_format_version,
+        }
+        try:
+            handler = self.get_handler_by_type(handler_type)
+        except ValueError as exc:
+            raise CacheManifestUnsupportedVersionError(
+                "Canonical manifest declares an unsupported handler type",
+                context=context,
+            ) from exc
+
+        supports_contract = getattr(handler, "supports_payload_contract", None)
+        if not callable(supports_contract) or not supports_contract(
+            payload_format, payload_format_version
+        ):
+            raise CacheManifestUnsupportedVersionError(
+                "Canonical manifest declares an unsupported native payload contract",
+                context=context,
+            )
+        return handler
 
     def register_handler(
         self, 

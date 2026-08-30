@@ -48,6 +48,8 @@ class CacheWriter(ABC):
         Returns:
             Dictionary containing:
                 - storage_format: Format used for storage
+                - payload_format: Stable handler-owned native payload identifier
+                - payload_format_version: Cacheness contract version for that format
                 - file_size: Size of cached file in bytes
                 - actual_path: Actual file path used (with extension)
                 - metadata: Handler-specific metadata
@@ -115,7 +117,35 @@ class CacheHandler(CacheabilityChecker, CacheWriter, CacheReader, FormatProvider
     Handlers can also implement individual interfaces for more focused responsibilities.
     """
 
-    pass
+    PAYLOAD_FORMAT_VERSION = 1
+
+    @property
+    def payload_format(self) -> str:
+        """Return the stable native container identifier owned by this handler.
+
+        Custom handlers that have not opted into a native container identifier
+        retain the historical ``data_type`` fallback. Built-in handlers override
+        this property with their exact persisted format names.
+        """
+        return self.data_type
+
+    @property
+    def payload_format_version(self) -> int:
+        """Return the independently versioned Cacheness payload contract."""
+        return self.PAYLOAD_FORMAT_VERSION
+
+    def payload_identity(self) -> tuple[str, int]:
+        """Return the declared native payload format and contract version."""
+        return self.payload_format, self.payload_format_version
+
+    def supports_payload_contract(
+        self, payload_format: str, payload_format_version: int
+    ) -> bool:
+        """Check a declared payload identity without opening payload bytes."""
+        return (
+            payload_format == self.payload_format
+            and payload_format_version == self.payload_format_version
+        )
 
 
 class GuardedWriteResult(TypedDict, total=False):
@@ -127,6 +157,8 @@ class GuardedWriteResult(TypedDict, total=False):
     """
 
     storage_format: str
+    payload_format: str
+    payload_format_version: int
     file_size: int
     actual_path: str
     metadata: Dict[str, Any]
