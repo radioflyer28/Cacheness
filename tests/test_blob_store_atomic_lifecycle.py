@@ -6,6 +6,9 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
+from cacheness.error_handling import CacheBlobRecoverableCleanupError
 from cacheness.storage import BlobStore
 
 
@@ -43,6 +46,19 @@ class _SingleHandlerRegistry:
 
     def get_handler(self, _data: Any) -> _NativeJsonHandler:
         return self.handler
+
+
+class _SimulatedProcessLoss(BaseException):
+    """Model a crash that skips the ordinary-exception cleanup path."""
+
+
+class _FailingSerializationHandler(_NativeJsonHandler):
+    """Prove private handler serialization precedes lifecycle evidence."""
+
+    def put(self, data: Any, file_path: Path, config: Any) -> dict[str, Any]:
+        del data, file_path, config
+        self.events.append("private_serialization")
+        raise RuntimeError("native serialization failed")
 
     def get_handler_by_type(self, data_type: str) -> _NativeJsonHandler:
         assert data_type == self.handler.data_type
@@ -118,3 +134,138 @@ def test_tracer_json_put_uses_immutable_generation_cas_and_native_bytes(
         ]
     finally:
         store.close()
+
+
+def test_serialization_failure_leaves_no_operation_evidence_or_candidate(
+    tmp_path: Path,
+) -> None:
+    """The durable lifecycle starts only after native serialization succeeds."""
+    root = tmp_path / "serialization-failure"
+    events: list[str] = []
+    store = BlobStore(root, backend="json")
+    store.handlers = _SingleHandlerRegistry(_FailingSerializationHandler(events))
+
+    try:
+        with pytest.raises(RuntimeError, match="native serialization failed"):
+            store.put({"value": "never-published"}, key="failure-key")
+
+        assert events == ["private_serialization"]
+        assert not list((root / "operations").glob("*.json"))
+        assert not list(root.glob("*generation-*"))
+        assert store.get_metadata("failure-key") is None
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    "fault_step",
+    (
+        "evidence_created",
+        "candidate_published",
+        "candidate_verified",
+        "authority_published",
+        "cleanup_completed",
+        "evidence_retired",
+    ),
+)
+@pytest.mark.parametrize("failure_kind", ("ordinary", "crash"))
+def test_lifecycle_failure_boundary_reopens_to_one_complete_generation(
+    tmp_path: Path,
+    fault_step: str,
+    failure_kind: str,
+) -> None:
+    """Every persisted boundary converges after exceptions or process loss."""
+    root = tmp_path / f"reopen-{fault_step}-{failure_kind}"
+    store = BlobStore(root, backend="json")
+    previous_path: Path | None = None
+    try:
+        key = store.put({"generation": "old"}, key="failure-key")
+        existing = store._load_authenticated_manifest(
+            key,
+            operation="test",
+            require_locator=True,
+        )
+        assert existing is not None
+        previous_path = existing[2]
+        assert previous_path is not None
+
+        def interrupt(step: str, _record: Any) -> None:
+            if step != fault_step:
+                return
+            if failure_kind == "crash":
+                raise _SimulatedProcessLoss(f"process lost at {step}")
+            raise RuntimeError(f"ordinary failure at {step}")
+
+        store.lifecycle.test_hook = interrupt
+        expected_exception: type[BaseException]
+        if failure_kind == "crash":
+            expected_exception = _SimulatedProcessLoss
+        else:
+            expected_exception = Exception
+        with pytest.raises(expected_exception):
+            store.put({"generation": "new"}, key=key)
+    finally:
+        store.close()
+
+    assert previous_path is not None
+    reopened = BlobStore(root, backend="json")
+    try:
+        new_authority = fault_step in {
+            "authority_published",
+            "cleanup_completed",
+            "evidence_retired",
+        }
+        expected = {"generation": "new"} if new_authority else {"generation": "old"}
+        assert reopened.get("failure-key") == expected
+        assert not list((root / "operations").glob("*.json"))
+        if new_authority:
+            assert not previous_path.exists()
+        else:
+            assert previous_path.exists()
+    finally:
+        reopened.close()
+
+
+def test_cleanup_failure_keeps_new_authority_and_resumes_after_reopen(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Post-authority cleanup debt carries stable context and remains resumable."""
+    root = tmp_path / "cleanup-failure"
+    store = BlobStore(root, backend="json")
+    previous_path: Path | None = None
+    try:
+        key = store.put({"generation": "old"}, key="cleanup-key")
+        existing = store._load_authenticated_manifest(
+            key,
+            operation="test",
+            require_locator=True,
+        )
+        assert existing is not None
+        previous_path = existing[2]
+        assert previous_path is not None
+
+        def reject_cleanup(_locator: Path) -> None:
+            raise OSError("simulated cleanup failure")
+
+        monkeypatch.setattr(store, "_delete_or_prove_absent", reject_cleanup)
+        with pytest.raises(CacheBlobRecoverableCleanupError) as error:
+            store.put({"generation": "new"}, key=key)
+
+        assert error.value.context["operation_id"]
+        assert error.value.context["generation"]
+        assert error.value.context["key"] == key
+        assert store.get(key) == {"generation": "new"}
+        assert previous_path.exists()
+        assert list((root / "operations").glob("*.json"))
+    finally:
+        store.close()
+
+    assert previous_path is not None
+    reopened = BlobStore(root, backend="json")
+    try:
+        assert reopened.get("cleanup-key") == {"generation": "new"}
+        assert not previous_path.exists()
+        assert not list((root / "operations").glob("*.json"))
+    finally:
+        reopened.close()
