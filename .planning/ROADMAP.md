@@ -30,7 +30,7 @@ Cacheness will move from overlapping cache and storage paths to one production-g
   4. Structured metadata and query fields are parsed and constructed without metadata-controlled `eval` or interpolated backend query fragments.
   5. Users can identify the trusted-application-payload boundary and the risks and required configuration for unsafe serializers from project documentation.
 
-**Plans**: 14/15 plans executed
+**Plans**: 15/15 plans executed; orchestrator review and validation remain pending
 
 Plans:
 **Wave 1**
@@ -76,7 +76,7 @@ Plans:
 
 **Wave 10** *(gap closure; blocked on Wave 9 completion)*
 
-- [ ] 01-15-PLAN.md — Close candidate and UnifiedCache clear gaps and stage renewed evidence.
+- [x] 01-15-PLAN.md — Close candidate and UnifiedCache clear gaps and stage renewed evidence.
 
 ### Phase 2: Canonical Storage and Integrity Contract
 
@@ -184,7 +184,7 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Compatibility and Security Baseline | 14/15 | In Progress|  |
+| 1. Compatibility and Security Baseline | 15/15 | Review/validation pending |  |
 | 2. Canonical Storage and Integrity Contract | 0/TBD | Not started | - |
 | 3. Atomic Lifecycle and Recovery Engine | 0/TBD | Not started | - |
 | 4. Metadata Composition and Topology Contracts | 0/TBD | Not started | - |
