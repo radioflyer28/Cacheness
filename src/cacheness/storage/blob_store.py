@@ -71,7 +71,12 @@ from .integrity import (
     sign_hmac_sha256,
     verify_hmac_sha256,
 )
-from .manifest import BlobManifestV1, ManifestDecodeError
+from .manifest import (
+    BlobManifestV1,
+    ManifestDecodeError,
+    canonical_signing_bytes_from_record,
+    decode_canonical_manifest_record,
+)
 from .manifest_repository import create_manifest_repository
 from .legacy_manifest import LegacyManifestIdentity, recognize_legacy_fixture_tree
 from .path_security import encode_physical_name, resolve_managed_locator
@@ -929,7 +934,25 @@ class BlobStore:
         if raw_manifest is None:
             return None
         try:
-            manifest = BlobManifestV1.from_canonical_bytes(raw_manifest)
+            raw_record = decode_canonical_manifest_record(raw_manifest)
+        except CacheManifestUnsupportedVersionError as exc:
+            raise CacheBlobManifestUnsupportedVersionError(
+                "Canonical BlobStore manifest schema is unsupported"
+            ) from exc
+        except ManifestDecodeError as exc:
+            raise CacheBlobManifestMalformedError(
+                "Canonical BlobStore manifest is malformed"
+            ) from exc
+        if not verify_hmac_sha256(
+            canonical_signing_bytes_from_record(raw_record),
+            raw_record.get("signature"),
+            self._manifest_key(),
+        ):
+            raise CacheBlobManifestUnauthenticatedError(
+                "Canonical BlobStore manifest signature is invalid"
+            )
+        try:
+            manifest = BlobManifestV1.from_mapping(raw_record)
         except CacheManifestUnsupportedVersionError as exc:
             if "Payload format" in str(exc):
                 raise CacheBlobPayloadUnsupportedVersionError(
@@ -942,14 +965,6 @@ class BlobStore:
             raise CacheBlobManifestMalformedError(
                 "Canonical BlobStore manifest is malformed"
             ) from exc
-        if not verify_hmac_sha256(
-            manifest.signing_bytes(),
-            manifest.signature,
-            self._manifest_key(),
-        ):
-            raise CacheBlobManifestUnauthenticatedError(
-                "Canonical BlobStore manifest signature is invalid"
-            )
         if manifest.key != key:
             raise CacheBlobLifecycleConflictError(
                 "Canonical BlobStore manifest key conflicts with lookup"

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import os
 import logging
+import json
+import os
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -285,6 +286,28 @@ def test_unauthenticated_manifest_fails_before_snapshot_or_handler(
         CacheReason.BLOB_MANIFEST_UNAUTHENTICATED.value
     )
     assert store.manifest_repository.get_raw("integrity-key") == raw_before
+
+
+def test_unauthenticated_invalid_critical_syntax_is_not_semantically_classified(
+    signed_store: BlobStore, monkeypatch: pytest.MonkeyPatch
+):
+    """A malformed-looking signed field cannot bypass the HMAC failure outcome."""
+    store = signed_store
+    record = _manifest_for(store, "integrity-key").to_mapping()
+    record["digest"] = "not-a-sha256-digest"
+    store.manifest_repository.put_raw(
+        "integrity-key",
+        json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+    )
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("unauthenticated records must not use payload state")
+
+    monkeypatch.setattr(store.guarded_handler_io, "open_snapshot", forbidden)
+    monkeypatch.setattr(store.handlers, "resolve_payload_contract", forbidden)
+
+    with pytest.raises(CacheBlobManifestUnauthenticatedError):
+        store.get("integrity-key")
 
 
 @pytest.mark.parametrize(

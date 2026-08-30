@@ -31,6 +31,26 @@ MAX_STRING_UTF8_BYTES = 262_144
 MIN_SIGNED_64 = -(2**63)
 MAX_SIGNED_64 = 2**63 - 1
 _HEX_SHA256 = re.compile(r"[0-9a-f]{64}")
+_CANONICAL_FIELDS = frozenset(
+    {
+        "byte_size",
+        "created_at",
+        "digest",
+        "digest_algorithm",
+        "generation",
+        "handler_metadata",
+        "handler_type",
+        "key",
+        "locator",
+        "payload_format",
+        "payload_format_version",
+        "schema_version",
+        "signature",
+        "signature_algorithm",
+        "state",
+        "user_metadata",
+    }
+)
 
 
 ManifestDecodeError = CacheManifestIntegrityError
@@ -141,6 +161,78 @@ def _validate_canonical_value(value: Any, *, depth: int, nodes: list[int]) -> No
             _validate_canonical_value(item, depth=depth + 1, nodes=nodes)
         return
     raise CacheManifestIntegrityError("Manifest metadata is not JSON-compatible")
+
+
+def _canonical_encode(record: Mapping[str, Any]) -> bytes:
+    """Encode one bounded raw record without applying semantic manifest rules."""
+    _validate_canonical_value(record, depth=1, nodes=[0])
+    try:
+        text = json.dumps(
+            record,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as exc:
+        raise CacheManifestIntegrityError("Manifest metadata is not JSON-compatible") from exc
+    encoded = text.encode("utf-8")
+    if len(encoded) > MAX_MANIFEST_BYTES:
+        raise CacheManifestIntegrityError(
+            "Canonical manifest byte limit exceeded",
+            reason=CacheReason.MANIFEST_BOUNDS,
+        )
+    return encoded
+
+
+def decode_canonical_manifest_record(raw: bytes) -> dict[str, Any]:
+    """Boundedly decode only the framing needed before authentication.
+
+    The schema version is needed to dispatch the wire format.  Every other
+    structural claim remains raw until its complete signed projection has been
+    authenticated by the BlobStore read boundary.
+    """
+    if not isinstance(raw, bytes) or not raw:
+        raise CacheManifestIntegrityError("Canonical manifest bytes must be non-empty")
+    if len(raw) > MAX_MANIFEST_BYTES:
+        raise CacheManifestIntegrityError(
+            "Canonical manifest byte limit exceeded",
+            reason=CacheReason.MANIFEST_BOUNDS,
+        )
+    try:
+        decoded = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise CacheManifestIntegrityError("Canonical manifest is not valid UTF-8") from exc
+    try:
+        record = json.loads(
+            decoded,
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_int=_parse_canonical_int,
+            parse_float=_reject_float,
+            parse_constant=_reject_constant,
+        )
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        if isinstance(exc, CacheManifestIntegrityError):
+            raise
+        raise CacheManifestIntegrityError("Canonical manifest is not valid JSON") from exc
+    if not isinstance(record, dict):
+        raise CacheManifestIntegrityError("Canonical manifest must be a JSON object")
+    _validate_canonical_value(record, depth=1, nodes=[0])
+    schema_version = record.get("schema_version")
+    if not isinstance(schema_version, int) or isinstance(schema_version, bool):
+        raise CacheManifestIntegrityError("Manifest schema version must be an integer")
+    if schema_version != MANIFEST_SCHEMA_VERSION:
+        raise CacheManifestUnsupportedVersionError(
+            f"Unsupported manifest schema version: {schema_version}"
+        )
+    return record
+
+
+def canonical_signing_bytes_from_record(record: Mapping[str, Any]) -> bytes:
+    """Return the fixed unsigned projection of a bounded raw manifest record."""
+    unsigned = dict(record)
+    unsigned.pop("signature", None)
+    return _canonical_encode(unsigned)
 
 
 @dataclass(frozen=True)
@@ -276,24 +368,7 @@ class BlobManifestV1:
         # untrusted records on the read path.  Validating the two metadata
         # maps independently is insufficient because their combined node
         # count, plus the enclosing schema fields, can exceed the wire limit.
-        _validate_canonical_value(record, depth=1, nodes=[0])
-        try:
-            text = json.dumps(
-                record,
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=False,
-                allow_nan=False,
-            )
-        except (TypeError, ValueError) as exc:
-            raise CacheManifestIntegrityError("Manifest metadata is not JSON-compatible") from exc
-        encoded = text.encode("utf-8")
-        if len(encoded) > MAX_MANIFEST_BYTES:
-            raise CacheManifestIntegrityError(
-                "Canonical manifest byte limit exceeded",
-                reason=CacheReason.MANIFEST_BOUNDS,
-            )
-        return encoded
+        return _canonical_encode(record)
 
     def signing_bytes(self) -> bytes:
         """Return the complete signed projection, excluding only the signature."""
@@ -308,54 +383,15 @@ class BlobManifestV1:
     @classmethod
     def from_canonical_bytes(cls, raw: bytes) -> "BlobManifestV1":
         """Decode a schema-1 record without interpreting any payload bytes."""
-        if not isinstance(raw, bytes) or not raw:
-            raise CacheManifestIntegrityError("Canonical manifest bytes must be non-empty")
-        if len(raw) > MAX_MANIFEST_BYTES:
-            raise CacheManifestIntegrityError(
-                "Canonical manifest byte limit exceeded",
-                reason=CacheReason.MANIFEST_BOUNDS,
-            )
-        try:
-            decoded = raw.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise CacheManifestIntegrityError("Canonical manifest is not valid UTF-8") from exc
-        try:
-            record = json.loads(
-                decoded,
-                object_pairs_hook=_reject_duplicate_keys,
-                parse_int=_parse_canonical_int,
-                parse_float=_reject_float,
-                parse_constant=_reject_constant,
-            )
-        except (TypeError, ValueError, json.JSONDecodeError) as exc:
-            if isinstance(exc, CacheManifestIntegrityError):
-                raise
-            raise CacheManifestIntegrityError("Canonical manifest is not valid JSON") from exc
-        if not isinstance(record, dict):
-            raise CacheManifestIntegrityError("Canonical manifest must be a JSON object")
-        expected = {
-            "byte_size",
-            "created_at",
-            "digest",
-            "digest_algorithm",
-            "generation",
-            "handler_metadata",
-            "handler_type",
-            "key",
-            "locator",
-            "payload_format",
-            "payload_format_version",
-            "schema_version",
-            "signature",
-            "signature_algorithm",
-            "state",
-            "user_metadata",
-        }
-        if set(record) != expected:
+        return cls.from_mapping(decode_canonical_manifest_record(raw))
+
+    @classmethod
+    def from_mapping(cls, record: Mapping[str, Any]) -> "BlobManifestV1":
+        """Validate a previously bounded and, when required, authenticated map."""
+        if set(record) != _CANONICAL_FIELDS:
             raise CacheManifestIntegrityError(
                 "Canonical manifest has an unknown or missing field"
             )
-        _validate_canonical_value(record, depth=1, nodes=[0])
         return cls(**record)
 
 
@@ -370,6 +406,8 @@ __all__ = [
     "MAX_COLLECTION_ITEMS",
     "MAX_TOTAL_NODES",
     "MAX_STRING_UTF8_BYTES",
+    "canonical_signing_bytes_from_record",
+    "decode_canonical_manifest_record",
     "ManifestDecodeError",
     "UnsupportedManifestVersionError",
 ]
