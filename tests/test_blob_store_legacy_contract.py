@@ -12,6 +12,7 @@ import pytest
 
 from cacheness.error_handling import CacheBlobMigrationRequiredError
 from cacheness.storage.blob_store import BlobStore
+from cacheness.storage import legacy_manifest
 from cacheness.storage.legacy_manifest import (
     LegacyManifestRecognitionError,
     recognize_legacy_fixture_tree,
@@ -139,3 +140,85 @@ def test_malformed_signed_legacy_evidence_is_typed_and_non_mutating(tmp_path: Pa
         recognize_legacy_fixture_tree(copied)
 
     assert _tree_evidence(copied) == before
+
+
+@pytest.mark.parametrize(
+    ("fixture_id", "evidence_name"),
+    (
+        ("array-raw-v035-compress", "payload.b2nd"),
+        ("json-split-unsigned-v037", "metadata.json"),
+        ("json-split-signed-v038", "payload.npz"),
+        ("sqlite-metadata-json-v039", "metadata.sqlite3"),
+        ("json-nested-v0314", "provenance.json"),
+    ),
+)
+def test_legacy_recognition_rejects_symlinked_evidence(
+    tmp_path: Path, fixture_id: str, evidence_name: str
+) -> None:
+    """Every named legacy evidence kind remains contained below its root."""
+    source = FIXTURE_ROOT / fixture_id
+    copied = tmp_path / source.name
+    shutil.copytree(source, copied, copy_function=shutil.copy2)
+    evidence = copied / evidence_name
+    outside = tmp_path / f"outside-{evidence_name}"
+    outside.write_bytes(evidence.read_bytes())
+    evidence.unlink()
+    evidence.symlink_to(outside)
+
+    with pytest.raises(LegacyManifestRecognitionError):
+        recognize_legacy_fixture_tree(copied)
+
+
+def test_signed_legacy_evidence_requires_valid_hmac_after_pinned_hash_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Valid-hex signature tampering is rejected by the historical verifier."""
+    source = FIXTURE_ROOT / "json-split-signed-v038"
+    copied = tmp_path / source.name
+    shutil.copytree(source, copied, copy_function=shutil.copy2)
+    metadata_path = copied / "metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    signature_key = next(iter(metadata["entry_signature"]))
+    original = metadata["entry_signature"][signature_key]
+    replacement = f"{'0' if original[0] != '0' else '1'}{original[1:]}"
+    metadata["entry_signature"][signature_key] = replacement
+    metadata["entries"][signature_key]["entry_signature"] = replacement
+    metadata_path.write_text(
+        json.dumps(metadata, sort_keys=True, separators=(",", ":")), encoding="utf-8"
+    )
+    monkeypatch.setitem(
+        legacy_manifest._EXACT_EVIDENCE_SHA256["json-split-signed-v038"],
+        "metadata.json",
+        hashlib.sha256(metadata_path.read_bytes()).hexdigest(),
+    )
+
+    with pytest.raises(LegacyManifestRecognitionError, match="HMAC"):
+        recognize_legacy_fixture_tree(copied)
+
+
+@pytest.mark.parametrize(
+    ("fixture_id", "evidence_name"),
+    (
+        ("json-split-unsigned-v037", "metadata.json"),
+        ("json-split-unsigned-v037", "payload.npz"),
+    ),
+)
+def test_legacy_recognition_requires_pinned_evidence_and_no_extra_sidecars(
+    tmp_path: Path, fixture_id: str, evidence_name: str
+) -> None:
+    """Shape-compatible mutation and extra files cannot claim exact identity."""
+    source = FIXTURE_ROOT / fixture_id
+    copied = tmp_path / source.name
+    shutil.copytree(source, copied, copy_function=shutil.copy2)
+    evidence = copied / evidence_name
+    raw = bytearray(evidence.read_bytes())
+    raw[-1] ^= 1
+    evidence.write_bytes(bytes(raw))
+
+    with pytest.raises(LegacyManifestRecognitionError):
+        recognize_legacy_fixture_tree(copied)
+
+    shutil.copytree(source, copied, copy_function=shutil.copy2, dirs_exist_ok=True)
+    (copied / "unexpected.sidecar").write_bytes(b"not legacy evidence")
+    with pytest.raises(LegacyManifestRecognitionError):
+        recognize_legacy_fixture_tree(copied)
