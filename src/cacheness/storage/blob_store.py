@@ -154,6 +154,9 @@ def _raise_translated_recovery_failure(
     coordinator: ClearRecoveryCoordinator, error: CacheStorageError
 ) -> None:
     """Map tagged recovery-admission failures into the direct BlobStore API."""
+    if isinstance(error, (CacheBlobBackendError, CacheBlobLifecycleConflictError)):
+        raise error
+
     if not ClearRecoveryCoordinator.is_lifecycle_conflict(error) and (
         "clear_recovery_failure" not in error.context
     ):
@@ -720,12 +723,22 @@ class BlobStore:
         mappings = self._preflight_clear_manifests()
         try:
             cleared = self._clear_recovery.clear(mappings)
+        except (CacheBlobBackendError, CacheBlobLifecycleConflictError):
+            raise
         except CacheStorageError as exc:
             if ClearRecoveryCoordinator.is_lifecycle_conflict(exc):
                 raise CacheBlobLifecycleConflictError(
                     str(exc), context=exc.context
                 ) from exc
             raise CacheBlobBackendError(str(exc), context=exc.context) from exc
+        except Exception as exc:
+            raise CacheBlobBackendError(
+                "BlobStore clear transaction failed",
+                context={
+                    "operation": "clear",
+                    "backend": type(self.backend).__name__,
+                },
+            ) from exc
         if type(self.backend) is SqliteBackend:
             for cache_key, _ in mappings:
                 self.manifest_repository.remove(cache_key)
