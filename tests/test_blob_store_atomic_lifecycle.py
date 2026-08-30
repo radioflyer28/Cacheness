@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from cacheness import CacheConfig
+from cacheness.config import LifecycleLimits
 from cacheness.error_handling import (
     CacheBlobLifecycleConflictError,
     CacheBlobRecoverableCleanupError,
@@ -478,5 +481,119 @@ def test_clear_target_page_and_checkpoint_preserve_exact_progress_after_reopen(
         assert ClearTargetCheckpoint.from_canonical_bytes(
             persisted_checkpoint
         ).completed_target_indices == (0,)
+    finally:
+        reopened.close()
+
+
+def test_clear_snapshot_barrier_preserves_a_later_key_after_bounded_admission(
+    tmp_path: Path,
+) -> None:
+    """Clear only admits its finite target snapshot before ordinary work resumes."""
+    root = tmp_path / "clear-snapshot-barrier"
+    limits = LifecycleLimits(manifest_page_size=1)
+    config = CacheConfig(cache_dir=str(root), lifecycle_limits=limits)
+    owner = BlobStore(root, backend="json", config=config)
+    contender = BlobStore(root, backend="json", config=config)
+    snapshot_complete = threading.Event()
+    release_snapshot = threading.Event()
+    later_complete = threading.Event()
+    clear_errors: list[BaseException] = []
+
+    try:
+        owner.put({"generation": "before"}, key="before")
+        assert owner.manifest_repository.lifecycle_limits is limits
+        assert owner._admission_barrier is contender._admission_barrier
+
+        def pause_at_snapshot(seam: str, _record: Any) -> None:
+            if seam == "clear_snapshot_complete":
+                snapshot_complete.set()
+                assert release_snapshot.wait(timeout=5)
+
+        def clear_owner() -> None:
+            try:
+                owner.clear()
+            except BaseException as exc:
+                clear_errors.append(exc)
+
+        def publish_later() -> None:
+            contender.put({"generation": "later"}, key="later")
+            later_complete.set()
+
+        owner.lifecycle.fault_hook = pause_at_snapshot
+        clear_thread = threading.Thread(target=clear_owner)
+        clear_thread.start()
+        assert snapshot_complete.wait(timeout=5)
+
+        put_thread = threading.Thread(target=publish_later)
+        put_thread.start()
+        assert not later_complete.wait(timeout=0.2)
+
+        release_snapshot.set()
+        clear_thread.join(timeout=5)
+        put_thread.join(timeout=5)
+        assert not clear_thread.is_alive()
+        assert not put_thread.is_alive()
+        assert clear_errors == []
+        assert owner.get("before") is None
+        assert contender.get("later") == {"generation": "later"}
+    finally:
+        contender.close()
+        owner.close()
+
+
+def test_clear_conflict_does_not_revoke_a_later_generation(tmp_path: Path) -> None:
+    """A snapshot target whose authority changed is retained as a conflict."""
+    root = tmp_path / "clear-changed-target"
+    owner = BlobStore(root, backend="json")
+    winner = BlobStore(root, backend="json")
+    overwritten = False
+
+    try:
+        owner.put({"generation": "before"}, key="shared")
+
+        def overwrite_after_snapshot(seam: str, _record: Any) -> None:
+            nonlocal overwritten
+            if seam == "clear_target_delete" and not overwritten:
+                overwritten = True
+                winner.put({"generation": "later"}, key="shared")
+
+        owner.lifecycle.fault_hook = overwrite_after_snapshot
+        assert owner.clear() == 0
+        assert overwritten
+        assert owner.get("shared") == {"generation": "later"}
+        assert winner.get("shared") == {"generation": "later"}
+    finally:
+        winner.close()
+        owner.close()
+
+
+def test_clear_resume_does_not_repeat_completed_targets_after_reopen(
+    tmp_path: Path,
+) -> None:
+    """Durable page checkpoints let recovery resume only the unfinished target."""
+    root = tmp_path / "clear-resume"
+    store = BlobStore(root, backend="json")
+    completed_once = False
+    try:
+        store.put({"generation": "first"}, key="first")
+        store.put({"generation": "second"}, key="second")
+
+        def interrupt_after_checkpoint(seam: str, _record: Any) -> None:
+            nonlocal completed_once
+            if seam == "clear_target_checkpoint" and not completed_once:
+                completed_once = True
+                raise _SimulatedProcessLoss("interrupted after durable clear progress")
+
+        store.lifecycle.fault_hook = interrupt_after_checkpoint
+        with pytest.raises(_SimulatedProcessLoss):
+            store.clear()
+    finally:
+        store.close()
+
+    reopened = BlobStore(root, backend="json")
+    try:
+        assert completed_once
+        assert reopened.get("first") is None
+        assert reopened.get("second") is None
     finally:
         reopened.close()
