@@ -1,6 +1,7 @@
 """Validation helpers for safe SQLite cache metadata field queries."""
 
 from collections.abc import Iterable, Mapping
+import math
 import re
 from typing import Any
 
@@ -18,6 +19,15 @@ def _invalid_query_field(field: object) -> CacheQueryValidationError:
         f"Invalid cache metadata query field: {field!r}",
         context={"field": field},
         reason=CacheReason.INVALID_QUERY_FIELD,
+    )
+
+
+def _invalid_query_value(field: str, value: object) -> CacheQueryValidationError:
+    """Build the stable public error used for an invalid query value."""
+    return CacheQueryValidationError(
+        f"Invalid cache metadata query value for {field!r}: {value!r}",
+        context={"field": field, "value": repr(value)},
+        reason=CacheReason.INVALID_QUERY_VALUE,
     )
 
 
@@ -43,6 +53,18 @@ def validate_query_fields(fields: Mapping[str, Any] | Iterable[str]) -> tuple[st
             raise _invalid_query_field(field)
 
     return field_names
+
+
+def validate_query_numeric_filters(filters: Mapping[str, Any]) -> None:
+    """Reject numeric thresholds that cannot have ordered comparison semantics.
+
+    SQLite accepts permissive casts for non-finite spellings such as ``nan`` and
+    ``inf``. Metadata numeric filters deliberately use threshold comparisons, so
+    accepting those values would make their result backend-dependent.
+    """
+    for field, value in filters.items():
+        if isinstance(value, float) and not math.isfinite(value):
+            raise _invalid_query_value(field, value)
 
 
 def to_sqlite_json_path(field: str) -> str:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from types import SimpleNamespace
 
 import pytest
@@ -188,6 +189,24 @@ def test_invalid_fields_fail_before_session_or_execute_at_every_mapping_position
     assert error.value.context == {
         "field": invalid_field,
         "reason": CacheReason.INVALID_QUERY_FIELD.value,
+    }
+    assert session_spy.session_calls == 0
+    assert session_spy.execute_calls == 0
+
+
+@pytest.mark.parametrize("value", (math.nan, math.inf, -math.inf))
+def test_nonfinite_numeric_filters_fail_before_session_or_execute(value: float) -> None:
+    """Non-finite thresholds are rejected before reaching SQLite casts."""
+    session_spy = _SessionSpy()
+    cache = _sqlite_cache_with_session_spy(session_spy)
+
+    with pytest.raises(CacheQueryValidationError) as error:
+        cache.query_meta(score=value)
+
+    assert error.value.context == {
+        "field": "score",
+        "value": repr(value),
+        "reason": CacheReason.INVALID_QUERY_VALUE.value,
     }
     assert session_spy.session_calls == 0
     assert session_spy.execute_calls == 0

@@ -28,6 +28,7 @@ class CacheReason(str, Enum):
     PATH_RACE = "path_race"
     INVALID_IDENTIFIER = "invalid_identifier"
     INVALID_QUERY_FIELD = "invalid_query_field"
+    INVALID_QUERY_VALUE = "invalid_query_value"
     INVALID_LEGACY_ARRAY = "invalid_legacy_array"
     UNSAFE_OBJECT_ARRAY = "unsafe_object_array"
     UNSUPPORTED_LEGACY_LAYOUT = "unsupported_legacy_layout"

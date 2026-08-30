@@ -11,6 +11,7 @@ import xxhash
 import inspect
 import threading
 import logging
+import sys
 import uuid
 import warnings
 from pathlib import Path
@@ -573,9 +574,14 @@ class UnifiedCache:
             specific_exp = cache.query_meta(experiment="exp_001")
         """
         try:
-            from .query_validation import to_sqlite_json_path, validate_query_fields
+            from .query_validation import (
+                to_sqlite_json_path,
+                validate_query_fields,
+                validate_query_numeric_filters,
+            )
 
             validated_fields = validate_query_fields(filters)
+            validate_query_numeric_filters(filters)
             sqlite_paths = tuple(
                 to_sqlite_json_path(field) for field in validated_fields
             )
@@ -594,7 +600,7 @@ class UnifiedCache:
                 logger.warning("SQLAlchemy session not available for query_meta()")
                 return None
 
-            from sqlalchemy import Float, bindparam, cast, func, or_, select
+            from sqlalchemy import Float, and_, bindparam, case, cast, func, or_, select
 
             from .metadata import CacheEntry
             from .serialization import serialize_for_cache_key
@@ -648,8 +654,31 @@ class UnifiedCache:
                             json_value,
                             func.instr(json_value, ":") + 1,
                         )
+                        is_valid_json_number = func.json_type(
+                            case(
+                                (
+                                    func.json_valid(numeric_value)
+                                    == bindparam(
+                                        f"query_meta_json_valid_{index}", value=1
+                                    ),
+                                    numeric_value,
+                                ),
+                                else_=bindparam(
+                                    f"query_meta_invalid_json_{index}", value="null"
+                                ),
+                            )
+                        ).in_(("integer", "real"))
+                        finite_numeric_value = and_(
+                            is_valid_json_number,
+                            func.abs(cast(numeric_value, Float))
+                            <= bindparam(
+                                f"query_meta_max_finite_{index}",
+                                value=sys.float_info.max,
+                            ),
+                        )
                         query = query.where(
                             numeric_type,
+                            finite_numeric_value,
                             cast(numeric_value, Float)
                             >= bindparam(value_parameter, value=value),
                         )

@@ -8,6 +8,8 @@ based on their stored cache_key_params using SQLite JSON1 extension.
 """
 
 import tempfile
+import math
+import sys
 import pytest
 from pathlib import Path
 from datetime import datetime
@@ -149,6 +151,54 @@ class TestQueryMeta:
         assert [entry["cache_key_params"]["score"] for entry in entries] == [
             "float:1.5"
         ]
+
+    def test_query_meta_numeric_filters_only_compare_finite_json_numbers(
+        self, temp_cache
+    ):
+        """Special float spellings never enter finite numeric threshold results."""
+        cache = temp_cache
+        finite_scores = (
+            -sys.float_info.max,
+            -0.0,
+            1.25e-200,
+            sys.float_info.max,
+        )
+        for index, score in enumerate(finite_scores):
+            cache.put(f"finite-{index}", score=score)
+        for index, score in enumerate((math.nan, math.inf, -math.inf)):
+            cache.put(f"non-finite-{index}", score=score)
+
+        all_finite = {
+            f"float:{score}" for score in finite_scores
+        }
+        assert {
+            entry["cache_key_params"]["score"]
+            for entry in cache.query_meta(score=-sys.float_info.max)
+        } == all_finite
+        assert {
+            entry["cache_key_params"]["score"]
+            for entry in cache.query_meta(score=0.0)
+        } == {
+            "float:-0.0",
+            "float:1.25e-200",
+            f"float:{sys.float_info.max}",
+        }
+        assert [
+            entry["cache_key_params"]["score"]
+            for entry in cache.query_meta(score=sys.float_info.max)
+        ] == [f"float:{sys.float_info.max}"]
+
+    @pytest.mark.parametrize("value", (math.nan, math.inf, -math.inf))
+    def test_query_meta_rejects_nonfinite_numeric_thresholds(self, temp_cache, value):
+        """NaN and infinity have no stable ordered metadata-query semantics."""
+        with pytest.raises(CacheQueryValidationError) as error:
+            temp_cache.query_meta(score=value)
+
+        assert error.value.context == {
+            "field": "score",
+            "value": repr(value),
+            "reason": CacheReason.INVALID_QUERY_VALUE.value,
+        }
 
     def test_query_meta_multiple_filters(self, temp_cache):
         """Test query_meta with multiple parameter filters."""
