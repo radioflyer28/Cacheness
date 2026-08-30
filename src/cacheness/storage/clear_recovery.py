@@ -61,6 +61,7 @@ _SNAPSHOT_ENTRY_FIELDS = {
 }
 _HANDLER_SUFFIX = re.compile(r"(?:\.[A-Za-z0-9_-]+){0,4}\Z")
 _MAX_HANDLER_SUFFIX_LENGTH = 96
+_CANDIDATE_PREFIX = re.compile(r"-candidate-[0-9a-f]{32}")
 
 _PROCESS_LOCKS_GUARD = threading.Lock()
 _PROCESS_LOCKS: dict[tuple[str, int, int], threading.Lock] = {}
@@ -467,13 +468,17 @@ class ClearRecoveryCoordinator:
             self._invalid_journal()
 
     def _validate_original_locator(self, cache_key: str, original: str) -> None:
-        """Accept only the direct opaque BlobStore payload name for its key."""
+        """Accept only a direct canonical payload or one exact candidate form."""
         if Path(original).parent != Path("."):
             self._invalid_journal()
         physical_name = encode_physical_name(cache_key, namespace="blob-store")
         if not original.startswith(physical_name):
             self._invalid_journal()
-        suffix = original[len(physical_name) :]
+        locator_suffix = original[len(physical_name) :]
+        suffix = locator_suffix
+        candidate_match = _CANDIDATE_PREFIX.match(locator_suffix)
+        if candidate_match is not None:
+            suffix = locator_suffix[candidate_match.end() :]
         if (
             len(suffix) > _MAX_HANDLER_SUFFIX_LENGTH
             or not _HANDLER_SUFFIX.fullmatch(suffix)

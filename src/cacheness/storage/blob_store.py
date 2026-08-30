@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 from datetime import datetime, timezone
 
+from ..error_handling import CacheStorageError
 from .backends import MetadataBackend, JsonBackend
 from .clear_recovery import ClearRecoveryCoordinator
 from .guarded_handler_io import GuardedHandlerIO
@@ -176,34 +177,68 @@ class BlobStore:
 
         storage_id = self._storage_id_for_key(blob_key)
         existing = self.backend.get_entry(blob_key)
+        previous_locator = None
         if existing is not None:
             # Refuse to overwrite a record whose evidence points outside this
             # store before serializing or publishing a replacement payload.
-            self._entry_locator(existing, blob_key, operation="overwrite")
+            previous_locator = self._entry_locator(
+                existing,
+                blob_key,
+                operation="overwrite",
+            )
         
         # Get appropriate handler
         handler = self.handlers.get_handler(data)
-        
-        # Store through the private handler stage and guarded publication seam.
-        result = self.guarded_handler_io.put(handler, data, storage_id, self.config)
-        
-        # Build entry metadata
-        # Note: JsonBackend stores custom fields in nested 'metadata' dict
-        custom_metadata = dict(metadata or {})
-        custom_metadata["actual_path"] = result["actual_path"]
-        custom_metadata["storage_format"] = result.get("storage_format", "pickle")
-        custom_metadata["compression_codec"] = self.compression
-        
-        entry_data = {
-            "cache_key": blob_key,
-            "data_type": handler.data_type,
-            "file_size": result.get("file_size", 0),
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "metadata": custom_metadata,
-        }
-        
-        # Store metadata
-        self.backend.put_entry(blob_key, entry_data)
+
+        # A candidate is not authoritative until metadata publication has
+        # returned successfully. Its physical base remains derived from the
+        # stable logical-key ID, while the nonce prevents overwriting a prior
+        # committed payload before that publication boundary.
+        candidate_id = f"{storage_id}-candidate-{uuid.uuid4().hex}"
+        candidate_locator: Path | None = None
+        metadata_committed = False
+        try:
+            result = self.guarded_handler_io.put(
+                handler,
+                data,
+                candidate_id,
+                self.config,
+            )
+            candidate_locator = resolve_managed_locator(
+                self.guarded_handler_io.root,
+                result["actual_path"],
+                operation="candidate_publish",
+            )
+
+            # Note: JsonBackend stores custom fields in nested 'metadata' dict.
+            custom_metadata = dict(metadata or {})
+            custom_metadata["actual_path"] = str(candidate_locator)
+            custom_metadata["storage_format"] = result.get(
+                "storage_format",
+                "pickle",
+            )
+            custom_metadata["compression_codec"] = self.compression
+
+            entry_data = {
+                "cache_key": blob_key,
+                "data_type": handler.data_type,
+                "file_size": result.get("file_size", 0),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "metadata": custom_metadata,
+            }
+
+            self.backend.put_entry(blob_key, entry_data)
+            metadata_committed = True
+        except BaseException as exc:
+            if candidate_locator is not None and not metadata_committed:
+                self._cleanup_uncommitted_candidate(candidate_locator, exc)
+            raise
+
+        # The candidate is now the sole authoritative payload. A failure to
+        # erase the superseded payload cannot roll metadata back to stale
+        # evidence, but it must remain visible to callers for reconciliation.
+        if previous_locator is not None and previous_locator != candidate_locator:
+            self._cleanup_prior_payload(previous_locator)
         
         logger.debug(f"Stored blob {blob_key}: {handler.data_type}, {entry_data['file_size']} bytes")
         
@@ -524,6 +559,53 @@ class BlobStore:
     def _storage_id_for_key(self, key: str) -> str:
         """Map one public logical key to a backend-safe physical ID."""
         return encode_physical_name(key, namespace="blob-store")
+
+    def _delete_or_prove_absent(self, locator: Path) -> None:
+        """Remove a contained payload only when deletion is conclusively known."""
+        cleanup_error: Exception | None = None
+        try:
+            if self.guarded_handler_io.file_ops.delete(locator):
+                return
+        except Exception as exc:
+            cleanup_error = exc
+
+        try:
+            if not self.guarded_handler_io.file_ops.exists(locator):
+                return
+        except Exception as exc:
+            cleanup_error = exc
+
+        context = {"operation": "payload_cleanup"}
+        if cleanup_error is not None:
+            context["cleanup_error"] = type(cleanup_error).__name__
+        raise CacheStorageError("Could not prove managed payload cleanup", context=context)
+
+    def _cleanup_uncommitted_candidate(
+        self,
+        candidate_locator: Path,
+        triggering_error: BaseException,
+    ) -> None:
+        """Erase an uncommitted candidate or expose the unresolved residue."""
+        try:
+            self._delete_or_prove_absent(candidate_locator)
+        except CacheStorageError as cleanup_error:
+            raise CacheStorageError(
+                "Candidate payload cleanup could not be confirmed",
+                context={
+                    "operation": "put",
+                    "cleanup_error": cleanup_error.context.get("cleanup_error"),
+                },
+            ) from triggering_error
+
+    def _cleanup_prior_payload(self, previous_locator: Path) -> None:
+        """Erase the superseded payload without rolling back published metadata."""
+        try:
+            self._delete_or_prove_absent(previous_locator)
+        except CacheStorageError as cleanup_error:
+            raise CacheStorageError(
+                "Prior payload cleanup failed after metadata publication",
+                context={"operation": "put"},
+            ) from cleanup_error
 
     def _entry_locator(
         self,

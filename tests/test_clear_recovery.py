@@ -151,6 +151,7 @@ def test_json_prepared_clear_reopens_to_exact_payload_and_metadata_rollback(
     store = BlobStore(root, backend="json")
     keys, payload_bytes = _put_json_payloads(store)
     metadata_before = deepcopy(store.backend.load_metadata())
+    assert all("-candidate-" in path.name for path in payload_bytes)
 
     def interrupt_metadata_clear() -> int:
         raise _SimulatedClearInterruption("interrupted while prepared")
@@ -685,6 +686,9 @@ def test_journal_entry_count_bounds_are_checked_before_recovery_callbacks(
         "admission_lock_original",
         "unrelated_payload_original",
         "long_handler_suffix",
+        "malformed_candidate_marker",
+        "malformed_candidate_uuid",
+        "candidate_long_handler_suffix",
         "forged_tombstone",
         "snapshot_actual_path_mismatch",
         "snapshot_extra_field",
@@ -752,6 +756,27 @@ def test_hostile_journal_defects_fail_closed_without_recovery_mutation(
     elif defect == "long_handler_suffix":
         physical_name = encode_physical_name(keys[0], namespace="blob-store")
         forged_original = f"{physical_name}.{('a' * 97)}"
+        journal["mappings"][0]["original"] = forged_original
+        journal["metadata_snapshot"]["entries"][keys[0]]["metadata"][
+            "actual_path"
+        ] = str(root / forged_original)
+    elif defect == "malformed_candidate_marker":
+        physical_name = encode_physical_name(keys[0], namespace="blob-store")
+        forged_original = f"{physical_name}-candidate-short.pkl"
+        journal["mappings"][0]["original"] = forged_original
+        journal["metadata_snapshot"]["entries"][keys[0]]["metadata"][
+            "actual_path"
+        ] = str(root / forged_original)
+    elif defect == "malformed_candidate_uuid":
+        physical_name = encode_physical_name(keys[0], namespace="blob-store")
+        forged_original = f"{physical_name}-candidate-{'A' * 32}.pkl"
+        journal["mappings"][0]["original"] = forged_original
+        journal["metadata_snapshot"]["entries"][keys[0]]["metadata"][
+            "actual_path"
+        ] = str(root / forged_original)
+    elif defect == "candidate_long_handler_suffix":
+        physical_name = encode_physical_name(keys[0], namespace="blob-store")
+        forged_original = f"{physical_name}-candidate-{'a' * 32}.{('b' * 97)}"
         journal["mappings"][0]["original"] = forged_original
         journal["metadata_snapshot"]["entries"][keys[0]]["metadata"][
             "actual_path"
