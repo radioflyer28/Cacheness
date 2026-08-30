@@ -21,10 +21,18 @@ from cacheness.metadata import (
 )
 from cacheness.storage.backends.postgresql_backend import PostgresBackend
 from cacheness.storage.blob_store import BlobStore
+from cacheness.storage.path_security import encode_physical_name
 
 
 class _SimulatedClearInterruption(BaseException):
     """Represent loss of control between durable clear phases."""
+
+
+class _NoopPostgresEngine:
+    """Avoid real PostgreSQL construction while allowing sentinel cleanup."""
+
+    def dispose(self) -> None:
+        """Match the engine cleanup method without opening a connection."""
 
 
 def _entry_data(label: str) -> dict[str, object]:
@@ -281,7 +289,12 @@ def _journal_for(store: BlobStore, keys: list[str]) -> dict[str, object]:
         entry = store.get_metadata(key)
         assert entry is not None
         mappings.append((key, Path(entry["metadata"]["actual_path"])))
-    return coordinator._new_prepared_journal(mappings)
+    journal = coordinator._new_prepared_journal(mappings)
+    snapshot_entries = journal["metadata_snapshot"]["entries"]
+    journal["metadata_snapshot"]["entries"] = {
+        key: snapshot_entries[key] for key in keys
+    }
+    return journal
 
 
 def _write_untrusted_journal(store: BlobStore, journal: dict[str, object]) -> None:
@@ -492,6 +505,7 @@ def test_postgres_backend_rejection_precedes_all_metadata_and_staging_callbacks(
     """A remote backend is refused without connecting or calling any callback."""
     root = tmp_path / "postgres-root"
     backend = object.__new__(PostgresBackend)
+    backend.engine = _NoopPostgresEngine()
     callbacks = []
 
     def forbidden_callback(*args, **kwargs):
@@ -568,7 +582,7 @@ def test_journal_total_encoded_byte_bound_precedes_json_deserialization(
 def test_journal_field_bounds_are_checked_before_recovery_callbacks(
     tmp_path, field, offset
 ):
-    """Every string field accepts its boundary and rejects the next UTF-8 byte."""
+    """Raw bounds are checked before the stricter payload locator grammar."""
     root = tmp_path / "journal-bounds"
     store = BlobStore(root, backend="json")
     try:
@@ -583,10 +597,23 @@ def test_journal_field_bounds_are_checked_before_recovery_callbacks(
                 : limit + offset
             ]
         journal["mappings"][0][field] = value
-
         coordinator = store._clear_recovery
         assert coordinator is not None
-        if offset > 0:
+        assert coordinator._within_field_bound(value) is (offset <= 0)
+        if field == "cache_key":
+            original = journal["mappings"][0]["original"]
+            original_id = encode_physical_name("first", namespace="blob-store")
+            suffix = original[len(original_id) :]
+            journal["mappings"][0]["original"] = (
+                encode_physical_name(value, namespace="blob-store") + suffix
+            )
+            entry = journal["metadata_snapshot"]["entries"].pop("first")
+            journal["metadata_snapshot"]["entries"][value] = entry
+            entry["metadata"]["actual_path"] = str(
+                root / journal["mappings"][0]["original"]
+            )
+
+        if offset > 0 or field in {"original", "tombstone"}:
             with pytest.raises(CacheStorageError):
                 coordinator._validate_journal(journal)
         else:
@@ -606,13 +633,27 @@ def test_journal_entry_count_bounds_are_checked_before_recovery_callbacks(
         _, _ = _put_payloads(store)
         journal = _journal_for(store, ["first"])
         mapping = deepcopy(journal["mappings"][0])
+        original_id = encode_physical_name("first", namespace="blob-store")
+        suffix = mapping["original"][len(original_id) :]
         journal["mappings"] = []
+        snapshot_entries = {}
         for index in range(entry_count):
             next_mapping = deepcopy(mapping)
-            next_mapping["cache_key"] = f"key-{index}"
-            next_mapping["original"] = f"payload-{index}"
-            next_mapping["tombstone"] = f"tombstone-{index}"
+            cache_key = f"key-{index}"
+            next_mapping["cache_key"] = cache_key
+            next_mapping["original"] = (
+                encode_physical_name(cache_key, namespace="blob-store") + suffix
+            )
+            next_mapping["tombstone"] = (
+                f"clear-tombstone-{journal['operation_id']}-{index}"
+            )
             journal["mappings"].append(next_mapping)
+        snapshot_entry = journal["metadata_snapshot"]["entries"]["first"]
+        for mapping in journal["mappings"]:
+            entry = deepcopy(snapshot_entry)
+            entry["metadata"]["actual_path"] = str(root / mapping["original"])
+            snapshot_entries[mapping["cache_key"]] = entry
+        journal["metadata_snapshot"]["entries"] = snapshot_entries
         monkeypatch.setattr(clear_recovery, "MAX_JOURNAL_ENTRIES", 2, raising=False)
 
         coordinator = store._clear_recovery
@@ -640,6 +681,17 @@ def test_journal_entry_count_bounds_are_checked_before_recovery_callbacks(
         "duplicate_tombstone",
         "snapshot_cardinality_mismatch",
         "path_escape",
+        "metadata_file_original",
+        "admission_lock_original",
+        "unrelated_payload_original",
+        "long_handler_suffix",
+        "forged_tombstone",
+        "snapshot_actual_path_mismatch",
+        "snapshot_extra_field",
+        "snapshot_non_dict_metadata",
+        "negative_file_size",
+        "negative_counter",
+        "snapshot_bad_timestamp",
     ),
 )
 def test_hostile_journal_defects_fail_closed_without_recovery_mutation(
@@ -651,6 +703,8 @@ def test_hostile_journal_defects_fail_closed_without_recovery_mutation(
     keys, payloads = _put_payloads(store)
     metadata_before = deepcopy(store.backend.load_metadata())
     journal = _journal_for(store, keys)
+    unrelated_payload = None
+    other_payload = list(payloads)[1]
 
     if defect == "extra_field":
         journal["unexpected"] = True
@@ -676,8 +730,48 @@ def test_hostile_journal_defects_fail_closed_without_recovery_mutation(
         journal["mappings"][1] = duplicate
     elif defect == "snapshot_cardinality_mismatch":
         journal["metadata_snapshot"]["entries"].pop(keys[0])
-    else:
+    elif defect == "path_escape":
         journal["mappings"][0]["original"] = "../outside"
+    elif defect == "metadata_file_original":
+        journal["mappings"][0]["original"] = "cache_metadata.json"
+        journal["metadata_snapshot"]["entries"][keys[0]]["metadata"][
+            "actual_path"
+        ] = str(root / "cache_metadata.json")
+    elif defect == "admission_lock_original":
+        journal["mappings"][0]["original"] = ".cacheness-clear-admission.lock"
+        journal["metadata_snapshot"]["entries"][keys[0]]["metadata"][
+            "actual_path"
+        ] = str(root / ".cacheness-clear-admission.lock")
+    elif defect == "unrelated_payload_original":
+        unrelated_payload = root / "unrelated-payload.pkl"
+        unrelated_payload.write_bytes(b"unrelated-payload")
+        journal["mappings"][0]["original"] = unrelated_payload.name
+        journal["metadata_snapshot"]["entries"][keys[0]]["metadata"][
+            "actual_path"
+        ] = str(unrelated_payload)
+    elif defect == "long_handler_suffix":
+        physical_name = encode_physical_name(keys[0], namespace="blob-store")
+        forged_original = f"{physical_name}.{('a' * 97)}"
+        journal["mappings"][0]["original"] = forged_original
+        journal["metadata_snapshot"]["entries"][keys[0]]["metadata"][
+            "actual_path"
+        ] = str(root / forged_original)
+    elif defect == "forged_tombstone":
+        journal["mappings"][0]["tombstone"] = "cache_metadata.json"
+    elif defect == "snapshot_actual_path_mismatch":
+        journal["metadata_snapshot"]["entries"][keys[0]]["metadata"][
+            "actual_path"
+        ] = str(other_payload)
+    elif defect == "snapshot_extra_field":
+        journal["metadata_snapshot"]["entries"][keys[0]]["unexpected"] = True
+    elif defect == "snapshot_non_dict_metadata":
+        journal["metadata_snapshot"]["entries"][keys[0]]["metadata"] = []
+    elif defect == "negative_file_size":
+        journal["metadata_snapshot"]["entries"][keys[0]]["file_size"] = -1
+    elif defect == "snapshot_bad_timestamp":
+        journal["metadata_snapshot"]["entries"][keys[0]]["created_at"] = 0
+    else:
+        journal["metadata_snapshot"]["cache_hits"] = -1
 
     _write_untrusted_journal(store, journal)
     store.close()
@@ -687,6 +781,8 @@ def test_hostile_journal_defects_fail_closed_without_recovery_mutation(
 
     assert JsonBackend(root / "cache_metadata.json").load_metadata() == metadata_before
     assert {path: path.read_bytes() for path in payloads} == payloads
+    if unrelated_payload is not None:
+        assert unrelated_payload.read_bytes() == b"unrelated-payload"
 
 
 def test_advisory_lock_unavailability_fails_before_clear_mutation(tmp_path, monkeypatch):

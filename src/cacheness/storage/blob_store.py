@@ -50,7 +50,7 @@ from .clear_recovery import ClearRecoveryCoordinator
 from .guarded_handler_io import GuardedHandlerIO
 from .handlers import HandlerRegistry
 from .path_security import encode_physical_name, resolve_managed_locator
-from ..error_handling import CacheStorageError
+from ..metadata import MetadataBackend as CoreMetadataBackend
 
 # Import CacheConfig for proper handler configuration
 from ..config import CacheConfig, CompressionConfig
@@ -121,7 +121,7 @@ class BlobStore:
         elif backend == "sqlite":
             from .backends import SqliteBackend
             self.backend = SqliteBackend(self.cache_dir / "cache_metadata.db")
-        elif isinstance(backend, MetadataBackend):
+        elif isinstance(backend, (MetadataBackend, CoreMetadataBackend)):
             self.backend = backend
         else:
             raise ValueError(f"Unknown backend type: {backend}")
@@ -129,16 +129,21 @@ class BlobStore:
         # Initialize handler registry
         self.handlers = HandlerRegistry()
 
-        # The initial clear tracer is intentionally limited to exact local JSON
-        # metadata.  Other backend topologies remain untouched until their
-        # explicit recovery adapters are implemented.
+        # Clear recovery is deliberately confined to exact local backend
+        # identities. Capability-shaped or wrapped backends never inherit a
+        # crash boundary merely because they expose similarly named methods.
         self._clear_recovery = None
-        if type(self.backend) is JsonBackend:
+        if ClearRecoveryCoordinator.can_coordinate(self.backend):
             self._clear_recovery = ClearRecoveryCoordinator(
                 self.guarded_handler_io.file_ops,
                 self.backend,
             )
-            self._clear_recovery.recover()
+            try:
+                with self._clear_recovery.admission():
+                    self._clear_recovery.recover()
+            except Exception:
+                self.guarded_handler_io.close()
+                raise
         
         logger.debug(f"BlobStore initialized at {self.cache_dir}")
     
@@ -385,23 +390,19 @@ class BlobStore:
             Number of blobs removed
         """
         if self._clear_recovery is None:
-            raise CacheStorageError(
-                "BlobStore clear recovery requires a supported local metadata backend",
-                context={
-                    "operation": "clear",
-                    "backend": type(self.backend).__name__,
-                },
-            )
+            raise ClearRecoveryCoordinator.unsupported_error(self.backend)
 
-        entries = self.backend.list_entries()
-        self._preflight_entries(entries, operation="clear")
-        mappings = []
-        for entry in entries:
-            cache_key = entry.get("cache_key", "")
-            actual_path = self._entry_locator(entry, cache_key, operation="clear")
-            if self.guarded_handler_io.file_ops.exists(actual_path):
+        with self._clear_recovery.admission():
+            entries = self.backend.list_entries()
+            self._preflight_entries(entries, operation="clear")
+            mappings = []
+            for entry in entries:
+                cache_key = entry.get("cache_key", "")
+                actual_path = self._entry_locator(entry, cache_key, operation="clear")
+                # Every metadata entry participates, even when its payload is
+                # already absent, so snapshot and journal cardinalities agree.
                 mappings.append((cache_key, actual_path))
-        return self._clear_recovery.clear(mappings)
+            return self._clear_recovery.clear(mappings)
 
     def _stage_clear_payloads(self, entries: List[Dict[str, Any]]) -> List[tuple[Path, Path]]:
         """Copy each live payload to a private tombstone before deleting it."""

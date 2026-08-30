@@ -31,6 +31,7 @@ Usage:
 import os
 import sqlite3
 import threading
+import uuid
 import warnings
 from abc import ABC, abstractmethod
 from copy import deepcopy
@@ -558,6 +559,10 @@ class InMemoryBackend(MetadataBackend):
     def __init__(self):
         """Initialize in-memory backend with simple unified entry structure."""
         self._lock = threading.RLock()  # Reentrant lock for thread safety
+        # A recovery journal may restore this backend only while this exact
+        # process-local object remains alive. A reopened in-memory backend has
+        # a new nonce and must never replay stale on-disk metadata.
+        self._clear_recovery_nonce = uuid.uuid4().hex
         
         # Simple unified dict: cache_key -> complete_entry
         # Entry structure matches SQLite schema at the entry level
@@ -737,6 +742,22 @@ class InMemoryBackend(MetadataBackend):
         """Save complete metadata structure (in-memory backend doesn't persist data)."""
         # In-memory backend doesn't persist - no-op
         pass
+
+    def _snapshot_clear_state(self) -> Dict[str, Any]:
+        """Return the complete process-local state used by clear recovery."""
+        with self._lock:
+            return {
+                "entries": deepcopy(self._entries),
+                "cache_hits": self._cache_hits,
+                "cache_misses": self._cache_misses,
+            }
+
+    def _restore_clear_state(self, snapshot: Dict[str, Any]) -> None:
+        """Atomically restore one validated in-process clear snapshot."""
+        with self._lock:
+            self._entries = deepcopy(snapshot["entries"])
+            self._cache_hits = snapshot["cache_hits"]
+            self._cache_misses = snapshot["cache_misses"]
 
     def close(self):
         """Close and clean up resources (in-memory backend has no external resources)."""
@@ -1080,6 +1101,15 @@ class JsonBackend(MetadataBackend):
     def load_metadata(self) -> Dict[str, Any]:
         with self._lock:
             return self._metadata.copy()
+
+    def _snapshot_clear_state(self) -> Dict[str, Any]:
+        """Return the entire durable JSON state for one clear journal."""
+        with self._lock:
+            return deepcopy(self._metadata)
+
+    def _restore_clear_state(self, snapshot: Dict[str, Any]) -> None:
+        """Durably restore one already-validated clear journal snapshot."""
+        self.save_metadata(deepcopy(snapshot))
 
     def save_metadata(self, metadata: Dict[str, Any]) -> None:
         with self._lock:
@@ -1877,6 +1907,120 @@ class SqliteBackend(MetadataBackend):
         # SQLite backend doesn't use bulk metadata operations - no-op
         self._ensure_writable()
         pass
+
+    def _snapshot_clear_state(self) -> Dict[str, Any]:
+        """Read all clear-relevant SQLite state through one database snapshot."""
+        self._ensure_writable()
+        with self._lock, self.SessionLocal() as session:
+            entries = {}
+            for entry in session.execute(select(CacheEntry)).scalars().all():
+                metadata = {}
+                for field in (
+                    "object_type",
+                    "storage_format",
+                    "serializer",
+                    "compression_codec",
+                    "actual_path",
+                    "file_hash",
+                    "entry_signature",
+                ):
+                    value = getattr(entry, field)
+                    if value is not None:
+                        metadata[field] = value
+                if entry.cache_key_params is not None:
+                    try:
+                        metadata["cache_key_params"] = json_loads(
+                            entry.cache_key_params
+                        )
+                    except (TypeError, ValueError) as exc:
+                        raise CacheStorageError(
+                            "SQLite metadata cannot be snapshotted for clear recovery",
+                            context={"metadata_file": self.db_file},
+                        ) from exc
+                entries[entry.cache_key] = {
+                    "description": entry.description,
+                    "data_type": entry.data_type,
+                    "prefix": entry.prefix,
+                    "created_at": entry.created_at.isoformat(),
+                    "accessed_at": entry.accessed_at.isoformat(),
+                    "file_size": entry.file_size,
+                    "metadata": metadata,
+                }
+
+            stats = self._get_stats_row(session)
+            return {
+                "entries": entries,
+                "cache_hits": stats.cache_hits,
+                "cache_misses": stats.cache_misses,
+            }
+
+    def _restore_clear_state(self, snapshot: Dict[str, Any]) -> None:
+        """Restore one validated clear snapshot in a single SQLite transaction."""
+        self._ensure_writable()
+        try:
+            with self._lock, self.SessionLocal() as session:
+                session.execute(delete(CacheEntry))
+                for cache_key, entry_data in snapshot["entries"].items():
+                    metadata = entry_data["metadata"]
+                    cache_key_params = metadata.get("cache_key_params")
+                    from sqlalchemy import text
+
+                    session.execute(
+                        text(
+                            """
+                            INSERT INTO cache_entries
+                            (cache_key, description, data_type, prefix, file_size,
+                             file_hash, entry_signature, cache_key_params,
+                             object_type, storage_format, serializer, compression_codec,
+                             actual_path, created_at, accessed_at)
+                            VALUES (:cache_key, :description, :data_type, :prefix, :file_size,
+                                    :file_hash, :entry_signature, :cache_key_params,
+                                    :object_type, :storage_format, :serializer,
+                                    :compression_codec, :actual_path, :created_at,
+                                    :accessed_at)
+                            """
+                        ),
+                        {
+                            "cache_key": cache_key,
+                            "description": entry_data["description"],
+                            "data_type": entry_data["data_type"],
+                            "prefix": entry_data["prefix"],
+                            "file_size": entry_data["file_size"],
+                            "file_hash": metadata.get("file_hash"),
+                            "entry_signature": metadata.get("entry_signature"),
+                            "cache_key_params": (
+                                json_dumps(cache_key_params)
+                                if cache_key_params is not None
+                                else None
+                            ),
+                            "object_type": metadata.get("object_type"),
+                            "storage_format": metadata.get("storage_format"),
+                            "serializer": metadata.get("serializer"),
+                            "compression_codec": metadata.get("compression_codec"),
+                            "actual_path": metadata.get("actual_path"),
+                            "created_at": datetime.fromisoformat(
+                                entry_data["created_at"]
+                            ),
+                            "accessed_at": datetime.fromisoformat(
+                                entry_data["accessed_at"]
+                            ),
+                        },
+                    )
+                stats = session.execute(
+                    select(CacheStats).where(CacheStats.id == 1)
+                ).scalar_one_or_none()
+                if stats is None:
+                    stats = CacheStats(id=1)
+                    session.add(stats)
+                stats.cache_hits = snapshot["cache_hits"]
+                stats.cache_misses = snapshot["cache_misses"]
+                stats.last_updated = datetime.now(timezone.utc)
+                session.commit()
+        except Exception as exc:
+            raise CacheStorageError(
+                "SQLite metadata clear recovery restore failed",
+                context={"metadata_file": self.db_file},
+            ) from exc
 
     def record_legacy_read(self, cache_key: str) -> None:
         """Record compatibility reads in process memory without changing SQLite."""
