@@ -18,7 +18,7 @@ from cacheness.error_handling import (
     CacheStorageError,
     CacheUnsafePathError,
 )
-from cacheness.metadata import InMemoryBackend, SqliteBackend
+from cacheness.metadata import InMemoryBackend, JsonBackend, SqliteBackend
 from cacheness.storage import BlobStore
 from cacheness.storage import blob_store as blob_store_module
 from cacheness.storage.guarded_handler_io import GuardedHandlerIO
@@ -171,6 +171,121 @@ def test_failed_initialization_does_not_close_caller_injected_backend(
         BlobStore(tmp_path / "injected-backend", backend=backend)
 
     assert closed == []
+
+
+@pytest.mark.parametrize("signal_type", (KeyboardInterrupt, SystemExit))
+@pytest.mark.parametrize(
+    ("backend_name", "backend_type"),
+    (("json", JsonBackend), ("sqlite", SqliteBackend)),
+)
+def test_constructor_cancellation_closes_owned_resources_after_backend_creation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    signal_type: type[BaseException],
+    backend_name: str,
+    backend_type: type[JsonBackend] | type[SqliteBackend],
+) -> None:
+    """Cancellation after local backend construction releases every owned resource."""
+    closed_io: list[GuardedHandlerIO] = []
+    closed_backends: list[JsonBackend | SqliteBackend] = []
+    initialized_backends: list[object] = []
+    original_io_close = GuardedHandlerIO.close
+    original_backend_close = backend_type.close
+    cancellation = signal_type("constructor cancellation")
+
+    def close_io_spy(adapter: GuardedHandlerIO) -> None:
+        closed_io.append(adapter)
+        original_io_close(adapter)
+
+    def close_backend_spy(backend: JsonBackend | SqliteBackend) -> None:
+        closed_backends.append(backend)
+        original_backend_close(backend)
+
+    def interrupt_repository_setup(backend: object) -> None:
+        initialized_backends.append(backend)
+        raise cancellation
+
+    monkeypatch.setattr(GuardedHandlerIO, "close", close_io_spy)
+    monkeypatch.setattr(backend_type, "close", close_backend_spy)
+    monkeypatch.setattr(
+        blob_store_module,
+        "create_manifest_repository",
+        interrupt_repository_setup,
+    )
+
+    with pytest.raises(signal_type) as error:
+        BlobStore(tmp_path / f"owned-{backend_name}", backend=backend_name)
+
+    assert error.value is cancellation
+    assert len(closed_io) == 1
+    assert len(initialized_backends) == 1
+    assert closed_backends.count(initialized_backends[0]) == 1
+
+
+@pytest.mark.parametrize("signal_type", (KeyboardInterrupt, SystemExit))
+def test_constructor_cancellation_before_backend_creation_closes_guarded_io(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    signal_type: type[BaseException],
+) -> None:
+    """A cancellation before backend setup still closes the acquired root descriptor."""
+    closed_io: list[GuardedHandlerIO] = []
+    original_io_close = GuardedHandlerIO.close
+    cancellation = signal_type("configuration cancellation")
+
+    def close_io_spy(adapter: GuardedHandlerIO) -> None:
+        closed_io.append(adapter)
+        original_io_close(adapter)
+
+    def interrupt_config(*_args: Any, **_kwargs: Any) -> None:
+        raise cancellation
+
+    monkeypatch.setattr(GuardedHandlerIO, "close", close_io_spy)
+    monkeypatch.setattr(blob_store_module, "CacheConfig", interrupt_config)
+
+    with pytest.raises(signal_type) as error:
+        BlobStore(tmp_path / "before-backend", backend="json")
+
+    assert error.value is cancellation
+    assert len(closed_io) == 1
+
+
+@pytest.mark.parametrize("signal_type", (KeyboardInterrupt, SystemExit))
+def test_constructor_cancellation_does_not_close_injected_backend(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    signal_type: type[BaseException],
+) -> None:
+    """Cancellation never transfers caller-injected backend ownership to BlobStore."""
+    backend = InMemoryBackend()
+    closed_io: list[GuardedHandlerIO] = []
+    closed_backends: list[InMemoryBackend] = []
+    original_io_close = GuardedHandlerIO.close
+    original_backend_close = InMemoryBackend.close
+    cancellation = signal_type("handler cancellation")
+
+    def close_io_spy(adapter: GuardedHandlerIO) -> None:
+        closed_io.append(adapter)
+        original_io_close(adapter)
+
+    def close_backend_spy(candidate: InMemoryBackend) -> None:
+        if candidate is backend:
+            closed_backends.append(candidate)
+        original_backend_close(candidate)
+
+    def interrupt_handler_setup() -> None:
+        raise cancellation
+
+    monkeypatch.setattr(GuardedHandlerIO, "close", close_io_spy)
+    monkeypatch.setattr(InMemoryBackend, "close", close_backend_spy)
+    monkeypatch.setattr(blob_store_module, "HandlerRegistry", interrupt_handler_setup)
+
+    with pytest.raises(signal_type) as error:
+        BlobStore(tmp_path / "injected", backend=backend)
+
+    assert error.value is cancellation
+    assert len(closed_io) == 1
+    assert closed_backends == []
 
 
 def _call_direct_operation(store: BlobStore, operation: str, key: str) -> object:

@@ -225,7 +225,9 @@ class BlobStore:
                 compression_level,
                 content_addressable,
             )
-        except Exception:
+        except BaseException:
+            # Cancellation must not retain a partially initialized owner and
+            # its managed root descriptor or internally created backend.
             self._close_failed_initialization_resources()
             raise
 
