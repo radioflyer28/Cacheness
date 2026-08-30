@@ -602,3 +602,15 @@ def test_clear_resume_does_not_repeat_completed_targets_after_reopen(
         assert reopened.get("second") is None
     finally:
         reopened.close()
+
+
+def test_clear_empty_store_initializes_authenticated_control_evidence(
+    tmp_path: Path,
+) -> None:
+    """An empty store still clears through authenticated bounded control state."""
+    store = BlobStore(tmp_path / "empty-clear", backend="json")
+    try:
+        assert store.clear() == 0
+        assert store.list() == []
+    finally:
+        store.close()
