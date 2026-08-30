@@ -14,7 +14,7 @@ import pytest
 from cacheness import CacheConfig, cacheness
 import cacheness.metadata as metadata_module
 import cacheness.storage.clear_recovery as clear_recovery
-from cacheness.error_handling import CacheStorageError
+from cacheness.error_handling import CacheBlobBackendError, CacheStorageError
 from cacheness.metadata import (
     CachedMetadataBackend,
     InMemoryBackend,
@@ -1470,33 +1470,44 @@ class _CustomMetadataBackend(InMemoryBackend):
         ),
     ),
 )
-def test_unsupported_clear_topologies_fail_before_any_mutation(
+def test_unsupported_manifest_topologies_fail_before_any_mutation(
     tmp_path, name, backend_factory
 ):
-    """Remote, wrapped, custom, and SQLite-memory topologies have no local journal proof."""
+    """Unsupported backends fail before manifest or clear-recovery mutation."""
     root = tmp_path / name
-    store = BlobStore(root, backend=backend_factory(root))
+    backend = backend_factory(root)
+    store = None
     try:
-        keys, payloads = _put_payloads(store)
-        before = _backend_snapshot(store.backend, keys)
+        if name == "sqlite_memory":
+            store = BlobStore(root, backend=backend)
+            with pytest.raises(CacheStorageError) as error:
+                store.clear()
+            assert error.value.context == {
+                "operation": "clear",
+                "backend": "SqliteBackend",
+                "supported_local_kinds": ["json", "sqlite", "memory"],
+            }
+            assert not list(root.glob(".cacheness-clear-journal-*.json"))
+            assert not list(root.glob("*candidate-*"))
+            return
 
-        with pytest.raises(CacheStorageError) as error:
-            store.clear()
+        with pytest.raises(CacheBlobBackendError) as error:
+            BlobStore(root, backend=backend)
 
-        assert error.value.context == {
-            "operation": "clear",
-            "backend": type(store.backend).__name__,
-            "supported_local_kinds": ["json", "sqlite", "memory"],
-        }
-        assert _backend_snapshot(store.backend, keys) == before
-        assert {path: path.read_bytes() for path in payloads} == payloads
+        assert error.value.context["operation"] == "create_manifest_repository"
+        assert error.value.context["backend"] == type(backend).__name__
+        assert error.value.context["reason"] == "blob_backend_failure"
         assert not list(root.glob(".cacheness-clear-journal-*.json"))
+        assert not list(root.glob("*candidate-*"))
     finally:
-        store.close()
+        if store is not None:
+            store.close()
+        else:
+            backend.close()
 
 
 def test_postgres_backend_rejection_precedes_all_metadata_and_staging_callbacks(tmp_path):
-    """A remote backend is refused without connecting or calling any callback."""
+    """A remote backend is refused before any callback or payload staging."""
     root = tmp_path / "postgres-root"
     backend = object.__new__(PostgresBackend)
     backend.engine = _NoopPostgresEngine()
@@ -1509,16 +1520,12 @@ def test_postgres_backend_rejection_precedes_all_metadata_and_staging_callbacks(
     backend.list_entries = forbidden_callback
     backend.load_metadata = forbidden_callback
     backend.clear_all = forbidden_callback
-    store = BlobStore(root, backend=backend)
+    with pytest.raises(CacheBlobBackendError) as error:
+        BlobStore(root, backend=backend)
 
-    with pytest.raises(CacheStorageError) as error:
-        store.clear()
-
-    assert error.value.context == {
-        "operation": "clear",
-        "backend": "PostgresBackend",
-        "supported_local_kinds": ["json", "sqlite", "memory"],
-    }
+    assert error.value.context["operation"] == "create_manifest_repository"
+    assert error.value.context["backend"] == "PostgresBackend"
+    assert error.value.context["reason"] == "blob_backend_failure"
     assert callbacks == []
     assert not list(root.glob(".cacheness-clear-journal-*.json"))
     assert not list(root.glob("clear-tombstone-*"))

@@ -64,9 +64,10 @@ from .integrity import (
     verify_hmac_sha256,
 )
 from .manifest import BlobManifestV1, ManifestDecodeError
-from .manifest_repository import MetadataManifestRepository
+from .manifest_repository import create_manifest_repository
 from .path_security import encode_physical_name, resolve_managed_locator
 from ..metadata import MetadataBackend as CoreMetadataBackend
+from ..metadata import SqliteBackend
 
 # Import CacheConfig for proper handler configuration
 from ..config import CacheConfig, CompressionConfig
@@ -172,7 +173,7 @@ class BlobStore:
         
         # Initialize handler registry
         self.handlers = HandlerRegistry()
-        self.manifest_repository = MetadataManifestRepository(self.backend)
+        self.manifest_repository = create_manifest_repository(self.backend)
         self._manifest_key_provider = ManifestKeyProvider(
             self.cache_dir / "blob_manifest_hmac_key.bin"
         )
@@ -189,6 +190,7 @@ class BlobStore:
             try:
                 with self._clear_recovery.admission():
                     self._clear_recovery.recover()
+                    self._reconcile_sqlite_manifest_records_after_clear()
             except Exception:
                 self.guarded_handler_io.close()
                 raise
@@ -540,7 +542,29 @@ class BlobStore:
             # Every metadata entry participates, even when its payload is
             # already absent, so snapshot and journal cardinalities agree.
             mappings.append((cache_key, actual_path))
-        return self._clear_recovery.clear(mappings)
+        cleared = self._clear_recovery.clear(mappings)
+        if type(self.backend) is SqliteBackend:
+            for cache_key, _ in mappings:
+                self.manifest_repository.remove(cache_key)
+        return cleared
+
+    def _reconcile_sqlite_manifest_records_after_clear(self) -> None:
+        """Drop SQLite sidecar records orphaned by a completed clear recovery.
+
+        Clear recovery remains owned by the Phase 1 coordinator. This only
+        removes dedicated canonical BLOB rows after that coordinator has
+        reached a terminal state and established ``cache_entries`` authority.
+        """
+        if type(self.backend) is not SqliteBackend:
+            return
+        active_keys = {
+            entry["cache_key"]
+            for entry in self.backend.list_entries()
+            if isinstance(entry, dict) and isinstance(entry.get("cache_key"), str)
+        }
+        for key in self.manifest_repository.list_keys():
+            if key not in active_keys:
+                self.manifest_repository.remove(key)
 
     def _stage_clear_payloads(self, entries: List[Dict[str, Any]]) -> List[tuple[Path, Path]]:
         """Copy each live payload to a private tombstone before deleting it."""
