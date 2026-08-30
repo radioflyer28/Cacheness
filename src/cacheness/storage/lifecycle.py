@@ -226,7 +226,7 @@ class LifecycleEngine:
             created_at=timestamp,
             updated_at=timestamp,
         )
-        return self._signed_record(record)
+        return self._signed_record(record, initialize_new_store=True)
 
     def _load_or_create_clear_checkpoint(
         self, page: ClearTargetPage

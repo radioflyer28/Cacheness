@@ -821,7 +821,9 @@ class BlobStore:
 
     def _manifest_key(self, *, initialize_new_store: bool = False) -> bytes:
         """Return the strict persistent key without silently downgrading signing."""
-        if initialize_new_store and not self.manifest_repository.list_keys():
+        if initialize_new_store and not self.manifest_repository.list_page(
+            page_size=1
+        ).entries:
             try:
                 return self._manifest_key_provider.get_or_initialize_new_store()
             except ManifestKeyError as exc:
