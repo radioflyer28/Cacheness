@@ -74,6 +74,36 @@ class OperationRecordRepository(Protocol):
     ) -> OperationPage:
         """Return a stable, bounded inventory page without interpreting evidence."""
 
+    def create_clear_target_page_exclusive(
+        self, operation_id: str, page_id: str, raw_record: bytes
+    ) -> Path:
+        """Persist one exact clear target page before advancing its cursor."""
+
+    def get_clear_target_page_raw(
+        self, operation_id: str, page_id: str
+    ) -> bytes | None:
+        """Return one exact target page without assigning it authority."""
+
+    def create_clear_target_checkpoint_exclusive(
+        self, operation_id: str, page_id: str, raw_record: bytes
+    ) -> Path:
+        """Persist zero progress before destructive target work begins."""
+
+    def get_clear_target_checkpoint_raw(
+        self, operation_id: str, page_id: str
+    ) -> bytes | None:
+        """Return one exact clear checkpoint without interpreting progress."""
+
+    def checkpoint_clear_target_if_exact(
+        self,
+        operation_id: str,
+        page_id: str,
+        *,
+        expected_raw: bytes,
+        raw_record: bytes,
+    ) -> None:
+        """Advance target/page progress only from the exact observed bytes."""
+
 
 class FileOperationRecordRepository:
     """Local operation evidence repository inside the managed store root."""
@@ -101,6 +131,149 @@ class FileOperationRecordRepository:
             operation="operation_record",
             allow_missing_leaf=True,
         )
+
+    def _clear_target_locator(
+        self, operation_id: str, page_id: str, *, checkpoint: bool
+    ) -> Path:
+        """Derive one contained deterministic clear page/checkpoint locator."""
+        safe_operation_id = validate_blob_id(operation_id)
+        safe_page_id = validate_blob_id(page_id)
+        kind = "checkpoint" if checkpoint else "page"
+        return resolve_managed_locator(
+            self.file_ops.root,
+            Path("operations")
+            / f"clear-target-{kind}-{safe_operation_id}-{safe_page_id}.json",
+            operation=f"clear_target_{kind}",
+            allow_missing_leaf=True,
+        )
+
+    def clear_target_page_locator(self, operation_id: str, page_id: str) -> Path:
+        """Return the exact contained locator for one target page."""
+        return self._clear_target_locator(operation_id, page_id, checkpoint=False)
+
+    def clear_target_checkpoint_locator(self, operation_id: str, page_id: str) -> Path:
+        """Return the exact contained locator for one target checkpoint."""
+        return self._clear_target_locator(operation_id, page_id, checkpoint=True)
+
+    def _create_clear_target_exclusive(
+        self,
+        operation_id: str,
+        page_id: str,
+        raw_record: bytes,
+        *,
+        checkpoint: bool,
+    ) -> Path:
+        """Create one durable clear control record without replacing evidence."""
+        if not isinstance(raw_record, bytes) or not raw_record:
+            raise TypeError("Clear target evidence must be non-empty bytes")
+        locator = self._clear_target_locator(
+            operation_id, page_id, checkpoint=checkpoint
+        )
+        try:
+            return self.file_ops.create_bytes_durable_exclusive(locator, raw_record)
+        except FileExistsError as exc:
+            raise CacheBlobLifecycleConflictError(
+                "Clear target evidence already exists",
+                context={
+                    "operation_id": operation_id,
+                    "page_id": page_id,
+                    "operation": "create_clear_target",
+                },
+            ) from exc
+        except OSError as exc:
+            raise CacheBlobBackendError(
+                "Clear target evidence could not be created",
+                context={
+                    "operation_id": operation_id,
+                    "page_id": page_id,
+                    "operation": "create_clear_target",
+                },
+            ) from exc
+
+    def create_clear_target_page_exclusive(
+        self, operation_id: str, page_id: str, raw_record: bytes
+    ) -> Path:
+        """Durably save exact page targets before their source cursor advances."""
+        return self._create_clear_target_exclusive(
+            operation_id, page_id, raw_record, checkpoint=False
+        )
+
+    def create_clear_target_checkpoint_exclusive(
+        self, operation_id: str, page_id: str, raw_record: bytes
+    ) -> Path:
+        """Durably save zero-progress state before a page can delete targets."""
+        return self._create_clear_target_exclusive(
+            operation_id, page_id, raw_record, checkpoint=True
+        )
+
+    def _get_clear_target_raw(
+        self, operation_id: str, page_id: str, *, checkpoint: bool
+    ) -> bytes | None:
+        """Load opaque exact clear evidence without declaring it authoritative."""
+        try:
+            return self.file_ops.read_bytes(
+                self._clear_target_locator(operation_id, page_id, checkpoint=checkpoint)
+            )
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise CacheBlobBackendError(
+                "Clear target evidence could not be read",
+                context={
+                    "operation_id": operation_id,
+                    "page_id": page_id,
+                    "operation": "get_clear_target",
+                },
+            ) from exc
+
+    def get_clear_target_page_raw(
+        self, operation_id: str, page_id: str
+    ) -> bytes | None:
+        """Read one exact target page without parsing or authenticating it."""
+        return self._get_clear_target_raw(operation_id, page_id, checkpoint=False)
+
+    def get_clear_target_checkpoint_raw(
+        self, operation_id: str, page_id: str
+    ) -> bytes | None:
+        """Read one exact target checkpoint without parsing or authenticating it."""
+        return self._get_clear_target_raw(operation_id, page_id, checkpoint=True)
+
+    def checkpoint_clear_target_if_exact(
+        self,
+        operation_id: str,
+        page_id: str,
+        *,
+        expected_raw: bytes,
+        raw_record: bytes,
+    ) -> None:
+        """Conditionally replace exact progress so stale writers cannot regress it."""
+        if not isinstance(expected_raw, bytes) or not isinstance(raw_record, bytes):
+            raise TypeError("Clear target checkpoints require exact bytes")
+        locator = self.clear_target_checkpoint_locator(operation_id, page_id)
+        try:
+            with self._conditional_lock_for(f"{operation_id}:{page_id}"):
+                current = self.get_clear_target_checkpoint_raw(operation_id, page_id)
+                if current != expected_raw:
+                    raise CacheBlobLifecycleConflictError(
+                        "Clear target checkpoint no longer matches",
+                        context={
+                            "operation_id": operation_id,
+                            "page_id": page_id,
+                            "operation": "checkpoint_clear_target_if_exact",
+                        },
+                    )
+                self.file_ops.write_bytes_durable(locator, raw_record)
+        except CacheBlobLifecycleConflictError:
+            raise
+        except OSError as exc:
+            raise CacheBlobBackendError(
+                "Clear target checkpoint could not be persisted",
+                context={
+                    "operation_id": operation_id,
+                    "page_id": page_id,
+                    "operation": "checkpoint_clear_target_if_exact",
+                },
+            ) from exc
 
     def create_exclusive(
         self, record: LifecycleOperationRecord, raw_record: bytes

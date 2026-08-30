@@ -13,9 +13,11 @@ from copy import deepcopy
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from heapq import nsmallest
 from pathlib import Path
 from typing import Any, Mapping, Optional, Protocol
 
+from cacheness.config import LifecycleLimits
 from cacheness.error_handling import (
     CacheBlobBackendError,
     CacheBlobLifecycleConflictError,
@@ -88,6 +90,28 @@ class ManifestExpectation:
         return raw_record is not None and hashlib.sha256(raw_record).hexdigest() == self.record_digest
 
 
+@dataclass(frozen=True)
+class ManifestCursor:
+    """Opaque stable position after a bounded manifest page."""
+
+    key: str
+
+    def __post_init__(self) -> None:
+        """Keep cursors bounded without imposing a path grammar on logical keys."""
+        if not isinstance(self.key, str) or not self.key:
+            raise ValueError("Manifest cursor key must be a non-empty string")
+        if len(self.key.encode("utf-8")) > 8_192:
+            raise ValueError("Manifest cursor key exceeds the byte limit")
+
+
+@dataclass(frozen=True)
+class ManifestPage:
+    """One bounded page of opaque exact manifest records."""
+
+    entries: tuple[tuple[str, bytes], ...]
+    next_cursor: ManifestCursor | None
+
+
 class ManifestRepository(Protocol):
     """Persistence contract for exact canonical manifest bytes."""
 
@@ -122,6 +146,14 @@ class ManifestRepository(Protocol):
     def list_keys(self) -> list[str]:
         """List logical keys that have canonical records."""
 
+    def list_page(
+        self,
+        cursor: ManifestCursor | None = None,
+        *,
+        page_size: int | None = None,
+    ) -> ManifestPage:
+        """Return one stable bounded page without authenticating its records."""
+
     def list_backend_entries(self) -> list[dict[str, Any]]:
         """Return compatibility projections with typed backend translation."""
 
@@ -142,8 +174,29 @@ def _backend_failure(
 class _MetadataManifestRepository:
     """Store exact bytes in a reversible JSON-safe metadata projection."""
 
-    def __init__(self, backend: InMemoryBackend | JsonBackend):
+    def __init__(
+        self,
+        backend: InMemoryBackend | JsonBackend,
+        *,
+        lifecycle_limits: LifecycleLimits | None = None,
+    ):
         self.backend = backend
+        self.lifecycle_limits = (
+            LifecycleLimits() if lifecycle_limits is None else lifecycle_limits
+        )
+
+    def _page_size(self, page_size: int | None) -> int:
+        """Resolve one caller page without bypassing the configured bound."""
+        resolved = (
+            self.lifecycle_limits.manifest_page_size
+            if page_size is None
+            else page_size
+        )
+        if type(resolved) is not int or resolved <= 0:
+            raise ValueError("manifest page size must be a positive integer")
+        if resolved > self.lifecycle_limits.manifest_page_size:
+            raise ValueError("manifest page size exceeds configured lifecycle limit")
+        return resolved
 
     def get_raw(self, key: str) -> Optional[bytes]:
         """Load one reversible byte projection without interpreting the manifest."""
@@ -375,6 +428,44 @@ class _MetadataManifestRepository:
             keys.append(entry["cache_key"])
         return keys
 
+    def list_page(
+        self,
+        cursor: ManifestCursor | None = None,
+        *,
+        page_size: int | None = None,
+    ) -> ManifestPage:
+        """Read one lexical page while retaining at most ``limit + 1`` keys."""
+        if cursor is not None and not isinstance(cursor, ManifestCursor):
+            raise TypeError("manifest cursor must be a ManifestCursor or None")
+        limit = self._page_size(page_size)
+        try:
+            with self.backend._lock, self._json_compare_publish_lock():
+                self._refresh_json_for_conditional_operation()
+                if type(self.backend) is JsonBackend:
+                    entries = self.backend._metadata.get("entries", {})
+                else:
+                    entries = self.backend._entries
+                selected = nsmallest(
+                    limit + 1,
+                    (
+                        key
+                        for key in entries
+                        if isinstance(key, str)
+                        and (cursor is None or key > cursor.key)
+                    ),
+                )
+                has_more = len(selected) > limit
+                page_keys = selected[:limit]
+                page_entries = tuple(
+                    (key, self._raw_from_entry(entries[key])) for key in page_keys
+                )
+        except _BACKEND_OPERATION_ERRORS as exc:
+            raise _backend_failure("list_page", self.backend, exc) from exc
+        return ManifestPage(
+            entries=page_entries,
+            next_cursor=(ManifestCursor(page_keys[-1]) if has_more and page_keys else None),
+        )
+
     def list_backend_entries(self) -> list[dict[str, Any]]:
         """Read backend projections without allowing operational failures to leak."""
         try:
@@ -386,15 +477,19 @@ class _MetadataManifestRepository:
 class InMemoryManifestRepository(_MetadataManifestRepository):
     """Exact raw records backed by one process-local metadata identity."""
 
-    def __init__(self, backend: InMemoryBackend):
-        super().__init__(backend)
+    def __init__(
+        self, backend: InMemoryBackend, *, lifecycle_limits: LifecycleLimits | None = None
+    ):
+        super().__init__(backend, lifecycle_limits=lifecycle_limits)
 
 
 class JsonManifestRepository(_MetadataManifestRepository):
     """Exact raw records persisted by JsonBackend's durable document protocol."""
 
-    def __init__(self, backend: JsonBackend):
-        super().__init__(backend)
+    def __init__(
+        self, backend: JsonBackend, *, lifecycle_limits: LifecycleLimits | None = None
+    ):
+        super().__init__(backend, lifecycle_limits=lifecycle_limits)
 
 
 class SqliteManifestRepository:
@@ -404,8 +499,13 @@ class SqliteManifestRepository:
     fields never pass through its fixed-column metadata projection.
     """
 
-    def __init__(self, backend: SqliteBackend):
+    def __init__(
+        self, backend: SqliteBackend, *, lifecycle_limits: LifecycleLimits | None = None
+    ):
         self.backend = backend
+        self.lifecycle_limits = (
+            LifecycleLimits() if lifecycle_limits is None else lifecycle_limits
+        )
         if backend._legacy_layout is not None:
             raise CacheBlobBackendError(
                 "Canonical manifest storage requires a current SQLite backend",
@@ -637,6 +737,48 @@ class SqliteManifestRepository:
             )
         return keys
 
+    def list_page(
+        self,
+        cursor: ManifestCursor | None = None,
+        *,
+        page_size: int | None = None,
+    ) -> ManifestPage:
+        """Fetch only one SQL-bounded lexical page of canonical bytes."""
+        if cursor is not None and not isinstance(cursor, ManifestCursor):
+            raise TypeError("manifest cursor must be a ManifestCursor or None")
+        resolved = (
+            self.lifecycle_limits.manifest_page_size
+            if page_size is None
+            else page_size
+        )
+        if type(resolved) is not int or resolved <= 0:
+            raise ValueError("manifest page size must be a positive integer")
+        if resolved > self.lifecycle_limits.manifest_page_size:
+            raise ValueError("manifest page size exceeds configured lifecycle limit")
+        try:
+            with self.backend._lock, self.backend.engine.begin() as connection:
+                if cursor is None:
+                    rows = connection.exec_driver_sql(
+                        f"SELECT logical_key, canonical_bytes FROM {_SQLITE_MANIFEST_TABLE} "
+                        "ORDER BY logical_key LIMIT ?",
+                        (resolved + 1,),
+                    ).all()
+                else:
+                    rows = connection.exec_driver_sql(
+                        f"SELECT logical_key, canonical_bytes FROM {_SQLITE_MANIFEST_TABLE} "
+                        "WHERE logical_key > ? ORDER BY logical_key LIMIT ?",
+                        (cursor.key, resolved + 1),
+                    ).all()
+        except _BACKEND_OPERATION_ERRORS as exc:
+            raise _backend_failure("list_page", self.backend, exc) from exc
+        has_more = len(rows) > resolved
+        page_rows = rows[:resolved]
+        entries = tuple((str(row[0]), bytes(row[1])) for row in page_rows)
+        return ManifestPage(
+            entries=entries,
+            next_cursor=(ManifestCursor(entries[-1][0]) if has_more and entries else None),
+        )
+
     def list_backend_entries(self) -> list[dict[str, Any]]:
         """Read the SQLite compatibility projection with typed translation."""
         try:
@@ -645,14 +787,16 @@ class SqliteManifestRepository:
             raise _backend_failure("list_entries", self.backend, exc) from exc
 
 
-def create_manifest_repository(backend: object) -> ManifestRepository:
+def create_manifest_repository(
+    backend: object, *, lifecycle_limits: LifecycleLimits | None = None
+) -> ManifestRepository:
     """Select the exact local adapter that can preserve canonical record bytes."""
     if type(backend) is InMemoryBackend:
-        return InMemoryManifestRepository(backend)
+        return InMemoryManifestRepository(backend, lifecycle_limits=lifecycle_limits)
     if type(backend) is JsonBackend:
-        return JsonManifestRepository(backend)
+        return JsonManifestRepository(backend, lifecycle_limits=lifecycle_limits)
     if type(backend) is SqliteBackend:
-        return SqliteManifestRepository(backend)
+        return SqliteManifestRepository(backend, lifecycle_limits=lifecycle_limits)
     raise CacheBlobBackendError(
         "Canonical manifest storage supports only exact local backend identities",
         context={
@@ -666,8 +810,12 @@ def create_manifest_repository(backend: object) -> ManifestRepository:
 class MetadataManifestRepository:
     """Compatibility facade for callers of the original Phase 2 repository seam."""
 
-    def __init__(self, backend: object):
-        self._repository = create_manifest_repository(backend)
+    def __init__(
+        self, backend: object, *, lifecycle_limits: LifecycleLimits | None = None
+    ):
+        self._repository = create_manifest_repository(
+            backend, lifecycle_limits=lifecycle_limits
+        )
 
     def get_raw(self, key: str) -> Optional[bytes]:
         return self._repository.get_raw(key)
@@ -696,8 +844,19 @@ class MetadataManifestRepository:
     def remove(self, key: str) -> None:
         self._repository.remove(key)
 
+    def remove_if_expected(self, key: str, expected: ManifestExpectation) -> None:
+        self._repository.remove_if_expected(key, expected)
+
     def list_keys(self) -> list[str]:
         return self._repository.list_keys()
+
+    def list_page(
+        self,
+        cursor: ManifestCursor | None = None,
+        *,
+        page_size: int | None = None,
+    ) -> ManifestPage:
+        return self._repository.list_page(cursor, page_size=page_size)
 
     def list_backend_entries(self) -> list[dict[str, Any]]:
         return self._repository.list_backend_entries()
@@ -706,6 +865,8 @@ class MetadataManifestRepository:
 __all__ = [
     "ManifestRepository",
     "ManifestExpectation",
+    "ManifestCursor",
+    "ManifestPage",
     "InMemoryManifestRepository",
     "JsonManifestRepository",
     "SqliteManifestRepository",

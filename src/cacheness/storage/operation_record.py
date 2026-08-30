@@ -7,6 +7,7 @@ use them to authorize cleanup after a process interruption.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import re
@@ -28,6 +29,10 @@ OPERATION_RECORD_SCHEMA_VERSION = 2
 OPERATION_RECORD_OWNER = "cacheness.blob-store.lifecycle"
 OPERATION_SIGNATURE_ALGORITHM = "hmac-sha256"
 OPERATION_SIGNING_DOMAIN = b"cacheness.operation-record.v2\x00"
+CLEAR_TARGET_PAGE_SIGNING_DOMAIN = b"cacheness.clear-target-page.v1\x00"
+CLEAR_TARGET_CHECKPOINT_SIGNING_DOMAIN = (
+    b"cacheness.clear-target-checkpoint.v1\x00"
+)
 MAX_OPERATION_RECORD_BYTES = 1_048_576
 MAX_OPERATION_FIELD_BYTES = 8_192
 MAX_OPERATION_TOPOLOGY_FIELDS = 8
@@ -98,6 +103,31 @@ _RECORD_FIELDS = frozenset(
         "updated_at",
     }
 )
+_CLEAR_TARGET_PAGE_FIELDS = frozenset(
+    {
+        "next_cursor",
+        "operation_id",
+        "page_id",
+        "schema_version",
+        "signature",
+        "signature_algorithm",
+        "source_cursor",
+        "targets",
+    }
+)
+_CLEAR_TARGET_CHECKPOINT_FIELDS = frozenset(
+    {
+        "completed_target_indices",
+        "operation_id",
+        "page_complete",
+        "page_id",
+        "page_record_digest",
+        "schema_version",
+        "signature",
+        "signature_algorithm",
+    }
+)
+CLEAR_TARGET_SCHEMA_VERSION = 1
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -266,6 +296,336 @@ def _validate_timestamp(value: object, field: str) -> str:
     if parsed.tzinfo is None:
         raise CacheManifestIntegrityError(f"Operation record {field} requires a timezone")
     return timestamp
+
+
+def _canonical_clear_bytes(record: Mapping[str, Any]) -> bytes:
+    """Encode bounded clear control evidence without reusing payload codecs."""
+    try:
+        encoded = json.dumps(
+            record,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise CacheManifestIntegrityError("Clear control evidence is not JSON-compatible") from exc
+    if len(encoded) > MAX_OPERATION_RECORD_BYTES:
+        raise CacheManifestIntegrityError(
+            "Clear control evidence exceeds the byte limit",
+            reason=CacheReason.MANIFEST_BOUNDS,
+        )
+    return encoded
+
+
+def _decode_clear_mapping(raw: bytes, fields: frozenset[str], label: str) -> dict[str, Any]:
+    """Decode one strict clear evidence projection without assigning authority."""
+    if not isinstance(raw, bytes) or not raw or len(raw) > MAX_OPERATION_RECORD_BYTES:
+        raise CacheManifestIntegrityError(f"{label} bytes are invalid")
+    try:
+        decoded = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_int=_parse_signed_64,
+            parse_float=_reject_float,
+            parse_constant=_reject_constant,
+        )
+    except (UnicodeDecodeError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        if isinstance(exc, CacheManifestIntegrityError):
+            raise
+        raise CacheManifestIntegrityError(f"{label} is not valid JSON") from exc
+    if not isinstance(decoded, dict) or set(decoded) != fields:
+        raise CacheManifestIntegrityError(f"{label} has an unknown or missing field")
+    return decoded
+
+
+def _validated_clear_cursor(value: object, field: str) -> str | None:
+    """Accept bounded opaque logical cursors without treating them as paths."""
+    return _bounded_string(value, field, allow_none=True)
+
+
+@dataclass(frozen=True)
+class ClearTarget:
+    """One authenticated-manifest observation preserved for a clear page."""
+
+    key: str
+    generation: str
+    record_digest: str
+    raw_record: bytes
+
+    def __post_init__(self) -> None:
+        """Bind the persisted target to its exact opaque manifest bytes."""
+        _bounded_string(self.key, "clear_target.key")
+        _validated_hex(self.generation, "clear_target.generation", allow_none=False, pattern=_HEX_UUID)
+        _validated_hex(
+            self.record_digest,
+            "clear_target.record_digest",
+            allow_none=False,
+            pattern=_HEX_SHA256,
+        )
+        if not isinstance(self.raw_record, bytes) or not self.raw_record:
+            raise CacheManifestIntegrityError("Clear target record must be non-empty bytes")
+        if len(self.raw_record) > MAX_OPERATION_RECORD_BYTES:
+            raise CacheManifestIntegrityError(
+                "Clear target record exceeds the byte limit",
+                reason=CacheReason.MANIFEST_BOUNDS,
+            )
+        if hashlib.sha256(self.raw_record).hexdigest() != self.record_digest:
+            raise CacheManifestIntegrityError("Clear target digest does not match exact record")
+
+    @classmethod
+    def from_raw(cls, key: str, generation: str, raw_record: bytes) -> "ClearTarget":
+        """Construct one exact target from the observed canonical manifest bytes."""
+        return cls(
+            key=key,
+            generation=generation,
+            record_digest=hashlib.sha256(raw_record).hexdigest(),
+            raw_record=raw_record,
+        )
+
+    def to_mapping(self) -> dict[str, str]:
+        """Return a reversible JSON-safe representation of one exact target."""
+        return {
+            "generation": self.generation,
+            "key": self.key,
+            "raw_record": base64.b64encode(self.raw_record).decode("ascii"),
+            "record_digest": self.record_digest,
+        }
+
+    @classmethod
+    def from_mapping(cls, value: object) -> "ClearTarget":
+        """Decode one strict target without authenticating it as authority."""
+        if not isinstance(value, Mapping) or set(value) != {
+            "generation",
+            "key",
+            "raw_record",
+            "record_digest",
+        }:
+            raise CacheManifestIntegrityError("Clear target fields are invalid")
+        encoded = value["raw_record"]
+        if not isinstance(encoded, str):
+            raise CacheManifestIntegrityError("Clear target raw record is invalid")
+        try:
+            raw_record = base64.b64decode(encoded, validate=True)
+        except (ValueError, UnicodeEncodeError) as exc:
+            raise CacheManifestIntegrityError("Clear target raw record is invalid") from exc
+        return cls(
+            key=value["key"],
+            generation=value["generation"],
+            record_digest=value["record_digest"],
+            raw_record=raw_record,
+        )
+
+
+@dataclass(frozen=True)
+class ClearTargetPage:
+    """One bounded durable page of exact clear targets.
+
+    Repository code stores this as opaque bytes. Lifecycle code authenticates
+    the page before treating any target as destructive authority.
+    """
+
+    operation_id: str
+    page_id: str
+    source_cursor: str | None
+    next_cursor: str | None
+    targets: tuple[ClearTarget, ...]
+    signature_algorithm: str = OPERATION_SIGNATURE_ALGORITHM
+    signature: str = ""
+    schema_version: int = CLEAR_TARGET_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        """Reject ambiguous, unbounded, or malformed page values."""
+        if self.schema_version != CLEAR_TARGET_SCHEMA_VERSION:
+            raise CacheManifestUnsupportedVersionError(
+                f"Unsupported clear target page schema version: {self.schema_version}"
+            )
+        _validated_hex(self.operation_id, "clear_target_page.operation_id", allow_none=False, pattern=_HEX_UUID)
+        _validated_hex(self.page_id, "clear_target_page.page_id", allow_none=False, pattern=_HEX_UUID)
+        _validated_clear_cursor(self.source_cursor, "clear_target_page.source_cursor")
+        _validated_clear_cursor(self.next_cursor, "clear_target_page.next_cursor")
+        if not isinstance(self.targets, tuple) or not self.targets:
+            raise CacheManifestIntegrityError("Clear target page must contain targets")
+        if len(self.targets) > 4_096 or any(not isinstance(target, ClearTarget) for target in self.targets):
+            raise CacheManifestIntegrityError("Clear target page targets are invalid")
+        keys = [target.key for target in self.targets]
+        if keys != sorted(keys) or len(set(keys)) != len(keys):
+            raise CacheManifestIntegrityError("Clear target page keys must be unique and ordered")
+        if self.signature_algorithm != OPERATION_SIGNATURE_ALGORITHM:
+            raise CacheManifestIntegrityError("Unsupported clear target page signature algorithm")
+        _bounded_string(self.signature, "clear_target_page.signature", allow_empty=True)
+        if self.signature and not _HEX_SHA256.fullmatch(self.signature):
+            raise CacheManifestIntegrityError("Clear target page signature is invalid")
+
+    def to_mapping(self, *, include_signature: bool = True) -> dict[str, Any]:
+        """Return the deterministic bounded target-page projection."""
+        result = {
+            "next_cursor": self.next_cursor,
+            "operation_id": self.operation_id,
+            "page_id": self.page_id,
+            "schema_version": self.schema_version,
+            "signature_algorithm": self.signature_algorithm,
+            "source_cursor": self.source_cursor,
+            "targets": [target.to_mapping() for target in self.targets],
+        }
+        if include_signature:
+            result["signature"] = self.signature
+        return result
+
+    def canonical_bytes(self, *, include_signature: bool = True) -> bytes:
+        """Encode exact target evidence for conditional durable persistence."""
+        return _canonical_clear_bytes(self.to_mapping(include_signature=include_signature))
+
+    def signing_bytes(self) -> bytes:
+        """Domain-separate page authentication from manifests and operations."""
+        return CLEAR_TARGET_PAGE_SIGNING_DOMAIN + self.canonical_bytes(include_signature=False)
+
+    def with_signature(self, signature: str) -> "ClearTargetPage":
+        """Return a signed page without mutating its immutable target set."""
+        return replace(self, signature=signature)
+
+    @classmethod
+    def from_canonical_bytes(cls, raw: bytes) -> "ClearTargetPage":
+        """Decode exact page bytes without assigning them lifecycle authority."""
+        decoded = _decode_clear_mapping(raw, _CLEAR_TARGET_PAGE_FIELDS, "Clear target page")
+        targets = decoded["targets"]
+        if not isinstance(targets, list):
+            raise CacheManifestIntegrityError("Clear target page targets are invalid")
+        return cls(
+            operation_id=decoded["operation_id"],
+            page_id=decoded["page_id"],
+            source_cursor=decoded["source_cursor"],
+            next_cursor=decoded["next_cursor"],
+            targets=tuple(ClearTarget.from_mapping(target) for target in targets),
+            signature_algorithm=decoded["signature_algorithm"],
+            signature=decoded["signature"],
+            schema_version=decoded["schema_version"],
+        )
+
+
+@dataclass(frozen=True)
+class ClearTargetCheckpoint:
+    """Monotonic, exact-page-bound progress for one persisted target page."""
+
+    operation_id: str
+    page_id: str
+    page_record_digest: str
+    completed_target_indices: tuple[int, ...]
+    page_complete: bool
+    signature_algorithm: str = OPERATION_SIGNATURE_ALGORITHM
+    signature: str = ""
+    schema_version: int = CLEAR_TARGET_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        """Require canonical monotonic index sets before durable replacement."""
+        if self.schema_version != CLEAR_TARGET_SCHEMA_VERSION:
+            raise CacheManifestUnsupportedVersionError(
+                f"Unsupported clear target checkpoint schema version: {self.schema_version}"
+            )
+        _validated_hex(self.operation_id, "clear_target_checkpoint.operation_id", allow_none=False, pattern=_HEX_UUID)
+        _validated_hex(self.page_id, "clear_target_checkpoint.page_id", allow_none=False, pattern=_HEX_UUID)
+        _validated_hex(
+            self.page_record_digest,
+            "clear_target_checkpoint.page_record_digest",
+            allow_none=False,
+            pattern=_HEX_SHA256,
+        )
+        if (
+            not isinstance(self.completed_target_indices, tuple)
+            or any(type(index) is not int or index < 0 for index in self.completed_target_indices)
+            or tuple(sorted(set(self.completed_target_indices))) != self.completed_target_indices
+        ):
+            raise CacheManifestIntegrityError("Clear target checkpoint indices are invalid")
+        if type(self.page_complete) is not bool:
+            raise CacheManifestIntegrityError("Clear target checkpoint completion is invalid")
+        if self.signature_algorithm != OPERATION_SIGNATURE_ALGORITHM:
+            raise CacheManifestIntegrityError("Unsupported clear target checkpoint signature algorithm")
+        _bounded_string(self.signature, "clear_target_checkpoint.signature", allow_empty=True)
+        if self.signature and not _HEX_SHA256.fullmatch(self.signature):
+            raise CacheManifestIntegrityError("Clear target checkpoint signature is invalid")
+
+    @classmethod
+    def initial_for(cls, page: ClearTargetPage) -> "ClearTargetCheckpoint":
+        """Bind zero progress to one exact persisted target page."""
+        return cls(
+            operation_id=page.operation_id,
+            page_id=page.page_id,
+            page_record_digest=hashlib.sha256(page.canonical_bytes()).hexdigest(),
+            completed_target_indices=(),
+            page_complete=False,
+        )
+
+    def with_completed_target(self, index: int) -> "ClearTargetCheckpoint":
+        """Advance one target without allowing a writer to drop prior progress."""
+        if type(index) is not int or index < 0:
+            raise ValueError("clear target index must be a non-negative integer")
+        if self.page_complete:
+            raise CacheManifestIntegrityError("Clear target page is already complete")
+        return replace(
+            self,
+            completed_target_indices=tuple(
+                sorted(set(self.completed_target_indices).union({index}))
+            ),
+            signature="",
+        )
+
+    def complete_page(self, target_count: int) -> "ClearTargetCheckpoint":
+        """Mark a page complete only after every bounded target is checkpointed."""
+        if type(target_count) is not int or target_count <= 0:
+            raise ValueError("clear target count must be a positive integer")
+        if self.completed_target_indices != tuple(range(target_count)):
+            raise CacheManifestIntegrityError("Clear target page completion skipped targets")
+        return replace(self, page_complete=True, signature="")
+
+    def to_mapping(self, *, include_signature: bool = True) -> dict[str, Any]:
+        """Return the exact checkpoint projection for conditional persistence."""
+        result = {
+            "completed_target_indices": list(self.completed_target_indices),
+            "operation_id": self.operation_id,
+            "page_complete": self.page_complete,
+            "page_id": self.page_id,
+            "page_record_digest": self.page_record_digest,
+            "schema_version": self.schema_version,
+            "signature_algorithm": self.signature_algorithm,
+        }
+        if include_signature:
+            result["signature"] = self.signature
+        return result
+
+    def canonical_bytes(self, *, include_signature: bool = True) -> bytes:
+        """Encode immutable checkpoint bytes for exact replacement."""
+        return _canonical_clear_bytes(self.to_mapping(include_signature=include_signature))
+
+    def signing_bytes(self) -> bytes:
+        """Domain-separate checkpoint authentication from all other records."""
+        return (
+            CLEAR_TARGET_CHECKPOINT_SIGNING_DOMAIN
+            + self.canonical_bytes(include_signature=False)
+        )
+
+    def with_signature(self, signature: str) -> "ClearTargetCheckpoint":
+        """Return a signed checkpoint without mutating progress."""
+        return replace(self, signature=signature)
+
+    @classmethod
+    def from_canonical_bytes(cls, raw: bytes) -> "ClearTargetCheckpoint":
+        """Decode a strict checkpoint without treating it as authority."""
+        decoded = _decode_clear_mapping(
+            raw, _CLEAR_TARGET_CHECKPOINT_FIELDS, "Clear target checkpoint"
+        )
+        indices = decoded["completed_target_indices"]
+        if not isinstance(indices, list):
+            raise CacheManifestIntegrityError("Clear target checkpoint indices are invalid")
+        return cls(
+            operation_id=decoded["operation_id"],
+            page_id=decoded["page_id"],
+            page_record_digest=decoded["page_record_digest"],
+            completed_target_indices=tuple(indices),
+            page_complete=decoded["page_complete"],
+            signature_algorithm=decoded["signature_algorithm"],
+            signature=decoded["signature"],
+            schema_version=decoded["schema_version"],
+        )
 
 
 @dataclass(frozen=True)
@@ -456,6 +816,12 @@ def store_identity(root: str) -> str:
 
 
 __all__ = [
+    "CLEAR_TARGET_CHECKPOINT_SIGNING_DOMAIN",
+    "CLEAR_TARGET_PAGE_SIGNING_DOMAIN",
+    "CLEAR_TARGET_SCHEMA_VERSION",
+    "ClearTarget",
+    "ClearTargetCheckpoint",
+    "ClearTargetPage",
     "LifecycleOperationRecord",
     "MAX_OPERATION_FIELD_BYTES",
     "MAX_OPERATION_RECORD_BYTES",
