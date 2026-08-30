@@ -7,9 +7,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from cacheness.error_handling import CacheBlobRecoverableCleanupError
+from cacheness.error_handling import (
+    CacheBlobRecoverableCleanupError,
+    CacheManifestIntegrityError,
+    CacheStorageError,
+    CacheUnsafePathError,
+)
 
-from .integrity import sha256_and_size, sign_hmac_sha256
+from .integrity import sha256_and_size, sign_hmac_sha256, verify_hmac_sha256
 from .manifest import BlobManifestV1
 from .manifest_repository import ManifestExpectation
 from .operation_record import (
@@ -19,7 +24,7 @@ from .operation_record import (
     store_identity,
 )
 from .operation_repository import FileOperationRecordRepository
-from .path_security import validate_blob_id
+from .path_security import resolve_managed_locator, validate_blob_id
 
 
 class LifecycleEngine:
@@ -36,10 +41,17 @@ class LifecycleEngine:
             store.guarded_handler_io.file_ops
         )
         self.test_hook: Callable[[str, LifecycleOperationRecord], None] | None = None
+        self.fault_hook: Callable[[str, LifecycleOperationRecord], None] | None = None
+        self.recover()
 
     def _emit(self, step: str, record: LifecycleOperationRecord) -> None:
         if self.test_hook is not None:
             self.test_hook(step, record)
+
+    def _fault(self, seam: str, record: LifecycleOperationRecord) -> None:
+        """Invoke a deterministic test-only interruption seam before I/O."""
+        if self.fault_hook is not None:
+            self.fault_hook(seam, record)
 
     def _signed_record(
         self,
@@ -60,6 +72,115 @@ class LifecycleEngine:
         updated = self._signed_record(record.at_checkpoint(checkpoint))
         self.operation_repository.checkpoint(updated, updated.canonical_bytes())
         return updated
+
+    def _recoverable_record(
+        self,
+        operation_id: str,
+        raw: bytes,
+    ) -> tuple[LifecycleOperationRecord, Path, Path | None] | None:
+        """Authenticate and validate one record before any recovery mutation."""
+        try:
+            record = LifecycleOperationRecord.from_canonical_bytes(raw)
+        except CacheManifestIntegrityError:
+            return None
+        if record.operation_id != operation_id:
+            return None
+        if record.canonical_bytes() != raw:
+            return None
+        if record.store_id != store_identity(str(self.store.guarded_handler_io.root)):
+            return None
+        if not verify_hmac_sha256(
+            record.signing_bytes(),
+            record.signature,
+            self.store._manifest_key(),
+        ):
+            return None
+        try:
+            candidate_locator = resolve_managed_locator(
+                self.store.guarded_handler_io.root,
+                record.candidate_locator,
+                operation="recover_operation_candidate",
+            )
+            previous_locator = (
+                None
+                if record.previous_locator is None
+                else resolve_managed_locator(
+                    self.store.guarded_handler_io.root,
+                    record.previous_locator,
+                    operation="recover_operation_previous",
+                )
+            )
+        except CacheUnsafePathError:
+            return None
+        return record, candidate_locator, previous_locator
+
+    def _recover_record(
+        self,
+        record: LifecycleOperationRecord,
+        candidate_locator: Path,
+        previous_locator: Path | None,
+    ) -> None:
+        """Converge one authenticated record without guessing manifest authority."""
+        current = self.store._load_authenticated_manifest(
+            record.key,
+            operation="recover_operation",
+            require_locator=True,
+        )
+        if current is None:
+            if record.expected_generation is not None:
+                return
+            self.store._delete_or_prove_absent(candidate_locator)
+            self.operation_repository.retire(record)
+            return
+
+        manifest, _, current_locator = current
+        assert current_locator is not None
+        if manifest.generation == record.generation:
+            if current_locator != candidate_locator:
+                # The same generation must retain the exact operation-owned
+                # locator; deleting either side would be speculative.
+                return
+            if (
+                record.checkpoint != OperationCheckpoint.CLEANUP_COMPLETED
+                and previous_locator is not None
+                and previous_locator != candidate_locator
+            ):
+                self.store._delete_or_prove_absent(previous_locator)
+            if record.checkpoint != OperationCheckpoint.CLEANUP_COMPLETED:
+                record = self._checkpoint(record, OperationCheckpoint.CLEANUP_COMPLETED)
+            self.operation_repository.retire(record)
+            return
+
+        if (
+            record.expected_generation is not None
+            and manifest.generation == record.expected_generation
+        ):
+            self.store._delete_or_prove_absent(candidate_locator)
+            self.operation_repository.retire(record)
+
+    def recover(self) -> None:
+        """Resume authenticated lifecycle debt during store initialization.
+
+        Normal reads never call this method.  A record that is malformed,
+        unauthenticated, from another store, or locator-invalid remains
+        untouched rather than becoming authority or a deletion target.
+        """
+        for operation_id, raw in self.operation_repository.iter_raw():
+            recovered = self._recoverable_record(operation_id, raw)
+            if recovered is None:
+                continue
+            record, candidate_locator, previous_locator = recovered
+            try:
+                self._recover_record(record, candidate_locator, previous_locator)
+            except (CacheStorageError, OSError) as exc:
+                raise CacheBlobRecoverableCleanupError(
+                    "BlobStore lifecycle recovery needs another cleanup attempt",
+                    context={
+                        "operation_id": record.operation_id,
+                        "generation": record.generation,
+                        "key": record.key,
+                    },
+                ) from exc
 
     def put(
         self,
@@ -121,15 +242,18 @@ class LifecycleEngine:
                 record,
                 initialize_new_store=previous_manifest is None,
             )
+            self._fault("evidence_create", record)
             self.operation_repository.create(record, record.canonical_bytes())
             self._emit("evidence_created", record)
 
+            self._fault("candidate_publish", record)
             result = self.store.guarded_handler_io.publish_generation(
                 staged, candidate_locator
             )
             record = self._checkpoint(record, OperationCheckpoint.CANDIDATE_PUBLISHED)
             self._emit("candidate_published", record)
 
+            self._fault("candidate_verification", record)
             published_locator = Path(result["actual_path"])
             digest, byte_size = sha256_and_size(published_locator)
             if published_locator != candidate_locator:
@@ -171,20 +295,24 @@ class LifecycleEngine:
                     ),
                 )
             )
+            self._fault("manifest_publish", record)
             self.store.manifest_repository.publish_if_expected(
                 key,
                 expected,
                 signed_manifest.canonical_bytes(),
                 entry_data=self.store._manifest_entry_data(signed_manifest),
             )
+            self._fault("authority_checkpoint", record)
             record = self._checkpoint(record, OperationCheckpoint.AUTHORITY_PUBLISHED)
             self._emit("authority_published", record)
 
             try:
                 if previous_locator is not None and previous_locator != candidate_locator:
+                    self._fault("payload_cleanup", record)
                     self.store._delete_or_prove_absent(previous_locator)
                 record = self._checkpoint(record, OperationCheckpoint.CLEANUP_COMPLETED)
                 self._emit("cleanup_completed", record)
+                self._fault("evidence_retire", record)
                 self.operation_repository.retire(record)
                 self._emit("evidence_retired", record)
             except Exception as exc:

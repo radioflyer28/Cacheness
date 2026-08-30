@@ -47,19 +47,6 @@ class _SingleHandlerRegistry:
     def get_handler(self, _data: Any) -> _NativeJsonHandler:
         return self.handler
 
-
-class _SimulatedProcessLoss(BaseException):
-    """Model a crash that skips the ordinary-exception cleanup path."""
-
-
-class _FailingSerializationHandler(_NativeJsonHandler):
-    """Prove private handler serialization precedes lifecycle evidence."""
-
-    def put(self, data: Any, file_path: Path, config: Any) -> dict[str, Any]:
-        del data, file_path, config
-        self.events.append("private_serialization")
-        raise RuntimeError("native serialization failed")
-
     def get_handler_by_type(self, data_type: str) -> _NativeJsonHandler:
         assert data_type == self.handler.data_type
         return self.handler
@@ -74,6 +61,19 @@ class _FailingSerializationHandler(_NativeJsonHandler):
         assert payload_format == self.handler.payload_format
         assert payload_format_version == self.handler.payload_format_version
         return self.handler
+
+
+class _SimulatedProcessLoss(BaseException):
+    """Model a crash that skips the ordinary-exception cleanup path."""
+
+
+class _FailingSerializationHandler(_NativeJsonHandler):
+    """Prove private handler serialization precedes lifecycle evidence."""
+
+    def put(self, data: Any, file_path: Path, config: Any) -> dict[str, Any]:
+        del data, file_path, config
+        self.events.append("private_serialization")
+        raise RuntimeError("native serialization failed")
 
 
 def test_tracer_json_put_uses_immutable_generation_cas_and_native_bytes(
