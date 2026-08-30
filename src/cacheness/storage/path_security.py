@@ -553,6 +553,19 @@ class ManagedFileOps:
         """Atomically write a stream using a validated opaque ID."""
         locator = self.blob_locator(blob_id, shard_chars)
 
+        return self.write_stream_to_locator(locator, stream)
+
+    def write_stream_to_locator(
+        self, locator: Union[str, Path], stream: BinaryIO
+    ) -> Path:
+        """Atomically replace one already-contained locator from a stream.
+
+        High-level reconciliation paths retain a previously validated locator,
+        rather than a backend identifier, while restoring a managed payload.
+        This method keeps that write inside the same no-follow boundary as
+        ordinary blob-ID writes.
+        """
+
         def chunks() -> Iterator[bytes]:
             while True:
                 chunk = stream.read(8192)
@@ -562,12 +575,12 @@ class ManagedFileOps:
 
         if self._descriptor_mode:
             locator = self._prepare_locator(
-                locator, operation="write_stream", allow_missing_leaf=True
+                locator, operation="write_stream_to_locator", allow_missing_leaf=True
             )
             return self._write_descriptor(locator, chunks())
         with self._lock:
             locator = self._prepare_locator(
-                locator, operation="write_stream", allow_missing_leaf=True
+                locator, operation="write_stream_to_locator", allow_missing_leaf=True
             )
             return self._write_fallback(locator, chunks())
 

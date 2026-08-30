@@ -39,6 +39,8 @@ Usage:
 
 import hashlib
 import logging
+import uuid
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 from datetime import datetime, timezone
@@ -364,13 +366,59 @@ class BlobStore:
     
     def clear(self) -> int:
         """
-        Remove every managed payload and then its metadata.
+        Remove every managed payload with recoverable clear tombstones.
 
         Returns:
             Number of blobs removed
         """
         entries = self.backend.list_entries()
         self._preflight_entries(entries, operation="clear")
+        metadata_snapshot = self._snapshot_clear_metadata(entries)
+        staged_payloads = self._stage_clear_payloads(entries)
+
+        try:
+            cleared_count = self.backend.clear_all()
+        except Exception:
+            recovery_error = None
+            try:
+                self._restore_clear_tombstones(staged_payloads)
+            except Exception as exc:
+                logger.exception(
+                    "Blob metadata clear failed and staged payload recovery failed"
+                )
+                recovery_error = exc
+            try:
+                self._restore_clear_metadata(metadata_snapshot)
+            except Exception as exc:
+                logger.exception(
+                    "Blob metadata clear failed and metadata snapshot recovery failed"
+                )
+                recovery_error = exc
+            if recovery_error is not None:
+                raise
+            raise
+
+        cleanup_error = None
+        for _, tombstone in staged_payloads:
+            try:
+                self.guarded_handler_io.file_ops.delete(tombstone)
+            except Exception as exc:
+                logger.exception(
+                    "Blob metadata clear committed; recoverable tombstone cleanup failed"
+                )
+                cleanup_error = exc
+
+        if cleanup_error is not None:
+            raise RuntimeError(
+                "Blob metadata clear committed, but tombstone cleanup failed: "
+                f"{cleanup_error}"
+            ) from cleanup_error
+
+        return cleared_count
+
+    def _stage_clear_payloads(self, entries: List[Dict[str, Any]]) -> List[tuple[Path, Path]]:
+        """Copy each live payload to a private tombstone before deleting it."""
+        staged_payloads: List[tuple[Path, Path]] = []
         for entry in entries:
             logical_key = entry.get("cache_key", "")
             actual_path = self._entry_locator(
@@ -378,15 +426,88 @@ class BlobStore:
                 logical_key,
                 operation="clear",
             )
-            self.guarded_handler_io.file_ops.delete(actual_path)
+            if not self.guarded_handler_io.file_ops.exists(actual_path):
+                continue
 
-        try:
-            return self.backend.clear_all()
-        except Exception:
-            # Files have already been deleted, so propagating this failure is
-            # preferable to falsely reporting a complete metadata cleanup.
-            logger.exception("Blob payloads were deleted but metadata clear failed")
-            raise
+            tombstone = self.guarded_handler_io.root / (
+                f"clear-tombstone-{uuid.uuid4().hex}"
+            )
+            tombstone_registered = False
+            try:
+                with self.guarded_handler_io.file_ops.open_read(actual_path) as source:
+                    self.guarded_handler_io.file_ops.write_stream_to_locator(
+                        tombstone,
+                        source,
+                    )
+                staged_payloads.append((actual_path, tombstone))
+                tombstone_registered = True
+                if not self.guarded_handler_io.file_ops.delete(actual_path):
+                    raise FileNotFoundError(
+                        "Blob payload disappeared while staging clear reconciliation"
+                    )
+            except Exception:
+                cleanup_error = None
+                try:
+                    if (
+                        not tombstone_registered
+                        and self.guarded_handler_io.file_ops.exists(tombstone)
+                    ):
+                        self.guarded_handler_io.file_ops.delete(tombstone)
+                except Exception as exc:
+                    logger.exception("Failed to remove incomplete BlobStore clear tombstone")
+                    cleanup_error = exc
+                try:
+                    self._restore_clear_tombstones(staged_payloads)
+                except Exception as exc:
+                    logger.exception("Failed to roll back staged BlobStore clear payloads")
+                    cleanup_error = exc
+                if cleanup_error is not None:
+                    raise RuntimeError(
+                        "BlobStore clear staging failed and recovery was incomplete"
+                    ) from cleanup_error
+                raise
+
+        return staged_payloads
+
+    def _restore_clear_tombstones(
+        self, staged_payloads: List[tuple[Path, Path]]
+    ) -> None:
+        """Restore metadata-referenced payloads after an uncommitted clear fails."""
+        recovery_error = None
+        for actual_path, tombstone in reversed(staged_payloads):
+            try:
+                with self.guarded_handler_io.file_ops.open_read(tombstone) as source:
+                    self.guarded_handler_io.file_ops.write_stream_to_locator(
+                        actual_path,
+                        source,
+                    )
+                self.guarded_handler_io.file_ops.delete(tombstone)
+            except Exception as exc:
+                logger.exception("Failed to restore a staged BlobStore clear payload")
+                recovery_error = exc
+
+        if recovery_error is not None:
+            raise RuntimeError("BlobStore clear rollback could not restore every payload") from recovery_error
+
+    def _snapshot_clear_metadata(
+        self, entries: List[Dict[str, Any]]
+    ) -> Dict[str, Dict[str, Any]]:
+        """Capture exact backend records before a clear can mutate them."""
+        snapshot = {}
+        for entry in entries:
+            cache_key = entry.get("cache_key")
+            stored_entry = self.backend.get_entry(cache_key)
+            if stored_entry is not None:
+                snapshot[cache_key] = deepcopy(stored_entry)
+        return snapshot
+
+    def _restore_clear_metadata(
+        self, metadata_snapshot: Dict[str, Dict[str, Any]]
+    ) -> None:
+        """Restore missing or changed entries after a failed metadata clear."""
+        for cache_key, entry in metadata_snapshot.items():
+            if self.backend.get_entry(cache_key) != entry:
+                self.backend.put_entry(cache_key, deepcopy(entry))
     
     def close(self):
         """Close the blob store and release resources."""
@@ -462,5 +583,4 @@ class BlobStore:
     
     def _generate_unique_key(self) -> str:
         """Generate a unique blob key."""
-        import uuid
         return uuid.uuid4().hex[:16]

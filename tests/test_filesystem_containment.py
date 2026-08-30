@@ -504,10 +504,93 @@ def test_blob_store_clear_removes_guarded_payloads_before_metadata(tmp_path):
         store.close()
 
 
-def test_blob_store_clear_surfaces_metadata_failure_after_payload_cleanup(
+@pytest.mark.parametrize("failing_payload_delete", [1, 2])
+def test_blob_store_clear_rolls_back_every_payload_when_staging_delete_fails(
+    tmp_path, monkeypatch, failing_payload_delete
+):
+    """A staged clear restores every still-committed payload after delete failure."""
+    root = tmp_path / "blob-root"
+    handler = _InstrumentedHandler()
+    store = BlobStore(root)
+    store.handlers = _SingleHandlerRegistry(handler)
+
+    try:
+        keys = [store.put("first", key="first"), store.put("second", key="second")]
+        entries_before = [store.get_metadata(key) for key in keys]
+        assert all(entry is not None for entry in entries_before)
+        payload_paths = [
+            Path(entry["metadata"]["actual_path"])
+            for entry in entries_before
+            if entry is not None
+        ]
+        payload_bytes = {path: path.read_bytes() for path in payload_paths}
+        delete = store.guarded_handler_io.file_ops.delete
+        payload_delete_count = 0
+
+        def fail_one_payload_delete(locator):
+            nonlocal payload_delete_count
+            if Path(locator) in payload_paths:
+                payload_delete_count += 1
+                if payload_delete_count == failing_payload_delete:
+                    raise RuntimeError("payload delete unavailable")
+            return delete(locator)
+
+        monkeypatch.setattr(store.guarded_handler_io.file_ops, "delete", fail_one_payload_delete)
+
+        with pytest.raises(RuntimeError, match="payload delete unavailable"):
+            store.clear()
+
+        assert [store.get_metadata(key) for key in keys] == entries_before
+        assert {path: path.read_bytes() for path in payload_paths} == payload_bytes
+        assert [store.get(key) for key in keys] == ["first", "second"]
+        assert not list(root.glob("clear-tombstone-*"))
+    finally:
+        store.close()
+
+
+def test_blob_store_clear_rolls_back_payloads_when_metadata_clear_fails(
     tmp_path, monkeypatch
 ):
-    """A metadata failure is visible and cannot retain payload bytes as orphans."""
+    """A metadata failure restores every staged payload to its original locator."""
+    root = tmp_path / "blob-root"
+    handler = _InstrumentedHandler()
+    store = BlobStore(root)
+    store.handlers = _SingleHandlerRegistry(handler)
+
+    try:
+        keys = [store.put("first", key="first"), store.put("second", key="second")]
+        entries_before = [store.get_metadata(key) for key in keys]
+        assert all(entry is not None for entry in entries_before)
+        payload_paths = [
+            Path(entry["metadata"]["actual_path"])
+            for entry in entries_before
+            if entry is not None
+        ]
+        payload_bytes = {path: path.read_bytes() for path in payload_paths}
+
+        remove_entry = store.backend.remove_entry
+
+        def fail_metadata_clear() -> int:
+            remove_entry(keys[0])
+            raise RuntimeError("metadata unavailable after partial clear")
+
+        monkeypatch.setattr(store.backend, "clear_all", fail_metadata_clear)
+
+        with pytest.raises(RuntimeError, match="metadata unavailable after partial clear"):
+            store.clear()
+
+        assert [store.get_metadata(key) for key in keys] == entries_before
+        assert {path: path.read_bytes() for path in payload_paths} == payload_bytes
+        assert [store.get(key) for key in keys] == ["first", "second"]
+        assert not list(root.glob("clear-tombstone-*"))
+    finally:
+        store.close()
+
+
+def test_blob_store_clear_discards_tombstone_if_staging_copy_raises(
+    tmp_path, monkeypatch
+):
+    """A stage-write failure cannot leak an unregistered tombstone payload."""
     root = tmp_path / "blob-root"
     handler = _InstrumentedHandler()
     store = BlobStore(root)
@@ -515,20 +598,63 @@ def test_blob_store_clear_surfaces_metadata_failure_after_payload_cleanup(
 
     try:
         key = store.put("payload", key="entry")
-        entry = store.get_metadata(key)
-        assert entry is not None
-        payload_path = Path(entry["metadata"]["actual_path"])
+        entry_before = store.get_metadata(key)
+        assert entry_before is not None
+        payload_path = Path(entry_before["metadata"]["actual_path"])
+        payload_bytes = payload_path.read_bytes()
+        write_stream_to_locator = store.guarded_handler_io.file_ops.write_stream_to_locator
 
-        def fail_metadata_clear() -> int:
-            raise RuntimeError("metadata unavailable")
+        def write_tombstone_then_raise(locator, source):
+            write_stream_to_locator(locator, source)
+            raise RuntimeError("tombstone staging unavailable")
 
-        monkeypatch.setattr(store.backend, "clear_all", fail_metadata_clear)
+        monkeypatch.setattr(
+            store.guarded_handler_io.file_ops,
+            "write_stream_to_locator",
+            write_tombstone_then_raise,
+        )
 
-        with pytest.raises(RuntimeError, match="metadata unavailable"):
+        with pytest.raises(RuntimeError, match="tombstone staging unavailable"):
             store.clear()
 
-        assert not payload_path.exists()
-        assert store.backend.get_entry(key) is not None
+        assert store.get_metadata(key) == entry_before
+        assert payload_path.read_bytes() == payload_bytes
+        assert not list(root.glob("clear-tombstone-*"))
+    finally:
+        store.close()
+
+
+def test_blob_store_clear_leaves_only_recoverable_tombstones_when_final_delete_fails(
+    tmp_path, monkeypatch
+):
+    """Post-commit payload cleanup cannot leave live metadata pointing at a miss."""
+    root = tmp_path / "blob-root"
+    handler = _InstrumentedHandler()
+    store = BlobStore(root)
+    store.handlers = _SingleHandlerRegistry(handler)
+
+    try:
+        keys = [store.put("first", key="first"), store.put("second", key="second")]
+        payload_paths = [
+            Path(store.get_metadata(key)["metadata"]["actual_path"])
+            for key in keys
+        ]
+        delete = store.guarded_handler_io.file_ops.delete
+
+        def fail_tombstone_delete(locator):
+            if Path(locator).name.startswith("clear-tombstone-"):
+                raise RuntimeError("tombstone delete unavailable")
+            return delete(locator)
+
+        monkeypatch.setattr(store.guarded_handler_io.file_ops, "delete", fail_tombstone_delete)
+
+        with pytest.raises(RuntimeError, match="tombstone delete unavailable"):
+            store.clear()
+
+        assert store.backend.list_entries() == []
+        assert [store.get(key) for key in keys] == [None, None]
+        assert all(not path.exists() for path in payload_paths)
+        assert len(list(root.glob("clear-tombstone-*"))) == len(keys)
     finally:
         store.close()
 
