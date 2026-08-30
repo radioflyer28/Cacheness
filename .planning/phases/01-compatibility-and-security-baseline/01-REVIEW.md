@@ -1,8 +1,8 @@
 ---
 phase: 01-compatibility-and-security-baseline
-reviewed: 2026-08-29T23:35:35Z
+reviewed: 2026-08-30T00:32:17Z
 depth: standard
-files_reviewed: 54
+files_reviewed: 56
 files_reviewed_list:
   - README.md
   - docs/SECURITY.md
@@ -45,10 +45,12 @@ files_reviewed_list:
   - tests/fixtures/compat/sqlite-metadata-json-v039/provenance.json
   - tests/fixtures/compat/validate_corpus.py
   - tests/test_blob_backend_registry.py
+  - tests/test_cache_integrity.py
   - tests/test_config_validation.py
   - tests/test_core.py
   - tests/test_directory_sharding.py
   - tests/test_filesystem_containment.py
+  - tests/test_handlers.py
   - tests/test_legacy_array_security.py
   - tests/test_phase1_quality_gates.py
   - tests/test_public_api_contract.py
@@ -59,80 +61,90 @@ files_reviewed_list:
   - tests/test_sql_cache_failure_contract.py
   - tests/test_stored_compatibility.py
 findings:
-  critical: 5
+  critical: 6
   warning: 0
   info: 0
-  total: 5
+  total: 6
 status: issues_found
 ---
 
 # Phase 1: Code Review Report
 
-**Reviewed:** 2026-08-29T23:35:35Z
+**Reviewed:** 2026-08-30T00:32:17Z
 **Depth:** standard
-**Files Reviewed:** 54
+**Files Reviewed:** 56
 **Status:** issues_found
 
 ## Summary
 
-The Phase 1 compatibility corpus validates successfully and the focused quality, containment, and metadata-query suites pass, but adversarial review found five release-blocking defects. Two independently bypass the promised executable-serializer authenticity/integrity gate, one returns type-confused metadata query results, one leaves blob bytes behind after a successful clear, and one permits handler output outside the private staging directory to cross the managed publication boundary.
+The prior two fix iterations close their exact reported reproductions: failed overwrite digests and strict signing preserve the committed entry, finite-value validation excludes stored NaN/infinities, and pre-commit `BlobStore.clear()` failures restore the tested state. The final pass still found six release-blocking lifecycle and boundary failures. Three are direct regressions or incomplete variants of the new fixes: regular-file staging swaps are published, candidate payloads survive metadata-commit failure, and final clear tombstones are not durably recoverable. The remaining failures are deterministic state corruption in `BlobStore.put()` and `UnifiedCache.clear_all()`, plus an unhandled valid-integer query boundary.
 
 ## Narrative Findings (AI reviewer)
 
 ## Critical Issues
 
-### CR-01: Missing digests silently disable required integrity verification
+### CR-01: Descriptor-mode staging publishes a regular file swapped in after validation
 
 **Classification:** BLOCKER
 
-**File:** `src/cacheness/core.py:990-1004,1244-1248`
+**File:** `src/cacheness/storage/guarded_handler_io.py:82-128,130-209`
 
-**Issue:** When integrity verification is enabled, `_calculate_file_hash()` is allowed to return `None`; `put()` persists that value and still signs/commits the entry. On read, `get()` performs the digest comparison only when `stored_hash is not None`, so the supposedly mandatory gate is skipped. This reaches executable `ObjectHandler` deserialization even under the complete trusted-object-array policy. A direct reproduction that replaced `_calculate_file_hash` with a failing/`None` result stored an object array with `file_hash=None` and then successfully deserialized it. This contradicts the Phase 1 requirement that object arrays require payload integrity verification.
+**Issue:** `_staged_artifact()` validates an inode but returns only its resolved pathname. `_open_staged_artifact()` then opens that pathname later and checks only that the newly opened inode is a regular single-link file; descriptor mode never compares it with the inode validated earlier. Replacing the validated artifact with another ordinary file between those calls therefore succeeds. A direct reproduction replaced the validated `good` artifact with an ordinary file containing `swapped`; `GuardedHandlerIO.put()` published `b"swapped"`. The new tests cover a symlink leaf and symlink ancestor, but not an ordinary-file or ordinary-directory replacement. This defeats the claimed validation/open binding for handler-controlled publication.
 
-**Fix:** Treat an unavailable digest as a write failure whenever `verify_cache_integrity` is enabled, and reject existing entries with a missing or malformed digest before signature verification or handler dispatch. Do not represent “verification requested but unavailable” with the same `None` value as “verification disabled.”
+**Fix:** Open the staged artifact during validation and carry that descriptor (or its recorded `st_dev`/`st_ino` identity) into publication. If reopening is unavoidable, compare the opened descriptor with the exact validated identity after the descriptor-relative walk and reject any mismatch. Add leaf regular-file and ancestor ordinary-directory replacement regressions in both descriptor and fallback modes.
 
-### CR-02: Custom signed-field sets can authenticate tampered executable payloads
-
-**Classification:** BLOCKER
-
-**File:** `src/cacheness/config.py:590-615`
-
-**Issue:** The trusted-object-array validator checks that signing is enabled, integrity checking is enabled, and unsigned entries are rejected, but it does not require the signature to cover `file_hash`, `data_type`, `actual_path`, `storage_format`, `serializer`, or `compression_codec`. `SecurityConfig(custom_signed_fields=["cache_key"])` therefore passes the strict opt-in validation. An attacker who can alter cache payload and metadata can replace an object-array payload, update the unsigned `file_hash` to the replacement digest, retain the original valid cache-key-only HMAC, and cause the replacement pickle to deserialize. This was reproduced by copying a second valid object-array payload over the first and changing only its stored hash; `get(first_key)` returned the second payload.
-
-**Fix:** When `allow_trusted_object_arrays=True`, reject custom signer configurations unless they include every field that controls payload identity and deserialization, at minimum `cache_key`, `file_hash`, `data_type`, `actual_path`, `storage_format`, `serializer`, and `compression_codec`. Prefer a fixed mandatory signed-field core that custom fields may extend but never remove.
-
-### CR-03: Numeric metadata filters include nonnumeric values
+### CR-02: `BlobStore.put()` corrupts an existing value when metadata commit fails
 
 **Classification:** BLOCKER
 
-**File:** `src/cacheness/core.py:634-642`
+**File:** `src/cacheness/storage/blob_store.py:159-188`
 
-**Issue:** Numeric `query_meta` filters strip everything through the first colon and cast the remainder to SQLite `FLOAT`, but never check the stored type prefix. SQLite casts nonnumeric strings such as `str:oops` to `0`. Consequently `query_meta(score=-1)` matches a record whose stored score is the string `"oops"`, while excluding a numeric `-2` record. This violates the documented raw numeric-versus-string semantics and can return materially incorrect cache metadata.
+**Issue:** `BlobStore.put()` publishes an overwrite to the deterministic live `storage_id` before calling `backend.put_entry()`. If metadata publication raises, the old metadata remains but its locator now contains the replacement bytes. A direct reproduction wrote `{"v": "old"}`, forced `put_entry()` to fail during replacement, observed the exception and unchanged metadata, then `get("k")` returned `{"v": "new"}`. The operation reports failure while silently changing committed data, and a changed handler type/format can instead make the old entry unreadable.
 
-**Fix:** Add a bound type predicate before casting, accepting only the exact numeric encodings (`int:` and `float:`), or store/query JSON values with an explicit type discriminator. Keep the caller path and prefix values bound rather than interpolated.
+**Fix:** Give `BlobStore.put()` a private-candidate protocol: serialize to a unique candidate, complete validation, then atomically publish metadata/locator ownership. Preserve the prior payload and metadata until commit succeeds, discard only the candidate on failure, and delete the prior payload only after the new record is authoritative. Add first-write and overwrite metadata-failure tests with differing handler formats.
 
-### CR-04: BlobStore.clear reports deletion while retaining every payload
-
-**Classification:** BLOCKER
-
-**File:** `src/cacheness/storage/blob_store.py:365-374`
-
-**Issue:** `clear()` preflights entries and then calls only `self.backend.clear_all()`. Metadata backends remove records, not payload files. The method returns the number of “blobs removed” even though all managed payload bytes remain on disk and become unreachable orphans. A direct reproduction returned `1`, removed the metadata, and left the payload path present. This is a data-retention and storage-correctness failure, and the Phase 1 plan explicitly required clear to route deletion through guarded operations after complete preflight.
-
-**Fix:** After the full preflight pass, delete each validated locator through `guarded_handler_io.file_ops`, then clear metadata using a failure policy that does not falsely report success or silently orphan bytes. Add a safe-entry regression asserting both metadata and payload removal.
-
-### CR-05: Lexical stage containment accepts `..` artifacts outside the private directory
+### CR-03: `UnifiedCache.put()` leaks arbitrary candidate payloads when metadata commit fails
 
 **Classification:** BLOCKER
 
-**File:** `src/cacheness/storage/guarded_handler_io.py:82-115`
+**File:** `src/cacheness/core.py:1064-1163`
 
-**Issue:** `_staged_artifact()` uses lexical `artifact.relative_to(stage_root)` without resolving or rejecting `..`. A returned path such as `<stage>/../payload.npz` produces the relative path `../payload.npz`; the component loop accepts the ordinary parent directory and regular external file, and `_safe_suffix()` accepts its `payload` basename. Bytes outside the private handler stage can therefore be published through the managed boundary despite the stated containment contract. The symlink checks do not address parent traversal or hard-linked external files.
+**Issue:** The candidate fix cleans up only the explicit invalid-digest and strict-signing branches. `metadata_backend.put_entry()` is outside any rollback handler, so a commit exception leaves the already-published candidate in managed storage with no metadata owner. A direct reproduction forced `put_entry()` to raise and found a complete `*-candidate-*.pkl` payload afterward. These candidates may contain sensitive or executable serialized application data, are not discoverable through normal cache cleanup, and accumulate on retries. The same gap applies to exceptions after guarded publication but before the two explicit cleanup branches.
 
-**Fix:** Reject `..` components before any filesystem access, resolve the candidate strictly and require it to be a descendant of the resolved stage root, then open it with a no-follow descriptor and verify that same descriptor is a regular file before copying. Add regressions for relative and absolute parent traversal and for a path swapped after validation.
+**Fix:** Track candidate ownership around the entire pre-commit region. In one `try/finally`, delete the candidate on every path until metadata commit has definitely succeeded; treat a false/failed delete as an explicit reconciliation error. Add injected failures for snapshot opening, digesting, signing, and metadata publication, asserting no candidate residue and exact preservation of an overwritten entry.
+
+### CR-04: `UnifiedCache.clear_all()` still performs irreversible prefix deletion
+
+**Classification:** BLOCKER
+
+**File:** `src/cacheness/core.py:1466-1482`
+
+**Issue:** `clear_all()` deletes payloads sequentially and clears metadata only afterward. If any later delete raises, earlier payloads are gone while all metadata records remain. A two-entry reproduction failed the second deletion and left one payload missing with both metadata rows still committed. This is the same deterministic partial-data-loss pattern that the second iteration fixed only in `BlobStore.clear()`.
+
+**Fix:** Route `UnifiedCache.clear_all()` through a transactional/reconciliation protocol: stage every payload into durable same-root tombstones, clear metadata only after staging succeeds, restore all payloads on any pre-commit failure, and durably journal post-commit finalization. Inject failures at every payload position, during metadata clear, and during finalization.
+
+### CR-05: Finalization-failed clear tombstones have no durable recovery identity
+
+**Classification:** BLOCKER
+
+**File:** `src/cacheness/storage/blob_store.py:401-415,419-490`
+
+**Issue:** After metadata is successfully cleared, a tombstone-delete failure raises and deliberately leaves `clear-tombstone-<uuid>` files. The only mapping from those random names to their original payload locators is the local `staged_payloads` list, which is discarded when `clear()` returns. There is no persisted journal, encoded original identity, startup reconciliation, or public recovery operation. The new test labels these files “recoverable” but asserts only that they remain; after close/restart they are anonymous retained copies. Thus `clear()` can remove all records, return failure, and indefinitely retain the supposedly deleted payload bytes—an erasure/confidentiality and deterministic-reconciliation failure.
+
+**Fix:** Persist an atomic clear journal mapping each tombstone to its original locator and operation state before deleting live payloads. On startup or an explicit recovery call, deterministically roll forward committed clears (remove tombstones) or roll back uncommitted clears. Test close/reopen after every final-delete failure and prove the journal drives a terminal state.
+
+### CR-06: Valid large Python integer filters collapse into an untyped query miss
+
+**Classification:** BLOCKER
+
+**File:** `src/cacheness/query_validation.py:58-67`; `src/cacheness/core.py:642-683,723-727`
+
+**Issue:** Numeric validation rejects only non-finite floats. Python integers outside SQLite's signed 64-bit bind range are accepted, then passed directly as bind values. SQLite raises `OverflowError: Python int too large to convert to SQLite INTEGER`; the broad query catch logs it and returns `None`. A direct reproduction stored `score=10**100` and queried `score=10**99`; instead of returning the matching entry or a typed validation error, `query_meta()` returned `None`. These are valid Python values under the documented raw numeric threshold contract, and `None` is indistinguishable from unsupported backend/configuration.
+
+**Fix:** Define and enforce a numeric domain before opening the session. Either preserve arbitrary integer ordering with a decimal-safe representation/comparison, or reject values outside the supported backend range with `CacheQueryValidationError(reason=invalid_query_value)`. Never swallow numeric-domain failures into `None`. Add values at and beyond `-(2**63)`/`2**63-1`, very large positive/negative integers, and mixed int/float boundary tests.
 
 ---
 
-_Reviewed: 2026-08-29T23:35:35Z_
+_Reviewed: 2026-08-30T00:32:17Z_
 _Reviewer: the agent (gsd-code-reviewer)_
 _Depth: standard_
