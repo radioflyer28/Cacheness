@@ -123,7 +123,7 @@ def test_json_unacknowledged_rollback_rereads_live_document_before_typed_error(
     assert backend.load_metadata() == reopened.load_metadata()
 
 
-def test_prepared_clear_reopens_to_exact_payload_and_metadata_rollback(
+def test_json_prepared_clear_reopens_to_exact_payload_and_metadata_rollback(
     tmp_path, monkeypatch
 ):
     """A pre-commit interruption retains prepared evidence and rolls it back on reopen."""
@@ -149,7 +149,7 @@ def test_prepared_clear_reopens_to_exact_payload_and_metadata_rollback(
         reopened.close()
 
 
-def test_prepared_clear_recovery_restores_entries_and_all_json_counters(
+def test_json_prepared_clear_recovery_restores_entries_and_all_json_counters(
     tmp_path, monkeypatch
 ):
     """Rollback restores the complete JSON metadata document, not entries alone."""
@@ -179,7 +179,7 @@ def test_prepared_clear_recovery_restores_entries_and_all_json_counters(
         reopened.close()
 
 
-def test_committed_clear_reopens_to_roll_forward_without_payload_residue(
+def test_json_committed_clear_reopens_to_roll_forward_without_payload_residue(
     tmp_path, monkeypatch
 ):
     """A post-commit interruption reopens to complete payload erasure exactly once."""

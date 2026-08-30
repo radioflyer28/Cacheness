@@ -46,9 +46,11 @@ from typing import Any, Dict, List, Optional, Union
 from datetime import datetime, timezone
 
 from .backends import MetadataBackend, JsonBackend
+from .clear_recovery import ClearRecoveryCoordinator
 from .guarded_handler_io import GuardedHandlerIO
 from .handlers import HandlerRegistry
 from .path_security import encode_physical_name, resolve_managed_locator
+from ..error_handling import CacheStorageError
 
 # Import CacheConfig for proper handler configuration
 from ..config import CacheConfig, CompressionConfig
@@ -126,6 +128,17 @@ class BlobStore:
         
         # Initialize handler registry
         self.handlers = HandlerRegistry()
+
+        # The initial clear tracer is intentionally limited to exact local JSON
+        # metadata.  Other backend topologies remain untouched until their
+        # explicit recovery adapters are implemented.
+        self._clear_recovery = None
+        if type(self.backend) is JsonBackend:
+            self._clear_recovery = ClearRecoveryCoordinator(
+                self.guarded_handler_io.file_ops,
+                self.backend,
+            )
+            self._clear_recovery.recover()
         
         logger.debug(f"BlobStore initialized at {self.cache_dir}")
     
@@ -371,50 +384,24 @@ class BlobStore:
         Returns:
             Number of blobs removed
         """
+        if self._clear_recovery is None:
+            raise CacheStorageError(
+                "BlobStore clear recovery requires a supported local metadata backend",
+                context={
+                    "operation": "clear",
+                    "backend": type(self.backend).__name__,
+                },
+            )
+
         entries = self.backend.list_entries()
         self._preflight_entries(entries, operation="clear")
-        metadata_snapshot = self._snapshot_clear_metadata(entries)
-        staged_payloads = self._stage_clear_payloads(entries)
-
-        try:
-            cleared_count = self.backend.clear_all()
-        except Exception:
-            recovery_error = None
-            try:
-                self._restore_clear_tombstones(staged_payloads)
-            except Exception as exc:
-                logger.exception(
-                    "Blob metadata clear failed and staged payload recovery failed"
-                )
-                recovery_error = exc
-            try:
-                self._restore_clear_metadata(metadata_snapshot)
-            except Exception as exc:
-                logger.exception(
-                    "Blob metadata clear failed and metadata snapshot recovery failed"
-                )
-                recovery_error = exc
-            if recovery_error is not None:
-                raise
-            raise
-
-        cleanup_error = None
-        for _, tombstone in staged_payloads:
-            try:
-                self.guarded_handler_io.file_ops.delete(tombstone)
-            except Exception as exc:
-                logger.exception(
-                    "Blob metadata clear committed; recoverable tombstone cleanup failed"
-                )
-                cleanup_error = exc
-
-        if cleanup_error is not None:
-            raise RuntimeError(
-                "Blob metadata clear committed, but tombstone cleanup failed: "
-                f"{cleanup_error}"
-            ) from cleanup_error
-
-        return cleared_count
+        mappings = []
+        for entry in entries:
+            cache_key = entry.get("cache_key", "")
+            actual_path = self._entry_locator(entry, cache_key, operation="clear")
+            if self.guarded_handler_io.file_ops.exists(actual_path):
+                mappings.append((cache_key, actual_path))
+        return self._clear_recovery.clear(mappings)
 
     def _stage_clear_payloads(self, entries: List[Dict[str, Any]]) -> List[tuple[Path, Path]]:
         """Copy each live payload to a private tombstone before deleting it."""

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import errno
 import hashlib
+from io import BytesIO
 import os
 import re
 import stat
@@ -583,6 +584,92 @@ class ManagedFileOps:
                 locator, operation="write_stream_to_locator", allow_missing_leaf=True
             )
             return self._write_fallback(locator, chunks())
+
+    def _fsync_containing_directory(self, locator: Union[str, Path]) -> None:
+        """Durably acknowledge a contained locator's parent-directory update."""
+        if self._descriptor_mode:
+            prepared = self._prepare_locator(
+                locator,
+                operation="directory_fsync",
+                allow_missing_leaf=True,
+            )
+            parts = self._relative_parts(prepared)
+            with self._descriptor_parent(parts, create=False) as (parent_fd, _):
+                os.fsync(parent_fd)
+            return
+
+        with self._lock:
+            prepared = self._prepare_locator(
+                locator,
+                operation="directory_fsync",
+                allow_missing_leaf=True,
+            )
+            directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            directory_fd = os.open(prepared.parent, directory_flags)
+            try:
+                self._assert_root_identity()
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+
+    def write_bytes_durable(self, locator: Union[str, Path], data: bytes) -> Path:
+        """Atomically publish bytes and acknowledge the containing directory."""
+        written = self.write_stream_to_locator(locator, BytesIO(data))
+        self._fsync_containing_directory(written)
+        return written
+
+    def create_bytes_durable_exclusive(
+        self, locator: Union[str, Path], data: bytes
+    ) -> Path:
+        """Create one contained durable locator without replacing existing evidence."""
+        if self._descriptor_mode:
+            prepared = self._prepare_locator(
+                locator,
+                operation="exclusive_create",
+                allow_missing_leaf=True,
+            )
+            parts = self._relative_parts(prepared)
+            with self._descriptor_parent(parts, create=True) as (parent_fd, name):
+                descriptor = os.open(
+                    name,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=parent_fd,
+                )
+                try:
+                    self._write_all(descriptor, data)
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                os.fsync(parent_fd)
+            return prepared
+
+        with self._lock:
+            prepared = self._prepare_locator(
+                locator,
+                operation="exclusive_create",
+                allow_missing_leaf=True,
+            )
+            self._ensure_fallback_parent(prepared)
+            prepared = resolve_managed_locator(
+                self.root,
+                prepared,
+                operation="exclusive_create",
+                allow_missing_leaf=True,
+            )
+            with open(prepared, "xb") as destination:
+                destination.write(data)
+                destination.flush()
+                os.fsync(destination.fileno())
+            self._fsync_containing_directory(prepared)
+            return prepared
+
+    def delete_durable(self, locator: Union[str, Path]) -> bool:
+        """Delete a contained locator and acknowledge the directory when it existed."""
+        deleted = self.delete(locator)
+        if deleted:
+            self._fsync_containing_directory(locator)
+        return deleted
 
     def read_bytes(self, locator: Union[str, Path]) -> bytes:
         """Read a contained locator or raise a typed unsafe-path error."""

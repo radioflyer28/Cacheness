@@ -33,6 +33,7 @@ import sqlite3
 import threading
 import warnings
 from abc import ABC, abstractmethod
+from copy import deepcopy
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Union
@@ -40,7 +41,7 @@ from typing import Dict, Any, Optional, List, Union
 import logging
 
 from .json_utils import dumps as json_dumps, loads as json_loads
-from .error_handling import CacheLegacyFormatError, CacheReason
+from .error_handling import CacheLegacyFormatError, CacheReason, CacheStorageError
 
 logger = logging.getLogger(__name__)
 
@@ -916,43 +917,164 @@ class JsonBackend(MetadataBackend):
         if self._legacy_layout is not None:
             raise _legacy_layout_error(CacheReason.READ_ONLY_LEGACY_STORE)
 
-    def _save_to_disk(self) -> None:
-        """Persist current JSON metadata with the existing atomic replace flow."""
-        import tempfile
-
-        self._ensure_writable()
+    def _fsync_metadata_directory(self) -> None:
+        """Acknowledge a metadata-directory entry change before reporting success."""
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
         try:
-            if not self.metadata_file.parent.exists():
-                logger.debug("Metadata directory no longer exists: %s", self.metadata_file.parent)
-                return
-            fd, temp_path = tempfile.mkstemp(
-                suffix=".json.tmp",
-                dir=self.metadata_file.parent,
-                prefix="cache_metadata_",
-            )
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as metadata_file:
-                    metadata_file.write(json_dumps(self._metadata, default=str))
-                import shutil
+            directory_fd = os.open(self.metadata_file.parent, directory_flags)
+        except OSError as exc:
+            raise CacheStorageError(
+                "Unable to open JSON metadata directory for durability acknowledgement",
+                context={"metadata_file": str(self.metadata_file)},
+            ) from exc
+        try:
+            os.fsync(directory_fd)
+        except OSError as exc:
+            raise CacheStorageError(
+                "Unable to fsync JSON metadata directory",
+                context={"metadata_file": str(self.metadata_file)},
+            ) from exc
+        finally:
+            os.close(directory_fd)
 
-                shutil.move(temp_path, self.metadata_file)
-            except Exception:
-                try:
-                    os.remove(temp_path)
-                except OSError:
-                    pass
-                raise
+    def _read_live_document(self) -> Dict[str, Any]:
+        """Read the authoritative JSON document without treating corruption as empty."""
+        try:
+            with open(self.metadata_file, "r", encoding="utf-8") as metadata_file:
+                document = json_loads(metadata_file.read())
+            return self._normalize_legacy_split_map(document)
         except CacheLegacyFormatError:
             raise
         except Exception as exc:
-            logger.error("Failed to save JSON metadata: %s", exc)
+            raise CacheStorageError(
+                "Unable to re-read authoritative JSON metadata after persistence failure",
+                context={"metadata_file": str(self.metadata_file)},
+            ) from exc
+
+    @staticmethod
+    def _write_json_candidate(path: Path, metadata: Dict[str, Any]) -> None:
+        """Write and fsync one same-directory JSON candidate file."""
+        try:
+            with open(path, "x", encoding="utf-8") as metadata_file:
+                metadata_file.write(json_dumps(metadata, default=str))
+                metadata_file.flush()
+                os.fsync(metadata_file.fileno())
+        except Exception:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            raise
+
+    def _save_to_disk(self, metadata: Optional[Dict[str, Any]] = None) -> None:
+        """Durably replace JSON metadata, retaining a rollback copy until acknowledged."""
+        import tempfile
+
+        self._ensure_writable()
+        candidate_metadata = deepcopy(self._metadata if metadata is None else metadata)
+        parent = self.metadata_file.parent
+        if not parent.exists():
+            raise CacheStorageError(
+                "JSON metadata directory is unavailable",
+                context={"metadata_file": str(self.metadata_file)},
+            )
+
+        candidate_path: Optional[Path] = None
+        backup_path = parent / f".{self.metadata_file.name}.backup"
+        backup_candidate: Optional[Path] = None
+        had_live_document = self.metadata_file.exists()
+        replaced_live = False
+        try:
+            candidate_fd, candidate_name = tempfile.mkstemp(
+                suffix=".json.tmp",
+                dir=parent,
+                prefix="cache_metadata_",
+            )
+            os.close(candidate_fd)
+            candidate_path = Path(candidate_name)
+            candidate_path.unlink()
+            self._write_json_candidate(candidate_path, candidate_metadata)
+
+            if had_live_document:
+                backup_fd, backup_name = tempfile.mkstemp(
+                    suffix=".json.backup.tmp",
+                    dir=parent,
+                    prefix="cache_metadata_",
+                )
+                os.close(backup_fd)
+                backup_candidate = Path(backup_name)
+                backup_candidate.unlink()
+                with open(self.metadata_file, "rb") as source:
+                    with open(backup_candidate, "xb") as destination:
+                        while chunk := source.read(8192):
+                            destination.write(chunk)
+                        destination.flush()
+                        os.fsync(destination.fileno())
+                os.replace(backup_candidate, backup_path)
+                backup_candidate = None
+                self._fsync_metadata_directory()
+
+            os.replace(candidate_path, self.metadata_file)
+            candidate_path = None
+            replaced_live = True
+            self._fsync_metadata_directory()
+        except Exception as exc:
+            for temporary_path in (candidate_path, backup_candidate):
+                if temporary_path is not None:
+                    try:
+                        temporary_path.unlink()
+                    except OSError:
+                        pass
+
+            if replaced_live:
+                try:
+                    if had_live_document:
+                        os.replace(backup_path, self.metadata_file)
+                    else:
+                        self.metadata_file.unlink()
+                    self._fsync_metadata_directory()
+                except Exception as rollback_exc:
+                    try:
+                        self._metadata = self._read_live_document()
+                    except Exception as reread_exc:
+                        raise CacheStorageError(
+                            "JSON metadata persistence has an uncertain recovery outcome",
+                            context={"metadata_file": str(self.metadata_file)},
+                        ) from reread_exc
+                    raise CacheStorageError(
+                        "JSON metadata persistence rollback could not be durably acknowledged",
+                        context={"metadata_file": str(self.metadata_file)},
+                    ) from rollback_exc
+
+                raise CacheStorageError(
+                    "JSON metadata persistence failed after durable rollback",
+                    context={"metadata_file": str(self.metadata_file)},
+                ) from exc
+
+            raise CacheStorageError(
+                "JSON metadata persistence failed before replacement",
+                context={"metadata_file": str(self.metadata_file)},
+            ) from exc
+
+        if had_live_document:
+            try:
+                backup_path.unlink()
+                self._fsync_metadata_directory()
+            except Exception as exc:
+                self._metadata = self._read_live_document()
+                raise CacheStorageError(
+                    "JSON metadata was replaced but backup cleanup was not acknowledged",
+                    context={"metadata_file": str(self.metadata_file)},
+                ) from exc
 
     def _flush_pending_writes(self) -> None:
         self._ensure_writable()
         if self._pending_writes:
-            self._metadata.update(self._pending_writes)
+            candidate = deepcopy(self._metadata)
+            candidate.update(self._pending_writes)
+            self._save_to_disk(candidate)
+            self._metadata = candidate
             self._pending_writes.clear()
-            self._save_to_disk()
             self._write_count = 0
 
     def load_metadata(self) -> Dict[str, Any]:
@@ -962,8 +1084,9 @@ class JsonBackend(MetadataBackend):
     def save_metadata(self, metadata: Dict[str, Any]) -> None:
         with self._lock:
             self._ensure_writable()
-            self._metadata = metadata
-            self._save_to_disk()
+            candidate = deepcopy(metadata)
+            self._save_to_disk(candidate)
+            self._metadata = candidate
 
     def get_entry(self, cache_key: str) -> Optional[Dict[str, Any]]:
         with self._lock:
@@ -973,7 +1096,8 @@ class JsonBackend(MetadataBackend):
         with self._lock:
             self._ensure_writable()
             now = datetime.now(timezone.utc).isoformat()
-            self._metadata["entries"][cache_key] = {
+            candidate = deepcopy(self._metadata)
+            candidate.setdefault("entries", {})[cache_key] = {
                 "description": entry_data.get("description", ""),
                 "data_type": entry_data.get("data_type", "unknown"),
                 "prefix": entry_data.get("prefix", ""),
@@ -982,16 +1106,19 @@ class JsonBackend(MetadataBackend):
                 "file_size": entry_data.get("file_size", 0),
                 "metadata": entry_data.get("metadata", {}).copy(),
             }
+            self._save_to_disk(candidate)
+            self._metadata = candidate
             self._write_count += 1
-            self._save_to_disk()
             if self._write_count >= self._batch_size:
                 self._write_count = 0
 
     def remove_entry(self, cache_key: str) -> None:
         with self._lock:
             self._ensure_writable()
-            self._metadata.get("entries", {}).pop(cache_key, None)
-            self._save_to_disk()
+            candidate = deepcopy(self._metadata)
+            candidate.get("entries", {}).pop(cache_key, None)
+            self._save_to_disk(candidate)
+            self._metadata = candidate
 
     def list_entries(self) -> List[Dict[str, Any]]:
         with self._lock:
@@ -1053,28 +1180,35 @@ class JsonBackend(MetadataBackend):
     def update_access_time(self, cache_key: str) -> None:
         with self._lock:
             self._ensure_writable()
-            entry = self._metadata.get("entries", {}).get(cache_key)
+            candidate = deepcopy(self._metadata)
+            entry = candidate.get("entries", {}).get(cache_key)
             if entry is not None:
                 entry["accessed_at"] = datetime.now(timezone.utc).isoformat()
-                self._save_to_disk()
+                self._save_to_disk(candidate)
+                self._metadata = candidate
 
     def increment_hits(self) -> None:
         with self._lock:
             self._ensure_writable()
-            self._metadata["cache_hits"] = self._metadata.get("cache_hits", 0) + 1
-            self._save_to_disk()
+            candidate = deepcopy(self._metadata)
+            candidate["cache_hits"] = candidate.get("cache_hits", 0) + 1
+            self._save_to_disk(candidate)
+            self._metadata = candidate
 
     def increment_misses(self) -> None:
         with self._lock:
             self._ensure_writable()
-            self._metadata["cache_misses"] = self._metadata.get("cache_misses", 0) + 1
-            self._save_to_disk()
+            candidate = deepcopy(self._metadata)
+            candidate["cache_misses"] = candidate.get("cache_misses", 0) + 1
+            self._save_to_disk(candidate)
+            self._metadata = candidate
 
     def cleanup_expired(self, ttl_hours: int) -> int:
         with self._lock:
             self._ensure_writable()
             cutoff = datetime.now(timezone.utc) - timedelta(hours=ttl_hours)
-            entries = self._metadata.get("entries", {})
+            candidate = deepcopy(self._metadata)
+            entries = candidate.get("entries", {})
             expired = []
             for cache_key, entry in entries.items():
                 try:
@@ -1088,13 +1222,15 @@ class JsonBackend(MetadataBackend):
             for cache_key in expired:
                 entries.pop(cache_key, None)
             if expired:
-                self._save_to_disk()
+                self._save_to_disk(candidate)
+                self._metadata = candidate
             return len(expired)
 
     def cleanup_by_size(self, target_size_mb: float) -> int:
         with self._lock:
             self._ensure_writable()
-            entries = self._metadata.get("entries", {})
+            candidate = deepcopy(self._metadata)
+            entries = candidate.get("entries", {})
             total = sum(entry.get("file_size", 0) for entry in entries.values())
             target = target_size_mb * 1024 * 1024
             removed = 0
@@ -1107,15 +1243,17 @@ class JsonBackend(MetadataBackend):
                 del entries[cache_key]
                 removed += 1
             if removed:
-                self._save_to_disk()
+                self._save_to_disk(candidate)
+                self._metadata = candidate
             return removed
 
     def clear_all(self) -> int:
         with self._lock:
             self._ensure_writable()
             count = len(self._metadata.get("entries", {}))
-            self._metadata = {"entries": {}, "cache_hits": 0, "cache_misses": 0}
-            self._save_to_disk()
+            candidate = {"entries": {}, "cache_hits": 0, "cache_misses": 0}
+            self._save_to_disk(candidate)
+            self._metadata = candidate
             return count
 
     def record_legacy_read(self, cache_key: str) -> None:
