@@ -14,6 +14,7 @@ import stat
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict
 
@@ -38,6 +39,57 @@ def _raise_invalid_stage_artifact() -> None:
         "Handler produced an unsafe staging artifact",
         reason=CacheReason.INVALID_IDENTIFIER,
     )
+
+
+def _raise_stage_path_race() -> None:
+    """Fail closed when the validated private-stage identity changes."""
+    raise CacheUnsafePathError(
+        "Handler staging artifact changed before publication",
+        reason=CacheReason.PATH_RACE,
+    )
+
+
+@dataclass
+class _StageArtifactRecord:
+    """Identity captured from the validated staged regular-file descriptor."""
+
+    st_dev: int
+    st_ino: int
+    st_mode: int
+    st_nlink: int
+    descriptor: int | None
+
+    @classmethod
+    def from_stat(cls, descriptor: int, artifact_stat: os.stat_result) -> _StageArtifactRecord:
+        """Capture the file identity that publication must reopen exactly."""
+        return cls(
+            st_dev=artifact_stat.st_dev,
+            st_ino=artifact_stat.st_ino,
+            st_mode=stat.S_IFMT(artifact_stat.st_mode),
+            st_nlink=artifact_stat.st_nlink,
+            descriptor=descriptor,
+        )
+
+    def matches(self, artifact_stat: os.stat_result) -> bool:
+        """Return whether an opened descriptor is the validated stage file."""
+        return (
+            artifact_stat.st_dev == self.st_dev
+            and artifact_stat.st_ino == self.st_ino
+            and stat.S_IFMT(artifact_stat.st_mode) == self.st_mode
+            and artifact_stat.st_nlink == self.st_nlink
+        )
+
+    def close(self) -> None:
+        """Release the retained validation descriptor exactly once."""
+        if self.descriptor is not None:
+            os.close(self.descriptor)
+            self.descriptor = None
+
+
+class _ValidatedStageArtifact(type(Path())):
+    """A Path retaining the descriptor identity validated for publication."""
+
+    record: _StageArtifactRecord
 
 
 class GuardedHandlerIO:
@@ -81,7 +133,7 @@ class GuardedHandlerIO:
     @staticmethod
     def _staged_artifact(
         stage_root: Path, stage_base: Path, result: Dict[str, Any]
-    ) -> Path:
+    ) -> _ValidatedStageArtifact:
         """Validate that a handler result identifies one ordinary stage file."""
         actual_path = result.get("actual_path")
         if not isinstance(actual_path, (str, Path)):
@@ -125,12 +177,43 @@ class GuardedHandlerIO:
                 "Handler staging artifact is unavailable",
                 reason=CacheReason.PATH_RACE,
             ) from exc
-        return resolved_artifact
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(
+                resolved_artifact,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            )
+            descriptor_stat = os.fstat(descriptor)
+        except OSError as exc:
+            if descriptor is not None:
+                os.close(descriptor)
+            raise CacheUnsafePathError(
+                "Handler staging artifact is unavailable",
+                reason=CacheReason.PATH_RACE,
+            ) from exc
+        if (
+            not stat.S_ISREG(descriptor_stat.st_mode)
+            or descriptor_stat.st_nlink != 1
+        ):
+            os.close(descriptor)
+            _raise_invalid_stage_artifact()
+        if (
+            descriptor_stat.st_dev != artifact_stat.st_dev
+            or descriptor_stat.st_ino != artifact_stat.st_ino
+        ):
+            os.close(descriptor)
+            _raise_stage_path_race()
+
+        validated_artifact = _ValidatedStageArtifact(resolved_artifact)
+        validated_artifact.record = _StageArtifactRecord.from_stat(
+            descriptor, descriptor_stat
+        )
+        return validated_artifact
 
     @staticmethod
     @contextmanager
     def _open_staged_artifact(
-        stage_root: Path, artifact: Path
+        stage_root: Path, artifact: Path, record: _StageArtifactRecord
     ) -> Iterator[tuple[Any, int]]:
         """Yield one regular stage descriptor anchored below the private root."""
         descriptor: int | None = None
@@ -189,6 +272,8 @@ class GuardedHandlerIO:
                 or descriptor_stat.st_nlink != 1
             ):
                 _raise_invalid_stage_artifact()
+            if not record.matches(descriptor_stat):
+                _raise_stage_path_race()
             if not supports_descriptor_walk:
                 try:
                     pathname_stat = os.lstat(artifact)
@@ -202,7 +287,7 @@ class GuardedHandlerIO:
                     or pathname_stat.st_dev != descriptor_stat.st_dev
                     or pathname_stat.st_ino != descriptor_stat.st_ino
                 ):
-                    _raise_invalid_stage_artifact()
+                    _raise_stage_path_race()
 
             source = os.fdopen(descriptor, "rb")
             descriptor = None
@@ -228,13 +313,18 @@ class GuardedHandlerIO:
             if not isinstance(raw_result, dict):
                 _raise_invalid_stage_artifact()
             artifact = self._staged_artifact(stage_root, stage_base, raw_result)
-            suffix = self._safe_suffix(stage_base, artifact)
-            final_id = validate_blob_id(f"{safe_storage_id}{suffix}")
+            try:
+                suffix = self._safe_suffix(stage_base, artifact)
+                final_id = validate_blob_id(f"{safe_storage_id}{suffix}")
 
-            with self._open_staged_artifact(
-                stage_root, artifact
-            ) as (source, file_size):
-                final_path = self.file_ops.write_stream(final_id, source, shard_chars=0)
+                with self._open_staged_artifact(
+                    stage_root, artifact, artifact.record
+                ) as (source, file_size):
+                    final_path = self.file_ops.write_stream(
+                        final_id, source, shard_chars=0
+                    )
+            finally:
+                artifact.record.close()
 
             result: GuardedWriteResult = dict(raw_result)
             result["actual_path"] = str(final_path)
