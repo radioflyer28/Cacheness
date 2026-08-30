@@ -7,6 +7,7 @@ Configuration is split into focused sub-configurations for better maintainabilit
 """
 
 import logging
+import math
 from dataclasses import dataclass, field
 from typing import Optional, List, Union
 from pathlib import Path
@@ -348,6 +349,48 @@ class SecurityConfig:
         )
 
 
+@dataclass(frozen=True)
+class LifecycleLimits:
+    """Explicit caller-owned bounds for BlobStore lifecycle operations.
+
+    This value contains policy only. Runtime lifecycle components consume the
+    instance supplied by :class:`CacheConfig`; they must not recreate it or
+    perform repository, recovery, or payload work here.
+    """
+
+    max_operation_record_bytes: int = 1_048_576
+    max_operation_field_bytes: int = 8_192
+    manifest_page_size: int = 256
+    operation_page_size: int = 256
+    max_reconcile_actions: int = 10_000
+    orphan_grace_seconds: float = 300.0
+    close_wait_seconds: float = 30.0
+
+    def __post_init__(self) -> None:
+        """Reject invalid operational bounds rather than silently normalizing them."""
+        integer_fields = (
+            "max_operation_record_bytes",
+            "max_operation_field_bytes",
+            "manifest_page_size",
+            "operation_page_size",
+            "max_reconcile_actions",
+        )
+        for field_name in integer_fields:
+            value = getattr(self, field_name)
+            if type(value) is not int or value <= 0:
+                raise ValueError(f"{field_name} must be a positive integer")
+
+        for field_name in ("orphan_grace_seconds", "close_wait_seconds"):
+            value = getattr(self, field_name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value <= 0
+            ):
+                raise ValueError(f"{field_name} must be a positive finite number")
+
+
 class CacheConfig:
     """Main configuration class that combines all sub-configurations."""
 
@@ -358,6 +401,7 @@ class CacheConfig:
     serialization: SerializationConfig = field(default_factory=SerializationConfig)
     handlers: HandlerConfig = field(default_factory=HandlerConfig)
     security: SecurityConfig = field(default_factory=SecurityConfig)
+    lifecycle_limits: LifecycleLimits = field(default_factory=LifecycleLimits)
 
     def __init__(
         self,
@@ -368,6 +412,7 @@ class CacheConfig:
         serialization: Optional[SerializationConfig] = None,
         handlers: Optional[HandlerConfig] = None,
         security: Optional[SecurityConfig] = None,
+        lifecycle_limits: Optional[LifecycleLimits] = None,
         # Backwards compatibility parameters
         cache_dir: Optional[str] = None,
         default_ttl_hours: Optional[float] = None,
@@ -423,6 +468,11 @@ class CacheConfig:
         self.serialization = serialization or SerializationConfig()
         self.handlers = handlers or HandlerConfig()
         self.security = security or SecurityConfig()
+        if lifecycle_limits is not None and not isinstance(lifecycle_limits, LifecycleLimits):
+            raise ValueError("lifecycle_limits must be a LifecycleLimits instance")
+        self.lifecycle_limits = (
+            LifecycleLimits() if lifecycle_limits is None else lifecycle_limits
+        )
 
         # Apply backwards compatibility mappings
         if cache_dir is not None:
@@ -1024,7 +1074,16 @@ def load_config_from_dict(data: dict) -> CacheConfig:
         ... })
     """
     # Check if nested format
-    sub_config_names = {"storage", "metadata", "blob", "compression", "serialization", "handlers", "security"}
+    sub_config_names = {
+        "storage",
+        "metadata",
+        "blob",
+        "compression",
+        "serialization",
+        "handlers",
+        "security",
+        "lifecycle_limits",
+    }
     is_nested = any(key in sub_config_names for key in data.keys())
     
     if is_nested:
@@ -1036,6 +1095,11 @@ def load_config_from_dict(data: dict) -> CacheConfig:
         serialization = SerializationConfig(**data.get("serialization", {})) if "serialization" in data else None
         handlers = HandlerConfig(**data.get("handlers", {})) if "handlers" in data else None
         security = SecurityConfig(**data.get("security", {})) if "security" in data else None
+        lifecycle_limits = (
+            LifecycleLimits(**data["lifecycle_limits"])
+            if "lifecycle_limits" in data
+            else None
+        )
         
         return CacheConfig(
             storage=storage,
@@ -1044,7 +1108,8 @@ def load_config_from_dict(data: dict) -> CacheConfig:
             compression=compression,
             serialization=serialization,
             handlers=handlers,
-            security=security
+            security=security,
+            lifecycle_limits=lifecycle_limits,
         )
     else:
         # Flat format - use CacheConfig's backwards compatibility
@@ -1149,6 +1214,7 @@ def save_config_to_json(config: CacheConfig, path: Union[str, Path], indent: int
         "serialization": asdict(config.serialization),
         "handlers": asdict(config.handlers),
         "security": asdict(config.security),
+        "lifecycle_limits": asdict(config.lifecycle_limits),
     }
     
     path = Path(path)
@@ -1191,6 +1257,7 @@ def save_config_to_yaml(config: CacheConfig, path: Union[str, Path]) -> None:
         "serialization": asdict(config.serialization),
         "handlers": asdict(config.handlers),
         "security": asdict(config.security),
+        "lifecycle_limits": asdict(config.lifecycle_limits),
     }
     
     path = Path(path)

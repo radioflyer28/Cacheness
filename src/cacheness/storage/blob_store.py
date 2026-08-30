@@ -203,6 +203,8 @@ class BlobStore:
         compression: str = "lz4",
         compression_level: int = 3,
         content_addressable: bool = False,
+        *,
+        config: CacheConfig | None = None,
     ):
         """
         Initialize a BlobStore.
@@ -213,8 +215,14 @@ class BlobStore:
             compression: Compression codec (lz4, zstd, gzip, blosclz, etc.)
             compression_level: Compression level (1-9)
             content_addressable: If True, use content hash as blob key
+            config: Optional caller-owned configuration for lifecycle policy
         """
-        self.cache_dir = Path(cache_dir)
+        configured_path = (
+            config.storage.cache_dir
+            if config is not None and cache_dir == ".blobstore"
+            else cache_dir
+        )
+        self.cache_dir = Path(configured_path)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.guarded_handler_io = GuardedHandlerIO(self.cache_dir)
         self._owns_backend = False
@@ -224,6 +232,7 @@ class BlobStore:
                 compression,
                 compression_level,
                 content_addressable,
+                config,
             )
         except BaseException:
             # Cancellation must not retain a partially initialized owner and
@@ -239,6 +248,7 @@ class BlobStore:
         compression: str,
         compression_level: int,
         content_addressable: bool,
+        config: CacheConfig | None,
     ) -> None:
         """Finish initialization after the managed-root descriptor is acquired."""
         self._legacy_identity: LegacyManifestIdentity | None = None
@@ -253,15 +263,22 @@ class BlobStore:
         self.compression_level = compression_level
         self.content_addressable = content_addressable
         
-        # Create config for handlers
-        self.config = CacheConfig(
-            cache_dir=self.cache_dir,
-            compression=CompressionConfig(
-                pickle_compression_codec=compression,
-                pickle_compression_level=compression_level,
-                blosc2_array_clevel=compression_level,
-            ),
+        # Keep an explicitly supplied config object intact. The flat path keeps
+        # its historical handler-compression defaults and constructs one local
+        # configuration only when no caller-owned configuration was supplied.
+        self.config = (
+            CacheConfig(
+                cache_dir=self.cache_dir,
+                compression=CompressionConfig(
+                    pickle_compression_codec=compression,
+                    pickle_compression_level=compression_level,
+                    blosc2_array_clevel=compression_level,
+                ),
+            )
+            if config is None
+            else config
         )
+        self.lifecycle_limits = self.config.lifecycle_limits
         
         # Initialize metadata backend
         if self._legacy_identity is not None:
@@ -285,7 +302,7 @@ class BlobStore:
         self._manifest_key_provider = ManifestKeyProvider(
             self.cache_dir / "blob_manifest_hmac_key.bin"
         )
-        self.lifecycle = LifecycleEngine(self)
+        self.lifecycle = LifecycleEngine(self, lifecycle_limits=self.lifecycle_limits)
 
         # Clear recovery is deliberately confined to exact local backend
         # identities. Capability-shaped or wrapped backends never inherit a

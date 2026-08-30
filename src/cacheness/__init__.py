@@ -56,6 +56,7 @@ from .config import (
     CompressionConfig,
     SerializationConfig,
     HandlerConfig,
+    LifecycleLimits,
     SecurityConfig,
     ConfigValidationError,
     validate_config,
@@ -230,6 +231,7 @@ __all__ = [
     "CompressionConfig",
     "SerializationConfig",
     "HandlerConfig",
+    "LifecycleLimits",
     "SecurityConfig",
     # Configuration validation (Phase 2.4)
     "ConfigValidationError",

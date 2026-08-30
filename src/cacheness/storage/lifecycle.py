@@ -38,8 +38,11 @@ class LifecycleEngine:
     forward from the successful manifest compare-and-swap authority point.
     """
 
-    def __init__(self, store: Any):
+    def __init__(self, store: Any, *, lifecycle_limits: Any):
         self.store = store
+        # This is the caller-owned policy object. Later paging, reconciliation,
+        # and close admission consume this same instance rather than copies.
+        self.lifecycle_limits = lifecycle_limits
         self.operation_repository = FileOperationRecordRepository(
             store.guarded_handler_io.file_ops
         )
