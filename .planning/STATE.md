@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 03
 current_phase_name: Atomic Lifecycle and Recovery Engine
 status: executing
-stopped_at: Completed 03-01-PLAN.md
-last_updated: "2026-08-30T18:30:49.431Z"
+stopped_at: Completed 03-02-PLAN.md
+last_updated: "2026-08-30T18:41:04.438Z"
 last_activity: 2026-08-30
 last_activity_desc: Phase 03 execution started
-state_head: 8d2e514c26658c80e92c10c9aaa25fd667026979
+state_head: 48b306fd66b78981086ddd8fa3b0e6edbb70fb56
 progress:
   total_phases: 8
   completed_phases: 2
   total_plans: 32
-  completed_plans: 23
+  completed_plans: 24
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-08-29)
 ## Current Position
 
 Phase: 03 (Atomic Lifecycle and Recovery Engine) — EXECUTING
-Plan: 2 of 10
+Plan: 3 of 10
 Status: Ready to execute
 Last activity: 2026-08-30 — Phase 03 execution started
 
@@ -64,6 +64,7 @@ Progress: [█░░░░░░░░░] 1 of 8 phases complete
 | Phase 02 P06 | 6 min | 2 tasks | 2 files |
 | Phase 02 P07 | 10min | 2 tasks | 4 files |
 | Phase 03 P01 | 18min | 2 tasks | 9 files |
+| Phase 03 P02 | 7 min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -132,6 +133,8 @@ Recent decisions affecting current work:
 - [Phase 02]: Every direct read API preserves malformed, future-version, lifecycle, and local-backend failures rather than collapsing them into absence.
 - [Phase 03]: BlobStore publication now uses immutable generation locators and exact manifest CAS as its sole authority transition.
 - [Phase 03]: Reopen recovery acts only on authenticated manifest authority plus validated signed operation evidence; normal reads do not mutate evidence.
+- [Phase 03]: Manifest authority mutations require the authenticated generation plus SHA-256 of the exact canonical record; repository adapters compare opaque bytes only.
+- [Phase 03]: JSON conditional publication refreshes under a short OS-backed lock, while SQLite takes a writer transaction before exact-record comparison.
 
 ### Pending Todos
 
@@ -155,6 +158,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-30T18:30:49.379Z
-Stopped at: Completed 03-01-PLAN.md
+Last session: 2026-08-30T18:41:04.392Z
+Stopped at: Completed 03-02-PLAN.md
 Resume file: None
