@@ -1,9 +1,9 @@
 ---
 phase: 02
 slug: canonical-storage-and-integrity-contract
-status: draft
-nyquist_compliant: false
-wave_0_complete: false
+status: validated
+nyquist_compliant: true
+wave_0_complete: true
 created: 2026-08-30
 ---
 
@@ -40,15 +40,15 @@ Task/plan identifiers are finalized by the planner; the requirement-to-target co
 
 | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |-------------|------------|-----------------|-----------|-------------------|-------------|--------|
-| STOR-01 | T-02 manifest parity | JSON, memory, and SQLite expose identical typed manifest semantics and canonical signed bytes | backend contract | `uv run pytest -q -o log_cli=false tests/test_blob_manifest_backends.py -x` | ❌ W0 | ⬜ pending |
-| STOR-02 | T-02 committed visibility | Only authenticated committed manifests can reach a payload snapshot | ordering/contract | `uv run pytest -q -o log_cli=false tests/test_blob_store_read_contract.py -x` | ❌ W0 | ⬜ pending |
-| STOR-08 | T-02 outcome collapse | Missing, corrupt, conflict, unsupported-version, and backend failures remain distinct | API contract | `uv run pytest -q -o log_cli=false tests/test_blob_store_read_contract.py -x` | ❌ W0 | ⬜ pending |
-| SECU-03 | T-02 verify ordering | Manifest authenticity, size, and SHA-256 digest verification precede handler deserialization on one snapshot | adversarial integration | `uv run pytest -q -o log_cli=false tests/test_blob_store_integrity.py -x` | ❌ W0 | ⬜ pending |
-| SECU-04 | T-02 signing downgrade | Missing/invalid/unsafe key material, absent/invalid signatures, and unsupported signer configuration fail closed | unit/platform | `uv run pytest -q -o log_cli=false tests/test_blob_store_integrity.py -x` | ❌ W0 | ⬜ pending |
-| SECU-05 | T-02 incomplete signature projection | Mutating any security-critical manifest field invalidates the signature | parameterized unit | `uv run pytest -q -o log_cli=false tests/test_blob_manifest.py -x` | ❌ W0 | ⬜ pending |
-| SECU-08 | T-02 cache translation collapse | Public typed integrity errors exist and a pure seam classifies them without rewiring `UnifiedCache` | unit contract | `uv run pytest -q -o log_cli=false tests/test_blob_store_translation_seam.py -x` | ❌ W0 | ⬜ pending |
-| MIGR-02 | T-02 version ambiguity | Manifest schema and native payload format versions are independent, exact identifiers | golden/contract | `uv run pytest -q -o log_cli=false tests/test_blob_manifest.py -x` | ❌ W0 | ⬜ pending |
-| MIGR-07 | T-02 future-version guessing | Unknown versions and exact legacy conversion-needed outcomes are typed and non-mutating | compatibility | `uv run pytest -q -o log_cli=false tests/test_blob_store_legacy_contract.py -x` | ❌ W0 | ⬜ pending |
+| STOR-01 | T-02 manifest parity | JSON, memory, and SQLite expose identical typed manifest semantics and canonical signed bytes | backend contract | `uv run pytest -q -o log_cli=false tests/test_blob_manifest_backends.py -x` | ✅ | ✅ green |
+| STOR-02 | T-02 committed visibility | Only authenticated committed manifests can reach a payload snapshot | ordering/contract | `uv run pytest -q -o log_cli=false tests/test_blob_store_read_contract.py -x` | ✅ | ✅ green |
+| STOR-08 | T-02 outcome collapse | Missing, corrupt, conflict, unsupported-version, and backend failures remain distinct | API contract | `uv run pytest -q -o log_cli=false tests/test_blob_store_read_contract.py -x` | ✅ | ✅ green |
+| SECU-03 | T-02 verify ordering | Manifest authenticity, size, and SHA-256 digest verification precede handler deserialization on one snapshot | adversarial integration | `uv run pytest -q -o log_cli=false tests/test_blob_store_integrity.py -x` | ✅ | ✅ green |
+| SECU-04 | T-02 signing downgrade | Missing/invalid/unsafe key material, absent/invalid signatures, and unsupported signer configuration fail closed | unit/platform | `uv run pytest -q -o log_cli=false tests/test_blob_store_integrity.py -x` | ✅ | ✅ green |
+| SECU-05 | T-02 incomplete signature projection | Mutating any security-critical manifest field invalidates the signature | parameterized unit | `uv run pytest -q -o log_cli=false tests/test_blob_manifest.py -x` | ✅ | ✅ green |
+| SECU-08 | T-02 cache translation collapse | Public typed integrity errors exist and a pure seam classifies them without rewiring `UnifiedCache` | unit contract | `uv run pytest -q -o log_cli=false tests/test_blob_store_translation_seam.py -x` | ✅ | ✅ green |
+| MIGR-02 | T-02 version ambiguity | Manifest schema and native payload format versions are independent, exact identifiers | golden/contract | `uv run pytest -q -o log_cli=false tests/test_blob_manifest.py -x` | ✅ | ✅ green |
+| MIGR-07 | T-02 future-version guessing | Unknown versions and exact legacy conversion-needed outcomes are typed and non-mutating | compatibility | `uv run pytest -q -o log_cli=false tests/test_blob_store_legacy_contract.py -x` | ✅ | ✅ green |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
@@ -66,12 +66,12 @@ Task/plan identifiers are finalized by the planner; the requirement-to-target co
 
 ## Wave 0 Requirements
 
-- [ ] `tests/test_blob_manifest.py` — golden codec, bounds, independent versions, and complete signed projection.
-- [ ] `tests/test_blob_manifest_backends.py` — JSON/memory/SQLite parity and persistent reopen.
-- [ ] `tests/test_blob_store_read_contract.py` — ordered outcomes for every direct public read surface.
-- [ ] `tests/test_blob_store_integrity.py` — digest/signature/key/tamper matrix and one-snapshot proof.
-- [ ] `tests/test_blob_store_legacy_contract.py` — exact eight-fixture read-only outcomes.
-- [ ] `tests/test_blob_store_translation_seam.py` — pure future `UnifiedCache` classification boundary.
+- [x] `tests/test_blob_manifest.py` — golden codec, bounds, independent versions, and complete signed projection.
+- [x] `tests/test_blob_manifest_backends.py` — JSON/memory/SQLite parity and persistent reopen.
+- [x] `tests/test_blob_store_read_contract.py` — ordered outcomes for every direct public read surface.
+- [x] `tests/test_blob_store_integrity.py` — digest/signature/key/tamper matrix and one-snapshot proof.
+- [x] `tests/test_blob_store_legacy_contract.py` — exact eight-fixture read-only outcomes.
+- [x] `tests/test_blob_store_translation_seam.py` — pure future `UnifiedCache` classification boundary.
 
 ---
 
@@ -83,13 +83,24 @@ All Phase 2 behaviors have automated verification. Non-POSIX key-permission beha
 
 ## Validation Sign-Off
 
-- [ ] Every plan task has an automated check or explicit Wave 0 dependency.
-- [ ] Sampling continuity: no three consecutive tasks lack an automated check.
-- [ ] Wave 0 covers every missing test reference.
-- [ ] No watch-mode flags are used.
-- [ ] Focused feedback latency remains under 30 seconds.
-- [ ] Full suite and compatibility corpus validator pass without suppressing failures.
-- [ ] Phase 2-created Python files are Ruff-clean.
-- [ ] `nyquist_compliant: true` and `wave_0_complete: true` are set only after execution evidence is complete.
+- [x] Every plan task has an automated check or explicit Wave 0 dependency.
+- [x] Sampling continuity: no three consecutive tasks lack an automated check.
+- [x] Wave 0 covers every missing test reference.
+- [x] No watch-mode flags are used.
+- [x] Focused feedback latency remains under 30 seconds.
+- [x] Full suite and compatibility corpus validator pass without suppressing failures.
+- [x] Phase 2-created Python files are Ruff-clean.
+- [x] `nyquist_compliant: true` and `wave_0_complete: true` are set only after execution evidence is complete.
 
-**Approval:** pending
+**Approval:** validated 2026-08-30
+
+## Validation Audit 2026-08-30
+
+| Metric | Count |
+|--------|-------|
+| Gaps found | 0 |
+| Resolved | 0 |
+| Escalated | 0 |
+
+The consolidated Phase 2 requirement gate passed across 461 automated cases, with
+one expected Windows-junction skip. No manual-only requirement remains.
