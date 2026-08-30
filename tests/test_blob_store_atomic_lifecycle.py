@@ -13,6 +13,7 @@ from cacheness.error_handling import (
     CacheBlobRecoverableCleanupError,
 )
 from cacheness.storage import BlobStore
+from cacheness.storage.manifest import BlobManifestV1
 
 
 class _NativeJsonHandler:
@@ -303,3 +304,48 @@ def test_stale_overwrite_conflict_reclaims_only_loser_candidate(
     finally:
         contender.close()
         winner.close()
+
+
+def test_delete_publishes_signed_tombstone_before_payload_reclamation(
+    tmp_path: Path,
+) -> None:
+    """Delete preserves signed absence intent if reclamation is interrupted."""
+    root = tmp_path / "tombstone-first"
+    store = BlobStore(root, backend="json")
+    payload_path: Path | None = None
+    try:
+        key = store.put({"state": "present"}, key="delete-key")
+        existing = store._load_authenticated_manifest(
+            key,
+            operation="test",
+            require_locator=True,
+        )
+        assert existing is not None
+        payload_path = existing[2]
+        assert payload_path is not None
+
+        def interrupt_reclamation(seam: str, _record: Any) -> None:
+            if seam != "payload_cleanup":
+                return
+            raw_tombstone = store.manifest_repository.get_raw(key)
+            assert raw_tombstone is not None
+            tombstone = BlobManifestV1.from_canonical_bytes(raw_tombstone)
+            assert tombstone.state == "tombstoned"
+            assert tombstone.signature
+            assert payload_path.exists()
+            raise RuntimeError("interrupted after tombstone authority")
+
+        store.lifecycle.fault_hook = interrupt_reclamation
+        with pytest.raises(RuntimeError, match="tombstone authority"):
+            store.delete(key)
+    finally:
+        store.close()
+
+    assert payload_path is not None
+    reopened = BlobStore(root, backend="json")
+    try:
+        assert reopened.get(key) is None
+        assert not payload_path.exists()
+        assert not list((root / "operations").glob("*.json"))
+    finally:
+        reopened.close()
