@@ -41,6 +41,7 @@ import hashlib
 import logging
 import uuid
 from copy import deepcopy
+from dataclasses import replace
 from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
@@ -79,6 +80,33 @@ from ..metadata import SqliteBackend
 from ..config import CacheConfig, CompressionConfig
 
 logger = logging.getLogger(__name__)
+
+
+_IMMUTABLE_METADATA_PATCH_FIELDS = frozenset(
+    {
+        "schema_version",
+        "key",
+        "cache_key",
+        "generation",
+        "state",
+        "locator",
+        "actual_path",
+        "handler_type",
+        "data_type",
+        "payload_format",
+        "payload_format_version",
+        "storage_format",
+        "digest_algorithm",
+        "digest",
+        "byte_size",
+        "file_size",
+        "created_at",
+        "handler_metadata",
+        "user_metadata",
+        "signature_algorithm",
+        "signature",
+    }
+)
 
 
 def _clear_coordinated(method: Callable) -> Callable:
@@ -232,16 +260,16 @@ class BlobStore:
             blob_key = self._generate_unique_key()
 
         storage_id = self._storage_id_for_key(blob_key)
-        existing = self.backend.get_entry(blob_key)
         previous_locator = None
-        if existing is not None:
-            # Refuse to overwrite a record whose evidence points outside this
-            # store before serializing or publishing a replacement payload.
-            previous_locator = self._entry_locator(
-                existing,
-                blob_key,
-                operation="overwrite",
-            )
+        existing_manifest = self._load_authenticated_manifest(
+            blob_key,
+            operation="overwrite",
+            require_locator=True,
+        )
+        if existing_manifest is not None:
+            # Refuse to overwrite a record whose authenticated locator points
+            # outside this store before serializing or publishing a candidate.
+            _manifest, _handler, previous_locator = existing_manifest
         
         # Get appropriate handler
         handler = self.handlers.get_handler(data)
@@ -413,27 +441,37 @@ class BlobStore:
         Returns:
             True if successful, False if blob not found
         """
-        existing = self.backend.get_entry(key)
-        if existing is None:
+        if not isinstance(metadata, dict):
+            raise CacheBlobManifestMalformedError(
+                "BlobStore metadata patches must be dictionaries"
+            )
+        immutable_fields = _IMMUTABLE_METADATA_PATCH_FIELDS.intersection(metadata)
+        if immutable_fields:
+            raise CacheBlobLifecycleConflictError(
+                "BlobStore metadata patches cannot change canonical structural fields",
+                context={"fields": sorted(immutable_fields)},
+            )
+
+        authenticated = self._load_authenticated_manifest(
+            key,
+            operation="update_metadata",
+        )
+        if authenticated is None:
             return False
-        
-        # Validate both the existing and prospective record before a metadata
-        # write. A metadata patch cannot introduce an unsafe locator.
-        self._entry_locator(existing, key, operation="update_metadata")
-        nested_meta = existing.get("metadata", {})
-        if not isinstance(nested_meta, dict):
-            nested_meta = {}
-        else:
-            nested_meta = dict(nested_meta)
-        
-        # Merge user metadata into nested dict
-        nested_meta.update(metadata)
-        
-        # Update the entry
-        updated = {**existing, "metadata": nested_meta}
-        self._entry_locator(updated, key, operation="update_metadata")
-        
-        self.backend.put_entry(key, updated)
+        manifest, _handler, _locator = authenticated
+        user_metadata = {**dict(manifest.user_metadata), **metadata}
+        updated_manifest = replace(manifest, user_metadata=user_metadata)
+        signed_manifest = updated_manifest.with_signature(
+            sign_hmac_sha256(
+                updated_manifest.signing_bytes(),
+                self._manifest_key(),
+            )
+        )
+        self.manifest_repository.put_raw(
+            key,
+            signed_manifest.canonical_bytes(),
+            entry_data=self._manifest_entry_data(signed_manifest),
+        )
         return True
     
     @_clear_coordinated
@@ -447,15 +485,17 @@ class BlobStore:
         Returns:
             True if deleted, False if not found
         """
-        entry = self.backend.get_entry(key)
-        if entry is None:
+        authenticated = self._load_authenticated_manifest(
+            key,
+            operation="delete",
+            require_locator=True,
+        )
+        if authenticated is None:
             return False
-        
-        actual_path = self._entry_locator(entry, key, operation="delete")
+        _manifest, _handler, actual_path = authenticated
+        assert actual_path is not None
         self.guarded_handler_io.file_ops.delete(actual_path)
-        
-        # Remove metadata
-        self.backend.remove_entry(key)
+        self.manifest_repository.remove(key)
         
         logger.debug(f"Deleted blob: {key}")
         return True
@@ -516,6 +556,7 @@ class BlobStore:
         Returns:
             List of matching blob keys
         """
+        entries = self.backend.list_entries()
         keys = []
 
         for key in self.manifest_repository.list_keys():
@@ -542,7 +583,11 @@ class BlobStore:
                 ):
                     continue
             keys.append(key)
-        
+
+        # Legacy projections are never returned or used as authoritative
+        # metadata, but their locators remain a containment tripwire for this
+        # long-standing all-or-error public operation.
+        self._preflight_entries(entries, operation="list")
         return keys
     
     @_clear_coordinated
@@ -556,15 +601,7 @@ class BlobStore:
         if self._clear_recovery is None:
             raise ClearRecoveryCoordinator.unsupported_error(self.backend)
 
-        entries = self.backend.list_entries()
-        self._preflight_entries(entries, operation="clear")
-        mappings = []
-        for entry in entries:
-            cache_key = entry.get("cache_key", "")
-            actual_path = self._entry_locator(entry, cache_key, operation="clear")
-            # Every metadata entry participates, even when its payload is
-            # already absent, so snapshot and journal cardinalities agree.
-            mappings.append((cache_key, actual_path))
+        mappings = self._preflight_clear_manifests()
         cleared = self._clear_recovery.clear(mappings)
         if type(self.backend) is SqliteBackend:
             for cache_key, _ in mappings:
@@ -936,6 +973,43 @@ class BlobStore:
         for entry in entries:
             logical_key = entry.get("cache_key")
             self._entry_locator(entry, logical_key, operation=operation)
+
+    def _preflight_clear_manifests(self) -> List[tuple[str, Path]]:
+        """Authenticate every clear target before recovery may mutate anything."""
+        manifest_keys = self.manifest_repository.list_keys()
+        backend_entries = self.backend.list_entries()
+        backend_keys = set()
+        for entry in backend_entries:
+            if not isinstance(entry, dict) or not isinstance(entry.get("cache_key"), str):
+                raise CacheBlobLifecycleConflictError(
+                    "BlobStore clear found a metadata entry without a canonical key"
+                )
+            backend_keys.add(entry["cache_key"])
+        if backend_keys != set(manifest_keys):
+            raise CacheBlobLifecycleConflictError(
+                "BlobStore clear requires a canonical manifest for every metadata entry"
+            )
+
+        mappings = []
+        for key in manifest_keys:
+            authenticated = self._load_authenticated_manifest(
+                key,
+                operation="clear",
+                require_locator=True,
+            )
+            if authenticated is None:
+                raise CacheBlobLifecycleConflictError(
+                    "BlobStore manifest disappeared during clear preflight"
+                )
+            _manifest, _handler, actual_path = authenticated
+            assert actual_path is not None
+            mappings.append((key, actual_path))
+
+        # Do not trust these backend-shaped paths for recovery mappings. They
+        # are validated only after all canonical records authenticate so an
+        # unsafe compatibility projection cannot bypass the containment guard.
+        self._preflight_entries(backend_entries, operation="clear")
+        return mappings
     
     def _generate_unique_key(self) -> str:
         """Generate a unique blob key."""
