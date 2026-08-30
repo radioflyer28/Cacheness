@@ -4,8 +4,12 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Optional, Protocol
 
+from cacheness.metadata import SqliteBackend
+
 
 _RAW_MANIFEST_FIELD = "canonical_manifest_v1"
+_SQLITE_MANIFEST_PARAMS_FIELD = "cacheness_manifest_v1"
+_SERIALIZED_STRING_PREFIX = "str:"
 
 
 class ManifestRepository(Protocol):
@@ -31,7 +35,13 @@ class ManifestRepository(Protocol):
 
 
 class MetadataManifestRepository:
-    """Store exact UTF-8 canonical bytes inside a compatible metadata entry."""
+    """Store exact UTF-8 canonical bytes inside a compatible metadata entry.
+
+    SQLite intentionally projects metadata into fixed columns. Its existing
+    ``cache_key_params`` JSON column is the durable, clear-recovery-snapshotted
+    transport for this repository's explicitly named raw record; every other
+    backend retains the record in ordinary metadata.
+    """
 
     def __init__(self, backend: Any):
         self.backend = backend
@@ -44,6 +54,19 @@ class MetadataManifestRepository:
         record = metadata.get(_RAW_MANIFEST_FIELD) if isinstance(metadata, Mapping) else None
         if isinstance(record, str):
             return record.encode("utf-8")
+        if type(self.backend) is SqliteBackend and isinstance(metadata, Mapping):
+            parameters = metadata.get("cache_key_params")
+            sqlite_record = (
+                parameters.get(_SQLITE_MANIFEST_PARAMS_FIELD)
+                if isinstance(parameters, Mapping)
+                else None
+            )
+            if isinstance(sqlite_record, str) and sqlite_record.startswith(
+                _SERIALIZED_STRING_PREFIX
+            ):
+                return sqlite_record.removeprefix(_SERIALIZED_STRING_PREFIX).encode(
+                    "utf-8"
+                )
         return b""
 
     def put_raw(
@@ -59,7 +82,12 @@ class MetadataManifestRepository:
             raise ValueError("Canonical manifest record must be UTF-8") from exc
         projection = dict(entry_data or {})
         metadata = dict(projection.pop("metadata", {}) or {})
-        metadata[_RAW_MANIFEST_FIELD] = encoded
+        if type(self.backend) is SqliteBackend:
+            parameters = dict(metadata.get("cache_key_params", {}) or {})
+            parameters[_SQLITE_MANIFEST_PARAMS_FIELD] = encoded
+            metadata["cache_key_params"] = parameters
+        else:
+            metadata[_RAW_MANIFEST_FIELD] = encoded
         projection["cache_key"] = key
         projection["metadata"] = metadata
         self.backend.put_entry(key, projection)

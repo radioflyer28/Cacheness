@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from cacheness.storage import BlobStore
 
 
@@ -45,12 +47,13 @@ class _SingleHandlerRegistry:
         return self.handler
 
 
+@pytest.mark.parametrize("backend_name", ("json", "sqlite"))
 def test_tracer_direct_blob_store_uses_one_authenticated_committed_manifest(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, backend_name
 ):
     """A direct put/get signs the raw record and verifies one snapshot first."""
     events: list[str] = []
-    store = BlobStore(tmp_path / "tracer", backend="json")
+    store = BlobStore(tmp_path / "tracer", backend=backend_name)
     store.handlers = _SingleHandlerRegistry(_TracingHandler(events))
 
     try:
