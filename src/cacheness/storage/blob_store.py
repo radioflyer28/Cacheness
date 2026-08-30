@@ -48,8 +48,13 @@ from datetime import datetime, timezone
 
 from ..error_handling import (
     CacheBlobLifecycleConflictError,
+    CacheBlobManifestMalformedError,
     CacheBlobManifestUnauthenticatedError,
-    CacheManifestIntegrityError,
+    CacheBlobManifestUnsupportedVersionError,
+    CacheBlobPayloadMissingError,
+    CacheBlobPayloadTamperedError,
+    CacheBlobPayloadUnsupportedVersionError,
+    CacheManifestUnsupportedVersionError,
     CacheReason,
     CacheStorageError,
 )
@@ -263,8 +268,10 @@ class BlobStore:
 
             digest, byte_size = sha256_and_size(candidate_locator)
             handler_metadata = dict(result.get("metadata", {}) or {})
-            payload_format = result.get("storage_format", "pickle")
-            handler_metadata["storage_format"] = payload_format
+            storage_format = result.get("storage_format", "pickle")
+            payload_format = result.get("payload_format", storage_format)
+            payload_format_version = result.get("payload_format_version", 1)
+            handler_metadata["storage_format"] = storage_format
             handler_metadata.setdefault("compression_codec", self.compression)
             created_at = datetime.now(timezone.utc).isoformat()
             manifest = BlobManifestV1(
@@ -275,7 +282,7 @@ class BlobStore:
                 locator=str(candidate_locator),
                 handler_type=handler.data_type,
                 payload_format=payload_format,
-                payload_format_version=1,
+                payload_format_version=payload_format_version,
                 digest_algorithm="sha256",
                 digest=digest,
                 byte_size=byte_size,
@@ -299,7 +306,7 @@ class BlobStore:
                     **dict(signed_manifest.user_metadata),
                     **dict(signed_manifest.handler_metadata),
                     "actual_path": signed_manifest.locator,
-                    "storage_format": signed_manifest.payload_format,
+            "storage_format": storage_format,
                     "compression_codec": self.compression,
                 },
             }
@@ -339,16 +346,25 @@ class BlobStore:
             return None
         try:
             manifest = BlobManifestV1.from_canonical_bytes(raw_manifest)
-        except ManifestDecodeError:
-            raise
+        except CacheManifestUnsupportedVersionError as exc:
+            if "Payload format" in str(exc):
+                raise CacheBlobPayloadUnsupportedVersionError(
+                    "Canonical BlobStore payload format is unsupported"
+                ) from exc
+            raise CacheBlobManifestUnsupportedVersionError(
+                "Canonical BlobStore manifest schema is unsupported"
+            ) from exc
+        except ManifestDecodeError as exc:
+            raise CacheBlobManifestMalformedError(
+                "Canonical BlobStore manifest is malformed"
+            ) from exc
         if not verify_hmac_sha256(
             manifest.signing_bytes(),
             manifest.signature,
             self._manifest_key(),
         ):
-            raise CacheManifestIntegrityError(
+            raise CacheBlobManifestUnauthenticatedError(
                 "Canonical BlobStore manifest signature is invalid",
-                reason=CacheReason.MANIFEST_SIGNATURE_INVALID,
             )
         if manifest.key != key:
             raise CacheBlobLifecycleConflictError(
@@ -358,6 +374,33 @@ class BlobStore:
             raise CacheBlobLifecycleConflictError(
                 "Canonical BlobStore manifest is not committed"
             )
+
+        resolver = getattr(self.handlers, "resolve_payload_contract", None)
+        try:
+            if callable(resolver):
+                handler = resolver(
+                    manifest.handler_type,
+                    manifest.payload_format,
+                    manifest.payload_format_version,
+                )
+            else:
+                # Small compatibility registries used by existing direct
+                # callers predate the explicit handler declaration protocol.
+                # They still need an authenticated exact identity and a
+                # signed native-format agreement before a snapshot can open.
+                handler = self.handlers.get_handler_by_type(manifest.handler_type)
+                declared_format = manifest.handler_metadata.get("storage_format")
+                if (
+                    declared_format != manifest.payload_format
+                    or manifest.payload_format_version != 1
+                ):
+                    raise CacheManifestUnsupportedVersionError(
+                        "Canonical manifest declares an unsupported native payload contract"
+                    )
+        except (CacheManifestUnsupportedVersionError, ValueError) as exc:
+            raise CacheBlobPayloadUnsupportedVersionError(
+                "Canonical BlobStore payload contract is unsupported"
+            ) from exc
 
         actual_path = resolve_managed_locator(
             self.guarded_handler_io.root,
@@ -374,17 +417,29 @@ class BlobStore:
             "created_at": manifest.created_at,
         }
 
-        # The handler is intentionally resolved and invoked only after one
-        # live private snapshot has passed exact digest and size verification.
-        with self.guarded_handler_io.open_snapshot(actual_path, handler_metadata) as snapshot:
-            digest, byte_size = sha256_and_size(snapshot.path)
-            if digest != manifest.digest or byte_size != manifest.byte_size:
-                raise CacheManifestIntegrityError(
-                    "Canonical BlobStore payload integrity check failed",
-                    reason=CacheReason.MANIFEST_SIGNATURE_INVALID,
-                )
-            handler = self.handlers.get_handler_by_type(manifest.handler_type)
-            data = handler.get(snapshot.path, snapshot.metadata)
+        # The resolved handler receives only this private snapshot. It is
+        # hashed and size-checked inside the same live context before any
+        # trusted-payload deserialization can begin.
+        try:
+            with self.guarded_handler_io.open_snapshot(
+                actual_path, handler_metadata
+            ) as snapshot:
+                digest, byte_size = sha256_and_size(snapshot.path)
+                if digest != manifest.digest or byte_size != manifest.byte_size:
+                    raise CacheBlobPayloadTamperedError(
+                        "Canonical BlobStore payload integrity check failed"
+                    )
+                data = handler.get(snapshot.path, snapshot.metadata)
+        except FileNotFoundError as exc:
+            raise CacheBlobPayloadMissingError(
+                "Canonical BlobStore payload is missing"
+            ) from exc
+        except CacheBlobPayloadTamperedError:
+            raise
+        except OSError as exc:
+            raise CacheBlobPayloadTamperedError(
+                "Canonical BlobStore payload could not be verified"
+            ) from exc
         
         # Update access time
         self.backend.update_access_time(key)
