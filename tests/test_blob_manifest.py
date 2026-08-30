@@ -22,6 +22,8 @@ from cacheness.handlers import (
     PANDAS_AVAILABLE,
     PandasDataFrameHandler,
 )
+from cacheness.interfaces import CacheHandler
+from cacheness.storage.blob_store import BlobStore
 from cacheness.storage import BlobManifestV1
 from cacheness.storage.integrity import sign_hmac_sha256, verify_hmac_sha256
 from cacheness.storage.manifest import (
@@ -268,6 +270,76 @@ def test_total_node_and_string_boundaries_are_independent():
     node_values["nodes_3"].append(0)
     with pytest.raises(CacheManifestIntegrityError, match="nodes"):
         BlobManifestV1.from_canonical_bytes(_raw_manifest_with_user_metadata(node_values))
+
+
+def test_outgoing_manifest_rejects_combined_metadata_node_overflow():
+    """A manifest never publishes bytes that its own decoder rejects."""
+    handler_metadata = {
+        f"handler_{index}": "h" for index in range(MAX_COLLECTION_ITEMS)
+    }
+    user_metadata = {
+        f"user_{index}": "u" for index in range(MAX_COLLECTION_ITEMS)
+    }
+    manifest = BlobManifestV1(
+        **{
+            **_manifest().to_mapping(),
+            "handler_metadata": handler_metadata,
+            "user_metadata": user_metadata,
+        }
+    )
+
+    with pytest.raises(CacheManifestIntegrityError, match="nodes"):
+        manifest.canonical_bytes()
+
+
+class _CustomHandler(CacheHandler):
+    """A public custom handler that keeps the historical write-result shape."""
+
+    @property
+    def data_type(self) -> str:
+        return "review_custom"
+
+    def can_handle(self, data: object) -> bool:
+        return isinstance(data, str)
+
+    def get_file_extension(self, _config: object) -> str:
+        return ".custom"
+
+    def put(self, data: object, file_path: Path, _config: object) -> dict[str, object]:
+        payload_path = file_path.with_suffix(".custom")
+        payload_path.write_text(str(data), encoding="utf-8")
+        return {
+            "storage_format": "text",
+            "file_size": payload_path.stat().st_size,
+            "actual_path": str(payload_path),
+            "metadata": {},
+        }
+
+    def get(self, file_path: Path, _metadata: dict[str, object]) -> str:
+        return file_path.read_text(encoding="utf-8")
+
+
+def test_custom_handler_round_trips_with_declared_default_payload_contract(
+    tmp_path: Path,
+):
+    """Legacy custom write results inherit their own declared payload identity."""
+    store = BlobStore(tmp_path / "custom-handler", backend="json")
+    custom_handler = _CustomHandler()
+    store.handlers.register_handler(custom_handler, priority=0)
+
+    try:
+        key = store.put("custom payload", key="custom-key")
+        manifest = BlobManifestV1.from_canonical_bytes(
+            store.manifest_repository.get_raw(key) or b""
+        )
+
+        assert (manifest.payload_format, manifest.payload_format_version) == (
+            custom_handler.payload_format,
+            custom_handler.payload_format_version,
+        )
+        assert store.get(key) == "custom payload"
+    finally:
+        store.close()
 
 
 def test_builtin_writes_publish_explicit_payload_format_identity(tmp_path):

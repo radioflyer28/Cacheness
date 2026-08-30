@@ -326,8 +326,13 @@ class BlobStore:
             digest, byte_size = sha256_and_size(candidate_locator)
             handler_metadata = dict(result.get("metadata", {}) or {})
             storage_format = result.get("storage_format", "pickle")
-            payload_format = result.get("payload_format", storage_format)
-            payload_format_version = result.get("payload_format_version", 1)
+            # A custom handler may retain the historical write-result shape.
+            # Its declared contract, not an incidental compatibility storage
+            # label, is authoritative for the canonical payload identity.
+            payload_format = result.get("payload_format", handler.payload_format)
+            payload_format_version = result.get(
+                "payload_format_version", handler.payload_format_version
+            )
             handler_metadata["storage_format"] = storage_format
             handler_metadata.setdefault("compression_codec", self.compression)
             created_at = datetime.now(timezone.utc).isoformat()

@@ -271,9 +271,15 @@ class BlobManifestV1:
 
     def canonical_bytes(self, *, include_signature: bool = True) -> bytes:
         """Encode this exact field set into deterministic UTF-8 JSON bytes."""
+        record = self.to_mapping(include_signature=include_signature)
+        # Outgoing records must obey the same aggregate structural limits as
+        # untrusted records on the read path.  Validating the two metadata
+        # maps independently is insufficient because their combined node
+        # count, plus the enclosing schema fields, can exceed the wire limit.
+        _validate_canonical_value(record, depth=1, nodes=[0])
         try:
             text = json.dumps(
-                self.to_mapping(include_signature=include_signature),
+                record,
                 sort_keys=True,
                 separators=(",", ":"),
                 ensure_ascii=False,
