@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 03
 current_phase_name: Atomic Lifecycle and Recovery Engine
 status: executing
-stopped_at: Phase 3 context gathered
-last_updated: "2026-08-30T18:06:41.151Z"
+stopped_at: Completed 03-01-PLAN.md
+last_updated: "2026-08-30T18:30:49.431Z"
 last_activity: 2026-08-30
-last_activity_desc: Phase 02 complete, transitioned to Phase 3
-state_head: e0469eb742b1822588e9541ec8f34fe40471af86
+last_activity_desc: Phase 03 execution started
+state_head: 8d2e514c26658c80e92c10c9aaa25fd667026979
 progress:
   total_phases: 8
   completed_phases: 2
   total_plans: 32
-  completed_plans: 22
+  completed_plans: 23
 milestone_name: milestone
 ---
 
@@ -24,14 +24,14 @@ milestone_name: milestone
 See: .planning/PROJECT.md (updated 2026-08-29)
 
 **Core value:** Applications can store and retrieve data reliably through one backend-neutral lifecycle, with caching policy layered above storage without compromising integrity or cleanup correctness.
-**Current focus:** Phase 02 — Canonical Storage and Integrity Contract
+**Current focus:** Phase 03 — Atomic Lifecycle and Recovery Engine
 
 ## Current Position
 
-Phase: 03 (Atomic Lifecycle and Recovery Engine) — READY TO EXECUTE
-Plan: Not started
+Phase: 03 (Atomic Lifecycle and Recovery Engine) — EXECUTING
+Plan: 2 of 10
 Status: Ready to execute
-Last activity: 2026-08-30 — Phase 02 complete, transitioned to Phase 3
+Last activity: 2026-08-30 — Phase 03 execution started
 
 Progress: [█░░░░░░░░░] 1 of 8 phases complete
 
@@ -63,6 +63,7 @@ Progress: [█░░░░░░░░░] 1 of 8 phases complete
 | Phase 02 P05 | 10 min | 2 tasks | 4 files |
 | Phase 02 P06 | 6 min | 2 tasks | 2 files |
 | Phase 02 P07 | 10min | 2 tasks | 4 files |
+| Phase 03 P01 | 18min | 2 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -129,6 +130,8 @@ Recent decisions affecting current work:
 - [Phase 02]: Exact Phase 1 fixture trees attach in-memory identities and report migration-required; Phase 7 alone owns migration execution.
 - [Phase 02]: Legacy SQLite inspection uses immutable read-only mode so compatibility detection cannot create journal sidecars.
 - [Phase 02]: Every direct read API preserves malformed, future-version, lifecycle, and local-backend failures rather than collapsing them into absence.
+- [Phase 03]: BlobStore publication now uses immutable generation locators and exact manifest CAS as its sole authority transition.
+- [Phase 03]: Reopen recovery acts only on authenticated manifest authority plus validated signed operation evidence; normal reads do not mutate evidence.
 
 ### Pending Todos
 
@@ -152,6 +155,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-30T16:35:39.738Z
-Stopped at: Phase 3 context gathered
-Resume file: .planning/phases/03-atomic-lifecycle-and-recovery-engine/03-CONTEXT.md
+Last session: 2026-08-30T18:30:49.379Z
+Stopped at: Completed 03-01-PLAN.md
+Resume file: None
