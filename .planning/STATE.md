@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 03
 current_phase_name: Atomic Lifecycle and Recovery Engine
 status: executing
-stopped_at: Completed 03-04-PLAN.md
-last_updated: "2026-08-30T19:16:48.164Z"
+stopped_at: Completed 03-05-PLAN.md
+last_updated: "2026-08-30T19:38:12.210Z"
 last_activity: 2026-08-30
 last_activity_desc: Phase 03 execution started
-state_head: 9a1deb926a78411de9b93ac62d3700fb574fd99f
+state_head: fe6c72a8e732f3ca3fc525c7b141409552421a3c
 progress:
   total_phases: 8
   completed_phases: 2
   total_plans: 32
-  completed_plans: 26
+  completed_plans: 27
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-08-29)
 ## Current Position
 
 Phase: 03 (Atomic Lifecycle and Recovery Engine) — EXECUTING
-Plan: 5 of 10
+Plan: 6 of 10
 Status: Ready to execute
 Last activity: 2026-08-30 — Phase 03 execution started
 
@@ -67,6 +67,7 @@ Progress: [█░░░░░░░░░] 1 of 8 phases complete
 | Phase 03 P02 | 7 min | 2 tasks | 4 files |
 | Phase 03-atomic-lifecycle-and-recovery-engine P03 | 18 min | 3 tasks | 8 files |
 | Phase 03 P04 | 8 min | 2 tasks | 3 files |
+| Phase 03 P05 | 12 min | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -141,6 +142,8 @@ Recent decisions affecting current work:
 - [Phase 03]: Operation evidence uses a dedicated HMAC domain and exact-byte conditional checkpoint and retirement; grace never authorizes unauthenticated evidence.
 - [Phase 03]: Stale write cleanup reclaims only the operation-bound immutable candidate after exact CAS conflict.
 - [Phase 03]: Delete publishes a signed tombstone before payload reclamation and retires it with exact-record CAS.
+- [Phase 03]: StoreAdmissionBarrier holds aggregate admission only while clear persists its authenticated finite target snapshot; ordinary operations are otherwise concurrent.
+- [Phase 03]: Clear checkpoints exact authenticated target pages and treats changed current records as conflicts, never as authority to delete a later generation.
 
 ### Pending Todos
 
@@ -164,6 +167,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-30T19:16:48.116Z
-Stopped at: Completed 03-04-PLAN.md
+Last session: 2026-08-30T19:38:12.158Z
+Stopped at: Completed 03-05-PLAN.md
 Resume file: None
