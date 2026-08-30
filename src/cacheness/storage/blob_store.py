@@ -45,7 +45,6 @@ from dataclasses import replace
 from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
-from datetime import datetime, timezone
 
 from ..error_handling import (
     CacheBlobBackendError,
@@ -79,6 +78,7 @@ from .manifest import (
 )
 from .manifest_repository import create_manifest_repository
 from .legacy_manifest import LegacyManifestIdentity, recognize_legacy_fixture_tree
+from .lifecycle import LifecycleEngine
 from .path_security import encode_physical_name, resolve_managed_locator
 from ..metadata import InMemoryBackend, MetadataBackend as CoreMetadataBackend
 from ..metadata import SqliteBackend
@@ -285,6 +285,7 @@ class BlobStore:
         self._manifest_key_provider = ManifestKeyProvider(
             self.cache_dir / "blob_manifest_hmac_key.bin"
         )
+        self.lifecycle = LifecycleEngine(self)
 
         # Clear recovery is deliberately confined to exact local backend
         # identities. Capability-shaped or wrapped backends never inherit a
@@ -332,7 +333,6 @@ class BlobStore:
         """
         return recognize_legacy_fixture_tree(root)
     
-    @_clear_coordinated
     def put(
         self,
         data: Any,
@@ -361,113 +361,9 @@ class BlobStore:
         else:
             blob_key = self._generate_unique_key()
 
-        storage_id = self._storage_id_for_key(blob_key)
-        previous_locator = None
-        existing_manifest = self._load_authenticated_manifest(
-            blob_key,
-            operation="overwrite",
-            require_locator=True,
-        )
-        if existing_manifest is not None:
-            # Refuse to overwrite a record whose authenticated locator points
-            # outside this store before serializing or publishing a candidate.
-            _manifest, _handler, previous_locator = existing_manifest
-        
-        # Get appropriate handler
-        handler = self.handlers.get_handler(data)
-
-        # A candidate is not authoritative until metadata publication has
-        # returned successfully. Its physical base remains derived from the
-        # stable logical-key ID, while the nonce prevents overwriting a prior
-        # committed payload before that publication boundary.
-        candidate_id = f"{storage_id}-candidate-{uuid.uuid4().hex}"
-        candidate_locator: Path | None = None
-        metadata_committed = False
-        try:
-            result = self.guarded_handler_io.put(
-                handler,
-                data,
-                candidate_id,
-                self.config,
-            )
-            candidate_locator = resolve_managed_locator(
-                self.guarded_handler_io.root,
-                result["actual_path"],
-                operation="candidate_publish",
-            )
-
-            digest, byte_size = sha256_and_size(candidate_locator)
-            handler_metadata = dict(result.get("metadata", {}) or {})
-            storage_format = result.get("storage_format", "pickle")
-            # A custom handler may retain the historical write-result shape.
-            # Its declared contract, not an incidental compatibility storage
-            # label, is authoritative when it exposes that contract. Older
-            # direct registries without the contract retain their native
-            # result format so their compatible read path remains usable.
-            declared_payload_format = getattr(handler, "payload_format", None)
-            payload_format = result.get(
-                "payload_format", declared_payload_format or storage_format
-            )
-            payload_format_version = result.get(
-                "payload_format_version", getattr(handler, "payload_format_version", 1)
-            )
-            handler_metadata["storage_format"] = storage_format
-            handler_metadata.setdefault("compression_codec", self.compression)
-            created_at = datetime.now(timezone.utc).isoformat()
-            manifest = BlobManifestV1(
-                schema_version=1,
-                key=blob_key,
-                generation=uuid.uuid4().hex,
-                state="committed",
-                locator=str(candidate_locator),
-                handler_type=handler.data_type,
-                payload_format=payload_format,
-                payload_format_version=payload_format_version,
-                digest_algorithm="sha256",
-                digest=digest,
-                byte_size=byte_size,
-                created_at=created_at,
-                handler_metadata=handler_metadata,
-                user_metadata=dict(metadata or {}),
-            )
-            signed_manifest = manifest.with_signature(
-                sign_hmac_sha256(
-                    manifest.signing_bytes(),
-                    self._manifest_key(initialize_new_store=True),
-                )
-            )
-            raw_manifest = signed_manifest.canonical_bytes()
-            entry_data = {
-                "cache_key": blob_key,
-                "data_type": signed_manifest.handler_type,
-                "file_size": signed_manifest.byte_size,
-                "created_at": signed_manifest.created_at,
-                "metadata": {
-                    **dict(signed_manifest.user_metadata),
-                    **dict(signed_manifest.handler_metadata),
-                    "actual_path": signed_manifest.locator,
-            "storage_format": storage_format,
-                    "compression_codec": self.compression,
-                },
-            }
-            self.manifest_repository.put_raw(
-                blob_key, raw_manifest, entry_data=entry_data
-            )
-            metadata_committed = True
-        except BaseException as exc:
-            if candidate_locator is not None and not metadata_committed:
-                self._cleanup_uncommitted_candidate(candidate_locator, exc)
-            raise
-
-        # The candidate is now the sole authoritative payload. A failure to
-        # erase the superseded payload cannot roll metadata back to stale
-        # evidence, but it must remain visible to callers for reconciliation.
-        if previous_locator is not None and previous_locator != candidate_locator:
-            self._cleanup_prior_payload(previous_locator)
-        
-        logger.debug(f"Stored blob {blob_key}: {handler.data_type}, {entry_data['file_size']} bytes")
-        
-        return blob_key
+        stored_key = self.lifecycle.put(data, key=blob_key, metadata=metadata)
+        logger.debug(f"Stored blob {stored_key} through the lifecycle engine")
+        return stored_key
     
     @_clear_read_coordinated
     def get(self, key: str) -> Optional[Any]:

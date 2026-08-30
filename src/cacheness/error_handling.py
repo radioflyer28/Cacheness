@@ -52,6 +52,7 @@ class CacheReason(str, Enum):
     BLOB_LIFECYCLE_CONFLICT = "blob_lifecycle_conflict"
     BLOB_BACKEND_FAILURE = "blob_backend_failure"
     BLOB_MIGRATION_REQUIRED = "blob_migration_required"
+    BLOB_RECOVERABLE_CLEANUP = "blob_recoverable_cleanup"
 
 
 class CacheError(Exception):
@@ -295,6 +296,19 @@ class CacheBlobMigrationRequiredError(CacheStorageError):
         context: Optional[Dict[str, Any]] = None,
         *,
         reason: CacheReason = CacheReason.BLOB_MIGRATION_REQUIRED,
+    ):
+        super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheBlobRecoverableCleanupError(CacheStorageError):
+    """Raised when published authority survives but cleanup needs resumption."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_RECOVERABLE_CLEANUP,
     ):
         super().__init__(message, _context_with_reason(context, reason))
 

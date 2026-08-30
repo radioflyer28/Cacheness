@@ -92,6 +92,44 @@ class _ValidatedStageArtifact(type(Path())):
     record: _StageArtifactRecord
 
 
+@dataclass
+class GuardedStagedArtifact:
+    """One validated private handler artifact held live for publication.
+
+    The enclosing :meth:`GuardedHandlerIO.stage` context owns the temporary
+    directory and retained descriptor.  Consumers can publish its bytes only
+    while that context is live, preserving the validation identity captured
+    before the lifecycle creates durable operation evidence.
+    """
+
+    stage_root: Path
+    stage_base: Path
+    artifact: _ValidatedStageArtifact
+    raw_result: Dict[str, Any]
+
+    @property
+    def suffix(self) -> str:
+        """Return the validated native handler suffix for a managed locator."""
+        return GuardedHandlerIO._safe_suffix(self.stage_base, self.artifact)
+
+    @contextmanager
+    def open(self) -> Iterator[tuple[Any, int]]:
+        """Yield the still-validated staged payload stream exactly once."""
+        with GuardedHandlerIO._open_staged_artifact(
+            self.stage_root, self.artifact, self.artifact.record
+        ) as opened:
+            yield opened
+
+    def result_for(self, final_path: Path, file_size: int) -> GuardedWriteResult:
+        """Return a compatible handler result naming a managed payload path."""
+        result: GuardedWriteResult = dict(self.raw_result)
+        result["actual_path"] = str(final_path)
+        result["file_size"] = file_size
+        metadata = result.get("metadata")
+        result["metadata"] = dict(metadata) if isinstance(metadata, dict) else {}
+        return result
+
+
 class GuardedHandlerIO:
     """Publish handler output and snapshot handler input through managed I/O.
 
@@ -106,6 +144,40 @@ class GuardedHandlerIO:
     def close(self) -> None:
         """Release the managed root descriptor held by the adapter."""
         self.file_ops.close()
+
+    @contextmanager
+    def stage(
+        self,
+        handler: Any,
+        data: Any,
+        config: Any,
+    ) -> Iterator[GuardedStagedArtifact]:
+        """Serialize a handler payload privately without managed side effects.
+
+        Callers must create durable lifecycle evidence before calling
+        :meth:`publish_generation`.  A serialization failure therefore leaves
+        neither an operation record nor a managed candidate.
+        """
+        with self._private_stage() as stage_root:
+            stage_base = stage_root / "payload"
+            raw_result = handler.put(data, stage_base, config)
+            if not isinstance(raw_result, dict):
+                _raise_invalid_stage_artifact()
+            artifact = self._staged_artifact(stage_root, stage_base, raw_result)
+            try:
+                yield GuardedStagedArtifact(stage_root, stage_base, artifact, raw_result)
+            finally:
+                artifact.record.close()
+
+    def publish_generation(
+        self,
+        staged: GuardedStagedArtifact,
+        locator: Path | str,
+    ) -> GuardedWriteResult:
+        """Exclusively publish a staged native payload at an immutable locator."""
+        with staged.open() as (source, file_size):
+            final_path = self.file_ops.create_stream_durable_exclusive(locator, source)
+        return staged.result_for(final_path, file_size)
 
     @contextmanager
     def _private_stage(self) -> Iterator[Path]:
@@ -307,31 +379,12 @@ class GuardedHandlerIO:
     ) -> GuardedWriteResult:
         """Serialize in a private stage and publish through ``ManagedFileOps``."""
         safe_storage_id = validate_blob_id(storage_id)
-        with self._private_stage() as stage_root:
-            stage_base = stage_root / "payload"
-            raw_result = handler.put(data, stage_base, config)
-            if not isinstance(raw_result, dict):
-                _raise_invalid_stage_artifact()
-            artifact = self._staged_artifact(stage_root, stage_base, raw_result)
-            try:
-                suffix = self._safe_suffix(stage_base, artifact)
-                final_id = validate_blob_id(f"{safe_storage_id}{suffix}")
-
-                with self._open_staged_artifact(
-                    stage_root, artifact, artifact.record
-                ) as (source, file_size):
-                    final_path = self.file_ops.write_stream(
-                        final_id, source, shard_chars=0
-                    )
-            finally:
-                artifact.record.close()
-
-            result: GuardedWriteResult = dict(raw_result)
-            result["actual_path"] = str(final_path)
-            result["file_size"] = file_size
-            metadata = result.get("metadata")
-            result["metadata"] = dict(metadata) if isinstance(metadata, dict) else {}
-            return result
+        with self.stage(handler, data, config) as staged:
+            final_id = validate_blob_id(f"{safe_storage_id}{staged.suffix}")
+            final_path = self.file_ops.blob_locator(final_id, shard_chars=0)
+            with staged.open() as (source, file_size):
+                published = self.file_ops.write_stream_to_locator(final_path, source)
+            return staged.result_for(published, file_size)
 
     @contextmanager
     def open_snapshot(
@@ -367,4 +420,4 @@ class GuardedHandlerIO:
             yield GuardedReadSnapshot(snapshot_path, snapshot_metadata)
 
 
-__all__ = ["GuardedHandlerIO", "GuardedReadSnapshot"]
+__all__ = ["GuardedHandlerIO", "GuardedReadSnapshot", "GuardedStagedArtifact"]

@@ -8,11 +8,15 @@ canonical record. General metadata-backend composition belongs to Phase 4.
 from __future__ import annotations
 
 import base64
+import hashlib
+from copy import deepcopy
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Mapping, Optional, Protocol
 
 from cacheness.error_handling import (
     CacheBlobBackendError,
+    CacheBlobLifecycleConflictError,
     CacheBlobMigrationRequiredError,
     CacheError,
 )
@@ -35,6 +39,36 @@ _BACKEND_OPERATION_ERRORS = (
 )
 
 
+@dataclass(frozen=True)
+class ManifestExpectation:
+    """An authenticated opaque record expectation for conditional publication."""
+
+    generation: str | None
+    record_digest: str | None
+
+    @classmethod
+    def absent(cls) -> "ManifestExpectation":
+        """Build the expectation used to create a previously absent key."""
+        return cls(generation=None, record_digest=None)
+
+    @classmethod
+    def from_authenticated_record(
+        cls, generation: str, raw_record: bytes
+    ) -> "ManifestExpectation":
+        """Bind a committed generation to the exact bytes observed by the engine."""
+        if not isinstance(generation, str) or not generation:
+            raise ValueError("Manifest expectation generation must be non-empty")
+        if not isinstance(raw_record, bytes) or not raw_record:
+            raise ValueError("Manifest expectation record must be non-empty bytes")
+        return cls(generation, hashlib.sha256(raw_record).hexdigest())
+
+    def matches(self, raw_record: bytes | None) -> bool:
+        """Compare only opaque canonical bytes; repository code never authenticates."""
+        if self.record_digest is None:
+            return raw_record is None
+        return raw_record is not None and hashlib.sha256(raw_record).hexdigest() == self.record_digest
+
+
 class ManifestRepository(Protocol):
     """Persistence contract for exact canonical manifest bytes."""
 
@@ -49,6 +83,16 @@ class ManifestRepository(Protocol):
         entry_data: Optional[Mapping[str, Any]] = None,
     ) -> None:
         """Persist one raw canonical record without decoding it."""
+
+    def publish_if_expected(
+        self,
+        key: str,
+        expected: ManifestExpectation,
+        record: bytes,
+        *,
+        entry_data: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        """Atomically publish only when one exact authenticated record remains."""
 
     def remove(self, key: str) -> None:
         """Remove a canonical record by logical key."""
@@ -103,6 +147,32 @@ class _MetadataManifestRepository:
         except (ValueError, UnicodeEncodeError) as exc:
             raise _backend_failure("get_raw", self.backend, exc) from exc
 
+    @staticmethod
+    def _raw_from_entry(entry: object) -> bytes | None:
+        """Decode one stored projection while preserving malformed-record failure."""
+        if entry is None:
+            return None
+        metadata = entry.get("metadata") if isinstance(entry, Mapping) else None
+        if not isinstance(metadata, Mapping) or _RAW_MANIFEST_FIELD not in metadata:
+            raise CacheBlobMigrationRequiredError(
+                "Compatibility metadata exists without canonical manifest bytes"
+            )
+        encoded = metadata[_RAW_MANIFEST_FIELD]
+        if not isinstance(encoded, str):
+            raise ValueError("Canonical manifest record is not a base64 string")
+        return base64.b64decode(encoded, validate=True)
+
+    @staticmethod
+    def _projection(key: str, record: bytes, entry_data: Optional[Mapping[str, Any]]) -> dict[str, Any]:
+        """Build the reversible compatibility representation used by local backends."""
+        projection = dict(entry_data or {})
+        source_metadata = projection.get("metadata", {})
+        metadata = dict(source_metadata) if isinstance(source_metadata, Mapping) else {}
+        metadata[_RAW_MANIFEST_FIELD] = base64.b64encode(record).decode("ascii")
+        projection["cache_key"] = key
+        projection["metadata"] = metadata
+        return projection
+
     def put_raw(
         self,
         key: str,
@@ -113,16 +183,57 @@ class _MetadataManifestRepository:
         """Write one exact byte sequence through existing durable backend storage."""
         if not isinstance(record, bytes):
             raise TypeError("Canonical manifest records must be bytes")
-        projection = dict(entry_data or {})
-        source_metadata = projection.get("metadata", {})
-        metadata = dict(source_metadata) if isinstance(source_metadata, Mapping) else {}
-        metadata[_RAW_MANIFEST_FIELD] = base64.b64encode(record).decode("ascii")
-        projection["cache_key"] = key
-        projection["metadata"] = metadata
+        projection = self._projection(key, record, entry_data)
         try:
             self.backend.put_entry(key, projection)
         except _BACKEND_OPERATION_ERRORS as exc:
             raise _backend_failure("put_raw", self.backend, exc) from exc
+
+    def publish_if_expected(
+        self,
+        key: str,
+        expected: ManifestExpectation,
+        record: bytes,
+        *,
+        entry_data: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        """Compare opaque bytes and update one local metadata record atomically."""
+        if not isinstance(record, bytes):
+            raise TypeError("Canonical manifest records must be bytes")
+        try:
+            with self.backend._lock:
+                if type(self.backend) is JsonBackend:
+                    current_entry = self.backend._metadata.get("entries", {}).get(key)
+                else:
+                    current_entry = self.backend._entries.get(key)
+                current_raw = self._raw_from_entry(current_entry)
+                if not expected.matches(current_raw):
+                    raise CacheBlobLifecycleConflictError(
+                        "Canonical manifest expectation no longer matches",
+                        context={"key": key, "operation": "publish_if_expected"},
+                    )
+                projection = self._projection(key, record, entry_data)
+                if type(self.backend) is JsonBackend:
+                    self.backend._ensure_writable()
+                    candidate = deepcopy(self.backend._metadata)
+                    now = datetime.now(timezone.utc).isoformat()
+                    candidate.setdefault("entries", {})[key] = {
+                        "description": projection.get("description", ""),
+                        "data_type": projection.get("data_type", "unknown"),
+                        "prefix": projection.get("prefix", ""),
+                        "created_at": projection.get("created_at", now),
+                        "accessed_at": projection.get("accessed_at", now),
+                        "file_size": projection.get("file_size", 0),
+                        "metadata": projection["metadata"].copy(),
+                    }
+                    self.backend._save_to_disk(candidate)
+                    self.backend._metadata = candidate
+                else:
+                    self.backend.put_entry(key, projection)
+        except CacheBlobLifecycleConflictError:
+            raise
+        except _BACKEND_OPERATION_ERRORS as exc:
+            raise _backend_failure("publish_if_expected", self.backend, exc) from exc
 
     def remove(self, key: str) -> None:
         """Remove the record and its compatibility metadata projection together."""
@@ -250,6 +361,38 @@ class SqliteManifestRepository:
                 self._write_raw_row(connection, key, record)
         except _BACKEND_OPERATION_ERRORS as exc:
             raise _backend_failure("put_raw", self.backend, exc) from exc
+
+    def publish_if_expected(
+        self,
+        key: str,
+        expected: ManifestExpectation,
+        record: bytes,
+        *,
+        entry_data: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        """Conditionally update local SQLite authority in one transaction."""
+        if not isinstance(record, bytes):
+            raise TypeError("Canonical manifest records must be bytes")
+        try:
+            with self.backend._lock, self.backend.engine.begin() as connection:
+                row = connection.exec_driver_sql(
+                    f"SELECT canonical_bytes FROM {_SQLITE_MANIFEST_TABLE} "
+                    "WHERE logical_key = ?",
+                    (key,),
+                ).first()
+                current_raw = None if row is None else bytes(row[0])
+                if not expected.matches(current_raw):
+                    raise CacheBlobLifecycleConflictError(
+                        "Canonical manifest expectation no longer matches",
+                        context={"key": key, "operation": "publish_if_expected"},
+                    )
+                if entry_data is not None:
+                    self._write_compatibility_projection(connection, key, entry_data)
+                self._write_raw_row(connection, key, record)
+        except CacheBlobLifecycleConflictError:
+            raise
+        except _BACKEND_OPERATION_ERRORS as exc:
+            raise _backend_failure("publish_if_expected", self.backend, exc) from exc
 
     @staticmethod
     def _write_compatibility_projection(
@@ -384,6 +527,18 @@ class MetadataManifestRepository:
     ) -> None:
         self._repository.put_raw(key, record, entry_data=entry_data)
 
+    def publish_if_expected(
+        self,
+        key: str,
+        expected: ManifestExpectation,
+        record: bytes,
+        *,
+        entry_data: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        self._repository.publish_if_expected(
+            key, expected, record, entry_data=entry_data
+        )
+
     def remove(self, key: str) -> None:
         self._repository.remove(key)
 
@@ -396,6 +551,7 @@ class MetadataManifestRepository:
 
 __all__ = [
     "ManifestRepository",
+    "ManifestExpectation",
     "InMemoryManifestRepository",
     "JsonManifestRepository",
     "SqliteManifestRepository",

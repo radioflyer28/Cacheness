@@ -664,6 +664,70 @@ class ManagedFileOps:
             self._fsync_containing_directory(prepared)
             return prepared
 
+    def create_stream_durable_exclusive(
+        self, locator: Union[str, Path], stream: BinaryIO
+    ) -> Path:
+        """Create one durable contained file from ``stream`` without replacement.
+
+        This is deliberately distinct from ``write_stream_to_locator``: an
+        immutable lifecycle generation must never replace a prior candidate or
+        committed payload.  A partially written file remains operation-record
+        owned residue for recovery instead of becoming an untracked temporary.
+        """
+
+        def write_stream(descriptor: int) -> None:
+            while True:
+                chunk = stream.read(8192)
+                if not chunk:
+                    return
+                self._write_all(descriptor, chunk)
+
+        if self._descriptor_mode:
+            prepared = self._prepare_locator(
+                locator,
+                operation="exclusive_stream_create",
+                allow_missing_leaf=True,
+            )
+            parts = self._relative_parts(prepared)
+            with self._descriptor_parent(parts, create=True) as (parent_fd, name):
+                descriptor = os.open(
+                    name,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=parent_fd,
+                )
+                try:
+                    write_stream(descriptor)
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                os.fsync(parent_fd)
+            return prepared
+
+        with self._lock:
+            prepared = self._prepare_locator(
+                locator,
+                operation="exclusive_stream_create",
+                allow_missing_leaf=True,
+            )
+            self._ensure_fallback_parent(prepared)
+            prepared = resolve_managed_locator(
+                self.root,
+                prepared,
+                operation="exclusive_stream_create",
+                allow_missing_leaf=True,
+            )
+            with open(prepared, "xb") as destination:
+                while True:
+                    chunk = stream.read(8192)
+                    if not chunk:
+                        break
+                    destination.write(chunk)
+                destination.flush()
+                os.fsync(destination.fileno())
+            self._fsync_containing_directory(prepared)
+            return prepared
+
     def delete_durable(self, locator: Union[str, Path]) -> bool:
         """Delete a contained locator and acknowledge the directory when it existed."""
         deleted = self.delete(locator)
