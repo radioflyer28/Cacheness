@@ -4,11 +4,11 @@ milestone: v1.0
 current_phase: 02
 current_phase_name: Canonical Storage and Integrity Contract
 status: executing
-stopped_at: Completed 02-01-PLAN.md
-last_updated: "2026-08-30T13:25:07.435Z"
+stopped_at: Completed 02-01-PLAN.md post-wave SQLite repair
+last_updated: "2026-08-30T13:43:59.276Z"
 last_activity: 2026-08-30
 last_activity_desc: Phase 02 execution started
-state_head: cafb95969e33b2a9bc64718f8cbd2fcf889ba61a
+state_head: e7550925866268f408441d90b41bec92d9d4570c
 progress:
   total_phases: 8
   completed_phases: 1
@@ -38,9 +38,11 @@ Progress: [█░░░░░░░░░] 1 of 8 phases complete
 ## Performance Metrics
 
 **Velocity:**
+
 - Total plans completed: 0
 - Average duration: -
 - Total execution time: 0.0 hours
+
 **By Phase:**
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
@@ -122,6 +124,7 @@ Recent decisions affecting current work:
 - [Phase 02]: Schema-1 manifests use restricted deterministic JSON and bind every canonical field except signature.
 - [Phase 02]: Only a genuinely absent raw repository record maps to None; malformed, unauthenticated, unsupported, and lifecycle-conflict records are typed failures.
 - [Phase 02]: Read integrity validates one private payload snapshot before handler deserialization.
+- [Phase 02]: SQLite carries raw canonical manifests only through its clear-recovery-snapshotted cache_key_params projection; empty records remain typed corruption.
 
 ### Pending Todos
 
@@ -145,6 +148,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-30T13:25:07.394Z
-Stopped at: Completed 02-01-PLAN.md
+Last session: 2026-08-30T13:43:59.221Z
+Stopped at: Completed 02-01-PLAN.md post-wave SQLite repair
 Resume file: None
