@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 1
+open_count: 0
 waived_count: 0
-fixed_count: 16
+fixed_count: 17
 total_count: 17
-last_updated: 2026-08-30T14:54:20.549Z
+last_updated: 2026-08-30T14:55:49.102Z
 ---
 
 # Broken Windows Ledger
@@ -31,7 +31,7 @@ last_updated: 2026-08-30T14:54:20.549Z
 | 14 | 02 | deviation | tests/test_blob_manifest_backends.py | 15 | Corrected the canonical manifest HMAC fixture key length. | fixed |  | 2026-08-30T14:01:49.331Z | 2026-08-30T14:02:15.784Z |
 | 15 | 02 | deviation | src/cacheness/storage/blob_store.py | 545 | Reconciled SQLite manifest sidecars after terminal clear recovery. | fixed |  | 2026-08-30T14:01:49.428Z | 2026-08-30T14:02:15.891Z |
 | 16 | 02 | deviation | tests/test_clear_recovery.py | 1473 | Aligned unsupported-topology coverage with fail-early selection. | fixed |  | 2026-08-30T14:01:49.522Z | 2026-08-30T14:02:15.992Z |
-| 17 | 02 | deviation | src/cacheness/storage/blob_store.py |  | Retained containment-only validation for legacy backend projections after canonical authentication. | open |  | 2026-08-30T14:54:20.549Z |  |
+| 17 | 02 | deviation | src/cacheness/storage/blob_store.py |  | Retained containment-only validation for legacy backend projections after canonical authentication. | fixed |  | 2026-08-30T14:54:20.549Z | 2026-08-30T14:55:49.102Z |
 
 ````json
 [
@@ -234,10 +234,10 @@ last_updated: 2026-08-30T14:54:20.549Z
     "file": "src/cacheness/storage/blob_store.py",
     "line": null,
     "description": "Retained containment-only validation for legacy backend projections after canonical authentication.",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-08-30T14:54:20.549Z",
-    "resolved_at": null
+    "resolved_at": "2026-08-30T14:55:49.102Z"
   }
 ]
 ````
