@@ -2,9 +2,9 @@
 schema_version: 1
 open_count: 0
 waived_count: 0
-fixed_count: 17
-total_count: 17
-last_updated: 2026-08-30T14:55:49.102Z
+fixed_count: 19
+total_count: 19
+last_updated: 2026-08-30T15:09:54.024Z
 ---
 
 # Broken Windows Ledger
@@ -32,6 +32,8 @@ last_updated: 2026-08-30T14:55:49.102Z
 | 15 | 02 | deviation | src/cacheness/storage/blob_store.py | 545 | Reconciled SQLite manifest sidecars after terminal clear recovery. | fixed |  | 2026-08-30T14:01:49.428Z | 2026-08-30T14:02:15.891Z |
 | 16 | 02 | deviation | tests/test_clear_recovery.py | 1473 | Aligned unsupported-topology coverage with fail-early selection. | fixed |  | 2026-08-30T14:01:49.522Z | 2026-08-30T14:02:15.992Z |
 | 17 | 02 | deviation | src/cacheness/storage/blob_store.py |  | Retained containment-only validation for legacy backend projections after canonical authentication. | fixed |  | 2026-08-30T14:54:20.549Z | 2026-08-30T14:55:49.102Z |
+| 18 | 02 | deviation | src/cacheness/storage/legacy_manifest.py |  | SQLite legacy inspection initially created WAL/SHM sidecars; immutable read-only mode now preserves fixture evidence. | fixed |  | 2026-08-30T15:09:46.116Z | 2026-08-30T15:09:53.927Z |
+| 19 | 02 | deviation | tests/test_blob_store_read_contract.py |  | Future-schema regression now edits raw manifest bytes because the schema model rejects unsupported versions at construction. | fixed |  | 2026-08-30T15:09:46.215Z | 2026-08-30T15:09:54.024Z |
 
 ````json
 [
@@ -238,6 +240,30 @@ last_updated: 2026-08-30T14:55:49.102Z
     "reason": "",
     "recorded_at": "2026-08-30T14:54:20.549Z",
     "resolved_at": "2026-08-30T14:55:49.102Z"
+  },
+  {
+    "id": 18,
+    "kind": "deviation",
+    "phase": "02",
+    "file": "src/cacheness/storage/legacy_manifest.py",
+    "line": null,
+    "description": "SQLite legacy inspection initially created WAL/SHM sidecars; immutable read-only mode now preserves fixture evidence.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-08-30T15:09:46.116Z",
+    "resolved_at": "2026-08-30T15:09:53.927Z"
+  },
+  {
+    "id": 19,
+    "kind": "deviation",
+    "phase": "02",
+    "file": "tests/test_blob_store_read_contract.py",
+    "line": null,
+    "description": "Future-schema regression now edits raw manifest bytes because the schema model rejects unsupported versions at construction.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-08-30T15:09:46.215Z",
+    "resolved_at": "2026-08-30T15:09:54.024Z"
   }
 ]
 ````
