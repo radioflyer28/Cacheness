@@ -7,7 +7,7 @@
 
 ### Storage Lifecycle
 
-- [ ] **STOR-01**: Every stored entry uses one versioned canonical manifest across all supported backends.
+- [x] **STOR-01**: Every stored entry uses one versioned canonical manifest across all supported backends.
 - [ ] **STOR-02**: Normal reads expose only committed entry generations.
 - [ ] **STOR-03**: A write exposes either the previous complete generation or the new complete generation, never partial payload or metadata state.
 - [ ] **STOR-04**: A failed write preserves the last valid generation and leaves any residue detectable and recoverable.
@@ -39,7 +39,7 @@
 
 - [x] **SECU-01**: Filesystem reads, writes, deletes, and listings reject traversal, absolute-path, drive, UNC, and symlink escapes from the configured root.
 - [x] **SECU-02**: Structured metadata uses typed safe parsers, and metadata-controlled `eval` is eliminated.
-- [ ] **SECU-03**: Configured manifest authenticity and payload integrity are verified before deserialization.
+- [x] **SECU-03**: Configured manifest authenticity and payload integrity are verified before deserialization.
 - [ ] **SECU-04**: Required signing fails closed when keys, signatures, permissions, or signer configuration are missing or invalid.
 - [ ] **SECU-05**: Signed manifests bind critical locator, handler/type, format, and lifecycle-generation fields.
 - [x] **SECU-06**: Metadata query fields are validated and safely constructed rather than interpolated into backend queries.
@@ -49,12 +49,12 @@
 ### Migration and Compatibility
 
 - [x] **MIGR-01**: Public imports, constructors, configuration names, registries, decorators, aliases, exceptions, and result behavior have characterization tests before ownership changes.
-- [ ] **MIGR-02**: Stored metadata schemas and payload formats have explicit, independently versioned identifiers.
+- [x] **MIGR-02**: Stored metadata schemas and payload formats have explicit, independently versioned identifiers.
 - [ ] **MIGR-03**: Migration begins with a non-mutating inventory and produces both human-readable and machine-readable plans.
 - [ ] **MIGR-04**: Same-backend format and schema migrations use resumable copy-verify-switch semantics.
 - [ ] **MIGR-05**: Interrupted migrations resume safely without losing the only valid copy of an entry.
 - [ ] **MIGR-06**: Incompatible formats and cross-backend moves have an explicit, confirmed rebuild path rather than implicit deletion or universal physical migration.
-- [ ] **MIGR-07**: Unknown future formats fail explicitly rather than being guessed, rewritten, or silently deleted.
+- [x] **MIGR-07**: Unknown future formats fail explicitly rather than being guessed, rewritten, or silently deleted.
 
 ### Delivery Confidence
 
@@ -91,7 +91,7 @@ Deferred to future releases and not included in the current roadmap.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| STOR-01 | Phase 2 | Pending |
+| STOR-01 | Phase 2 | Complete |
 | STOR-02 | Phase 2 | Pending |
 | STOR-03 | Phase 3 | Pending |
 | STOR-04 | Phase 3 | Pending |
@@ -114,19 +114,19 @@ Deferred to future releases and not included in the current roadmap.
 | CACH-07 | Phase 1 | Complete |
 | SECU-01 | Phase 1 | Complete |
 | SECU-02 | Phase 1 | Complete |
-| SECU-03 | Phase 2 | Pending |
+| SECU-03 | Phase 2 | Complete |
 | SECU-04 | Phase 2 | Pending |
 | SECU-05 | Phase 2 | Pending |
 | SECU-06 | Phase 1 | Complete |
 | SECU-07 | Phase 1 | Complete |
 | SECU-08 | Phase 2 | Pending |
 | MIGR-01 | Phase 1 | Complete |
-| MIGR-02 | Phase 2 | Pending |
+| MIGR-02 | Phase 2 | Complete |
 | MIGR-03 | Phase 7 | Pending |
 | MIGR-04 | Phase 7 | Pending |
 | MIGR-05 | Phase 7 | Pending |
 | MIGR-06 | Phase 7 | Pending |
-| MIGR-07 | Phase 2 | Pending |
+| MIGR-07 | Phase 2 | Complete |
 | QUAL-01 | Phase 8 | Pending |
 | QUAL-02 | Phase 8 | Pending |
 | QUAL-03 | Phase 8 | Pending |
