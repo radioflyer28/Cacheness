@@ -1,41 +1,96 @@
-"""Durable exact-byte persistence for lifecycle operation evidence."""
+"""Durable exact-byte persistence and bounded paging for lifecycle evidence."""
 
 from __future__ import annotations
 
 from collections.abc import Iterator
+from dataclasses import dataclass
+import hashlib
+from heapq import nsmallest
 from pathlib import Path
+from threading import RLock
 from typing import Protocol
 
-from cacheness.error_handling import CacheBlobBackendError, CacheUnsafePathError
+from cacheness.config import LifecycleLimits
+from cacheness.error_handling import (
+    CacheBlobBackendError,
+    CacheBlobLifecycleConflictError,
+    CacheUnsafePathError,
+)
 
 from .operation_record import LifecycleOperationRecord
 from .path_security import ManagedFileOps, resolve_managed_locator, validate_blob_id
 
 
+@dataclass(frozen=True)
+class OperationCursor:
+    """Opaque stable position after one operation-record page."""
+
+    operation_id: str
+
+    def __post_init__(self) -> None:
+        validate_blob_id(self.operation_id)
+
+
+@dataclass(frozen=True)
+class OperationPage:
+    """One bounded, lexically ordered page of opaque evidence bytes."""
+
+    entries: tuple[tuple[str, bytes], ...]
+    next_cursor: OperationCursor | None
+
+
 class OperationRecordRepository(Protocol):
     """Exact-byte evidence storage used by lifecycle and recovery code."""
 
-    def create(self, record: LifecycleOperationRecord, raw_record: bytes) -> Path:
+    lifecycle_limits: LifecycleLimits
+
+    def create_exclusive(
+        self, record: LifecycleOperationRecord, raw_record: bytes
+    ) -> Path:
         """Durably create evidence before a managed candidate side effect."""
 
     def get_raw(self, operation_id: str) -> bytes | None:
         """Return exact evidence bytes, or ``None`` only for an absent record."""
 
-    def checkpoint(self, record: LifecycleOperationRecord, raw_record: bytes) -> None:
-        """Durably replace an existing operation record at a monotonic checkpoint."""
+    def checkpoint_if_exact(
+        self,
+        record: LifecycleOperationRecord,
+        *,
+        expected_raw: bytes,
+        raw_record: bytes,
+    ) -> None:
+        """Checkpoint only if the exact previously observed bytes still exist."""
 
-    def retire(self, record: LifecycleOperationRecord) -> None:
-        """Retire proven-complete evidence without affecting payload authority."""
+    def retire_if_exact(
+        self, record: LifecycleOperationRecord, *, expected_raw: bytes
+    ) -> None:
+        """Retire evidence only after the exact terminal record remains current."""
 
-    def iter_raw(self) -> Iterator[tuple[str, bytes]]:
-        """Yield exact evidence bytes for recovery without assigning authority."""
+    def list_page(
+        self,
+        cursor: OperationCursor | None = None,
+        *,
+        page_size: int | None = None,
+    ) -> OperationPage:
+        """Return a stable, bounded inventory page without interpreting evidence."""
 
 
 class FileOperationRecordRepository:
     """Local operation evidence repository inside the managed store root."""
 
-    def __init__(self, file_ops: ManagedFileOps):
+    def __init__(self, file_ops: ManagedFileOps, *, lifecycle_limits: LifecycleLimits):
         self.file_ops = file_ops
+        # Retain the one caller-owned policy object; no field copies are used.
+        self.lifecycle_limits = lifecycle_limits
+        # A fixed set of per-operation stripes protects only in-process
+        # read-compare-write evidence transitions. It deliberately avoids one
+        # global normal-operation lock and keeps lock memory bounded.
+        self._conditional_locks = tuple(RLock() for _ in range(32))
+
+    def _conditional_lock_for(self, operation_id: str) -> RLock:
+        """Return a bounded in-process lock stripe for one opaque evidence ID."""
+        stripe = hashlib.sha256(operation_id.encode("ascii")).digest()[0]
+        return self._conditional_locks[stripe % len(self._conditional_locks)]
 
     def locator_for(self, operation_id: str) -> Path:
         """Derive a contained locator from an opaque operation identifier."""
@@ -47,17 +102,28 @@ class FileOperationRecordRepository:
             allow_missing_leaf=True,
         )
 
-    def create(self, record: LifecycleOperationRecord, raw_record: bytes) -> Path:
+    def create_exclusive(
+        self, record: LifecycleOperationRecord, raw_record: bytes
+    ) -> Path:
         """Create evidence exclusively and durably before payload publication."""
         try:
             return self.file_ops.create_bytes_durable_exclusive(
                 self.locator_for(record.operation_id), raw_record
             )
+        except FileExistsError as exc:
+            raise CacheBlobLifecycleConflictError(
+                "Lifecycle operation evidence already exists",
+                context={"operation_id": record.operation_id, "operation": "create"},
+            ) from exc
         except OSError as exc:
             raise CacheBlobBackendError(
                 "Lifecycle operation evidence could not be created",
                 context={"operation_id": record.operation_id, "operation": "create"},
             ) from exc
+
+    def create(self, record: LifecycleOperationRecord, raw_record: bytes) -> Path:
+        """Compatibility alias for explicit exclusive evidence creation."""
+        return self.create_exclusive(record, raw_record)
 
     def get_raw(self, operation_id: str) -> bytes | None:
         """Read exact bytes without assigning evidence any read authority."""
@@ -71,75 +137,185 @@ class FileOperationRecordRepository:
                 context={"operation_id": operation_id, "operation": "get_raw"},
             ) from exc
 
-    def checkpoint(self, record: LifecycleOperationRecord, raw_record: bytes) -> None:
-        """Durably persist one authenticated monotonic progress checkpoint."""
-        try:
-            self.file_ops.write_bytes_durable(
-                self.locator_for(record.operation_id), raw_record
+    def _require_exact_current(
+        self, record: LifecycleOperationRecord, expected_raw: bytes, *, operation: str
+    ) -> None:
+        """Reject stale evidence without parsing or interpreting its bytes."""
+        if self.get_raw(record.operation_id) != expected_raw:
+            raise CacheBlobLifecycleConflictError(
+                "Lifecycle operation evidence no longer matches",
+                context={"operation_id": record.operation_id, "operation": operation},
             )
+
+    def checkpoint_if_exact(
+        self,
+        record: LifecycleOperationRecord,
+        *,
+        expected_raw: bytes,
+        raw_record: bytes,
+    ) -> None:
+        """Replace evidence only when the observed bytes remain current."""
+        if not isinstance(expected_raw, bytes) or not isinstance(raw_record, bytes):
+            raise TypeError("Operation evidence transitions require exact bytes")
+        try:
+            with self._conditional_lock_for(record.operation_id):
+                self._require_exact_current(
+                    record, expected_raw, operation="checkpoint_if_exact"
+                )
+                self.file_ops.write_bytes_durable(
+                    self.locator_for(record.operation_id), raw_record
+                )
+        except CacheBlobLifecycleConflictError:
+            raise
         except OSError as exc:
             raise CacheBlobBackendError(
                 "Lifecycle operation evidence could not be checkpointed",
                 context={
                     "operation_id": record.operation_id,
-                    "operation": "checkpoint",
+                    "operation": "checkpoint_if_exact",
+                },
+            ) from exc
+
+    def checkpoint(self, record: LifecycleOperationRecord, raw_record: bytes) -> None:
+        """Compatibility checkpoint that still verifies current evidence."""
+        previous = self.get_raw(record.operation_id)
+        if previous is None:
+            raise CacheBlobLifecycleConflictError(
+                "Lifecycle operation evidence is absent",
+                context={"operation_id": record.operation_id, "operation": "checkpoint"},
+            )
+        self.checkpoint_if_exact(record, expected_raw=previous, raw_record=raw_record)
+
+    def retire_if_exact(
+        self, record: LifecycleOperationRecord, *, expected_raw: bytes
+    ) -> None:
+        """Retire evidence only when the exact terminal bytes remain current."""
+        if not isinstance(expected_raw, bytes):
+            raise TypeError("Operation evidence retirement requires exact bytes")
+        try:
+            with self._conditional_lock_for(record.operation_id):
+                self._require_exact_current(
+                    record, expected_raw, operation="retire_if_exact"
+                )
+                if not self.file_ops.delete_durable(self.locator_for(record.operation_id)):
+                    raise CacheBlobLifecycleConflictError(
+                        "Lifecycle operation evidence is absent",
+                        context={
+                            "operation_id": record.operation_id,
+                            "operation": "retire_if_exact",
+                        },
+                    )
+        except CacheBlobLifecycleConflictError:
+            raise
+        except OSError as exc:
+            raise CacheBlobBackendError(
+                "Lifecycle operation evidence could not be retired",
+                context={
+                    "operation_id": record.operation_id,
+                    "operation": "retire_if_exact",
                 },
             ) from exc
 
     def retire(self, record: LifecycleOperationRecord) -> None:
-        """Remove evidence only after the lifecycle proves terminal cleanup."""
-        try:
-            self.file_ops.delete_durable(self.locator_for(record.operation_id))
-        except OSError as exc:
-            raise CacheBlobBackendError(
-                "Lifecycle operation evidence could not be retired",
-                context={"operation_id": record.operation_id, "operation": "retire"},
-            ) from exc
+        """Compatibility retirement that still compares current evidence."""
+        previous = self.get_raw(record.operation_id)
+        if previous is not None:
+            self.retire_if_exact(record, expected_raw=previous)
 
-    def iter_raw(self) -> Iterator[tuple[str, bytes]]:
-        """Yield bounded candidates that still need record/authentication checks.
+    def _page_size(self, page_size: int | None) -> int:
+        """Allow smaller caller pages but never bypass configured resource bounds."""
+        resolved = (
+            self.lifecycle_limits.operation_page_size
+            if page_size is None
+            else page_size
+        )
+        if type(resolved) is not int or resolved <= 0:
+            raise ValueError("operation page size must be a positive integer")
+        if resolved > self.lifecycle_limits.operation_page_size:
+            raise ValueError("operation page size exceeds configured lifecycle limit")
+        return resolved
 
-        Directory membership is never treated as payload ownership.  Recovery
-        validates the returned raw record, its signature, its store binding,
-        and its locators before taking a destructive action.
+    def list_page(
+        self,
+        cursor: OperationCursor | None = None,
+        *,
+        page_size: int | None = None,
+    ) -> OperationPage:
+        """Return one bounded page using only ``page_size + 1`` ID slots.
+
+        Directory membership, cursors, and raw evidence remain opaque here. The
+        lifecycle layer authenticates the bytes before assigning any authority.
         """
+        if cursor is not None and not isinstance(cursor, OperationCursor):
+            raise TypeError("operation cursor must be an OperationCursor or None")
+        limit = self._page_size(page_size)
         operations_directory = resolve_managed_locator(
             self.file_ops.root,
             "operations",
             operation="list_operation_records",
             allow_missing_leaf=True,
         )
+
+        def operation_ids() -> Iterator[str]:
+            for path in operations_directory.iterdir():
+                name = path.name
+                if not name.endswith(".json"):
+                    continue
+                operation_id = name.removesuffix(".json")
+                if cursor is not None and operation_id <= cursor.operation_id:
+                    continue
+                try:
+                    validate_blob_id(operation_id)
+                except CacheUnsafePathError:
+                    # Hostile names are never evidence or deletion targets.
+                    continue
+                yield operation_id
+
         try:
-            names = sorted(path.name for path in operations_directory.iterdir())
+            selected = nsmallest(limit + 1, operation_ids())
         except FileNotFoundError:
-            return
+            return OperationPage(entries=(), next_cursor=None)
         except OSError as exc:
             raise CacheBlobBackendError(
                 "Lifecycle operation evidence directory could not be listed",
-                context={"operation": "iter_raw"},
+                context={"operation": "list_page"},
             ) from exc
 
-        for name in names:
-            if not name.endswith(".json"):
-                continue
-            operation_id = name.removesuffix(".json")
-            try:
-                validate_blob_id(operation_id)
-            except CacheUnsafePathError:
-                # A hostile filename is not evidence and is never a deletion
-                # target.  A valid signed record must prove ownership instead.
-                continue
+        has_more = len(selected) > limit
+        page_ids = selected[:limit]
+        entries: list[tuple[str, bytes]] = []
+        for operation_id in page_ids:
             try:
                 raw = self.file_ops.read_bytes(self.locator_for(operation_id))
             except FileNotFoundError:
-                # A concurrent already-retired record is an idempotent absence.
+                # Concurrent exact retirement is an idempotent absence.
                 continue
             except OSError as exc:
                 raise CacheBlobBackendError(
                     "Lifecycle operation evidence could not be read",
-                    context={"operation_id": operation_id, "operation": "iter_raw"},
+                    context={"operation_id": operation_id, "operation": "list_page"},
                 ) from exc
-            yield operation_id, raw
+            entries.append((operation_id, raw))
+
+        next_cursor = (
+            OperationCursor(page_ids[-1]) if has_more and page_ids else None
+        )
+        return OperationPage(entries=tuple(entries), next_cursor=next_cursor)
+
+    def iter_raw(self) -> Iterator[tuple[str, bytes]]:
+        """Compatibility iterator composed from bounded cursor pages."""
+        cursor: OperationCursor | None = None
+        while True:
+            page = self.list_page(cursor)
+            yield from page.entries
+            if page.next_cursor is None:
+                return
+            cursor = page.next_cursor
 
 
-__all__ = ["FileOperationRecordRepository", "OperationRecordRepository"]
+__all__ = [
+    "FileOperationRecordRepository",
+    "OperationCursor",
+    "OperationPage",
+    "OperationRecordRepository",
+]

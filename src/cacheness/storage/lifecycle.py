@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from cacheness.config import LifecycleLimits
 from cacheness.error_handling import (
     CacheBlobRecoverableCleanupError,
     CacheManifestIntegrityError,
@@ -38,13 +39,14 @@ class LifecycleEngine:
     forward from the successful manifest compare-and-swap authority point.
     """
 
-    def __init__(self, store: Any, *, lifecycle_limits: Any):
+    def __init__(self, store: Any, *, lifecycle_limits: LifecycleLimits):
         self.store = store
         # This is the caller-owned policy object. Later paging, reconciliation,
         # and close admission consume this same instance rather than copies.
         self.lifecycle_limits = lifecycle_limits
         self.operation_repository = FileOperationRecordRepository(
-            store.guarded_handler_io.file_ops
+            store.guarded_handler_io.file_ops,
+            lifecycle_limits=lifecycle_limits,
         )
         self.test_hook: Callable[[str, LifecycleOperationRecord], None] | None = None
         self.fault_hook: Callable[[str, LifecycleOperationRecord], None] | None = None
@@ -75,9 +77,44 @@ class LifecycleEngine:
     def _checkpoint(
         self, record: LifecycleOperationRecord, checkpoint: OperationCheckpoint
     ) -> LifecycleOperationRecord:
+        expected_raw = record.canonical_bytes()
         updated = self._signed_record(record.at_checkpoint(checkpoint))
-        self.operation_repository.checkpoint(updated, updated.canonical_bytes())
+        self.operation_repository.checkpoint_if_exact(
+            updated,
+            expected_raw=expected_raw,
+            raw_record=updated.canonical_bytes(),
+        )
         return updated
+
+    def _retire(self, record: LifecycleOperationRecord) -> None:
+        """Retire only the exact terminal evidence observed by this lifecycle."""
+        self.operation_repository.retire_if_exact(
+            record, expected_raw=record.canonical_bytes()
+        )
+
+    def is_pre_authority_candidate_eligible(
+        self,
+        record: LifecycleOperationRecord,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        """Return whether already-authenticated pre-authority debt passed grace.
+
+        Callers must first authenticate and topology-bind ``record`` through
+        ``_recoverable_record``. Age alone never supplies recovery authority.
+        """
+        if record.checkpoint not in {
+            OperationCheckpoint.PREPARED,
+            OperationCheckpoint.CANDIDATE_PUBLISHED,
+        }:
+            return False
+        observed_at = datetime.now(timezone.utc) if now is None else now
+        if observed_at.tzinfo is None:
+            raise ValueError("orphan grace checks require a timezone-aware clock")
+        checkpoint_at = datetime.fromisoformat(record.updated_at)
+        return observed_at >= checkpoint_at + timedelta(
+            seconds=self.lifecycle_limits.orphan_grace_seconds
+        )
 
     def _advance_to(
         self,
@@ -161,8 +198,10 @@ class LifecycleEngine:
         if current is None:
             if record.expected_generation is not None:
                 return
+            if not self.is_pre_authority_candidate_eligible(record):
+                return
             self.store._delete_or_prove_absent(candidate_locator)
-            self.operation_repository.retire(record)
+            self._retire(record)
             return
 
         manifest, _, current_locator = current
@@ -179,7 +218,7 @@ class LifecycleEngine:
                 self.store._delete_or_prove_absent(previous_locator)
             if record.checkpoint != OperationCheckpoint.TERMINAL:
                 record = self._advance_to(record, OperationCheckpoint.TERMINAL)
-            self.operation_repository.retire(record)
+            self._retire(record)
             return
 
         if (
@@ -187,7 +226,7 @@ class LifecycleEngine:
             and manifest.generation == record.expected_generation
         ):
             self.store._delete_or_prove_absent(candidate_locator)
-            self.operation_repository.retire(record)
+            self._retire(record)
 
     def recover(self) -> None:
         """Resume authenticated lifecycle debt during store initialization.
@@ -196,22 +235,41 @@ class LifecycleEngine:
         unauthenticated, from another store, or locator-invalid remains
         untouched rather than becoming authority or a deletion target.
         """
-        for operation_id, raw in self.operation_repository.iter_raw():
-            recovered = self._recoverable_record(operation_id, raw)
-            if recovered is None:
-                continue
-            record, candidate_locator, previous_locator = recovered
-            try:
-                self._recover_record(record, candidate_locator, previous_locator)
-            except (CacheStorageError, OSError) as exc:
-                raise CacheBlobRecoverableCleanupError(
-                    "BlobStore lifecycle recovery needs another cleanup attempt",
-                    context={
-                        "operation_id": record.operation_id,
-                        "generation": record.generation,
-                        "key": record.key,
-                    },
-                ) from exc
+        cursor = None
+        remaining_actions = self.lifecycle_limits.max_reconcile_actions
+        while remaining_actions > 0:
+            page = self.operation_repository.list_page(
+                cursor,
+                page_size=min(
+                    self.lifecycle_limits.operation_page_size,
+                    remaining_actions,
+                ),
+            )
+            for operation_id, raw in page.entries:
+                recovered = self._recoverable_record(operation_id, raw)
+                if recovered is None:
+                    remaining_actions -= 1
+                    if remaining_actions == 0:
+                        return
+                    continue
+                record, candidate_locator, previous_locator = recovered
+                try:
+                    self._recover_record(record, candidate_locator, previous_locator)
+                except (CacheStorageError, OSError) as exc:
+                    raise CacheBlobRecoverableCleanupError(
+                        "BlobStore lifecycle recovery needs another cleanup attempt",
+                        context={
+                            "operation_id": record.operation_id,
+                            "generation": record.generation,
+                            "key": record.key,
+                        },
+                    ) from exc
+                remaining_actions -= 1
+                if remaining_actions == 0:
+                    return
+            if page.next_cursor is None:
+                return
+            cursor = page.next_cursor
 
     def put(
         self,
@@ -296,7 +354,7 @@ class LifecycleEngine:
                 initialize_new_store=previous_manifest is None,
             )
             self._fault("evidence_create", record)
-            self.operation_repository.create(record, record.canonical_bytes())
+            self.operation_repository.create_exclusive(record, record.canonical_bytes())
             self._emit("evidence_created", record)
 
             self._fault("candidate_publish", record)
@@ -367,7 +425,7 @@ class LifecycleEngine:
                 record = self._checkpoint(record, OperationCheckpoint.TERMINAL)
                 self._emit("cleanup_completed", record)
                 self._fault("evidence_retire", record)
-                self.operation_repository.retire(record)
+                self._retire(record)
                 self._emit("evidence_retired", record)
             except Exception as exc:
                 raise CacheBlobRecoverableCleanupError(
