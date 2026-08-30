@@ -36,10 +36,12 @@ WAVE_ZERO_FILES = (
 PHASE_CREATED_PYTHON_FILES = (
     "src/cacheness/storage/path_security.py",
     "src/cacheness/storage/guarded_handler_io.py",
+    "src/cacheness/storage/clear_recovery.py",
     "src/cacheness/query_validation.py",
     "tests/test_public_api_contract.py",
     "tests/test_stored_compatibility.py",
     "tests/test_filesystem_containment.py",
+    "tests/test_clear_recovery.py",
     "tests/test_legacy_array_security.py",
     "tests/test_query_meta_security.py",
     "tests/test_sql_cache_failure_contract.py",
@@ -221,13 +223,24 @@ def test_sql_cache_has_no_direct_print_failure_path() -> None:
     assert not _contains_direct_print(sql_cache)
 
 
-def test_validation_artifact_records_completed_quality_evidence() -> None:
-    """Validation can be marked complete only after this gate has evidence."""
+def test_validation_artifact_requires_gap_wave_pending_evidence() -> None:
+    """Gap waves reject stale approval while retaining prior evidence as history."""
     validation = VALIDATION_FILE.read_text(encoding="utf-8")
-    assert "status: complete" in validation
-    assert "nyquist_compliant: true" in validation
-    assert "wave_0_complete: true" in validation
-    assert "**Approval:** passed" in validation
+    assert "status: draft" in validation
+    assert "nyquist_compliant: false" in validation
+    assert "wave_0_complete: false" in validation
+    assert "**Approval:** pending" in validation
+    assert "**Approval:** passed" not in validation
+    assert "During Waves 8-9, the only accepted validation state" in validation
+    assert "01-13" in validation
+    assert "01-14" in validation
+    assert "01-15" in validation
+    for finding in ("CR-01", "CR-02", "CR-03", "CR-04", "CR-05", "CR-06"):
+        assert finding in validation
+    for threat in ("T-01-38..T-01-40", "T-01-41..T-01-45", "T-01-46..T-01-48"):
+        assert threat in validation
+    assert "STOR-03, STOR-04, STOR-05, STOR-06, and CACH-03 remain **INCOMPLETE**" in validation
+    assert "Executors do not modify `01-REVIEW.md` or `01-REVIEW-FIX.md`" in validation
     assert "T-01-09..T-01-11, T-01-28..T-01-36" in validation
     assert "T-01-20..T-01-23" in validation
     assert "T-01-01..T-01-07, T-01-12, T-01-37" in validation
@@ -238,7 +251,5 @@ def test_validation_artifact_records_completed_quality_evidence() -> None:
     for path in WAVE_ZERO_FILES:
         assert f"- [x] `{path}`" in validation
     assert validation.count("✅ green") >= 6
-    assert "⬜ pending" not in validation
-    assert "**Approval:** pending" not in validation
     assert re.search(r"Full pytest: \d+ passed, \d+ skipped", validation)
     assert re.search(r"Ruff: \d+ findings", validation)

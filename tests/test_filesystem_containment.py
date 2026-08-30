@@ -869,6 +869,113 @@ def test_guarded_handler_io_rejects_stage_artifact_swapped_after_validation(
         io.close()
 
 
+@pytest.mark.parametrize("force_fallback", [False, True])
+def test_guarded_handler_io_rejects_ordinary_leaf_replacement_after_validation(
+    tmp_path, monkeypatch, force_fallback: bool
+):
+    """A validated leaf inode cannot be replaced before managed publication."""
+    from cacheness.storage import guarded_handler_io
+    from cacheness.storage.guarded_handler_io import GuardedHandlerIO
+
+    if not force_fallback and (
+        os.open not in os.supports_dir_fd
+        or not hasattr(os, "O_DIRECTORY")
+        or not hasattr(os, "O_NOFOLLOW")
+    ):
+        pytest.skip("descriptor-relative staged-artifact open is unsupported")
+    if force_fallback:
+        monkeypatch.setattr(guarded_handler_io.os, "supports_dir_fd", set())
+
+    root = tmp_path / "root"
+    root.mkdir()
+    handler = _InstrumentedHandler()
+    io = GuardedHandlerIO(root)
+    original_staged_artifact = GuardedHandlerIO._staged_artifact
+
+    def replace_leaf_after_validation(
+        stage_root: Path, stage_base: Path, result: dict[str, Any]
+    ) -> Path:
+        artifact = original_staged_artifact(stage_root, stage_base, result)
+        replacement = artifact.with_name("replacement.guarded")
+        replacement.write_text("swapped", encoding="utf-8")
+        replacement.replace(artifact)
+        return artifact
+
+    monkeypatch.setattr(
+        GuardedHandlerIO,
+        "_staged_artifact",
+        staticmethod(replace_leaf_after_validation),
+    )
+    try:
+        with pytest.raises(CacheUnsafePathError) as exc_info:
+            io.put(handler, "payload", "g" * 64, CacheConfig(cache_dir=str(root)))
+        assert exc_info.value.context["reason"] == CacheReason.PATH_RACE.value
+        assert list(root.iterdir()) == []
+    finally:
+        io.close()
+
+
+@pytest.mark.parametrize("force_fallback", [False, True])
+def test_guarded_handler_io_rejects_ordinary_ancestor_replacement_after_validation(
+    tmp_path, monkeypatch, force_fallback: bool
+):
+    """A validated ancestor directory cannot be replaced before publication."""
+    from cacheness.storage import guarded_handler_io
+    from cacheness.storage.guarded_handler_io import GuardedHandlerIO
+
+    if not force_fallback and (
+        os.open not in os.supports_dir_fd
+        or not hasattr(os, "O_DIRECTORY")
+        or not hasattr(os, "O_NOFOLLOW")
+    ):
+        pytest.skip("descriptor-relative staged-artifact open is unsupported")
+    if force_fallback:
+        monkeypatch.setattr(guarded_handler_io.os, "supports_dir_fd", set())
+
+    root = tmp_path / "root"
+    root.mkdir()
+
+    class NestedStageHandler:
+        data_type = "nested-stage"
+
+        def put(self, _data: Any, file_path: Path, _config: Any) -> dict[str, Any]:
+            artifact = file_path.parent / "nested" / "payload.guarded"
+            artifact.parent.mkdir()
+            artifact.write_text("inside", encoding="utf-8")
+            return {
+                "storage_format": "guarded",
+                "file_size": artifact.stat().st_size,
+                "actual_path": artifact,
+                "metadata": {},
+            }
+
+    io = GuardedHandlerIO(root)
+    original_staged_artifact = GuardedHandlerIO._staged_artifact
+
+    def replace_ancestor_after_validation(
+        stage_root: Path, stage_base: Path, result: dict[str, Any]
+    ) -> Path:
+        artifact = original_staged_artifact(stage_root, stage_base, result)
+        original_parent = artifact.parent
+        original_parent.rename(original_parent.with_name("original-nested"))
+        artifact.parent.mkdir()
+        artifact.write_text("swapped", encoding="utf-8")
+        return artifact
+
+    monkeypatch.setattr(
+        GuardedHandlerIO,
+        "_staged_artifact",
+        staticmethod(replace_ancestor_after_validation),
+    )
+    try:
+        with pytest.raises(CacheUnsafePathError) as exc_info:
+            io.put(NestedStageHandler(), "payload", "h" * 64, CacheConfig(cache_dir=str(root)))
+        assert exc_info.value.context["reason"] == CacheReason.PATH_RACE.value
+        assert list(root.iterdir()) == []
+    finally:
+        io.close()
+
+
 def test_guarded_handler_io_rejects_hard_linked_external_stage_artifact(tmp_path):
     """A stage path may not alias external bytes through a hard link."""
     from cacheness.storage.guarded_handler_io import GuardedHandlerIO

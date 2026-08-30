@@ -1,9 +1,9 @@
 ---
 phase: 01
 slug: compatibility-and-security-baseline
-status: complete
-nyquist_compliant: true
-wave_0_complete: true
+status: draft
+nyquist_compliant: false
+wave_0_complete: false
 created: 2026-08-29
 ---
 
@@ -51,6 +51,27 @@ Task and wave assignments are finalized by the planner. Every requirement alread
 
 Phase-gate threats T-01-25..T-01-27 cover validation sign-off, unsafe-construct regression, and Ruff-baseline integrity; they are tracked by Plan 01-07's final gate rather than attributed to a single phase requirement.
 
+## Gap-Closure Waves 8-10
+
+The completed rows and measured counts below are historical Phase 1 evidence,
+not current approval. During Waves 8-9, the only accepted validation state is
+`status: draft`, `nyquist_compliant: false`, `wave_0_complete: false`, and
+`Approval: pending`.
+
+| Wave | Plans | Review findings | Threat refs | Status |
+|------|-------|-----------------|-------------|--------|
+| 8 | 01-13 | CR-01, CR-06 | T-01-38..T-01-40 | ⬜ pending |
+| 9 | 01-14 | CR-04, CR-05 | T-01-41..T-01-45 | ⬜ pending |
+| 10 | 01-15 | CR-02, CR-03, CR-04 | T-01-46..T-01-48 | ⬜ pending |
+
+Executors do not modify `01-REVIEW.md` or `01-REVIEW-FIX.md`, and do not
+restore approval. Only the orchestrator renews review and finalizes validation
+after Plans 01-13 through 01-15 execute.
+
+STOR-03, STOR-04, STOR-05, STOR-06, and CACH-03 remain **INCOMPLETE**
+downstream requirements. The gap waves do not introduce a canonical manifest,
+generation/CAS model, or general lifecycle/reconciliation engine.
+
 ---
 
 ## Required Test Dimensions
@@ -82,7 +103,7 @@ All phase behaviors have automated verification. Human review may improve docume
 
 ---
 
-## Validation Sign-Off
+## Historical Validation Sign-Off
 
 - [x] All tasks have automated verification or explicit Wave 0 dependencies.
 - [x] Sampling continuity: no three consecutive tasks lack an automated check.
@@ -99,4 +120,13 @@ All phase behaviors have automated verification. Human review may improve docume
 - Ruff: 118 findings across `src tests`, within the measured 123-finding baseline; all Phase 1-created Python files had zero findings.
 - `tests/test_phase1_quality_gates.py` parses Ruff JSON and proves each unsafe-construct sentinel against a synthetic violating snippet before scanning production code.
 
-**Approval:** passed
+**Historical evidence:** retained; this is not current approval.
+
+## Gap-Closure Validation Sign-Off
+
+- [ ] CR-01 through CR-06 have current adversarial regression evidence.
+- [ ] Focused, full-suite, and parsed-Ruff evidence has been rerun after Waves 8-10.
+- [ ] The orchestrator has completed renewed code and security review.
+- [ ] `status: complete`, `nyquist_compliant: true`, `wave_0_complete: true`, and Approval may be restored only by the orchestrator after renewed review.
+
+**Approval:** pending
