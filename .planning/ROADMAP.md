@@ -115,6 +115,45 @@ Plans:
   5. Forced same-key write, delete, and read races have deterministic outcomes without globally serializing operations on distinct keys.
 
 **Plans**: TBD
+**Wave 1**
+
+- [ ] 03-01-PLAN.md
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 03-02-PLAN.md
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 03-03-PLAN.md
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [ ] 03-04-PLAN.md
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [ ] 03-05-PLAN.md
+
+**Wave 6** *(blocked on Wave 5 completion)*
+
+- [ ] 03-06-PLAN.md
+
+**Wave 7** *(blocked on Wave 6 completion)*
+
+- [ ] 03-07-PLAN.md
+
+**Wave 8** *(blocked on Wave 7 completion)*
+
+- [ ] 03-08-PLAN.md
+
+**Wave 9** *(blocked on Wave 8 completion)*
+
+- [ ] 03-09-PLAN.md
+
+**Wave 10** *(blocked on Wave 9 completion)*
+
+- [ ] 03-10-PLAN.md
 
 ### Phase 4: Metadata Composition and Topology Contracts
 
@@ -194,7 +233,7 @@ Plans:
 |-------|----------------|--------|-----------|
 | 1. Compatibility and Security Baseline | 15/15 | Complete | 2026-08-30 |
 | 2. Canonical Storage and Integrity Contract | 7/7 | Complete    | 2026-08-30 |
-| 3. Atomic Lifecycle and Recovery Engine | 0/TBD | Not started | - |
+| 3. Atomic Lifecycle and Recovery Engine | 0/10 | Planned    |  |
 | 4. Metadata Composition and Topology Contracts | 0/TBD | Not started | - |
 | 5. Payload Backends and Full Matrix Parity | 0/TBD | Not started | - |
 | 6. UnifiedCache Policy Composition | 0/TBD | Not started | - |

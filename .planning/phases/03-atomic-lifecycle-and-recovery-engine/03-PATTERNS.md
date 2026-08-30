@@ -1,8 +1,8 @@
 # Phase 3: Atomic Lifecycle and Recovery Engine - Pattern Map
 
 **Mapped:** 2026-08-30  
-**Files analyzed:** 17 proposed new/modified files  
-**Analogs found:** 17 / 17 (role-match or stronger)
+**Files analyzed:** 22 proposed new/modified files  
+**Analogs found:** 22 / 22 (role-match or stronger)
 
 This map follows the proposed Phase 3 split in `03-RESEARCH.md`. Exact names for
 the five new modules remain discretionary; the responsibilities, ordering, and
@@ -26,11 +26,16 @@ lifecycle wrapper or header should be introduced.
 | `src/cacheness/storage/clear_recovery.py` | recovery service (compatibility predecessor) | batch + file I/O + event-driven recovery | itself; `tests/test_clear_recovery.py` | exact predecessor, to absorb/shim |
 | `src/cacheness/error_handling.py` | model/error taxonomy | request-response | existing BlobStore error subclasses | exact taxonomy match |
 | `src/cacheness/storage/__init__.py` | provider/barrel | request-response imports | itself | package-convention match |
+| `src/cacheness/config.py` | config/model | request-response + transform | itself (`CacheStorageConfig`, `CacheMetadataConfig`, `CacheConfig`) | exact grouped-config match |
+| `src/cacheness/__init__.py` | provider/barrel | request-response imports | itself (conditional exports and `__all__`) | exact package-convention match |
 | `tests/test_manifest_repository_cas.py` | test | CRUD + concurrency/fault injection | `tests/test_blob_manifest_backends.py` | exact repository-test match |
 | `tests/test_blob_store_atomic_lifecycle.py` | test | CRUD + streaming + crash/reopen | `tests/test_clear_recovery.py`, `tests/test_blob_store_read_contract.py` | lifecycle/fault match |
 | `tests/test_blob_store_reconciliation.py` | test | batch + file I/O + report/apply | `tests/test_clear_recovery.py` | recovery-adversarial match |
 | `tests/test_blob_store_concurrency.py` | test | event-driven synchronization | `tests/test_clear_recovery.py`, `tests/test_sqlite_concurrency.py` | deterministic concurrency match |
 | `tests/test_blob_store_close_contract.py` | test | request-response + event-driven drain | `tests/test_blob_store_read_contract.py` | ownership/cleanup match |
+| `tests/test_config_validation.py` | test | request-response + transform | itself (existing config validation suite) | exact validation-test match |
+| `tests/test_blob_store_read_contract.py` | test | request-response + file I/O + event-driven fault injection | itself (existing read/ownership contract suite) | exact read-contract match |
+| `tests/test_clear_recovery.py` | test | batch + file I/O + event-driven recovery | itself (existing predecessor recovery suite) | exact recovery-compatibility match |
 
 ## Pattern Assignments
 
@@ -788,6 +793,204 @@ backends and `GuardedHandlerIO` are closed once; caller-injected backends are
 never closed. Assert close does not clear stored user data and no operation uses
 resources after closure.
 
+---
+
+### `src/cacheness/config.py` (config/model, request-response + transform)
+
+**Analog:** existing grouped configuration classes in
+`src/cacheness/config.py:9-14,33-112,351-425`.
+
+Keep lifecycle limits as a configuration-owned public value object, following
+the module's dataclass and validation conventions rather than defining a second
+policy type in `storage/`. The import and grouped-default pattern is:
+
+```python
+import logging
+from dataclasses import dataclass, field
+from typing import Optional, List, Union
+from pathlib import Path
+
+@dataclass
+class CacheStorageConfig:
+    cache_dir: str = "./cache"
+    max_cache_size_mb: Optional[int] = 2000
+
+@dataclass
+class CacheMetadataConfig:
+    metadata_backend: str = "auto"
+    default_ttl_hours: float = 24
+
+class CacheConfig:
+    storage: CacheStorageConfig = field(default_factory=CacheStorageConfig)
+    metadata: CacheMetadataConfig = field(default_factory=CacheMetadataConfig)
+```
+
+Add the frozen `LifecycleLimits` dataclass beside these configuration models,
+with the seven exact defaults locked by Plan 03-03:
+`max_operation_record_bytes=1_048_576`, `max_operation_field_bytes=8_192`,
+`manifest_page_size=256`, `operation_page_size=256`,
+`max_reconcile_actions=10_000`, `orphan_grace_seconds=300.0`, and
+`close_wait_seconds=30.0`. Preserve caller-supplied values; reject booleans,
+non-finite values, zero, and negative values rather than silently clamping. The
+existing local validation style (`config.py:44-47,80-102`) raises a precise
+`ValueError` from `__post_init__`; use that for constructor-time limits
+validation. Compose one `lifecycle_limits` field into `CacheConfig` with a
+default factory and preserve a supplied instance by identity using `is None`,
+not truthiness or reconstruction. Keep the type import stable for all lifecycle
+modules.
+
+---
+
+### `src/cacheness/__init__.py` (provider/barrel, request-response imports)
+
+**Analog:** the existing conditional public-export barrel in
+`src/cacheness/__init__.py:32-74,205-241`.
+
+Import the configuration-owned lifecycle type directly from `.config` with the
+other config exports, and add it to the stable `__all__` list. Do not re-export
+it through `storage/__init__.py`; the plan deliberately gives configuration
+ownership to the top-level API. Preserve optional import guards and aliases:
+
+```python
+from .config import (
+    CacheBlobConfig,
+    CacheMetadataConfig,
+    CacheStorageConfig,
+    CompressionConfig,
+    SerializationConfig,
+    HandlerConfig,
+    SecurityConfig,
+    ConfigValidationError,
+    validate_config,
+    validate_config_strict,
+)
+
+__all__ = [
+    "cacheness",
+    "CacheConfig",
+    "CacheBlobConfig",
+    "CacheMetadataConfig",
+    "CacheStorageConfig",
+    # ... existing public exports ...
+]
+```
+
+Add `LifecycleLimits` alongside these config names, retaining the existing
+convenience import surface and avoiding a broad import of new storage modules
+that could introduce a cycle.
+
+---
+
+### `tests/test_config_validation.py` (test, request-response + transform)
+
+**Analog:** the existing configuration validation suite itself, especially
+`tests/test_config_validation.py:7-49,56-85,171-295`.
+
+Use its direct `cacheness.config` imports, temporary-directory fixture, valid
+config fixture, banner grouping, and exact `pytest.raises(..., match=...)`
+assertions:
+
+```python
+from cacheness.config import (
+    CacheConfig,
+    CacheStorageConfig,
+    CacheMetadataConfig,
+    ConfigValidationError,
+    validate_config,
+    validate_config_strict,
+)
+
+@pytest.fixture
+def valid_config():
+    """Provide a valid configuration instance."""
+    return CacheConfig()
+
+def test_invalid_stream_threshold(self):
+    with pytest.raises(ValueError, match="must be non-negative"):
+        CacheBlobConfig(stream_threshold_bytes=-1)
+```
+
+Extend the suite with a focused `LifecycleLimits` block: assert all seven
+defaults exactly, assert every limit accepts an explicit caller value, and
+parameterize each invalid edge (non-finite, non-positive, or field-specific
+invalid value) with the stable field name in the message. Also test that the
+top-level `cacheness.LifecycleLimits` identity is the config class, preventing
+duplicate ownership or a storage-only type.
+
+---
+
+### `tests/test_blob_store_read_contract.py` (test, request-response + file I/O + event-driven fault injection)
+
+**Analog:** the existing direct-read and constructor/ownership contract suite
+in `tests/test_blob_store_read_contract.py:507-583,586-634,838-946` and
+`tests/test_blob_store_read_contract.py:90-288`.
+
+Preserve the event tracer that proves the read ordering (repository, one
+snapshot, digest, then handler) and the rule that absence returns `None`
+without payload I/O:
+
+```python
+events: list[str] = []
+...
+def get_raw_with_event(blob_key: str):
+    events.append("repository")
+    return original_get_raw(blob_key)
+
+@contextmanager
+def snapshot_with_event(locator, metadata):
+    events.append("snapshot")
+    with original_snapshot(locator, metadata) as snapshot:
+        yield snapshot
+
+assert store.get(key) == "tracer payload"
+assert events == ["repository", "snapshot", "digest", "handler"]
+```
+
+Use its parametrized typed-failure matrix (`:838-946`) to ensure CAS
+retirement/patch errors remain typed and preserve the original cause; use the
+constructor tests to cover Plan 03-09's ownership regressions. Add the revised
+Plan 03-02/03-08 cases here without replacing these existing guarantees:
+one retryable read acquisition after a concurrent generation change, no second
+payload snapshot, and read/close behavior that leaves injected resources owned
+by the caller.
+
+---
+
+### `tests/test_clear_recovery.py` (test, batch + file I/O + event-driven recovery)
+
+**Analog:** the predecessor recovery and adversarial-journal suite in
+`tests/test_clear_recovery.py:29-65,234-326,945-974,1538-1590`.
+
+Keep the explicit process-loss exception, managed payload-byte capture, and
+reopen helper used to make recovery deterministic:
+
+```python
+class _SimulatedClearInterruption(BaseException):
+    """Represent loss of control between durable clear phases."""
+
+def _put_json_payloads(store: BlobStore) -> tuple[list[str], dict[Path, bytes]]:
+    keys = [store.put("first", key="first"), store.put("second", key="second")]
+    payload_bytes = {}
+    for key in keys:
+        entry = store.get_metadata(key)
+        assert entry is not None
+        payload_path = Path(entry["metadata"]["actual_path"])
+        payload_bytes[payload_path] = payload_path.read_bytes()
+    return keys, payload_bytes
+
+def _reopen_json_store(root: Path) -> BlobStore:
+    return BlobStore(root, backend="json")
+```
+
+Extend the legacy-compatibility tests to prove exact Phase 1 clear journals
+remain readable, while malformed, future-schema, topology-mismatched, or
+provenance-free evidence is preserved byte-for-byte and causes zero mutation.
+Retain the raw-bound-before-JSON pattern (`:1545-1580`) and the attacker-journal
+helper (`:952-974`); these are the closest concrete tests for bounded parsing,
+authenticated evidence, and “report/no destructive guess” recovery. Add the
+Plan 03-06 assertion that ordinary mutations no longer use the predecessor's
+global clear path.
+
 ## Shared Patterns
 
 ### Authority and CAS
@@ -795,6 +998,10 @@ resources after closure.
 **Sources:** `src/cacheness/storage/manifest.py:238-395`,
 `src/cacheness/storage/manifest_repository.py:38-60,236-307`,
 `src/cacheness/storage/blob_store.py:1006-1076`.
+
+**Apply to:** `src/cacheness/storage/manifest_repository.py`,
+`src/cacheness/storage/blob_store.py`, `tests/test_manifest_repository_cas.py`,
+`tests/test_blob_store_read_contract.py`, and all lifecycle mutation tests.
 
 Authenticate the current committed manifest before deriving the expectation;
 compare expected generation plus exact-record digest in one repository-local
@@ -806,6 +1013,12 @@ comparison is a typed conflict and never overwrites or revokes the winner.
 **Sources:** `src/cacheness/storage/manifest.py:80-228`,
 `src/cacheness/storage/clear_recovery.py:34-52,543-642`.
 
+**Apply to:** `src/cacheness/config.py`,
+`tests/test_config_validation.py`, `src/cacheness/storage/operation_record.py`,
+`src/cacheness/storage/operation_repository.py`,
+`src/cacheness/storage/reconciliation.py`, and
+`tests/test_clear_recovery.py`.
+
 Reject oversized bytes before parsing, duplicate/unknown fields, unsupported
 versions, invalid owner/topology, bad locators, and out-of-bound collections.
 Operation records carry provenance and progress but never payload contents.
@@ -815,6 +1028,9 @@ Malformed or unauthenticated evidence is reported/blocked, not guessed around.
 
 **Sources:** `src/cacheness/storage/guarded_handler_io.py:134-211,336-367`,
 `src/cacheness/storage/path_security.py:285-314,437-476,615-750`.
+
+**Apply to:** `src/cacheness/storage/blob_store.py`,
+`tests/test_blob_store_read_contract.py`, and `tests/test_clear_recovery.py`.
 
 All managed reads/writes/deletes/quarantines go through no-follow,
 root-identity-checked `ManagedFileOps`; use exclusive streamed generation
@@ -827,6 +1043,11 @@ directory fsyncs. Never deserialize payloads during reconciliation.
 `src/cacheness/storage/manifest_repository.py:63-73`,
 `tests/test_blob_manifest_backends.py:172-195`.
 
+**Apply to:** `src/cacheness/storage/lifecycle.py`,
+`src/cacheness/storage/operation_repository.py`,
+`src/cacheness/storage/reconciliation.py`, `src/cacheness/storage/blob_store.py`,
+`tests/test_blob_store_read_contract.py`, and `tests/test_clear_recovery.py`.
+
 Use domain subclasses with stable `context["reason"]`, preserve
 `__cause__`, and distinguish conflict, backend failure, integrity/version,
 unsupported capability, and recoverable cleanup. Existing typed errors are
@@ -838,6 +1059,41 @@ re-raised unchanged when already classified.
 `src/cacheness/storage/path_security.py:220-236`,
 `tests/test_clear_recovery.py:565-602`,
 `tests/test_blob_store_read_contract.py:150-288`.
+
+**Apply to:** `src/cacheness/storage/coordination.py`,
+`src/cacheness/storage/blob_store.py`, `tests/test_blob_store_concurrency.py`,
+`tests/test_blob_store_close_contract.py`,
+`tests/test_blob_store_read_contract.py`, and `tests/test_clear_recovery.py`.
+
+### Configuration ownership and public API stability
+
+**Sources:** `src/cacheness/config.py:9-14,33-112,351-425,773-815`,
+`src/cacheness/__init__.py:32-67,221-241`,
+`tests/test_config_validation.py:39-49,171-295`.
+
+**Apply to:** `src/cacheness/config.py`, `src/cacheness/__init__.py`,
+`tests/test_config_validation.py`, and every lifecycle module importing limits.
+
+Configuration models use focused dataclasses and constructor-time validation;
+the top-level package imports those symbols directly and enumerates its stable
+public API in `__all__`. Keep `LifecycleLimits` defined once in config,
+re-exported from the top-level barrel, and verified by identity/default/edge
+tests. Do not create a second storage-owned limits class or add a storage barrel
+re-export.
+
+### Read and recovery regression harnesses
+
+**Sources:** `tests/test_blob_store_read_contract.py:507-583,838-946`,
+`tests/test_clear_recovery.py:29-65,234-326,945-974,1538-1590`.
+
+**Apply to:** `tests/test_blob_store_read_contract.py` and
+`tests/test_clear_recovery.py`, with related lifecycle and reconciliation tests.
+
+Use event-traced ordering and typed-failure parameterization for direct reads;
+use reopen-after-interruption, byte snapshots, raw bound checks, and untrusted
+journal fixtures for recovery. Tests should assert state and bytes are
+unchanged on malformed or untrusted evidence, use bounded waits for concurrency,
+and distinguish `BaseException` process-loss simulation from ordinary errors.
 
 Use refcounted per-key entries, a short aggregate barrier only for clear/
 reconciliation, event/barrier seam hooks with bounded waits, and explicit
