@@ -14,9 +14,9 @@ provides:
   - Native-container evidence for NPZ, Parquet, pickle, dill, and read-only legacy Blosc2
 affects: [02-05-integrity-pipeline, BlobStore, handler-registry, migration-compatibility]
 actuals:
-  tokens: 4867
+  tokens: 4968
   tasks: 2
-  commits: 4
+  commits: 5
 tech-stack:
   added: []
   patterns:
@@ -86,6 +86,7 @@ status: complete
 
 1. **Task 1: Add explicit native payload identity to handler contracts** - `fea9672` (RED), `7560810` (GREEN)
 2. **Task 2: Prove native containers and reject unknown payload contracts** - `85865a8` (RED), `fd28b40` (GREEN)
+3. **Closeout correction: Restore the targeted Ruff gate** - `808be91` (fix)
 
 ## Files Created/Modified
 
@@ -119,14 +120,22 @@ status: complete
 - **Verification:** `uv run pytest -q -o log_cli=false tests/test_blob_manifest.py tests/test_handlers.py tests/test_stored_compatibility.py -x`
 - **Committed in:** `fd28b40`
 
+**3. [Rule 1 - Quality gate] Removed genuinely unused handler imports.**
+- **Found during:** Plan 02-03 closeout correction
+- **Issue:** Three unused imports in the plan-owned handler module caused the exact targeted Ruff command to fail.
+- **Fix:** Removed the unused imports while preserving their existing public exports from their owning modules and barrels.
+- **Files modified:** `src/cacheness/handlers.py`
+- **Verification:** `uv run ruff check src/cacheness/interfaces.py src/cacheness/handlers.py tests/test_blob_manifest.py`
+- **Committed in:** `808be91`
+
 ---
 
-**Total deviations:** 2 auto-fixed (2 Rule 1 test corrections).
-**Impact on plan:** Both fixes sharpen the planned native-format assertions without expanding storage lifecycle scope.
+**Total deviations:** 3 auto-fixed (3 Rule 1 corrections).
+**Impact on plan:** The corrections sharpen native-format assertions and restore the required quality gate without expanding storage lifecycle scope.
 
 ## Issues Encountered
 
-- The plan's exact Ruff command reports three pre-existing `F401` imports in `src/cacheness/handlers.py` (`CacheHandlerError`, `CacheFormatError`, and `verify_dill_serializable`). The planned tests pass, and Ruff passes for the changed interface/test files and for all changed files when those existing `F401` findings are excluded. The unrelated baseline imports were left unchanged.
+None - the exact targeted Ruff command passes after removal of the genuinely unused imports.
 
 ## User Setup Required
 
@@ -139,7 +148,7 @@ Plan 02-05 can use `HandlerRegistry.resolve_payload_contract()` before opening i
 ## Self-Check: PASSED
 
 - Confirmed all three planned files exist on disk.
-- Confirmed TDD RED/GREEN commits `fea9672`, `7560810`, `85865a8`, and `fd28b40` exist in git history.
+- Confirmed TDD RED/GREEN commits `fea9672`, `7560810`, `85865a8`, and `fd28b40`, plus closeout fix `808be91`, exist in git history.
 
 ---
 *Phase: 02-canonical-storage-and-integrity-contract*
