@@ -6,7 +6,7 @@ Cacheness will move from overlapping cache and storage paths to one production-g
 
 ## Phases
 
-- [ ] **Phase 1: Compatibility and Security Baseline** - Freeze supported behavior and close the currently exposed path, parser, query, and trust-boundary gaps.
+- [x] **Phase 1: Compatibility and Security Baseline** - Freeze supported behavior and close the currently exposed path, parser, query, and trust-boundary gaps.
 - [ ] **Phase 2: Canonical Storage and Integrity Contract** - Give direct `BlobStore` callers one versioned manifest, committed-read model, and fail-closed integrity contract.
 - [ ] **Phase 3: Atomic Lifecycle and Recovery Engine** - Make writes, replacements, deletions, races, and crash residue converge without corrupting the last valid generation.
 - [ ] **Phase 4: Metadata Composition and Topology Contracts** - Unify all metadata backends behind one injectable CAS contract with honest capability validation.
@@ -30,7 +30,7 @@ Cacheness will move from overlapping cache and storage paths to one production-g
   4. Structured metadata and query fields are parsed and constructed without metadata-controlled `eval` or interpolated backend query fragments.
   5. Users can identify the trusted-application-payload boundary and the risks and required configuration for unsafe serializers from project documentation.
 
-**Plans**: 15/15 plans executed; orchestrator review and validation remain pending
+**Plans**: 15/15 plans complete; review, security audit, and validation approved
 
 Plans:
 **Wave 1**
@@ -184,7 +184,7 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Compatibility and Security Baseline | 15/15 | Review/validation pending |  |
+| 1. Compatibility and Security Baseline | 15/15 | Complete | 2026-08-30 |
 | 2. Canonical Storage and Integrity Contract | 0/TBD | Not started | - |
 | 3. Atomic Lifecycle and Recovery Engine | 0/TBD | Not started | - |
 | 4. Metadata Composition and Topology Contracts | 0/TBD | Not started | - |

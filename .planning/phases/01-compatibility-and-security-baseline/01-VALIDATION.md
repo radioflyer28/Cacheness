@@ -1,9 +1,9 @@
 ---
 phase: 01
 slug: compatibility-and-security-baseline
-status: draft
-nyquist_compliant: false
-wave_0_complete: false
+status: complete
+nyquist_compliant: true
+wave_0_complete: true
 created: 2026-08-29
 ---
 
@@ -60,9 +60,9 @@ not current approval. During Waves 8-9, the only accepted validation state is
 
 | Wave | Plans | Review findings | Threat refs | Status |
 |------|-------|-----------------|-------------|--------|
-| 8 | 01-13 | CR-01, CR-06 | T-01-38..T-01-40 | ⬜ pending |
-| 9 | 01-14 | CR-04, CR-05 | T-01-41..T-01-45 | ⬜ pending |
-| 10 | 01-15 | CR-02, CR-03, CR-04 | T-01-46..T-01-48 | ⬜ pending |
+| 8 | 01-13 | CR-01, CR-06 | T-01-38..T-01-40 | ✅ complete |
+| 9 | 01-14 | CR-04, CR-05 | T-01-41..T-01-45 | ✅ complete |
+| 10 | 01-15 | CR-02, CR-03, CR-04 | T-01-46..T-01-48 | ✅ complete |
 
 Executors do not modify `01-REVIEW.md` or `01-REVIEW-FIX.md`, and do not
 restore approval. Only the orchestrator renews review and finalizes validation
@@ -120,13 +120,23 @@ All phase behaviors have automated verification. Human review may improve docume
 - Ruff: 118 findings across `src tests`, within the measured 123-finding baseline; all Phase 1-created Python files had zero findings.
 - `tests/test_phase1_quality_gates.py` parses Ruff JSON and proves each unsafe-construct sentinel against a synthetic violating snippet before scanning production code.
 
-**Historical evidence:** retained; this is not current approval.
+**Historical evidence:** retained alongside the renewed approval below.
 
 ## Gap-Closure Validation Sign-Off
 
-- [ ] CR-01 through CR-06 have current adversarial regression evidence.
-- [ ] Focused, full-suite, and parsed-Ruff evidence has been rerun after Waves 8-10.
-- [ ] The orchestrator has completed renewed code and security review.
-- [ ] `status: complete`, `nyquist_compliant: true`, `wave_0_complete: true`, and Approval may be restored only by the orchestrator after renewed review.
+- [x] CR-01 through CR-06 and CR-R1 through CR-R4 have current adversarial regression evidence.
+- [x] Focused, full-suite, and executable parsed-Ruff evidence was rerun after Waves 8-10 and the final review fixes.
+- [x] Renewed independent code review is clean with zero findings.
+- [x] Renewed independent security review is SECURED with 47/47 threats closed.
+- [x] `status: complete`, `nyquist_compliant: true`, and `wave_0_complete: true` are restored by the orchestrator after review convergence.
 
-**Approval:** pending
+## Renewed Approval Evidence
+
+- Final implementation commit: `cf3be4b`.
+- Full suite: `uv run pytest -q -o log_cli=false` passed on 2026-08-30 with 27 expected optional/platform skips and one existing collection warning.
+- Phase quality gate: `tests/test_phase1_quality_gates.py` passed (7 tests).
+- Final focused review matrix passed, including clear recovery, metadata, integrity, containment, query, custom-metadata, and concurrent-access coverage.
+- Final security re-audit: SECURED, 47/47 declared threats closed, no unregistered flags.
+- Downstream `STOR-03..STOR-06`, `CACH-03`, `BACK-03`, and `BACK-06` remain incomplete and are not claimed by this approval.
+
+**Approval:** approved 2026-08-30

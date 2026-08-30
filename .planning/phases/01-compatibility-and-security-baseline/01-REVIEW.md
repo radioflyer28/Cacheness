@@ -1,6 +1,6 @@
 ---
 phase: 01-compatibility-and-security-baseline
-reviewed: 2026-08-30T04:07:10Z
+reviewed: 2026-08-30T04:17:32Z
 depth: deep
 files_reviewed: 5
 files_reviewed_list:
@@ -10,91 +10,83 @@ files_reviewed_list:
   - src/cacheness/storage/clear_recovery.py
   - tests/test_clear_recovery.py
 findings:
-  critical: 1
+  critical: 0
   warning: 0
   info: 0
-  total: 1
-status: issues_found
+  total: 0
+status: clean
 ---
 
-# Phase 1: Renewed Fix Re-review Report
+# Phase 1: Final Code Review Report
 
-**Reviewed:** 2026-08-30T04:07:10Z
+**Reviewed:** 2026-08-30T04:17:32Z
 **Depth:** deep
 **Files Reviewed:** 5
-**Fix Commit:** `08b3f99`
-**Review Head:** `9158c24`
-**Status:** issues_found
+**Final Fix Commit:** `cf3be4b`
+**Review Head:** `eb72eb5`
+**Status:** clean
 
 ## Summary
 
-The fix closes CR-R1's JSON publication-authority failure and CR-R2's ordinary
-committed-journal failure boundary. It also closes CR-R3 for `put()`, the primary
-BlobStore reads, and the primary UnifiedCache `get`/list/stats paths: live same- and
-second-instance JSON/SQLite writers now serialize behind clear, stale JSON instances
-refresh after admission, and unresolved publication outcomes poison the live owner.
+Final independent review found no remaining blockers in the narrow Phase 1
+candidate-publication and recoverable-global-clear contract. All reviewed files
+meet the applicable correctness, security, and robustness standards. CR-R1 through
+CR-R4 are closed, and the stale-JSON-close regression discovered during the prior
+fix cycle is also closed.
 
-CR-R3 is not fully closed because public UnifiedCache query reads bypass the new
-prepared/committed state gate. A direct SQLite reproduction left a prepared journal
-after metadata clear: `get()` correctly raised `CacheStorageError`, while
-`query_meta(score=1)` returned `[]`. The focused implementation matrix otherwise
-passed. Validation must remain draft/pending.
+The final query-admission fix enters the clear boundary outside query methods'
+broad exception handlers, so prepared/poisoned evidence cannot collapse into
+`None`, `[]`, or `{}`. `query_custom_session()` retains admission for its complete
+context-manager lifetime. `JsonBackend.close()` no longer republishes cached state;
+all writable JSON operations already persist synchronously, so a stale second
+instance cannot resurrect entries after an authoritative clear.
 
 The explicitly deferred `STOR-03..STOR-06`, `CACH-03`, `BACK-03`, and `BACK-06`
-generalizations remain outside this review. The finding is limited to consistency
-among current Phase 1 public read paths during the new narrow clear transaction.
+generalizations remain incomplete and were not treated as Phase 1 findings.
+Validation remains draft/pending for the orchestrator's separate finalization step.
 
 ## Narrative Findings (AI reviewer)
 
-## Critical Issues
+No Critical, Warning, or Info findings remain in the reviewed scope.
 
-### CR-R4: Public metadata queries bypass prepared-clear admission and expose an intermediate empty state
+## Final Blocker Closure Audit
 
-**Classification:** BLOCKER
-
-**File:** `src/cacheness/core.py:491-614,616-795,797-813`
-
-**Issue:** The fix decorates `get()`, `get_stats()`, and `list_entries()` with
-`_clear_read_coordinated`, but leaves `query_meta()`, `query_custom()`,
-`query_custom_session()`, and `get_custom_metadata_for_entry()` outside the clear
-coordinator. After a `BaseException` occurs immediately after SQLite metadata clear,
-the journal remains `prepared` and the payloads are recoverable tombstones. In a
-direct reproduction, `get(score=1)` correctly rejected the read with “A prepared
-clear journal requires recovery before reads,” but `query_meta(score=1)` opened a
-SQLite session directly and returned `[]`. That result is indistinguishable from a
-real no-match result and exposes a state which the next mutation/restart will roll
-back. Custom-metadata query paths can likewise observe link/table state without the
-same admission decision. The public API therefore gives contradictory answers for
-one transaction and violates the fix's own fail-closed prepared-read contract.
-
-**Fix:** Apply clear read admission to `query_meta()`, `query_custom()`, and
-`get_custom_metadata_for_entry()`. For `query_custom_session()`, hold admission for
-the entire returned context-manager lifetime rather than only while constructing
-the query. Ensure admission errors occur outside the methods' broad exception
-handlers so they cannot be converted to `None`, `[]`, or `{}`. Add prepared,
-committed, poisoned, live-clear blocking, and second-instance SQLite tests for each
-public query/read surface.
-
-## Renewed Blocker Closure Audit
-
-- **CR-R1 — CLOSED:** backup retirement after acknowledged JSON replacement logs
-  cleanup debt without revoking metadata authority or deleting the referenced
-  candidate. First-write and cross-format cases cover BlobStore and UnifiedCache.
-- **CR-R2 — CLOSED for the reviewed boundary:** a proven prepared journal rolls
-  back; committed/uncertain publication and `BaseException` outcomes poison the
-  live coordinator and reject ordinary decorated work until restart recovery.
-- **CR-R3 — PARTIAL:** puts, deletes, updates, invalidation, clear, and primary
-  reads participate in root admission. Public query reads remain outside it as
-  described by CR-R4.
+- **CR-01 — CLOSED:** staged publication is bound to the exact validated file
+  identity in descriptor and fallback modes.
+- **CR-02 / CR-03 — CLOSED:** BlobStore and UnifiedCache candidates remain private
+  until metadata authority, preserve prior entries on failure, and do not delete a
+  JSON-authoritative candidate after backup-retirement debt.
+- **CR-04 / CR-05 — CLOSED for the narrow Phase 1 global-clear contract:** both
+  callers share one bounded, topology-bound journal; prepared work rolls back,
+  committed work rolls forward, and uncertain publication poisons the live owner.
+- **CR-06 — CLOSED:** outside-signed-64 integers fail with typed validation before
+  backend/session access.
+- **CR-R1 — CLOSED:** acknowledged JSON publication remains authoritative through
+  backup unlink or post-unlink directory-fsync failure.
+- **CR-R2 — CLOSED:** committed-journal failures are classified as prepared,
+  committed, or uncertain; safe prepared failures roll back and unsafe outcomes
+  reject live operations until restart recovery.
+- **CR-R3 — CLOSED:** lifecycle mutations serialize behind root admission; same-
+  and second-instance JSON/SQLite puts linearize with clear, and stale JSON views
+  refresh after admission.
+- **CR-R4 — CLOSED:** `query_meta`, custom query helpers, and the full custom-query
+  context lifetime participate in read admission. Prepared and poisoned states
+  fail closed; committed state exposes only its authoritative empty view.
+- **Stale JSON close resurrection — CLOSED:** JSON close is non-publishing and
+  cannot restore a pre-clear snapshot held by a preconstructed second instance.
 
 ## Verification
 
-- Focused matrix passed:
-  `uv run pytest -q -o log_cli=false tests/test_clear_recovery.py tests/test_metadata.py tests/test_cache_integrity.py tests/test_filesystem_containment.py tests/test_core.py::TestCacheness::test_concurrent_access -x`
-  (one expected Windows-junction skip).
-- Direct prepared-state reproduction: `UnifiedCache.get()` raised the expected
-  `CacheStorageError`; `UnifiedCache.query_meta()` incorrectly returned `[]`.
-- `01-VALIDATION.md` remains draft/pending.
+- Passed final focused matrix:
+  `uv run pytest -q -o log_cli=false tests/test_clear_recovery.py tests/test_metadata.py tests/test_cache_integrity.py tests/test_filesystem_containment.py tests/test_query_meta.py tests/test_query_meta_security.py tests/test_custom_metadata.py tests/test_core.py::TestCacheness::test_concurrent_access -x`.
+- One expected Windows-junction fixture was skipped.
+- The only teardown output was the already-recorded shutdown-only
+  `SqliteBackend.__del__` `ImportError: sys.meta_path is None`; it is not new to
+  this change and is already tracked in the protected project concerns.
+- `git diff --check` passed before the review artifact update.
+- Source inspection confirmed query admission wraps before broad query exception
+  handlers, the custom-query context holds admission through `yield`, and JSON
+  close performs no state write.
 
 ## Prior Review History (preserved)
 
@@ -103,18 +95,18 @@ staged-inode substitution, BlobStore overwrite corruption, UnifiedCache candidat
 leakage, partial global clear, anonymous clear tombstones, and untyped oversized
 integer query failures.
 
-The renewed deep review at `2026-08-30T03:35:34Z` reported:
+The renewed deep review at `2026-08-30T03:35:34Z` reported CR-R1 through CR-R3:
+JSON authority misclassification, unsafe committed-journal publication failure,
+and ordinary writes bypassing clear admission.
 
-1. **CR-R1:** acknowledged JSON metadata could be misclassified as uncommitted.
-2. **CR-R2:** failed committed-journal publication left unsafe prepared work live.
-3. **CR-R3:** normal writes bypassed clear admission and could be silently discarded.
-
-Commit `08b3f99` was reviewed as the attempted closure of CR-R1 through CR-R3.
-The closure audit above preserves their disposition and records the remaining
-public-read defect separately as CR-R4.
+The fix re-review at `2026-08-30T04:07:10Z` closed CR-R1 and CR-R2, found CR-R3
+partial, and reported CR-R4 for public metadata/custom query reads bypassing
+prepared-clear admission. The final fix also addressed stale JSON instance
+resurrection on close. This report records the independent final clean verdict
+without erasing those prior iterations.
 
 ---
 
-_Reviewed: 2026-08-30T04:07:10Z_
+_Reviewed: 2026-08-30T04:17:32Z_
 _Reviewer: the agent (gsd-code-reviewer)_
 _Depth: deep_
