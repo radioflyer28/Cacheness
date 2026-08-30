@@ -1,0 +1,233 @@
+"""Contract tests for canonical schema-1 BlobStore manifest records."""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from cacheness.error_handling import (
+    CacheManifestIntegrityError,
+    CacheManifestUnsupportedVersionError,
+)
+from cacheness.storage import BlobManifestV1
+from cacheness.storage.integrity import sign_hmac_sha256, verify_hmac_sha256
+from cacheness.storage.manifest import (
+    MAX_COLLECTION_ITEMS,
+    MAX_MANIFEST_BYTES,
+    MAX_NESTING_DEPTH,
+    MAX_STRING_UTF8_BYTES,
+    MAX_TOTAL_NODES,
+)
+
+
+_KEY = b"canonical-manifest-test-key-0001"
+
+
+def _manifest(**overrides) -> BlobManifestV1:
+    """Build one complete signed schema-1 manifest for codec contracts."""
+    values = {
+        "schema_version": 1,
+        "key": "tenant/asset",
+        "generation": "0123456789abcdef",
+        "state": "committed",
+        "locator": "/managed/payload.bin",
+        "handler_type": "object",
+        "payload_format": "compressed_pickle",
+        "payload_format_version": 1,
+        "digest_algorithm": "sha256",
+        "digest": "a" * 64,
+        "byte_size": 7,
+        "created_at": "2026-08-30T00:00:00+00:00",
+        "handler_metadata": {"serializer": "pickle", "empty": ""},
+        "user_metadata": {"label": "café", "empty": {}},
+    }
+    values.update(overrides)
+    unsigned = BlobManifestV1(**values)
+    return unsigned.with_signature(sign_hmac_sha256(unsigned.signing_bytes(), _KEY))
+
+
+def _raw_manifest_with_user_metadata(user_metadata: dict) -> bytes:
+    """Produce valid canonical bytes with a replacement user metadata map."""
+    manifest = _manifest(user_metadata=user_metadata)
+    return manifest.canonical_bytes()
+
+
+def _nested_map(depth: int) -> dict:
+    """Build a map whose deepest value occurs at the requested JSON depth."""
+    result: dict = {"leaf": "value"}
+    for _ in range(depth - 1):
+        result = {"nested": result}
+    return result
+
+
+def test_canonical_bytes_are_stable_for_reordered_unicode_and_empty_metadata():
+    """Equivalent field values always produce one byte-identical UTF-8 record."""
+    first = _manifest(
+        handler_metadata={"z": "last", "a": ["é", ""]},
+        user_metadata={"empty": {}, "nested": {"b": 2, "a": 1}},
+    )
+    second = _manifest(
+        handler_metadata={"a": ["é", ""], "z": "last"},
+        user_metadata={"nested": {"a": 1, "b": 2}, "empty": {}},
+    )
+
+    assert first.canonical_bytes() == second.canonical_bytes()
+    assert b"caf\xc3\xa9" in _manifest().canonical_bytes()
+    assert BlobManifestV1.from_canonical_bytes(first.canonical_bytes()) == first
+
+
+def test_manifest_raw_byte_limit_accepts_exact_boundary_and_rejects_next_byte():
+    """The raw-record byte ceiling is checked before parse or payload work."""
+    padding = {f"padding_{index}": "" for index in range(5)}
+    raw = _raw_manifest_with_user_metadata(padding)
+    remaining = MAX_MANIFEST_BYTES - len(raw)
+    assert remaining > 0
+
+    for index in padding:
+        addition = min(remaining, MAX_STRING_UTF8_BYTES)
+        padding[index] = "x" * addition
+        remaining -= addition
+    assert remaining == 0
+    exact_boundary = _raw_manifest_with_user_metadata(padding)
+    assert len(exact_boundary) == MAX_MANIFEST_BYTES
+
+    assert BlobManifestV1.from_canonical_bytes(exact_boundary).user_metadata == padding
+    with pytest.raises(CacheManifestIntegrityError, match="byte limit"):
+        BlobManifestV1.from_canonical_bytes(exact_boundary + b" ")
+
+
+@pytest.mark.parametrize("depth", [MAX_NESTING_DEPTH, MAX_NESTING_DEPTH + 1])
+def test_manifest_nesting_boundary(depth: int):
+    """Nested metadata accepts the exact depth limit and rejects one deeper."""
+    raw = _raw_manifest_with_user_metadata(_nested_map(depth))
+    if depth == MAX_NESTING_DEPTH:
+        assert BlobManifestV1.from_canonical_bytes(raw).user_metadata
+    else:
+        with pytest.raises(CacheManifestIntegrityError, match="nesting"):
+            BlobManifestV1.from_canonical_bytes(raw)
+
+
+@pytest.mark.parametrize(
+    ("count", "should_pass"),
+    [(MAX_COLLECTION_ITEMS, True), (MAX_COLLECTION_ITEMS + 1, False)],
+)
+def test_manifest_collection_boundary(count: int, should_pass: bool):
+    """Each map/list has an exact independently enforced item ceiling."""
+    raw = _raw_manifest_with_user_metadata({"items": list(range(count))})
+    if should_pass:
+        assert BlobManifestV1.from_canonical_bytes(raw).user_metadata["items"]
+    else:
+        with pytest.raises(CacheManifestIntegrityError, match="collection"):
+            BlobManifestV1.from_canonical_bytes(raw)
+
+
+@pytest.mark.parametrize(
+    ("value", "should_pass"),
+    [
+        (-(2**63), True),
+        (2**63 - 1, True),
+        (-(2**63) - 1, False),
+        (2**63, False),
+    ],
+)
+def test_manifest_signed_64_integer_boundary(value: int, should_pass: bool):
+    """All canonical integers are signed-64 values, never booleans or floats."""
+    raw = _raw_manifest_with_user_metadata({"value": value})
+    if should_pass:
+        assert BlobManifestV1.from_canonical_bytes(raw).user_metadata["value"] == value
+    else:
+        with pytest.raises(CacheManifestIntegrityError, match="signed-64"):
+            BlobManifestV1.from_canonical_bytes(raw)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"",
+        b"null",
+        b"\xff",
+        b'{"schema_version":1,"schema_version":1}',
+        b'{"schema_version":1,"byte_size":true}',
+        b'{"schema_version":1,"byte_size":1.5}',
+        b'{"schema_version":1,"byte_size":NaN}',
+    ],
+)
+def test_malformed_manifest_bytes_fail_with_typed_integrity_error(raw: bytes):
+    """Ambiguous or malformed records never become ordinary cache misses."""
+    with pytest.raises(CacheManifestIntegrityError):
+        BlobManifestV1.from_canonical_bytes(raw)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("schema_version", 2), ("payload_format_version", 2)],
+)
+def test_unknown_manifest_or_payload_version_fails_explicitly(field: str, value: int):
+    """Schema and native-format versions are independent and never inferred."""
+    record = _manifest().to_mapping()
+    record[field] = value
+    raw = json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+    with pytest.raises(CacheManifestUnsupportedVersionError):
+        BlobManifestV1.from_canonical_bytes(raw)
+
+
+def test_signature_binds_every_critical_manifest_field():
+    """Every D-09 field mutation changes the complete signed projection."""
+    manifest = _manifest()
+    critical_mutations = {
+        "schema_version": 1,
+        "key": "other-key",
+        "generation": "fedcba9876543210",
+        "state": "prepared",
+        "locator": "/managed/other.bin",
+        "handler_type": "other_handler",
+        "payload_format": "other_format",
+        "payload_format_version": 1,
+        "digest_algorithm": "sha256",
+        "digest": "b" * 64,
+        "byte_size": 8,
+        "created_at": "2026-08-31T00:00:00+00:00",
+    }
+
+    assert verify_hmac_sha256(manifest.signing_bytes(), manifest.signature, _KEY)
+    for field, value in critical_mutations.items():
+        signed_mapping = manifest.to_mapping(include_signature=False)
+        if value == getattr(manifest, field):
+            value = 2
+        signed_mapping[field] = value
+        mutated = json.dumps(
+            signed_mapping,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+        assert not verify_hmac_sha256(
+            mutated, manifest.signature, _KEY
+        ), field
+
+
+def test_total_node_and_string_boundaries_are_independent():
+    """String and aggregate-node ceilings are enforced independently of bytes."""
+    accepted_string = _raw_manifest_with_user_metadata(
+        {"text": "x" * MAX_STRING_UTF8_BYTES}
+    )
+    assert BlobManifestV1.from_canonical_bytes(accepted_string).user_metadata
+
+    with pytest.raises(CacheManifestIntegrityError, match="string"):
+        BlobManifestV1.from_canonical_bytes(
+            _raw_manifest_with_user_metadata(
+                {"text": "x" * (MAX_STRING_UTF8_BYTES + 1)}
+            )
+        )
+
+    collection_count = MAX_TOTAL_NODES // MAX_COLLECTION_ITEMS
+    node_values = {
+        f"nodes_{index}": list(range(MAX_COLLECTION_ITEMS))
+        for index in range(collection_count)
+    }
+    with pytest.raises(CacheManifestIntegrityError, match="nodes"):
+        BlobManifestV1.from_canonical_bytes(
+            _raw_manifest_with_user_metadata({"nodes": node_values})
+        )
