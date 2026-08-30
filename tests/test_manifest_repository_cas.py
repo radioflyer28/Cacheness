@@ -6,11 +6,13 @@ from pathlib import Path
 
 import pytest
 
+from cacheness.config import LifecycleLimits
 from cacheness.error_handling import CacheBlobBackendError, CacheBlobLifecycleConflictError
 from cacheness.metadata import InMemoryBackend, JsonBackend, SqliteBackend
 from cacheness.storage.manifest_repository import (
     InMemoryManifestRepository,
     JsonManifestRepository,
+    ManifestCursor,
     ManifestExpectation,
     SqliteManifestRepository,
 )
@@ -150,3 +152,30 @@ def test_sqlite_cas_rolls_back_compatibility_projection_with_raw_record(
         assert backend.get_entry("key")["description"] == "original"
     finally:
         backend.close()
+
+
+@pytest.mark.parametrize("backend_name", ("memory", "json", "sqlite"))
+def test_manifest_pages_are_stable_bounded_and_retain_the_supplied_limits(
+    tmp_path: Path, backend_name: str
+) -> None:
+    """Local adapters expose two-item opaque pages without a local policy copy."""
+    repository, _other, backends = _repository_pair(tmp_path, backend_name)
+    limits = LifecycleLimits(manifest_page_size=2)
+    repository = type(repository)(repository.backend, lifecycle_limits=limits)
+    records = {key: _record(key) for key in ("delta", "alpha", "charlie", "bravo")}
+    try:
+        for key, record in records.items():
+            repository.put_raw(key, record)
+
+        first = repository.list_page()
+        assert repository.lifecycle_limits is limits
+        assert [key for key, _raw in first.entries] == ["alpha", "bravo"]
+        assert [raw for _key, raw in first.entries] == [records["alpha"], records["bravo"]]
+        assert first.next_cursor == ManifestCursor("bravo")
+
+        second = repository.list_page(first.next_cursor)
+        assert [key for key, _raw in second.entries] == ["charlie", "delta"]
+        assert second.next_cursor is None
+    finally:
+        for backend in backends:
+            backend.close()

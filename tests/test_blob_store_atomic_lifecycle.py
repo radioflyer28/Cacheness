@@ -14,6 +14,12 @@ from cacheness.error_handling import (
 )
 from cacheness.storage import BlobStore
 from cacheness.storage.manifest import BlobManifestV1
+from cacheness.storage.operation_record import (
+    ClearTarget,
+    ClearTargetCheckpoint,
+    ClearTargetPage,
+)
+from cacheness.storage.operation_repository import FileOperationRecordRepository
 
 
 class _NativeJsonHandler:
@@ -405,3 +411,72 @@ def test_stale_delete_conflict_preserves_newer_committed_generation(
     finally:
         contender.close()
         winner.close()
+
+
+def test_clear_target_page_and_checkpoint_preserve_exact_progress_after_reopen(
+    tmp_path: Path,
+) -> None:
+    """Clear evidence persists exact targets and rejects stale progress writers."""
+    root = tmp_path / "clear-target-evidence"
+    store = BlobStore(root, backend="json")
+    operation_id = "a" * 32
+    page_id = "b" * 32
+    raw_first = b'{"first":"exact"}'
+    raw_second = b'{"second":"exact"}'
+    page = ClearTargetPage(
+        operation_id=operation_id,
+        page_id=page_id,
+        source_cursor=None,
+        next_cursor="second",
+        targets=(
+            ClearTarget.from_raw("first", "c" * 32, raw_first),
+            ClearTarget.from_raw("second", "d" * 32, raw_second),
+        ),
+    )
+    repository = FileOperationRecordRepository(
+        store.guarded_handler_io.file_ops,
+        lifecycle_limits=store.lifecycle_limits,
+    )
+    try:
+        raw_page = page.canonical_bytes()
+        repository.create_clear_target_page_exclusive(
+            operation_id, page_id, raw_page
+        )
+        checkpoint = ClearTargetCheckpoint.initial_for(page)
+        raw_initial = checkpoint.canonical_bytes()
+        repository.create_clear_target_checkpoint_exclusive(
+            operation_id, page_id, raw_initial
+        )
+        advanced = checkpoint.with_completed_target(0)
+        raw_advanced = advanced.canonical_bytes()
+        repository.checkpoint_clear_target_if_exact(
+            operation_id,
+            page_id,
+            expected_raw=raw_initial,
+            raw_record=raw_advanced,
+        )
+        with pytest.raises(CacheBlobLifecycleConflictError):
+            repository.checkpoint_clear_target_if_exact(
+                operation_id,
+                page_id,
+                expected_raw=raw_initial,
+                raw_record=checkpoint.with_completed_target(1).canonical_bytes(),
+            )
+    finally:
+        store.close()
+
+    reopened = BlobStore(root, backend="json")
+    try:
+        repository = reopened.lifecycle.operation_repository
+        persisted_page = repository.get_clear_target_page_raw(operation_id, page_id)
+        persisted_checkpoint = repository.get_clear_target_checkpoint_raw(
+            operation_id, page_id
+        )
+        assert persisted_page == raw_page
+        assert persisted_checkpoint == raw_advanced
+        assert ClearTargetPage.from_canonical_bytes(persisted_page) == page
+        assert ClearTargetCheckpoint.from_canonical_bytes(
+            persisted_checkpoint
+        ).completed_target_indices == (0,)
+    finally:
+        reopened.close()
