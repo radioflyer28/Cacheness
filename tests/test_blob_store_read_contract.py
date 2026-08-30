@@ -17,7 +17,9 @@ from cacheness.error_handling import (
     CacheBlobPayloadTamperedError,
     CacheUnsafePathError,
 )
+from cacheness.metadata import InMemoryBackend
 from cacheness.storage import BlobStore
+from cacheness.storage.guarded_handler_io import GuardedHandlerIO
 from cacheness.storage.integrity import sign_hmac_sha256
 from cacheness.storage.manifest import BlobManifestV1
 
@@ -59,6 +61,10 @@ class _SingleHandlerRegistry:
         return self.handler
 
 
+class _UnsupportedBackend(InMemoryBackend):
+    """An inherited metadata backend that is not an exact canonical identity."""
+
+
 def _replace_signed_manifest(
     store: BlobStore, key: str, **changes: Any
 ) -> BlobManifestV1:
@@ -72,6 +78,32 @@ def _replace_signed_manifest(
     )
     store.manifest_repository.put_raw(key, signed_manifest.canonical_bytes())
     return signed_manifest
+
+
+@pytest.mark.parametrize("failure", ("malformed_legacy", "unsupported_backend"))
+def test_constructor_failure_closes_managed_root_descriptor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    """Failed legacy recognition and backend selection release GuardedHandlerIO."""
+    closed: list[GuardedHandlerIO] = []
+    original_close = GuardedHandlerIO.close
+
+    def close_spy(adapter: GuardedHandlerIO) -> None:
+        closed.append(adapter)
+        original_close(adapter)
+
+    monkeypatch.setattr(GuardedHandlerIO, "close", close_spy)
+    cache_dir = tmp_path / failure
+    if failure == "malformed_legacy":
+        cache_dir.mkdir()
+        (cache_dir / "provenance.json").write_text("not json", encoding="utf-8")
+        with pytest.raises(CacheBlobManifestMalformedError):
+            BlobStore(cache_dir)
+    else:
+        with pytest.raises(CacheBlobBackendError):
+            BlobStore(cache_dir, backend=_UnsupportedBackend())
+
+    assert len(closed) == 1
 
 
 @pytest.mark.parametrize("backend_name", ("json", "sqlite"))

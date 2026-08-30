@@ -186,6 +186,29 @@ class BlobStore:
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.guarded_handler_io = GuardedHandlerIO(self.cache_dir)
+        try:
+            self._initialize_after_guarded_io(
+                backend,
+                compression,
+                compression_level,
+                content_addressable,
+            )
+        except Exception:
+            # GuardedHandlerIO owns a retained managed-root descriptor.  No
+            # partially initialized BlobStore can transfer that ownership.
+            self.guarded_handler_io.close()
+            raise
+
+        logger.debug(f"BlobStore initialized at {self.cache_dir}")
+
+    def _initialize_after_guarded_io(
+        self,
+        backend: Optional[Union[str, MetadataBackend]],
+        compression: str,
+        compression_level: int,
+        content_addressable: bool,
+    ) -> None:
+        """Finish initialization after the managed-root descriptor is acquired."""
         self._legacy_identity: LegacyManifestIdentity | None = None
         # A compatibility fixture is recognized only when it presents the
         # fixed provenance filename.  This is not a directory scan and runs
@@ -245,10 +268,7 @@ class BlobStore:
                     self._clear_recovery.recover()
                     self._reconcile_sqlite_manifest_records_after_clear()
             except Exception:
-                self.guarded_handler_io.close()
                 raise
-        
-        logger.debug(f"BlobStore initialized at {self.cache_dir}")
 
     @property
     def legacy_identity(self) -> LegacyManifestIdentity | None:
@@ -334,9 +354,12 @@ class BlobStore:
             storage_format = result.get("storage_format", "pickle")
             # A custom handler may retain the historical write-result shape.
             # Its declared contract, not an incidental compatibility storage
-            # label, is authoritative for the canonical payload identity.
+            # label, is authoritative when it exposes that contract. Older
+            # direct registries without the contract retain their native
+            # result format so their compatible read path remains usable.
+            declared_payload_format = getattr(handler, "payload_format", None)
             payload_format = result.get(
-                "payload_format", getattr(handler, "payload_format", handler.data_type)
+                "payload_format", declared_payload_format or storage_format
             )
             payload_format_version = result.get(
                 "payload_format_version", getattr(handler, "payload_format_version", 1)
