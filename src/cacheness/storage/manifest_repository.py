@@ -10,8 +10,10 @@ from __future__ import annotations
 import base64
 import hashlib
 from copy import deepcopy
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Mapping, Optional, Protocol
 
 from cacheness.error_handling import (
@@ -45,6 +47,23 @@ class ManifestExpectation:
 
     generation: str | None
     record_digest: str | None
+
+    def __post_init__(self) -> None:
+        """Reject ambiguous absence and partial exact-record expectations."""
+        if (self.generation is None) != (self.record_digest is None):
+            raise ValueError(
+                "Manifest expectations require both generation and record digest"
+            )
+        if self.generation is not None and (
+            not isinstance(self.generation, str) or not self.generation
+        ):
+            raise ValueError("Manifest expectation generation must be non-empty")
+        if self.record_digest is not None and (
+            not isinstance(self.record_digest, str)
+            or len(self.record_digest) != 64
+            or any(character not in "0123456789abcdef" for character in self.record_digest)
+        ):
+            raise ValueError("Manifest expectation digest must be a SHA-256 hex value")
 
     @classmethod
     def absent(cls) -> "ManifestExpectation":
@@ -97,6 +116,9 @@ class ManifestRepository(Protocol):
     def remove(self, key: str) -> None:
         """Remove a canonical record by logical key."""
 
+    def remove_if_expected(self, key: str, expected: ManifestExpectation) -> None:
+        """Atomically remove only the exact authenticated record observed."""
+
     def list_keys(self) -> list[str]:
         """List logical keys that have canonical records."""
 
@@ -126,7 +148,15 @@ class _MetadataManifestRepository:
     def get_raw(self, key: str) -> Optional[bytes]:
         """Load one reversible byte projection without interpreting the manifest."""
         try:
-            entry = self.backend.get_entry(key)
+            if type(self.backend) is JsonBackend:
+                # Separate JSON backend instances cache their document. Refresh
+                # under the same short OS-backed lock as conditional mutation so
+                # direct repository reads cannot report a superseded authority.
+                with self.backend._lock, self._json_compare_publish_lock():
+                    self._refresh_json_for_conditional_operation()
+                entry = self.backend.get_entry(key)
+            else:
+                entry = self.backend.get_entry(key)
         except _BACKEND_OPERATION_ERRORS as exc:
             raise _backend_failure("get_raw", self.backend, exc) from exc
         if entry is None:
@@ -189,6 +219,88 @@ class _MetadataManifestRepository:
         except _BACKEND_OPERATION_ERRORS as exc:
             raise _backend_failure("put_raw", self.backend, exc) from exc
 
+    @contextmanager
+    def _json_compare_publish_lock(self):
+        """Serialize one JSON refresh/compare/publish sequence across processes."""
+        if type(self.backend) is not JsonBackend:
+            yield
+            return
+        try:
+            import fcntl
+        except ImportError as exc:  # pragma: no cover - POSIX is required here.
+            raise CacheBlobBackendError(
+                "JSON canonical manifest CAS requires POSIX file locking",
+                context={"backend": type(self.backend).__name__},
+            ) from exc
+
+        lock_path = Path(self.backend.metadata_file).with_name(
+            f".{self.backend.metadata_file.name}.manifest-cas.lock"
+        )
+        try:
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(lock_path, "a+b") as lock_file:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        except CacheBlobBackendError:
+            raise
+        except OSError as exc:
+            raise _backend_failure("conditional_lock", self.backend, exc) from exc
+
+    def _refresh_json_for_conditional_operation(self) -> None:
+        """Refresh cached JSON only while the shared CAS lock is held."""
+        if type(self.backend) is not JsonBackend:
+            return
+        self.backend._ensure_writable()
+        if self.backend.metadata_file.exists():
+            self.backend._metadata = self.backend._read_live_document()
+            return
+        self.backend._metadata = {
+            "entries": {},
+            "cache_hits": 0,
+            "cache_misses": 0,
+        }
+
+    def _current_entry(self, key: str) -> object:
+        """Return the current projection while the caller holds the backend lock."""
+        if type(self.backend) is JsonBackend:
+            return self.backend._metadata.get("entries", {}).get(key)
+        return self.backend._entries.get(key)
+
+    def _publish_projection(
+        self, key: str, record: bytes, entry_data: Optional[Mapping[str, Any]]
+    ) -> None:
+        """Publish one reversible projection inside the established lock boundary."""
+        projection = self._projection(key, record, entry_data)
+        if type(self.backend) is JsonBackend:
+            candidate = deepcopy(self.backend._metadata)
+            now = datetime.now(timezone.utc).isoformat()
+            candidate.setdefault("entries", {})[key] = {
+                "description": projection.get("description", ""),
+                "data_type": projection.get("data_type", "unknown"),
+                "prefix": projection.get("prefix", ""),
+                "created_at": projection.get("created_at", now),
+                "accessed_at": projection.get("accessed_at", now),
+                "file_size": projection.get("file_size", 0),
+                "metadata": projection["metadata"].copy(),
+            }
+            self.backend._save_to_disk(candidate)
+            self.backend._metadata = candidate
+            return
+        self.backend.put_entry(key, projection)
+
+    def _remove_projection(self, key: str) -> None:
+        """Retire the raw and compatibility projections in one local boundary."""
+        if type(self.backend) is JsonBackend:
+            candidate = deepcopy(self.backend._metadata)
+            candidate.get("entries", {}).pop(key, None)
+            self.backend._save_to_disk(candidate)
+            self.backend._metadata = candidate
+            return
+        self.backend._entries.pop(key, None)
+
     def publish_if_expected(
         self,
         key: str,
@@ -201,35 +313,15 @@ class _MetadataManifestRepository:
         if not isinstance(record, bytes):
             raise TypeError("Canonical manifest records must be bytes")
         try:
-            with self.backend._lock:
-                if type(self.backend) is JsonBackend:
-                    current_entry = self.backend._metadata.get("entries", {}).get(key)
-                else:
-                    current_entry = self.backend._entries.get(key)
-                current_raw = self._raw_from_entry(current_entry)
+            with self.backend._lock, self._json_compare_publish_lock():
+                self._refresh_json_for_conditional_operation()
+                current_raw = self._raw_from_entry(self._current_entry(key))
                 if not expected.matches(current_raw):
                     raise CacheBlobLifecycleConflictError(
                         "Canonical manifest expectation no longer matches",
                         context={"key": key, "operation": "publish_if_expected"},
                     )
-                projection = self._projection(key, record, entry_data)
-                if type(self.backend) is JsonBackend:
-                    self.backend._ensure_writable()
-                    candidate = deepcopy(self.backend._metadata)
-                    now = datetime.now(timezone.utc).isoformat()
-                    candidate.setdefault("entries", {})[key] = {
-                        "description": projection.get("description", ""),
-                        "data_type": projection.get("data_type", "unknown"),
-                        "prefix": projection.get("prefix", ""),
-                        "created_at": projection.get("created_at", now),
-                        "accessed_at": projection.get("accessed_at", now),
-                        "file_size": projection.get("file_size", 0),
-                        "metadata": projection["metadata"].copy(),
-                    }
-                    self.backend._save_to_disk(candidate)
-                    self.backend._metadata = candidate
-                else:
-                    self.backend.put_entry(key, projection)
+                self._publish_projection(key, record, entry_data)
         except CacheBlobLifecycleConflictError:
             raise
         except _BACKEND_OPERATION_ERRORS as exc:
@@ -241,6 +333,23 @@ class _MetadataManifestRepository:
             self.backend.remove_entry(key)
         except _BACKEND_OPERATION_ERRORS as exc:
             raise _backend_failure("remove", self.backend, exc) from exc
+
+    def remove_if_expected(self, key: str, expected: ManifestExpectation) -> None:
+        """Conditionally retire a JSON or memory projection without stale deletion."""
+        try:
+            with self.backend._lock, self._json_compare_publish_lock():
+                self._refresh_json_for_conditional_operation()
+                current_raw = self._raw_from_entry(self._current_entry(key))
+                if not expected.matches(current_raw):
+                    raise CacheBlobLifecycleConflictError(
+                        "Canonical manifest expectation no longer matches",
+                        context={"key": key, "operation": "remove_if_expected"},
+                    )
+                self._remove_projection(key)
+        except CacheBlobLifecycleConflictError:
+            raise
+        except _BACKEND_OPERATION_ERRORS as exc:
+            raise _backend_failure("remove_if_expected", self.backend, exc) from exc
 
     def list_keys(self) -> list[str]:
         """Return canonical keys and reject a partial compatibility projection."""
@@ -362,6 +471,24 @@ class SqliteManifestRepository:
         except _BACKEND_OPERATION_ERRORS as exc:
             raise _backend_failure("put_raw", self.backend, exc) from exc
 
+    @contextmanager
+    def _conditional_transaction(self):
+        """Take SQLite's writer lock before comparing opaque authority bytes."""
+        try:
+            with self.backend._lock, self.backend.engine.connect() as connection:
+                connection.exec_driver_sql("BEGIN IMMEDIATE")
+                try:
+                    yield connection
+                except BaseException:
+                    connection.rollback()
+                    raise
+                else:
+                    connection.commit()
+        except CacheBlobLifecycleConflictError:
+            raise
+        except _BACKEND_OPERATION_ERRORS as exc:
+            raise _backend_failure("conditional_transaction", self.backend, exc) from exc
+
     def publish_if_expected(
         self,
         key: str,
@@ -374,7 +501,7 @@ class SqliteManifestRepository:
         if not isinstance(record, bytes):
             raise TypeError("Canonical manifest records must be bytes")
         try:
-            with self.backend._lock, self.backend.engine.begin() as connection:
+            with self._conditional_transaction() as connection:
                 row = connection.exec_driver_sql(
                     f"SELECT canonical_bytes FROM {_SQLITE_MANIFEST_TABLE} "
                     "WHERE logical_key = ?",
@@ -460,6 +587,33 @@ class SqliteManifestRepository:
             self.backend.remove_entry(key)
         except _BACKEND_OPERATION_ERRORS as exc:
             raise _backend_failure("remove", self.backend, exc) from exc
+
+    def remove_if_expected(self, key: str, expected: ManifestExpectation) -> None:
+        """Atomically retire only the exact canonical record and its projection."""
+        try:
+            with self._conditional_transaction() as connection:
+                row = connection.exec_driver_sql(
+                    f"SELECT canonical_bytes FROM {_SQLITE_MANIFEST_TABLE} "
+                    "WHERE logical_key = ?",
+                    (key,),
+                ).first()
+                current_raw = None if row is None else bytes(row[0])
+                if not expected.matches(current_raw):
+                    raise CacheBlobLifecycleConflictError(
+                        "Canonical manifest expectation no longer matches",
+                        context={"key": key, "operation": "remove_if_expected"},
+                    )
+                connection.exec_driver_sql(
+                    f"DELETE FROM {_SQLITE_MANIFEST_TABLE} WHERE logical_key = ?",
+                    (key,),
+                )
+                connection.exec_driver_sql(
+                    "DELETE FROM cache_entries WHERE cache_key = ?", (key,)
+                )
+        except CacheBlobLifecycleConflictError:
+            raise
+        except _BACKEND_OPERATION_ERRORS as exc:
+            raise _backend_failure("remove_if_expected", self.backend, exc) from exc
 
     def list_keys(self) -> list[str]:
         """List keys while treating compatibility-only rows as non-absence."""
