@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import json
 
+import numpy as np
 import pytest
 
+from cacheness.config import CacheConfig, CompressionConfig
 from cacheness.error_handling import (
     CacheManifestIntegrityError,
     CacheManifestUnsupportedVersionError,
 )
+from cacheness.handlers import ArrayHandler, HandlerRegistry, ObjectHandler
 from cacheness.storage import BlobManifestV1
 from cacheness.storage.integrity import sign_hmac_sha256, verify_hmac_sha256
 from cacheness.storage.manifest import (
@@ -256,3 +259,77 @@ def test_total_node_and_string_boundaries_are_independent():
     node_values["nodes_3"].append(0)
     with pytest.raises(CacheManifestIntegrityError, match="nodes"):
         BlobManifestV1.from_canonical_bytes(_raw_manifest_with_user_metadata(node_values))
+
+
+def test_builtin_writes_publish_explicit_payload_format_identity(tmp_path):
+    """Successful built-in writes identify their own native payload contract."""
+    config = CacheConfig(
+        cache_dir=str(tmp_path),
+        compression=CompressionConfig(
+            pickle_compression_codec="none",
+            use_blosc2_arrays=False,
+        ),
+    )
+
+    array_result = ArrayHandler().put(
+        np.arange(3, dtype=np.int64), tmp_path / "array", config
+    )
+    object_result = ObjectHandler().put({"kind": "object"}, tmp_path / "object", config)
+
+    assert (
+        array_result["payload_format"],
+        array_result["payload_format_version"],
+    ) == ("npz", 1)
+    assert (
+        object_result["payload_format"],
+        object_result["payload_format_version"],
+    ) == ("pickle", 1)
+
+
+@pytest.mark.parametrize(
+    ("handler_type", "payload_format", "payload_format_version"),
+    [
+        ("array", "npz", 1),
+        ("array", "blosc2", 1),
+        ("object", "pickle", 1),
+        ("object", "dill", 1),
+        ("object", "compressed_pickle", 1),
+        ("object", "compressed_dill", 1),
+    ],
+)
+def test_handler_identity_resolution_is_independent_of_payload_bytes(
+    handler_type, payload_format, payload_format_version
+):
+    """Identity resolution trusts declarations and never opens a payload."""
+    registry = HandlerRegistry()
+
+    handler = registry.resolve_payload_contract(
+        handler_type, payload_format, payload_format_version
+    )
+
+    assert handler.data_type == handler_type
+    assert handler.supports_payload_contract(
+        payload_format, payload_format_version
+    )
+
+
+@pytest.mark.parametrize(
+    ("handler_type", "payload_format", "payload_format_version"),
+    [
+        ("array", "zip-of-pickle", 1),
+        ("array", "npz", 2),
+        ("object", "compressed_pickle", 2),
+    ],
+)
+def test_unknown_handler_identity_or_independent_version_is_rejected(
+    handler_type, payload_format, payload_format_version
+):
+    """Unknown native contracts are rejected before a future read can snapshot."""
+    registry = HandlerRegistry()
+
+    with pytest.raises(CacheManifestUnsupportedVersionError) as error:
+        registry.resolve_payload_contract(
+            handler_type, payload_format, payload_format_version
+        )
+
+    assert error.value.context["reason"] == "manifest_unsupported_version"
