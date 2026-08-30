@@ -76,7 +76,7 @@ from .manifest import (
     canonical_signing_bytes_from_record,
     decode_canonical_manifest_record,
 )
-from .manifest_repository import create_manifest_repository
+from .manifest_repository import ManifestExpectation, create_manifest_repository
 from .legacy_manifest import LegacyManifestIdentity, recognize_legacy_fixture_tree
 from .lifecycle import LifecycleEngine
 from .path_security import encode_physical_name, resolve_managed_locator
@@ -472,6 +472,16 @@ class BlobStore:
         if authenticated is None:
             return False
         manifest, _handler, _locator = authenticated
+        observed_record = self.manifest_repository.get_raw(key)
+        if observed_record is None or observed_record != manifest.canonical_bytes():
+            raise CacheBlobLifecycleConflictError(
+                "BlobStore metadata authority changed before conditional patch",
+                context={"key": key, "operation": "update_metadata"},
+            )
+        expected = ManifestExpectation.from_authenticated_record(
+            manifest.generation,
+            observed_record,
+        )
         user_metadata = {**dict(manifest.user_metadata), **metadata}
         updated_manifest = replace(manifest, user_metadata=user_metadata)
         signed_manifest = updated_manifest.with_signature(
@@ -480,8 +490,9 @@ class BlobStore:
                 self._manifest_key(),
             )
         )
-        self.manifest_repository.put_raw(
+        self.manifest_repository.publish_if_expected(
             key,
+            expected,
             signed_manifest.canonical_bytes(),
             entry_data=self._manifest_entry_data(signed_manifest),
         )
