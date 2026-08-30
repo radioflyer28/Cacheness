@@ -265,3 +265,110 @@ def test_list_authenticates_every_selected_manifest_before_returning(tmp_path):
         assert first == "selected-first"
     finally:
         store.close()
+
+
+def test_update_metadata_resigns_only_user_metadata_and_rejects_structure(
+    tmp_path, monkeypatch
+):
+    """Public metadata patches cannot alter signed storage structure."""
+    store = BlobStore(tmp_path / "update", backend="json")
+    store.handlers = _SingleHandlerRegistry(_TracingHandler([]))
+
+    try:
+        key = store.put("update payload", key="update-key", metadata={"owner": "one"})
+        before = BlobManifestV1.from_canonical_bytes(
+            store.manifest_repository.get_raw(key) or b""
+        )
+
+        assert store.update_metadata(key, {"owner": "two", "label": "current"})
+
+        after = BlobManifestV1.from_canonical_bytes(
+            store.manifest_repository.get_raw(key) or b""
+        )
+        assert dict(after.user_metadata) == {"owner": "two", "label": "current"}
+        assert after.signature != before.signature
+        for field in (
+            "schema_version",
+            "key",
+            "generation",
+            "state",
+            "locator",
+            "handler_type",
+            "payload_format",
+            "payload_format_version",
+            "digest_algorithm",
+            "digest",
+            "byte_size",
+            "created_at",
+            "handler_metadata",
+            "signature_algorithm",
+        ):
+            assert getattr(after, field) == getattr(before, field)
+
+        raw_before_rejected_patch = store.manifest_repository.get_raw(key)
+        assert raw_before_rejected_patch is not None
+        monkeypatch.setattr(
+            store.manifest_repository,
+            "put_raw",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("structural patch must fail before manifest write")
+            ),
+        )
+
+        with pytest.raises(CacheBlobLifecycleConflictError):
+            store.update_metadata(key, {"locator": "/unsafe-replacement"})
+        assert store.manifest_repository.get_raw(key) == raw_before_rejected_patch
+        assert store.update_metadata("absent-update", {"owner": "none"}) is False
+    finally:
+        store.close()
+
+
+def test_delete_and_clear_preflight_authenticated_manifests_before_mutation(
+    tmp_path, monkeypatch
+):
+    """Unsafe direct mutation never trusts a backend-shaped locator first."""
+    store = BlobStore(tmp_path / "mutate", backend="json")
+    store.handlers = _SingleHandlerRegistry(_TracingHandler([]))
+
+    try:
+        delete_key = store.put("delete payload", key="delete-key")
+        raw_manifest = store.manifest_repository.get_raw(delete_key)
+        assert raw_manifest is not None
+        tampered = json.loads(raw_manifest)
+        tampered["signature"] = "0" * 64
+        store.manifest_repository.put_raw(
+            delete_key,
+            json.dumps(
+                tampered, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+            ).encode("utf-8"),
+        )
+        monkeypatch.setattr(
+            store.guarded_handler_io.file_ops,
+            "delete",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("unauthenticated manifest must not delete payload")
+            ),
+        )
+
+        with pytest.raises(CacheBlobManifestUnauthenticatedError):
+            store.delete(delete_key)
+        assert store.manifest_repository.get_raw(delete_key) is not None
+
+        first = store.put("first clear", key="clear-first")
+        second = store.put("second clear", key="clear-second")
+        _replace_signed_manifest(store, second, state="prepared")
+        monkeypatch.setattr(
+            store._clear_recovery,
+            "clear",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("clear must not begin before full manifest preflight")
+            ),
+        )
+
+        with pytest.raises(CacheBlobLifecycleConflictError):
+            store.clear()
+        assert store.manifest_repository.get_raw(first) is not None
+        assert store.manifest_repository.get_raw(second) is not None
+        assert store.delete("absent-delete") is False
+    finally:
+        store.close()
