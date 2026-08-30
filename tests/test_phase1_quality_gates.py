@@ -223,15 +223,17 @@ def test_sql_cache_has_no_direct_print_failure_path() -> None:
     assert not _contains_direct_print(sql_cache)
 
 
-def test_validation_artifact_requires_gap_wave_pending_evidence() -> None:
-    """Gap waves reject stale approval while retaining prior evidence as history."""
+def test_validation_artifact_records_terminal_approval_and_gap_wave_history() -> None:
+    """Terminal approval is executable while the temporary gap state stays documented."""
     validation = VALIDATION_FILE.read_text(encoding="utf-8")
-    assert "status: draft" in validation
-    assert "nyquist_compliant: false" in validation
-    assert "wave_0_complete: false" in validation
-    assert "**Approval:** pending" in validation
-    assert "**Approval:** passed" not in validation
+    frontmatter = validation.split("---", 2)[1]
+    assert "status: complete" in frontmatter
+    assert "nyquist_compliant: true" in frontmatter
+    assert "wave_0_complete: true" in frontmatter
+    assert "**Approval:** approved 2026-08-30" in validation
     assert "During Waves 8-9, the only accepted validation state" in validation
+    assert "`status: draft`, `nyquist_compliant: false`, `wave_0_complete: false`" in validation
+    assert "`Approval: pending`" in validation
     assert "01-13" in validation
     assert "01-14" in validation
     assert "01-15" in validation
