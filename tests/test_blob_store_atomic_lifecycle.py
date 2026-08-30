@@ -8,7 +8,10 @@ from typing import Any
 
 import pytest
 
-from cacheness.error_handling import CacheBlobRecoverableCleanupError
+from cacheness.error_handling import (
+    CacheBlobLifecycleConflictError,
+    CacheBlobRecoverableCleanupError,
+)
 from cacheness.storage import BlobStore
 
 
@@ -269,3 +272,34 @@ def test_cleanup_failure_keeps_new_authority_and_resumes_after_reopen(
         assert not list((root / "operations").glob("*.json"))
     finally:
         reopened.close()
+
+
+def test_stale_overwrite_conflict_reclaims_only_loser_candidate(
+    tmp_path: Path,
+) -> None:
+    """A stale writer cannot revoke a winner and leaves no owned candidate behind."""
+    root = tmp_path / "stale-overwrite"
+    contender = BlobStore(root, backend="json")
+    winner = BlobStore(root, backend="json")
+    try:
+        key = contender.put({"generation": "old"}, key="shared-key")
+        published_winner = False
+
+        def publish_winner(step: str, _record: Any) -> None:
+            nonlocal published_winner
+            if step == "candidate_verified" and not published_winner:
+                published_winner = True
+                winner.put({"generation": "winner"}, key=key)
+
+        contender.lifecycle.test_hook = publish_winner
+        with pytest.raises(CacheBlobLifecycleConflictError):
+            contender.put({"generation": "loser"}, key=key)
+
+        assert winner.get(key) == {"generation": "winner"}
+        assert contender.get(key) == {"generation": "winner"}
+        assert not list((root / "operations").glob("*.json"))
+        generation_payloads = list(root.glob("*generation-*"))
+        assert len(generation_payloads) == 1
+    finally:
+        contender.close()
+        winner.close()
