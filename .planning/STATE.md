@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 03
 current_phase_name: Atomic Lifecycle and Recovery Engine
 status: executing
-stopped_at: Completed 03-02-PLAN.md
-last_updated: "2026-08-30T18:41:04.438Z"
+stopped_at: Completed 03-03-PLAN.md
+last_updated: "2026-08-30T19:04:51.453Z"
 last_activity: 2026-08-30
 last_activity_desc: Phase 03 execution started
-state_head: 48b306fd66b78981086ddd8fa3b0e6edbb70fb56
+state_head: 9c3da1e6a20452c640cc488f93773434e0ee3e74
 progress:
   total_phases: 8
   completed_phases: 2
   total_plans: 32
-  completed_plans: 24
+  completed_plans: 25
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-08-29)
 ## Current Position
 
 Phase: 03 (Atomic Lifecycle and Recovery Engine) — EXECUTING
-Plan: 3 of 10
+Plan: 4 of 10
 Status: Ready to execute
 Last activity: 2026-08-30 — Phase 03 execution started
 
@@ -65,6 +65,7 @@ Progress: [█░░░░░░░░░] 1 of 8 phases complete
 | Phase 02 P07 | 10min | 2 tasks | 4 files |
 | Phase 03 P01 | 18min | 2 tasks | 9 files |
 | Phase 03 P02 | 7 min | 2 tasks | 4 files |
+| Phase 03-atomic-lifecycle-and-recovery-engine P03 | 18 min | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -135,6 +136,8 @@ Recent decisions affecting current work:
 - [Phase 03]: Reopen recovery acts only on authenticated manifest authority plus validated signed operation evidence; normal reads do not mutate evidence.
 - [Phase 03]: Manifest authority mutations require the authenticated generation plus SHA-256 of the exact canonical record; repository adapters compare opaque bytes only.
 - [Phase 03]: JSON conditional publication refreshes under a short OS-backed lock, while SQLite takes a writer transaction before exact-record comparison.
+- [Phase 03]: LifecycleLimits is declared once in cacheness.config and is passed by identity from CacheConfig through BlobStore, LifecycleEngine, and the operation repository.
+- [Phase 03]: Operation evidence uses a dedicated HMAC domain and exact-byte conditional checkpoint and retirement; grace never authorizes unauthenticated evidence.
 
 ### Pending Todos
 
@@ -158,6 +161,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-30T18:41:04.392Z
-Stopped at: Completed 03-02-PLAN.md
+Last session: 2026-08-30T19:04:51.405Z
+Stopped at: Completed 03-03-PLAN.md
 Resume file: None
