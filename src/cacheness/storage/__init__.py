@@ -60,8 +60,14 @@ from .blob_store import BlobStore
 from .manifest import BlobManifestV1
 from cacheness.error_handling import (
     CacheBlobBackendError,
+    CacheBlobManifestMalformedError,
+    CacheBlobManifestUnauthenticatedError,
+    CacheBlobManifestUnsupportedVersionError,
     CacheBlobLifecycleConflictError,
     CacheBlobMigrationRequiredError,
+    CacheBlobPayloadMissingError,
+    CacheBlobPayloadTamperedError,
+    CacheBlobPayloadUnsupportedVersionError,
     CacheManifestIntegrityError,
     CacheManifestUnsupportedVersionError,
 )
@@ -79,6 +85,12 @@ __all__ = [
     # Main API
     "BlobStore",
     "BlobManifestV1",
+    "CacheBlobManifestMalformedError",
+    "CacheBlobManifestUnauthenticatedError",
+    "CacheBlobPayloadMissingError",
+    "CacheBlobPayloadTamperedError",
+    "CacheBlobManifestUnsupportedVersionError",
+    "CacheBlobPayloadUnsupportedVersionError",
     "CacheManifestIntegrityError",
     "CacheManifestUnsupportedVersionError",
     "CacheBlobLifecycleConflictError",

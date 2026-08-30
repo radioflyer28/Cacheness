@@ -43,6 +43,12 @@ class CacheReason(str, Enum):
     MANIFEST_UNSUPPORTED_VERSION = "manifest_unsupported_version"
     MANIFEST_SIGNATURE_INVALID = "manifest_signature_invalid"
     MANIFEST_SIGNING_KEY_INVALID = "manifest_signing_key_invalid"
+    BLOB_MANIFEST_MALFORMED = MANIFEST_INVALID
+    BLOB_MANIFEST_UNAUTHENTICATED = MANIFEST_SIGNATURE_INVALID
+    BLOB_PAYLOAD_MISSING = MANIFEST_INVALID
+    BLOB_PAYLOAD_TAMPERED = MANIFEST_INVALID
+    BLOB_MANIFEST_UNSUPPORTED_VERSION = MANIFEST_UNSUPPORTED_VERSION
+    BLOB_PAYLOAD_UNSUPPORTED_VERSION = MANIFEST_UNSUPPORTED_VERSION
     BLOB_LIFECYCLE_CONFLICT = "blob_lifecycle_conflict"
     BLOB_BACKEND_FAILURE = "blob_backend_failure"
     BLOB_MIGRATION_REQUIRED = "blob_migration_required"
@@ -146,7 +152,11 @@ class CacheLegacyFormatError(CacheSerializationError):
         super().__init__(message, _context_with_reason(context, reason))
 
 
-class CacheManifestIntegrityError(CacheIntegrityError):
+class CacheBlobIntegrityError(CacheIntegrityError):
+    """Base class for direct BlobStore evidence and payload integrity failures."""
+
+
+class CacheManifestIntegrityError(CacheBlobIntegrityError):
     """Raised when canonical BlobStore evidence is malformed or tampered with."""
 
     def __init__(
@@ -157,6 +167,58 @@ class CacheManifestIntegrityError(CacheIntegrityError):
         reason: CacheReason = CacheReason.MANIFEST_INVALID,
     ):
         super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheBlobManifestMalformedError(CacheManifestIntegrityError):
+    """Raised when a canonical BlobStore manifest is malformed."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_MANIFEST_MALFORMED,
+    ):
+        super().__init__(message, context, reason=reason)
+
+
+class CacheBlobManifestUnauthenticatedError(CacheManifestIntegrityError):
+    """Raised when a canonical BlobStore manifest cannot be authenticated."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_MANIFEST_UNAUTHENTICATED,
+    ):
+        super().__init__(message, context, reason=reason)
+
+
+class CacheBlobPayloadMissingError(CacheManifestIntegrityError):
+    """Raised when an authenticated BlobStore payload is missing."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_PAYLOAD_MISSING,
+    ):
+        super().__init__(message, context, reason=reason)
+
+
+class CacheBlobPayloadTamperedError(CacheManifestIntegrityError):
+    """Raised when a BlobStore payload fails an integrity check."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_PAYLOAD_TAMPERED,
+    ):
+        super().__init__(message, context, reason=reason)
 
 
 class CacheManifestUnsupportedVersionError(CacheStorageError):
@@ -170,6 +232,32 @@ class CacheManifestUnsupportedVersionError(CacheStorageError):
         reason: CacheReason = CacheReason.MANIFEST_UNSUPPORTED_VERSION,
     ):
         super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheBlobManifestUnsupportedVersionError(CacheManifestUnsupportedVersionError):
+    """Raised when a BlobStore manifest schema version is unsupported."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_MANIFEST_UNSUPPORTED_VERSION,
+    ):
+        super().__init__(message, context, reason=reason)
+
+
+class CacheBlobPayloadUnsupportedVersionError(CacheManifestUnsupportedVersionError):
+    """Raised when a BlobStore payload format version is unsupported."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_PAYLOAD_UNSUPPORTED_VERSION,
+    ):
+        super().__init__(message, context, reason=reason)
 
 
 class CacheBlobLifecycleConflictError(CacheStorageError):
