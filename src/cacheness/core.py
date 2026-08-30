@@ -14,6 +14,7 @@ import logging
 import sys
 import uuid
 import warnings
+from functools import wraps
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List, Callable, Tuple
@@ -34,6 +35,34 @@ from .storage.guarded_handler_io import GuardedHandlerIO
 from .storage.path_security import encode_physical_name, resolve_managed_locator
 
 logger = logging.getLogger(__name__)
+
+
+def _clear_coordinated(method: Callable) -> Callable:
+    """Serialize a local lifecycle operation with clear/recovery when available."""
+
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        coordinator = self._clear_recovery
+        if coordinator is None:
+            return method(self, *args, **kwargs)
+        with coordinator.mutation_admission():
+            return method(self, *args, **kwargs)
+
+    return wrapped
+
+
+def _clear_read_coordinated(method: Callable) -> Callable:
+    """Exclude a live clear without forcing terminal cleanup during reads."""
+
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        coordinator = self._clear_recovery
+        if coordinator is None:
+            return method(self, *args, **kwargs)
+        with coordinator.read_admission():
+            return method(self, *args, **kwargs)
+
+    return wrapped
 
 
 def _normalize_function_args(func: Callable, args: Tuple, kwargs: Dict[str, Any]) -> Dict[str, Any]:
@@ -119,7 +148,11 @@ class UnifiedCache:
 
         # Clean up expired entries on initialization
         if self.config.storage.cleanup_on_init:
-            self._cleanup_expired()
+            if self._clear_recovery is None:
+                self._cleanup_expired()
+            else:
+                with self._clear_recovery.mutation_admission():
+                    self._cleanup_expired()
 
         logger.info(
             f"✅ Unified cache initialized: {self.cache_dir} (backend: {self.actual_backend})"
@@ -1081,6 +1114,7 @@ class UnifiedCache:
                 stacklevel=2,
             )
 
+    @_clear_coordinated
     def put(
         self,
         data: Any,
@@ -1343,6 +1377,7 @@ class UnifiedCache:
             self.metadata_backend.remove_entry(cache_key)
         self.metadata_backend.increment_misses()
 
+    @_clear_read_coordinated
     def get(
         self,
         cache_key: Optional[str] = None,
@@ -1476,6 +1511,7 @@ class UnifiedCache:
         if removed_count > 0:
             logger.info(f"Cache size enforcement: removed {removed_count} entries")
 
+    @_clear_coordinated
     def invalidate(self, cache_key: Optional[str] = None, prefix: str = "", **kwargs):
         """
         Invalidate (remove) specific cache entries.
@@ -1496,6 +1532,7 @@ class UnifiedCache:
         else:
             logger.debug(f"Cache entry {cache_key} not found for invalidation")
 
+    @_clear_coordinated
     def clear_all(self):
         """Clear all cache entries through the shared recoverable primitive."""
         coordinator = self._clear_recovery
@@ -1506,26 +1543,26 @@ class UnifiedCache:
         ):
             raise ClearRecoveryCoordinator.unsupported_error(self.metadata_backend)
 
-        with coordinator.admission():
-            entries = self.metadata_backend.list_entries()
-            self._preflight_entries(entries, operation="clear_all")
-            mappings = [
-                (
+        entries = self.metadata_backend.list_entries()
+        self._preflight_entries(entries, operation="clear_all")
+        mappings = [
+            (
+                entry["cache_key"],
+                self._entry_locator(
+                    entry,
                     entry["cache_key"],
-                    self._entry_locator(
-                        entry,
-                        entry["cache_key"],
-                        operation="clear_all",
-                    ),
-                )
-                for entry in entries
-            ]
-            removed_count = coordinator.clear(mappings)
+                    operation="clear_all",
+                ),
+            )
+            for entry in entries
+        ]
+        removed_count = coordinator.clear(mappings)
         logger.info(
             f"Cleared {removed_count} cache entries through recoverable clear"
         )
         return removed_count
 
+    @_clear_read_coordinated
     def get_stats(self) -> Dict[str, Any]:
         """Get comprehensive cache statistics."""
         stats = self.metadata_backend.get_stats()
@@ -1542,6 +1579,7 @@ class UnifiedCache:
 
         return stats
 
+    @_clear_read_coordinated
     def list_entries(self) -> List[Dict[str, Any]]:
         """List all cache entries with metadata."""
         entries = self.metadata_backend.list_entries()

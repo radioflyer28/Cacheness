@@ -41,8 +41,9 @@ import hashlib
 import logging
 import uuid
 from copy import deepcopy
+from functools import wraps
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 from datetime import datetime, timezone
 
 from ..error_handling import CacheStorageError
@@ -57,6 +58,34 @@ from ..metadata import MetadataBackend as CoreMetadataBackend
 from ..config import CacheConfig, CompressionConfig
 
 logger = logging.getLogger(__name__)
+
+
+def _clear_coordinated(method: Callable) -> Callable:
+    """Serialize a local lifecycle operation with clear/recovery when available."""
+
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        coordinator = self._clear_recovery
+        if coordinator is None:
+            return method(self, *args, **kwargs)
+        with coordinator.mutation_admission():
+            return method(self, *args, **kwargs)
+
+    return wrapped
+
+
+def _clear_read_coordinated(method: Callable) -> Callable:
+    """Exclude an active clear without forcing terminal cleanup during reads."""
+
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        coordinator = self._clear_recovery
+        if coordinator is None:
+            return method(self, *args, **kwargs)
+        with coordinator.read_admission():
+            return method(self, *args, **kwargs)
+
+    return wrapped
 
 
 class BlobStore:
@@ -148,6 +177,7 @@ class BlobStore:
         
         logger.debug(f"BlobStore initialized at {self.cache_dir}")
     
+    @_clear_coordinated
     def put(
         self,
         data: Any,
@@ -244,6 +274,7 @@ class BlobStore:
         
         return blob_key
     
+    @_clear_read_coordinated
     def get(self, key: str) -> Optional[Any]:
         """
         Retrieve a blob by key.
@@ -287,6 +318,7 @@ class BlobStore:
         
         return data
     
+    @_clear_read_coordinated
     def get_metadata(self, key: str) -> Optional[Dict[str, Any]]:
         """
         Get blob metadata without loading the blob content.
@@ -303,6 +335,7 @@ class BlobStore:
         self._entry_locator(entry, key, operation="get_metadata")
         return {**entry, "cache_key": entry.get("cache_key", key)}
     
+    @_clear_coordinated
     def update_metadata(self, key: str, metadata: Dict[str, Any]) -> bool:
         """
         Update metadata for an existing blob.
@@ -337,6 +370,7 @@ class BlobStore:
         self.backend.put_entry(key, updated)
         return True
     
+    @_clear_coordinated
     def delete(self, key: str) -> bool:
         """
         Delete a blob and its metadata.
@@ -360,6 +394,7 @@ class BlobStore:
         logger.debug(f"Deleted blob: {key}")
         return True
     
+    @_clear_read_coordinated
     def exists(self, key: str) -> bool:
         """
         Check if a blob exists.
@@ -377,6 +412,7 @@ class BlobStore:
         actual_path = self._entry_locator(entry, key, operation="exists")
         return self.guarded_handler_io.file_ops.exists(actual_path)
     
+    @_clear_read_coordinated
     def list(
         self,
         prefix: Optional[str] = None,
@@ -417,6 +453,7 @@ class BlobStore:
         
         return keys
     
+    @_clear_coordinated
     def clear(self) -> int:
         """
         Remove every managed payload with recoverable clear tombstones.
@@ -427,17 +464,16 @@ class BlobStore:
         if self._clear_recovery is None:
             raise ClearRecoveryCoordinator.unsupported_error(self.backend)
 
-        with self._clear_recovery.admission():
-            entries = self.backend.list_entries()
-            self._preflight_entries(entries, operation="clear")
-            mappings = []
-            for entry in entries:
-                cache_key = entry.get("cache_key", "")
-                actual_path = self._entry_locator(entry, cache_key, operation="clear")
-                # Every metadata entry participates, even when its payload is
-                # already absent, so snapshot and journal cardinalities agree.
-                mappings.append((cache_key, actual_path))
-            return self._clear_recovery.clear(mappings)
+        entries = self.backend.list_entries()
+        self._preflight_entries(entries, operation="clear")
+        mappings = []
+        for entry in entries:
+            cache_key = entry.get("cache_key", "")
+            actual_path = self._entry_locator(entry, cache_key, operation="clear")
+            # Every metadata entry participates, even when its payload is
+            # already absent, so snapshot and journal cardinalities agree.
+            mappings.append((cache_key, actual_path))
+        return self._clear_recovery.clear(mappings)
 
     def _stage_clear_payloads(self, entries: List[Dict[str, Any]]) -> List[tuple[Path, Path]]:
         """Copy each live payload to a private tombstone before deleting it."""

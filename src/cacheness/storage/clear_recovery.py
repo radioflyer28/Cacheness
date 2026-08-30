@@ -65,6 +65,7 @@ _CANDIDATE_PREFIX = re.compile(r"-candidate-[0-9a-f]{32}")
 
 _PROCESS_LOCKS_GUARD = threading.Lock()
 _PROCESS_LOCKS: dict[tuple[str, int, int], threading.Lock] = {}
+_PROCESS_LOCK_OWNERS: dict[tuple[str, int, int], int] = {}
 
 
 def _advisory_lock_available(root_path: Path) -> bool:
@@ -96,6 +97,10 @@ class ClearRecoveryCoordinator:
         self._physical_name = physical_name or self._blob_store_physical_name
         self.journal_path = file_ops.root / _JOURNAL_NAME
         self.lock_path = file_ops.root / _LOCK_NAME
+        # A failed committed-journal publication may leave the durable state
+        # unknown. Normal operations must not continue until recovery reaches
+        # a terminal prepared rollback or committed roll-forward outcome.
+        self._poisoned = False
 
     @staticmethod
     def _blob_store_physical_name(cache_key: str, _entry: dict[str, Any]) -> str:
@@ -134,31 +139,79 @@ class ClearRecoveryCoordinator:
         raise ClearRecoveryCoordinator.unsupported_error(backend)
 
     @contextmanager
-    def admission(self) -> Iterator[None]:
+    def admission(self, *, blocking: bool = False) -> Iterator[None]:
         """Hold process and OS admission locks across recovery or one full clear."""
+        if self._poisoned:
+            raise self._poisoned_error()
         if not _advisory_lock_available(self.file_ops.root):
             raise self._admission_error("Reliable advisory locking is unavailable")
 
-        process_lock = self._process_lock()
-        if not process_lock.acquire(blocking=False):
+        process_lock, identity = self._process_lock()
+        owner_thread = threading.get_ident()
+        with _PROCESS_LOCKS_GUARD:
+            if _PROCESS_LOCK_OWNERS.get(identity) == owner_thread:
+                raise self._admission_error("A same-root clear owner is already active")
+        if not process_lock.acquire(blocking=blocking):
             raise self._admission_error("A same-root clear owner is already active")
 
         lock_descriptor: int | None = None
         try:
-            lock_descriptor = self._acquire_advisory_lock()
+            with _PROCESS_LOCKS_GUARD:
+                _PROCESS_LOCK_OWNERS[identity] = owner_thread
+            lock_descriptor = self._acquire_advisory_lock(blocking=blocking)
             yield
         finally:
             if lock_descriptor is not None:
                 self._release_advisory_lock(lock_descriptor)
+            with _PROCESS_LOCKS_GUARD:
+                _PROCESS_LOCK_OWNERS.pop(identity, None)
             process_lock.release()
 
-    def _process_lock(self) -> threading.Lock:
+    @contextmanager
+    def mutation_admission(self) -> Iterator[None]:
+        """Exclude clear/recovery, then reconcile retained evidence before mutation.
+
+        Phase 1 intentionally uses exclusive admission for all lifecycle
+        mutations. This is narrower than a general reader/writer protocol but
+        makes the clear snapshot and ordinary publication boundary linearizable.
+        """
+        with self.admission(blocking=True):
+            self.recover()
+            self._refresh_backend_view()
+            yield
+
+    @contextmanager
+    def read_admission(self) -> Iterator[None]:
+        """Exclude a live clear while allowing an already-committed empty view.
+
+        Reads cannot inspect a prepared rollback because its metadata and
+        payloads may be between states. A committed journal, however, has
+        already crossed the metadata authority boundary; readers may observe
+        the cleared view while terminal tombstone reclamation is retried.
+        """
+        with self.admission(blocking=True):
+            if self.file_ops.exists(self.journal_path):
+                journal = self._read_journal()
+                self._validate_journal(journal, allow_memory_nonce_mismatch=True)
+                if journal["state"] == "prepared":
+                    raise self._admission_error(
+                        "A prepared clear journal requires recovery before reads"
+                    )
+            self._refresh_backend_view()
+            yield
+
+    def _refresh_backend_view(self) -> None:
+        """Prevent a second JSON instance from publishing a stale document view."""
+        if self.kind == "json":
+            self.backend._refresh_from_disk_for_clear_admission()
+
+    def _process_lock(self) -> tuple[threading.Lock, tuple[str, int, int]]:
         root_stat = os.stat(self.file_ops.root)
         identity = (str(self.file_ops.root), root_stat.st_dev, root_stat.st_ino)
         with _PROCESS_LOCKS_GUARD:
-            return _PROCESS_LOCKS.setdefault(identity, threading.Lock())
+            return _PROCESS_LOCKS.setdefault(identity, threading.Lock()), identity
 
-    def _acquire_advisory_lock(self) -> int:
+    def _acquire_advisory_lock(self, *, blocking: bool) -> int:
         """Acquire the fixed lock file without treating contention as a retry."""
         import fcntl  # pylint: disable=import-outside-toplevel
 
@@ -176,7 +229,10 @@ class ClearRecoveryCoordinator:
         try:
             if not stat.S_ISREG(os.fstat(descriptor).st_mode):
                 raise self._admission_error("Clear admission lock is not a regular file")
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            lock_flags = fcntl.LOCK_EX
+            if not blocking:
+                lock_flags |= fcntl.LOCK_NB
+            fcntl.flock(descriptor, lock_flags)
             return descriptor
         except OSError as exc:
             os.close(descriptor)
@@ -203,11 +259,25 @@ class ClearRecoveryCoordinator:
             context={"operation": "clear", "backend": self.kind},
         )
 
+    def _poisoned_error(self) -> CacheStorageError:
+        return CacheStorageError(
+            "BlobStore clear recovery requires terminal reconciliation before normal operations",
+            context={"operation": "clear", "backend": self.kind},
+        )
+
+    def _poison(self) -> None:
+        """Fail closed after evidence cannot prove one terminal outcome."""
+        self._poisoned = True
+
     def clear(self, mappings: Sequence[tuple[str, Path]]) -> int:
         """Clear preflighted payload mappings with prepared/committed evidence."""
         journal = self._new_prepared_journal(mappings)
         self._validate_journal(journal)
         self._create_journal(journal)
+        # Retain the exact durable pre-commit record before the first staged
+        # payload or metadata mutation. No allocation/copying boundary remains
+        # between successful metadata clear and committed publication.
+        prepared_journal = deepcopy(journal)
 
         try:
             for mapping in journal["mappings"]:
@@ -218,6 +288,7 @@ class ClearRecoveryCoordinator:
                 try:
                     self._rollback_prepared(journal)
                 except Exception as rollback_exc:
+                    self._poison()
                     raise CacheStorageError(
                         "BlobStore clear failed and prepared recovery could not complete",
                         context={"operation": "clear", "backend": self.kind},
@@ -225,7 +296,45 @@ class ClearRecoveryCoordinator:
             raise exc
 
         journal["state"] = "committed"
-        self._replace_journal(journal)
+        try:
+            self._replace_journal(journal)
+        except BaseException as exc:
+            # A failure before replacement is recoverable only when the live
+            # evidence remains exactly the prepared journal. If replacement or
+            # its directory acknowledgement might have happened, restoring the
+            # snapshot could erase a successful clear, so retain evidence and
+            # reject normal operations until a recovery pass can decide.
+            if not isinstance(exc, Exception):
+                # A BaseException models loss of control at this boundary in
+                # the recovery tests. If application code catches it instead
+                # of exiting, the live coordinator still cannot accept a
+                # normal operation until a terminal recovery is performed.
+                self._poison()
+                raise
+            publication_state = self._publication_state_after_failure(
+                prepared_journal,
+                journal,
+            )
+            if publication_state == "prepared":
+                try:
+                    self._rollback_prepared(prepared_journal)
+                except Exception as rollback_exc:
+                    self._poison()
+                    raise CacheStorageError(
+                        "Committed clear journal publication failed and rollback could not complete",
+                        context={"operation": "clear", "backend": self.kind},
+                    ) from rollback_exc
+                raise
+
+            self._poison()
+            raise CacheStorageError(
+                "Committed clear journal publication has an unresolved recovery outcome",
+                context={
+                    "operation": "clear",
+                    "backend": self.kind,
+                    "publication_state": publication_state,
+                },
+            ) from exc
         try:
             self._roll_forward_committed(journal, wrap_errors=False)
         except BaseException:
@@ -246,11 +355,34 @@ class ClearRecoveryCoordinator:
             # erase residual payloads and never replay a stale disk snapshot.
             self._clear_backend()
             self._roll_forward_committed(journal)
+            self._poisoned = False
             return
         if journal["state"] == "prepared":
             self._rollback_prepared(journal)
+            self._poisoned = False
             return
         self._roll_forward_committed(journal)
+        self._poisoned = False
+
+    def _publication_state_after_failure(
+        self,
+        prepared_journal: dict[str, Any],
+        committed_journal: dict[str, Any],
+    ) -> str:
+        """Classify the live journal without guessing past a failed barrier."""
+        try:
+            observed = self._read_journal()
+            self._validate_journal(observed)
+        except Exception:
+            return "uncertain"
+        if observed == prepared_journal:
+            return "prepared"
+        if observed == committed_journal:
+            # Visible committed bytes do not prove that a failed directory
+            # acknowledgement reached durable storage. Leave them intact for
+            # restart recovery rather than attempting an unsafe rollback.
+            return "committed"
+        return "uncertain"
 
     def _new_prepared_journal(
         self, mappings: Sequence[tuple[str, Path]]

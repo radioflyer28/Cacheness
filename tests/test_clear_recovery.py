@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 
+import numpy as np
 import pytest
 
 from cacheness import CacheConfig, cacheness
@@ -144,6 +145,92 @@ def test_json_unacknowledged_rollback_rereads_live_document_before_typed_error(
     assert backend.load_metadata() == reopened.load_metadata()
 
 
+@pytest.mark.parametrize("writer", ("blob_store", "unified_cache"))
+@pytest.mark.parametrize("retirement_fault", ("unlink", "directory_fsync"))
+@pytest.mark.parametrize("case", ("first_write", "cross_format_overwrite"))
+def test_json_backup_retirement_does_not_revoke_authoritative_candidate(
+    tmp_path, monkeypatch, writer, retirement_fault, case
+):
+    """A post-authority backup fault keeps the candidate named by live metadata."""
+    root = tmp_path / f"json-retirement-{writer}-{retirement_fault}-{case}"
+    if writer == "blob_store":
+        owner = BlobStore(root, backend="json")
+
+        def put(value, key):
+            return owner.put(value, key=key)
+
+        def get(key):
+            return owner.get(key)
+
+        metadata_backend = owner.backend
+    else:
+        owner = _unified_cache(root, "json")
+
+        def put(value, key):
+            return owner.put(value, retirement_case=key)
+
+        def get(key):
+            return owner.get(retirement_case=key)
+
+        metadata_backend = owner.metadata_backend
+
+    target_key = "target"
+    try:
+        # A different established entry makes this the first write for target
+        # while exercising the JSON backup-retirement region.
+        put("metadata-already-exists", "anchor")
+        if case == "cross_format_overwrite":
+            put("old format", target_key)
+
+        backup_path = metadata_backend.metadata_file.parent / (
+            f".{metadata_backend.metadata_file.name}.backup"
+        )
+        if retirement_fault == "unlink":
+            unlink = Path.unlink
+
+            def fail_backup_retirement(path, *args, **kwargs):
+                if path == backup_path:
+                    raise OSError("backup retirement unavailable")
+                return unlink(path, *args, **kwargs)
+
+            monkeypatch.setattr(Path, "unlink", fail_backup_retirement)
+        else:
+            fsync_metadata_directory = metadata_backend._fsync_metadata_directory
+            directory_syncs = 0
+
+            def fail_post_unlink_acknowledgement():
+                nonlocal directory_syncs
+                directory_syncs += 1
+                if directory_syncs == 3:
+                    raise OSError("backup retirement acknowledgement unavailable")
+                return fsync_metadata_directory()
+
+            monkeypatch.setattr(
+                metadata_backend,
+                "_fsync_metadata_directory",
+                fail_post_unlink_acknowledgement,
+            )
+
+        replacement = np.array([1, 2, 3]) if case == "cross_format_overwrite" else "new"
+        put(replacement, target_key)
+
+        if writer == "blob_store":
+            entry = owner.get_metadata(target_key)
+        else:
+            cache_key = owner._create_cache_key({"retirement_case": target_key})
+            entry = owner.metadata_backend.get_entry(cache_key)
+        assert entry is not None
+        candidate = Path(entry["metadata"]["actual_path"])
+        assert candidate.exists()
+        read_value = get(target_key)
+        if case == "cross_format_overwrite":
+            np.testing.assert_array_equal(read_value, replacement)
+        else:
+            assert read_value == replacement
+    finally:
+        owner.close()
+
+
 def test_json_prepared_clear_reopens_to_exact_payload_and_metadata_rollback(
     tmp_path, monkeypatch
 ):
@@ -264,6 +351,349 @@ def _put_payloads(store: BlobStore) -> tuple[list[str], dict[Path, bytes]]:
         payload_path = Path(entry["metadata"]["actual_path"])
         payloads[payload_path] = payload_path.read_bytes()
     return keys, payloads
+
+
+@pytest.mark.parametrize("backend_name", ("json", "sqlite", "memory"))
+@pytest.mark.parametrize("boundary", ("serialization", "candidate_write", "replace"))
+def test_committed_journal_prepublication_failure_rolls_back_exactly(
+    tmp_path, monkeypatch, backend_name, boundary
+):
+    """A proven prepared journal is rolled back before the clear error returns."""
+    root = tmp_path / f"commit-publication-{backend_name}-{boundary}"
+    backend = InMemoryBackend() if backend_name == "memory" else backend_name
+    store = BlobStore(root, backend=backend)
+    try:
+        keys, payloads = _put_payloads(store)
+        store.backend.increment_hits()
+        store.backend.increment_misses()
+        before = _backend_snapshot(store.backend, keys)
+        coordinator = store._clear_recovery
+        assert coordinator is not None
+
+        if boundary == "serialization":
+            encode_journal = coordinator._encode_journal
+
+            def fail_committed_serialization(journal):
+                if journal["state"] == "committed":
+                    raise RuntimeError("committed journal serialization unavailable")
+                return encode_journal(journal)
+
+            monkeypatch.setattr(
+                coordinator,
+                "_encode_journal",
+                fail_committed_serialization,
+            )
+        elif boundary == "candidate_write":
+            write_stream = store.guarded_handler_io.file_ops.write_stream_to_locator
+
+            def fail_committed_candidate_write(locator, source):
+                if Path(locator) == coordinator.journal_path:
+                    raise RuntimeError("committed journal candidate write unavailable")
+                return write_stream(locator, source)
+
+            monkeypatch.setattr(
+                store.guarded_handler_io.file_ops,
+                "write_stream_to_locator",
+                fail_committed_candidate_write,
+            )
+        else:
+            replace_journal = coordinator._replace_journal
+
+            def fail_before_committed_replace(journal):
+                if journal["state"] == "committed":
+                    raise RuntimeError("committed journal replacement unavailable")
+                return replace_journal(journal)
+
+            monkeypatch.setattr(
+                coordinator,
+                "_replace_journal",
+                fail_before_committed_replace,
+            )
+
+        with pytest.raises((RuntimeError, CacheStorageError)):
+            store.clear()
+
+        assert _backend_snapshot(store.backend, keys) == before
+        assert {path: path.read_bytes() for path in payloads} == payloads
+        assert not coordinator.journal_path.exists()
+        assert not list(root.glob("clear-tombstone-*"))
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("backend_name", ("json", "sqlite", "memory"))
+def test_unacknowledged_committed_journal_poison_rejects_intervening_operations(
+    tmp_path, monkeypatch, backend_name
+):
+    """A post-replace journal barrier failure leaves evidence and rejects all work."""
+    root = tmp_path / f"commit-publication-{backend_name}-directory-fsync"
+    backend = InMemoryBackend() if backend_name == "memory" else backend_name
+    store = BlobStore(root, backend=backend)
+    try:
+        _put_payloads(store)
+        coordinator = store._clear_recovery
+        assert coordinator is not None
+        write_bytes_durable = store.guarded_handler_io.file_ops.write_bytes_durable
+
+        def fail_postreplace_journal_acknowledgement(locator, data):
+            written = write_bytes_durable(locator, data)
+            if Path(locator) == coordinator.journal_path:
+                raise OSError("committed journal directory fsync unavailable")
+            return written
+
+        monkeypatch.setattr(
+            store.guarded_handler_io.file_ops,
+            "write_bytes_durable",
+            fail_postreplace_journal_acknowledgement,
+        )
+
+        with pytest.raises(CacheStorageError, match="unresolved recovery outcome"):
+            store.clear()
+
+        assert coordinator.journal_path.exists()
+        with pytest.raises(CacheStorageError, match="terminal reconciliation"):
+            store.put("must not publish", key="intervening")
+        with pytest.raises(CacheStorageError, match="terminal reconciliation"):
+            store.get("first")
+        assert not list(root.glob("*intervening*candidate-*"))
+    finally:
+        store.close()
+
+
+def test_base_exception_during_committed_publication_poison_rejects_live_store(
+    tmp_path, monkeypatch
+):
+    """A caught interruption after metadata clear cannot leave the owner usable."""
+    store = BlobStore(tmp_path / "base-exception-publication", backend="json")
+    try:
+        _put_payloads(store)
+        coordinator = store._clear_recovery
+        assert coordinator is not None
+
+        def interrupt_committed_publication(_journal):
+            raise _SimulatedClearInterruption("interrupted while publishing committed journal")
+
+        monkeypatch.setattr(
+            coordinator,
+            "_replace_journal",
+            interrupt_committed_publication,
+        )
+        with pytest.raises(_SimulatedClearInterruption):
+            store.clear()
+        with pytest.raises(CacheStorageError, match="terminal reconciliation"):
+            store.put("must not publish", key="intervening")
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("backend_name", ("json", "sqlite"))
+def test_blobstore_puts_are_rejected_before_candidate_creation_while_admitted(
+    tmp_path, backend_name
+):
+    """Same- and two-instance writes cannot race a root's clear snapshot."""
+    root = tmp_path / f"blob-put-admission-{backend_name}"
+    owner = BlobStore(root, backend=backend_name)
+    contender = BlobStore(root, backend=backend_name)
+    try:
+        keys, payloads = _put_payloads(owner)
+        before = _backend_snapshot(owner.backend, keys)
+        candidates_before = set(root.glob("*candidate-*"))
+        coordinator = owner._clear_recovery
+        assert coordinator is not None
+
+        with coordinator.admission():
+            with pytest.raises(CacheStorageError):
+                owner.put("same instance", key="same-instance")
+            with pytest.raises(CacheStorageError):
+                contender.put("other instance", key="other-instance")
+
+        assert _backend_snapshot(owner.backend, keys) == before
+        assert {path: path.read_bytes() for path in payloads} == payloads
+        assert set(root.glob("*candidate-*")) == candidates_before
+    finally:
+        contender.close()
+        owner.close()
+
+
+@pytest.mark.parametrize("backend_name", ("json", "sqlite"))
+def test_unified_cache_puts_are_rejected_before_candidate_creation_while_admitted(
+    tmp_path, backend_name
+):
+    """UnifiedCache shares the same root admission across cache instances."""
+    root = tmp_path / f"unified-put-admission-{backend_name}"
+    owner = _unified_cache(root, backend_name)
+    contender = _unified_cache(root, backend_name)
+    try:
+        keys, payloads = _put_unified_payloads(owner)
+        before = _backend_snapshot(owner.metadata_backend, keys)
+        candidates_before = set(root.glob("*candidate-*"))
+        coordinator = owner._clear_recovery
+        assert coordinator is not None
+
+        with coordinator.admission():
+            with pytest.raises(CacheStorageError):
+                owner.put({"value": "same"}, put_admission="same-instance")
+            with pytest.raises(CacheStorageError):
+                contender.put({"value": "other"}, put_admission="other-instance")
+
+        assert _backend_snapshot(owner.metadata_backend, keys) == before
+        assert {path: path.read_bytes() for path in payloads} == payloads
+        assert set(root.glob("*candidate-*")) == candidates_before
+    finally:
+        contender.close()
+        owner.close()
+
+
+@pytest.mark.parametrize("backend_name", ("json", "sqlite"))
+@pytest.mark.parametrize("writer_instance", ("same", "second"))
+def test_blobstore_live_put_waits_for_clear_then_publishes_linearly(
+    tmp_path, monkeypatch, backend_name, writer_instance
+):
+    """A live same- or second-instance put cannot be discarded by a clear."""
+    root = tmp_path / f"blob-live-put-clear-{backend_name}-{writer_instance}"
+    owner = BlobStore(root, backend=backend_name)
+    contender = None
+    try:
+        old_keys, old_payloads = _put_payloads(owner)
+        contender = (
+            owner
+            if writer_instance == "same"
+            else BlobStore(root, backend=backend_name)
+        )
+        coordinator = owner._clear_recovery
+        assert coordinator is not None
+        entered = threading.Event()
+        release = threading.Event()
+        clear_errors: list[BaseException] = []
+        put_errors: list[BaseException] = []
+        put_complete = threading.Event()
+        put_result: list[str] = []
+        stage_mapping = coordinator._stage_mapping
+
+        def pause_after_prepared_journal(mapping):
+            entered.set()
+            assert coordinator.journal_path.exists()
+            assert release.wait(timeout=5)
+            return stage_mapping(mapping)
+
+        def run_clear():
+            try:
+                owner.clear()
+            except BaseException as exc:
+                clear_errors.append(exc)
+
+        def run_put():
+            try:
+                put_result.append(contender.put("raced", key="raced"))
+            except BaseException as exc:
+                put_errors.append(exc)
+            finally:
+                put_complete.set()
+
+        monkeypatch.setattr(coordinator, "_stage_mapping", pause_after_prepared_journal)
+        clear_thread = threading.Thread(target=run_clear)
+        clear_thread.start()
+        assert entered.wait(timeout=5)
+        put_thread = threading.Thread(target=run_put)
+        put_thread.start()
+        assert not put_complete.wait(timeout=0.2)
+
+        release.set()
+        clear_thread.join(timeout=5)
+        put_thread.join(timeout=5)
+        assert not clear_thread.is_alive()
+        assert not put_thread.is_alive()
+        assert clear_errors == []
+        assert put_errors == []
+        assert put_result == ["raced"]
+        assert all(not path.exists() for path in old_payloads)
+        assert contender.get("raced") == "raced"
+        entry = contender.get_metadata("raced")
+        assert entry is not None
+        candidate = Path(entry["metadata"]["actual_path"])
+        assert candidate.exists()
+        assert {candidate} == set(root.glob("*candidate-*"))
+        assert all(contender.get(key) is None for key in old_keys)
+    finally:
+        if contender is not None and contender is not owner:
+            contender.close()
+        owner.close()
+
+
+@pytest.mark.parametrize("backend_name", ("json", "sqlite"))
+@pytest.mark.parametrize("writer_instance", ("same", "second"))
+def test_unified_cache_live_put_waits_for_clear_then_publishes_linearly(
+    tmp_path, monkeypatch, backend_name, writer_instance
+):
+    """UnifiedCache serializes live same- and second-instance writers."""
+    root = tmp_path / f"unified-live-put-clear-{backend_name}-{writer_instance}"
+    owner = _unified_cache(root, backend_name)
+    contender = None
+    try:
+        old_keys, old_payloads = _put_unified_payloads(owner)
+        contender = (
+            owner
+            if writer_instance == "same"
+            else _unified_cache(root, backend_name)
+        )
+        coordinator = owner._clear_recovery
+        assert coordinator is not None
+        entered = threading.Event()
+        release = threading.Event()
+        clear_errors: list[BaseException] = []
+        put_errors: list[BaseException] = []
+        put_complete = threading.Event()
+        put_result: list[str] = []
+        stage_mapping = coordinator._stage_mapping
+
+        def pause_after_prepared_journal(mapping):
+            entered.set()
+            assert coordinator.journal_path.exists()
+            assert release.wait(timeout=5)
+            return stage_mapping(mapping)
+
+        def run_clear():
+            try:
+                owner.clear_all()
+            except BaseException as exc:
+                clear_errors.append(exc)
+
+        def run_put():
+            try:
+                put_result.append(contender.put({"value": "raced"}, race="raced"))
+            except BaseException as exc:
+                put_errors.append(exc)
+            finally:
+                put_complete.set()
+
+        monkeypatch.setattr(coordinator, "_stage_mapping", pause_after_prepared_journal)
+        clear_thread = threading.Thread(target=run_clear)
+        clear_thread.start()
+        assert entered.wait(timeout=5)
+        put_thread = threading.Thread(target=run_put)
+        put_thread.start()
+        assert not put_complete.wait(timeout=0.2)
+
+        release.set()
+        clear_thread.join(timeout=5)
+        put_thread.join(timeout=5)
+        assert not clear_thread.is_alive()
+        assert not put_thread.is_alive()
+        assert clear_errors == []
+        assert put_errors == []
+        assert len(put_result) == 1
+        assert all(not path.exists() for path in old_payloads)
+        assert contender.get(race="raced") == {"value": "raced"}
+        entry = contender.metadata_backend.get_entry(put_result[0])
+        assert entry is not None
+        candidate = Path(entry["metadata"]["actual_path"])
+        assert candidate.exists()
+        assert {candidate} == set(root.glob("*candidate-*"))
+        assert all(contender.metadata_backend.get_entry(key) is None for key in old_keys)
+    finally:
+        if contender is not None and contender is not owner:
+            contender.close()
+        owner.close()
 
 
 def _backend_snapshot(backend, keys: list[str]) -> dict[str, object]:
@@ -1220,12 +1650,13 @@ def test_same_root_thread_contender_fails_while_clear_owner_holds_admission(
 
 
 @pytest.mark.skipif(sys.platform.startswith("win"), reason="requires POSIX advisory locks")
+@pytest.mark.parametrize("backend_name", ("json", "sqlite"))
 def test_same_root_subprocess_contender_fails_while_clear_owner_holds_admission(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, backend_name
 ):
     """The advisory lock rejects a separate process before it can recover or mutate."""
-    root = tmp_path / "subprocess-admission"
-    owner = BlobStore(root, backend="json")
+    root = tmp_path / f"subprocess-admission-{backend_name}"
+    owner = BlobStore(root, backend=backend_name)
     _put_payloads(owner)
     coordinator = owner._clear_recovery
     assert coordinator is not None
@@ -1248,7 +1679,8 @@ def test_same_root_subprocess_contender_fails_while_clear_owner_holds_admission(
             "from cacheness.error_handling import CacheStorageError",
             "from cacheness.storage.blob_store import BlobStore",
             "try:",
-            "    store = BlobStore(sys.argv[1], backend='json')",
+            "    store = BlobStore(sys.argv[1], backend=sys.argv[2])",
+            "    store.put('subprocess contender', key='subprocess-contender')",
             "except CacheStorageError:",
             "    raise SystemExit(0)",
             "else:",
@@ -1258,7 +1690,61 @@ def test_same_root_subprocess_contender_fails_while_clear_owner_holds_admission(
     )
     try:
         result = subprocess.run(
-            [sys.executable, "-c", script, str(root)],
+            [sys.executable, "-c", script, str(root), backend_name],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0
+    finally:
+        release.set()
+        worker.join(timeout=5)
+        owner.close()
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="requires POSIX advisory locks")
+@pytest.mark.parametrize("backend_name", ("json", "sqlite"))
+def test_unified_cache_subprocess_put_is_rejected_while_clear_holds_admission(
+    tmp_path, monkeypatch, backend_name
+):
+    """A separate UnifiedCache process cannot publish during a local clear."""
+    root = tmp_path / f"unified-subprocess-admission-{backend_name}"
+    owner = _unified_cache(root, backend_name)
+    _put_unified_payloads(owner)
+    coordinator = owner._clear_recovery
+    assert coordinator is not None
+    entered = threading.Event()
+    release = threading.Event()
+    stage_mapping = coordinator._stage_mapping
+
+    def hold_owner_admission(mapping):
+        entered.set()
+        assert release.wait(timeout=5)
+        return stage_mapping(mapping)
+
+    monkeypatch.setattr(coordinator, "_stage_mapping", hold_owner_admission)
+    worker = threading.Thread(target=owner.clear_all)
+    worker.start()
+    assert entered.wait(timeout=5)
+    script = "\n".join(
+        (
+            "import sys",
+            "from cacheness import CacheConfig, cacheness",
+            "from cacheness.error_handling import CacheStorageError",
+            "try:",
+            "    cache = cacheness(CacheConfig(cache_dir=sys.argv[1], metadata_backend=sys.argv[2], cleanup_on_init=False))",
+            "    cache.put({'value': 'subprocess contender'}, put_admission='subprocess')",
+            "except CacheStorageError:",
+            "    raise SystemExit(0)",
+            "else:",
+            "    cache.close()",
+            "    raise SystemExit(1)",
+        )
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(root), backend_name],
             capture_output=True,
             check=False,
             text=True,

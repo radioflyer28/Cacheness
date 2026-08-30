@@ -972,6 +972,29 @@ class JsonBackend(MetadataBackend):
                 context={"metadata_file": str(self.metadata_file)},
             ) from exc
 
+    def _refresh_from_disk_for_clear_admission(self) -> None:
+        """Synchronize one JSON instance after root-level lifecycle admission.
+
+        The clear coordinator serializes separate store instances by payload
+        root, while each JsonBackend still caches its document in process. A
+        writer admitted after another instance's clear must not publish from a
+        stale in-memory snapshot and resurrect the cleared mappings.
+        """
+        with self._lock:
+            self._ensure_writable()
+            if not self.metadata_file.exists():
+                # A first write legitimately has no document to refresh.  Do
+                # not use the permissive loader here: once a live document
+                # exists, clear admission must surface malformed evidence
+                # rather than silently replacing it with an empty snapshot.
+                self._metadata = {
+                    "entries": {},
+                    "cache_hits": 0,
+                    "cache_misses": 0,
+                }
+                return
+            self._metadata = self._read_live_document()
+
     @staticmethod
     def _write_json_candidate(path: Path, metadata: Dict[str, Any]) -> None:
         """Write and fsync one same-directory JSON candidate file."""
@@ -1082,11 +1105,19 @@ class JsonBackend(MetadataBackend):
                 backup_path.unlink()
                 self._fsync_metadata_directory()
             except Exception as exc:
-                self._metadata = self._read_live_document()
-                raise CacheStorageError(
-                    "JSON metadata was replaced but backup cleanup was not acknowledged",
-                    context={"metadata_file": str(self.metadata_file)},
-                ) from exc
+                # The replacement was already fsynced before backup retirement
+                # started.  The backup is only rollback evidence; it cannot
+                # change which live document is authoritative.  Reporting this
+                # cleanup acknowledgement failure as a failed publication made
+                # callers delete the payload now named by the new document.
+                # Keep any backup residue for the next copy-on-write cycle and
+                # report the operational debt without revoking publication.
+                logger.warning(
+                    "JSON metadata publication succeeded but backup retirement "
+                    "was not acknowledged for %s: %s",
+                    self.metadata_file,
+                    exc,
+                )
 
     def _flush_pending_writes(self) -> None:
         self._ensure_writable()
