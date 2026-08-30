@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
-from cacheness.error_handling import CacheManifestIntegrityError
+from cacheness.config import CacheConfig, LifecycleLimits
+from cacheness.error_handling import (
+    CacheBlobLifecycleConflictError,
+    CacheManifestIntegrityError,
+)
 from cacheness.storage import BlobStore
 from cacheness.storage.integrity import sign_hmac_sha256, verify_hmac_sha256
 from cacheness.storage.operation_record import (
@@ -49,6 +54,38 @@ def _record(root: Path, **overrides: object) -> LifecycleOperationRecord:
 
 def _signed_record(root: Path, key: bytes) -> LifecycleOperationRecord:
     record = _record(root)
+    return record.with_signature(sign_hmac_sha256(record.signing_bytes(), key))
+
+
+def _small_lifecycle_limits() -> LifecycleLimits:
+    """Return deliberately small policy values for bounded lifecycle tests."""
+    return LifecycleLimits(
+        max_operation_record_bytes=1_048_576,
+        max_operation_field_bytes=8_192,
+        manifest_page_size=2,
+        operation_page_size=2,
+        max_reconcile_actions=1,
+        orphan_grace_seconds=0.01,
+        close_wait_seconds=0.02,
+    )
+
+
+def _record_for_operation(
+    root: Path,
+    key: bytes,
+    operation_id: str,
+) -> LifecycleOperationRecord:
+    """Build signed, distinct evidence for one opaque repository entry."""
+    record = _record(
+        root,
+        operation_id=operation_id,
+        generation=operation_id,
+        candidate_locator=f"candidate-{operation_id}",
+        previous_locator=None,
+        transition=OperationTransition.CREATE,
+        expected_generation=None,
+        expected_record_digest=None,
+    )
     return record.with_signature(sign_hmac_sha256(record.signing_bytes(), key))
 
 
@@ -150,6 +187,109 @@ def test_operation_record_field_and_raw_byte_bounds_are_checked_before_use(
     with pytest.raises(CacheManifestIntegrityError, match="byte limit"):
         LifecycleOperationRecord.from_canonical_bytes(b"x" * (MAX_OPERATION_RECORD_BYTES + 1))
     assert not parser_called
+
+
+def test_operation_repository_uses_configured_bounded_stable_pages(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A small caller policy reaches opaque pages without over-reading entries."""
+    root = tmp_path / "paged-operation-records"
+    limits = _small_lifecycle_limits()
+    config = CacheConfig(cache_dir=str(root), lifecycle_limits=limits)
+    store = BlobStore(config=config, backend="json")
+    try:
+        key = store._manifest_key(initialize_new_store=True)
+        repository = store.lifecycle.operation_repository
+        assert repository.lifecycle_limits is limits
+
+        for operation_id in ("c" * 32, "a" * 32, "b" * 32):
+            record = _record_for_operation(root, key, operation_id)
+            repository.create_exclusive(record, record.canonical_bytes())
+
+        calls: list[Path] = []
+        original_read = repository.file_ops.read_bytes
+
+        def counting_read(locator: Path) -> bytes:
+            calls.append(locator)
+            return original_read(locator)
+
+        monkeypatch.setattr(repository.file_ops, "read_bytes", counting_read)
+        first_page = repository.list_page()
+
+        assert [operation_id for operation_id, _ in first_page.entries] == [
+            "a" * 32,
+            "b" * 32,
+        ]
+        assert first_page.next_cursor is not None
+        assert len(calls) == limits.operation_page_size
+
+        second_page = repository.list_page(first_page.next_cursor)
+        assert [operation_id for operation_id, _ in second_page.entries] == ["c" * 32]
+        assert second_page.next_cursor is None
+        assert len(calls) == 3
+    finally:
+        store.close()
+
+
+def test_operation_checkpoint_and_retirement_require_exact_prior_bytes(
+    tmp_path: Path,
+) -> None:
+    """Stale recovery work cannot overwrite or retire newer operation evidence."""
+    root = tmp_path / "exact-operation-records"
+    store = BlobStore(root, backend="json")
+    try:
+        key = store._manifest_key(initialize_new_store=True)
+        repository = store.lifecycle.operation_repository
+        original = _record_for_operation(root, key, "a" * 32)
+        original_raw = original.canonical_bytes()
+        repository.create_exclusive(original, original_raw)
+        updated = original.at_checkpoint(
+            OperationCheckpoint.CANDIDATE_PUBLISHED,
+            updated_at="2026-08-30T00:00:01+00:00",
+        )
+        updated = updated.with_signature(sign_hmac_sha256(updated.signing_bytes(), key))
+        updated_raw = updated.canonical_bytes()
+
+        repository.checkpoint_if_exact(
+            updated, expected_raw=original_raw, raw_record=updated_raw
+        )
+        with pytest.raises(CacheBlobLifecycleConflictError):
+            repository.retire_if_exact(original, expected_raw=original_raw)
+        assert repository.get_raw(original.operation_id) == updated_raw
+
+        repository.retire_if_exact(updated, expected_raw=updated_raw)
+        assert repository.get_raw(updated.operation_id) is None
+    finally:
+        store.close()
+
+
+def test_configured_orphan_grace_delays_authenticated_candidate_eligibility(
+    tmp_path: Path,
+) -> None:
+    """Age is only one input after authenticated evidence revalidation."""
+    root = tmp_path / "orphan-grace"
+    limits = _small_lifecycle_limits()
+    store = BlobStore(
+        config=CacheConfig(cache_dir=str(root), lifecycle_limits=limits), backend="json"
+    )
+    try:
+        key = store._manifest_key(initialize_new_store=True)
+        record = _record_for_operation(root, key, "a" * 32).at_checkpoint(
+            OperationCheckpoint.CANDIDATE_PUBLISHED,
+            updated_at="2026-08-30T00:00:00+00:00",
+        )
+        record = record.with_signature(sign_hmac_sha256(record.signing_bytes(), key))
+        created = datetime(2026, 8, 30, tzinfo=timezone.utc)
+
+        assert not store.lifecycle.is_pre_authority_candidate_eligible(
+            record, now=created + timedelta(seconds=0.009)
+        )
+        assert store.lifecycle.is_pre_authority_candidate_eligible(
+            record, now=created + timedelta(seconds=0.01)
+        )
+    finally:
+        store.close()
 
 
 @pytest.mark.parametrize("defect", ("wrong_owner", "wrong_store", "wrong_operation", "escape"))
