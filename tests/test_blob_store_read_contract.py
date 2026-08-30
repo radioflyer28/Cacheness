@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 import json
 from pathlib import Path
+from threading import Event, Thread
 from typing import Any
 
 import pytest
@@ -755,6 +756,59 @@ def test_update_metadata_resigns_only_user_metadata_and_rejects_structure(
         assert store.update_metadata("absent-update", {"owner": "none"}) is False
     finally:
         store.close()
+
+
+def test_update_metadata_rejects_a_stale_independent_store_patch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Concurrent same-generation patches have one CAS winner, never last write wins."""
+    root = tmp_path / "independent-metadata-patch"
+    first_store = BlobStore(root, backend="json")
+    first_store.handlers = _SingleHandlerRegistry(_TracingHandler([]))
+    second_store: BlobStore | None = None
+    try:
+        key = first_store.put("payload", key="patch-key", metadata={"owner": "base"})
+        second_store = BlobStore(root, backend="json")
+        publish_entered = Event()
+        release_first_publish = Event()
+        first_result: list[BaseException | bool] = []
+        original_publish = first_store.manifest_repository.publish_if_expected
+
+        def block_first_publish(*args: Any, **kwargs: Any) -> None:
+            publish_entered.set()
+            assert release_first_publish.wait(timeout=2)
+            original_publish(*args, **kwargs)
+
+        monkeypatch.setattr(
+            first_store.manifest_repository, "publish_if_expected", block_first_publish
+        )
+
+        def patch_first_store() -> None:
+            try:
+                first_result.append(first_store.update_metadata(key, {"owner": "first"}))
+            except BaseException as exc:
+                first_result.append(exc)
+
+        first_thread = Thread(target=patch_first_store)
+        first_thread.start()
+        assert publish_entered.wait(timeout=2)
+
+        _replace_signed_manifest(
+            second_store,
+            key,
+            user_metadata={"owner": "second"},
+        )
+        release_first_publish.set()
+        first_thread.join(timeout=2)
+
+        assert not first_thread.is_alive()
+        assert len(first_result) == 1
+        assert isinstance(first_result[0], CacheBlobLifecycleConflictError)
+        assert second_store.get_metadata(key)["metadata"]["owner"] == "second"
+    finally:
+        if second_store is not None:
+            second_store.close()
+        first_store.close()
 
 
 def test_update_metadata_rejects_an_authenticated_outside_root_locator(
