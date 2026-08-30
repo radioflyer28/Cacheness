@@ -49,6 +49,7 @@ class TestPublicExports:
             "path_race",
             "invalid_identifier",
             "invalid_query_field",
+            "invalid_query_value",
             "invalid_legacy_array",
             "unsafe_object_array",
             "unsupported_legacy_layout",
