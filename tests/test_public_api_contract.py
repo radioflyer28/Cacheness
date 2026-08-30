@@ -59,6 +59,14 @@ class TestPublicExports:
             "sql_cache_gap_detection_failed",
             "sql_cache_upsert_failed",
             "missing_optional_dependency",
+            "manifest_invalid",
+            "manifest_bounds",
+            "manifest_unsupported_version",
+            "manifest_signature_invalid",
+            "manifest_signing_key_invalid",
+            "blob_lifecycle_conflict",
+            "blob_backend_failure",
+            "blob_migration_required",
         }
 
         assert {reason.value for reason in error_handling.CacheReason} == expected_reasons

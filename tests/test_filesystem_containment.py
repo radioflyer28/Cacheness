@@ -22,6 +22,8 @@ from cacheness.error_handling import (
 )
 from cacheness.storage.blob_store import BlobStore
 from cacheness.storage.backends.blob_backends import FilesystemBlobBackend
+from cacheness.storage.integrity import sign_hmac_sha256
+from cacheness.storage.manifest import BlobManifestV1
 from cacheness.storage import path_security
 from cacheness.storage.path_security import (
     ManagedFileOps,
@@ -909,8 +911,24 @@ def test_persisted_locator_raises_before_deserialization(tmp_path):
         key = store.put("inside", key="safe")
         entry = store.backend.get_entry(key)
         assert entry is not None
-        entry["metadata"]["actual_path"] = str(outside)
-        store.backend.put_entry(key, entry)
+
+        # BlobStore reads the authenticated canonical manifest, not the legacy
+        # backend projection. Re-sign this trusted fixture so locator containment
+        # is the first rejected boundary rather than manifest integrity.
+        raw_manifest = store.manifest_repository.get_raw(key)
+        assert raw_manifest is not None
+        manifest_data = BlobManifestV1.from_canonical_bytes(raw_manifest).to_mapping()
+        manifest_data["locator"] = str(outside)
+        manifest_data.pop("signature")
+        unsigned_manifest = BlobManifestV1(**manifest_data)
+        tampered_manifest = unsigned_manifest.with_signature(
+            sign_hmac_sha256(unsigned_manifest.signing_bytes(), store._manifest_key())
+        )
+        store.manifest_repository.put_raw(
+            key,
+            tampered_manifest.canonical_bytes(),
+            entry_data=entry,
+        )
 
         with pytest.raises(CacheUnsafePathError):
             store.get(key)
