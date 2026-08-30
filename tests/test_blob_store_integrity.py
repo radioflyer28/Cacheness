@@ -16,10 +16,10 @@ from cacheness.storage.integrity import (
 )
 
 
-_KEY = b"canonical-manifest-key-material-32"
+_KEY = b"0123456789abcdef0123456789abcdef"
 
 
-def test_strict_provider_requires_explicit_initialization(tmp_path):
+def test_strict_key_provider_requires_explicit_initialization(tmp_path):
     """An absent file key cannot turn a read/reopen into a new trust root."""
     key_path = tmp_path / "blob_manifest_hmac_key.bin"
     provider = ManifestKeyProvider(key_path)
@@ -36,7 +36,7 @@ def test_strict_provider_requires_explicit_initialization(tmp_path):
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX ownership and mode contract")
-def test_strict_provider_rejects_symlink_and_unsafe_permissions(tmp_path):
+def test_strict_key_provider_rejects_symlink_and_unsafe_permissions(tmp_path):
     """A file-backed key is trusted only after no-follow regular-file attestation."""
     target = tmp_path / "target-key.bin"
     target.write_bytes(_KEY)
@@ -95,4 +95,8 @@ def test_reopen_with_missing_key_never_creates_a_replacement_key(tmp_path):
 
     assert error.value.context["reason"] == CacheReason.MANIFEST_SIGNING_KEY_INVALID.value
     assert not key_path.exists()
-    assert raw_manifest == BlobStore(tmp_path).manifest_repository.get_raw("signed")
+    final_store = BlobStore(tmp_path)
+    try:
+        assert raw_manifest == final_store.manifest_repository.get_raw("signed")
+    finally:
+        final_store.close()

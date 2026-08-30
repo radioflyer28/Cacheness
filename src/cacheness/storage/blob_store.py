@@ -48,6 +48,7 @@ from datetime import datetime, timezone
 
 from ..error_handling import (
     CacheBlobLifecycleConflictError,
+    CacheBlobManifestUnauthenticatedError,
     CacheManifestIntegrityError,
     CacheReason,
     CacheStorageError,
@@ -283,7 +284,10 @@ class BlobStore:
                 user_metadata=dict(metadata or {}),
             )
             signed_manifest = manifest.with_signature(
-                sign_hmac_sha256(manifest.signing_bytes(), self._manifest_key())
+                sign_hmac_sha256(
+                    manifest.signing_bytes(),
+                    self._manifest_key(initialize_new_store=True),
+                )
             )
             raw_manifest = signed_manifest.canonical_bytes()
             entry_data = {
@@ -687,12 +691,20 @@ class BlobStore:
         """Map one public logical key to a backend-safe physical ID."""
         return encode_physical_name(key, namespace="blob-store")
 
-    def _manifest_key(self) -> bytes:
+    def _manifest_key(self, *, initialize_new_store: bool = False) -> bytes:
         """Return the strict persistent key without silently downgrading signing."""
         try:
             return self._manifest_key_provider.get_key()
         except ManifestKeyError as exc:
-            raise CacheManifestIntegrityError(
+            if initialize_new_store and not self.manifest_repository.list_keys():
+                try:
+                    return self._manifest_key_provider.initialize_new_store()
+                except ManifestKeyError as initialization_error:
+                    raise CacheBlobManifestUnauthenticatedError(
+                        "Canonical BlobStore signing key is unavailable",
+                        reason=CacheReason.MANIFEST_SIGNING_KEY_INVALID,
+                    ) from initialization_error
+            raise CacheBlobManifestUnauthenticatedError(
                 "Canonical BlobStore signing key is unavailable",
                 reason=CacheReason.MANIFEST_SIGNING_KEY_INVALID,
             ) from exc

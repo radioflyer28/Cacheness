@@ -72,11 +72,12 @@ def verify_legacy_v038_entry(
 
 
 class CacheEntrySigner:
-    """
-    HMAC-based cache entry signer for metadata integrity protection.
-    
-    Provides cryptographic signatures for cache entry metadata to detect tampering
-    with the SQLite database or JSON metadata files.
+    """Legacy cache-entry signer retained for compatibility paths only.
+
+    Canonical ``BlobStore`` manifests use the fixed schema-1 HMAC-SHA256 contract
+    in :mod:`cacheness.storage.integrity`. This configurable signer intentionally
+    remains separate because its field subset, automatic key creation, and
+    in-memory fallback are not valid for canonical storage authenticity.
     """
     
     # Default enhanced fields (previously "enhanced" security level)
