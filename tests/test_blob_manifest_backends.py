@@ -9,6 +9,7 @@ import pytest
 
 from cacheness.error_handling import CacheBlobBackendError, CacheReason
 from cacheness.metadata import InMemoryBackend, JsonBackend, SqliteBackend
+from cacheness.storage.blob_store import BlobStore
 from cacheness.storage.integrity import sign_hmac_sha256
 from cacheness.storage.manifest import BlobManifestV1
 from cacheness.storage.manifest_repository import (
@@ -187,3 +188,36 @@ def test_repository_backend_failures_are_typed_and_preserve_their_cause(
 
     assert error.value.context["reason"] == CacheReason.BLOB_BACKEND_FAILURE.value
     assert error.value.__cause__ is failure
+
+
+@pytest.mark.parametrize(
+    ("backend", "expected_repository"),
+    (
+        ("json", JsonManifestRepository),
+        ("sqlite", SqliteManifestRepository),
+        (InMemoryBackend(), InMemoryManifestRepository),
+    ),
+)
+def test_blob_store_selects_the_exact_supported_local_repository(
+    tmp_path: Path, backend, expected_repository
+):
+    """BlobStore makes the raw-record boundary concrete for each local identity."""
+    store = BlobStore(tmp_path / expected_repository.__name__, backend=backend)
+    try:
+        assert type(store.manifest_repository) is expected_repository
+    finally:
+        store.close()
+
+
+def test_blob_store_rejects_custom_backend_before_payload_staging(tmp_path: Path):
+    """Capability-shaped metadata objects cannot inherit local manifest guarantees."""
+
+    class CustomMemoryBackend(InMemoryBackend):
+        """A deliberately unsupported backend identity."""
+
+    root = tmp_path / "unsupported"
+    with pytest.raises(CacheBlobBackendError) as error:
+        BlobStore(root, backend=CustomMemoryBackend())
+
+    assert error.value.context["reason"] == CacheReason.BLOB_BACKEND_FAILURE.value
+    assert not list(root.glob("*candidate-*"))
