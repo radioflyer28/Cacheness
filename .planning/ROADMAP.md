@@ -93,6 +93,14 @@ Plans:
 
 **Plans**: TBD
 
+- [x] 02-01-PLAN.md
+- [ ] 02-02-PLAN.md
+- [ ] 02-03-PLAN.md
+- [ ] 02-04-PLAN.md
+- [ ] 02-05-PLAN.md
+- [ ] 02-06-PLAN.md
+- [ ] 02-07-PLAN.md
+
 ### Phase 3: Atomic Lifecycle and Recovery Engine
 
 **Goal**: Object lifecycle operations preserve an old or new complete generation and leave every incomplete outcome recoverable.
@@ -185,7 +193,7 @@ Plans:
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Compatibility and Security Baseline | 15/15 | Complete | 2026-08-30 |
-| 2. Canonical Storage and Integrity Contract | 0/TBD | Not started | - |
+| 2. Canonical Storage and Integrity Contract | 1/7 | In Progress|  |
 | 3. Atomic Lifecycle and Recovery Engine | 0/TBD | Not started | - |
 | 4. Metadata Composition and Topology Contracts | 0/TBD | Not started | - |
 | 5. Payload Backends and Full Matrix Parity | 0/TBD | Not started | - |

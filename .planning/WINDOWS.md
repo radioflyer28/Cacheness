@@ -2,9 +2,9 @@
 schema_version: 1
 open_count: 0
 waived_count: 0
-fixed_count: 8
-total_count: 8
-last_updated: 2026-08-29T23:08:07.482Z
+fixed_count: 10
+total_count: 10
+last_updated: 2026-08-30T13:25:25.296Z
 ---
 
 # Broken Windows Ledger
@@ -23,6 +23,8 @@ last_updated: 2026-08-29T23:08:07.482Z
 | 6 | 01 | deviation | src/cacheness/core.py |  | Invalid current signatures remain fail-closed unless the exact signed split-map discriminator selects the documented legacy verifier. | fixed |  | 2026-08-29T23:03:43.045Z | 2026-08-29T23:03:46.749Z |
 | 7 | 01 | deviation | tests/test_stored_compatibility.py |  | Phase-owned compatibility tests use named local invariance helpers and pass their zero-findings Ruff gate. | fixed |  | 2026-08-29T23:03:43.152Z | 2026-08-29T23:03:46.861Z |
 | 8 | 01 | deviation | src/cacheness/core.py |  | Unrecognized legacy-signature metadata now rejects before unsigned policy and cannot reach a handler. | fixed |  | 2026-08-29T23:08:02.399Z | 2026-08-29T23:08:07.482Z |
+| 9 | 02 | deviation | tests/test_blob_manifest.py |  | Corrected the nesting-boundary fixture to count the complete manifest document. | fixed |  | 2026-08-30T13:25:06.323Z | 2026-08-30T13:25:25.193Z |
+| 10 | 02 | deviation | src/cacheness/storage/manifest.py |  | Enforced the fixed signer and complete outgoing record bounds. | fixed |  | 2026-08-30T13:25:06.424Z | 2026-08-30T13:25:25.296Z |
 
 ````json
 [
@@ -121,6 +123,30 @@ last_updated: 2026-08-29T23:08:07.482Z
     "reason": "",
     "recorded_at": "2026-08-29T23:08:02.399Z",
     "resolved_at": "2026-08-29T23:08:07.482Z"
+  },
+  {
+    "id": 9,
+    "kind": "deviation",
+    "phase": "02",
+    "file": "tests/test_blob_manifest.py",
+    "line": null,
+    "description": "Corrected the nesting-boundary fixture to count the complete manifest document.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-08-30T13:25:06.323Z",
+    "resolved_at": "2026-08-30T13:25:25.193Z"
+  },
+  {
+    "id": 10,
+    "kind": "deviation",
+    "phase": "02",
+    "file": "src/cacheness/storage/manifest.py",
+    "line": null,
+    "description": "Enforced the fixed signer and complete outgoing record bounds.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-08-30T13:25:06.424Z",
+    "resolved_at": "2026-08-30T13:25:25.296Z"
   }
 ]
 ````

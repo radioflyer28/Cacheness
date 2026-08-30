@@ -1,19 +1,19 @@
 ---
 gsd_state_version: 1.0
 milestone: v1.0
-current_phase: 2
-current_phase_name: canonical-storage-and-integrity-contract
+current_phase: 02
+current_phase_name: Canonical Storage and Integrity Contract
 status: executing
-stopped_at: Phase 2 context gathered
-last_updated: "2026-08-30T05:27:29.148Z"
+stopped_at: Completed 02-01-PLAN.md
+last_updated: "2026-08-30T13:25:07.435Z"
 last_activity: 2026-08-30
-last_activity_desc: Phase 1 review, security audit, and validation approved
-state_head: 8a77a078a73b05626ad79757fe23b1cb2e9097f8
+last_activity_desc: Phase 02 execution started
+state_head: cafb95969e33b2a9bc64718f8cbd2fcf889ba61a
 progress:
   total_phases: 8
   completed_phases: 1
   total_plans: 22
-  completed_plans: 15
+  completed_plans: 16
 milestone_name: milestone
 ---
 
@@ -28,23 +28,20 @@ See: .planning/PROJECT.md (updated 2026-08-29)
 
 ## Current Position
 
-Phase: 2 (canonical-storage-and-integrity-contract) — READY TO EXECUTE
-Plan: Not planned
+Phase: 02 (Canonical Storage and Integrity Contract) — EXECUTING
+Plan: 2 of 7
 Status: Ready to execute
-Last activity: 2026-08-30 — Phase 1 review, security audit, and validation approved
+Last activity: 2026-08-30 — Phase 02 execution started
 
 Progress: [█░░░░░░░░░] 1 of 8 phases complete
 
 ## Performance Metrics
 
 **Velocity:**
-
 - Total plans completed: 0
 - Average duration: -
 - Total execution time: 0.0 hours
-
 **By Phase:**
-
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | - | - | - | - |
@@ -73,6 +70,7 @@ Progress: [█░░░░░░░░░] 1 of 8 phases complete
 | Phase 01 P07 | 15min | 2 tasks | 5 files |
 | Phase 01 P13 | 8min | 2 tasks | 7 files |
 | Phase 01 P15 | 35min | 3 tasks | 8 files |
+| Phase 02 P01 | 7h 50m | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -121,6 +119,9 @@ Recent decisions affecting current work:
 - [Phase 01]: Gap-wave validation remains draft and approval pending until the orchestrator renews review after Plans 01-13 through 01-15.
 - [Phase 01]: Clear recovery is a bounded BlobStore-only primitive with exact local topology identities; Plan 01-15 must integrate its prerequisite into UnifiedCache before CR-04 can close.
 - [Phase 01]: Candidate publication and UnifiedCache global clear now reuse bounded ownership/recovery rules, but the primitive remains clear-only for Phase 3 absorption and validation stays pending orchestrator review.
+- [Phase 02]: Schema-1 manifests use restricted deterministic JSON and bind every canonical field except signature.
+- [Phase 02]: Only a genuinely absent raw repository record maps to None; malformed, unauthenticated, unsupported, and lifecycle-conflict records are typed failures.
+- [Phase 02]: Read integrity validates one private payload snapshot before handler deserialization.
 
 ### Pending Todos
 
@@ -144,6 +145,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-30T04:37:13.180Z
-Stopped at: Phase 2 context gathered
-Resume file: .planning/phases/02-canonical-storage-and-integrity-contract/02-CONTEXT.md
+Last session: 2026-08-30T13:25:07.394Z
+Stopped at: Completed 02-01-PLAN.md
+Resume file: None
