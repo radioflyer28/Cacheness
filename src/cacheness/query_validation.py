@@ -10,6 +10,8 @@ from .error_handling import CacheQueryValidationError, CacheReason
 
 MAX_QUERY_FIELD_LENGTH = 255
 MAX_QUERY_FIELD_SEGMENTS = 16
+SQLITE_SIGNED_64_MIN = -(2**63)
+SQLITE_SIGNED_64_MAX = 2**63 - 1
 _QUERY_FIELD_SEGMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
 
@@ -63,6 +65,14 @@ def validate_query_numeric_filters(filters: Mapping[str, Any]) -> None:
     accepting those values would make their result backend-dependent.
     """
     for field, value in filters.items():
+        if isinstance(value, bool):
+            continue
+
+        if isinstance(value, int) and not (
+            SQLITE_SIGNED_64_MIN <= value <= SQLITE_SIGNED_64_MAX
+        ):
+            raise _invalid_query_value(field, value)
+
         if isinstance(value, float) and not math.isfinite(value):
             raise _invalid_query_value(field, value)
 
