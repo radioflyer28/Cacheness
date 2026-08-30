@@ -49,14 +49,17 @@ def _manifest(**overrides) -> BlobManifestV1:
 
 def _raw_manifest_with_user_metadata(user_metadata: dict) -> bytes:
     """Produce valid canonical bytes with a replacement user metadata map."""
-    manifest = _manifest(user_metadata=user_metadata)
-    return manifest.canonical_bytes()
+    record = _manifest().to_mapping()
+    record["user_metadata"] = user_metadata
+    return json.dumps(
+        record, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
 
 
 def _nested_map(depth: int) -> dict:
     """Build a map whose deepest value occurs at the requested JSON depth."""
     result: dict = {"leaf": "value"}
-    for _ in range(depth - 1):
+    for _ in range(depth - 3):
         result = {"nested": result}
     return result
 
@@ -173,6 +176,16 @@ def test_unknown_manifest_or_payload_version_fails_explicitly(field: str, value:
         BlobManifestV1.from_canonical_bytes(raw)
 
 
+def test_unknown_signature_algorithm_fails_with_typed_integrity_error():
+    """Only the fixed HMAC-SHA256 v1 signer can authenticate a manifest."""
+    record = _manifest().to_mapping()
+    record["signature_algorithm"] = "other-hmac"
+    raw = json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+    with pytest.raises(CacheManifestIntegrityError, match="signature algorithm"):
+        BlobManifestV1.from_canonical_bytes(raw)
+
+
 def test_signature_binds_every_critical_manifest_field():
     """Every D-09 field mutation changes the complete signed projection."""
     manifest = _manifest()
@@ -189,6 +202,9 @@ def test_signature_binds_every_critical_manifest_field():
         "digest": "b" * 64,
         "byte_size": 8,
         "created_at": "2026-08-31T00:00:00+00:00",
+        "handler_metadata": {"serializer": "dill"},
+        "user_metadata": {"label": "mutated"},
+        "signature_algorithm": "other-hmac",
     }
 
     assert verify_hmac_sha256(manifest.signing_bytes(), manifest.signature, _KEY)
@@ -222,12 +238,21 @@ def test_total_node_and_string_boundaries_are_independent():
             )
         )
 
-    collection_count = MAX_TOTAL_NODES // MAX_COLLECTION_ITEMS
+    # The complete canonical document contributes 36 nodes before user metadata:
+    # the root mapping, its 16 keys and values, and the default handler metadata.
+    # The user-metadata map, four keys/lists, and their values fill the exact limit.
+    final_item_count = MAX_TOTAL_NODES - (
+        36 + 1 + 3 * (MAX_COLLECTION_ITEMS + 2) + 2
+    )
     node_values = {
-        f"nodes_{index}": list(range(MAX_COLLECTION_ITEMS))
-        for index in range(collection_count)
+        "nodes_0": list(range(MAX_COLLECTION_ITEMS)),
+        "nodes_1": list(range(MAX_COLLECTION_ITEMS)),
+        "nodes_2": list(range(MAX_COLLECTION_ITEMS)),
+        "nodes_3": list(range(final_item_count)),
     }
+    exact_boundary = _raw_manifest_with_user_metadata(node_values)
+    assert BlobManifestV1.from_canonical_bytes(exact_boundary).user_metadata
+
+    node_values["nodes_3"].append(0)
     with pytest.raises(CacheManifestIntegrityError, match="nodes"):
-        BlobManifestV1.from_canonical_bytes(
-            _raw_manifest_with_user_metadata({"nodes": node_values})
-        )
+        BlobManifestV1.from_canonical_bytes(_raw_manifest_with_user_metadata(node_values))

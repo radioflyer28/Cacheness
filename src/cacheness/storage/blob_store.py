@@ -46,12 +46,18 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 from datetime import datetime, timezone
 
-from ..error_handling import CacheIntegrityError, CacheStorageError
+from ..error_handling import (
+    CacheBlobLifecycleConflictError,
+    CacheManifestIntegrityError,
+    CacheReason,
+    CacheStorageError,
+)
 from .backends import MetadataBackend, JsonBackend
 from .clear_recovery import ClearRecoveryCoordinator
 from .guarded_handler_io import GuardedHandlerIO
 from .handlers import HandlerRegistry
 from .integrity import (
+    ManifestKeyError,
     ManifestKeyProvider,
     sha256_and_size,
     sign_hmac_sha256,
@@ -275,9 +281,7 @@ class BlobStore:
                 user_metadata=dict(metadata or {}),
             )
             signed_manifest = manifest.with_signature(
-                sign_hmac_sha256(
-                    manifest.signing_bytes(), self._manifest_key_provider.get_key()
-                )
+                sign_hmac_sha256(manifest.signing_bytes(), self._manifest_key())
             )
             raw_manifest = signed_manifest.canonical_bytes()
             entry_data = {
@@ -329,18 +333,25 @@ class BlobStore:
             return None
         try:
             manifest = BlobManifestV1.from_canonical_bytes(raw_manifest)
-        except ManifestDecodeError as exc:
-            raise CacheIntegrityError("Canonical BlobStore manifest is invalid") from exc
+        except ManifestDecodeError:
+            raise
         if not verify_hmac_sha256(
             manifest.signing_bytes(),
             manifest.signature,
-            self._manifest_key_provider.get_key(),
+            self._manifest_key(),
         ):
-            raise CacheIntegrityError("Canonical BlobStore manifest signature is invalid")
+            raise CacheManifestIntegrityError(
+                "Canonical BlobStore manifest signature is invalid",
+                reason=CacheReason.MANIFEST_SIGNATURE_INVALID,
+            )
         if manifest.key != key:
-            raise CacheStorageError("Canonical BlobStore manifest key conflicts with lookup")
+            raise CacheBlobLifecycleConflictError(
+                "Canonical BlobStore manifest key conflicts with lookup"
+            )
         if manifest.state != "committed":
-            raise CacheStorageError("Canonical BlobStore manifest is not committed")
+            raise CacheBlobLifecycleConflictError(
+                "Canonical BlobStore manifest is not committed"
+            )
 
         actual_path = resolve_managed_locator(
             self.guarded_handler_io.root,
@@ -362,7 +373,10 @@ class BlobStore:
         with self.guarded_handler_io.open_snapshot(actual_path, handler_metadata) as snapshot:
             digest, byte_size = sha256_and_size(snapshot.path)
             if digest != manifest.digest or byte_size != manifest.byte_size:
-                raise CacheIntegrityError("Canonical BlobStore payload integrity check failed")
+                raise CacheManifestIntegrityError(
+                    "Canonical BlobStore payload integrity check failed",
+                    reason=CacheReason.MANIFEST_SIGNATURE_INVALID,
+                )
             handler = self.handlers.get_handler_by_type(manifest.handler_type)
             data = handler.get(snapshot.path, snapshot.metadata)
         
@@ -648,6 +662,16 @@ class BlobStore:
     def _storage_id_for_key(self, key: str) -> str:
         """Map one public logical key to a backend-safe physical ID."""
         return encode_physical_name(key, namespace="blob-store")
+
+    def _manifest_key(self) -> bytes:
+        """Return the strict persistent key without silently downgrading signing."""
+        try:
+            return self._manifest_key_provider.get_key()
+        except ManifestKeyError as exc:
+            raise CacheManifestIntegrityError(
+                "Canonical BlobStore signing key is unavailable",
+                reason=CacheReason.MANIFEST_SIGNING_KEY_INVALID,
+            ) from exc
 
     def _delete_or_prove_absent(self, locator: Path) -> None:
         """Remove a contained payload only when deletion is conclusively known."""

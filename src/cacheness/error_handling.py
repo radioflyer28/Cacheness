@@ -38,6 +38,14 @@ class CacheReason(str, Enum):
     SQL_CACHE_GAP_DETECTION_FAILED = "sql_cache_gap_detection_failed"
     SQL_CACHE_UPSERT_FAILED = "sql_cache_upsert_failed"
     MISSING_OPTIONAL_DEPENDENCY = "missing_optional_dependency"
+    MANIFEST_INVALID = "manifest_invalid"
+    MANIFEST_BOUNDS = "manifest_bounds"
+    MANIFEST_UNSUPPORTED_VERSION = "manifest_unsupported_version"
+    MANIFEST_SIGNATURE_INVALID = "manifest_signature_invalid"
+    MANIFEST_SIGNING_KEY_INVALID = "manifest_signing_key_invalid"
+    BLOB_LIFECYCLE_CONFLICT = "blob_lifecycle_conflict"
+    BLOB_BACKEND_FAILURE = "blob_backend_failure"
+    BLOB_MIGRATION_REQUIRED = "blob_migration_required"
 
 
 class CacheError(Exception):
@@ -134,6 +142,71 @@ class CacheLegacyFormatError(CacheSerializationError):
         context: Optional[Dict[str, Any]] = None,
         *,
         reason: CacheReason,
+    ):
+        super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheManifestIntegrityError(CacheIntegrityError):
+    """Raised when canonical BlobStore evidence is malformed or tampered with."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.MANIFEST_INVALID,
+    ):
+        super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheManifestUnsupportedVersionError(CacheStorageError):
+    """Raised when a manifest or native payload version is not supported."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.MANIFEST_UNSUPPORTED_VERSION,
+    ):
+        super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheBlobLifecycleConflictError(CacheStorageError):
+    """Raised when a direct BlobStore read sees a non-committed generation."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_LIFECYCLE_CONFLICT,
+    ):
+        super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheBlobBackendError(CacheStorageError):
+    """Raised when a manifest repository cannot complete a backend operation."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_BACKEND_FAILURE,
+    ):
+        super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheBlobMigrationRequiredError(CacheStorageError):
+    """Raised for an exact legacy layout that requires explicit migration."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_MIGRATION_REQUIRED,
     ):
         super().__init__(message, _context_with_reason(context, reason))
 

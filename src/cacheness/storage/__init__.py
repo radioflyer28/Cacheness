@@ -57,10 +57,20 @@ from .security import CacheEntrySigner
 
 # Import BlobStore
 from .blob_store import BlobStore
+from .manifest import BlobManifestV1
+from cacheness.error_handling import (
+    CacheBlobBackendError,
+    CacheBlobLifecycleConflictError,
+    CacheBlobMigrationRequiredError,
+    CacheManifestIntegrityError,
+    CacheManifestUnsupportedVersionError,
+)
 
 # Conditionally import SqliteBackend
 try:
-    from .backends import SqliteBackend
+    from .backends import SqliteBackend as _SqliteBackend
+
+    SqliteBackend = _SqliteBackend
     _HAS_SQLITE = True
 except ImportError:
     _HAS_SQLITE = False
@@ -68,6 +78,12 @@ except ImportError:
 __all__ = [
     # Main API
     "BlobStore",
+    "BlobManifestV1",
+    "CacheManifestIntegrityError",
+    "CacheManifestUnsupportedVersionError",
+    "CacheBlobLifecycleConflictError",
+    "CacheBlobBackendError",
+    "CacheBlobMigrationRequiredError",
     # Backends
     "MetadataBackend",
     "JsonBackend", 

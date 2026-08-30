@@ -7,32 +7,43 @@ another container around native NumPy, parquet, pickle, or dill bytes.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Any, Mapping
+
+from cacheness.error_handling import (
+    CacheManifestIntegrityError,
+    CacheManifestUnsupportedVersionError,
+    CacheReason,
+)
 
 
 MANIFEST_SCHEMA_VERSION = 1
 PAYLOAD_FORMAT_VERSION = 1
 MANIFEST_SIGNATURE_ALGORITHM = "hmac-sha256"
 PAYLOAD_DIGEST_ALGORITHM = "sha256"
+MAX_MANIFEST_BYTES = 1_048_576
+MAX_NESTING_DEPTH = 16
+MAX_COLLECTION_ITEMS = 4_096
+MAX_TOTAL_NODES = 16_384
+MAX_STRING_UTF8_BYTES = 262_144
+MIN_SIGNED_64 = -(2**63)
+MAX_SIGNED_64 = 2**63 - 1
+_HEX_SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
-class ManifestDecodeError(ValueError):
-    """Raised when a canonical manifest record cannot be decoded."""
-
-
-class UnsupportedManifestVersionError(ManifestDecodeError):
-    """Raised for a manifest or payload version this reader does not support."""
+ManifestDecodeError = CacheManifestIntegrityError
+UnsupportedManifestVersionError = CacheManifestUnsupportedVersionError
 
 
 def _freeze_json_value(value: Any) -> Any:
     """Freeze JSON-compatible metadata so a frozen manifest stays immutable."""
     if isinstance(value, Mapping):
-        return MappingProxyType(
-            {str(key): _freeze_json_value(item) for key, item in value.items()}
-        )
-    if isinstance(value, list):
+        if any(not isinstance(key, str) for key in value):
+            raise CacheManifestIntegrityError("Manifest metadata keys must be strings")
+        return MappingProxyType({key: _freeze_json_value(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
         return tuple(_freeze_json_value(item) for item in value)
     return value
 
@@ -51,9 +62,85 @@ def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
         if key in result:
-            raise ManifestDecodeError(f"Duplicate canonical manifest key: {key}")
+            raise CacheManifestIntegrityError(
+                f"Duplicate canonical manifest key: {key}"
+            )
         result[key] = value
     return result
+
+
+def _parse_canonical_int(value: str) -> int:
+    """Parse an integer token without accepting out-of-range Python integers."""
+    try:
+        number = int(value)
+    except ValueError as exc:
+        raise CacheManifestIntegrityError("Manifest integer is invalid") from exc
+    if not MIN_SIGNED_64 <= number <= MAX_SIGNED_64:
+        raise CacheManifestIntegrityError(
+            "Manifest integer exceeds the signed-64 range",
+            reason=CacheReason.MANIFEST_BOUNDS,
+        )
+    return number
+
+
+def _reject_float(_value: str) -> None:
+    """Reject floats and non-finite values from canonical JSON altogether."""
+    raise CacheManifestIntegrityError("Manifest values cannot be floating point")
+
+
+def _reject_constant(_value: str) -> None:
+    """Reject JSON's NaN and infinity extensions from canonical JSON."""
+    raise CacheManifestIntegrityError("Manifest values cannot be non-finite")
+
+
+def _validate_canonical_value(value: Any, *, depth: int, nodes: list[int]) -> None:
+    """Enforce bounded JSON-compatible metadata before model construction."""
+    if depth > MAX_NESTING_DEPTH:
+        raise CacheManifestIntegrityError(
+            "Manifest nesting limit exceeded", reason=CacheReason.MANIFEST_BOUNDS
+        )
+    nodes[0] += 1
+    if nodes[0] > MAX_TOTAL_NODES:
+        raise CacheManifestIntegrityError(
+            "Manifest total nodes limit exceeded", reason=CacheReason.MANIFEST_BOUNDS
+        )
+    if value is None or isinstance(value, bool):
+        return
+    if isinstance(value, int):
+        if not MIN_SIGNED_64 <= value <= MAX_SIGNED_64:
+            raise CacheManifestIntegrityError(
+                "Manifest integer exceeds the signed-64 range",
+                reason=CacheReason.MANIFEST_BOUNDS,
+            )
+        return
+    if isinstance(value, str):
+        if len(value.encode("utf-8")) > MAX_STRING_UTF8_BYTES:
+            raise CacheManifestIntegrityError(
+                "Manifest string byte limit exceeded", reason=CacheReason.MANIFEST_BOUNDS
+            )
+        return
+    if isinstance(value, (list, tuple)):
+        if len(value) > MAX_COLLECTION_ITEMS:
+            raise CacheManifestIntegrityError(
+                "Manifest collection item limit exceeded",
+                reason=CacheReason.MANIFEST_BOUNDS,
+            )
+        for item in value:
+            _validate_canonical_value(item, depth=depth + 1, nodes=nodes)
+        return
+    if isinstance(value, Mapping):
+        if len(value) > MAX_COLLECTION_ITEMS:
+            raise CacheManifestIntegrityError(
+                "Manifest collection item limit exceeded",
+                reason=CacheReason.MANIFEST_BOUNDS,
+            )
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise CacheManifestIntegrityError("Manifest metadata keys must be strings")
+            _validate_canonical_value(key, depth=depth + 1, nodes=nodes)
+            _validate_canonical_value(item, depth=depth + 1, nodes=nodes)
+        return
+    raise CacheManifestIntegrityError("Manifest metadata is not JSON-compatible")
 
 
 @dataclass(frozen=True)
@@ -91,17 +178,37 @@ class BlobManifestV1:
             "created_at": self.created_at,
             "signature_algorithm": self.signature_algorithm,
         }
+        if not isinstance(self.schema_version, int) or isinstance(self.schema_version, bool):
+            raise CacheManifestIntegrityError("Manifest schema version must be an integer")
         if self.schema_version != MANIFEST_SCHEMA_VERSION:
-            raise UnsupportedManifestVersionError(
+            raise CacheManifestUnsupportedVersionError(
                 f"Unsupported manifest schema version: {self.schema_version}"
             )
+        if not isinstance(self.payload_format_version, int) or isinstance(
+            self.payload_format_version, bool
+        ):
+            raise CacheManifestIntegrityError(
+                "Payload format version must be an integer"
+            )
         if self.payload_format_version != PAYLOAD_FORMAT_VERSION:
-            raise UnsupportedManifestVersionError(
+            raise CacheManifestUnsupportedVersionError(
                 "Unsupported payload format version: "
                 f"{self.payload_format_version}"
             )
         if any(not isinstance(value, str) or not value for value in required_strings.values()):
-            raise ManifestDecodeError("Canonical manifest requires non-empty string fields")
+            raise CacheManifestIntegrityError(
+                "Canonical manifest requires non-empty string fields"
+            )
+        if any(
+            len(value.encode("utf-8")) > MAX_STRING_UTF8_BYTES
+            for value in required_strings.values()
+        ):
+            raise CacheManifestIntegrityError(
+                "Manifest string byte limit exceeded",
+                reason=CacheReason.MANIFEST_BOUNDS,
+            )
+        if self.signature_algorithm != MANIFEST_SIGNATURE_ALGORITHM:
+            raise CacheManifestIntegrityError("Unsupported manifest signature algorithm")
         if self.state not in {
             "prepared",
             "committed",
@@ -109,19 +216,31 @@ class BlobManifestV1:
             "tombstoned",
             "conflicted",
         }:
-            raise ManifestDecodeError(f"Unsupported manifest lifecycle state: {self.state}")
+            raise CacheManifestIntegrityError(
+                f"Unsupported manifest lifecycle state: {self.state}"
+            )
         if self.digest_algorithm != PAYLOAD_DIGEST_ALGORITHM:
-            raise ManifestDecodeError(
+            raise CacheManifestIntegrityError(
                 f"Unsupported payload digest algorithm: {self.digest_algorithm}"
             )
         if not isinstance(self.byte_size, int) or isinstance(self.byte_size, bool):
-            raise ManifestDecodeError("Canonical manifest byte_size must be an integer")
-        if self.byte_size < 0:
-            raise ManifestDecodeError("Canonical manifest byte_size cannot be negative")
+            raise CacheManifestIntegrityError("Canonical manifest byte_size must be an integer")
+        if not 0 <= self.byte_size <= MAX_SIGNED_64:
+            raise CacheManifestIntegrityError(
+                "Canonical manifest byte_size must be a non-negative signed-64 integer"
+            )
         if not isinstance(self.handler_metadata, Mapping) or not isinstance(
             self.user_metadata, Mapping
         ):
-            raise ManifestDecodeError("Canonical manifest metadata must be string-keyed maps")
+            raise CacheManifestIntegrityError(
+                "Canonical manifest metadata must be string-keyed maps"
+            )
+        if not _HEX_SHA256.fullmatch(self.digest):
+            raise CacheManifestIntegrityError("Canonical manifest digest is invalid")
+        if self.signature and not _HEX_SHA256.fullmatch(self.signature):
+            raise CacheManifestIntegrityError("Canonical manifest signature is invalid")
+        _validate_canonical_value(self.handler_metadata, depth=2, nodes=[0])
+        _validate_canonical_value(self.user_metadata, depth=2, nodes=[0])
         object.__setattr__(
             self, "handler_metadata", _freeze_json_value(self.handler_metadata)
         )
@@ -161,8 +280,14 @@ class BlobManifestV1:
                 allow_nan=False,
             )
         except (TypeError, ValueError) as exc:
-            raise ManifestDecodeError("Manifest metadata is not JSON-compatible") from exc
-        return text.encode("utf-8")
+            raise CacheManifestIntegrityError("Manifest metadata is not JSON-compatible") from exc
+        encoded = text.encode("utf-8")
+        if len(encoded) > MAX_MANIFEST_BYTES:
+            raise CacheManifestIntegrityError(
+                "Canonical manifest byte limit exceeded",
+                reason=CacheReason.MANIFEST_BOUNDS,
+            )
+        return encoded
 
     def signing_bytes(self) -> bytes:
         """Return the complete signed projection, excluding only the signature."""
@@ -171,26 +296,37 @@ class BlobManifestV1:
     def with_signature(self, signature: str) -> "BlobManifestV1":
         """Return a new manifest with an authenticated HMAC value."""
         if not isinstance(signature, str) or not signature:
-            raise ManifestDecodeError("Canonical manifest signature must be non-empty")
+            raise CacheManifestIntegrityError("Canonical manifest signature must be non-empty")
         return replace(self, signature=signature)
 
     @classmethod
     def from_canonical_bytes(cls, raw: bytes) -> "BlobManifestV1":
         """Decode a schema-1 record without interpreting any payload bytes."""
         if not isinstance(raw, bytes) or not raw:
-            raise ManifestDecodeError("Canonical manifest bytes must be non-empty")
+            raise CacheManifestIntegrityError("Canonical manifest bytes must be non-empty")
+        if len(raw) > MAX_MANIFEST_BYTES:
+            raise CacheManifestIntegrityError(
+                "Canonical manifest byte limit exceeded",
+                reason=CacheReason.MANIFEST_BOUNDS,
+            )
         try:
             decoded = raw.decode("utf-8")
         except UnicodeDecodeError as exc:
-            raise ManifestDecodeError("Canonical manifest is not valid UTF-8") from exc
+            raise CacheManifestIntegrityError("Canonical manifest is not valid UTF-8") from exc
         try:
-            record = json.loads(decoded, object_pairs_hook=_reject_duplicate_keys)
+            record = json.loads(
+                decoded,
+                object_pairs_hook=_reject_duplicate_keys,
+                parse_int=_parse_canonical_int,
+                parse_float=_reject_float,
+                parse_constant=_reject_constant,
+            )
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
-            if isinstance(exc, ManifestDecodeError):
+            if isinstance(exc, CacheManifestIntegrityError):
                 raise
-            raise ManifestDecodeError("Canonical manifest is not valid JSON") from exc
+            raise CacheManifestIntegrityError("Canonical manifest is not valid JSON") from exc
         if not isinstance(record, dict):
-            raise ManifestDecodeError("Canonical manifest must be a JSON object")
+            raise CacheManifestIntegrityError("Canonical manifest must be a JSON object")
         expected = {
             "byte_size",
             "created_at",
@@ -210,7 +346,10 @@ class BlobManifestV1:
             "user_metadata",
         }
         if set(record) != expected:
-            raise ManifestDecodeError("Canonical manifest has an unknown or missing field")
+            raise CacheManifestIntegrityError(
+                "Canonical manifest has an unknown or missing field"
+            )
+        _validate_canonical_value(record, depth=1, nodes=[0])
         return cls(**record)
 
 
@@ -220,6 +359,11 @@ __all__ = [
     "MANIFEST_SIGNATURE_ALGORITHM",
     "PAYLOAD_DIGEST_ALGORITHM",
     "PAYLOAD_FORMAT_VERSION",
+    "MAX_MANIFEST_BYTES",
+    "MAX_NESTING_DEPTH",
+    "MAX_COLLECTION_ITEMS",
+    "MAX_TOTAL_NODES",
+    "MAX_STRING_UTF8_BYTES",
     "ManifestDecodeError",
     "UnsupportedManifestVersionError",
 ]
