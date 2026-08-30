@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 02
 current_phase_name: Canonical Storage and Integrity Contract
 status: executing
-stopped_at: Completed 02-01-PLAN.md post-wave SQLite repair
-last_updated: "2026-08-30T13:43:59.276Z"
+stopped_at: Completed 02-02-PLAN.md
+last_updated: "2026-08-30T14:02:48.887Z"
 last_activity: 2026-08-30
 last_activity_desc: Phase 02 execution started
-state_head: e7550925866268f408441d90b41bec92d9d4570c
+state_head: 3ea556c1d71a9d46a7dabb36d633469e298a36c7
 progress:
   total_phases: 8
   completed_phases: 1
   total_plans: 22
-  completed_plans: 16
+  completed_plans: 17
 milestone_name: milestone
 ---
 
@@ -29,29 +29,13 @@ See: .planning/PROJECT.md (updated 2026-08-29)
 ## Current Position
 
 Phase: 02 (Canonical Storage and Integrity Contract) — EXECUTING
-Plan: 2 of 7
+Plan: 3 of 7
 Status: Ready to execute
 Last activity: 2026-08-30 — Phase 02 execution started
 
 Progress: [█░░░░░░░░░] 1 of 8 phases complete
 
 ## Performance Metrics
-
-**Velocity:**
-
-- Total plans completed: 0
-- Average duration: -
-- Total execution time: 0.0 hours
-
-**By Phase:**
-| Phase | Plans | Total | Avg/Plan |
-|-------|-------|-------|----------|
-| - | - | - | - |
-
-**Recent Trend:**
-
-- Last 5 plans: -
-- Trend: No execution data yet
 
 *Updated after each plan completion*
 **Per-Plan Metrics:**
@@ -73,6 +57,7 @@ Progress: [█░░░░░░░░░] 1 of 8 phases complete
 | Phase 01 P13 | 8min | 2 tasks | 7 files |
 | Phase 01 P15 | 35min | 3 tasks | 8 files |
 | Phase 02 P01 | 7h 50m | 2 tasks | 8 files |
+| Phase 02 P02 | 8 min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -125,6 +110,9 @@ Recent decisions affecting current work:
 - [Phase 02]: Only a genuinely absent raw repository record maps to None; malformed, unauthenticated, unsupported, and lifecycle-conflict records are typed failures.
 - [Phase 02]: Read integrity validates one private payload snapshot before handler deserialization.
 - [Phase 02]: SQLite carries raw canonical manifests only through its clear-recovery-snapshotted cache_key_params projection; empty records remain typed corruption.
+- [Phase 02]: JSON and in-memory repositories preserve canonical bytes through reversible base64 metadata transport, while SQLite uses an isolated BLOB table.
+- [Phase 02]: BlobStore admits only exact JsonBackend, SqliteBackend, and InMemoryBackend identities for Phase 2 manifest persistence.
+- [Phase 02]: SQLite sidecar rows are removed only after the existing clear-recovery coordinator establishes terminal cache_entries authority.
 
 ### Pending Todos
 
@@ -148,6 +136,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-30T13:43:59.221Z
-Stopped at: Completed 02-01-PLAN.md post-wave SQLite repair
+Last session: 2026-08-30T14:02:48.849Z
+Stopped at: Completed 02-02-PLAN.md
 Resume file: None
