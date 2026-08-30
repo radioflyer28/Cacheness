@@ -462,3 +462,27 @@ def test_every_direct_read_surface_propagates_a_local_backend_failure(
             assert error.value is failure
     finally:
         store.close()
+
+
+@pytest.mark.parametrize("operation", ("list", "clear"))
+def test_projection_backend_failures_are_typed_on_every_direct_surface(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, operation: str
+):
+    """Compatibility projection failures never bypass the BlobStore taxonomy."""
+    store = BlobStore(tmp_path / operation, backend="json")
+    try:
+        key = store.put({"operation": operation}, key="projection-key")
+        monkeypatch.setattr(store.manifest_repository, "list_keys", lambda: [key])
+        failure = OSError("metadata projection unavailable")
+        monkeypatch.setattr(
+            store.manifest_repository,
+            "list_backend_entries",
+            lambda: (_ for _ in ()).throw(failure),
+        )
+
+        with pytest.raises(CacheBlobBackendError) as error:
+            getattr(store, operation)()
+
+        assert error.value.__cause__ is failure
+    finally:
+        store.close()

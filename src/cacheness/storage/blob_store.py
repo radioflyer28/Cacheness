@@ -48,6 +48,7 @@ from typing import Any, Callable, Dict, List, Optional, Union
 from datetime import datetime, timezone
 
 from ..error_handling import (
+    CacheBlobBackendError,
     CacheBlobLifecycleConflictError,
     CacheBlobManifestMalformedError,
     CacheBlobManifestUnauthenticatedError,
@@ -596,7 +597,7 @@ class BlobStore:
             List of matching blob keys
         """
         self._require_canonical_store()
-        entries = self.backend.list_entries()
+        entries = self._list_backend_entries(operation="list")
         keys = []
 
         for key in self.manifest_repository.list_keys():
@@ -858,6 +859,18 @@ class BlobStore:
                 context={"operation": "put"},
             ) from cleanup_error
 
+    def _list_backend_entries(self, *, operation: str) -> List[Dict[str, Any]]:
+        """Read compatibility projections with the canonical backend taxonomy."""
+        try:
+            return self.manifest_repository.list_backend_entries()
+        except CacheBlobBackendError:
+            raise
+        except (CacheStorageError, OSError, TypeError, ValueError) as exc:
+            raise CacheBlobBackendError(
+                "BlobStore compatibility metadata projection failed",
+                context={"operation": operation},
+            ) from exc
+
     def _entry_locator(
         self,
         entry: Dict[str, Any],
@@ -1023,7 +1036,7 @@ class BlobStore:
     def _preflight_clear_manifests(self) -> List[tuple[str, Path]]:
         """Authenticate every clear target before recovery may mutate anything."""
         manifest_keys = self.manifest_repository.list_keys()
-        backend_entries = self.backend.list_entries()
+        backend_entries = self._list_backend_entries(operation="clear")
         backend_keys = set()
         for entry in backend_entries:
             if not isinstance(entry, dict) or not isinstance(entry.get("cache_key"), str):

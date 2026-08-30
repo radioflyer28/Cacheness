@@ -8,9 +8,14 @@ canonical record. General metadata-backend composition belongs to Phase 4.
 from __future__ import annotations
 
 import base64
+from datetime import datetime, timezone
 from typing import Any, Mapping, Optional, Protocol
 
-from cacheness.error_handling import CacheBlobBackendError, CacheError
+from cacheness.error_handling import (
+    CacheBlobBackendError,
+    CacheBlobMigrationRequiredError,
+    CacheError,
+)
 from cacheness.metadata import InMemoryBackend, JsonBackend, SqliteBackend
 
 try:
@@ -51,6 +56,9 @@ class ManifestRepository(Protocol):
     def list_keys(self) -> list[str]:
         """List logical keys that have canonical records."""
 
+    def list_backend_entries(self) -> list[dict[str, Any]]:
+        """Return compatibility projections with typed backend translation."""
+
 
 def _backend_failure(
     operation: str, backend: object, exc: BaseException
@@ -82,7 +90,10 @@ class _MetadataManifestRepository:
 
         metadata = entry.get("metadata") if isinstance(entry, Mapping) else None
         if not isinstance(metadata, Mapping) or _RAW_MANIFEST_FIELD not in metadata:
-            return None
+            raise CacheBlobMigrationRequiredError(
+                "Compatibility metadata exists without canonical manifest bytes",
+                context={"key": key, "backend": type(self.backend).__name__},
+            )
         encoded = metadata[_RAW_MANIFEST_FIELD]
         if not isinstance(encoded, str):
             exc = ValueError("Canonical manifest record is not a base64 string")
@@ -121,19 +132,35 @@ class _MetadataManifestRepository:
             raise _backend_failure("remove", self.backend, exc) from exc
 
     def list_keys(self) -> list[str]:
-        """Return only keys that carry a raw canonical record."""
+        """Return canonical keys and reject a partial compatibility projection."""
+        entries = self.list_backend_entries()
+        keys = []
+        for entry in entries:
+            if not isinstance(entry, Mapping) or not isinstance(
+                entry.get("cache_key"), str
+            ):
+                raise CacheBlobMigrationRequiredError(
+                    "Compatibility metadata entry has no canonical key",
+                    context={"backend": type(self.backend).__name__},
+                )
+            metadata = entry.get("metadata")
+            if not isinstance(metadata, Mapping) or _RAW_MANIFEST_FIELD not in metadata:
+                raise CacheBlobMigrationRequiredError(
+                    "Compatibility metadata exists without canonical manifest bytes",
+                    context={
+                        "key": entry["cache_key"],
+                        "backend": type(self.backend).__name__,
+                    },
+                )
+            keys.append(entry["cache_key"])
+        return keys
+
+    def list_backend_entries(self) -> list[dict[str, Any]]:
+        """Read backend projections without allowing operational failures to leak."""
         try:
-            entries = self.backend.list_entries()
+            return self.backend.list_entries()
         except _BACKEND_OPERATION_ERRORS as exc:
-            raise _backend_failure("list_keys", self.backend, exc) from exc
-        return [
-            entry["cache_key"]
-            for entry in entries
-            if isinstance(entry, Mapping)
-            and isinstance(entry.get("cache_key"), str)
-            and isinstance(entry.get("metadata"), Mapping)
-            and _RAW_MANIFEST_FIELD in entry["metadata"]
-        ]
+            raise _backend_failure("list_entries", self.backend, exc) from exc
 
 
 class InMemoryManifestRepository(_MetadataManifestRepository):
@@ -190,9 +217,19 @@ class SqliteManifestRepository:
                     "WHERE logical_key = ?",
                     (key,),
                 ).first()
+                metadata_row = None
+                if row is None:
+                    metadata_row = connection.exec_driver_sql(
+                        "SELECT 1 FROM cache_entries WHERE cache_key = ?", (key,)
+                    ).first()
         except _BACKEND_OPERATION_ERRORS as exc:
             raise _backend_failure("get_raw", self.backend, exc) from exc
         if row is None:
+            if metadata_row is not None:
+                raise CacheBlobMigrationRequiredError(
+                    "SQLite compatibility metadata exists without canonical manifest bytes",
+                    context={"key": key, "backend": type(self.backend).__name__},
+                )
             return None
         return bytes(row[0])
 
@@ -203,25 +240,71 @@ class SqliteManifestRepository:
         *,
         entry_data: Optional[Mapping[str, Any]] = None,
     ) -> None:
-        """Upsert exact bytes and preserve existing BlobStore metadata when supplied."""
+        """Atomically publish the compatibility projection and canonical bytes."""
         if not isinstance(record, bytes):
             raise TypeError("Canonical manifest records must be bytes")
         try:
-            if entry_data is not None:
-                self.backend.put_entry(key, dict(entry_data))
             with self.backend._lock, self.backend.engine.begin() as connection:
-                connection.exec_driver_sql(
-                    f"""
-                    INSERT INTO {_SQLITE_MANIFEST_TABLE}
-                    (logical_key, canonical_bytes)
-                    VALUES (?, ?)
-                    ON CONFLICT(logical_key) DO UPDATE SET
-                        canonical_bytes = excluded.canonical_bytes
-                    """,
-                    (key, record),
-                )
+                if entry_data is not None:
+                    self._write_compatibility_projection(connection, key, entry_data)
+                self._write_raw_row(connection, key, record)
         except _BACKEND_OPERATION_ERRORS as exc:
             raise _backend_failure("put_raw", self.backend, exc) from exc
+
+    @staticmethod
+    def _write_compatibility_projection(
+        connection: Any, key: str, entry_data: Mapping[str, Any]
+    ) -> None:
+        """Write the established SQLite projection in the caller transaction."""
+        metadata_value = entry_data.get("metadata", {})
+        metadata = dict(metadata_value) if isinstance(metadata_value, Mapping) else {}
+        created_at = entry_data.get("created_at")
+        if isinstance(created_at, str):
+            created_at = datetime.fromisoformat(created_at)
+        if created_at is None:
+            created_at = datetime.now(timezone.utc)
+
+        connection.exec_driver_sql(
+            """
+            INSERT OR REPLACE INTO cache_entries
+            (cache_key, description, data_type, prefix, file_size,
+             file_hash, entry_signature, cache_key_params,
+             object_type, storage_format, serializer, compression_codec, actual_path,
+             created_at, accessed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                key,
+                entry_data.get("description", ""),
+                entry_data.get("data_type", "unknown"),
+                entry_data.get("prefix", ""),
+                entry_data.get("file_size", 0),
+                metadata.get("file_hash"),
+                metadata.get("entry_signature"),
+                None,
+                metadata.get("object_type"),
+                metadata.get("storage_format"),
+                metadata.get("serializer"),
+                metadata.get("compression_codec"),
+                metadata.get("actual_path"),
+                created_at,
+                datetime.now(timezone.utc),
+            ),
+        )
+
+    @staticmethod
+    def _write_raw_row(connection: Any, key: str, record: bytes) -> None:
+        """Upsert canonical bytes inside the surrounding SQLite transaction."""
+        connection.exec_driver_sql(
+            f"""
+            INSERT INTO {_SQLITE_MANIFEST_TABLE}
+            (logical_key, canonical_bytes)
+            VALUES (?, ?)
+            ON CONFLICT(logical_key) DO UPDATE SET
+                canonical_bytes = excluded.canonical_bytes
+            """,
+            (key, record),
+        )
 
     def remove(self, key: str) -> None:
         """Remove the raw manifest and compatible BlobStore metadata if present."""
@@ -236,16 +319,33 @@ class SqliteManifestRepository:
             raise _backend_failure("remove", self.backend, exc) from exc
 
     def list_keys(self) -> list[str]:
-        """List exact logical keys persisted in the dedicated table."""
+        """List keys while treating compatibility-only rows as non-absence."""
         try:
             with self.backend._lock, self.backend.engine.begin() as connection:
                 rows = connection.exec_driver_sql(
                     f"SELECT logical_key FROM {_SQLITE_MANIFEST_TABLE} "
                     "ORDER BY logical_key"
                 ).all()
+                metadata_rows = connection.exec_driver_sql(
+                    "SELECT cache_key FROM cache_entries"
+                ).all()
         except _BACKEND_OPERATION_ERRORS as exc:
             raise _backend_failure("list_keys", self.backend, exc) from exc
-        return [row[0] for row in rows]
+        keys = [row[0] for row in rows]
+        compatibility_only = {row[0] for row in metadata_rows}.difference(keys)
+        if compatibility_only:
+            raise CacheBlobMigrationRequiredError(
+                "SQLite compatibility metadata exists without canonical manifest bytes",
+                context={"keys": sorted(compatibility_only)},
+            )
+        return keys
+
+    def list_backend_entries(self) -> list[dict[str, Any]]:
+        """Read the SQLite compatibility projection with typed translation."""
+        try:
+            return self.backend.list_entries()
+        except _BACKEND_OPERATION_ERRORS as exc:
+            raise _backend_failure("list_entries", self.backend, exc) from exc
 
 
 def create_manifest_repository(backend: object) -> ManifestRepository:
@@ -289,6 +389,9 @@ class MetadataManifestRepository:
 
     def list_keys(self) -> list[str]:
         return self._repository.list_keys()
+
+    def list_backend_entries(self) -> list[dict[str, Any]]:
+        return self._repository.list_backend_entries()
 
 
 __all__ = [

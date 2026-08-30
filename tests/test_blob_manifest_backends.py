@@ -7,7 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from cacheness.error_handling import CacheBlobBackendError, CacheReason
+from cacheness.error_handling import (
+    CacheBlobBackendError,
+    CacheBlobMigrationRequiredError,
+    CacheReason,
+)
 from cacheness.metadata import InMemoryBackend, JsonBackend, SqliteBackend
 from cacheness.storage.blob_store import BlobStore
 from cacheness.storage.integrity import sign_hmac_sha256
@@ -188,6 +192,83 @@ def test_repository_backend_failures_are_typed_and_preserve_their_cause(
 
     assert error.value.context["reason"] == CacheReason.BLOB_BACKEND_FAILURE.value
     assert error.value.__cause__ is failure
+
+
+@pytest.mark.parametrize("backend_kind", ("memory", "json", "sqlite"))
+def test_compatibility_metadata_without_canonical_bytes_is_not_absence(
+    tmp_path: Path, backend_kind: str
+):
+    """Partial legacy/failed publications remain an inspectable typed outcome."""
+    if backend_kind == "memory":
+        backend = InMemoryBackend()
+        repository = InMemoryManifestRepository(backend)
+    elif backend_kind == "json":
+        backend = JsonBackend(tmp_path / "partial.json")
+        repository = JsonManifestRepository(backend)
+    else:
+        backend = SqliteBackend(tmp_path / "partial.db")
+        repository = SqliteManifestRepository(backend)
+    try:
+        backend.put_entry(
+            "partial",
+            {
+                "data_type": "object",
+                "file_size": 1,
+                "metadata": {"actual_path": "partial.bin"},
+            },
+        )
+
+        with pytest.raises(CacheBlobMigrationRequiredError):
+            repository.get_raw("partial")
+        with pytest.raises(CacheBlobMigrationRequiredError):
+            repository.list_keys()
+    finally:
+        backend.close()
+
+
+def test_sqlite_publication_rolls_back_both_records_on_raw_write_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A canonical BLOB failure cannot leave a newer compatibility projection."""
+    backend = SqliteBackend(tmp_path / "atomic.db")
+    repository = SqliteManifestRepository(backend)
+    original = _canonical_record(label="before")
+    replacement = _canonical_record(label="after")
+    entry_data = {
+        "data_type": "object",
+        "file_size": 7,
+        "created_at": "2026-08-30T00:00:00+00:00",
+        "metadata": {"actual_path": "before.bin", "storage_format": "pickle"},
+    }
+    try:
+        repository.put_raw("atomic", original, entry_data=entry_data)
+        before_entry = backend.get_entry("atomic")
+        assert before_entry is not None
+
+        failure = OSError("canonical BLOB write failed")
+        monkeypatch.setattr(
+            repository,
+            "_write_raw_row",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(failure),
+        )
+        with pytest.raises(CacheBlobBackendError) as error:
+            repository.put_raw(
+                "atomic",
+                replacement,
+                entry_data={
+                    **entry_data,
+                    "metadata": {
+                        "actual_path": "after.bin",
+                        "storage_format": "pickle",
+                    },
+                },
+            )
+
+        assert error.value.__cause__ is failure
+        assert repository.get_raw("atomic") == original
+        assert backend.get_entry("atomic") == before_entry
+    finally:
+        backend.close()
 
 
 @pytest.mark.parametrize(
