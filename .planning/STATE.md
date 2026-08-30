@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 02
 current_phase_name: Canonical Storage and Integrity Contract
 status: executing
-stopped_at: Completed 02-05-PLAN.md
-last_updated: "2026-08-30T14:42:06.974Z"
+stopped_at: Completed 02-06-PLAN.md
+last_updated: "2026-08-30T14:54:42.584Z"
 last_activity: 2026-08-30
 last_activity_desc: Phase 02 execution started
-state_head: 33b0adaa83d03315cc9a20a5a64e8b6d4782e7a6
+state_head: df14dc653c8818d32ee6f2baf2832e5c4aa7f157
 progress:
   total_phases: 8
   completed_phases: 1
   total_plans: 22
-  completed_plans: 20
+  completed_plans: 21
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-08-29)
 ## Current Position
 
 Phase: 02 (Canonical Storage and Integrity Contract) — EXECUTING
-Plan: 6 of 7
+Plan: 7 of 7
 Status: Ready to execute
 Last activity: 2026-08-30 — Phase 02 execution started
 
@@ -61,6 +61,7 @@ Progress: [█░░░░░░░░░] 1 of 8 phases complete
 | Phase 02 P03 | 6min | 2 tasks | 3 files |
 | Phase 02-canonical-storage-and-integrity-contract P04 | 6 min | 2 tasks | 4 files |
 | Phase 02 P05 | 10 min | 2 tasks | 4 files |
+| Phase 02 P06 | 6 min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -122,6 +123,8 @@ Recent decisions affecting current work:
 - [Phase 02]: The future cache seam classifies only explicit BlobStore failures and returns None for compatible direct absence.
 - [Phase 02]: Canonical signing accepts only exact 32-byte key material or strict POSIX no-follow file attestation; reopen never creates fallback keys.
 - [Phase 02]: BlobStore direct reads authenticate and validate signed fields before one guarded snapshot is SHA-256 and size verified for handler deserialization.
+- [Phase 02]: Direct BlobStore operations derive authoritative state only from authenticated committed manifests.
+- [Phase 02]: Metadata patches re-sign only user_metadata; clear builds mappings only after full manifest preflight.
 
 ### Pending Todos
 
@@ -145,6 +148,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-30T14:42:06.914Z
-Stopped at: Completed 02-05-PLAN.md
+Last session: 2026-08-30T14:54:42.522Z
+Stopped at: Completed 02-06-PLAN.md
 Resume file: None

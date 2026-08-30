@@ -8,13 +8,13 @@
 ### Storage Lifecycle
 
 - [x] **STOR-01**: Every stored entry uses one versioned canonical manifest across all supported backends.
-- [ ] **STOR-02**: Normal reads expose only committed entry generations.
+- [x] **STOR-02**: Normal reads expose only committed entry generations.
 - [ ] **STOR-03**: A write exposes either the previous complete generation or the new complete generation, never partial payload or metadata state.
 - [ ] **STOR-04**: A failed write preserves the last valid generation and leaves any residue detectable and recoverable.
 - [ ] **STOR-05**: Overwrite, delete, clear, and close operations are idempotent and clean up both payload and metadata state.
 - [ ] **STOR-06**: Operators can run dry-run and resumable reconciliation that detects inconsistent state and safely repairs, quarantines, or reports it.
 - [ ] **STOR-07**: Same-key races have deterministic outcomes through per-key coordination and backend generation checks without globally serializing distinct keys.
-- [ ] **STOR-08**: Direct `BlobStore` operations distinguish missing, corrupt, conflict, and backend failures through typed results or exceptions.
+- [x] **STOR-08**: Direct `BlobStore` operations distinguish missing, corrupt, conflict, and backend failures through typed results or exceptions.
 
 ### Backend Unification
 
@@ -40,11 +40,11 @@
 - [x] **SECU-01**: Filesystem reads, writes, deletes, and listings reject traversal, absolute-path, drive, UNC, and symlink escapes from the configured root.
 - [x] **SECU-02**: Structured metadata uses typed safe parsers, and metadata-controlled `eval` is eliminated.
 - [x] **SECU-03**: Configured manifest authenticity and payload integrity are verified before deserialization.
-- [ ] **SECU-04**: Required signing fails closed when keys, signatures, permissions, or signer configuration are missing or invalid.
-- [ ] **SECU-05**: Signed manifests bind critical locator, handler/type, format, and lifecycle-generation fields.
+- [x] **SECU-04**: Required signing fails closed when keys, signatures, permissions, or signer configuration are missing or invalid.
+- [x] **SECU-05**: Signed manifests bind critical locator, handler/type, format, and lifecycle-generation fields.
 - [x] **SECU-06**: Metadata query fields are validated and safely constructed rather than interpolated into backend queries.
 - [x] **SECU-07**: Documentation states the trusted-application-payload boundary and the risks and configuration requirements of unsafe serializers.
-- [ ] **SECU-08**: `BlobStore` raises a typed integrity exception for corrupt or invalidly signed entries, while `UnifiedCache` may translate it into a separately recorded cache miss.
+- [x] **SECU-08**: `BlobStore` raises a typed integrity exception for corrupt or invalidly signed entries, while `UnifiedCache` may translate it into a separately recorded cache miss.
 
 ### Migration and Compatibility
 
@@ -92,13 +92,13 @@ Deferred to future releases and not included in the current roadmap.
 | Requirement | Phase | Status |
 |-------------|-------|--------|
 | STOR-01 | Phase 2 | Complete |
-| STOR-02 | Phase 2 | Pending |
+| STOR-02 | Phase 2 | Complete |
 | STOR-03 | Phase 3 | Pending |
 | STOR-04 | Phase 3 | Pending |
 | STOR-05 | Phase 3 | Pending |
 | STOR-06 | Phase 3 | Pending |
 | STOR-07 | Phase 3 | Pending |
-| STOR-08 | Phase 2 | Pending |
+| STOR-08 | Phase 2 | Complete |
 | BACK-01 | Phase 5 | Pending |
 | BACK-02 | Phase 4 | Pending |
 | BACK-03 | Phase 4 | Pending |
@@ -115,11 +115,11 @@ Deferred to future releases and not included in the current roadmap.
 | SECU-01 | Phase 1 | Complete |
 | SECU-02 | Phase 1 | Complete |
 | SECU-03 | Phase 2 | Complete |
-| SECU-04 | Phase 2 | Pending |
-| SECU-05 | Phase 2 | Pending |
+| SECU-04 | Phase 2 | Complete |
+| SECU-05 | Phase 2 | Complete |
 | SECU-06 | Phase 1 | Complete |
 | SECU-07 | Phase 1 | Complete |
-| SECU-08 | Phase 2 | Pending |
+| SECU-08 | Phase 2 | Complete |
 | MIGR-01 | Phase 1 | Complete |
 | MIGR-02 | Phase 2 | Complete |
 | MIGR-03 | Phase 7 | Pending |
