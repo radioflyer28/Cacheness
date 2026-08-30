@@ -18,6 +18,7 @@ from cacheness.config import (
     CompressionConfig,
     SerializationConfig,
     HandlerConfig,
+    LifecycleLimits,
     SecurityConfig,
     ConfigValidationError,
     validate_config,
@@ -162,6 +163,55 @@ class TestCacheConfigBlobIntegration:
         assert config.metadata.metadata_backend_options["connection_url"] == "postgresql://localhost/cache"
         assert config.blob.blob_backend == "s3"
         assert config.blob.blob_backend_options["bucket"] == "my-cache"
+
+
+# =============================================================================
+# Test LifecycleLimits
+# =============================================================================
+
+class TestLifecycleLimits:
+    """Test caller-owned lifecycle policy and BlobStore identity handoff."""
+
+    def test_defaults_exports_and_blobstore_identity(self, temp_dir):
+        """One config-owned limits instance reaches the direct storage facade unchanged."""
+        limits = LifecycleLimits()
+        assert limits.max_operation_record_bytes == 1_048_576
+        assert limits.max_operation_field_bytes == 8_192
+        assert limits.manifest_page_size == 256
+        assert limits.operation_page_size == 256
+        assert limits.max_reconcile_actions == 10_000
+        assert limits.orphan_grace_seconds == 300.0
+        assert limits.close_wait_seconds == 30.0
+        assert cacheness.LifecycleLimits is LifecycleLimits
+
+        config = CacheConfig(cache_dir=str(temp_dir / "configured"), lifecycle_limits=limits)
+        from cacheness.storage import BlobStore
+
+        store = BlobStore(config=config, backend="json")
+        try:
+            assert config.lifecycle_limits is limits
+            assert store.config is config
+            assert store.lifecycle_limits is limits
+            assert store.lifecycle.lifecycle_limits is limits
+        finally:
+            store.close()
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        (
+            ("max_operation_record_bytes", True),
+            ("max_operation_field_bytes", 0),
+            ("manifest_page_size", -1),
+            ("operation_page_size", False),
+            ("max_reconcile_actions", 0),
+            ("orphan_grace_seconds", float("nan")),
+            ("close_wait_seconds", float("inf")),
+        ),
+    )
+    def test_invalid_lifecycle_limit_values_are_rejected(self, field, value):
+        """Boolean, non-finite, and non-positive policy values never normalize."""
+        with pytest.raises(ValueError, match=field):
+            LifecycleLimits(**{field: value})
 
 
 # =============================================================================
