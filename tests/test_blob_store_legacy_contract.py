@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 from pathlib import Path
@@ -10,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from cacheness.error_handling import CacheBlobMigrationRequiredError
+from cacheness.storage.blob_store import BlobStore
 from cacheness.storage.legacy_manifest import (
     LegacyManifestRecognitionError,
     recognize_legacy_fixture_tree,
@@ -42,7 +44,7 @@ def _tree_evidence(root: Path) -> dict[str, tuple[str, int]]:
 
 
 @pytest.mark.parametrize("fixture_id", FIXTURE_IDS)
-def test_exact_legacy_fixture_identity_is_attached_in_memory_without_mutation(
+def test_exact_legacy_fixture_identity_is_attached_in_memory_and_non_mutating(
     tmp_path: Path, fixture_id: str
 ) -> None:
     """Every normative Phase 1 tree has one narrow, read-only identity."""
@@ -52,7 +54,7 @@ def test_exact_legacy_fixture_identity_is_attached_in_memory_without_mutation(
     source_before = _tree_evidence(source)
     copy_before = _tree_evidence(copied)
 
-    identity = recognize_legacy_fixture_tree(copied)
+    identity = BlobStore.inspect_legacy_fixture_tree(copied)
 
     assert identity.fixture_id == fixture_id
     assert identity.source_version.startswith("0.3.")
@@ -66,12 +68,46 @@ def test_exact_legacy_fixture_identity_is_attached_in_memory_without_mutation(
     assert _tree_evidence(copied) == copy_before
 
 
-def test_unknown_lookalike_is_typed_and_never_falls_back_or_mutates(tmp_path: Path) -> None:
-    """A similar tree with extra evidence is never guessed as a legacy format."""
+@pytest.mark.parametrize("fixture_id", FIXTURE_IDS)
+def test_blob_store_read_surfaces_report_exact_legacy_migration_without_mutation(
+    tmp_path: Path, fixture_id: str
+) -> None:
+    """Direct read APIs never treat exact legacy evidence as an ordinary miss."""
+    source = FIXTURE_ROOT / fixture_id
+    copied = tmp_path / fixture_id
+    shutil.copytree(source, copied, copy_function=shutil.copy2)
+    before = _tree_evidence(copied)
+
+    with BlobStore(cache_dir=copied) as store:
+        assert store.legacy_identity is not None
+        for operation in (
+            lambda: store.get("historical-key"),
+            lambda: store.get_metadata("historical-key"),
+            lambda: store.exists("historical-key"),
+            lambda: store.list(),
+        ):
+            with pytest.raises(CacheBlobMigrationRequiredError):
+                operation()
+
+    assert _tree_evidence(copied) == before
+
+
+def test_unknown_lookalike_is_typed_and_non_mutating(tmp_path: Path) -> None:
+    """A partial split-map tree is never guessed as a legacy format."""
     source = FIXTURE_ROOT / "json-split-unsigned-v037"
     copied = tmp_path / source.name
     shutil.copytree(source, copied, copy_function=shutil.copy2)
-    (copied / "unexpected.json").write_text("{}", encoding="utf-8")
+    metadata_path = copied / "metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata.pop("file_sizes")
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    os.utime(
+        metadata_path,
+        ns=(
+            metadata_path.stat().st_atime_ns,
+            source.joinpath("metadata.json").stat().st_mtime_ns,
+        ),
+    )
     before = _tree_evidence(copied)
 
     with pytest.raises(LegacyManifestRecognitionError):
@@ -86,11 +122,17 @@ def test_malformed_signed_legacy_evidence_is_typed_and_non_mutating(tmp_path: Pa
     copied = tmp_path / source.name
     shutil.copytree(source, copied, copy_function=shutil.copy2)
     metadata_path = copied / "metadata.json"
-    payload = metadata_path.read_text(encoding="utf-8").replace(
-        '"entry_signature": "', '"entry_signature": "not-a-valid-signature', 1
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    signature_key = next(iter(metadata["entry_signature"]))
+    metadata["entry_signature"][signature_key] = "g" * 64
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    os.utime(
+        metadata_path,
+        ns=(
+            metadata_path.stat().st_atime_ns,
+            source.joinpath("metadata.json").stat().st_mtime_ns,
+        ),
     )
-    metadata_path.write_text(payload, encoding="utf-8")
-    os.utime(metadata_path, ns=(metadata_path.stat().st_atime_ns, source.joinpath("metadata.json").stat().st_mtime_ns))
     before = _tree_evidence(copied)
 
     with pytest.raises(LegacyManifestRecognitionError):

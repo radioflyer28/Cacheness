@@ -72,8 +72,9 @@ from .integrity import (
 )
 from .manifest import BlobManifestV1, ManifestDecodeError
 from .manifest_repository import create_manifest_repository
+from .legacy_manifest import LegacyManifestIdentity, recognize_legacy_fixture_tree
 from .path_security import encode_physical_name, resolve_managed_locator
-from ..metadata import MetadataBackend as CoreMetadataBackend
+from ..metadata import InMemoryBackend, MetadataBackend as CoreMetadataBackend
 from ..metadata import SqliteBackend
 
 # Import CacheConfig for proper handler configuration
@@ -179,6 +180,13 @@ class BlobStore:
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.guarded_handler_io = GuardedHandlerIO(self.cache_dir)
+        self._legacy_identity: LegacyManifestIdentity | None = None
+        # A compatibility fixture is recognized only when it presents the
+        # fixed provenance filename.  This is not a directory scan and runs
+        # before metadata/key initialization so inspection cannot create a
+        # sidecar, rotate a key, or convert the historical store.
+        if (self.cache_dir / "provenance.json").is_file():
+            self._legacy_identity = recognize_legacy_fixture_tree(self.cache_dir)
         
         self.compression = compression
         self.compression_level = compression_level
@@ -195,7 +203,9 @@ class BlobStore:
         )
         
         # Initialize metadata backend
-        if backend is None or backend == "json":
+        if self._legacy_identity is not None:
+            self.backend = InMemoryBackend()
+        elif backend is None or backend == "json":
             self.backend = JsonBackend(self.cache_dir / "cache_metadata.json")
         elif backend == "sqlite":
             from .backends import SqliteBackend
@@ -216,7 +226,10 @@ class BlobStore:
         # identities. Capability-shaped or wrapped backends never inherit a
         # crash boundary merely because they expose similarly named methods.
         self._clear_recovery = None
-        if ClearRecoveryCoordinator.can_coordinate(self.backend):
+        if (
+            self._legacy_identity is None
+            and ClearRecoveryCoordinator.can_coordinate(self.backend)
+        ):
             self._clear_recovery = ClearRecoveryCoordinator(
                 self.guarded_handler_io.file_ops,
                 self.backend,
@@ -230,6 +243,21 @@ class BlobStore:
                 raise
         
         logger.debug(f"BlobStore initialized at {self.cache_dir}")
+
+    @property
+    def legacy_identity(self) -> LegacyManifestIdentity | None:
+        """Expose the attached compatibility identity without persisting it."""
+        return self._legacy_identity
+
+    @staticmethod
+    def inspect_legacy_fixture_tree(root: str | Path) -> LegacyManifestIdentity:
+        """Return an in-memory identity for exact read-only legacy evidence.
+
+        Canonical storage never invokes this compatibility adapter as a
+        fallback.  Callers may use it to inspect one known historical store
+        before an explicit Phase 7 migration.
+        """
+        return recognize_legacy_fixture_tree(root)
     
     @_clear_coordinated
     def put(
@@ -250,6 +278,7 @@ class BlobStore:
         Returns:
             The blob key (can be used to retrieve the blob)
         """
+        self._require_canonical_store()
         # Generate key
         if self.content_addressable:
             # Use content hash as key
@@ -368,6 +397,7 @@ class BlobStore:
         Returns:
             The stored data, or None if not found
         """
+        self._require_canonical_store()
         authenticated = self._load_authenticated_manifest(
             key,
             operation="get",
@@ -419,6 +449,7 @@ class BlobStore:
         Returns:
             Metadata dictionary, or None if not found
         """
+        self._require_canonical_store()
         authenticated = self._load_authenticated_manifest(
             key,
             operation="get_metadata",
@@ -441,6 +472,7 @@ class BlobStore:
         Returns:
             True if successful, False if blob not found
         """
+        self._require_canonical_store()
         if not isinstance(metadata, dict):
             raise CacheBlobManifestMalformedError(
                 "BlobStore metadata patches must be dictionaries"
@@ -485,6 +517,7 @@ class BlobStore:
         Returns:
             True if deleted, False if not found
         """
+        self._require_canonical_store()
         authenticated = self._load_authenticated_manifest(
             key,
             operation="delete",
@@ -511,6 +544,7 @@ class BlobStore:
         Returns:
             True if the blob exists
         """
+        self._require_canonical_store()
         authenticated = self._load_authenticated_manifest(
             key,
             operation="exists",
@@ -556,6 +590,7 @@ class BlobStore:
         Returns:
             List of matching blob keys
         """
+        self._require_canonical_store()
         entries = self.backend.list_entries()
         keys = []
 
@@ -598,6 +633,7 @@ class BlobStore:
         Returns:
             Number of blobs removed
         """
+        self._require_canonical_store()
         if self._clear_recovery is None:
             raise ClearRecoveryCoordinator.unsupported_error(self.backend)
 
@@ -742,6 +778,11 @@ class BlobStore:
             # Fall back to repr for non-pickleable objects
             serialized = repr(data).encode()
         return hashlib.sha256(serialized).hexdigest()[:16]
+
+    def _require_canonical_store(self) -> None:
+        """Reject every public operation on exact read-only legacy evidence."""
+        if self._legacy_identity is not None:
+            self._legacy_identity.require_explicit_migration()
     
     def _storage_id_for_key(self, key: str) -> str:
         """Map one public logical key to a backend-safe physical ID."""
