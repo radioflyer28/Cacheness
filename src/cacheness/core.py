@@ -11,6 +11,7 @@ import xxhash
 import inspect
 import threading
 import logging
+import uuid
 import warnings
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
@@ -747,6 +748,15 @@ class UnifiedCache:
             namespace="unified-cache",
         )
 
+    @classmethod
+    def _candidate_storage_id_for_cache_key(cls, cache_key: str, prefix: str = "") -> str:
+        """Return a private replacement ID that cannot overwrite a live payload."""
+        return f"{cls._storage_id_for_cache_key(cache_key, prefix)}-candidate-{uuid.uuid4().hex}"
+
+    def _discard_uncommitted_payload(self, locator: Path | str) -> None:
+        """Remove a candidate payload that has never been published in metadata."""
+        self.guarded_handler_io.file_ops.delete(locator)
+
     def _entry_locator(
         self,
         entry: Dict[str, Any],
@@ -988,7 +998,7 @@ class UnifiedCache:
         # Get appropriate handler
         handler = self.handlers.get_handler(data)
         cache_key = self._create_cache_key(kwargs)
-        storage_id = self._storage_id_for_cache_key(cache_key, prefix)
+        storage_id = self._candidate_storage_id_for_cache_key(cache_key, prefix)
 
         # A put can overwrite an entry or trigger the backend's conservative
         # size cleanup. Validate the complete visible set before publishing a
@@ -996,6 +1006,12 @@ class UnifiedCache:
         self._preflight_entries(
             self.metadata_backend.list_entries(),
             operation="put",
+        )
+        previous_entry = self.metadata_backend.get_entry(cache_key)
+        previous_locator = (
+            self._entry_locator(previous_entry, cache_key, operation="put")
+            if previous_entry is not None
+            else None
         )
 
         try:
@@ -1019,9 +1035,10 @@ class UnifiedCache:
                 if not self._is_valid_file_hash(file_hash):
                     # Integrity-enabled entries are not allowed to fall back to
                     # the same missing-digest representation used when the
-                    # feature is explicitly disabled. Remove the just-published
-                    # payload before refusing the metadata commit.
-                    self.guarded_handler_io.file_ops.delete(result["actual_path"])
+                    # feature is explicitly disabled. The candidate has never
+                    # been recorded in metadata, so discarding it cannot damage
+                    # an older payload still committed for this cache key.
+                    self._discard_uncommitted_payload(result["actual_path"])
                     raise CacheIntegrityError(
                         "Unable to calculate a complete payload integrity digest"
                     )
@@ -1078,6 +1095,14 @@ class UnifiedCache:
                     # Continue without signature for backward compatibility
             
             self.metadata_backend.put_entry(cache_key, entry_data)
+
+            if previous_locator is not None:
+                try:
+                    self.guarded_handler_io.file_ops.delete(previous_locator)
+                except Exception:
+                    logger.exception(
+                        "Replacement metadata committed but prior payload cleanup failed"
+                    )
 
             # Handle custom metadata if provided
             if custom_metadata and self._supports_custom_metadata():

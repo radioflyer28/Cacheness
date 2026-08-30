@@ -4,6 +4,7 @@ Tests for cache file integrity verification functionality.
 
 import pytest
 import tempfile
+from copy import deepcopy
 from pathlib import Path
 import numpy as np
 
@@ -186,6 +187,32 @@ class TestCacheIntegrity:
 
         cache_key = cache._create_cache_key({"test_key": "unverified"})
         assert cache.metadata_backend.get_entry(cache_key) is None
+
+    def test_overwrite_digest_failure_preserves_the_committed_entry(
+        self, temp_cache, monkeypatch
+    ):
+        """A failed replacement digest must not damage the still-committed value."""
+        cache = temp_cache
+        cache.put({"message": "committed"}, test_key="replace-me")
+        cache_key = cache._create_cache_key({"test_key": "replace-me"})
+        entry_before = cache.metadata_backend.get_entry(cache_key)
+        assert entry_before is not None
+        entry_before = deepcopy(entry_before)
+        payload_before = Path(entry_before["metadata"]["actual_path"])
+        payload_bytes_before = payload_before.read_bytes()
+        candidate_paths_before = set(Path(cache.cache_dir).glob("*candidate-*"))
+        calculate_file_hash = cache._calculate_file_hash
+
+        monkeypatch.setattr(cache, "_calculate_file_hash", lambda _path: None)
+
+        with pytest.raises(CacheIntegrityError, match="digest"):
+            cache.put({"message": "replacement"}, test_key="replace-me")
+
+        assert cache.metadata_backend.get_entry(cache_key) == entry_before
+        assert payload_before.read_bytes() == payload_bytes_before
+        monkeypatch.setattr(cache, "_calculate_file_hash", calculate_file_hash)
+        assert cache.get(test_key="replace-me") == {"message": "committed"}
+        assert set(Path(cache.cache_dir).glob("*candidate-*")) == candidate_paths_before
 
     def test_integrity_verification_disabled_skips_check(self):
         """Test that disabling verification skips integrity check completely."""
