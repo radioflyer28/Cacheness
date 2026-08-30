@@ -9,8 +9,11 @@ from typing import Any
 import pytest
 
 from cacheness.error_handling import (
+    CacheBlobBackendError,
     CacheBlobLifecycleConflictError,
+    CacheBlobManifestMalformedError,
     CacheBlobManifestUnauthenticatedError,
+    CacheBlobManifestUnsupportedVersionError,
     CacheBlobPayloadTamperedError,
 )
 from cacheness.storage import BlobStore
@@ -370,5 +373,92 @@ def test_delete_and_clear_preflight_authenticated_manifests_before_mutation(
         assert store.manifest_repository.get_raw(first) is not None
         assert store.manifest_repository.get_raw(second) is not None
         assert store.delete("absent-delete") is False
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    ("fault", "error_type"),
+    (
+        ("malformed", CacheBlobManifestMalformedError),
+        ("future_schema", CacheBlobManifestUnsupportedVersionError),
+        ("conflict", CacheBlobLifecycleConflictError),
+    ),
+)
+def test_every_direct_read_surface_preserves_ordered_typed_failures(
+    tmp_path, fault: str, error_type: type[Exception]
+):
+    """Present corrupt, future, and conflicted records never become misses."""
+    store = BlobStore(tmp_path / fault, backend="json")
+    try:
+        key = store.put({"fault": fault}, key="fault-key")
+        manifest = BlobManifestV1.from_canonical_bytes(
+            store.manifest_repository.get_raw(key) or b""
+        )
+        payload_path = Path(manifest.locator)
+        payload_before = payload_path.read_bytes()
+        payload_mtime_before = payload_path.stat().st_mtime_ns
+        if fault == "malformed":
+            store.manifest_repository.put_raw(key, b"{")
+        elif fault == "future_schema":
+            future_manifest = json.loads(
+                store.manifest_repository.get_raw(key) or b"{}"
+            )
+            future_manifest["schema_version"] = 2
+            store.manifest_repository.put_raw(
+                key,
+                json.dumps(
+                    future_manifest,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8"),
+            )
+        else:
+            _replace_signed_manifest(store, key, state="prepared")
+        raw_before = store.manifest_repository.get_raw(key)
+        assert raw_before is not None
+
+        for operation in (
+            lambda: store.get(key),
+            lambda: store.get_metadata(key),
+            lambda: store.exists(key),
+            lambda: store.list(),
+        ):
+            with pytest.raises(error_type):
+                operation()
+            assert store.manifest_repository.get_raw(key) == raw_before
+            assert payload_path.read_bytes() == payload_before
+            assert payload_path.stat().st_mtime_ns == payload_mtime_before
+    finally:
+        store.close()
+
+
+def test_every_direct_read_surface_propagates_a_local_backend_failure(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    """A backend fault remains typed across get, metadata, existence, and list."""
+    store = BlobStore(tmp_path / "backend-failure", backend="json")
+    try:
+        key = store.put({"backend": "failure"}, key="backend-key")
+        raw_before = store.manifest_repository.get_raw(key)
+        assert raw_before is not None
+        failure = CacheBlobBackendError("injected local repository failure")
+        monkeypatch.setattr(
+            store.manifest_repository,
+            "get_raw",
+            lambda _key: (_ for _ in ()).throw(failure),
+        )
+        monkeypatch.setattr(store.manifest_repository, "list_keys", lambda: [key])
+
+        for operation in (
+            lambda: store.get(key),
+            lambda: store.get_metadata(key),
+            lambda: store.exists(key),
+            lambda: store.list(),
+        ):
+            with pytest.raises(CacheBlobBackendError) as error:
+                operation()
+            assert error.value is failure
     finally:
         store.close()
