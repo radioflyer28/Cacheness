@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import logging
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -45,6 +46,59 @@ def test_strict_key_provider_requires_explicit_initialization(tmp_path):
     provider.initialize_new_store()
     assert provider.get_key() == key_path.read_bytes()
     assert len(key_path.read_bytes()) == 32
+
+
+def test_key_provider_returns_the_attested_winner_of_a_first_write_race(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    """A normal exclusive-create race loads the winner instead of returning None."""
+    import cacheness.storage.integrity as integrity_module
+
+    key_path = tmp_path / "blob_manifest_hmac_key.bin"
+    provider = ManifestKeyProvider(key_path)
+    original_open = integrity_module.os.open
+
+    def winner_open(path, flags, *args):
+        if flags & os.O_EXCL:
+            Path(path).write_bytes(_KEY)
+            Path(path).chmod(0o600)
+            raise FileExistsError
+        return original_open(path, flags, *args)
+
+    monkeypatch.setattr(integrity_module.os, "open", winner_open)
+
+    assert provider.initialize_new_store() == _KEY
+    assert provider.get_key() == _KEY
+
+
+def test_key_provider_removes_its_partial_key_when_persistence_fails(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    """A failed first write leaves no malformed key to block later initialization."""
+    import cacheness.storage.integrity as integrity_module
+
+    key_path = tmp_path / "blob_manifest_hmac_key.bin"
+    provider = ManifestKeyProvider(key_path)
+    monkeypatch.setattr(integrity_module.os, "write", lambda *_args: 0)
+
+    with pytest.raises(ManifestKeyError):
+        provider.initialize_new_store()
+
+    assert not key_path.exists()
+
+
+def test_first_store_initialization_does_not_log_an_expected_missing_key(
+    tmp_path, caplog: pytest.LogCaptureFixture
+):
+    """A successful first write does not emit a false public security alert."""
+    caplog.set_level(logging.ERROR, logger="cacheness.error_handling")
+    store = BlobStore(tmp_path)
+    try:
+        store.put({"first": "write"}, key="first-key")
+    finally:
+        store.close()
+
+    assert "Unable to read canonical manifest key" not in caplog.text
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX ownership and mode contract")

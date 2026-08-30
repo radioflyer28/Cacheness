@@ -112,17 +112,36 @@ class ManifestKeyProvider:
                 0o600,
             )
         except FileExistsError:
-            return
+            # A concurrent first writer won the exclusive-create race.  Its
+            # key is authoritative only after the same no-follow attestation
+            # used by ordinary reads succeeds.
+            return self._read_existing_key()
         except OSError as exc:
             raise ManifestKeyError("Unable to create canonical manifest key") from exc
+        created_metadata = os.fstat(descriptor)
         try:
             self._write_all(descriptor, key)
             os.fsync(descriptor)
         except OSError as exc:
+            self._remove_partial_key(created_metadata)
             raise ManifestKeyError("Unable to persist canonical manifest key") from exc
         finally:
             os.close(descriptor)
         return self._read_existing_key()
+
+    def get_or_initialize_new_store(self) -> bytes:
+        """Read a current key or atomically initialize a proven-empty store.
+
+        Missing key material is expected while the first canonical record is
+        being created, so this path deliberately avoids constructing a public
+        read failure merely to use it as control flow.
+        """
+        if self._provided_key is not None:
+            return self._provided_key
+        existing = self._read_existing_key(missing_ok=True)
+        if existing is not None:
+            return existing
+        return self.initialize_new_store()
 
     @staticmethod
     def _write_all(descriptor: int, data: bytes) -> None:
@@ -134,7 +153,21 @@ class ManifestKeyProvider:
                 raise OSError("Unable to write canonical manifest key")
             view = view[written:]
 
-    def _read_existing_key(self) -> bytes:
+    def _remove_partial_key(self, created_metadata: os.stat_result) -> None:
+        """Remove only the incomplete key inode created by this provider."""
+        try:
+            current = os.lstat(self.key_path)
+            if (current.st_dev, current.st_ino) == (
+                created_metadata.st_dev,
+                created_metadata.st_ino,
+            ):
+                os.unlink(self.key_path)
+        except OSError:
+            # The original persistence failure remains authoritative.  A
+            # later open verifies any surviving evidence fail-closed.
+            pass
+
+    def _read_existing_key(self, *, missing_ok: bool = False) -> bytes | None:
         if os.name != "posix":
             raise ManifestKeyError(
                 "File-backed canonical manifest keys are unsupported on this platform"
@@ -157,6 +190,10 @@ class ManifestKeyProvider:
                 key += chunk
         except ManifestKeyError:
             raise
+        except FileNotFoundError:
+            if missing_ok:
+                return None
+            raise ManifestKeyError("Unable to read canonical manifest key") from None
         except OSError as exc:
             raise ManifestKeyError("Unable to read canonical manifest key") from exc
         finally:

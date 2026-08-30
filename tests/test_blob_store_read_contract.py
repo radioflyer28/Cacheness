@@ -15,6 +15,7 @@ from cacheness.error_handling import (
     CacheBlobManifestUnauthenticatedError,
     CacheBlobManifestUnsupportedVersionError,
     CacheBlobPayloadTamperedError,
+    CacheUnsafePathError,
 )
 from cacheness.storage import BlobStore
 from cacheness.storage.integrity import sign_hmac_sha256
@@ -322,6 +323,33 @@ def test_update_metadata_resigns_only_user_metadata_and_rejects_structure(
             store.update_metadata(key, {"locator": "/unsafe-replacement"})
         assert store.manifest_repository.get_raw(key) == raw_before_rejected_patch
         assert store.update_metadata("absent-update", {"owner": "none"}) is False
+    finally:
+        store.close()
+
+
+def test_update_metadata_rejects_an_authenticated_outside_root_locator(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    """Metadata mutation validates the signed locator before re-signing it."""
+    store = BlobStore(tmp_path / "outside-locator", backend="json")
+    store.handlers = _SingleHandlerRegistry(_TracingHandler([]))
+    try:
+        key = store.put("payload", key="outside-key")
+        _replace_signed_manifest(store, key, locator=str(tmp_path / "outside.bin"))
+        raw_before = store.manifest_repository.get_raw(key)
+        assert raw_before is not None
+        monkeypatch.setattr(
+            store.manifest_repository,
+            "put_raw",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("unsafe locator must fail before manifest mutation")
+            ),
+        )
+
+        with pytest.raises(CacheUnsafePathError):
+            store.update_metadata(key, {"label": "blocked"})
+
+        assert store.manifest_repository.get_raw(key) == raw_before
     finally:
         store.close()
 

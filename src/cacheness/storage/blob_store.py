@@ -330,9 +330,11 @@ class BlobStore:
             # A custom handler may retain the historical write-result shape.
             # Its declared contract, not an incidental compatibility storage
             # label, is authoritative for the canonical payload identity.
-            payload_format = result.get("payload_format", handler.payload_format)
+            payload_format = result.get(
+                "payload_format", getattr(handler, "payload_format", handler.data_type)
+            )
             payload_format_version = result.get(
-                "payload_format_version", handler.payload_format_version
+                "payload_format_version", getattr(handler, "payload_format_version", 1)
             )
             handler_metadata["storage_format"] = storage_format
             handler_metadata.setdefault("compression_codec", self.compression)
@@ -493,6 +495,7 @@ class BlobStore:
         authenticated = self._load_authenticated_manifest(
             key,
             operation="update_metadata",
+            require_locator=True,
         )
         if authenticated is None:
             return False
@@ -796,17 +799,17 @@ class BlobStore:
 
     def _manifest_key(self, *, initialize_new_store: bool = False) -> bytes:
         """Return the strict persistent key without silently downgrading signing."""
+        if initialize_new_store and not self.manifest_repository.list_keys():
+            try:
+                return self._manifest_key_provider.get_or_initialize_new_store()
+            except ManifestKeyError as exc:
+                raise CacheBlobManifestUnauthenticatedError(
+                    "Canonical BlobStore signing key is unavailable",
+                    reason=CacheReason.MANIFEST_SIGNING_KEY_INVALID,
+                ) from exc
         try:
             return self._manifest_key_provider.get_key()
         except ManifestKeyError as exc:
-            if initialize_new_store and not self.manifest_repository.list_keys():
-                try:
-                    return self._manifest_key_provider.initialize_new_store()
-                except ManifestKeyError as initialization_error:
-                    raise CacheBlobManifestUnauthenticatedError(
-                        "Canonical BlobStore signing key is unavailable",
-                        reason=CacheReason.MANIFEST_SIGNING_KEY_INVALID,
-                    ) from initialization_error
             raise CacheBlobManifestUnauthenticatedError(
                 "Canonical BlobStore signing key is unavailable",
                 reason=CacheReason.MANIFEST_SIGNING_KEY_INVALID,
