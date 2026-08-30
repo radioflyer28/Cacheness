@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import pickle
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -12,7 +14,14 @@ from cacheness.error_handling import (
     CacheManifestIntegrityError,
     CacheManifestUnsupportedVersionError,
 )
-from cacheness.handlers import ArrayHandler, HandlerRegistry, ObjectHandler
+from cacheness.handlers import (
+    BLOSC2_AVAILABLE,
+    ArrayHandler,
+    HandlerRegistry,
+    ObjectHandler,
+    PANDAS_AVAILABLE,
+    PandasDataFrameHandler,
+)
 from cacheness.storage import BlobManifestV1
 from cacheness.storage.integrity import sign_hmac_sha256, verify_hmac_sha256
 from cacheness.storage.manifest import (
@@ -333,3 +342,101 @@ def test_unknown_handler_identity_or_independent_version_is_rejected(
         )
 
     assert error.value.context["reason"] == "manifest_unsupported_version"
+
+
+def test_native_npz_and_pickle_payloads_keep_their_library_containers(tmp_path):
+    """New array and object writes stay directly consumable by NumPy and pickle."""
+    config = CacheConfig(
+        cache_dir=str(tmp_path),
+        compression=CompressionConfig(
+            pickle_compression_codec="none",
+            use_blosc2_arrays=False,
+        ),
+    )
+    array = np.arange(6, dtype=np.int32).reshape(2, 3)
+
+    array_result = ArrayHandler().put(array, tmp_path / "native-array", config)
+    array_path = Path(array_result["actual_path"])
+    assert array_path.read_bytes().startswith(b"PK\x03\x04")
+    with np.load(array_path, allow_pickle=False) as archive:
+        np.testing.assert_array_equal(archive["data"], array)
+
+    object_result = ObjectHandler().put({"native": "pickle"}, tmp_path / "object", config)
+    object_path = Path(object_result["actual_path"])
+    assert object_path.read_bytes().startswith(b"\x80")
+    assert pickle.loads(object_path.read_bytes()) == {"native": "pickle"}
+
+
+def test_native_parquet_payload_keeps_its_file_signature(tmp_path):
+    """The pandas handler writes a Parquet file, not a Cacheness wrapper."""
+    if not PANDAS_AVAILABLE:
+        pytest.skip("pandas is not enabled")
+
+    import pandas as pd
+
+    config = CacheConfig(cache_dir=str(tmp_path))
+    frame = pd.DataFrame({"value": [1, 2]})
+    result = PandasDataFrameHandler().put(frame, tmp_path / "native-frame", config)
+    payload_path = Path(result["actual_path"])
+
+    payload = payload_path.read_bytes()
+    assert payload.startswith(b"PAR1")
+    assert payload.endswith(b"PAR1")
+    assert pd.read_parquet(payload_path).equals(frame)
+
+
+def test_native_dill_payload_remains_a_dill_stream_when_selected(tmp_path):
+    """Dill fallback remains a handler-owned payload rather than a wrapper."""
+    dill = pytest.importorskip("dill")
+    config = CacheConfig(
+        cache_dir=str(tmp_path),
+        compression=CompressionConfig(pickle_compression_codec="none"),
+    )
+    callback = lambda value: value + 1
+
+    result = ObjectHandler().put(callback, tmp_path / "native-dill", config)
+    payload = Path(result["actual_path"]).read_bytes()
+
+    assert (result["payload_format"], result["payload_format_version"]) == ("dill", 1)
+    assert payload.startswith(b"\x80")
+    assert dill.loads(payload)(2) == 3
+
+
+def test_legacy_blosc2_dispatch_uses_the_declared_payload_format():
+    """The read-only legacy frame is selected only by its explicit identity."""
+    if not BLOSC2_AVAILABLE:
+        pytest.skip("blosc2 is not enabled")
+
+    payload_path = (
+        Path(__file__).parent
+        / "fixtures"
+        / "compat"
+        / "array-raw-v035-compress"
+        / "payload.b2nd"
+    )
+    payload = payload_path.read_bytes()
+    shape_size = int.from_bytes(payload[:4], "little")
+    assert payload[4 : 4 + shape_size] == b"(2, 3)"
+
+    restored = ArrayHandler().get(payload_path, {"payload_format": "blosc2"})
+
+    np.testing.assert_array_equal(
+        restored, np.arange(6, dtype=np.int32).reshape(2, 3)
+    )
+
+
+def test_unsupported_handler_identity_has_no_payload_handler_event(monkeypatch):
+    """An unsupported contract fails during registry resolution, before handler IO."""
+    registry = HandlerRegistry()
+    handler = registry.get_handler_by_type("array")
+    events: list[str] = []
+
+    def fail_if_called(*_args, **_kwargs):
+        events.append("handler")
+        raise AssertionError("unsupported identity must not invoke a handler")
+
+    monkeypatch.setattr(handler, "get", fail_if_called)
+    with pytest.raises(CacheManifestUnsupportedVersionError):
+        registry.resolve_payload_contract("array", "future-npz", 99)
+
+    assert events == []
