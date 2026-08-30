@@ -1,27 +1,27 @@
 ---
 phase: 01
-fixed_at: 2026-08-30T04:03:16Z
+fixed_at: 2026-08-30T04:15:39Z
 review_path: .planning/phases/01-compatibility-and-security-baseline/01-REVIEW.md
-iteration: 3
-findings_in_scope: 3
-fixed: 3
+iteration: 4
+findings_in_scope: 2
+fixed: 2
 skipped: 0
 status: all_fixed
 ---
 
 # Phase 01: Code Review Fix Report
 
-**Fixed at:** 2026-08-30T04:03:16Z
+**Fixed at:** 2026-08-30T04:15:39Z
 **Source review:** `.planning/phases/01-compatibility-and-security-baseline/01-REVIEW.md`
-**Iteration:** 3
+**Iteration:** 4
 
 ## Summary
 
-- Findings in scope: 3
-- Fixed: 3
+- Findings in scope: 2
+- Fixed: 2
 - Skipped: 0
 
-## Fixed Issues
+## Prior Iteration Closures
 
 ### CR-R1: A durably committed JSON entry is misclassified as uncommitted
 
@@ -83,6 +83,49 @@ correctness-over-availability tradeoff explicitly.
 
 **Status:** fixed: requires human verification
 
+## Fixed Issues (Iteration 4)
+
+### CR-R4: Public metadata queries bypass prepared-clear admission
+
+**Files modified:** `src/cacheness/core.py`, `tests/test_clear_recovery.py`
+**Commit:** `cf3be4b`
+
+`query_meta()`, `query_custom()`, and
+`get_custom_metadata_for_entry()` now enter the same root read admission as
+`get()`. The deprecated `query_custom_metadata()` reaches the decorated
+`query_custom()` path. `query_custom_session()` holds admission from context
+entry through the caller's complete `with` body, rather than only while it
+constructs the returned context manager. Admission happens outside the query
+methods' broad exception handlers, so prepared or poisoned recovery evidence
+cannot become `None`, `[]`, or `{}`.
+
+The SQLite regressions preconstruct a second cache, interrupt clear with a
+prepared journal, and verify each public surface rejects the intermediate state.
+They repeat that matrix for a poisoned local owner, verify a committed journal
+exposes only the authoritative empty query result, and prove a live clear blocks
+until a custom-query context exits.
+
+**Status:** fixed: requires human verification
+
+### CR-R5: JSON close can republish stale metadata after another instance clears
+
+**Files modified:** `src/cacheness/metadata.py`, `tests/test_clear_recovery.py`
+**Commit:** `cf3be4b`
+
+`JsonBackend.close()` no longer writes its in-memory metadata snapshot. JSON
+mutations already publish synchronously, so close has no pending state to flush;
+republishing on close could make a preconstructed second instance resurrect
+metadata that a first instance had authoritatively cleared. High-level
+`BlobStore.close()` and `UnifiedCache.close()` inherit this non-mutating backend
+close behavior without introducing a broader lifecycle or compare-and-swap
+protocol.
+
+Deterministic BlobStore and UnifiedCache tests perform A-write, B-preconstruct,
+A-clear, B-close, then reopen and prove the store remains empty and the old
+payload is absent.
+
+**Status:** fixed: requires human verification
+
 ## Verification
 
 Verification ran in the **main checkout**; no isolated worktree was used.
@@ -94,6 +137,16 @@ Verification ran in the **main checkout**; no isolated worktree was used.
 - Passed: `.venv/bin/ruff check src/cacheness/storage/clear_recovery.py src/cacheness/storage/blob_store.py tests/test_clear_recovery.py`.
 - Passed Phase 1 quality gate in its normal `uv` environment:
   `uv run pytest -q -o log_cli=false tests/test_phase1_quality_gates.py`.
+- Passed after iteration 4: `tests/test_clear_recovery.py`,
+  `tests/test_metadata.py`, `tests/test_cache_integrity.py`,
+  `tests/test_filesystem_containment.py`, and
+  `tests/test_core.py::TestCacheness::test_concurrent_access` (one expected
+  Windows-junction skip); `tests/test_query_meta.py`,
+  `tests/test_query_meta_security.py`, and `tests/test_custom_metadata.py`.
+- Passed after iteration 4: `.venv/bin/ruff check
+  src/cacheness/storage/clear_recovery.py src/cacheness/storage/blob_store.py
+  tests/test_clear_recovery.py`; the pre-existing nine Ruff findings in
+  `core.py`/`metadata.py` remain unchanged.
 - Passed complete suite in the same environment:
   `uv run pytest -q -o log_cli=false` (expected optional PostgreSQL/TensorFlow
   and Windows-junction skips, plus the existing dataclass collection warning).
@@ -101,6 +154,6 @@ Verification ran in the **main checkout**; no isolated worktree was used.
 
 ---
 
-_Fixed: 2026-08-30T04:03:16Z_
+_Fixed: 2026-08-30T04:15:39Z_
 _Fixer: the agent (gsd-code-fixer)_
-_Iteration: 3_
+_Iteration: 4_
