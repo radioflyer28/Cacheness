@@ -46,11 +46,19 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 from datetime import datetime, timezone
 
-from ..error_handling import CacheStorageError
+from ..error_handling import CacheIntegrityError, CacheStorageError
 from .backends import MetadataBackend, JsonBackend
 from .clear_recovery import ClearRecoveryCoordinator
 from .guarded_handler_io import GuardedHandlerIO
 from .handlers import HandlerRegistry
+from .integrity import (
+    ManifestKeyProvider,
+    sha256_and_size,
+    sign_hmac_sha256,
+    verify_hmac_sha256,
+)
+from .manifest import BlobManifestV1, ManifestDecodeError
+from .manifest_repository import MetadataManifestRepository
 from .path_security import encode_physical_name, resolve_managed_locator
 from ..metadata import MetadataBackend as CoreMetadataBackend
 
@@ -158,6 +166,10 @@ class BlobStore:
         
         # Initialize handler registry
         self.handlers = HandlerRegistry()
+        self.manifest_repository = MetadataManifestRepository(self.backend)
+        self._manifest_key_provider = ManifestKeyProvider(
+            self.cache_dir / "blob_manifest_hmac_key.bin"
+        )
 
         # Clear recovery is deliberately confined to exact local backend
         # identities. Capability-shaped or wrapped backends never inherit a
@@ -240,24 +252,50 @@ class BlobStore:
                 operation="candidate_publish",
             )
 
-            # Note: JsonBackend stores custom fields in nested 'metadata' dict.
-            custom_metadata = dict(metadata or {})
-            custom_metadata["actual_path"] = str(candidate_locator)
-            custom_metadata["storage_format"] = result.get(
-                "storage_format",
-                "pickle",
+            digest, byte_size = sha256_and_size(candidate_locator)
+            handler_metadata = dict(result.get("metadata", {}) or {})
+            payload_format = result.get("storage_format", "pickle")
+            handler_metadata["storage_format"] = payload_format
+            handler_metadata.setdefault("compression_codec", self.compression)
+            created_at = datetime.now(timezone.utc).isoformat()
+            manifest = BlobManifestV1(
+                schema_version=1,
+                key=blob_key,
+                generation=uuid.uuid4().hex,
+                state="committed",
+                locator=str(candidate_locator),
+                handler_type=handler.data_type,
+                payload_format=payload_format,
+                payload_format_version=1,
+                digest_algorithm="sha256",
+                digest=digest,
+                byte_size=byte_size,
+                created_at=created_at,
+                handler_metadata=handler_metadata,
+                user_metadata=dict(metadata or {}),
             )
-            custom_metadata["compression_codec"] = self.compression
-
+            signed_manifest = manifest.with_signature(
+                sign_hmac_sha256(
+                    manifest.signing_bytes(), self._manifest_key_provider.get_key()
+                )
+            )
+            raw_manifest = signed_manifest.canonical_bytes()
             entry_data = {
                 "cache_key": blob_key,
-                "data_type": handler.data_type,
-                "file_size": result.get("file_size", 0),
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "metadata": custom_metadata,
+                "data_type": signed_manifest.handler_type,
+                "file_size": signed_manifest.byte_size,
+                "created_at": signed_manifest.created_at,
+                "metadata": {
+                    **dict(signed_manifest.user_metadata),
+                    **dict(signed_manifest.handler_metadata),
+                    "actual_path": signed_manifest.locator,
+                    "storage_format": signed_manifest.payload_format,
+                    "compression_codec": self.compression,
+                },
             }
-
-            self.backend.put_entry(blob_key, entry_data)
+            self.manifest_repository.put_raw(
+                blob_key, raw_manifest, entry_data=entry_data
+            )
             metadata_committed = True
         except BaseException as exc:
             if candidate_locator is not None and not metadata_committed:
@@ -285,32 +323,47 @@ class BlobStore:
         Returns:
             The stored data, or None if not found
         """
-        entry = self.backend.get_entry(key)
-        if entry is None:
+        raw_manifest = self.manifest_repository.get_raw(key)
+        if raw_manifest is None:
             logger.debug(f"Blob not found: {key}")
             return None
-        
-        actual_path = self._entry_locator(entry, key, operation="get")
-        if not self.guarded_handler_io.file_ops.exists(actual_path):
-            logger.warning(f"Blob file missing: {actual_path}")
-            return None
-        
-        # Get the handler based on data type
-        data_type = entry.get("data_type", "object")
-        handler = self.handlers.get_handler_by_type(data_type)
-        
-        # Build handler metadata by merging entry with nested metadata
-        nested_meta = entry.get("metadata", {})
+        try:
+            manifest = BlobManifestV1.from_canonical_bytes(raw_manifest)
+        except ManifestDecodeError as exc:
+            raise CacheIntegrityError("Canonical BlobStore manifest is invalid") from exc
+        if not verify_hmac_sha256(
+            manifest.signing_bytes(),
+            manifest.signature,
+            self._manifest_key_provider.get_key(),
+        ):
+            raise CacheIntegrityError("Canonical BlobStore manifest signature is invalid")
+        if manifest.key != key:
+            raise CacheStorageError("Canonical BlobStore manifest key conflicts with lookup")
+        if manifest.state != "committed":
+            raise CacheStorageError("Canonical BlobStore manifest is not committed")
+
+        actual_path = resolve_managed_locator(
+            self.guarded_handler_io.root,
+            manifest.locator,
+            operation="get",
+        )
         handler_metadata = {
-            **entry,
-            **nested_meta,  # Flatten nested metadata to top level
+            **dict(manifest.user_metadata),
+            **dict(manifest.handler_metadata),
+            "cache_key": manifest.key,
+            "data_type": manifest.handler_type,
+            "storage_format": manifest.payload_format,
+            "file_size": manifest.byte_size,
+            "created_at": manifest.created_at,
         }
-        
-        # The handler is intentionally called only on the still-live private
-        # snapshot, never on a metadata-controlled managed path.
-        with self.guarded_handler_io.open_snapshot(
-            actual_path, handler_metadata
-        ) as snapshot:
+
+        # The handler is intentionally resolved and invoked only after one
+        # live private snapshot has passed exact digest and size verification.
+        with self.guarded_handler_io.open_snapshot(actual_path, handler_metadata) as snapshot:
+            digest, byte_size = sha256_and_size(snapshot.path)
+            if digest != manifest.digest or byte_size != manifest.byte_size:
+                raise CacheIntegrityError("Canonical BlobStore payload integrity check failed")
+            handler = self.handlers.get_handler_by_type(manifest.handler_type)
             data = handler.get(snapshot.path, snapshot.metadata)
         
         # Update access time
