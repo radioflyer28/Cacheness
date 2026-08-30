@@ -659,36 +659,37 @@ OWASP ASVS 5.0.0 is the latest stable release identified by the official project
 | A3 | A dynamically retained refcounted per-key registry is preferable to striping. | Pattern 7 | Low/medium: behavior is locked, implementation is discretionary; a carefully designed stripe scheme might be accepted but can serialize distinct keys. |
 | A4 | New test filenames and their exact CLI selectors will follow the five-file Wave 0 layout shown. | Validation Architecture | Low: planner may consolidate files; requirement-to-test coverage and commands must be updated together. |
 | A5 | Shared lifecycle fault hooks will be exposed as explicit test-only callbacks/fixtures after seam design stabilizes. | Wave 0 Gaps | Low: monkeypatch seams can work, but stable hooks make race/fault tests less coupled to line order. |
-| A6 | `delete()` should preserve `False` for true absence while treating that result as an idempotent non-error. | Open Questions | Medium: changing to `True` could be a deliberate public-contract decision; planner should lock the assertion before implementation. |
-| A7 | Tombstone/grace/page/close limits should be internal/test-injectable until measurements justify public defaults. | Open Questions | Medium: operational callers may need configuration earlier; no measured values exist yet. |
+| A6 | `delete()` preserves `False` for true absence while treating that result as an idempotent non-error. | Open Questions — RESOLVED | Resolved by Plan 03-04 and D-09 compatibility coverage. |
+| A7 | `LifecycleLimits` makes tombstone/grace/page/close policy explicit, finite, validated, and test-derived. | Open Questions — RESOLVED | Resolved by Plans 03-03 and 03-08 with deterministic boundary tests. |
 
 No retention/grace/page-size/retry-delay numeric default is assumed here. CONTEXT delegates bounded values, and STATE explicitly says tombstone retention and orphan grace must be derived from fault/crash testing. [VERIFIED: `.planning/STATE.md:143-147`; `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-CONTEXT.md:76-80`]
 
-## Open Questions
+## Open Questions — RESOLVED
 
-1. **What should `delete()` return when the key is already absent?**
+1. **[RESOLVED] What should `delete()` return when the key is already absent?**
    - What we know: D-09 calls repeated delete “successful”; the current public docstring says `True if deleted, False if not found`. [VERIFIED: CONTEXT D-09; `src/cacheness/storage/blob_store.py:594-611`]
-   - What's unclear: Whether compatibility requires returning `False` as a successful no-op or whether Phase 3 intentionally changes it to `True`.
-   - Recommendation: Preserve `False` for true absence as the legacy boolean meaning “nothing removed in this call,” while documenting/testing that it is an idempotent non-error. Use a richer internal result for absent/resumed/deleted/conflict. [ASSUMED]
+   - Resolution: Preserve `False` for true absence as the compatible boolean meaning “nothing removed in this call,” while treating it as an idempotent non-error. Plan 03-04 locks this behavior and tests absent, resumed-tombstone, deleted, and conflict outcomes separately. [RESOLVED: Plan 03-04; D-09]
+   - Recommendation adopted: Preserve `False` for true absence as the legacy boolean meaning “nothing removed in this call,” while documenting/testing that it is an idempotent non-error. Use a richer internal result for absent/resumed/deleted/conflict. [RESOLVED]
 
-2. **How much conditional-publication implementation belongs in Phase 3 versus Phase 4?**
+2. **[RESOLVED] How much conditional-publication implementation belongs in Phase 3 versus Phase 4?**
    - What we know: Phase 3 requires backend CAS as its correctness boundary, while Phase 4 owns full JSON/memory/SQLite/PostgreSQL parity and capability declarations. [VERIFIED: D-18; deferred scope]
-   - What's unclear: Whether all three currently admitted local adapters must be production CAS implementations now, or whether a reference repository plus contract tests is sufficient.
+   - Resolution: Phase 3 implements and independently tests truthful exact-record CAS for the exact local repositories admitted by Phase 2—JSON, memory, and SQLite. Registered/custom/PostgreSQL capability composition remains Phase 4 scope. [RESOLVED: Plans 03-01 and 03-02; D-02/D-18]
    - Recommendation: Implement truthful CAS for the exact local repositories already admitted by Phase 2 (JSON, memory, SQLite) and define the backend-neutral protocol now; defer registered/custom/PostgreSQL capability composition to Phase 4. Otherwise Phase 3 cannot validate independent-instance races on real direct `BlobStore` paths. [VERIFIED: current admitted set `src/cacheness/storage/manifest_repository.py:351-366`; deferred Phase 4]
 
-3. **What payload inventory can Phase 3 reconciliation truthfully claim?**
+3. **[RESOLVED] What payload inventory can Phase 3 reconciliation truthfully claim?**
    - What we know: D-06 forbids filename inference; full payload-backend listing/capability parity is Phase 5. [VERIFIED: D-06; deferred scope]
-   - What's unclear: Whether the local filesystem reference implementation should expose a bounded owned-namespace inventory now.
+   - Resolution: Phase 3 reconciles stable manifest pages plus authenticated operation-record pages. A payload inventory that cannot prove ownership is represented as a blocked/unsupported finding and remains untouched; Phase 3 never scans compatibility payload names or claims Phase 5 inventory capability. [RESOLVED: Plans 03-05 and 03-06; D-13-D-16]
    - Recommendation: Reconcile manifests plus authenticated operation records in Phase 3 and add a narrow bounded local owned-locator inventory only if ownership can be proven without filename guessing. Otherwise emit a blocked/unsupported inventory finding and let Phase 5 fill the payload contract. Never scan the repository's existing 76 candidate-named compatibility payloads as Phase 3 residue. [VERIFIED: D-13-D-16; runtime inventory]
 
-4. **What are the default tombstone retention, orphan grace, reconciliation page size, and close wait policy?**
+4. **[RESOLVED] What are the default tombstone retention, orphan grace, reconciliation page size, and close wait policy?**
    - What we know: Values must be bounded/deterministic; STATE requires retention/grace to come from fault/crash testing. [VERIFIED: discretion; `.planning/STATE.md:143-147`]
-   - What's unclear: No measured default exists yet.
-   - Recommendation: Make limits injectable in internal tests, choose conservative project defaults only after measuring the deterministic fault suite and call counts, and keep them out of the public API unless callers need operational control. [ASSUMED]
+   - Resolution: `LifecycleLimits` makes every limit finite, explicit, validated, and caller-configurable where operational policy is required. Defaults are selected and documented from deterministic page/call-count, frozen-clock, fault, and close-deadline tests; retention is semantic (until exact terminal cleanup), not an age-only evidence purge. [RESOLVED: Plan 03-03 and Plan 03-08]
+   - Recommendation adopted: Make limits injectable in tests, choose documented project defaults from deterministic fault/call-count/deadline evidence, and expose policy through the frozen `LifecycleLimits` boundary. [RESOLVED]
 
-5. **What might this research have missed?**
+5. **[RESOLVED] What might this research have missed?**
+   - Resolution: Plans require independent-instance CAS tests, exact-record expectations for same-generation metadata patches, and one lifecycle/recovery engine with the Phase 1 clear coordinator retained only as an exact legacy-evidence adapter. These requirements close the three residual risks below. [RESOLVED: Plans 03-02, 03-04, and 03-05; D-02/D-04/D-18]
    - The largest residual risk is a backend-local CAS implementation that is atomic inside one Python object but not across independent instances/processes. The plan checker should require independent-instance tests and refuse topology claims that cannot pass them. [VERIFIED: D-18]
-   - A second risk is treating metadata-only same-generation updates as irrelevant to CAS. The planner must either make metadata patches allocate new generations or adopt the exact-record expectation strengthening in A2. [ASSUMED]
+   - A second risk is treating metadata-only same-generation updates as irrelevant to CAS. Plan 03-02 adopts exact-record expectations for same-generation metadata patches. [RESOLVED]
    - A third risk is retaining the Phase 1 clear coordinator alongside the new engine so two journals can both claim one operation. The plan should choose one authority/recovery engine and provide only a compatibility adapter for old clear evidence. [VERIFIED: current clear-only coordinator plus Phase 3 ownership boundary]
 
 ## Environment Availability
