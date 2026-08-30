@@ -18,7 +18,7 @@ from cacheness.storage.manifest_repository import (
 )
 
 
-_MANIFEST_KEY = b"manifest-backend-contract-key-000"
+_MANIFEST_KEY = b"0123456789abcdef0123456789abcdef"
 
 
 def _canonical_record(*, label: str = "first") -> bytes:
