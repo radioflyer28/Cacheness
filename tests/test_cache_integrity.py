@@ -8,7 +8,7 @@ from copy import deepcopy
 from pathlib import Path
 import numpy as np
 
-from cacheness import cacheness, CacheConfig
+from cacheness import CacheConfig, SecurityConfig, cacheness
 from cacheness.error_handling import CacheIntegrityError
 
 
@@ -30,6 +30,21 @@ def temp_cache_no_integrity():
         cache = cacheness(config)
         yield cache
         cache.close()
+
+
+def _cache_with_signing_policy(tmp_path: Path, *, allow_unsigned: bool):
+    """Create a cache that exercises one entry-signing publication policy."""
+    return cacheness(
+        CacheConfig(
+            cache_dir=str(tmp_path / "cache"),
+            metadata_backend="memory",
+            cleanup_on_init=False,
+            security=SecurityConfig(
+                enable_entry_signing=True,
+                allow_unsigned_entries=allow_unsigned,
+            ),
+        )
+    )
 
 
 class TestCacheIntegrity:
@@ -213,6 +228,88 @@ class TestCacheIntegrity:
         monkeypatch.setattr(cache, "_calculate_file_hash", calculate_file_hash)
         assert cache.get(test_key="replace-me") == {"message": "committed"}
         assert set(Path(cache.cache_dir).glob("*candidate-*")) == candidate_paths_before
+
+    @pytest.mark.parametrize("signer_available", [True, False])
+    def test_strict_signing_failure_discards_an_uncommitted_candidate(
+        self, tmp_path, monkeypatch, signer_available
+    ):
+        """Strict signing never reports a key or leaves a payload without metadata."""
+        cache = _cache_with_signing_policy(tmp_path, allow_unsigned=False)
+        try:
+            cache_key = cache._create_cache_key({"test_key": "strict-failure"})
+            candidate_paths_before = set(Path(cache.cache_dir).glob("*candidate-*"))
+
+            if signer_available:
+                def signing_failure(_entry_data):
+                    raise RuntimeError("signer unavailable for test")
+
+                monkeypatch.setattr(cache.signer, "sign_entry", signing_failure)
+            else:
+                monkeypatch.setattr(cache, "signer", None)
+
+            with pytest.raises(CacheIntegrityError, match="Unable to sign cache entry"):
+                cache.put({"message": "uncommitted"}, test_key="strict-failure")
+
+            assert cache.metadata_backend.get_entry(cache_key) is None
+            assert (
+                set(Path(cache.cache_dir).glob("*candidate-*"))
+                == candidate_paths_before
+            )
+        finally:
+            cache.close()
+
+    def test_strict_signing_failure_preserves_a_committed_overwrite(
+        self, tmp_path, monkeypatch
+    ):
+        """Signing an overwrite happens before its candidate replaces old data."""
+        cache = _cache_with_signing_policy(tmp_path, allow_unsigned=False)
+        try:
+            cache.put({"message": "committed"}, test_key="strict-overwrite")
+            cache_key = cache._create_cache_key({"test_key": "strict-overwrite"})
+            entry_before = deepcopy(cache.metadata_backend.get_entry(cache_key))
+            assert entry_before is not None
+            payload_before = Path(entry_before["metadata"]["actual_path"])
+            payload_bytes_before = payload_before.read_bytes()
+            candidate_paths_before = set(Path(cache.cache_dir).glob("*candidate-*"))
+            sign_entry = cache.signer.sign_entry
+
+            def signing_failure(_entry_data):
+                raise RuntimeError("signer unavailable for test")
+
+            monkeypatch.setattr(cache.signer, "sign_entry", signing_failure)
+
+            with pytest.raises(CacheIntegrityError, match="Unable to sign cache entry"):
+                cache.put({"message": "replacement"}, test_key="strict-overwrite")
+
+            assert cache.metadata_backend.get_entry(cache_key) == entry_before
+            assert payload_before.read_bytes() == payload_bytes_before
+            monkeypatch.setattr(cache.signer, "sign_entry", sign_entry)
+            assert cache.get(test_key="strict-overwrite") == {"message": "committed"}
+            assert (
+                set(Path(cache.cache_dir).glob("*candidate-*"))
+                == candidate_paths_before
+            )
+        finally:
+            cache.close()
+
+    def test_compatibility_signing_failure_commits_an_explicit_unsigned_entry(
+        self, tmp_path, monkeypatch
+    ):
+        """Unsigned compatibility mode remains a deliberate permitted policy."""
+        cache = _cache_with_signing_policy(tmp_path, allow_unsigned=True)
+        try:
+            def signing_failure(_entry_data):
+                raise RuntimeError("signer unavailable for test")
+
+            monkeypatch.setattr(cache.signer, "sign_entry", signing_failure)
+
+            cache_key = cache.put({"message": "compatibility"}, test_key="unsigned")
+            entry = cache.metadata_backend.get_entry(cache_key)
+            assert entry is not None
+            assert "entry_signature" not in entry["metadata"]
+            assert cache.get(cache_key=cache_key) == {"message": "compatibility"}
+        finally:
+            cache.close()
 
     def test_integrity_verification_disabled_skips_check(self):
         """Test that disabling verification skips integrity check completely."""

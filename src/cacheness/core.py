@@ -786,6 +786,24 @@ class UnifiedCache:
         """Remove a candidate payload that has never been published in metadata."""
         self.guarded_handler_io.file_ops.delete(locator)
 
+    def _abort_unsigned_candidate(
+        self, locator: Path | str, signing_error: Exception
+    ) -> None:
+        """Fail a strict signing write without exposing its private payload."""
+        try:
+            self._discard_uncommitted_payload(locator)
+        except Exception as cleanup_error:
+            logger.exception(
+                "Failed to discard uncommitted payload after entry signing failure"
+            )
+            raise CacheIntegrityError(
+                "Unable to sign cache entry and failed to clean its "
+                "uncommitted payload"
+            ) from cleanup_error
+        raise CacheIntegrityError(
+            "Unable to sign cache entry while unsigned entries are disabled"
+        ) from signing_error
+
     def _entry_locator(
         self,
         entry: Dict[str, Any],
@@ -1094,9 +1112,19 @@ class UnifiedCache:
                 "metadata": metadata_dict,
             }
 
-            # Sign the entry if signing is enabled
-            if self.signer:
+            # A configured strict policy cannot publish an unsigned candidate.
+            # Compatibility mode is explicit: it can retain the historic
+            # best-effort behavior only when unsigned entries are allowed.
+            signing_required = (
+                self.config.security.enable_entry_signing
+                and not self.config.security.allow_unsigned_entries
+            )
+            if self.config.security.enable_entry_signing:
+                signing_error = None
                 try:
+                    if self.signer is None:
+                        raise RuntimeError("Entry signer is unavailable")
+
                     # Use consistent timestamp for both storage and signing
                     creation_timestamp = datetime.now(timezone.utc)
                     # Store without timezone info for consistency with database format
@@ -1115,13 +1143,22 @@ class UnifiedCache:
                     )
                     
                     signature = self.signer.sign_entry(complete_entry_data)
+                    if not isinstance(signature, str) or not signature:
+                        raise ValueError("Entry signer returned an empty signature")
                     metadata_dict["entry_signature"] = signature
                     
                     logger.debug(f"Created signature for entry {cache_key}")
                     
                 except Exception as e:
+                    signing_error = e
                     logger.warning(f"Failed to sign entry {cache_key}: {e}")
-                    # Continue without signature for backward compatibility
+                    if signing_required:
+                        self._abort_unsigned_candidate(result["actual_path"], e)
+
+                if signing_error is not None:
+                    logger.warning(
+                        "Committing unsigned entry because allow_unsigned_entries=True"
+                    )
             
             self.metadata_backend.put_entry(cache_key, entry_data)
 

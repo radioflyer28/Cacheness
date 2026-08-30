@@ -10,7 +10,11 @@ import shutil
 import numpy as np
 import pytest
 
-from cacheness.error_handling import CacheLegacyFormatError, CacheReason
+from cacheness.error_handling import (
+    CacheIntegrityError,
+    CacheLegacyFormatError,
+    CacheReason,
+)
 from cacheness.config import (
     CacheConfig,
     CompressionConfig,
@@ -380,6 +384,34 @@ def _trusted_object_array_cache(
             ),
         )
     )
+
+
+def test_trusted_object_array_signing_failure_discards_uncommitted_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The executable serializer inherits strict signing publication semantics."""
+    cache = _trusted_object_array_cache(tmp_path, delete_invalid_signatures=True)
+    try:
+        cache_key = cache._create_cache_key({"identity": "signing-failure"})
+        candidate_paths_before = set(Path(cache.cache_dir).glob("*candidate-*"))
+
+        def signing_failure(_entry_data: dict) -> str:
+            raise RuntimeError("signer unavailable for test")
+
+        monkeypatch.setattr(cache.signer, "sign_entry", signing_failure)
+
+        with pytest.raises(CacheIntegrityError, match="Unable to sign cache entry"):
+            cache.put(
+                np.array([{"safe": True}], dtype=object), identity="signing-failure"
+            )
+
+        assert cache.metadata_backend.get_entry(cache_key) is None
+        assert (
+            set(Path(cache.cache_dir).glob("*candidate-*"))
+            == candidate_paths_before
+        )
+    finally:
+        cache.close()
 
 
 @pytest.mark.parametrize(
