@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -191,6 +192,9 @@ class LifecycleEngine:
         previous_locator: Path | None,
     ) -> None:
         """Converge one authenticated record without guessing manifest authority."""
+        if record.transition is OperationTransition.TOMBSTONE:
+            self._recover_tombstone(record, candidate_locator)
+            return
         current = self.store._load_authenticated_manifest(
             record.key,
             operation="recover_operation",
@@ -228,6 +232,103 @@ class LifecycleEngine:
         ):
             self.store._delete_or_prove_absent(candidate_locator)
             self._retire(record)
+
+    def _tombstone_expectation(
+        self,
+        key: str,
+        manifest: BlobManifestV1,
+    ) -> ManifestExpectation | None:
+        """Return an exact expectation only for still-current authenticated bytes."""
+        raw_manifest = self.store.manifest_repository.get_raw(key)
+        if raw_manifest != manifest.canonical_bytes():
+            return None
+        return ManifestExpectation.from_authenticated_record(
+            manifest.generation,
+            raw_manifest,
+        )
+
+    def _recover_tombstone(
+        self,
+        record: LifecycleOperationRecord,
+        payload_locator: Path,
+    ) -> None:
+        """Resume only the signed tombstone created by this operation."""
+        current = self.store._load_authenticated_manifest(
+            record.key,
+            operation="recover_delete",
+            require_locator=True,
+            allowed_states=frozenset({"committed", "tombstoned"}),
+        )
+        if current is None:
+            # A missing authoritative record does not prove that the old
+            # payload is still ours to delete. Preserve evidence for later
+            # reconciliation instead of inferring ownership from a path.
+            return
+
+        manifest, _handler, current_locator = current
+        assert current_locator is not None
+        if manifest.state == "committed":
+            # The tombstone never became authority (or a newer writer won).
+            # This delete has no candidate bytes of its own to reclaim.
+            self._retire(record)
+            return
+        if (
+            manifest.generation != record.generation
+            or current_locator != payload_locator
+        ):
+            return
+
+        expectation = self._tombstone_expectation(record.key, manifest)
+        if expectation is None:
+            return
+        record = self._advance_to(record, OperationCheckpoint.AUTHORITY_PUBLISHED)
+        record = self._advance_to(record, OperationCheckpoint.RECLAIMING)
+        self.store._delete_or_prove_absent(payload_locator)
+        record = self._advance_to(record, OperationCheckpoint.TERMINAL)
+        try:
+            self.store.manifest_repository.remove_if_expected(record.key, expectation)
+        except CacheBlobLifecycleConflictError:
+            # A later generation survived a stale tombstone finalizer. The old
+            # payload is already reclaimed, so the exact operation evidence
+            # can safely retire without touching the new authority.
+            self._retire(record)
+            return
+        self._retire(record)
+
+    def _find_tombstone_record(
+        self,
+        key: str,
+        generation: str,
+    ) -> tuple[LifecycleOperationRecord, Path] | None:
+        """Find one authenticated delete record for an observed tombstone."""
+        cursor = None
+        remaining_actions = self.lifecycle_limits.max_reconcile_actions
+        while remaining_actions > 0:
+            page = self.operation_repository.list_page(
+                cursor,
+                page_size=min(
+                    self.lifecycle_limits.operation_page_size,
+                    remaining_actions,
+                ),
+            )
+            for operation_id, raw in page.entries:
+                recovered = self._recoverable_record(operation_id, raw)
+                remaining_actions -= 1
+                if recovered is None:
+                    continue
+                record, candidate_locator, _previous_locator = recovered
+                if (
+                    record.transition is OperationTransition.TOMBSTONE
+                    and record.key == key
+                    and record.generation == generation
+                ):
+                    return record, candidate_locator
+                if remaining_actions == 0:
+                    return None
+            if page.next_cursor is None:
+                return None
+            cursor = page.next_cursor
+        return None
 
     def recover(self) -> None:
         """Resume authenticated lifecycle debt during store initialization.
@@ -456,6 +557,124 @@ class LifecycleEngine:
                     },
                 ) from exc
         return key
+
+    def delete(self, *, key: str) -> bool:
+        """Publish signed deletion intent before reclaiming one payload generation."""
+        current = self.store._load_authenticated_manifest(
+            key,
+            operation="delete",
+            require_locator=True,
+            allowed_states=frozenset({"committed", "tombstoned"}),
+        )
+        if current is None:
+            return False
+        manifest, _handler, payload_locator = current
+        assert payload_locator is not None
+
+        if manifest.state == "tombstoned":
+            existing_record = self._find_tombstone_record(key, manifest.generation)
+            if existing_record is None:
+                raise CacheBlobLifecycleConflictError(
+                    "BlobStore tombstone has no matching authenticated operation",
+                    context={"key": key, "operation": "delete"},
+                )
+            record, owned_payload = existing_record
+            self._recover_tombstone(record, owned_payload)
+            return True
+
+        observed_raw = self.store.manifest_repository.get_raw(key)
+        if observed_raw != manifest.canonical_bytes():
+            raise CacheBlobLifecycleConflictError(
+                "BlobStore delete authority changed before tombstone publication",
+                context={"key": key, "operation": "delete"},
+            )
+        expected = ManifestExpectation.from_authenticated_record(
+            manifest.generation,
+            observed_raw,
+        )
+        operation_id = uuid.uuid4().hex
+        tombstone_generation = uuid.uuid4().hex
+        root = self.store.guarded_handler_io.root
+        timestamp = datetime.now(timezone.utc).isoformat()
+        record = LifecycleOperationRecord(
+            schema_version=2,
+            operation_id=operation_id,
+            kind=OperationKind.DELETE,
+            key=key,
+            owner=OPERATION_RECORD_OWNER,
+            store_id=store_identity(str(root)),
+            topology={
+                "backend": type(self.store.backend).__name__,
+                "root": store_identity(str(root)),
+            },
+            expected_generation=manifest.generation,
+            expected_record_digest=hashlib.sha256(observed_raw).hexdigest(),
+            generation=tombstone_generation,
+            candidate_locator=str(payload_locator.relative_to(root)),
+            previous_locator=None,
+            transition=OperationTransition.TOMBSTONE,
+            checkpoint=OperationCheckpoint.PREPARED,
+            created_at=timestamp,
+            updated_at=timestamp,
+        )
+        record = self._signed_record(record)
+        self._fault("evidence_create", record)
+        self.operation_repository.create_exclusive(record, record.canonical_bytes())
+        self._emit("evidence_created", record)
+
+        tombstone = replace(
+            manifest,
+            generation=tombstone_generation,
+            state="tombstoned",
+            signature="",
+        )
+        signed_tombstone = tombstone.with_signature(
+            sign_hmac_sha256(tombstone.signing_bytes(), self.store._manifest_key())
+        )
+        tombstone_expectation = ManifestExpectation.from_authenticated_record(
+            signed_tombstone.generation,
+            signed_tombstone.canonical_bytes(),
+        )
+        self._fault("tombstone_publish", record)
+        try:
+            self.store.manifest_repository.publish_if_expected(
+                key,
+                expected,
+                signed_tombstone.canonical_bytes(),
+                entry_data=self.store._manifest_entry_data(signed_tombstone),
+            )
+        except CacheBlobLifecycleConflictError:
+            self._retire(record)
+            raise
+        self._fault("authority_checkpoint", record)
+        record = self._checkpoint(record, OperationCheckpoint.CANDIDATE_PUBLISHED)
+        record = self._checkpoint(record, OperationCheckpoint.AUTHORITY_PUBLISHED)
+        self._emit("authority_published", record)
+
+        try:
+            record = self._advance_to(record, OperationCheckpoint.RECLAIMING)
+            self._fault("payload_cleanup", record)
+            self.store._delete_or_prove_absent(payload_locator)
+            record = self._advance_to(record, OperationCheckpoint.TERMINAL)
+            self._fault("tombstone_retire", record)
+            self.store.manifest_repository.remove_if_expected(key, tombstone_expectation)
+            self._retire(record)
+            self._emit("evidence_retired", record)
+        except CacheBlobLifecycleConflictError:
+            # A later generation won after tombstone authority. Never retry its
+            # removal; the payload for this exact tombstone was already safe to
+            # reclaim and only our terminal evidence is retired.
+            self._retire(record)
+        except Exception as exc:
+            raise CacheBlobRecoverableCleanupError(
+                "BlobStore tombstone authority was published but cleanup needs recovery",
+                context={
+                    "operation_id": record.operation_id,
+                    "generation": record.generation,
+                    "key": record.key,
+                },
+            ) from exc
+        return True
 
 
 __all__ = ["LifecycleEngine"]

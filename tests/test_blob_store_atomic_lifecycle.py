@@ -336,8 +336,9 @@ def test_delete_publishes_signed_tombstone_before_payload_reclamation(
             raise RuntimeError("interrupted after tombstone authority")
 
         store.lifecycle.fault_hook = interrupt_reclamation
-        with pytest.raises(RuntimeError, match="tombstone authority"):
+        with pytest.raises(CacheBlobRecoverableCleanupError) as error:
             store.delete(key)
+        assert error.value.__cause__ is not None
     finally:
         store.close()
 
@@ -349,3 +350,58 @@ def test_delete_publishes_signed_tombstone_before_payload_reclamation(
         assert not list((root / "operations").glob("*.json"))
     finally:
         reopened.close()
+
+
+def test_repeated_delete_resumes_the_same_signed_tombstone(
+    tmp_path: Path,
+) -> None:
+    """A repeated delete completes its own retained tombstone rather than guessing."""
+    root = tmp_path / "repeated-delete"
+    store = BlobStore(root, backend="json")
+    try:
+        key = store.put({"state": "present"}, key="repeat-key")
+
+        def interrupt_reclamation(seam: str, _record: Any) -> None:
+            if seam == "payload_cleanup":
+                raise RuntimeError("pause tombstone cleanup")
+
+        store.lifecycle.fault_hook = interrupt_reclamation
+        with pytest.raises(CacheBlobRecoverableCleanupError):
+            store.delete(key)
+
+        store.lifecycle.fault_hook = None
+        assert store.delete(key) is True
+        assert store.delete(key) is False
+        assert store.get(key) is None
+        assert not list((root / "operations").glob("*.json"))
+    finally:
+        store.close()
+
+
+def test_stale_delete_conflict_preserves_newer_committed_generation(
+    tmp_path: Path,
+) -> None:
+    """A delete that loses its tombstone CAS cannot revoke a newer winner."""
+    root = tmp_path / "stale-delete"
+    contender = BlobStore(root, backend="json")
+    winner = BlobStore(root, backend="json")
+    try:
+        key = contender.put({"generation": "old"}, key="shared-delete-key")
+        published_winner = False
+
+        def publish_winner(seam: str, _record: Any) -> None:
+            nonlocal published_winner
+            if seam == "tombstone_publish" and not published_winner:
+                published_winner = True
+                winner.put({"generation": "winner"}, key=key)
+
+        contender.lifecycle.fault_hook = publish_winner
+        with pytest.raises(CacheBlobLifecycleConflictError):
+            contender.delete(key)
+
+        assert contender.get(key) == {"generation": "winner"}
+        assert winner.get(key) == {"generation": "winner"}
+        assert not list((root / "operations").glob("*.json"))
+    finally:
+        contender.close()
+        winner.close()

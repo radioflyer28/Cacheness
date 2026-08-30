@@ -515,7 +515,6 @@ class BlobStore:
         )
         return True
     
-    @_clear_coordinated
     def delete(self, key: str) -> bool:
         """
         Delete a blob and its metadata.
@@ -527,20 +526,10 @@ class BlobStore:
             True if deleted, False if not found
         """
         self._require_canonical_store()
-        authenticated = self._load_authenticated_manifest(
-            key,
-            operation="delete",
-            require_locator=True,
-        )
-        if authenticated is None:
-            return False
-        _manifest, _handler, actual_path = authenticated
-        assert actual_path is not None
-        self.guarded_handler_io.file_ops.delete(actual_path)
-        self.manifest_repository.remove(key)
-        
-        logger.debug(f"Deleted blob: {key}")
-        return True
+        deleted = self.lifecycle.delete(key=key)
+        if deleted:
+            logger.debug(f"Deleted blob {key} through the lifecycle engine")
+        return deleted
     
     @_clear_read_coordinated
     def exists(self, key: str) -> bool:
@@ -954,6 +943,7 @@ class BlobStore:
         operation: str,
         require_payload_contract: bool = False,
         require_locator: bool = False,
+        allowed_states: frozenset[str] | None = None,
     ) -> tuple[BlobManifestV1, Any | None, Path | None] | None:
         """Load one committed manifest before any direct public operation.
 
@@ -1001,9 +991,17 @@ class BlobStore:
             raise CacheBlobLifecycleConflictError(
                 "Canonical BlobStore manifest key conflicts with lookup"
             )
-        if manifest.state != "committed":
+        expected_states = (
+            frozenset({"committed"}) if allowed_states is None else allowed_states
+        )
+        if manifest.state not in expected_states:
             raise CacheBlobLifecycleConflictError(
-                "Canonical BlobStore manifest is not committed"
+                "Canonical BlobStore manifest state conflicts with the operation",
+                context={
+                    "key": key,
+                    "operation": operation,
+                    "state": manifest.state,
+                },
             )
 
         handler = None
