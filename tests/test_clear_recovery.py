@@ -600,6 +600,34 @@ def test_unified_cache_rejects_unsupported_clear_topology_before_callbacks(
         cache.close()
 
 
+def test_unified_cache_contender_fails_before_list_or_preflight_while_admitted(
+    tmp_path, monkeypatch
+):
+    """A same-root contender cannot inspect entries while a clear owner holds admission."""
+    cache = _unified_cache(tmp_path / "unified-admission", "memory")
+    coordinator = cache._clear_recovery
+    assert coordinator is not None
+    callbacks: list[str] = []
+
+    def forbidden_list_entries():
+        callbacks.append("list")
+        raise AssertionError("contender listed entries before admission")
+
+    def forbidden_preflight(*_args, **_kwargs):
+        callbacks.append("preflight")
+        raise AssertionError("contender preflighted entries before admission")
+
+    monkeypatch.setattr(cache.metadata_backend, "list_entries", forbidden_list_entries)
+    monkeypatch.setattr(cache, "_preflight_entries", forbidden_preflight)
+    try:
+        with coordinator.admission():
+            with pytest.raises(CacheStorageError):
+                cache.clear_all()
+        assert callbacks == []
+    finally:
+        cache.close()
+
+
 def test_sqlite_prepared_recovery_uses_database_identity_not_wal_sidecars(
     tmp_path, monkeypatch
 ):

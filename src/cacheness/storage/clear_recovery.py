@@ -17,7 +17,7 @@ import uuid
 from contextlib import contextmanager
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Iterator, Sequence
+from typing import Any, Callable, Iterator, Sequence
 
 from cacheness.error_handling import CacheStorageError
 from cacheness.json_utils import dumps as json_dumps, loads as json_loads
@@ -84,12 +84,23 @@ class ClearRecoveryCoordinator:
 
     supported_local_kinds = ["json", "sqlite", "memory"]
 
-    def __init__(self, file_ops: ManagedFileOps, backend: object) -> None:
+    def __init__(
+        self,
+        file_ops: ManagedFileOps,
+        backend: object,
+        physical_name: Callable[[str, dict[str, Any]], str] | None = None,
+    ) -> None:
         self.file_ops = file_ops
         self.backend = backend
         self.kind = self._backend_kind(backend)
+        self._physical_name = physical_name or self._blob_store_physical_name
         self.journal_path = file_ops.root / _JOURNAL_NAME
         self.lock_path = file_ops.root / _LOCK_NAME
+
+    @staticmethod
+    def _blob_store_physical_name(cache_key: str, _entry: dict[str, Any]) -> str:
+        """Preserve BlobStore's canonical payload identity by default."""
+        return encode_physical_name(cache_key, namespace="blob-store")
 
     @classmethod
     def can_coordinate(cls, backend: object) -> bool:
@@ -412,7 +423,13 @@ class ClearRecoveryCoordinator:
             cache_keys.add(cache_key)
             originals.add(original)
             tombstones.add(tombstone)
-            self._validate_original_locator(cache_key, original)
+            if cache_key not in snapshot_entries:
+                self._invalid_journal()
+            self._validate_original_locator(
+                cache_key,
+                original,
+                snapshot_entries[cache_key],
+            )
             self._validate_tombstone_locator(
                 operation_id=journal["operation_id"],
                 index=index,
@@ -420,8 +437,6 @@ class ClearRecoveryCoordinator:
             )
             original_locator = self._journal_locator(original)
             self._journal_locator(tombstone)
-            if cache_key not in snapshot_entries:
-                self._invalid_journal()
             self._validate_snapshot_entry(
                 snapshot_entries[cache_key], original_locator
             )
@@ -467,11 +482,21 @@ class ClearRecoveryCoordinator:
         ):
             self._invalid_journal()
 
-    def _validate_original_locator(self, cache_key: str, original: str) -> None:
+    def _validate_original_locator(
+        self,
+        cache_key: str,
+        original: str,
+        snapshot_entry: dict[str, Any],
+    ) -> None:
         """Accept only a direct canonical payload or one exact candidate form."""
         if Path(original).parent != Path("."):
             self._invalid_journal()
-        physical_name = encode_physical_name(cache_key, namespace="blob-store")
+        try:
+            physical_name = self._physical_name(cache_key, snapshot_entry)
+        except Exception:
+            self._invalid_journal()
+        if not isinstance(physical_name, str) or not physical_name:
+            self._invalid_journal()
         if not original.startswith(physical_name):
             self._invalid_journal()
         locator_suffix = original[len(physical_name) :]

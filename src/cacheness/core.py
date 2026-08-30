@@ -24,10 +24,12 @@ from .error_handling import (
     CacheLegacyFormatError,
     CacheQueryValidationError,
     CacheReason,
+    CacheStorageError,
     CacheUnsafePathError,
 )
 from .handlers import HandlerRegistry
 from .serialization import create_unified_cache_key
+from .storage.clear_recovery import ClearRecoveryCoordinator
 from .storage.guarded_handler_io import GuardedHandlerIO
 from .storage.path_security import encode_physical_name, resolve_managed_locator
 
@@ -104,6 +106,10 @@ class UnifiedCache:
 
         # Initialize metadata backend
         self._init_metadata_backend(metadata_backend)
+
+        # Global clear recovery must be installed before any normal lifecycle
+        # work can observe a prepared or committed journal from a prior run.
+        self._init_clear_recovery()
 
         # Initialize custom metadata support
         self._init_custom_metadata_support()
@@ -223,6 +229,35 @@ class UnifiedCache:
                 )
                 actual_backend = "json"  # Store the actual backend used for reporting
         self.actual_backend = actual_backend
+
+    def _init_clear_recovery(self) -> None:
+        """Install/recover the shared clear-only primitive for exact local backends."""
+        self._clear_recovery = None
+        if not ClearRecoveryCoordinator.can_coordinate(self.metadata_backend):
+            return
+
+        self._clear_recovery = ClearRecoveryCoordinator(
+            self.guarded_handler_io.file_ops,
+            self.metadata_backend,
+            physical_name=self._clear_recovery_physical_name,
+        )
+        try:
+            with self._clear_recovery.admission():
+                self._clear_recovery.recover()
+        except Exception:
+            self.guarded_handler_io.close()
+            raise
+
+    def _clear_recovery_physical_name(
+        self,
+        cache_key: str,
+        snapshot_entry: Dict[str, Any],
+    ) -> str:
+        """Bind UnifiedCache journal payloads to its own opaque namespace."""
+        prefix = snapshot_entry.get("prefix")
+        if not isinstance(prefix, str):
+            raise ValueError("Clear recovery snapshot prefix is invalid")
+        return self._storage_id_for_cache_key(cache_key, prefix)
 
     def _supports_custom_metadata(self) -> bool:
         """Check if custom metadata is supported (requires SQLite or PostgreSQL backend with SQLAlchemy)."""
@@ -782,27 +817,53 @@ class UnifiedCache:
         """Return a private replacement ID that cannot overwrite a live payload."""
         return f"{cls._storage_id_for_cache_key(cache_key, prefix)}-candidate-{uuid.uuid4().hex}"
 
-    def _discard_uncommitted_payload(self, locator: Path | str) -> None:
-        """Remove a candidate payload that has never been published in metadata."""
-        self.guarded_handler_io.file_ops.delete(locator)
-
-    def _abort_unsigned_candidate(
-        self, locator: Path | str, signing_error: Exception
-    ) -> None:
-        """Fail a strict signing write without exposing its private payload."""
+    def _delete_or_prove_absent(self, locator: Path) -> None:
+        """Remove one contained payload or prove it is already absent."""
+        deletion_error: Exception | None = None
         try:
-            self._discard_uncommitted_payload(locator)
+            if self.guarded_handler_io.file_ops.delete(locator):
+                return
+        except Exception as exc:
+            deletion_error = exc
+
+        try:
+            if not self.guarded_handler_io.file_ops.exists(locator):
+                return
+        except Exception as exc:
+            deletion_error = deletion_error or exc
+
+        raise CacheStorageError(
+            "Unable to prove removal of a managed cache payload",
+            context={"operation": "put", "locator": str(locator)},
+        ) from deletion_error
+
+    def _cleanup_uncommitted_candidate(
+        self,
+        candidate_locator: Path,
+        triggering_error: BaseException,
+    ) -> None:
+        """Erase an uncommitted candidate or retain both failure contexts."""
+        try:
+            self._delete_or_prove_absent(candidate_locator)
         except Exception as cleanup_error:
-            logger.exception(
-                "Failed to discard uncommitted payload after entry signing failure"
-            )
-            raise CacheIntegrityError(
-                "Unable to sign cache entry and failed to clean its "
-                "uncommitted payload"
+            raise CacheStorageError(
+                "Failed to remove an uncommitted cache candidate",
+                context={
+                    "operation": "put",
+                    "locator": str(candidate_locator),
+                    "cleanup_error": type(cleanup_error).__name__,
+                },
+            ) from triggering_error
+
+    def _cleanup_prior_payload(self, previous_locator: Path) -> None:
+        """Report post-commit prior cleanup without reviving stale metadata."""
+        try:
+            self._delete_or_prove_absent(previous_locator)
+        except Exception as cleanup_error:
+            raise CacheStorageError(
+                "Cache metadata committed but prior payload cleanup failed",
+                context={"operation": "put", "locator": str(previous_locator)},
             ) from cleanup_error
-        raise CacheIntegrityError(
-            "Unable to sign cache entry while unsigned entries are disabled"
-        ) from signing_error
 
     def _entry_locator(
         self,
@@ -1061,48 +1122,43 @@ class UnifiedCache:
             else None
         )
 
+        candidate_locator: Path | None = None
+        metadata_committed = False
         try:
-            # Handler serialization happens only in a private stage. The
-            # adapter publishes a guarded opaque physical name.
+            # The candidate remains private throughout serialization, snapshot
+            # validation, integrity hashing, signing, and metadata publication.
             result = self.guarded_handler_io.put(
                 handler,
                 data,
                 storage_id,
                 self.config,
             )
+            candidate_locator = resolve_managed_locator(
+                self.guarded_handler_io.root,
+                result["actual_path"],
+                operation="candidate_publish",
+            )
 
-            # Calculate file hash for integrity verification (if enabled)
             file_hash = None
             if self.config.metadata.verify_cache_integrity:
                 with self.guarded_handler_io.open_snapshot(
-                    result["actual_path"],
+                    candidate_locator,
                     {},
                 ) as snapshot:
                     file_hash = self._calculate_file_hash(snapshot.path)
                 if not self._is_valid_file_hash(file_hash):
-                    # Integrity-enabled entries are not allowed to fall back to
-                    # the same missing-digest representation used when the
-                    # feature is explicitly disabled. The candidate has never
-                    # been recorded in metadata, so discarding it cannot damage
-                    # an older payload still committed for this cache key.
-                    self._discard_uncommitted_payload(result["actual_path"])
                     raise CacheIntegrityError(
                         "Unable to calculate a complete payload integrity digest"
                     )
 
-            # Update metadata
             metadata_dict = {
                 **result["metadata"],
                 "prefix": prefix,
-                "actual_path": result["actual_path"],
-                "file_hash": file_hash,  # Store file hash for verification
+                "actual_path": str(candidate_locator),
+                "file_hash": file_hash,
             }
-
-            # Only store cache_key_params if enabled in configuration
             if self.config.metadata.store_cache_key_params:
-                metadata_dict["cache_key_params"] = (
-                    kwargs  # Store original key-value parameters for efficient querying
-                )
+                metadata_dict["cache_key_params"] = kwargs
 
             entry_data = {
                 "data_type": handler.data_type,
@@ -1112,89 +1168,66 @@ class UnifiedCache:
                 "metadata": metadata_dict,
             }
 
-            # A configured strict policy cannot publish an unsigned candidate.
-            # Compatibility mode is explicit: it can retain the historic
-            # best-effort behavior only when unsigned entries are allowed.
             signing_required = (
                 self.config.security.enable_entry_signing
                 and not self.config.security.allow_unsigned_entries
             )
             if self.config.security.enable_entry_signing:
-                signing_error = None
                 try:
                     if self.signer is None:
                         raise RuntimeError("Entry signer is unavailable")
 
-                    # Use consistent timestamp for both storage and signing
                     creation_timestamp = datetime.now(timezone.utc)
-                    # Store without timezone info for consistency with database format
-                    creation_timestamp_str = creation_timestamp.replace(tzinfo=None).isoformat()
-                    
-                    # Store the creation timestamp in entry_data for the database
-                    entry_data["created_at"] = creation_timestamp_str
-                    
-                    # Use helper method for consistent field extraction
-                    cache_key_params = kwargs if self.config.metadata.store_cache_key_params else None
+                    entry_data["created_at"] = creation_timestamp.replace(
+                        tzinfo=None
+                    ).isoformat()
+                    cache_key_params = (
+                        kwargs if self.config.metadata.store_cache_key_params else None
+                    )
                     complete_entry_data = self._extract_signable_fields(
                         cache_key=cache_key,
                         entry_data=entry_data,
                         metadata=metadata_dict,
-                        cache_key_params=cache_key_params
+                        cache_key_params=cache_key_params,
                     )
-                    
                     signature = self.signer.sign_entry(complete_entry_data)
                     if not isinstance(signature, str) or not signature:
                         raise ValueError("Entry signer returned an empty signature")
                     metadata_dict["entry_signature"] = signature
-                    
                     logger.debug(f"Created signature for entry {cache_key}")
-                    
-                except Exception as e:
-                    signing_error = e
-                    logger.warning(f"Failed to sign entry {cache_key}: {e}")
+                except Exception as exc:
+                    logger.warning(f"Failed to sign entry {cache_key}: {exc}")
                     if signing_required:
-                        self._abort_unsigned_candidate(result["actual_path"], e)
-
-                if signing_error is not None:
+                        raise CacheIntegrityError(
+                            "Unable to sign cache entry while unsigned entries are disabled"
+                        ) from exc
                     logger.warning(
                         "Committing unsigned entry because allow_unsigned_entries=True"
                     )
-            
+
             self.metadata_backend.put_entry(cache_key, entry_data)
-
-            if previous_locator is not None:
-                try:
-                    self.guarded_handler_io.file_ops.delete(previous_locator)
-                except Exception:
-                    logger.exception(
-                        "Replacement metadata committed but prior payload cleanup failed"
-                    )
-
-            # Handle custom metadata if provided
-            if custom_metadata and self._supports_custom_metadata():
-                self._store_custom_metadata(cache_key, custom_metadata)
-
-            self._enforce_size_limit()
-
-            file_size_mb = result["file_size"] / (1024 * 1024)
-            format_info = f"({result['storage_format']} format)"
-            logger.info(
-                f"Cached {handler.data_type} {cache_key} ({file_size_mb:.3f}MB) {format_info}: {description}"
-            )
-            
-            return cache_key
-
-        except CacheUnsafePathError:
-            # Unsafe locators never become a generic storage failure.
+            metadata_committed = True
+        except BaseException as exc:
+            if candidate_locator is not None and not metadata_committed:
+                self._cleanup_uncommitted_candidate(candidate_locator, exc)
             raise
-        except (OSError, IOError) as e:
-            # I/O errors (disk full, permissions, etc.)
-            logger.error(f"Failed to cache {handler.data_type} (I/O error): {e}")
-            raise
-        except Exception as e:
-            # Include exception type for easier debugging
-            logger.error(f"Failed to cache {handler.data_type}: {type(e).__name__}: {e}")
-            raise
+
+        # Publication changes authority exactly once. The superseded payload is
+        # now cleanup-only and cannot be used to roll metadata back.
+        if previous_locator is not None and previous_locator != candidate_locator:
+            self._cleanup_prior_payload(previous_locator)
+
+        if custom_metadata and self._supports_custom_metadata():
+            self._store_custom_metadata(cache_key, custom_metadata)
+
+        self._enforce_size_limit()
+
+        file_size_mb = result["file_size"] / (1024 * 1024)
+        format_info = f"({result['storage_format']} format)"
+        logger.info(
+            f"Cached {handler.data_type} {cache_key} ({file_size_mb:.3f}MB) {format_info}: {description}"
+        )
+        return cache_key
 
     def _verify_legacy_entry_signature(
         self,
@@ -1464,24 +1497,32 @@ class UnifiedCache:
             logger.debug(f"Cache entry {cache_key} not found for invalidation")
 
     def clear_all(self):
-        """Clear all cache entries and remove cache files."""
-        entries = self.metadata_backend.list_entries()
-        self._preflight_entries(entries, operation="clear_all")
+        """Clear all cache entries through the shared recoverable primitive."""
+        coordinator = self._clear_recovery
+        if (
+            coordinator is None
+            or coordinator.backend is not self.metadata_backend
+            or not ClearRecoveryCoordinator.can_coordinate(self.metadata_backend)
+        ):
+            raise ClearRecoveryCoordinator.unsupported_error(self.metadata_backend)
 
-        # Known payload deletion remains guarded. Orphan reconciliation is a
-        # later lifecycle concern, so this does not glob arbitrary paths.
-        files_removed = 0
-        for entry in entries:
-            locator = self._entry_locator(
-                entry,
-                entry.get("cache_key"),
-                operation="clear_all",
-            )
-            files_removed += int(self.guarded_handler_io.file_ops.delete(locator))
-
-        removed_count = self.metadata_backend.clear_all()
+        with coordinator.admission():
+            entries = self.metadata_backend.list_entries()
+            self._preflight_entries(entries, operation="clear_all")
+            mappings = [
+                (
+                    entry["cache_key"],
+                    self._entry_locator(
+                        entry,
+                        entry["cache_key"],
+                        operation="clear_all",
+                    ),
+                )
+                for entry in entries
+            ]
+            removed_count = coordinator.clear(mappings)
         logger.info(
-            f"Cleared {removed_count} cache entries and removed {files_removed} cache files"
+            f"Cleared {removed_count} cache entries through recoverable clear"
         )
         return removed_count
 
