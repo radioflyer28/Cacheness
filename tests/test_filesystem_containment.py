@@ -768,15 +768,16 @@ def test_blob_store_clear_removes_guarded_payloads_before_metadata(tmp_path):
 
 
 @pytest.mark.parametrize("failing_payload_delete", [1, 2])
-def test_blob_store_clear_rolls_back_every_payload_when_staging_delete_fails(
+def test_blob_store_clear_keeps_tombstone_authority_when_reclamation_fails(
     tmp_path, monkeypatch, failing_payload_delete
 ):
-    """A staged clear restores every still-committed payload after delete failure."""
+    """A post-authority clear failure retains signed recovery evidence to converge."""
     root = tmp_path / "blob-root"
     handler = _InstrumentedHandler()
     store = BlobStore(root)
     store.handlers = _SingleHandlerRegistry(handler)
 
+    failed_key: str | None = None
     try:
         keys = [store.put("first", key="first"), store.put("second", key="second")]
         entries_before = [store.get_metadata(key) for key in keys]
@@ -786,7 +787,6 @@ def test_blob_store_clear_rolls_back_every_payload_when_staging_delete_fails(
             for entry in entries_before
             if entry is not None
         ]
-        payload_bytes = {path: path.read_bytes() for path in payload_paths}
         delete = store.guarded_handler_io.file_ops.delete
         payload_delete_count = 0
 
@@ -803,14 +803,30 @@ def test_blob_store_clear_rolls_back_every_payload_when_staging_delete_fails(
         with pytest.raises(CacheBlobBackendError) as error:
             store.clear()
 
-        assert isinstance(error.value.__cause__, RuntimeError)
-        assert str(error.value.__cause__) == "payload delete unavailable"
-        assert [store.get_metadata(key) for key in keys] == entries_before
-        assert {path: path.read_bytes() for path in payload_paths} == payload_bytes
-        assert [store.get(key) for key in keys] == ["first", "second"]
-        assert not list(root.glob("clear-tombstone-*"))
+        assert error.value.context["operation"] == "clear"
+        assert isinstance(error.value.__cause__, CacheBlobRecoverableCleanupError)
+        assert isinstance(error.value.__cause__.__cause__, CacheStorageError)
+        failed_key = keys[failing_payload_delete - 1]
+        raw_manifest = store.manifest_repository.get_raw(failed_key)
+        assert raw_manifest is not None
+        tombstone = BlobManifestV1.from_canonical_bytes(raw_manifest)
+        assert tombstone.state == "tombstoned"
+        assert tombstone.signature
+        with pytest.raises(CacheBlobLifecycleConflictError):
+            store.get(failed_key)
+        assert payload_paths[failing_payload_delete - 1].exists()
+        assert list(store.lifecycle.operation_repository.iter_raw())
     finally:
         store.close()
+
+    assert failed_key is not None
+    reopened = BlobStore(root)
+    try:
+        assert all(reopened.get(key) is None for key in keys)
+        assert all(not path.exists() for path in payload_paths)
+        assert list(reopened.lifecycle.operation_repository.iter_raw()) == []
+    finally:
+        reopened.close()
 
 
 def test_blob_store_clear_rolls_back_payloads_when_metadata_clear_fails(
