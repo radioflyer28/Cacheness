@@ -14,6 +14,7 @@ from cacheness.error_handling import (
     CacheManifestIntegrityError,
 )
 from cacheness.storage import BlobStore
+from cacheness.storage import ReconciliationAction, ReconciliationStatus
 from cacheness.storage.integrity import sign_hmac_sha256, verify_hmac_sha256
 from cacheness.storage.operation_record import (
     MAX_OPERATION_FIELD_BYTES,
@@ -341,5 +342,76 @@ def test_invalid_evidence_never_reaches_a_recovery_delete(
         assert evidence_path.read_bytes() == raw
         assert evidence_path.stat().st_mtime_ns == before_mtime
         assert mutation_calls == []
+    finally:
+        store.close()
+
+
+def test_reconcile_dry_run_is_deterministic_and_does_not_mutate_candidate_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dry-run reports authenticated, aged candidate debt without repairing it."""
+    root = tmp_path / "reconcile-dry-run"
+    limits = _small_lifecycle_limits()
+    store = BlobStore(
+        config=CacheConfig(cache_dir=str(root), lifecycle_limits=limits), backend="json"
+    )
+    try:
+        key = store._manifest_key(initialize_new_store=True)
+        record = _record_for_operation(root, key, "a" * 32)
+        candidate = store.guarded_handler_io.root / record.candidate_locator
+        store.guarded_handler_io.file_ops.write_bytes_durable(candidate, b"candidate")
+        store.lifecycle.operation_repository.create_exclusive(
+            record, record.canonical_bytes()
+        )
+        before = (candidate.read_bytes(), store.lifecycle.operation_repository.get_raw(record.operation_id))
+        handler_calls: list[str] = []
+        monkeypatch.setattr(
+            store.handlers,
+            "get_handler",
+            lambda _data: handler_calls.append("handler"),
+        )
+
+        first = store.reconcile(now=datetime(2026, 8, 31, tzinfo=timezone.utc))
+        second = store.reconcile(now=datetime(2026, 8, 31, tzinfo=timezone.utc))
+
+        assert first.to_dict() == second.to_dict()
+        assert first.human_summary == second.human_summary
+        assert first.findings[0].status is ReconciliationStatus.SAFE
+        assert first.findings[0].action is ReconciliationAction.DELETE_CANDIDATE
+        assert "tenant/asset" not in repr(first.to_dict())
+        assert before == (
+            candidate.read_bytes(),
+            store.lifecycle.operation_repository.get_raw(record.operation_id),
+        )
+        assert handler_calls == []
+        assert store._reconciler.lifecycle_limits is limits
+    finally:
+        store.close()
+
+
+def test_reconcile_dry_run_is_bounded_and_exposes_an_opaque_resume_token(
+    tmp_path: Path,
+) -> None:
+    """A short action budget reports deterministic partial progress without writes."""
+    root = tmp_path / "reconcile-bounded"
+    limits = _small_lifecycle_limits()
+    store = BlobStore(
+        config=CacheConfig(cache_dir=str(root), lifecycle_limits=limits), backend="json"
+    )
+    try:
+        key = store._manifest_key(initialize_new_store=True)
+        for operation_id in ("a" * 32, "b" * 32):
+            record = _record_for_operation(root, key, operation_id)
+            store.lifecycle.operation_repository.create_exclusive(
+                record, record.canonical_bytes()
+            )
+
+        report = store.reconcile(now=datetime(2026, 8, 31, tzinfo=timezone.utc))
+
+        assert len(report.findings) == limits.max_reconcile_actions
+        assert report.resume_token is not None
+        assert "a" * 32 not in report.resume_token
+        assert report.to_dict()["resume_token"] == report.resume_token
     finally:
         store.close()
