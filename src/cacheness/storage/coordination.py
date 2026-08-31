@@ -244,6 +244,12 @@ class InstanceAdmission:
                     )
                 self._wait(self._condition, remaining)
 
+            # A concurrent closer may have completed release while this caller
+            # waited.  ``CLOSED`` is terminal: do not run the owned-resource
+            # release sequence (including repository flush) again.
+            if self._state is InstanceState.CLOSED:
+                return False
+
             self._release_in_progress = True
             return True
 
