@@ -62,6 +62,7 @@ _SNAPSHOT_ENTRY_FIELDS = {
 _HANDLER_SUFFIX = re.compile(r"(?:\.[A-Za-z0-9_-]+){0,4}\Z")
 _MAX_HANDLER_SUFFIX_LENGTH = 96
 _CANDIDATE_PREFIX = re.compile(r"-candidate-[0-9a-f]{32}")
+_GENERATION_PREFIX = re.compile(r"-generation-[0-9a-f]{32}-[0-9a-f]{32}")
 _FAILURE_CONTEXT_KEY = "clear_recovery_failure"
 _BACKEND_FAILURE = "backend_failure"
 _LIFECYCLE_CONFLICT = "lifecycle_conflict"
@@ -697,6 +698,10 @@ class ClearRecoveryCoordinator:
         candidate_match = _CANDIDATE_PREFIX.match(locator_suffix)
         if candidate_match is not None:
             suffix = locator_suffix[candidate_match.end() :]
+        else:
+            generation_match = _GENERATION_PREFIX.match(locator_suffix)
+            if generation_match is not None:
+                suffix = locator_suffix[generation_match.end() :]
         if (
             len(suffix) > _MAX_HANDLER_SUFFIX_LENGTH
             or not _HANDLER_SUFFIX.fullmatch(suffix)
@@ -850,3 +855,46 @@ class ClearRecoveryCoordinator:
                 context={"operation": "clear"},
             )
         return encoded
+
+
+class LegacyClearEvidenceAdapter:
+    """Reopen exact predecessor clear evidence without starting new work.
+
+    Phase 1 clear journals remain an intentionally narrow compatibility input.
+    This adapter delegates their established prepared/committed convergence to
+    the frozen coordinator, but exposes no method for creating, replacing, or
+    otherwise publishing predecessor evidence. New BlobStore clears are
+    exclusively lifecycle operations and never call this adapter.
+    """
+
+    def __init__(self, file_ops: ManagedFileOps, backend: object) -> None:
+        self._coordinator = ClearRecoveryCoordinator(file_ops, backend)
+
+    @property
+    def journal_path(self) -> Path:
+        """Return the fixed predecessor-evidence locator for inspection only."""
+        return self._coordinator.journal_path
+
+    @property
+    def kind(self) -> str:
+        """Expose the validated predecessor backend identity for translation."""
+        return self._coordinator.kind
+
+    def has_evidence(self) -> bool:
+        """Return whether the fixed predecessor evidence file already exists."""
+        return self._coordinator.file_ops.exists(self.journal_path)
+
+    def recover(self) -> bool:
+        """Converge only evidence that was already present at reopen time.
+
+        The coordinator validates the complete bounded predecessor schema and
+        exact local topology before it restores or reclaims anything. Invalid
+        bytes deliberately remain untouched for diagnosis.
+        """
+        if not self.has_evidence():
+            return False
+        self._coordinator.recover()
+        return True
+
+
+__all__ = ["ClearRecoveryCoordinator", "LegacyClearEvidenceAdapter"]

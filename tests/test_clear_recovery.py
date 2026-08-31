@@ -310,7 +310,7 @@ def test_json_prepared_clear_reopens_to_exact_payload_and_metadata_rollback(
     store = BlobStore(root, backend="json")
     keys, payload_bytes = _put_json_payloads(store)
     metadata_before = deepcopy(store.backend.load_metadata())
-    assert all("-candidate-" in path.name for path in payload_bytes)
+    assert all("-generation-" in path.name for path in payload_bytes)
 
     def interrupt_metadata_clear() -> int:
         raise _SimulatedClearInterruption("interrupted while prepared")
