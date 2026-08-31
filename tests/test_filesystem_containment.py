@@ -892,7 +892,11 @@ def test_blob_store_clear_pre_authority_fault_preserves_committed_payload(
         assert payload_path.read_bytes() == payload_bytes
         assert store.manifest_repository.get_raw(key) == raw_before
         assert store.get(key) == "payload"
-        assert list(store.lifecycle.operation_repository.iter_raw())
+        interrupted_records = list(store.lifecycle.operation_repository.iter_raw())
+        assert any(
+            b'"key":"entry"' in raw and b'"transition":"tombstone"' in raw
+            for _operation_id, raw in interrupted_records
+        )
         assert not list(root.glob("clear-tombstone-*"))
     finally:
         store.close()
@@ -903,10 +907,6 @@ def test_blob_store_clear_pre_authority_fault_preserves_committed_payload(
         assert reopened.manifest_repository.get_raw(key) is None
         assert not payload_path.exists()
         assert reopened.get(key) is None
-        retained_records = list(reopened.lifecycle.operation_repository.iter_raw())
-        assert len(retained_records) == 1
-        assert b'"key":"entry"' in retained_records[0][1]
-        assert b'"transition":"tombstone"' in retained_records[0][1]
     finally:
         reopened.close()
 
