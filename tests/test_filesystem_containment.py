@@ -861,10 +861,10 @@ def test_blob_store_clear_does_not_use_metadata_bulk_clear_as_authority(
         store.close()
 
 
-def test_blob_store_clear_discards_tombstone_if_staging_copy_raises(
-    tmp_path, monkeypatch
+def test_blob_store_clear_pre_authority_fault_preserves_committed_payload(
+    tmp_path,
 ):
-    """A stage-write failure cannot leak an unregistered tombstone payload."""
+    """A pre-tombstone fault retains clear evidence and reopens to deletion."""
     root = tmp_path / "blob-root"
     handler = _InstrumentedHandler()
     store = BlobStore(root)
@@ -876,28 +876,36 @@ def test_blob_store_clear_discards_tombstone_if_staging_copy_raises(
         assert entry_before is not None
         payload_path = Path(entry_before["metadata"]["actual_path"])
         payload_bytes = payload_path.read_bytes()
-        write_stream_to_locator = store.guarded_handler_io.file_ops.write_stream_to_locator
+        raw_before = store.manifest_repository.get_raw(key)
+        assert raw_before is not None
 
-        def write_tombstone_then_raise(locator, source):
-            write_stream_to_locator(locator, source)
-            raise RuntimeError("tombstone staging unavailable")
+        def interrupt_before_tombstone_authority(seam, _record):
+            if seam == "tombstone_publish":
+                raise RuntimeError("tombstone publication unavailable")
 
-        monkeypatch.setattr(
-            store.guarded_handler_io.file_ops,
-            "write_stream_to_locator",
-            write_tombstone_then_raise,
-        )
+        store.lifecycle.fault_hook = interrupt_before_tombstone_authority
 
-        with pytest.raises(CacheBlobBackendError) as error:
+        with pytest.raises(RuntimeError, match="tombstone publication unavailable"):
             store.clear()
 
-        assert isinstance(error.value.__cause__, RuntimeError)
-        assert str(error.value.__cause__) == "tombstone staging unavailable"
         assert store.get_metadata(key) == entry_before
         assert payload_path.read_bytes() == payload_bytes
+        assert store.manifest_repository.get_raw(key) == raw_before
+        assert store.get(key) == "payload"
+        assert list(store.lifecycle.operation_repository.iter_raw())
         assert not list(root.glob("clear-tombstone-*"))
     finally:
         store.close()
+
+    reopened = BlobStore(root)
+    reopened.handlers = _SingleHandlerRegistry(_InstrumentedHandler())
+    try:
+        assert reopened.manifest_repository.get_raw(key) is None
+        assert not payload_path.exists()
+        assert reopened.get(key) is None
+        assert list(reopened.lifecycle.operation_repository.iter_raw()) == []
+    finally:
+        reopened.close()
 
 
 def test_blob_store_clear_leaves_only_recoverable_tombstones_when_final_delete_fails(
