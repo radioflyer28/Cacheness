@@ -596,9 +596,9 @@ def test_unified_cache_puts_are_rejected_before_candidate_creation_while_admitte
 @pytest.mark.parametrize("backend_name", ("json", "sqlite"))
 @pytest.mark.parametrize("writer_instance", ("same", "second"))
 def test_blobstore_live_put_waits_for_clear_then_publishes_linearly(
-    tmp_path, monkeypatch, backend_name, writer_instance
+    tmp_path, backend_name, writer_instance
 ):
-    """A live same- or second-instance put cannot be discarded by a clear."""
+    """A live put waits through clear admission and publishes one generation."""
     root = tmp_path / f"blob-live-put-clear-{backend_name}-{writer_instance}"
     owner = BlobStore(root, backend=backend_name)
     contender = None
@@ -609,21 +609,17 @@ def test_blobstore_live_put_waits_for_clear_then_publishes_linearly(
             if writer_instance == "same"
             else BlobStore(root, backend=backend_name)
         )
-        coordinator = owner._clear_recovery
-        assert coordinator is not None
         entered = threading.Event()
         release = threading.Event()
         clear_errors: list[BaseException] = []
         put_errors: list[BaseException] = []
         put_complete = threading.Event()
         put_result: list[str] = []
-        stage_mapping = coordinator._stage_mapping
 
-        def pause_after_prepared_journal(mapping):
-            entered.set()
-            assert coordinator.journal_path.exists()
-            assert release.wait(timeout=5)
-            return stage_mapping(mapping)
+        def pause_after_clear_snapshot(seam, _record):
+            if seam == "clear_snapshot_complete":
+                entered.set()
+                assert release.wait(timeout=5)
 
         def run_clear():
             try:
@@ -639,7 +635,7 @@ def test_blobstore_live_put_waits_for_clear_then_publishes_linearly(
             finally:
                 put_complete.set()
 
-        monkeypatch.setattr(coordinator, "_stage_mapping", pause_after_prepared_journal)
+        owner.lifecycle.fault_hook = pause_after_clear_snapshot
         clear_thread = threading.Thread(target=run_clear)
         clear_thread.start()
         assert entered.wait(timeout=5)
@@ -661,7 +657,8 @@ def test_blobstore_live_put_waits_for_clear_then_publishes_linearly(
         assert entry is not None
         candidate = Path(entry["metadata"]["actual_path"])
         assert candidate.exists()
-        assert {candidate} == set(root.glob("*candidate-*"))
+        assert "-generation-" in candidate.name
+        assert not set(root.glob("*candidate-*"))
         assert all(contender.get(key) is None for key in old_keys)
     finally:
         if contender is not None and contender is not owner:
