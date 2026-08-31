@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 03
 current_phase_name: Atomic Lifecycle and Recovery Engine
 status: executing
-stopped_at: Completed 03-07-PLAN.md
-last_updated: "2026-08-31T04:05:06.515Z"
+stopped_at: Completed 03-08-PLAN.md
+last_updated: "2026-08-31T04:25:14.989Z"
 last_activity: 2026-08-30
 last_activity_desc: Phase 03 execution started
-state_head: 995201be66218bdf14da72d59584113e58abd756
+state_head: 7734026327adbf621b5f90b9f99d10fbf05d2bdc
 progress:
   total_phases: 8
   completed_phases: 2
   total_plans: 32
-  completed_plans: 29
+  completed_plans: 30
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-08-29)
 ## Current Position
 
 Phase: 03 (Atomic Lifecycle and Recovery Engine) — EXECUTING
-Plan: 8 of 10
+Plan: 9 of 10
 Status: Ready to execute
 Last activity: 2026-08-30 — Phase 03 execution started
 
@@ -70,6 +70,7 @@ Progress: [█░░░░░░░░░] 1 of 8 phases complete
 | Phase 03 P05 | 12 min | 2 tasks | 8 files |
 | Phase 03 P06 | 8 min | 2 tasks | 4 files |
 | Phase 03 P07 | 785 | 3 tasks | 6 files |
+| Phase 03 P08 | 16min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -150,6 +151,8 @@ Recent decisions affecting current work:
 - [Phase 03]: BlobStore ordinary operations bypass predecessor global admission and use StoreAdmissionBarrier only for current clear snapshot establishment.
 - [Phase 03]: Reconciliation defaults to bounded dry-run reports and only applies authenticated, revalidated exact evidence.
 - [Phase 03]: Reconciliation resumes with encrypted authenticated independent manifest and operation cursors.
+- [Phase 03]: Key locks are per BlobStore instance; independent instances remain governed solely by exact manifest CAS.
+- [Phase 03]: BlobStore reads authenticate M1 and M2 around each private snapshot and retry only a proven newer generation once.
 
 ### Pending Todos
 
@@ -173,6 +176,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-08-31T04:05:06.471Z
-Stopped at: Completed 03-07-PLAN.md
+Last session: 2026-08-31T04:25:14.943Z
+Stopped at: Completed 03-08-PLAN.md
 Resume file: None
