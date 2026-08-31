@@ -513,10 +513,10 @@ def test_clear_does_not_rewrap_already_typed_coordinator_failure(
 
 
 @pytest.mark.parametrize("backend_name", ("json", "sqlite"))
-def test_tracer_direct_blob_store_uses_one_authenticated_committed_manifest(
+def test_tracer_direct_blob_store_reauthenticates_one_committed_snapshot(
     tmp_path, monkeypatch, backend_name
 ):
-    """A direct put/get signs the raw record and verifies one snapshot first."""
+    """A read validates M1, snapshots, validates M2, then deserializes."""
     events: list[str] = []
     store = BlobStore(tmp_path / "tracer", backend=backend_name)
     store.handlers = _SingleHandlerRegistry(_TracingHandler(events))
@@ -566,7 +566,7 @@ def test_tracer_direct_blob_store_uses_one_authenticated_committed_manifest(
 
         events.clear()
         assert store.get(key) == "tracer payload"
-        assert events == ["repository", "snapshot", "digest", "handler"]
+        assert events == ["repository", "snapshot", "repository", "digest", "handler"]
     finally:
         store.close()
 
