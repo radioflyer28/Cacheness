@@ -1,0 +1,102 @@
+{
+  "version": "1.0",
+  "timestamp": "2026-08-31T14:36:18.064Z",
+  "phase": "03",
+  "phase_name": "atomic-lifecycle-and-recovery-engine",
+  "phase_dir": ".planning/phases/03-atomic-lifecycle-and-recovery-engine",
+  "plan": 10,
+  "task": 4,
+  "total_tasks": 8,
+  "status": "paused",
+  "completed_tasks": [
+    {
+      "id": 1,
+      "name": "Execute Phase 03 plans 01 through 10",
+      "status": "done",
+      "commit": "1a1fb5d"
+    },
+    {
+      "id": 2,
+      "name": "Run independent full Phase 03 test gate",
+      "status": "done",
+      "commit": "1a1fb5d"
+    },
+    {
+      "id": 3,
+      "name": "Deep review and first two fix passes",
+      "status": "done",
+      "commit": "37c1afb"
+    },
+    {
+      "id": 4,
+      "name": "Close final deep-review findings",
+      "status": "in_progress",
+      "progress": "Global fix iteration 4 was dispatched then interrupted at the user's pause request before any commit or source change. Current 03-REVIEW.md has 4 Critical and 2 Warning findings."
+    }
+  ],
+  "remaining_tasks": [
+    {
+      "id": 4,
+      "name": "Fix all six current 03-REVIEW.md findings and write iteration-4 REVIEW-FIX.md",
+      "status": "not_started"
+    },
+    {
+      "id": 5,
+      "name": "Repeat deep re-review/fix cycles until 03-REVIEW.md is clean",
+      "status": "not_started"
+    },
+    {
+      "id": 6,
+      "name": "Commit converged review artifacts and rerun Phase 03/full/compatibility/lint gates",
+      "status": "not_started"
+    },
+    {
+      "id": 7,
+      "name": "Run Phase 03 Nyquist, security, regression, and goal verification hooks; close any gaps",
+      "status": "not_started"
+    },
+    {
+      "id": 8,
+      "name": "Mark Phase 03 complete and route to Phase 04",
+      "status": "not_started"
+    }
+  ],
+  "blockers": [
+    {
+      "description": "Current deep review has 4 Critical blockers and 2 Warnings; Phase 03 must not be verified or completed until a fresh deep review returns clean.",
+      "type": "technical",
+      "workaround": "Resume with a fresh gsd-code-fixer against current 03-REVIEW.md, then independently deep re-review the full 27-file scope."
+    }
+  ],
+  "async_jobs": [],
+  "human_actions_pending": [],
+  "decisions": [
+    {
+      "decision": "Continue review/fix cycles beyond the built-in three-iteration cap.",
+      "rationale": "The milestone contract requires real convergence; iteration 3 found new shipping blockers in the fixes themselves.",
+      "phase": "03"
+    },
+    {
+      "decision": "Native handlers remain the sole payload-format owners; no Cacheness wrapper/header is permitted.",
+      "rationale": "This is a locked project and phase architecture decision.",
+      "phase": "03"
+    },
+    {
+      "decision": "Protect the seven dirty codebase-map documents and milestone.lock from every stage/commit/edit/revert operation.",
+      "rationale": "They are user-owned pre-existing changes outside the active implementation scope.",
+      "phase": "03"
+    }
+  ],
+  "uncommitted_files": [
+    ".planning/phases/03-atomic-lifecycle-and-recovery-engine/03-REVIEW.md",
+    ".planning/phases/03-atomic-lifecycle-and-recovery-engine/03-REVIEW-FIX.md",
+    ".planning/phases/03-atomic-lifecycle-and-recovery-engine/03-REVIEW.iter2.md",
+    ".planning/phases/03-atomic-lifecycle-and-recovery-engine/03-REVIEW.iter3.md",
+    ".planning/phases/03-atomic-lifecycle-and-recovery-engine/03-REVIEW.iter4.md",
+    ".planning/phases/03-atomic-lifecycle-and-recovery-engine/03-REVIEW-FIX.iter2.md",
+    ".planning/phases/03-atomic-lifecycle-and-recovery-engine/03-REVIEW-FIX.iter3.md",
+    ".planning/phases/03-atomic-lifecycle-and-recovery-engine/03-REVIEW-FIX.iter4.md"
+  ],
+  "next_action": "Read the handoff and current 03-REVIEW.md, demonstrate understanding of every blocking anti-pattern, then spawn a fresh gsd-code-fixer for all 4 Critical and 2 Warning findings (global iteration 4).",
+  "context_notes": "HEAD is 37c1afb. No iteration-4 source/test changes or commits exist. All ten Phase 03 plans are summarized. Full pytest was green before deep review fixes. Review pass 1 found 6 Critical + 1 Warning; 6905569 addressed them. Re-review pass 2 found 3 Critical + 3 Warnings; 37c1afb addressed them. Re-review pass 3 found 4 Critical + 2 Warnings now recorded in current 03-REVIEW.md. Do not trust fix reports without independent deep re-review. Protected dirty files: .planning/codebase/{ARCHITECTURE,CONCERNS,CONVENTIONS,INTEGRATIONS,STACK,STRUCTURE,TESTING}.md and .planning/milestone.lock."
+}
