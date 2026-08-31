@@ -207,6 +207,10 @@ class BlobStore:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.guarded_handler_io = GuardedHandlerIO(self.cache_dir)
         self._owns_backend = False
+        self._released_resources = {
+            "guarded_handler_io": False,
+            "backend": False,
+        }
         try:
             self._initialize_after_guarded_io(
                 backend,
@@ -812,8 +816,7 @@ class BlobStore:
 
         closed = False
         try:
-            self.guarded_handler_io.close()
-            self.backend.close()
+            self._release_owned_resources()
             closed = True
         except CacheStorageError:
             raise
@@ -824,6 +827,27 @@ class BlobStore:
             ) from exc
         finally:
             self._instance_admission.finish_close(closed=closed)
+
+    def _release_owned_resources(self) -> None:
+        """Release successful owned resources once, leaving failed work retryable.
+
+        The lifecycle operation repository is file-backed through the same
+        managed descriptor as ``GuardedHandlerIO``.  It has no independent
+        handle to close; a future repository may offer a narrow ``flush``
+        hook, which is invoked before its shared descriptor is released.
+        """
+        operation_repository = self.lifecycle.operation_repository
+        flush = getattr(operation_repository, "flush", None)
+        if callable(flush):
+            flush()
+
+        if not self._released_resources["guarded_handler_io"]:
+            self.guarded_handler_io.close()
+            self._released_resources["guarded_handler_io"] = True
+
+        if self._owns_backend and not self._released_resources["backend"]:
+            self.backend.close()
+            self._released_resources["backend"] = True
     
     def __enter__(self):
         self._instance_admission.require_open()

@@ -66,6 +66,7 @@ from .reconciliation import (
 )
 from cacheness.error_handling import (
     CacheBlobBackendError,
+    CacheBlobCloseTimeoutError,
     CacheBlobManifestMalformedError,
     CacheBlobManifestUnauthenticatedError,
     CacheBlobManifestUnsupportedVersionError,
@@ -79,6 +80,7 @@ from cacheness.error_handling import (
     CacheBlobReconciliationCheckpointError,
     CacheBlobReconciliationConflictError,
     CacheBlobReconciliationError,
+    CacheBlobStoreClosedError,
 )
 
 # Conditionally import SqliteBackend
@@ -104,6 +106,8 @@ __all__ = [
     "CacheManifestUnsupportedVersionError",
     "CacheBlobLifecycleConflictError",
     "CacheBlobBackendError",
+    "CacheBlobCloseTimeoutError",
+    "CacheBlobStoreClosedError",
     "CacheBlobMigrationRequiredError",
     "CacheBlobReconciliationError",
     "CacheBlobReconciliationConflictError",
