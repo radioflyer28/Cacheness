@@ -242,3 +242,59 @@ def test_partial_owned_resource_failure_is_typed_and_retries_without_double_clos
     store.close()
     assert guarded_close_calls == [None]
     assert backend_close_calls == [None, None]
+
+
+def test_concurrent_close_waiter_does_not_repeat_owned_release(tmp_path, monkeypatch):
+    """A waiter observes CLOSED after another caller releases every owned handle."""
+    store = _configured_store(tmp_path / "concurrent-close", close_wait_seconds=5)
+    guarded_close_started = Event()
+    release_resource = Event()
+    waiting_close = Event()
+    close_errors: list[BaseException] = []
+    flush_calls: list[None] = []
+    guarded_close_calls: list[None] = []
+    original_guarded_close = store.guarded_handler_io.close
+    original_wait = store._instance_admission._wait
+
+    def flush() -> None:
+        flush_calls.append(None)
+
+    def guarded_close() -> None:
+        guarded_close_calls.append(None)
+        guarded_close_started.set()
+        assert release_resource.wait(timeout=5)
+        original_guarded_close()
+
+    def wait_with_signal(condition, timeout: float) -> None:
+        waiting_close.set()
+        original_wait(condition, timeout)
+
+    monkeypatch.setattr(
+        store.lifecycle.operation_repository,
+        "flush",
+        flush,
+        raising=False,
+    )
+    monkeypatch.setattr(store.guarded_handler_io, "close", guarded_close)
+    monkeypatch.setattr(store._instance_admission, "_wait", wait_with_signal)
+
+    def close_store() -> None:
+        try:
+            store.close()
+        except BaseException as exc:  # pragma: no cover - asserted below.
+            close_errors.append(exc)
+
+    first_close = Thread(target=close_store)
+    first_close.start()
+    assert guarded_close_started.wait(timeout=5)
+
+    second_close = Thread(target=close_store)
+    second_close.start()
+    assert waiting_close.wait(timeout=5)
+
+    release_resource.set()
+    _join(first_close)
+    _join(second_close)
+    assert close_errors == []
+    assert flush_calls == [None]
+    assert guarded_close_calls == [None]
