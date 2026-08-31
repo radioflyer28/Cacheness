@@ -81,6 +81,7 @@ from .manifest_repository import ManifestExpectation, create_manifest_repository
 from .legacy_manifest import LegacyManifestIdentity, recognize_legacy_fixture_tree
 from .lifecycle import LifecycleEngine
 from .path_security import encode_physical_name, resolve_managed_locator
+from .reconciliation import _Reconciler, ReconciliationReport
 from ..metadata import InMemoryBackend, MetadataBackend as CoreMetadataBackend
 from ..metadata import SqliteBackend
 
@@ -288,6 +289,7 @@ class BlobStore:
             self.cache_dir / "blob_manifest_hmac_key.bin"
         )
         self.lifecycle = LifecycleEngine(self, lifecycle_limits=self.lifecycle_limits)
+        self._reconciler = _Reconciler(self, lifecycle_limits=self.lifecycle_limits)
 
         # The predecessor coordinator remains an exact local compatibility
         # parser. It has no new-operation call site: fresh clear authority is
@@ -627,6 +629,26 @@ class BlobStore:
         cleared = self.lifecycle.clear()
         logger.debug("Cleared %s BlobStore targets through the lifecycle engine", cleared)
         return cleared
+
+    def reconcile(
+        self,
+        *,
+        apply: bool = False,
+        resume_token: str | None = None,
+        now: Any | None = None,
+    ) -> ReconciliationReport:
+        """Report bounded lifecycle debt without deserializing or scanning payloads.
+
+        Reconciliation defaults to a non-mutating inspection.  The explicit
+        apply path is intentionally implemented by the private reconciler so
+        it can revalidate exact evidence immediately before every action.
+        """
+        self._require_canonical_store()
+        return self._reconciler.reconcile(
+            apply=apply,
+            resume_token=resume_token,
+            now=now,
+        )
 
     def _reconcile_sqlite_manifest_records_after_clear(self) -> None:
         """Drop SQLite sidecar records orphaned by a completed clear recovery.

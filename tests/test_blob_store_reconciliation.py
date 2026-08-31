@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -14,7 +15,7 @@ from cacheness.error_handling import (
     CacheManifestIntegrityError,
 )
 from cacheness.storage import BlobStore
-from cacheness.storage import ReconciliationAction, ReconciliationStatus
+from cacheness.storage.reconciliation import ReconciliationAction, ReconciliationStatus
 from cacheness.storage.integrity import sign_hmac_sha256, verify_hmac_sha256
 from cacheness.storage.operation_record import (
     MAX_OPERATION_FIELD_BYTES,
@@ -86,6 +87,23 @@ def _record_for_operation(
         transition=OperationTransition.CREATE,
         expected_generation=None,
         expected_record_digest=None,
+    )
+    return record.with_signature(sign_hmac_sha256(record.signing_bytes(), key))
+
+
+def _reconciliation_record(
+    store: BlobStore,
+    root: Path,
+    key: bytes,
+    operation_id: str,
+) -> LifecycleOperationRecord:
+    """Bind a synthetic record to the exact local store topology."""
+    record = replace(
+        _record_for_operation(root, key, operation_id),
+        topology={
+            "backend": type(store.backend).__name__,
+            "root": store_identity(str(store.guarded_handler_io.root)),
+        },
     )
     return record.with_signature(sign_hmac_sha256(record.signing_bytes(), key))
 
@@ -358,7 +376,7 @@ def test_reconcile_dry_run_is_deterministic_and_does_not_mutate_candidate_eviden
     )
     try:
         key = store._manifest_key(initialize_new_store=True)
-        record = _record_for_operation(root, key, "a" * 32)
+        record = _reconciliation_record(store, root, key, "a" * 32)
         candidate = store.guarded_handler_io.root / record.candidate_locator
         store.guarded_handler_io.file_ops.write_bytes_durable(candidate, b"candidate")
         store.lifecycle.operation_repository.create_exclusive(
@@ -402,7 +420,7 @@ def test_reconcile_dry_run_is_bounded_and_exposes_an_opaque_resume_token(
     try:
         key = store._manifest_key(initialize_new_store=True)
         for operation_id in ("a" * 32, "b" * 32):
-            record = _record_for_operation(root, key, operation_id)
+            record = _reconciliation_record(store, root, key, operation_id)
             store.lifecycle.operation_repository.create_exclusive(
                 record, record.canonical_bytes()
             )
