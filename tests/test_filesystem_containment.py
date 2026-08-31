@@ -903,7 +903,10 @@ def test_blob_store_clear_pre_authority_fault_preserves_committed_payload(
         assert reopened.manifest_repository.get_raw(key) is None
         assert not payload_path.exists()
         assert reopened.get(key) is None
-        assert list(reopened.lifecycle.operation_repository.iter_raw()) == []
+        retained_records = list(reopened.lifecycle.operation_repository.iter_raw())
+        assert len(retained_records) == 1
+        assert b'"key":"entry"' in retained_records[0][1]
+        assert b'"transition":"tombstone"' in retained_records[0][1]
     finally:
         reopened.close()
 
