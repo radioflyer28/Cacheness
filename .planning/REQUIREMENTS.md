@@ -9,7 +9,7 @@
 
 - [x] **STOR-01**: Every stored entry uses one versioned canonical manifest across all supported backends.
 - [x] **STOR-02**: Normal reads expose only committed entry generations.
-- [ ] **STOR-03**: A write exposes either the previous complete generation or the new complete generation, never partial payload or metadata state.
+- [x] **STOR-03**: A write exposes either the previous complete generation or the new complete generation, never partial payload or metadata state.
 - [x] **STOR-04**: A failed write preserves the last valid generation and leaves any residue detectable and recoverable.
 - [x] **STOR-05**: Overwrite, delete, clear, and close operations are idempotent and clean up both payload and metadata state.
 - [x] **STOR-06**: Operators can run dry-run and resumable reconciliation that detects inconsistent state and safely repairs, quarantines, or reports it.
@@ -93,7 +93,7 @@ Deferred to future releases and not included in the current roadmap.
 |-------------|-------|--------|
 | STOR-01 | Phase 2 | Complete |
 | STOR-02 | Phase 2 | Complete |
-| STOR-03 | Phase 3 | Pending |
+| STOR-03 | Phase 3 | Complete |
 | STOR-04 | Phase 3 | Complete |
 | STOR-05 | Phase 3 | Complete |
 | STOR-06 | Phase 3 | Complete |

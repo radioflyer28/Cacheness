@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 1
+open_count: 2
 waived_count: 0
 fixed_count: 19
-total_count: 20
-last_updated: 2026-08-30T19:16:36.244Z
+total_count: 21
+last_updated: 2026-08-31T12:32:42.489Z
 ---
 
 # Broken Windows Ledger
@@ -35,6 +35,7 @@ last_updated: 2026-08-30T19:16:36.244Z
 | 18 | 02 | deviation | src/cacheness/storage/legacy_manifest.py |  | SQLite legacy inspection initially created WAL/SHM sidecars; immutable read-only mode now preserves fixture evidence. | fixed |  | 2026-08-30T15:09:46.116Z | 2026-08-30T15:09:53.927Z |
 | 19 | 02 | deviation | tests/test_blob_store_read_contract.py |  | Future-schema regression now edits raw manifest bytes because the schema model rejects unsupported versions at construction. | fixed |  | 2026-08-30T15:09:46.215Z | 2026-08-30T15:09:54.024Z |
 | 20 | 03 | unrun-verify | tests/test_blob_store_read_contract.py | 841 | Delete verification fixture intercepts lifecycle-evidence retirement; Plan 03-08 owns narrowing the payload-delete monkeypatch. | open |  | 2026-08-30T19:16:36.244Z |  |
+| 21 | 03 | lint-warning | src/cacheness/__init__.py |  | Targeted Ruff baseline: 23 pre-existing F401/F841 findings across untouched __init__.py, config.py, and test_config_validation.py; see Phase 03 deferred-items.md. | open |  | 2026-08-31T12:32:42.489Z |  |
 
 ````json
 [
@@ -276,6 +277,18 @@ last_updated: 2026-08-30T19:16:36.244Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-08-30T19:16:36.244Z",
+    "resolved_at": null
+  },
+  {
+    "id": 21,
+    "kind": "lint-warning",
+    "phase": "03",
+    "file": "src/cacheness/__init__.py",
+    "line": null,
+    "description": "Targeted Ruff baseline: 23 pre-existing F401/F841 findings across untouched __init__.py, config.py, and test_config_validation.py; see Phase 03 deferred-items.md.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-31T12:32:42.489Z",
     "resolved_at": null
   }
 ]
