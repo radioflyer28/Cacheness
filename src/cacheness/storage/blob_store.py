@@ -217,6 +217,7 @@ class BlobStore:
         self._released_resources = {
             "guarded_handler_io": False,
             "backend": False,
+            "admission_barrier": False,
         }
         try:
             self._initialize_after_guarded_io(
@@ -272,7 +273,7 @@ class BlobStore:
         )
         self.lifecycle_limits = self.config.lifecycle_limits
         self._instance_admission = InstanceAdmission(self.lifecycle_limits)
-        self._admission_barrier = StoreAdmissionBarrier.for_root(
+        self._admission_barrier = StoreAdmissionBarrier.acquire(
             self.guarded_handler_io.root
         )
         # This is intentionally per instance.  Same-process independent
@@ -343,6 +344,11 @@ class BlobStore:
             self.guarded_handler_io.close()
         except Exception:
             logger.exception("Failed to close BlobStore managed-root descriptor")
+        if hasattr(self, "_admission_barrier"):
+            try:
+                self._admission_barrier.release()
+            except Exception:
+                logger.exception("Failed to release BlobStore admission barrier")
 
     @property
     def legacy_identity(self) -> LegacyManifestIdentity | None:
@@ -896,6 +902,10 @@ class BlobStore:
         if self._owns_backend and not self._released_resources["backend"]:
             self.backend.close()
             self._released_resources["backend"] = True
+
+        if not self._released_resources["admission_barrier"]:
+            self._admission_barrier.release()
+            self._released_resources["admission_barrier"] = True
     
     def __enter__(self):
         self._instance_admission.require_open()

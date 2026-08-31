@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
 from threading import Event, Thread
 
 import pytest
@@ -16,6 +17,8 @@ from cacheness.error_handling import (
 )
 from cacheness.metadata import InMemoryBackend
 from cacheness.storage import BlobStore
+from cacheness.storage import coordination
+from cacheness.storage.coordination import StoreAdmissionBarrier
 
 
 def _join(thread: Thread) -> None:
@@ -298,3 +301,61 @@ def test_concurrent_close_waiter_does_not_repeat_owned_release(tmp_path, monkeyp
     assert close_errors == []
     assert flush_calls == [None]
     assert guarded_close_calls == [None]
+
+
+def test_admission_barrier_releases_final_root_lease_and_recreates_identity(tmp_path):
+    """Closed roots retain neither barrier descriptors nor stale inode identity."""
+    roots = [tmp_path / f"leased-{index}" for index in range(24)]
+    stores = [BlobStore(root, backend="json") for root in roots]
+    barriers = [store._admission_barrier for store in stores]
+    identities = [barrier._root_identity for barrier in barriers]
+    for store in stores:
+        store.close()
+
+    assert all(
+        StoreAdmissionBarrier._instances.get(identity) is None
+        for identity in identities
+    )
+    assert all(barrier._file_ops._root_fd is None for barrier in barriers)
+
+    root = tmp_path / "recreated-root"
+    original = BlobStore(root, backend="json")
+    original_barrier = original._admission_barrier
+    original.close()
+    shutil.rmtree(root)
+    root.mkdir()
+
+    recreated = BlobStore(root, backend="json")
+    try:
+        assert recreated._admission_barrier is not original_barrier
+        recreated.put({"value": "new-root"}, key="new-root")
+        assert recreated.get("new-root") == {"value": "new-root"}
+    finally:
+        recreated.close()
+
+
+def test_windows_lock_path_keeps_canonical_blobstore_constructible(
+    tmp_path, monkeypatch
+):
+    """The Win32 lock adapter serves shared admission and exact evidence CAS."""
+    calls: list[tuple[str, bool | None]] = []
+
+    class FakeWindowsLockApi:
+        def lock(self, _descriptor: int, *, exclusive: bool) -> object:
+            calls.append(("lock", exclusive))
+            return object()
+
+        def unlock(self, _descriptor: int, _token: object) -> object:
+            calls.append(("unlock", None))
+            return None
+
+    monkeypatch.setattr(coordination, "_platform_name", lambda: "nt")
+    monkeypatch.setattr(coordination, "_windows_lock_api", FakeWindowsLockApi)
+    store = BlobStore(tmp_path / "windows-lock-path", backend="json")
+    try:
+        store.put({"value": "ordinary"}, key="ordinary")
+        assert store.clear() == 1
+        assert ("lock", False) in calls
+        assert ("lock", True) in calls
+    finally:
+        store.close()

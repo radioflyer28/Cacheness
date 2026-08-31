@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-import threading
+import multiprocessing
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -32,6 +32,7 @@ from cacheness.storage.operation_record import (
     store_identity,
 )
 from cacheness.storage.operation_repository import FileOperationRecordRepository
+from cacheness.storage.path_security import ManagedFileOps
 from cacheness.storage import reconciliation as reconciliation_module
 
 
@@ -111,6 +112,47 @@ def _reconciliation_record(
         },
     )
     return record.with_signature(sign_hmac_sha256(record.signing_bytes(), key))
+
+
+def _race_exact_evidence_transition_in_process(
+    root: str,
+    initial: bytes,
+    updated: bytes,
+    transition: str,
+    ready: multiprocessing.queues.Queue,
+    release: multiprocessing.synchronize.Event,
+    outcomes: multiprocessing.queues.Queue,
+) -> None:
+    """Race a fresh managed root/repository without sharing interpreter locks."""
+    file_ops = ManagedFileOps(root)
+    repository = FileOperationRecordRepository(file_ops, lifecycle_limits=LifecycleLimits())
+    try:
+        # Pass only canonical evidence across the process boundary.  The
+        # immutable record intentionally contains a MappingProxyType topology,
+        # which is not a spawn-pickle transport; independently reopening the
+        # exact signed record is also the production recovery model.
+        record = LifecycleOperationRecord.from_canonical_bytes(initial)
+        ready.put("ready")
+        if not release.wait(timeout=10):
+            outcomes.put("timeout")
+            return
+        if transition == "checkpoint":
+            repository.checkpoint_if_exact(
+                record.at_checkpoint(OperationCheckpoint.CANDIDATE_PUBLISHED),
+                expected_raw=initial,
+                raw_record=updated,
+            )
+        elif transition == "retire":
+            repository.retire_if_exact(record, expected_raw=initial)
+        else:  # pragma: no cover - test harness invariant.
+            raise AssertionError(f"unknown transition: {transition}")
+        outcomes.put("won")
+    except CacheBlobLifecycleConflictError:
+        outcomes.put("conflict")
+    except BaseException as exc:  # pragma: no cover - surfaced by parent assertions.
+        outcomes.put(f"error:{exc!r}")
+    finally:
+        file_ops.close()
 
 
 def test_operation_evidence_binds_provenance_transition_and_domain_signature(
@@ -569,50 +611,99 @@ def test_reconcile_resume_interleaves_manifest_and_operation_pages(tmp_path: Pat
         store.close()
 
 
-def test_independent_operation_repositories_have_one_exact_checkpoint_winner(
+@pytest.mark.parametrize(
+    ("transitions", "expected_terminal"),
+    (
+        (("checkpoint", "checkpoint"), "checkpoint"),
+        (("checkpoint", "retire"), "either"),
+    ),
+)
+def test_independent_processes_have_one_exact_evidence_transition_winner(
     tmp_path: Path,
+    transitions: tuple[str, str],
+    expected_terminal: str,
 ) -> None:
-    """Exact evidence CAS is shared by independent repository instances."""
+    """Checkpoint/CAS races cross real process and descriptor boundaries."""
     root = tmp_path / "operation-cas-independent"
     store = BlobStore(root, backend="json")
+    context = multiprocessing.get_context("spawn")
+    workers: list[multiprocessing.Process] = []
     try:
         key = store._manifest_key(initialize_new_store=True)
         record = _reconciliation_record(store, root, key, "a" * 32)
         initial = record.canonical_bytes(lifecycle_limits=store.lifecycle_limits)
-        first = FileOperationRecordRepository(
+        updated = record.at_checkpoint(
+            OperationCheckpoint.CANDIDATE_PUBLISHED
+        ).canonical_bytes(lifecycle_limits=store.lifecycle_limits)
+        repository = FileOperationRecordRepository(
             store.guarded_handler_io.file_ops, lifecycle_limits=store.lifecycle_limits
         )
-        second = FileOperationRecordRepository(
-            store.guarded_handler_io.file_ops, lifecycle_limits=store.lifecycle_limits
-        )
-        first.create_exclusive(record, initial)
-        updated_record = record.at_checkpoint(OperationCheckpoint.CANDIDATE_PUBLISHED)
-        updated = updated_record.canonical_bytes(lifecycle_limits=store.lifecycle_limits)
-        gate = threading.Barrier(2)
-        outcomes: list[str] = []
-        errors: list[BaseException] = []
+        repository.create_exclusive(record, initial)
 
-        def checkpoint(repository: FileOperationRecordRepository) -> None:
-            try:
-                gate.wait(timeout=5)
-                repository.checkpoint_if_exact(
-                    updated_record, expected_raw=initial, raw_record=updated
-                )
-                outcomes.append("won")
-            except BaseException as exc:  # pragma: no cover - asserted below.
-                errors.append(exc)
-
-        workers = [threading.Thread(target=checkpoint, args=(repository,)) for repository in (first, second)]
-        for worker in workers:
+        ready = context.Queue()
+        release = context.Event()
+        outcomes = context.Queue()
+        for transition in transitions:
+            worker = context.Process(
+                target=_race_exact_evidence_transition_in_process,
+                args=(
+                    str(root),
+                    initial,
+                    updated,
+                    transition,
+                    ready,
+                    release,
+                    outcomes,
+                ),
+            )
             worker.start()
+            workers.append(worker)
+        assert ready.get(timeout=10) == "ready"
+        assert ready.get(timeout=10) == "ready"
+        release.set()
         for worker in workers:
-            worker.join(timeout=5)
-            assert not worker.is_alive()
+            worker.join(timeout=10)
+            assert worker.exitcode == 0
 
-        assert outcomes == ["won"]
-        assert len(errors) == 1
-        assert isinstance(errors[0], CacheBlobLifecycleConflictError)
-        assert first.get_raw(record.operation_id) == updated
+        observed = sorted(outcomes.get(timeout=10) for _ in workers)
+        assert observed == ["conflict", "won"]
+        current = repository.get_raw(record.operation_id)
+        if expected_terminal == "checkpoint":
+            assert current == updated
+        else:
+            assert current in {None, updated}
+    finally:
+        for worker in workers:
+            if worker.is_alive():
+                worker.terminate()
+                worker.join(timeout=5)
+        store.close()
+
+
+def test_evidence_transition_lock_files_are_fixed_bounded_stripes(tmp_path: Path) -> None:
+    """High-cardinality successful transitions retain only the fixed stripe set."""
+    root = tmp_path / "bounded-evidence-locks"
+    store = BlobStore(root, backend="json")
+    try:
+        key = store._manifest_key(initialize_new_store=True)
+        repository = store.lifecycle.operation_repository
+        for index in range(160):
+            operation_id = f"{index:032x}"
+            record = _reconciliation_record(store, root, key, operation_id)
+            initial = record.canonical_bytes(lifecycle_limits=store.lifecycle_limits)
+            updated_record = record.at_checkpoint(OperationCheckpoint.CANDIDATE_PUBLISHED)
+            updated = updated_record.canonical_bytes(
+                lifecycle_limits=store.lifecycle_limits
+            )
+            repository.create_exclusive(record, initial)
+            repository.checkpoint_if_exact(
+                updated_record, expected_raw=initial, raw_record=updated
+            )
+            repository.retire_if_exact(updated_record, expected_raw=updated)
+
+        lock_files = list((root / "operations" / ".conditional-locks").glob("*.lock"))
+        assert 0 < len(lock_files) <= 64
+        assert all(path.name[:-5].isalnum() and len(path.name) == 7 for path in lock_files)
     finally:
         store.close()
 

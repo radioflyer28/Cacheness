@@ -9,7 +9,7 @@ import hashlib
 from heapq import nsmallest
 from pathlib import Path
 from threading import RLock
-from typing import BinaryIO, Protocol
+from typing import Protocol
 
 from cacheness.config import LifecycleLimits
 from cacheness.error_handling import (
@@ -20,7 +20,12 @@ from cacheness.error_handling import (
     CacheUnsafePathError,
 )
 
-from .operation_record import LifecycleOperationRecord
+from .coordination import interprocess_file_lock, lock_stripe_index
+from .manifest import MAX_MANIFEST_BYTES
+from .operation_record import (
+    MAX_CLEAR_TARGET_REFERENCE_CHUNKS,
+    LifecycleOperationRecord,
+)
 from .path_security import ManagedFileOps, resolve_managed_locator, validate_blob_id
 
 
@@ -131,11 +136,11 @@ class FileOperationRecordRepository:
         return _CONDITIONAL_LOCK_STRIPES[stripe % len(_CONDITIONAL_LOCK_STRIPES)]
 
     def _conditional_lock_locator(self, operation_id: str) -> Path:
-        """Return one contained fixed advisory lock for an evidence transition."""
-        digest = hashlib.sha256(operation_id.encode("utf-8")).hexdigest()
+        """Return one of a fixed number of durable evidence-CAS lock stripes."""
+        stripe = lock_stripe_index(self.file_ops.root, operation_id)
         return resolve_managed_locator(
             self.file_ops.root,
-            Path("operations") / ".conditional-locks" / f"{digest}.lock",
+            Path("operations") / ".conditional-locks" / f"{stripe:02x}.lock",
             operation="operation_record_conditional_lock",
             allow_missing_leaf=True,
         )
@@ -148,40 +153,15 @@ class FileOperationRecordRepository:
         never spans handler serialization, manifest publication, or unrelated
         operation IDs, preserving the phase's no-global-normal-lock contract.
         """
-        try:
-            import fcntl
-        except ImportError as exc:  # pragma: no cover - non-POSIX topology.
-            raise CacheBlobBackendError(
-                "Operation evidence requires POSIX advisory locking",
-                context={"operation": "conditional_evidence"},
-            ) from exc
-
         lock_locator = self._conditional_lock_locator(operation_id)
-        try:
-            self.file_ops.create_bytes_durable_exclusive(lock_locator, b"lock\n")
-        except FileExistsError:
-            pass
-
-        handle: BinaryIO | None = None
         with self._conditional_lock_for(operation_id):
-            try:
-                handle = self.file_ops.open_read(lock_locator)
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            with interprocess_file_lock(
+                self.file_ops,
+                lock_locator,
+                exclusive=True,
+                operation="conditional_evidence",
+            ):
                 yield
-            except OSError as exc:
-                raise CacheBlobBackendError(
-                    "Operation evidence conditional transition could not lock",
-                    context={
-                        "operation_id": operation_id,
-                        "operation": "conditional_evidence",
-                    },
-                ) from exc
-            finally:
-                if handle is not None:
-                    try:
-                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-                    finally:
-                        handle.close()
 
     @contextmanager
     def operation_transition(self, operation_id: str) -> Iterator[None]:
@@ -256,6 +236,25 @@ class FileOperationRecordRepository:
             allow_missing_leaf=True,
         )
 
+    def _clear_target_reference_chunk_locator(
+        self, operation_id: str, reference: str, chunk_index: int
+    ) -> Path:
+        """Derive one ordered bounded chunk of exact manifest evidence."""
+        safe_operation_id = validate_blob_id(operation_id)
+        safe_reference = validate_blob_id(reference)
+        if type(chunk_index) is not int or not 0 <= chunk_index < MAX_CLEAR_TARGET_REFERENCE_CHUNKS:
+            raise ValueError("clear target reference chunk index is invalid")
+        return resolve_managed_locator(
+            self.file_ops.root,
+            Path("operations")
+            / (
+                "clear-target-reference-"
+                f"{safe_operation_id}-{safe_reference}-part-{chunk_index:04x}.json"
+            ),
+            operation="clear_target_reference_chunk",
+            allow_missing_leaf=True,
+        )
+
     def clear_target_page_locator(self, operation_id: str, page_id: str) -> Path:
         """Return the exact contained locator for one target page."""
         return self._clear_target_locator(operation_id, page_id, checkpoint=False)
@@ -267,6 +266,14 @@ class FileOperationRecordRepository:
     def clear_target_reference_locator(self, operation_id: str, reference: str) -> Path:
         """Return the exact contained locator for one referenced manifest copy."""
         return self._clear_target_reference_locator(operation_id, reference)
+
+    def clear_target_reference_chunk_locator(
+        self, operation_id: str, reference: str, chunk_index: int
+    ) -> Path:
+        """Return the deterministic contained locator for one reference chunk."""
+        return self._clear_target_reference_chunk_locator(
+            operation_id, reference, chunk_index
+        )
 
     def reconciliation_checkpoint_locator(self, operation_id: str) -> Path:
         """Return a private sidecar used to resume one reconciliation action.
@@ -425,6 +432,11 @@ class FileOperationRecordRepository:
         """Persist exact oversized target evidence without overwriting it."""
         if not isinstance(raw_record, bytes) or not raw_record:
             raise TypeError("Clear target reference requires non-empty bytes")
+        if len(raw_record) > self.lifecycle_limits.max_operation_record_bytes:
+            raise CacheManifestIntegrityError(
+                "Clear target reference exceeds the configured byte limit",
+                reason=CacheReason.MANIFEST_BOUNDS,
+            )
         try:
             return self.file_ops.create_bytes_durable_exclusive(
                 self._clear_target_reference_locator(operation_id, reference), raw_record
@@ -448,6 +460,63 @@ class FileOperationRecordRepository:
                 },
             ) from exc
 
+    def create_clear_target_reference_chunks_exclusive(
+        self, operation_id: str, reference: str, raw_record: bytes
+    ) -> int:
+        """Persist bounded immutable chunks before a signed page resolves them.
+
+        The caller must first prove the eventual page/control contract fits. A
+        crash after a page is durable but before every chunk is written remains
+        recoverable: pre-authority recovery authenticates and retires the page
+        without using any target as deletion authority.
+        """
+        if not isinstance(raw_record, bytes) or not raw_record:
+            raise TypeError("Clear target reference requires non-empty bytes")
+        if len(raw_record) > MAX_MANIFEST_BYTES:
+            raise CacheManifestIntegrityError(
+                "Clear target reference exceeds the manifest byte limit",
+                reason=CacheReason.MANIFEST_BOUNDS,
+            )
+        chunk_size = self.lifecycle_limits.max_operation_record_bytes
+        chunk_count = (len(raw_record) + chunk_size - 1) // chunk_size
+        if chunk_count > MAX_CLEAR_TARGET_REFERENCE_CHUNKS:
+            raise CacheManifestIntegrityError(
+                "Clear target reference needs too many bounded chunks",
+                reason=CacheReason.MANIFEST_BOUNDS,
+            )
+        for chunk_index in range(chunk_count):
+            chunk = raw_record[chunk_index * chunk_size : (chunk_index + 1) * chunk_size]
+            locator = self._clear_target_reference_chunk_locator(
+                operation_id, reference, chunk_index
+            )
+            try:
+                self.file_ops.create_bytes_durable_exclusive(locator, chunk)
+            except FileExistsError:
+                existing = self._read_bounded(
+                    locator, operation="create_clear_target_reference_chunk"
+                )
+                if existing != chunk:
+                    raise CacheBlobLifecycleConflictError(
+                        "Clear target reference chunk already exists",
+                        context={
+                            "operation_id": operation_id,
+                            "reference": reference,
+                            "chunk_index": str(chunk_index),
+                            "operation": "create_clear_target_reference_chunk",
+                        },
+                    )
+            except OSError as exc:
+                raise CacheBlobBackendError(
+                    "Clear target reference chunk could not be created",
+                    context={
+                        "operation_id": operation_id,
+                        "reference": reference,
+                        "chunk_index": str(chunk_index),
+                        "operation": "create_clear_target_reference_chunk",
+                    },
+                ) from exc
+        return chunk_count
+
     def _get_clear_target_raw(
         self, operation_id: str, page_id: str, *, checkpoint: bool
     ) -> bytes | None:
@@ -470,13 +539,122 @@ class FileOperationRecordRepository:
         return self._get_clear_target_raw(operation_id, page_id, checkpoint=True)
 
     def get_clear_target_reference_raw(
-        self, operation_id: str, reference: str
+        self,
+        operation_id: str,
+        reference: str,
+        *,
+        chunk_count: int | None = None,
+        byte_length: int | None = None,
+        chunk_digests: tuple[str, ...] | None = None,
     ) -> bytes | None:
-        """Read one oversized exact target record without granting authority."""
-        return self._read_bounded(
-            self._clear_target_reference_locator(operation_id, reference),
-            operation="get_clear_target_reference",
+        """Read exact target evidence under its signed bounded chunk contract.
+
+        Legacy single-record references remain readable under the caller's
+        limit. New references supply both count and length in the signed page;
+        those values are validated before allocation or any chunk read.
+        """
+        if chunk_count is None and byte_length is None and chunk_digests is None:
+            return self._read_bounded(
+                self._clear_target_reference_locator(operation_id, reference),
+                operation="get_clear_target_reference",
+            )
+        chunk_count, byte_length, chunk_digests = self._reference_chunk_contract(
+            chunk_count, byte_length, chunk_digests
         )
+
+        resolved = bytearray()
+        for chunk_index in range(chunk_count):
+            chunk = self._read_bounded(
+                self._clear_target_reference_chunk_locator(
+                    operation_id, reference, chunk_index
+                ),
+                operation="get_clear_target_reference_chunk",
+            )
+            if chunk is None:
+                return None
+            if (
+                not chunk
+                or hashlib.sha256(chunk).hexdigest() != chunk_digests[chunk_index]
+                or len(resolved) + len(chunk) > byte_length
+            ):
+                raise CacheManifestIntegrityError(
+                    "Clear target reference chunks do not match their signed length",
+                    reason=CacheReason.MANIFEST_BOUNDS,
+                )
+            resolved.extend(chunk)
+        if len(resolved) != byte_length:
+            raise CacheManifestIntegrityError(
+                "Clear target reference chunks do not match their signed length",
+                reason=CacheReason.MANIFEST_BOUNDS,
+            )
+        return bytes(resolved)
+
+    def _reference_chunk_contract(
+        self,
+        chunk_count: int | None,
+        byte_length: int | None,
+        chunk_digests: tuple[str, ...] | None,
+    ) -> tuple[int, int, tuple[str, ...]]:
+        """Validate signed reference bounds before reading or allocating chunks."""
+        if (
+            type(chunk_count) is not int
+            or type(byte_length) is not int
+            or not isinstance(chunk_digests, tuple)
+            or not 0 < chunk_count <= MAX_CLEAR_TARGET_REFERENCE_CHUNKS
+            or not 0 < byte_length <= MAX_MANIFEST_BYTES
+            or len(chunk_digests) != chunk_count
+            or any(
+                not isinstance(digest, str)
+                or len(digest) != 64
+                or any(character not in "0123456789abcdef" for character in digest)
+                for digest in chunk_digests
+            )
+        ):
+            raise CacheManifestIntegrityError(
+                "Clear target reference chunk contract is invalid",
+                reason=CacheReason.MANIFEST_BOUNDS,
+            )
+        maximum = self.lifecycle_limits.max_operation_record_bytes
+        if byte_length < chunk_count or byte_length > chunk_count * maximum:
+            raise CacheManifestIntegrityError(
+                "Clear target reference chunk contract exceeds configured bounds",
+                reason=CacheReason.MANIFEST_BOUNDS,
+            )
+        return chunk_count, byte_length, chunk_digests
+
+    def retire_clear_target_reference_chunks_if_bound(
+        self,
+        operation_id: str,
+        reference: str,
+        *,
+        chunk_count: int | None,
+        byte_length: int | None,
+        chunk_digests: tuple[str, ...] | None,
+    ) -> None:
+        """Retire each page-bound chunk that still matches its signed digest.
+
+        This is reserved for aborting an unauthoritative prepared inventory.
+        A missing chunk is normal after an interrupted write; a mismatching
+        chunk remains untouched rather than being inferred from its filename.
+        """
+        chunk_count, _byte_length, chunk_digests = self._reference_chunk_contract(
+            chunk_count, byte_length, chunk_digests
+        )
+        with self._conditional_transition(f"clear-reference:{operation_id}:{reference}"):
+            for chunk_index in range(chunk_count):
+                locator = self._clear_target_reference_chunk_locator(
+                    operation_id, reference, chunk_index
+                )
+                current = self._read_bounded(
+                    locator, operation="abort_clear_target_reference_chunk"
+                )
+                if current is None:
+                    continue
+                if hashlib.sha256(current).hexdigest() != chunk_digests[chunk_index]:
+                    raise CacheManifestIntegrityError(
+                        "Clear target reference chunk no longer matches signed evidence"
+                    )
+                self.file_ops.delete_durable(locator)
 
     def _retire_locator_if_exact(
         self,
@@ -535,19 +713,54 @@ class FileOperationRecordRepository:
         )
 
     def retire_clear_target_reference_if_exact(
-        self, operation_id: str, reference: str, *, expected_raw: bytes
+        self,
+        operation_id: str,
+        reference: str,
+        *,
+        expected_raw: bytes,
+        chunk_count: int | None = None,
+        byte_length: int | None = None,
+        chunk_digests: tuple[str, ...] | None = None,
     ) -> bool:
-        """Retire one authenticated page's oversized exact-manifest sidecar."""
-        return self._retire_locator_if_exact(
-            self.clear_target_reference_locator(operation_id, reference),
-            transition_id=f"clear-reference:{operation_id}:{reference}",
-            expected_raw=expected_raw,
-            context={
-                "operation_id": operation_id,
-                "reference": reference,
-                "operation": "retire_clear_target_reference",
-            },
-        )
+        """Retire authenticated reference bytes only after exact revalidation."""
+        if chunk_count is None and byte_length is None and chunk_digests is None:
+            return self._retire_locator_if_exact(
+                self.clear_target_reference_locator(operation_id, reference),
+                transition_id=f"clear-reference:{operation_id}:{reference}",
+                expected_raw=expected_raw,
+                context={
+                    "operation_id": operation_id,
+                    "reference": reference,
+                    "operation": "retire_clear_target_reference",
+                },
+            )
+        with self._conditional_transition(f"clear-reference:{operation_id}:{reference}"):
+            current = self.get_clear_target_reference_raw(
+                operation_id,
+                reference,
+                chunk_count=chunk_count,
+                byte_length=byte_length,
+                chunk_digests=chunk_digests,
+            )
+            if current is None:
+                return False
+            if current != expected_raw:
+                raise CacheBlobLifecycleConflictError(
+                    "Clear target reference no longer matches",
+                    context={
+                        "operation_id": operation_id,
+                        "reference": reference,
+                        "operation": "retire_clear_target_reference",
+                    },
+                )
+            assert chunk_count is not None
+            for chunk_index in range(chunk_count):
+                self.file_ops.delete_durable(
+                    self._clear_target_reference_chunk_locator(
+                        operation_id, reference, chunk_index
+                    )
+                )
+            return True
 
     def iter_clear_target_page_ids(self, operation_id: str) -> Iterator[str]:
         """Yield only this operation's syntactically exact page identifiers.

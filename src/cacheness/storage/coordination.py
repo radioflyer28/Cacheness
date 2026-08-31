@@ -5,10 +5,11 @@ from __future__ import annotations
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
+import ctypes
 from pathlib import Path
 from threading import Condition, Lock, get_ident
 import time
-from typing import BinaryIO, Callable, Iterator
+from typing import BinaryIO, Callable, Iterator, Protocol
 
 from cacheness.config import LifecycleLimits
 from cacheness.error_handling import (
@@ -18,6 +19,179 @@ from cacheness.error_handling import (
 )
 
 from .path_security import ManagedFileOps, resolve_managed_locator
+
+
+_INTERPROCESS_LOCK_STRIPES = 64
+
+
+class _WindowsLockApi(Protocol):
+    """Minimal Win32 byte-range lock surface kept injectable for tests."""
+
+    def lock(self, file_descriptor: int, *, exclusive: bool) -> object:
+        """Acquire one blocking shared or exclusive whole-file lock."""
+
+    def unlock(self, file_descriptor: int, token: object) -> object:
+        """Release the matching whole-file lock."""
+
+
+class _NativeWindowsLockApi:
+    """Use ``LockFileEx`` so Windows retains shared admission semantics."""
+
+    _LOCKFILE_EXCLUSIVE_LOCK = 0x00000002
+    _MAX_DWORD = 0xFFFFFFFF
+
+    class _Overlapped(ctypes.Structure):
+        _fields_ = [
+            ("Internal", ctypes.c_size_t),
+            ("InternalHigh", ctypes.c_size_t),
+            ("Offset", ctypes.c_uint32),
+            ("OffsetHigh", ctypes.c_uint32),
+            ("Pointer", ctypes.c_void_p),
+        ]
+
+    def __init__(self) -> None:
+        try:
+            import msvcrt
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        except (AttributeError, ImportError, OSError) as exc:  # pragma: no cover - Windows only.
+            raise CacheBlobBackendError(
+                "BlobStore lifecycle locking is unavailable on this Windows runtime",
+                context={"operation": "lifecycle_lock"},
+            ) from exc
+
+        self._get_osfhandle = msvcrt.get_osfhandle
+        self._lock_file_ex = kernel32.LockFileEx
+        self._lock_file_ex.argtypes = (
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.POINTER(self._Overlapped),
+        )
+        self._lock_file_ex.restype = ctypes.c_int
+        self._unlock_file_ex = kernel32.UnlockFileEx
+        self._unlock_file_ex.argtypes = (
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.POINTER(self._Overlapped),
+        )
+        self._unlock_file_ex.restype = ctypes.c_int
+
+    def lock(self, file_descriptor: int, *, exclusive: bool) -> object:
+        """Acquire a blocking whole-file lock without downgrading shared callers."""
+        flags = self._LOCKFILE_EXCLUSIVE_LOCK if exclusive else 0
+        overlapped = self._Overlapped()
+        handle = ctypes.c_void_p(self._get_osfhandle(file_descriptor))
+        if not self._lock_file_ex(
+            handle,
+            flags,
+            0,
+            self._MAX_DWORD,
+            self._MAX_DWORD,
+            ctypes.byref(overlapped),
+        ):
+            raise OSError(ctypes.get_last_error(), "LockFileEx failed")
+        return overlapped
+
+    def unlock(self, file_descriptor: int, token: object) -> object:
+        """Release exactly the byte range acquired by :meth:`lock`."""
+        if not isinstance(token, self._Overlapped):
+            raise TypeError("Windows lifecycle lock token is invalid")
+        handle = ctypes.c_void_p(self._get_osfhandle(file_descriptor))
+        if not self._unlock_file_ex(
+            handle,
+            0,
+            self._MAX_DWORD,
+            self._MAX_DWORD,
+            ctypes.byref(token),
+        ):
+            raise OSError(ctypes.get_last_error(), "UnlockFileEx failed")
+        return None
+
+
+def _platform_name() -> str:
+    """Resolve the runtime lock topology through a narrow test seam."""
+    import os
+
+    return os.name
+
+
+def _windows_lock_api() -> _WindowsLockApi:
+    """Construct the production Win32 lock adapter only on Windows."""
+    return _NativeWindowsLockApi()
+
+
+def lock_stripe_index(root: Path, identity: str) -> int:
+    """Map one root-scoped transition identity into a fixed lock-file set."""
+    import hashlib
+
+    digest = hashlib.sha256(f"{root}\x00{identity}".encode("utf-8")).digest()
+    return int.from_bytes(digest[:4], "big") % _INTERPROCESS_LOCK_STRIPES
+
+
+@contextmanager
+def interprocess_file_lock(
+    file_ops: ManagedFileOps,
+    locator: Path,
+    *,
+    exclusive: bool,
+    operation: str,
+) -> Iterator[None]:
+    """Acquire one truthful cross-process file lock on every supported OS.
+
+    POSIX uses ``flock`` for shared/exclusive admission. Windows uses Win32
+    ``LockFileEx`` over the same durable lock file, preserving shared ordinary
+    admission instead of silently turning all normal operations into a global
+    exclusive mutex. Unsupported runtimes fail at this narrow topology seam.
+    """
+    try:
+        file_ops.create_bytes_durable_exclusive(locator, b"lock\n")
+    except FileExistsError:
+        pass
+
+    handle: BinaryIO | None = None
+    unlock: Callable[[], object] | None = None
+    try:
+        handle = file_ops.open_read(locator)
+        if _platform_name() == "nt":
+            api = _windows_lock_api()
+            token = api.lock(handle.fileno(), exclusive=exclusive)
+
+            def unlock_windows_lock() -> object:
+                return api.unlock(handle.fileno(), token)
+
+            unlock = unlock_windows_lock
+        else:
+            try:
+                import fcntl
+            except ImportError as exc:  # pragma: no cover - exotic non-POSIX runtime.
+                raise CacheBlobBackendError(
+                    "BlobStore lifecycle locking requires POSIX flock or Win32 LockFileEx",
+                    context={"operation": operation},
+                ) from exc
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+
+            def unlock_posix_lock() -> object:
+                return fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+            unlock = unlock_posix_lock
+        yield
+    except CacheBlobBackendError:
+        raise
+    except OSError as exc:
+        raise CacheBlobBackendError(
+            "BlobStore lifecycle lock could not be acquired",
+            context={"operation": operation},
+        ) from exc
+    finally:
+        if unlock is not None:
+            unlock()
+        if handle is not None:
+            handle.close()
 
 
 class StoreAdmissionBarrier:
@@ -33,7 +207,7 @@ class StoreAdmissionBarrier:
     """
 
     _instances_guard = Lock()
-    _instances: dict[str, "StoreAdmissionBarrier"] = {}
+    _instances: dict[tuple[int, int], "StoreAdmissionBarrier"] = {}
 
     def __init__(self, root: Path) -> None:
         self._condition = Condition(Lock())
@@ -44,6 +218,8 @@ class StoreAdmissionBarrier:
         # retaining an individual instance's ManagedFileOps would make the
         # shared barrier unusable after that close.
         self._file_ops = ManagedFileOps(root)
+        self._root_identity = self._identity_for(root)
+        self._leases = 0
         self._lock_locator = resolve_managed_locator(
             self._file_ops.root,
             ".cacheness-lifecycle-admission.lock",
@@ -51,10 +227,32 @@ class StoreAdmissionBarrier:
             allow_missing_leaf=True,
         )
 
+    @staticmethod
+    def _identity_for(root: Path) -> tuple[int, int]:
+        """Use filesystem identity so a recreated pathname receives a new barrier."""
+        stat = root.stat()
+        return stat.st_dev, stat.st_ino
+
+    @classmethod
+    def acquire(cls, root: Path) -> "StoreAdmissionBarrier":
+        """Lease the root's shared barrier until its owning store closes."""
+        identity = cls._identity_for(root)
+        with cls._instances_guard:
+            barrier = cls._instances.get(identity)
+            if barrier is None:
+                barrier = cls(root)
+                cls._instances[identity] = barrier
+            barrier._leases += 1
+            return barrier
+
     @classmethod
     def for_root(cls, root: Path) -> "StoreAdmissionBarrier":
-        """Return the one process-local barrier for an exact managed root."""
-        identity = str(root.resolve())
+        """Compatibility constructor for direct callers outside BlobStore ownership.
+
+        Production ``BlobStore`` instances use :meth:`acquire` and pair it with
+        :meth:`release`; this helper retains the prior shared-lookup behavior.
+        """
+        identity = cls._identity_for(root)
         with cls._instances_guard:
             barrier = cls._instances.get(identity)
             if barrier is None:
@@ -62,39 +260,32 @@ class StoreAdmissionBarrier:
                 cls._instances[identity] = barrier
             return barrier
 
+    def release(self) -> None:
+        """Release one owning-store lease and close the final root descriptor."""
+        close_file_ops = False
+        with self._instances_guard:
+            current = self._instances.get(self._root_identity)
+            if current is not self:
+                return
+            if self._leases <= 0:
+                return
+            self._leases -= 1
+            if self._leases == 0:
+                del self._instances[self._root_identity]
+                close_file_ops = True
+        if close_file_ops:
+            self._file_ops.close()
+
     @contextmanager
     def _advisory_admission(self, *, exclusive: bool) -> Iterator[None]:
         """Hold the root-wide shared/exclusive lock for one admitted operation."""
-        try:
-            import fcntl
-        except ImportError as exc:  # pragma: no cover - non-POSIX topology.
-            raise CacheBlobBackendError(
-                "BlobStore lifecycle admission requires POSIX advisory locking",
-                context={"operation": "lifecycle_admission"},
-            ) from exc
-
-        try:
-            self._file_ops.create_bytes_durable_exclusive(self._lock_locator, b"lock\n")
-        except FileExistsError:
-            pass
-
-        handle: BinaryIO | None = None
-        try:
-            handle = self._file_ops.open_read(self._lock_locator)
-            mode = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
-            fcntl.flock(handle.fileno(), mode)
+        with interprocess_file_lock(
+            self._file_ops,
+            self._lock_locator,
+            exclusive=exclusive,
+            operation="lifecycle_admission",
+        ):
             yield
-        except OSError as exc:
-            raise CacheBlobBackendError(
-                "BlobStore lifecycle admission lock could not be acquired",
-                context={"operation": "lifecycle_admission"},
-            ) from exc
-        finally:
-            if handle is not None:
-                try:
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-                finally:
-                    handle.close()
 
     @contextmanager
     def ordinary_admission(self) -> Iterator[None]:
@@ -326,4 +517,6 @@ __all__ = [
     "InstanceState",
     "KeyCoordinatorRegistry",
     "StoreAdmissionBarrier",
+    "interprocess_file_lock",
+    "lock_stripe_index",
 ]

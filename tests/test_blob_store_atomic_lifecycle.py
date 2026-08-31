@@ -706,6 +706,97 @@ def test_clear_resume_does_not_repeat_completed_targets_after_reopen(
         reopened.close()
 
 
+def test_prepared_clear_inventory_is_aborted_after_process_loss_before_next_page(
+    tmp_path: Path,
+) -> None:
+    """Recovery never resumes a lexical inventory after its admission epoch ends."""
+    root = tmp_path / "prepared-clear-process-loss"
+    limits = LifecycleLimits(manifest_page_size=1)
+    config = CacheConfig(cache_dir=str(root), lifecycle_limits=limits)
+    owner = BlobStore(root, backend="json", config=config)
+    independent_writer = BlobStore(root, backend="json", config=config)
+    page_persisted = False
+    try:
+        owner.put({"generation": "a"}, key="a")
+        owner.put({"generation": "z"}, key="z")
+
+        def interrupt_after_first_page(seam: str, _record: Any) -> None:
+            nonlocal page_persisted
+            if seam == "clear_target_page_persisted" and not page_persisted:
+                page_persisted = True
+                raise _SimulatedProcessLoss("lost clear admission after first page")
+
+        owner.lifecycle.fault_hook = interrupt_after_first_page
+        with pytest.raises(_SimulatedProcessLoss):
+            owner.clear()
+        assert page_persisted
+
+        # This store existed before the interrupted clear and only gains its
+        # ordinary admission after the simulated owner process releases it.
+        independent_writer.put({"generation": "m"}, key="m")
+    finally:
+        owner.close()
+
+    reopened = BlobStore(root, backend="json", config=config)
+    try:
+        assert reopened.get("a") == {"generation": "a"}
+        assert reopened.get("m") == {"generation": "m"}
+        assert reopened.get("z") == {"generation": "z"}
+        operations = root / "operations"
+        assert not list(operations.glob("clear-target-*.json"))
+        assert not list(operations.glob("[0-9a-f]" * 32 + ".json"))
+    finally:
+        reopened.close()
+        independent_writer.close()
+
+
+def test_chunked_clear_reference_survives_crash_and_retires_under_small_limit(
+    tmp_path: Path,
+) -> None:
+    """A valid manifest larger than record policy remains recoverable evidence."""
+    root = tmp_path / "chunked-clear-reference"
+    limits = LifecycleLimits(
+        max_operation_record_bytes=10_000,
+        max_operation_field_bytes=8_192,
+        manifest_page_size=1,
+    )
+    config = CacheConfig(cache_dir=str(root), lifecycle_limits=limits)
+    store = BlobStore(root, backend="json", config=config)
+    try:
+        store.put(
+            {"value": "large manifest"},
+            key="large",
+            metadata={"large": "x" * 15_000},
+        )
+        raw_manifest = store.manifest_repository.get_raw("large")
+        assert raw_manifest is not None
+        assert len(raw_manifest) > limits.max_operation_record_bytes
+
+        def interrupt_after_snapshot(seam: str, _record: Any) -> None:
+            if seam == "clear_snapshot_complete":
+                raise _SimulatedProcessLoss("crash after chunked clear snapshot")
+
+        store.lifecycle.fault_hook = interrupt_after_snapshot
+        with pytest.raises(_SimulatedProcessLoss):
+            store.clear()
+
+        chunks = list(
+            (root / "operations").glob("clear-target-reference-*-part-*.json")
+        )
+        assert len(chunks) > 1
+        assert all(path.stat().st_size <= limits.max_operation_record_bytes for path in chunks)
+    finally:
+        store.close()
+
+    reopened = BlobStore(root, backend="json", config=config)
+    try:
+        assert reopened.list() == []
+        assert not list((root / "operations").glob("clear-target-*.json"))
+        assert not list((root / "operations").glob("[0-9a-f]" * 32 + ".json"))
+    finally:
+        reopened.close()
+
+
 def test_clear_empty_store_initializes_authenticated_control_evidence(
     tmp_path: Path,
 ) -> None:

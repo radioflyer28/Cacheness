@@ -19,7 +19,7 @@ from cacheness.error_handling import (
 )
 
 from .integrity import sha256_and_size, sign_hmac_sha256, verify_hmac_sha256
-from .manifest import BlobManifestV1
+from .manifest import MAX_MANIFEST_BYTES, BlobManifestV1
 from .manifest_repository import ManifestCursor, ManifestExpectation
 from .operation_record import (
     ClearTarget,
@@ -183,6 +183,55 @@ class LifecycleEngine:
             operation_id.encode("ascii") + b"\x00" + raw_record
         ).hexdigest()[:32]
 
+    def _reference_target(
+        self,
+        *,
+        key: str,
+        generation: str,
+        raw_manifest: bytes,
+        operation_id: str,
+    ) -> ClearTarget:
+        """Build page-bound bounded evidence for one exact oversized manifest."""
+        return ClearTarget.from_reference(
+            key,
+            generation,
+            raw_manifest,
+            self._clear_target_reference_id(operation_id, raw_manifest),
+            chunk_size=self.lifecycle_limits.max_operation_record_bytes,
+        )
+
+    def _validate_clear_evidence_contract(
+        self, record: LifecycleOperationRecord
+    ) -> None:
+        """Reject a policy that cannot encode every valid clear control page.
+
+        The primary clear record is deliberately not written until this check
+        succeeds.  A page may need to name the largest valid manifest through
+        a chunked reference, including every immutable chunk digest required
+        for safe read and retirement after a crash.
+        """
+        self._record_raw(record)
+        chunk_size = self.lifecycle_limits.max_operation_record_bytes
+        chunk_count = (MAX_MANIFEST_BYTES + chunk_size - 1) // chunk_size
+        probe = ClearTarget(
+            key="clear-control-probe",
+            generation="0" * 32,
+            record_digest="0" * 64,
+            raw_record=None,
+            raw_record_reference="1" * 32,
+            raw_record_chunk_count=chunk_count,
+            raw_record_byte_length=MAX_MANIFEST_BYTES,
+            raw_record_chunk_digests=("0" * 64,) * chunk_count,
+        )
+        page = ClearTargetPage(
+            operation_id=record.operation_id,
+            page_id=self._clear_page_id(record.operation_id, None),
+            source_cursor=None,
+            next_cursor=None,
+            targets=(probe,),
+        )
+        self._clear_page_raw(self._signed_clear_target_page(page))
+
     def _resolve_clear_target_references(
         self, page: ClearTargetPage
     ) -> ClearTargetPage:
@@ -198,7 +247,11 @@ class LifecycleEngine:
                 resolved.append(target)
                 continue
             raw_record = self.operation_repository.get_clear_target_reference_raw(
-                page.operation_id, target.raw_record_reference
+                page.operation_id,
+                target.raw_record_reference,
+                chunk_count=target.raw_record_chunk_count,
+                byte_length=target.raw_record_byte_length,
+                chunk_digests=target.raw_record_chunk_digests,
             )
             if raw_record is None:
                 raise CacheManifestIntegrityError("Clear target reference is missing")
@@ -347,6 +400,7 @@ class LifecycleEngine:
                         )
                     break
                 targets: list[ClearTarget] = []
+                referenced_manifests: list[tuple[ClearTarget, bytes]] = []
                 next_cursor: str | None = None
                 for index, (key, raw_manifest) in enumerate(page.entries):
                     manifest = BlobManifestV1.from_canonical_bytes(raw_manifest)
@@ -372,21 +426,11 @@ class LifecycleEngine:
                         # in immutable bounded sidecars when needed.
                         self._clear_page_raw(self._signed_clear_target_page(candidate))
                     except CacheManifestIntegrityError:
-                        reference = self._clear_target_reference_id(
-                            record.operation_id, raw_manifest
-                        )
-                        try:
-                            self.operation_repository.create_clear_target_reference_exclusive(
-                                record.operation_id, reference, raw_manifest
-                            )
-                        except CacheBlobLifecycleConflictError:
-                            existing = self.operation_repository.get_clear_target_reference_raw(
-                                record.operation_id, reference
-                            )
-                            if existing != raw_manifest:
-                                raise
-                        target = ClearTarget.from_reference(
-                            key, manifest.generation, raw_manifest, reference
+                        target = self._reference_target(
+                            key=key,
+                            generation=manifest.generation,
+                            raw_manifest=raw_manifest,
+                            operation_id=record.operation_id,
                         )
                         candidate_targets = tuple([*targets, target])
                         candidate = ClearTargetPage(
@@ -401,13 +445,14 @@ class LifecycleEngine:
                                 self._signed_clear_target_page(candidate)
                             )
                         except CacheManifestIntegrityError:
-                            # A reference page is deliberately tiny. If it
-                            # cannot fit, the configured evidence limit is
-                            # internally inconsistent and clear must fail
-                            # before any destructive action.
+                            # The primary clear contract was preflighted before
+                            # persistence. A later failure therefore reflects a
+                            # malformed/oversized observed manifest, never an
+                            # intentionally unrecoverable primary record.
                             if targets:
                                 break
                             raise
+                        referenced_manifests.append((target, raw_manifest))
                     targets.append(target)
                     next_cursor = candidate_cursor
                 if not targets:
@@ -432,6 +477,18 @@ class LifecycleEngine:
                     )
                     if raw_page is None:
                         raise
+                # Persist the signed page before its immutable chunks. A
+                # process loss in this pre-authority window can authenticate
+                # the page and retire every proven partial chunk without ever
+                # treating its targets as deletion authority.
+                self._fault("clear_target_page_persisted", record)
+                for target, raw_manifest in referenced_manifests:
+                    assert target.raw_record_reference is not None
+                    self.operation_repository.create_clear_target_reference_chunks_exclusive(
+                        record.operation_id,
+                        target.raw_record_reference,
+                        raw_manifest,
+                    )
                 page = self._authenticated_clear_target_page(
                     raw_page,
                     operation_id=record.operation_id,
@@ -619,7 +676,11 @@ class LifecycleEngine:
                 if reference is None:
                     continue
                 raw_reference = self.operation_repository.get_clear_target_reference_raw(
-                    record.operation_id, reference
+                    record.operation_id,
+                    reference,
+                    chunk_count=target.raw_record_chunk_count,
+                    byte_length=target.raw_record_byte_length,
+                    chunk_digests=target.raw_record_chunk_digests,
                 )
                 if raw_reference is None:
                     continue
@@ -627,28 +688,113 @@ class LifecycleEngine:
                 # it before removing the independently persisted bytes.
                 target.with_resolved_raw(raw_reference)
                 self.operation_repository.retire_clear_target_reference_if_exact(
-                    record.operation_id, reference, expected_raw=raw_reference
+                    record.operation_id,
+                    reference,
+                    expected_raw=raw_reference,
+                    chunk_count=target.raw_record_chunk_count,
+                    byte_length=target.raw_record_byte_length,
+                    chunk_digests=target.raw_record_chunk_digests,
                 )
             self.operation_repository.retire_clear_target_page_if_exact(
                 record.operation_id, page_id, expected_raw=raw_page
             )
+
+    def _abort_prepared_clear(self, record: LifecycleOperationRecord) -> None:
+        """Retire only authenticated pre-authority clear control evidence.
+
+        A PREPARED clear has not published its immutable inventory authority.
+        It therefore must never resume lexical listing after its admission epoch
+        was lost: a key committed by another process after the crash could
+        otherwise be added to an old clear. Every page is authenticated before
+        its sidecars are removed, and this path deliberately never reads or
+        deletes a manifest generation.
+        """
+        with self.operation_repository.operation_transition(record.operation_id):
+            current_raw = self.operation_repository.get_raw(record.operation_id)
+            if current_raw is None:
+                return
+            recovered = self._recoverable_record(record.operation_id, current_raw)
+            if recovered is None:
+                raise CacheManifestIntegrityError("Clear operation evidence is untrusted")
+            current, _candidate, _previous = recovered
+            if current.checkpoint is not OperationCheckpoint.PREPARED:
+                return
+            for page_id in self.operation_repository.iter_clear_target_page_ids(
+                current.operation_id
+            ):
+                raw_page = self.operation_repository.get_clear_target_page_raw(
+                    current.operation_id, page_id
+                )
+                if raw_page is None:
+                    continue
+                page = self._authenticated_clear_target_page(
+                    raw_page,
+                    operation_id=current.operation_id,
+                    page_id=page_id,
+                    source_cursor=None,
+                    resolve_references=False,
+                    validate_source_cursor=False,
+                )
+                raw_checkpoint = (
+                    self.operation_repository.get_clear_target_checkpoint_raw(
+                        current.operation_id, page_id
+                    )
+                )
+                if raw_checkpoint is not None:
+                    self._authenticated_clear_target_checkpoint(
+                        raw_checkpoint, page=page
+                    )
+                    self.operation_repository.retire_clear_target_checkpoint_if_exact(
+                        current.operation_id, page_id, expected_raw=raw_checkpoint
+                    )
+                for target in page.targets:
+                    reference = target.raw_record_reference
+                    if reference is None:
+                        continue
+                    if target.raw_record_chunk_count is not None:
+                        self.operation_repository.retire_clear_target_reference_chunks_if_bound(
+                            current.operation_id,
+                            reference,
+                            chunk_count=target.raw_record_chunk_count,
+                            byte_length=target.raw_record_byte_length,
+                            chunk_digests=target.raw_record_chunk_digests,
+                        )
+                    # A legacy one-file reference cannot be safely retired if
+                    # it no longer fits the current caller bound. It pre-dates
+                    # the signed chunk contract and remains evidence, not a
+                    # deletion target.
+                    if target.raw_record_chunk_count is None:
+                        raw_reference = (
+                            self.operation_repository.get_clear_target_reference_raw(
+                                current.operation_id, reference
+                            )
+                        )
+                        if raw_reference is not None:
+                            target.with_resolved_raw(raw_reference)
+                            self.operation_repository.retire_clear_target_reference_if_exact(
+                                current.operation_id,
+                                reference,
+                                expected_raw=raw_reference,
+                            )
+                self.operation_repository.retire_clear_target_page_if_exact(
+                    current.operation_id, page_id, expected_raw=raw_page
+                )
+            self._retire(current)
 
     def _recover_clear(
         self, record: LifecycleOperationRecord, *, snapshot_admitted: bool = False
     ) -> None:
         """Resume a retained clear from authenticated snapshot/progress evidence."""
         if record.checkpoint is OperationCheckpoint.PREPARED:
-            if snapshot_admitted:
-                record = self._snapshot_clear_targets(record)
-            else:
-                with self.store._admission_barrier.aggregate_admission():
-                    record = self._snapshot_clear_targets(record)
+            self._abort_prepared_clear(record)
+            return
         if record.checkpoint is not OperationCheckpoint.PREPARED:
             self._continue_clear(record)
 
     def clear(self) -> int:
         """Clear one authenticated finite target snapshot through tombstone deletion."""
         record = self._new_clear_record()
+        self._validate_clear_evidence_contract(record)
         with self.store._admission_barrier.aggregate_admission():
             self.operation_repository.create_exclusive(record, self._record_raw(record))
             record = self._snapshot_clear_targets(record)

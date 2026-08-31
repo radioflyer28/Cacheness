@@ -36,6 +36,7 @@ CLEAR_TARGET_CHECKPOINT_SIGNING_DOMAIN = (
 )
 MAX_OPERATION_RECORD_BYTES = 1_048_576
 MAX_OPERATION_FIELD_BYTES = 8_192
+MAX_CLEAR_TARGET_REFERENCE_CHUNKS = 4_096
 MAX_OPERATION_TOPOLOGY_FIELDS = 8
 MAX_OPERATION_NESTING_DEPTH = 4
 MAX_OPERATION_NODES = 64
@@ -406,16 +407,11 @@ def _decode_clear_mapping(
         raise CacheManifestIntegrityError(f"{label} is not valid JSON") from exc
     if not isinstance(decoded, dict) or set(decoded) != fields:
         raise CacheManifestIntegrityError(f"{label} has an unknown or missing field")
-    _validate_json_value(
-        decoded,
-        depth=1,
-        nodes=[0],
-        max_field_bytes=(
-            MAX_OPERATION_RECORD_BYTES
-            if lifecycle_limits is None
-            else lifecycle_limits.max_operation_record_bytes
-        ),
-    )
+    # Clear pages are structurally validated by ``ClearTargetPage`` and its
+    # targets below. Do not apply the operation-record 64-node topology limit
+    # here: one signed reference page intentionally carries a bounded list of
+    # chunk digests for a large manifest. The raw JSON is already capped before
+    # parsing, and every nested field is checked by the page/checkpoint model.
     return decoded
 
 
@@ -433,6 +429,9 @@ class ClearTarget:
     record_digest: str
     raw_record: bytes | None
     raw_record_reference: str | None = None
+    raw_record_chunk_count: int | None = None
+    raw_record_byte_length: int | None = None
+    raw_record_chunk_digests: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         """Bind the persisted target to its exact opaque manifest bytes."""
@@ -458,12 +457,71 @@ class ClearTarget:
                 raise CacheManifestIntegrityError(
                     "Clear target digest does not match exact record"
                 )
+            if self.raw_record_reference is None and (
+                self.raw_record_chunk_count is not None
+                or self.raw_record_byte_length is not None
+                or self.raw_record_chunk_digests is not None
+            ):
+                raise CacheManifestIntegrityError(
+                    "Inline clear target records cannot carry reference metadata"
+                )
         if self.raw_record_reference is not None:
             _validated_hex(
                 self.raw_record_reference,
                 "clear_target.raw_record_reference",
                 allow_none=False,
                 pattern=_HEX_UUID,
+            )
+            if (self.raw_record_chunk_count is None) != (
+                self.raw_record_byte_length is None
+            ):
+                raise CacheManifestIntegrityError(
+                    "Clear target reference chunk metadata is incomplete"
+                )
+            if (self.raw_record_chunk_count is None) != (
+                self.raw_record_chunk_digests is None
+            ):
+                raise CacheManifestIntegrityError(
+                    "Clear target reference chunk digests are incomplete"
+                )
+            if self.raw_record_chunk_count is not None:
+                if (
+                    type(self.raw_record_chunk_count) is not int
+                    or not 0 < self.raw_record_chunk_count <= MAX_CLEAR_TARGET_REFERENCE_CHUNKS
+                ):
+                    raise CacheManifestIntegrityError(
+                        "Clear target reference chunk count is invalid",
+                        reason=CacheReason.MANIFEST_BOUNDS,
+                    )
+                if (
+                    type(self.raw_record_byte_length) is not int
+                    or not 0 < self.raw_record_byte_length <= MAX_OPERATION_RECORD_BYTES
+                ):
+                    raise CacheManifestIntegrityError(
+                        "Clear target reference byte length is invalid",
+                        reason=CacheReason.MANIFEST_BOUNDS,
+                    )
+                if (
+                    not isinstance(self.raw_record_chunk_digests, tuple)
+                    or len(self.raw_record_chunk_digests)
+                    != self.raw_record_chunk_count
+                    or any(
+                        not isinstance(digest, str)
+                        or not _HEX_SHA256.fullmatch(digest)
+                        for digest in self.raw_record_chunk_digests
+                    )
+                ):
+                    raise CacheManifestIntegrityError(
+                        "Clear target reference chunk digests are invalid",
+                        reason=CacheReason.MANIFEST_BOUNDS,
+                    )
+        elif (
+            self.raw_record_chunk_count is not None
+            or self.raw_record_byte_length is not None
+            or self.raw_record_chunk_digests is not None
+        ):
+            raise CacheManifestIntegrityError(
+                "Clear target chunk metadata requires a reference"
             )
 
     @classmethod
@@ -483,14 +541,28 @@ class ClearTarget:
         generation: str,
         raw_record: bytes,
         reference: str,
+        *,
+        chunk_size: int,
     ) -> "ClearTarget":
-        """Persist a bounded reference when a valid record cannot fit inline."""
+        """Bind a bounded, ordered chunk contract for exact manifest evidence."""
+        if type(chunk_size) is not int or chunk_size <= 0:
+            raise ValueError("clear target reference chunk size must be positive")
+        chunk_count = (len(raw_record) + chunk_size - 1) // chunk_size
+        chunk_digests = tuple(
+            hashlib.sha256(
+                raw_record[index * chunk_size : (index + 1) * chunk_size]
+            ).hexdigest()
+            for index in range(chunk_count)
+        )
         return cls(
             key=key,
             generation=generation,
             record_digest=hashlib.sha256(raw_record).hexdigest(),
             raw_record=None,
             raw_record_reference=reference,
+            raw_record_chunk_count=chunk_count,
+            raw_record_byte_length=len(raw_record),
+            raw_record_chunk_digests=chunk_digests,
         )
 
     def with_resolved_raw(self, raw_record: bytes) -> "ClearTarget":
@@ -501,11 +573,18 @@ class ClearTarget:
             raise CacheManifestIntegrityError(
                 "Clear target reference does not match exact record"
             )
+        if (
+            self.raw_record_byte_length is not None
+            and len(raw_record) != self.raw_record_byte_length
+        ):
+            raise CacheManifestIntegrityError(
+                "Clear target reference byte length does not match exact record"
+            )
         return replace(self, raw_record=raw_record)
 
-    def to_mapping(self) -> dict[str, str | None]:
+    def to_mapping(self) -> dict[str, object]:
         """Return a reversible JSON-safe representation of one exact target."""
-        return {
+        result: dict[str, str | int | None] = {
             "generation": self.generation,
             "key": self.key,
             "raw_record": (
@@ -516,6 +595,13 @@ class ClearTarget:
             "raw_record_reference": self.raw_record_reference,
             "record_digest": self.record_digest,
         }
+        if self.raw_record_chunk_count is not None:
+            result["raw_record_chunk_count"] = self.raw_record_chunk_count
+            result["raw_record_byte_length"] = self.raw_record_byte_length
+            result["raw_record_chunk_digests"] = list(
+                self.raw_record_chunk_digests or ()
+            )
+        return result
 
     @classmethod
     def from_mapping(
@@ -531,9 +617,14 @@ class ClearTarget:
             "raw_record",
             "record_digest",
         }
-        extended_fields = supported_fields | {"raw_record_reference"}
+        reference_fields = supported_fields | {"raw_record_reference"}
+        extended_fields = reference_fields | {
+            "raw_record_chunk_count",
+            "raw_record_byte_length",
+            "raw_record_chunk_digests",
+        }
         if not isinstance(value, Mapping) or (
-            set(value) != supported_fields and set(value) != extended_fields
+            set(value) not in (supported_fields, reference_fields, extended_fields)
         ):
             raise CacheManifestIntegrityError("Clear target fields are invalid")
         max_field_bytes = (
@@ -557,12 +648,28 @@ class ClearTarget:
                 "clear_target.raw_record_reference",
                 max_field_bytes=max_field_bytes,
             )
+            chunk_count = value.get("raw_record_chunk_count")
+            byte_length = value.get("raw_record_byte_length")
+            chunk_digests = value.get("raw_record_chunk_digests")
+            if chunk_digests is not None and (
+                not isinstance(chunk_digests, list)
+                or len(chunk_digests) > MAX_CLEAR_TARGET_REFERENCE_CHUNKS
+                or any(not isinstance(digest, str) for digest in chunk_digests)
+            ):
+                raise CacheManifestIntegrityError(
+                    "Clear target reference chunk digests are invalid"
+                )
             return cls(
                 key=value["key"],
                 generation=value["generation"],
                 record_digest=value["record_digest"],
                 raw_record=None,
                 raw_record_reference=reference,
+                raw_record_chunk_count=chunk_count,
+                raw_record_byte_length=byte_length,
+                raw_record_chunk_digests=(
+                    None if chunk_digests is None else tuple(chunk_digests)
+                ),
             )
         if not isinstance(encoded, str) or reference is not None:
             raise CacheManifestIntegrityError("Clear target raw record is invalid")
@@ -1107,6 +1214,7 @@ __all__ = [
     "LifecycleOperationRecord",
     "MAX_OPERATION_FIELD_BYTES",
     "MAX_OPERATION_RECORD_BYTES",
+    "MAX_CLEAR_TARGET_REFERENCE_CHUNKS",
     "OPERATION_RECORD_OWNER",
     "OPERATION_RECORD_SCHEMA_VERSION",
     "OperationCheckpoint",
