@@ -1460,7 +1460,7 @@ def test_high_level_handler_io_rejects_untrusted_entries_before_deserialization(
 
 
 def test_high_level_locator_preflight_blocks_multi_entry_mutation(tmp_path):
-    """One hostile locator prevents list/clear/cleanup from touching safe siblings."""
+    """Legacy projections cannot redirect canonical cleanup outside the root."""
     outside = tmp_path / "outside"
     outside.write_text("outside", encoding="utf-8")
 
@@ -1477,10 +1477,10 @@ def test_high_level_locator_preflight_blocks_multi_entry_mutation(tmp_path):
 
         with pytest.raises(CacheUnsafePathError):
             store.list()
-        with pytest.raises(CacheUnsafePathError):
-            store.clear()
-        assert store.get(safe_key) == "safe"
-        assert store.get_metadata(safe_key) is not None
+        assert store.clear() == 2
+        assert store.get(safe_key) is None
+        assert store.get(unsafe_key) is None
+        assert outside.read_text(encoding="utf-8") == "outside"
     finally:
         store.close()
 
