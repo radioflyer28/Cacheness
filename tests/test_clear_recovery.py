@@ -1867,13 +1867,14 @@ def test_hostile_journal_defects_fail_closed_without_recovery_mutation(
         assert unrelated_payload.read_bytes() == b"unrelated-payload"
 
 
-def test_advisory_lock_unavailability_fails_before_clear_mutation(tmp_path, monkeypatch):
-    """A missing reliable OS advisory lock is a typed refusal, never a downgrade."""
+def test_current_lifecycle_clear_does_not_depend_on_legacy_advisory_lock(
+    tmp_path, monkeypatch
+):
+    """Current clear uses its bounded admission barrier, not legacy locking."""
     root = tmp_path / "advisory-lock"
     store = BlobStore(root, backend="json")
     try:
         keys, payloads = _put_payloads(store)
-        before = _backend_snapshot(store.backend, keys)
         monkeypatch.setattr(
             clear_recovery,
             "_advisory_lock_available",
@@ -1881,12 +1882,11 @@ def test_advisory_lock_unavailability_fails_before_clear_mutation(tmp_path, monk
             raising=False,
         )
 
-        with pytest.raises(CacheStorageError):
-            store.clear()
-
-        assert _backend_snapshot(store.backend, keys) == before
-        assert {path: path.read_bytes() for path in payloads} == payloads
+        assert store.clear() == len(keys)
+        assert store.backend.list_entries() == []
+        assert all(not path.exists() for path in payloads)
         assert not list(root.glob(".cacheness-clear-journal-*.json"))
+        assert not list(root.glob("*candidate-*"))
     finally:
         store.close()
 
