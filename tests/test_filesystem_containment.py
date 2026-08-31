@@ -911,41 +911,56 @@ def test_blob_store_clear_pre_authority_fault_preserves_committed_payload(
         reopened.close()
 
 
-def test_blob_store_clear_leaves_only_recoverable_tombstones_when_final_delete_fails(
-    tmp_path, monkeypatch
+def test_blob_store_clear_records_tombstone_before_current_payload_cleanup_fails(
+    tmp_path,
 ):
-    """Post-commit payload cleanup cannot leave live metadata pointing at a miss."""
+    """A clear records signed absence before a post-authority cleanup failure."""
     root = tmp_path / "blob-root"
     handler = _InstrumentedHandler()
     store = BlobStore(root)
     store.handlers = _SingleHandlerRegistry(handler)
 
+    interrupted_key: str | None = None
     try:
         keys = [store.put("first", key="first"), store.put("second", key="second")]
         payload_paths = [
             Path(store.get_metadata(key)["metadata"]["actual_path"])
             for key in keys
         ]
-        delete = store.guarded_handler_io.file_ops.delete
 
-        def fail_tombstone_delete(locator):
-            if Path(locator).name.startswith("clear-tombstone-"):
-                raise RuntimeError("tombstone delete unavailable")
-            return delete(locator)
+        def interrupt_post_authority_cleanup(seam, record):
+            nonlocal interrupted_key
+            if seam != "payload_cleanup" or interrupted_key is not None:
+                return
+            raw_manifest = store.manifest_repository.get_raw(record.key)
+            assert raw_manifest is not None
+            tombstone = BlobManifestV1.from_canonical_bytes(raw_manifest)
+            assert tombstone.state == "tombstoned"
+            assert tombstone.signature
+            interrupted_key = record.key
+            raise RuntimeError("payload cleanup unavailable")
 
-        monkeypatch.setattr(store.guarded_handler_io.file_ops, "delete", fail_tombstone_delete)
+        store.lifecycle.fault_hook = interrupt_post_authority_cleanup
 
         with pytest.raises(CacheBlobBackendError) as error:
             store.clear()
 
-        assert isinstance(error.value.__cause__, RuntimeError)
-        assert str(error.value.__cause__) == "tombstone delete unavailable"
-        assert store.backend.list_entries() == []
-        assert [store.get(key) for key in keys] == [None, None]
-        assert all(not path.exists() for path in payload_paths)
-        assert len(list(root.glob("clear-tombstone-*"))) == len(keys)
+        assert error.value.context["operation"] == "clear"
+        assert isinstance(error.value.__cause__, CacheBlobRecoverableCleanupError)
+        assert interrupted_key is not None
+        with pytest.raises(CacheBlobLifecycleConflictError):
+            store.get(interrupted_key)
+        assert payload_paths[keys.index(interrupted_key)].exists()
+        assert list(store.lifecycle.operation_repository.iter_raw())
     finally:
         store.close()
+
+    reopened = BlobStore(root)
+    try:
+        assert all(reopened.get(key) is None for key in keys)
+        assert all(not path.exists() for path in payload_paths)
+    finally:
+        reopened.close()
 
 
 def test_persisted_locator_raises_before_deserialization(tmp_path):
