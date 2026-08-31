@@ -393,45 +393,61 @@ class BlobStore:
         """
         self._require_canonical_store()
         with self._key_coordinator.hold(self._storage_id_for_key(key)):
-            authenticated = self._load_authenticated_manifest(
-                key,
-                operation="get",
-                require_payload_contract=True,
-                require_locator=True,
-            )
-            if authenticated is None:
-                logger.debug(f"Blob not found: {key}")
-                return None
-            manifest, handler, actual_path = authenticated
-            assert handler is not None
-            assert actual_path is not None
-            handler_metadata = self._handler_metadata(manifest)
+            for attempt in range(2):
+                authenticated = self._load_authenticated_manifest(
+                    key,
+                    operation="get",
+                    require_payload_contract=True,
+                    require_locator=True,
+                )
+                if authenticated is None:
+                    logger.debug(f"Blob not found: {key}")
+                    return None
+                manifest, handler, actual_path = authenticated
+                assert handler is not None
+                assert actual_path is not None
+                handler_metadata = self._handler_metadata(manifest)
 
-            # The resolved handler receives only this private snapshot. It is
-            # hashed and size-checked inside the same live context before any
-            # trusted-payload deserialization can begin.
-            try:
-                with self.guarded_handler_io.open_snapshot(
-                    actual_path, handler_metadata
-                ) as snapshot:
-                    digest, byte_size = sha256_and_size(snapshot.path)
-                    if digest != manifest.digest or byte_size != manifest.byte_size:
-                        raise CacheBlobPayloadTamperedError(
-                            "Canonical BlobStore payload integrity check failed"
-                        )
-                    data = handler.get(snapshot.path, snapshot.metadata)
-            except FileNotFoundError as exc:
-                raise CacheBlobPayloadMissingError(
-                    "Canonical BlobStore payload is missing"
-                ) from exc
-            except CacheBlobPayloadTamperedError:
-                raise
-            except OSError as exc:
-                raise CacheBlobPayloadTamperedError(
-                    "Canonical BlobStore payload could not be verified"
-                ) from exc
-        
-        return data
+                # The resolved handler receives only this private snapshot. It
+                # is reauthenticated before hashing or deserializing.  A newer
+                # committed generation invalidates this snapshot, while an
+                # unchanged generation preserves exact payload error classes.
+                try:
+                    with self.guarded_handler_io.open_snapshot(
+                        actual_path, handler_metadata
+                    ) as snapshot:
+                        if not self._read_generation_is_stable(
+                            key, manifest, attempt
+                        ):
+                            continue
+                        digest, byte_size = sha256_and_size(snapshot.path)
+                        if (
+                            digest != manifest.digest
+                            or byte_size != manifest.byte_size
+                        ):
+                            raise CacheBlobPayloadTamperedError(
+                                "Canonical BlobStore payload integrity check failed"
+                            )
+                        return handler.get(snapshot.path, snapshot.metadata)
+                except FileNotFoundError as exc:
+                    if not self._read_generation_is_stable(key, manifest, attempt):
+                        continue
+                    raise CacheBlobPayloadMissingError(
+                        "Canonical BlobStore payload is missing"
+                    ) from exc
+                except CacheBlobPayloadTamperedError:
+                    raise
+                except OSError as exc:
+                    if not self._read_generation_is_stable(key, manifest, attempt):
+                        continue
+                    raise CacheBlobPayloadTamperedError(
+                        "Canonical BlobStore payload could not be verified"
+                    ) from exc
+
+        raise CacheBlobLifecycleConflictError(
+            "Canonical BlobStore read exhausted its bounded generation retry",
+            context={"key": key, "operation": "get"},
+        )
     
     @_ordinary_admitted
     def get_metadata(self, key: str) -> Optional[Dict[str, Any]]:
@@ -635,7 +651,15 @@ class BlobStore:
         """
         self._require_canonical_store()
         self._refresh_metadata_view_for_lifecycle()
-        cleared = self.lifecycle.clear()
+        try:
+            cleared = self.lifecycle.clear()
+        except (CacheBlobBackendError, CacheBlobLifecycleConflictError):
+            raise
+        except (CacheStorageError, OSError) as exc:
+            raise CacheBlobBackendError(
+                "BlobStore clear lifecycle could not complete",
+                context={"operation": "clear"},
+            ) from exc
         logger.debug("Cleared %s BlobStore targets through the lifecycle engine", cleared)
         return cleared
 
@@ -1016,6 +1040,34 @@ class BlobStore:
                 operation=operation,
             )
         return manifest, handler, actual_path
+
+    def _read_generation_is_stable(
+        self,
+        key: str,
+        first_manifest: BlobManifestV1,
+        attempt: int,
+    ) -> bool:
+        """Reauthenticate M2 and allow only one retry for a newer generation."""
+        authenticated = self._load_authenticated_manifest(
+            key,
+            operation="get_reauthenticate",
+            require_payload_contract=True,
+            require_locator=True,
+        )
+        if authenticated is None:
+            raise CacheBlobLifecycleConflictError(
+                "Canonical BlobStore authority disappeared after a committed snapshot",
+                context={"key": key, "operation": "get"},
+            )
+        second_manifest, _handler, _locator = authenticated
+        if second_manifest.generation == first_manifest.generation:
+            return True
+        if attempt == 0:
+            return False
+        raise CacheBlobLifecycleConflictError(
+            "Canonical BlobStore authority changed during both read attempts",
+            context={"key": key, "operation": "get"},
+        )
 
     def _resolve_payload_handler(self, manifest: BlobManifestV1) -> Any:
         """Resolve one signed handler contract without opening payload bytes."""

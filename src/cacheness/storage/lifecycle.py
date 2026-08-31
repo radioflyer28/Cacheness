@@ -187,7 +187,10 @@ class LifecycleEngine:
             or manifest.generation != target.generation
             or manifest.state != "committed"
         ):
-            raise CacheManifestIntegrityError("Clear target manifest identity is invalid")
+            raise CacheBlobLifecycleConflictError(
+                "BlobStore clear target is not a committed manifest generation",
+                context={"key": target.key, "operation": "clear"},
+            )
         if not verify_hmac_sha256(
             manifest.signing_bytes(), manifest.signature, self.store._manifest_key()
         ):
