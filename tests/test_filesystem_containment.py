@@ -829,10 +829,10 @@ def test_blob_store_clear_keeps_tombstone_authority_when_reclamation_fails(
         reopened.close()
 
 
-def test_blob_store_clear_rolls_back_payloads_when_metadata_clear_fails(
+def test_blob_store_clear_does_not_use_metadata_bulk_clear_as_authority(
     tmp_path, monkeypatch
 ):
-    """A metadata failure restores every staged payload to its original locator."""
+    """Current clear commits per-key tombstones rather than bulk metadata deletion."""
     root = tmp_path / "blob-root"
     handler = _InstrumentedHandler()
     store = BlobStore(root)
@@ -847,25 +847,16 @@ def test_blob_store_clear_rolls_back_payloads_when_metadata_clear_fails(
             for entry in entries_before
             if entry is not None
         ]
-        payload_bytes = {path: path.read_bytes() for path in payload_paths}
+        def forbid_metadata_bulk_clear() -> int:
+            raise AssertionError("clear must not use the retired metadata bulk path")
 
-        remove_entry = store.backend.remove_entry
+        monkeypatch.setattr(store.backend, "clear_all", forbid_metadata_bulk_clear)
 
-        def fail_metadata_clear() -> int:
-            remove_entry(keys[0])
-            raise RuntimeError("metadata unavailable after partial clear")
-
-        monkeypatch.setattr(store.backend, "clear_all", fail_metadata_clear)
-
-        with pytest.raises(CacheBlobBackendError) as error:
-            store.clear()
-
-        assert isinstance(error.value.__cause__, RuntimeError)
-        assert str(error.value.__cause__) == "metadata unavailable after partial clear"
-        assert [store.get_metadata(key) for key in keys] == entries_before
-        assert {path: path.read_bytes() for path in payload_paths} == payload_bytes
-        assert [store.get(key) for key in keys] == ["first", "second"]
-        assert not list(root.glob("clear-tombstone-*"))
+        assert store.clear() == len(keys)
+        assert all(store.get(key) is None for key in keys)
+        assert all(not path.exists() for path in payload_paths)
+        assert store.backend.list_entries() == []
+        assert list(store.lifecycle.operation_repository.iter_raw()) == []
     finally:
         store.close()
 
