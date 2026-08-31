@@ -67,6 +67,12 @@ class TestPublicExports:
             "blob_lifecycle_conflict",
             "blob_backend_failure",
             "blob_migration_required",
+            "blob_recoverable_cleanup",
+            "blob_reconciliation_blocked",
+            "blob_reconciliation_conflict",
+            "blob_reconciliation_checkpoint_invalid",
+            "blob_store_closed",
+            "blob_close_timeout",
         }
 
         assert {reason.value for reason in error_handling.CacheReason} == expected_reasons
