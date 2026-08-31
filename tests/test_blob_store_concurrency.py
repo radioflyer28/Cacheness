@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import threading
 
 import pytest
@@ -146,3 +147,64 @@ def test_distinct_key_put_completes_while_another_key_is_pre_cas(tmp_path):
         _join(key_b_thread)
         store.close()
     assert errors == []
+
+
+def test_read_retries_once_when_an_independent_writer_commits_new_generation(
+    tmp_path,
+):
+    """A read discards its first snapshot when M2 proves a newer commit."""
+    root = tmp_path / "read-write"
+    reader = BlobStore(root, backend="json")
+    writer = BlobStore(root, backend="json")
+    key = "race-key"
+    snapshots = 0
+    try:
+        reader.put("first", key=key)
+        original_snapshot = reader.guarded_handler_io.open_snapshot
+
+        @contextmanager
+        def replace_before_first_snapshot(locator, metadata):
+            nonlocal snapshots
+            snapshots += 1
+            if snapshots == 1:
+                writer.put("second", key=key)
+            with original_snapshot(locator, metadata) as snapshot:
+                yield snapshot
+
+        reader.guarded_handler_io.open_snapshot = replace_before_first_snapshot
+
+        assert reader.get(key) == "second"
+        assert snapshots == 2
+    finally:
+        writer.close()
+        reader.close()
+
+
+def test_read_delete_race_is_a_typed_lifecycle_conflict(tmp_path):
+    """A delete after M1 cannot turn a committed read into a payload miss."""
+    root = tmp_path / "read-delete"
+    reader = BlobStore(root, backend="json")
+    deleter = BlobStore(root, backend="json")
+    key = "race-key"
+    snapshots = 0
+    try:
+        reader.put("payload", key=key)
+        original_snapshot = reader.guarded_handler_io.open_snapshot
+
+        @contextmanager
+        def delete_before_first_snapshot(locator, metadata):
+            nonlocal snapshots
+            snapshots += 1
+            if snapshots == 1:
+                assert deleter.delete(key) is True
+            with original_snapshot(locator, metadata) as snapshot:
+                yield snapshot
+
+        reader.guarded_handler_io.open_snapshot = delete_before_first_snapshot
+
+        with pytest.raises(CacheBlobLifecycleConflictError):
+            reader.get(key)
+        assert snapshots == 1
+    finally:
+        deleter.close()
+        reader.close()

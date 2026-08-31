@@ -133,10 +133,14 @@ def test_failed_initialization_closes_only_internally_owned_backend(
 
     monkeypatch.setattr(SqliteBackend, "__init__", tracked_init)
     monkeypatch.setattr(SqliteBackend, "close", tracked_close)
+    def fail_repository_setup(_backend: object, *, lifecycle_limits: object) -> None:
+        assert lifecycle_limits is not None
+        raise RuntimeError("repository setup failed")
+
     monkeypatch.setattr(
         blob_store_module,
         "create_manifest_repository",
-        lambda _backend: (_ for _ in ()).throw(RuntimeError("repository setup failed")),
+        fail_repository_setup,
     )
 
     with pytest.raises(RuntimeError) as failure:
@@ -202,8 +206,11 @@ def test_constructor_cancellation_closes_owned_resources_after_backend_creation(
         closed_backends.append(backend)
         original_backend_close(backend)
 
-    def interrupt_repository_setup(backend: object) -> None:
+    def interrupt_repository_setup(
+        backend: object, *, lifecycle_limits: object
+    ) -> None:
         initialized_backends.append(backend)
+        assert lifecycle_limits is not None
         raise cancellation
 
     monkeypatch.setattr(GuardedHandlerIO, "close", close_io_spy)
@@ -849,6 +856,7 @@ def test_delete_and_clear_preflight_authenticated_manifests_before_mutation(
         delete_key = store.put("delete payload", key="delete-key")
         raw_manifest = store.manifest_repository.get_raw(delete_key)
         assert raw_manifest is not None
+        payload_locator = Path(json.loads(raw_manifest)["locator"])
         tampered = json.loads(raw_manifest)
         tampered["signature"] = "0" * 64
         store.manifest_repository.put_raw(
@@ -857,12 +865,17 @@ def test_delete_and_clear_preflight_authenticated_manifests_before_mutation(
                 tampered, sort_keys=True, separators=(",", ":"), ensure_ascii=False
             ).encode("utf-8"),
         )
+        original_delete = store.guarded_handler_io.file_ops.delete
+
+        def reject_only_tampered_payload(locator: Path | str) -> bool:
+            if Path(locator) == payload_locator:
+                raise AssertionError("unauthenticated manifest must not delete payload")
+            return original_delete(locator)
+
         monkeypatch.setattr(
             store.guarded_handler_io.file_ops,
             "delete",
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                AssertionError("unauthenticated manifest must not delete payload")
-            ),
+            reject_only_tampered_payload,
         )
 
         with pytest.raises(CacheBlobManifestUnauthenticatedError):
