@@ -1511,7 +1511,6 @@ class _CustomMetadataBackend(InMemoryBackend):
     ("name", "backend_factory"),
     (
         ("custom", lambda root: _CustomMetadataBackend()),
-        ("sqlite_memory", lambda root: SqliteBackend(":memory:")),
         (
             "cached_wrapper",
             lambda root: CachedMetadataBackend(
@@ -1524,28 +1523,11 @@ class _CustomMetadataBackend(InMemoryBackend):
 def test_unsupported_manifest_topologies_fail_before_any_mutation(
     tmp_path, name, backend_factory
 ):
-    """Unsupported backends fail before manifest or clear-recovery mutation."""
+    """Unsupported backend identities fail before manifest or lifecycle mutation."""
     root = tmp_path / name
     backend = backend_factory(root)
     store = None
     try:
-        if name == "sqlite_memory":
-            store = BlobStore(root, backend=backend)
-            with pytest.raises(CacheBlobBackendError) as error:
-                store.clear()
-            assert {
-                key: error.value.context[key]
-                for key in ("operation", "backend", "supported_local_kinds")
-            } == {
-                "operation": "clear",
-                "backend": "SqliteBackend",
-                "supported_local_kinds": ["json", "sqlite", "memory"],
-            }
-            assert error.value.context["reason"] == "blob_backend_failure"
-            assert not list(root.glob(".cacheness-clear-journal-*.json"))
-            assert not list(root.glob("*candidate-*"))
-            return
-
         with pytest.raises(CacheBlobBackendError) as error:
             BlobStore(root, backend=backend)
 
@@ -1559,6 +1541,26 @@ def test_unsupported_manifest_topologies_fail_before_any_mutation(
             store.close()
         else:
             backend.close()
+
+
+def test_sqlite_memory_clear_uses_current_lifecycle_without_legacy_journal(tmp_path):
+    """The active lifecycle clears an in-memory SQLite store without legacy evidence."""
+    root = tmp_path / "sqlite-memory-current-lifecycle"
+    store = BlobStore(root, backend=SqliteBackend(":memory:"))
+    try:
+        key = store.put("in-memory payload", key="in-memory-key")
+        entry = store.get_metadata(key)
+        assert entry is not None
+        payload_path = Path(entry["metadata"]["actual_path"])
+
+        assert store.clear() == 1
+        assert store.get(key) is None
+        assert store.manifest_repository.get_raw(key) is None
+        assert not payload_path.exists()
+        assert not list(root.glob(".cacheness-clear-journal-*.json"))
+        assert not list(root.glob("*candidate-*"))
+    finally:
+        store.close()
 
 
 def test_postgres_backend_rejection_precedes_all_metadata_and_staging_callbacks(tmp_path):
