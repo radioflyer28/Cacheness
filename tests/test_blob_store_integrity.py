@@ -208,7 +208,7 @@ def test_read_authenticates_validates_snapshots_hashes_then_deserializes(
     signed_store: BlobStore,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Only an authenticated, declared contract can reach one private snapshot."""
+    """M1 and M2 must authenticate and validate before payload use."""
     import cacheness.storage.blob_store as blob_store_module
 
     store = signed_store
@@ -251,7 +251,17 @@ def test_read_authenticates_validates_snapshots_hashes_then_deserializes(
     monkeypatch.setattr(handler, "get", get_spy)
 
     assert store.get("integrity-key") == {"value": "verified"}
-    assert events == ["authenticate", "validate", "snapshot", "digest", "handler"]
+    assert events == [
+        "authenticate",
+        "validate",
+        "snapshot",
+        "authenticate",
+        "validate",
+        "digest",
+        "handler",
+    ]
+    assert events.count("authenticate") == 2
+    assert events.count("validate") == 2
     assert events.count("snapshot") == 1
 
 
