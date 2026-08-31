@@ -61,7 +61,7 @@ from ..error_handling import (
 )
 from .backends import MetadataBackend, JsonBackend
 from .clear_recovery import ClearRecoveryCoordinator, LegacyClearEvidenceAdapter
-from .coordination import KeyCoordinatorRegistry, StoreAdmissionBarrier
+from .coordination import InstanceAdmission, KeyCoordinatorRegistry, StoreAdmissionBarrier
 from .guarded_handler_io import GuardedHandlerIO
 from .handlers import HandlerRegistry
 from .integrity import (
@@ -123,9 +123,10 @@ def _ordinary_admitted(method: Callable) -> Callable:
 
     @wraps(method)
     def wrapped(self, *args, **kwargs):
-        with self._admission_barrier.ordinary_admission():
-            self._refresh_metadata_view_for_lifecycle()
-            return method(self, *args, **kwargs)
+        with self._instance_admission.operation():
+            with self._admission_barrier.ordinary_admission():
+                self._refresh_metadata_view_for_lifecycle()
+                return method(self, *args, **kwargs)
 
     return wrapped
 
@@ -259,6 +260,7 @@ class BlobStore:
             else config
         )
         self.lifecycle_limits = self.config.lifecycle_limits
+        self._instance_admission = InstanceAdmission(self.lifecycle_limits)
         self._admission_barrier = StoreAdmissionBarrier.for_root(
             self.guarded_handler_io.root
         )
@@ -649,17 +651,18 @@ class BlobStore:
         Returns:
             Number of blobs removed
         """
-        self._require_canonical_store()
-        self._refresh_metadata_view_for_lifecycle()
-        try:
-            cleared = self.lifecycle.clear()
-        except (CacheBlobBackendError, CacheBlobLifecycleConflictError):
-            raise
-        except (CacheStorageError, OSError) as exc:
-            raise CacheBlobBackendError(
-                "BlobStore clear lifecycle could not complete",
-                context={"operation": "clear"},
-            ) from exc
+        with self._instance_admission.operation():
+            self._require_canonical_store()
+            self._refresh_metadata_view_for_lifecycle()
+            try:
+                cleared = self.lifecycle.clear()
+            except (CacheBlobBackendError, CacheBlobLifecycleConflictError):
+                raise
+            except (CacheStorageError, OSError) as exc:
+                raise CacheBlobBackendError(
+                    "BlobStore clear lifecycle could not complete",
+                    context={"operation": "clear"},
+                ) from exc
         logger.debug("Cleared %s BlobStore targets through the lifecycle engine", cleared)
         return cleared
 
@@ -676,12 +679,13 @@ class BlobStore:
         apply path is intentionally implemented by the private reconciler so
         it can revalidate exact evidence immediately before every action.
         """
-        self._require_canonical_store()
-        return self._reconciler.reconcile(
-            apply=apply,
-            resume_token=resume_token,
-            now=now,
-        )
+        with self._instance_admission.operation():
+            self._require_canonical_store()
+            return self._reconciler.reconcile(
+                apply=apply,
+                resume_token=resume_token,
+                now=now,
+            )
 
     def _reconcile_sqlite_manifest_records_after_clear(self) -> None:
         """Drop SQLite sidecar records orphaned by a completed clear recovery.
@@ -794,12 +798,35 @@ class BlobStore:
             if self.backend.get_entry(cache_key) != entry:
                 self.backend.put_entry(cache_key, deepcopy(entry))
     
-    def close(self):
-        """Close the blob store and release resources."""
-        self.guarded_handler_io.close()
-        self.backend.close()
+    def close(self) -> None:
+        """Drain admitted work and release only resources owned by this store.
+
+        Close changes admission to ``CLOSING`` before it waits.  A drain timeout
+        deliberately preserves the live resources and closing state, making a
+        later call the only route to complete release.  Neither this method nor
+        its retry path performs lifecycle deletion or reconciliation.
+        """
+        should_release = self._instance_admission.begin_close()
+        if not should_release:
+            return
+
+        closed = False
+        try:
+            self.guarded_handler_io.close()
+            self.backend.close()
+            closed = True
+        except CacheStorageError:
+            raise
+        except Exception as exc:
+            raise CacheBlobBackendError(
+                "BlobStore close could not release an owned resource",
+                context={"operation": "close"},
+            ) from exc
+        finally:
+            self._instance_admission.finish_close(closed=closed)
     
     def __enter__(self):
+        self._instance_admission.require_open()
         return self
     
     def __exit__(self, exc_type, exc_val, exc_tb):

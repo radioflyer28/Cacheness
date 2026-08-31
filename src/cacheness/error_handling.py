@@ -56,6 +56,8 @@ class CacheReason(str, Enum):
     BLOB_RECONCILIATION_BLOCKED = "blob_reconciliation_blocked"
     BLOB_RECONCILIATION_CONFLICT = "blob_reconciliation_conflict"
     BLOB_RECONCILIATION_CHECKPOINT_INVALID = "blob_reconciliation_checkpoint_invalid"
+    BLOB_STORE_CLOSED = "blob_store_closed"
+    BLOB_CLOSE_TIMEOUT = "blob_close_timeout"
 
 
 class CacheError(Exception):
@@ -286,6 +288,32 @@ class CacheBlobBackendError(CacheStorageError):
         context: Optional[Dict[str, Any]] = None,
         *,
         reason: CacheReason = CacheReason.BLOB_BACKEND_FAILURE,
+    ):
+        super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheBlobStoreClosedError(CacheStorageError):
+    """Raised when a BlobStore instance rejects new work during close."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_STORE_CLOSED,
+    ):
+        super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheBlobCloseTimeoutError(CacheStorageError):
+    """Raised when a finite BlobStore close drain cannot complete in time."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_CLOSE_TIMEOUT,
     ):
         super().__init__(message, _context_with_reason(context, reason))
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 from threading import Event, Thread
-from typing import Any
 
 import pytest
 
@@ -243,4 +242,3 @@ def test_partial_owned_resource_failure_is_typed_and_retries_without_double_clos
     store.close()
     assert guarded_close_calls == [None]
     assert backend_close_calls == [None, None]
-
