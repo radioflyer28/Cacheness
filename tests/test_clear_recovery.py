@@ -64,6 +64,77 @@ def _reopen_json_store(root: Path) -> BlobStore:
     return BlobStore(root, backend="json")
 
 
+def test_legacy_clear_evidence_adapter_recovers_only_exact_prepared_journals(
+    tmp_path, monkeypatch
+):
+    """The predecessor compatibility seam has no API for starting new clears."""
+    root = tmp_path / "legacy-adapter-prepared"
+    store = BlobStore(root, backend="json")
+    try:
+        key = store.put("preserved", key="legacy-key")
+        entry = store.get_metadata(key)
+        assert entry is not None
+        payload = Path(entry["metadata"]["actual_path"])
+        original = payload.read_bytes()
+        coordinator = store._clear_recovery
+        assert coordinator is not None
+        journal = coordinator._new_prepared_journal([(key, payload)])
+        coordinator.journal_path.write_bytes(coordinator._encode_journal(journal))
+
+        adapter = clear_recovery.LegacyClearEvidenceAdapter(
+            coordinator.file_ops, coordinator.backend
+        )
+        assert not hasattr(adapter, "clear")
+        assert callable(adapter.recover)
+
+        adapter.recover()
+
+        assert not coordinator.journal_path.exists()
+        assert payload.read_bytes() == original
+    finally:
+        store.close()
+
+
+def test_legacy_clear_evidence_adapter_preserves_malformed_bytes_without_mutation(
+    tmp_path, monkeypatch
+):
+    """Malformed predecessor evidence cannot authorize a legacy recovery callback."""
+    root = tmp_path / "legacy-adapter-malformed"
+    store = BlobStore(root, backend="json")
+    try:
+        key = store.put("preserved", key="legacy-key")
+        entry = store.get_metadata(key)
+        assert entry is not None
+        payload = Path(entry["metadata"]["actual_path"])
+        original_payload = payload.read_bytes()
+        original_metadata = deepcopy(store.backend.load_metadata())
+        coordinator = store._clear_recovery
+        assert coordinator is not None
+        evidence = b'{"owner":"forged"}'
+        coordinator.journal_path.write_bytes(evidence)
+        destructive_calls: list[Path] = []
+        delete_durable = coordinator.file_ops.delete_durable
+
+        def record_delete(locator):
+            destructive_calls.append(Path(locator))
+            return delete_durable(locator)
+
+        monkeypatch.setattr(coordinator.file_ops, "delete_durable", record_delete)
+        adapter = clear_recovery.LegacyClearEvidenceAdapter(
+            coordinator.file_ops, coordinator.backend
+        )
+
+        with pytest.raises(CacheStorageError):
+            adapter.recover()
+
+        assert coordinator.journal_path.read_bytes() == evidence
+        assert destructive_calls == []
+        assert payload.read_bytes() == original_payload
+        assert store.backend.load_metadata() == original_metadata
+    finally:
+        store.close()
+
+
 def test_json_pre_replace_failure_preserves_live_disk_and_memory(
     tmp_path, monkeypatch
 ):
