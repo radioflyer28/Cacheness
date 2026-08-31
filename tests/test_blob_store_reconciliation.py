@@ -433,3 +433,65 @@ def test_reconcile_dry_run_is_bounded_and_exposes_an_opaque_resume_token(
         assert report.to_dict()["resume_token"] == report.resume_token
     finally:
         store.close()
+
+
+def test_reconcile_apply_revalidates_and_removes_only_authenticated_candidate(
+    tmp_path: Path,
+) -> None:
+    """Apply rechecks exact evidence before reclaiming an aged owned candidate."""
+    root = tmp_path / "reconcile-apply"
+    store = BlobStore(root, backend="json")
+    try:
+        key = store._manifest_key(initialize_new_store=True)
+        record = _reconciliation_record(store, root, key, "a" * 32)
+        candidate = store.guarded_handler_io.root / record.candidate_locator
+        store.guarded_handler_io.file_ops.write_bytes_durable(candidate, b"candidate")
+        store.lifecycle.operation_repository.create_exclusive(
+            record, record.canonical_bytes()
+        )
+
+        report = store.reconcile(
+            apply=True, now=datetime(2026, 8, 31, tzinfo=timezone.utc)
+        )
+
+        assert report.applied
+        assert report.findings[0].action is ReconciliationAction.DELETE_CANDIDATE
+        assert not candidate.exists()
+        assert store.lifecycle.operation_repository.get_raw(record.operation_id) is None
+    finally:
+        store.close()
+
+
+def test_reconcile_apply_base_exception_checkpoints_without_repeating_delete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A post-delete interruption leaves a completed checkpoint before re-raising."""
+    class Interrupted(BaseException):
+        pass
+
+    root = tmp_path / "reconcile-base-exception"
+    store = BlobStore(root, backend="json")
+    try:
+        key = store._manifest_key(initialize_new_store=True)
+        record = _reconciliation_record(store, root, key, "a" * 32)
+        candidate = store.guarded_handler_io.root / record.candidate_locator
+        store.guarded_handler_io.file_ops.write_bytes_durable(candidate, b"candidate")
+        store.lifecycle.operation_repository.create_exclusive(
+            record, record.canonical_bytes()
+        )
+        delete = store.guarded_handler_io.file_ops.delete
+
+        def delete_then_interrupt(locator: Path) -> bool:
+            assert delete(locator)
+            raise Interrupted("after candidate deletion")
+
+        monkeypatch.setattr(store.guarded_handler_io.file_ops, "delete", delete_then_interrupt)
+        with pytest.raises(Interrupted):
+            store.reconcile(
+                apply=True, now=datetime(2026, 8, 31, tzinfo=timezone.utc)
+            )
+        assert not candidate.exists()
+        assert store.lifecycle.operation_repository.get_raw(record.operation_id) is None
+    finally:
+        store.close()
