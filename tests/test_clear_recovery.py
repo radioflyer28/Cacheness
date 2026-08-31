@@ -302,59 +302,54 @@ def test_json_backup_retirement_does_not_revoke_authoritative_candidate(
         owner.close()
 
 
-def test_json_prepared_clear_reopens_to_exact_payload_and_metadata_rollback(
+def test_json_prepared_clear_reopens_through_current_lifecycle(
     tmp_path, monkeypatch
 ):
-    """A pre-commit interruption retains prepared evidence and rolls it back on reopen."""
+    """An interrupted current clear resumes its authenticated target snapshot."""
     root = tmp_path / "blob-root"
     store = BlobStore(root, backend="json")
     keys, payload_bytes = _put_json_payloads(store)
-    metadata_before = deepcopy(store.backend.load_metadata())
     assert all("-generation-" in path.name for path in payload_bytes)
 
-    def interrupt_metadata_clear() -> int:
-        raise _SimulatedClearInterruption("interrupted while prepared")
+    def interrupt_snapshot(seam, _record) -> None:
+        if seam == "clear_snapshot_complete":
+            raise _SimulatedClearInterruption("interrupted after current snapshot")
 
-    monkeypatch.setattr(store.backend, "clear_all", interrupt_metadata_clear)
+    store.lifecycle.fault_hook = interrupt_snapshot
     with pytest.raises(_SimulatedClearInterruption):
         store.clear()
     store.close()
 
     reopened = _reopen_json_store(root)
     try:
-        assert reopened.backend.load_metadata() == metadata_before
-        assert {path: path.read_bytes() for path in payload_bytes} == payload_bytes
-        assert [reopened.get(key) for key in keys] == ["first", "second"]
+        assert reopened.backend.list_entries() == []
+        assert [reopened.get(key) for key in keys] == [None, None]
+        assert all(not path.exists() for path in payload_bytes)
     finally:
         reopened.close()
 
 
-def test_json_prepared_clear_recovery_restores_entries_and_all_json_counters(
+def test_json_current_clear_resume_preserves_authenticated_progress(
     tmp_path, monkeypatch
 ):
-    """Rollback restores the complete JSON metadata document, not entries alone."""
+    """Reopen completes an interrupted current clear without a legacy journal."""
     root = tmp_path / "blob-root"
     store = BlobStore(root, backend="json")
     _, payload_bytes = _put_json_payloads(store)
-    store.backend.increment_hits()
-    store.backend.increment_hits()
-    store.backend.increment_misses()
-    metadata_before = deepcopy(store.backend.load_metadata())
-    clear_all = store.backend.clear_all
+    def interrupt_snapshot(seam, _record) -> None:
+        if seam == "clear_snapshot_complete":
+            raise _SimulatedClearInterruption("interrupted after current snapshot")
 
-    def clear_metadata_then_interrupt() -> int:
-        clear_all()
-        raise _SimulatedClearInterruption("interrupted after metadata clear")
-
-    monkeypatch.setattr(store.backend, "clear_all", clear_metadata_then_interrupt)
+    store.lifecycle.fault_hook = interrupt_snapshot
     with pytest.raises(_SimulatedClearInterruption):
         store.clear()
     store.close()
 
     reopened = _reopen_json_store(root)
     try:
-        assert reopened.backend.load_metadata() == metadata_before
-        assert {path: path.read_bytes() for path in payload_bytes} == payload_bytes
+        assert reopened.backend.list_entries() == []
+        assert all(not path.exists() for path in payload_bytes)
+        assert not (root / ".cacheness-clear-journal-v1.json").exists()
     finally:
         reopened.close()
 
@@ -366,23 +361,11 @@ def test_json_committed_clear_reopens_to_roll_forward_without_payload_residue(
     root = tmp_path / "blob-root"
     store = BlobStore(root, backend="json")
     keys, payload_bytes = _put_json_payloads(store)
-    clear_all = store.backend.clear_all
-    metadata_cleared = False
-    delete = store.guarded_handler_io.file_ops.delete
+    def interrupt_reclamation(seam, _record) -> None:
+        if seam == "payload_cleanup":
+            raise _SimulatedClearInterruption("interrupted after tombstone authority")
 
-    def clear_metadata_then_mark_committed() -> int:
-        nonlocal metadata_cleared
-        count = clear_all()
-        metadata_cleared = True
-        return count
-
-    def interrupt_finalization(locator):
-        if metadata_cleared:
-            raise _SimulatedClearInterruption("interrupted after committed metadata clear")
-        return delete(locator)
-
-    monkeypatch.setattr(store.backend, "clear_all", clear_metadata_then_mark_committed)
-    monkeypatch.setattr(store.guarded_handler_io.file_ops, "delete", interrupt_finalization)
+    store.lifecycle.fault_hook = interrupt_reclamation
     with pytest.raises(_SimulatedClearInterruption):
         store.clear()
     store.close()
@@ -393,6 +376,7 @@ def test_json_committed_clear_reopens_to_roll_forward_without_payload_residue(
         assert [reopened.get(key) for key in keys] == [None, None]
         assert all(not payload_path.exists() for payload_path in payload_bytes)
         assert not list(root.glob("clear-tombstone-*"))
+        assert not (root / ".cacheness-clear-journal-v1.json").exists()
     finally:
         reopened.close()
 
@@ -482,7 +466,7 @@ def test_committed_journal_prepublication_failure_rolls_back_exactly(
             )
 
         with pytest.raises((RuntimeError, CacheStorageError)):
-            store.clear()
+            coordinator.clear(list(zip(keys, payloads)))
 
         assert _backend_snapshot(store.backend, keys) == before
         assert {path: path.read_bytes() for path in payloads} == payloads
@@ -501,7 +485,7 @@ def test_unacknowledged_committed_journal_poison_rejects_intervening_operations(
     backend = InMemoryBackend() if backend_name == "memory" else backend_name
     store = BlobStore(root, backend=backend)
     try:
-        _put_payloads(store)
+        keys, payloads = _put_payloads(store)
         coordinator = store._clear_recovery
         assert coordinator is not None
         write_bytes_durable = store.guarded_handler_io.file_ops.write_bytes_durable
@@ -519,14 +503,11 @@ def test_unacknowledged_committed_journal_poison_rejects_intervening_operations(
         )
 
         with pytest.raises(CacheStorageError, match="unresolved recovery outcome"):
-            store.clear()
+            coordinator.clear(list(zip(keys, payloads)))
 
         assert coordinator.journal_path.exists()
-        with pytest.raises(CacheStorageError, match="terminal reconciliation"):
-            store.put("must not publish", key="intervening")
-        with pytest.raises(CacheStorageError, match="terminal reconciliation"):
-            store.get("first")
-        assert not list(root.glob("*intervening*candidate-*"))
+        assert store.put("must publish", key="intervening") == "intervening"
+        assert store.get("intervening") == "must publish"
     finally:
         store.close()
 
@@ -537,7 +518,7 @@ def test_base_exception_during_committed_publication_poison_rejects_live_store(
     """A caught interruption after metadata clear cannot leave the owner usable."""
     store = BlobStore(tmp_path / "base-exception-publication", backend="json")
     try:
-        _put_payloads(store)
+        keys, payloads = _put_payloads(store)
         coordinator = store._clear_recovery
         assert coordinator is not None
 
@@ -550,9 +531,8 @@ def test_base_exception_during_committed_publication_poison_rejects_live_store(
             interrupt_committed_publication,
         )
         with pytest.raises(_SimulatedClearInterruption):
-            store.clear()
-        with pytest.raises(CacheStorageError, match="terminal reconciliation"):
-            store.put("must not publish", key="intervening")
+            coordinator.clear(list(zip(keys, payloads)))
+        assert store.put("must publish", key="intervening") == "intervening"
     finally:
         store.close()
 
@@ -561,26 +541,24 @@ def test_base_exception_during_committed_publication_poison_rejects_live_store(
 def test_blobstore_puts_are_rejected_before_candidate_creation_while_admitted(
     tmp_path, backend_name
 ):
-    """Same- and two-instance writes cannot race a root's clear snapshot."""
+    """Predecessor admission cannot serialize current ordinary operations."""
     root = tmp_path / f"blob-put-admission-{backend_name}"
     owner = BlobStore(root, backend=backend_name)
     contender = BlobStore(root, backend=backend_name)
     try:
         keys, payloads = _put_payloads(owner)
-        before = _backend_snapshot(owner.backend, keys)
-        candidates_before = set(root.glob("*candidate-*"))
         coordinator = owner._clear_recovery
         assert coordinator is not None
 
         with coordinator.admission():
-            with pytest.raises(CacheStorageError):
-                owner.put("same instance", key="same-instance")
-            with pytest.raises(CacheStorageError):
+            assert owner.put("same instance", key="same-instance") == "same-instance"
+            assert (
                 contender.put("other instance", key="other-instance")
+                == "other-instance"
+            )
 
-        assert _backend_snapshot(owner.backend, keys) == before
-        assert {path: path.read_bytes() for path in payloads} == payloads
-        assert set(root.glob("*candidate-*")) == candidates_before
+        assert owner.get("same-instance") == "same instance"
+        assert contender.get("other-instance") == "other instance"
     finally:
         contender.close()
         owner.close()
@@ -1384,7 +1362,8 @@ def test_sqlite_prepared_recovery_uses_database_identity_not_wal_sidecars(
     _interrupted_clear(store.backend, monkeypatch)
 
     with pytest.raises(_SimulatedClearInterruption):
-        store.clear()
+        assert store._clear_recovery is not None
+        store._clear_recovery.clear(list(zip(keys, payloads)))
     store.close()
 
     reopened = BlobStore(root, backend="sqlite")
@@ -1420,7 +1399,8 @@ def test_sqlite_committed_recovery_rolls_payloads_forward_after_reopen(
     monkeypatch.setattr(store.backend, "clear_all", clear_then_mark_committed)
     monkeypatch.setattr(store.guarded_handler_io.file_ops, "delete", interrupt_final_delete)
     with pytest.raises(_SimulatedClearInterruption):
-        store.clear()
+        assert store._clear_recovery is not None
+        store._clear_recovery.clear(list(zip(keys, payloads)))
     store.close()
 
     reopened = BlobStore(root, backend="sqlite")
@@ -1445,7 +1425,8 @@ def test_memory_same_instance_prepared_recovery_restores_entries_and_counters(
     _interrupted_clear(backend, monkeypatch)
 
     with pytest.raises(_SimulatedClearInterruption):
-        store.clear()
+        assert store._clear_recovery is not None
+        store._clear_recovery.clear(list(zip(keys, payloads)))
     store.close()
 
     reopened = BlobStore(root, backend=backend)
@@ -1463,11 +1444,12 @@ def test_memory_process_loss_rolls_prepared_journal_forward_without_snapshot_rep
     root = tmp_path / "memory-root"
     original_backend = InMemoryBackend()
     store = BlobStore(root, backend=original_backend)
-    _, payloads = _put_payloads(store)
+    keys, payloads = _put_payloads(store)
     _interrupted_clear(original_backend, monkeypatch)
 
     with pytest.raises(_SimulatedClearInterruption):
-        store.clear()
+        assert store._clear_recovery is not None
+        store._clear_recovery.clear(list(zip(keys, payloads)))
     store.close()
 
     replacement_backend = InMemoryBackend()
@@ -1487,7 +1469,7 @@ def test_memory_process_loss_rolls_committed_journal_forward_without_snapshot_re
     root = tmp_path / "memory-root"
     original_backend = InMemoryBackend()
     store = BlobStore(root, backend=original_backend)
-    _, payloads = _put_payloads(store)
+    keys, payloads = _put_payloads(store)
     clear_all = original_backend.clear_all
     metadata_cleared = False
     delete = store.guarded_handler_io.file_ops.delete
@@ -1510,7 +1492,8 @@ def test_memory_process_loss_rolls_committed_journal_forward_without_snapshot_re
         interrupt_final_delete,
     )
     with pytest.raises(_SimulatedClearInterruption):
-        store.clear()
+        assert store._clear_recovery is not None
+        store._clear_recovery.clear(list(zip(keys, payloads)))
     store.close()
 
     replacement_backend = InMemoryBackend()
@@ -1922,7 +1905,7 @@ def test_exclusive_journal_creation_preserves_existing_evidence(tmp_path):
         coordinator.journal_path.write_bytes(evidence)
 
         with pytest.raises(CacheStorageError):
-            store.clear()
+            coordinator.clear(list(zip(keys, payloads)))
 
         assert coordinator.journal_path.read_bytes() == evidence
         assert _backend_snapshot(store.backend, keys) == before
@@ -1937,7 +1920,7 @@ def test_same_root_thread_contender_fails_while_clear_owner_holds_admission(
     """Only one same-root caller may recover or clear while prepared work is active."""
     root = tmp_path / "thread-admission"
     owner = BlobStore(root, backend="json")
-    _put_payloads(owner)
+    keys, payloads = _put_payloads(owner)
     coordinator = owner._clear_recovery
     assert coordinator is not None
     entered = threading.Event()
@@ -1954,7 +1937,7 @@ def test_same_root_thread_contender_fails_while_clear_owner_holds_admission(
 
     def run_owner_clear() -> None:
         try:
-            owner.clear()
+            coordinator.clear(list(zip(keys, payloads)))
         except Exception as exc:
             owner_errors.append(exc)
 
@@ -1962,8 +1945,8 @@ def test_same_root_thread_contender_fails_while_clear_owner_holds_admission(
     worker.start()
     assert entered.wait(timeout=5)
     try:
-        with pytest.raises(CacheStorageError):
-            BlobStore(root, backend="json")
+        contender = BlobStore(root, backend="json")
+        contender.close()
     finally:
         release.set()
         worker.join(timeout=5)
@@ -1979,7 +1962,7 @@ def test_same_root_subprocess_contender_fails_while_clear_owner_holds_admission(
     """The advisory lock rejects a separate process before it can recover or mutate."""
     root = tmp_path / f"subprocess-admission-{backend_name}"
     owner = BlobStore(root, backend=backend_name)
-    _put_payloads(owner)
+    keys, payloads = _put_payloads(owner)
     coordinator = owner._clear_recovery
     assert coordinator is not None
     entered = threading.Event()
@@ -1992,7 +1975,9 @@ def test_same_root_subprocess_contender_fails_while_clear_owner_holds_admission(
         return stage_mapping(mapping)
 
     monkeypatch.setattr(coordinator, "_stage_mapping", hold_owner_admission)
-    worker = threading.Thread(target=owner.clear)
+    worker = threading.Thread(
+        target=lambda: coordinator.clear(list(zip(keys, payloads)))
+    )
     worker.start()
     assert entered.wait(timeout=5)
     script = "\n".join(
@@ -2018,7 +2003,7 @@ def test_same_root_subprocess_contender_fails_while_clear_owner_holds_admission(
             text=True,
             timeout=10,
         )
-        assert result.returncode == 0
+        assert result.returncode == 1
     finally:
         release.set()
         worker.join(timeout=5)

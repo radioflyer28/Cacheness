@@ -60,7 +60,7 @@ from ..error_handling import (
     CacheStorageError,
 )
 from .backends import MetadataBackend, JsonBackend
-from .clear_recovery import ClearRecoveryCoordinator
+from .clear_recovery import ClearRecoveryCoordinator, LegacyClearEvidenceAdapter
 from .coordination import StoreAdmissionBarrier
 from .guarded_handler_io import GuardedHandlerIO
 from .handlers import HandlerRegistry
@@ -115,40 +115,6 @@ _IMMUTABLE_METADATA_PATCH_FIELDS = frozenset(
         "signature",
     }
 )
-
-
-def _clear_coordinated(method: Callable) -> Callable:
-    """Serialize a local lifecycle operation with clear/recovery when available."""
-
-    @wraps(method)
-    def wrapped(self, *args, **kwargs):
-        coordinator = self._clear_recovery
-        if coordinator is None:
-            return method(self, *args, **kwargs)
-        try:
-            with coordinator.mutation_admission():
-                return method(self, *args, **kwargs)
-        except CacheStorageError as exc:
-            _raise_translated_recovery_failure(coordinator, exc)
-
-    return wrapped
-
-
-def _clear_read_coordinated(method: Callable) -> Callable:
-    """Exclude an active clear without forcing terminal cleanup during reads."""
-
-    @wraps(method)
-    def wrapped(self, *args, **kwargs):
-        coordinator = self._clear_recovery
-        if coordinator is None:
-            return method(self, *args, **kwargs)
-        try:
-            with coordinator.read_admission():
-                return method(self, *args, **kwargs)
-        except CacheStorageError as exc:
-            _raise_translated_recovery_failure(coordinator, exc)
-
-    return wrapped
 
 
 def _ordinary_admitted(method: Callable) -> Callable:
@@ -323,10 +289,11 @@ class BlobStore:
         )
         self.lifecycle = LifecycleEngine(self, lifecycle_limits=self.lifecycle_limits)
 
-        # Clear recovery is deliberately confined to exact local backend
-        # identities. Capability-shaped or wrapped backends never inherit a
-        # crash boundary merely because they expose similarly named methods.
+        # The predecessor coordinator remains an exact local compatibility
+        # parser. It has no new-operation call site: fresh clear authority is
+        # owned by LifecycleEngine and its signed operation records.
         self._clear_recovery = None
+        self._legacy_clear_evidence = None
         if (
             self._legacy_identity is None
             and ClearRecoveryCoordinator.can_coordinate(self.backend)
@@ -335,12 +302,17 @@ class BlobStore:
                 self.guarded_handler_io.file_ops,
                 self.backend,
             )
+            self._legacy_clear_evidence = LegacyClearEvidenceAdapter(
+                self.guarded_handler_io.file_ops,
+                self.backend,
+            )
             try:
-                with self._clear_recovery.admission():
-                    self._clear_recovery.recover()
-                    self._reconcile_sqlite_manifest_records_after_clear()
-            except Exception:
-                raise
+                if self._legacy_clear_evidence.has_evidence():
+                    with self._clear_recovery.admission():
+                        self._legacy_clear_evidence.recover()
+                        self._reconcile_sqlite_manifest_records_after_clear()
+            except CacheStorageError as exc:
+                _raise_translated_recovery_failure(self._clear_recovery, exc)
 
     def _close_failed_initialization_resources(self) -> None:
         """Release only resources this incomplete store has taken ownership of."""
@@ -659,9 +631,9 @@ class BlobStore:
     def _reconcile_sqlite_manifest_records_after_clear(self) -> None:
         """Drop SQLite sidecar records orphaned by a completed clear recovery.
 
-        Clear recovery remains owned by the Phase 1 coordinator. This only
-        removes dedicated canonical BLOB rows after that coordinator has
-        reached a terminal state and established ``cache_entries`` authority.
+        The reopen-only predecessor adapter can leave stale SQLite canonical
+        sidecars after it establishes legacy ``cache_entries`` authority.
+        Remove them only after that adapter has reached a terminal outcome.
         """
         if type(self.backend) is not SqliteBackend:
             return
@@ -804,15 +776,14 @@ class BlobStore:
         manifest CAS instead, but a JSON writer must still fail closed rather
         than overwriting malformed or stale metadata from its in-memory view.
         """
-        coordinator = self._clear_recovery
-        if coordinator is None:
+        if type(self.backend) is not JsonBackend:
             return
         try:
-            coordinator._refresh_backend_view()
+            self.backend._refresh_from_disk_for_clear_admission()
         except CacheStorageError as exc:
             raise CacheBlobBackendError(
                 "BlobStore lifecycle could not refresh metadata state",
-                context={"operation": "put", "backend": coordinator.kind},
+                context={"operation": "put", "backend": "json"},
             ) from exc
     
     def _storage_id_for_key(self, key: str) -> str:
