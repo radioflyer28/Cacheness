@@ -20,6 +20,7 @@ from typing import Any
 
 from cacheness.config import LifecycleLimits
 from cacheness.error_handling import (
+    CacheBlobLifecycleConflictError,
     CacheBlobManifestUnauthenticatedError,
     CacheManifestIntegrityError,
     CacheManifestUnsupportedVersionError,
@@ -131,6 +132,101 @@ class _AuthenticatedManifest:
     locator: Path
 
 
+@dataclass(frozen=True)
+class _ActionCheckpoint:
+    """Private signed marker bracketing one destructive reconciliation action."""
+
+    operation_id: str
+    evidence_digest: str
+    action: ReconciliationAction
+    state: str
+    signature: str
+
+    _DOMAIN = b"cacheness.reconciliation.action.v1\x00"
+
+    def signing_bytes(self) -> bytes:
+        return self._DOMAIN + json.dumps(
+            {
+                "action": self.action.value,
+                "evidence_digest": self.evidence_digest,
+                "operation_id": self.operation_id,
+                "state": self.state,
+                "version": 1,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+    def canonical_bytes(self) -> bytes:
+        return json.dumps(
+            {
+                "action": self.action.value,
+                "evidence_digest": self.evidence_digest,
+                "operation_id": self.operation_id,
+                "signature": self.signature,
+                "state": self.state,
+                "version": 1,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+    @classmethod
+    def from_canonical_bytes(cls, raw: bytes, key: bytes) -> "_ActionCheckpoint":
+        """Reject malformed, non-canonical, or unauthenticated progress bytes."""
+        try:
+            mapping = json.loads(raw)
+            if not isinstance(mapping, dict) or set(mapping) != {
+                "action",
+                "evidence_digest",
+                "operation_id",
+                "signature",
+                "state",
+                "version",
+            }:
+                raise ValueError
+            action = ReconciliationAction(mapping["action"])
+            checkpoint = cls(
+                operation_id=mapping["operation_id"],
+                evidence_digest=mapping["evidence_digest"],
+                action=action,
+                state=mapping["state"],
+                signature=mapping["signature"],
+            )
+            if (
+                mapping["version"] != 1
+                or checkpoint.state not in {"prepared", "completed"}
+                or len(checkpoint.operation_id) != 32
+                or any(char not in "0123456789abcdef" for char in checkpoint.operation_id)
+                or len(checkpoint.evidence_digest) != 64
+                or any(char not in "0123456789abcdef" for char in checkpoint.evidence_digest)
+                or not isinstance(checkpoint.signature, str)
+                or checkpoint.canonical_bytes() != raw
+                or not verify_hmac_sha256(
+                    checkpoint.signing_bytes(), checkpoint.signature, key
+                )
+            ):
+                raise ValueError
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise CacheManifestIntegrityError(
+                "Reconciliation checkpoint is invalid"
+            ) from exc
+        return checkpoint
+
+    @classmethod
+    def new(
+        cls,
+        operation_id: str,
+        evidence_digest: str,
+        action: ReconciliationAction,
+        state: str,
+        key: bytes,
+    ) -> "_ActionCheckpoint":
+        unsigned = cls(operation_id, evidence_digest, action, state, signature="")
+        signature = hmac.new(key, unsigned.signing_bytes(), hashlib.sha256).hexdigest()
+        return cls(operation_id, evidence_digest, action, state, signature)
+
+
 class _Reconciler:
     """Private coordinator for bounded, non-deserializing evidence analysis."""
 
@@ -191,6 +287,8 @@ class _Reconciler:
             operation_page, consumed_operation
         )
         token = self._encode_resume_token(next_manifest, next_operation)
+        if apply:
+            self._apply_findings(findings, observed_at)
         return ReconciliationReport(
             findings=tuple(findings),
             resume_token=token,
@@ -198,6 +296,141 @@ class _Reconciler:
             manifest_records_seen=manifest_seen,
             operation_records_seen=operation_seen,
         )
+
+    def _apply_findings(
+        self,
+        findings: list[ReconciliationFinding],
+        observed_at: datetime,
+    ) -> None:
+        """Revalidate and checkpoint every authorized action under one snapshot gate."""
+        # Reconciliation uses aggregate admission only while it reloads exact
+        # authority and applies a bounded report. Ordinary operations retain
+        # their per-key lifecycle/CAS concurrency contract.
+        with self.store._admission_barrier.aggregate_admission():
+            for finding in findings:
+                if (
+                    finding.status is not ReconciliationStatus.SAFE
+                    or finding.evidence_id is None
+                    or finding.evidence_digest is None
+                ):
+                    continue
+                self._apply_finding(finding, observed_at)
+
+    def _apply_finding(
+        self,
+        finding: ReconciliationFinding,
+        observed_at: datetime,
+    ) -> None:
+        """Perform one exact revalidated action, never using an old report as proof."""
+        repository = self.store.lifecycle.operation_repository
+        raw = repository.get_raw(finding.evidence_id)
+        if raw is None or hashlib.sha256(raw).hexdigest() != finding.evidence_digest:
+            return
+        refreshed = self._classify_operation(finding.evidence_id, raw, observed_at)
+        if (
+            refreshed.status is not ReconciliationStatus.SAFE
+            or refreshed.action is not finding.action
+            or refreshed.evidence_digest != finding.evidence_digest
+        ):
+            return
+        recovered = self.store.lifecycle._recoverable_record(finding.evidence_id, raw)
+        if recovered is None:
+            return
+        record, candidate, _previous = recovered
+        checkpoint, checkpoint_raw = self._prepare_action_checkpoint(
+            record.operation_id,
+            finding.evidence_digest,
+            finding.action,
+        )
+        if checkpoint.state == "completed":
+            return
+        if finding.action is ReconciliationAction.DELETE_CANDIDATE:
+            self._apply_candidate_delete(record, candidate, checkpoint, checkpoint_raw)
+        elif finding.action is ReconciliationAction.RETIRE_EVIDENCE:
+            self.store.lifecycle._retire(record)
+            self._complete_action_checkpoint(checkpoint, checkpoint_raw)
+        elif finding.action is ReconciliationAction.COMPLETE_TOMBSTONE:
+            self.store.lifecycle._recover_tombstone(record, candidate)
+            self._complete_action_checkpoint(checkpoint, checkpoint_raw)
+
+    def _apply_candidate_delete(
+        self,
+        record: Any,
+        candidate: Path,
+        checkpoint: _ActionCheckpoint,
+        checkpoint_raw: bytes,
+    ) -> None:
+        """Delete one exact candidate and make post-delete cancellation resumable."""
+        if not self.store.guarded_handler_io.file_ops.exists(candidate):
+            completed, _ = self._complete_action_checkpoint(checkpoint, checkpoint_raw)
+            self.store.lifecycle._retire(record)
+            return
+        try:
+            self.store._delete_or_prove_absent(candidate)
+        except BaseException:
+            # A signal can arrive after the unlink reaches the filesystem.  If
+            # absence is now proven, finish durable progress before preserving
+            # the interruption; a fresh store will not call delete again.
+            if not self.store.guarded_handler_io.file_ops.exists(candidate):
+                self._complete_action_checkpoint(checkpoint, checkpoint_raw)
+                self.store.lifecycle._retire(record)
+            raise
+        self._complete_action_checkpoint(checkpoint, checkpoint_raw)
+        self.store.lifecycle._retire(record)
+
+    def _prepare_action_checkpoint(
+        self,
+        operation_id: str,
+        evidence_digest: str,
+        action: ReconciliationAction,
+    ) -> tuple[_ActionCheckpoint, bytes]:
+        """Durably record exact intent before any destructive reconciliation call."""
+        repository = self.store.lifecycle.operation_repository
+        key = self.store._manifest_key()
+        raw = repository.get_reconciliation_checkpoint_raw(operation_id)
+        if raw is None:
+            checkpoint = _ActionCheckpoint.new(
+                operation_id, evidence_digest, action, "prepared", key
+            )
+            raw = checkpoint.canonical_bytes()
+            try:
+                repository.create_reconciliation_checkpoint_exclusive(operation_id, raw)
+            except CacheBlobLifecycleConflictError:
+                raw = repository.get_reconciliation_checkpoint_raw(operation_id)
+                if raw is None:
+                    raise
+        checkpoint = _ActionCheckpoint.from_canonical_bytes(raw, key)
+        if (
+            checkpoint.evidence_digest != evidence_digest
+            or checkpoint.action is not action
+        ):
+            raise CacheBlobLifecycleConflictError(
+                "Reconciliation checkpoint is bound to different evidence",
+                context={"operation_id": operation_id, "operation": "reconcile"},
+            )
+        return checkpoint, raw
+
+    def _complete_action_checkpoint(
+        self, checkpoint: _ActionCheckpoint, expected_raw: bytes
+    ) -> tuple[_ActionCheckpoint, bytes]:
+        """Advance durable progress after an action, preserving exact CAS semantics."""
+        if checkpoint.state == "completed":
+            return checkpoint, expected_raw
+        key = self.store._manifest_key()
+        completed = _ActionCheckpoint.new(
+            checkpoint.operation_id,
+            checkpoint.evidence_digest,
+            checkpoint.action,
+            "completed",
+            key,
+        )
+        raw = completed.canonical_bytes()
+        self.store.lifecycle.operation_repository.checkpoint_reconciliation_if_exact(
+            checkpoint.operation_id,
+            expected_raw=expected_raw,
+            raw_record=raw,
+        )
+        return completed, raw
 
     def _manifest_page(self, cursor: ManifestCursor | None) -> ManifestPage:
         return self.store.manifest_repository.list_page(

@@ -155,6 +155,113 @@ class FileOperationRecordRepository:
         """Return the exact contained locator for one target checkpoint."""
         return self._clear_target_locator(operation_id, page_id, checkpoint=True)
 
+    def reconciliation_checkpoint_locator(self, operation_id: str) -> Path:
+        """Return a private sidecar used to resume one reconciliation action.
+
+        The name deliberately cannot satisfy the 32-hex operation inventory
+        grammar, so it never becomes lifecycle evidence or consumes a normal
+        recovery page slot.
+        """
+        safe_operation_id = validate_blob_id(operation_id)
+        return resolve_managed_locator(
+            self.file_ops.root,
+            Path("operations") / f"reconcile-action-{safe_operation_id}.json",
+            operation="reconciliation_checkpoint",
+            allow_missing_leaf=True,
+        )
+
+    def get_reconciliation_checkpoint_raw(self, operation_id: str) -> bytes | None:
+        """Read opaque reconciliation progress without granting it authority."""
+        try:
+            return self.file_ops.read_bytes(
+                self.reconciliation_checkpoint_locator(operation_id)
+            )
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise CacheBlobBackendError(
+                "Reconciliation checkpoint could not be read",
+                context={"operation_id": operation_id, "operation": "get_reconcile"},
+            ) from exc
+
+    def create_reconciliation_checkpoint_exclusive(
+        self, operation_id: str, raw_record: bytes
+    ) -> Path:
+        """Durably persist action intent before a reconciler mutates storage."""
+        if not isinstance(raw_record, bytes) or not raw_record:
+            raise TypeError("Reconciliation checkpoints require non-empty bytes")
+        try:
+            return self.file_ops.create_bytes_durable_exclusive(
+                self.reconciliation_checkpoint_locator(operation_id), raw_record
+            )
+        except FileExistsError as exc:
+            raise CacheBlobLifecycleConflictError(
+                "Reconciliation checkpoint already exists",
+                context={"operation_id": operation_id, "operation": "create_reconcile"},
+            ) from exc
+        except OSError as exc:
+            raise CacheBlobBackendError(
+                "Reconciliation checkpoint could not be created",
+                context={"operation_id": operation_id, "operation": "create_reconcile"},
+            ) from exc
+
+    def checkpoint_reconciliation_if_exact(
+        self,
+        operation_id: str,
+        *,
+        expected_raw: bytes,
+        raw_record: bytes,
+    ) -> None:
+        """Advance one reconciliation checkpoint only from exact bytes."""
+        if not isinstance(expected_raw, bytes) or not isinstance(raw_record, bytes):
+            raise TypeError("Reconciliation checkpoints require exact bytes")
+        try:
+            with self._conditional_lock_for(f"reconcile:{operation_id}"):
+                current = self.get_reconciliation_checkpoint_raw(operation_id)
+                if current != expected_raw:
+                    raise CacheBlobLifecycleConflictError(
+                        "Reconciliation checkpoint no longer matches",
+                        context={
+                            "operation_id": operation_id,
+                            "operation": "checkpoint_reconcile",
+                        },
+                    )
+                self.file_ops.write_bytes_durable(
+                    self.reconciliation_checkpoint_locator(operation_id), raw_record
+                )
+        except CacheBlobLifecycleConflictError:
+            raise
+        except OSError as exc:
+            raise CacheBlobBackendError(
+                "Reconciliation checkpoint could not be persisted",
+                context={"operation_id": operation_id, "operation": "checkpoint_reconcile"},
+            ) from exc
+
+    def retire_reconciliation_checkpoint_if_exact(
+        self, operation_id: str, *, expected_raw: bytes
+    ) -> None:
+        """Remove private progress only after the exact completed bytes remain."""
+        try:
+            with self._conditional_lock_for(f"reconcile:{operation_id}"):
+                if self.get_reconciliation_checkpoint_raw(operation_id) != expected_raw:
+                    raise CacheBlobLifecycleConflictError(
+                        "Reconciliation checkpoint no longer matches",
+                        context={
+                            "operation_id": operation_id,
+                            "operation": "retire_reconcile",
+                        },
+                    )
+                self.file_ops.delete_durable(
+                    self.reconciliation_checkpoint_locator(operation_id)
+                )
+        except CacheBlobLifecycleConflictError:
+            raise
+        except OSError as exc:
+            raise CacheBlobBackendError(
+                "Reconciliation checkpoint could not be retired",
+                context={"operation_id": operation_id, "operation": "retire_reconcile"},
+            ) from exc
+
     def _create_clear_target_exclusive(
         self,
         operation_id: str,

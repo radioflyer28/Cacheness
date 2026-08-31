@@ -495,3 +495,40 @@ def test_reconcile_apply_base_exception_checkpoints_without_repeating_delete(
         assert store.lifecycle.operation_repository.get_raw(record.operation_id) is None
     finally:
         store.close()
+
+
+def test_reconcile_apply_resumes_bounded_actions_from_opaque_token(tmp_path: Path) -> None:
+    """A second apply consumes only the remaining evidence after a cutoff."""
+    root = tmp_path / "reconcile-resume"
+    store = BlobStore(
+        config=CacheConfig(cache_dir=str(root), lifecycle_limits=_small_lifecycle_limits()),
+        backend="json",
+    )
+    try:
+        key = store._manifest_key(initialize_new_store=True)
+        candidates: list[Path] = []
+        for operation_id in ("a" * 32, "b" * 32):
+            record = _reconciliation_record(store, root, key, operation_id)
+            candidate = store.guarded_handler_io.root / record.candidate_locator
+            store.guarded_handler_io.file_ops.write_bytes_durable(candidate, operation_id.encode())
+            store.lifecycle.operation_repository.create_exclusive(
+                record, record.canonical_bytes()
+            )
+            candidates.append(candidate)
+
+        first = store.reconcile(
+            apply=True, now=datetime(2026, 8, 31, tzinfo=timezone.utc)
+        )
+        assert first.resume_token is not None
+        assert not candidates[0].exists()
+        assert candidates[1].exists()
+
+        second = store.reconcile(
+            apply=True,
+            resume_token=first.resume_token,
+            now=datetime(2026, 8, 31, tzinfo=timezone.utc),
+        )
+        assert second.resume_token is None
+        assert not candidates[1].exists()
+    finally:
+        store.close()
