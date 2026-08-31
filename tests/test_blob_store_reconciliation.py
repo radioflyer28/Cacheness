@@ -11,6 +11,8 @@ import pytest
 
 from cacheness.config import CacheConfig, LifecycleLimits
 from cacheness.error_handling import (
+    CacheBlobIntegrityError,
+    CacheStorageError,
     CacheBlobLifecycleConflictError,
     CacheManifestIntegrityError,
 )
@@ -532,3 +534,36 @@ def test_reconcile_apply_resumes_bounded_actions_from_opaque_token(tmp_path: Pat
         assert not candidates[1].exists()
     finally:
         store.close()
+
+
+def test_reconciliation_public_types_and_reason_coded_errors_are_narrow() -> None:
+    """Storage exports report values and exact reconciliation error boundaries."""
+    from cacheness.storage import (
+        CacheBlobReconciliationCheckpointError,
+        CacheBlobReconciliationConflictError,
+        CacheBlobReconciliationError,
+        ReconciliationAction,
+        ReconciliationFinding,
+        ReconciliationReport,
+        ReconciliationStatus,
+    )
+
+    finding = ReconciliationFinding(
+        status=ReconciliationStatus.BLOCKED,
+        action=ReconciliationAction.REPORT_ONLY,
+        reason="manifest_untrusted",
+    )
+    report = ReconciliationReport(
+        findings=(finding,),
+        resume_token=None,
+        applied=False,
+        manifest_records_seen=1,
+        operation_records_seen=0,
+    )
+    assert report.to_dict()["findings"][0]["reason"] == "manifest_untrusted"
+    assert issubclass(CacheBlobReconciliationError, CacheStorageError)
+    assert issubclass(CacheBlobReconciliationConflictError, CacheStorageError)
+    assert issubclass(CacheBlobReconciliationCheckpointError, CacheBlobIntegrityError)
+    assert CacheBlobReconciliationError("blocked").context["reason"] == (
+        "blob_reconciliation_blocked"
+    )
