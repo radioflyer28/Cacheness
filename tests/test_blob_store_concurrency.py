@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import multiprocessing
 import threading
 
 import pytest
@@ -10,6 +11,24 @@ import pytest
 from cacheness.error_handling import CacheBlobLifecycleConflictError
 from cacheness.storage.blob_store import BlobStore
 from cacheness.storage.coordination import KeyCoordinatorRegistry
+
+
+def _put_from_independent_process(
+    root: str,
+    started: multiprocessing.synchronize.Event,
+    completed: multiprocessing.synchronize.Event,
+    errors: multiprocessing.queues.Queue,
+) -> None:
+    """Exercise public admission from a fresh process, not a shared lock map."""
+    started.set()
+    store = BlobStore(root, backend="json")
+    try:
+        store.put("post-snapshot", key="post-snapshot")
+        completed.set()
+    except BaseException as exc:  # pragma: no cover - surfaced in parent.
+        errors.put(repr(exc))
+    finally:
+        store.close()
 
 
 def _join(thread: threading.Thread) -> None:
@@ -247,6 +266,91 @@ def test_clear_snapshot_does_not_delete_a_post_snapshot_key(tmp_path):
         assert store.get("after-key") == "after"
     finally:
         store.close()
+
+
+def test_clear_snapshot_excludes_a_later_independent_process_write(tmp_path):
+    """Cross-process admission holds the exact clear snapshot stable."""
+    root = tmp_path / "cross-process-clear-admission"
+    store = BlobStore(root, backend="json")
+    snapshot_complete = threading.Event()
+    release_snapshot = threading.Event()
+    clear_errors: list[BaseException] = []
+    clear_result: list[int] = []
+
+    def pause_after_snapshot(seam, _record) -> None:
+        if seam == "clear_snapshot_complete":
+            snapshot_complete.set()
+            assert release_snapshot.wait(timeout=10)
+
+    def clear() -> None:
+        try:
+            clear_result.append(store.clear())
+        except BaseException as exc:  # pragma: no cover - asserted below.
+            clear_errors.append(exc)
+
+    try:
+        store.put("present", key="present-before-snapshot")
+        store.lifecycle.fault_hook = pause_after_snapshot
+        clearer = threading.Thread(target=clear)
+        clearer.start()
+        assert snapshot_complete.wait(timeout=10)
+
+        context = multiprocessing.get_context("spawn")
+        child_started = context.Event()
+        child_completed = context.Event()
+        child_errors = context.Queue()
+        writer = context.Process(
+            target=_put_from_independent_process,
+            args=(str(root), child_started, child_completed, child_errors),
+        )
+        writer.start()
+        assert child_started.wait(timeout=10)
+        # The independent public put cannot pass its shared OS admission while
+        # the clear still owns exclusive snapshot admission.
+        assert not child_completed.wait(timeout=0.2)
+
+        release_snapshot.set()
+        _join(clearer)
+        writer.join(timeout=10)
+        assert writer.exitcode == 0
+        assert child_errors.empty()
+        assert clear_errors == []
+        assert clear_result == [1]
+        assert store.get("present-before-snapshot") is None
+        assert store.get("post-snapshot") == "post-snapshot"
+    finally:
+        release_snapshot.set()
+        store.close()
+
+
+def test_exists_reacquires_once_only_after_an_independent_generation_change(
+    tmp_path, monkeypatch
+):
+    """Existence checks use M1/snapshot/M2 rather than a stale path assertion."""
+    root = tmp_path / "exists-generation-retry"
+    reader = BlobStore(root, backend="json")
+    writer = BlobStore(root, backend="json")
+    key = "same-key"
+    try:
+        reader.put("old", key=key)
+        original_get_raw = reader.manifest_repository.get_raw
+        reads = 0
+
+        def change_after_snapshot(blob_key: str):
+            nonlocal reads
+            reads += 1
+            if reads == 2:
+                writer.put("new", key=key)
+            return original_get_raw(blob_key)
+
+        monkeypatch.setattr(reader.manifest_repository, "get_raw", change_after_snapshot)
+        assert reader.exists(key) is True
+        # M1/M2 then exactly one retry's M1/M2; no unbounded retry loop.
+        assert reads == 4
+        assert reader.get(key) == "new"
+    finally:
+        writer.close()
+        reader.close()
 
 
 def test_read_write_retry_once_when_an_independent_writer_commits_new_generation(

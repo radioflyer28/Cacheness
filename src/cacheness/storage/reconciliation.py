@@ -12,11 +12,15 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any
+
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
 from cacheness.config import LifecycleLimits
 from cacheness.error_handling import (
@@ -159,8 +163,8 @@ class _ActionCheckpoint:
             separators=(",", ":"),
         ).encode("utf-8")
 
-    def canonical_bytes(self) -> bytes:
-        return json.dumps(
+    def canonical_bytes(self, *, lifecycle_limits: LifecycleLimits | None = None) -> bytes:
+        raw = json.dumps(
             {
                 "action": self.action.value,
                 "evidence_digest": self.evidence_digest,
@@ -172,11 +176,30 @@ class _ActionCheckpoint:
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
+        if (
+            lifecycle_limits is not None
+            and len(raw) > lifecycle_limits.max_operation_record_bytes
+        ):
+            raise CacheManifestIntegrityError(
+                "Reconciliation checkpoint exceeds the configured byte limit"
+            )
+        return raw
 
     @classmethod
-    def from_canonical_bytes(cls, raw: bytes, key: bytes) -> "_ActionCheckpoint":
+    def from_canonical_bytes(
+        cls,
+        raw: bytes,
+        key: bytes,
+        *,
+        lifecycle_limits: LifecycleLimits | None = None,
+    ) -> "_ActionCheckpoint":
         """Reject malformed, non-canonical, or unauthenticated progress bytes."""
         try:
+            if (
+                lifecycle_limits is not None
+                and len(raw) > lifecycle_limits.max_operation_record_bytes
+            ):
+                raise ValueError
             mapping = json.loads(raw)
             if not isinstance(mapping, dict) or set(mapping) != {
                 "action",
@@ -203,7 +226,16 @@ class _ActionCheckpoint:
                 or len(checkpoint.evidence_digest) != 64
                 or any(char not in "0123456789abcdef" for char in checkpoint.evidence_digest)
                 or not isinstance(checkpoint.signature, str)
-                or checkpoint.canonical_bytes() != raw
+                or (
+                    lifecycle_limits is not None
+                    and any(
+                        isinstance(value, str)
+                        and len(value.encode("utf-8"))
+                        > lifecycle_limits.max_operation_field_bytes
+                        for value in mapping.values()
+                    )
+                )
+                or checkpoint.canonical_bytes(lifecycle_limits=lifecycle_limits) != raw
                 or not verify_hmac_sha256(
                     checkpoint.signing_bytes(), checkpoint.signature, key
                 )
@@ -233,6 +265,9 @@ class _Reconciler:
     """Private coordinator for bounded, non-deserializing evidence analysis."""
 
     _TOKEN_DOMAIN = b"cacheness.reconciliation.cursor.v1\x00"
+    _TOKEN_VERSION = 1
+    _TOKEN_NONCE_BYTES = 12
+    _TOKEN_TAG_BYTES = 16
 
     def __init__(self, store: Any, *, lifecycle_limits: LifecycleLimits):
         self.store = store
@@ -425,14 +460,16 @@ class _Reconciler:
             checkpoint = _ActionCheckpoint.new(
                 operation_id, evidence_digest, action, "prepared", key
             )
-            raw = checkpoint.canonical_bytes()
+            raw = checkpoint.canonical_bytes(lifecycle_limits=self.lifecycle_limits)
             try:
                 repository.create_reconciliation_checkpoint_exclusive(operation_id, raw)
             except CacheBlobLifecycleConflictError:
                 raw = repository.get_reconciliation_checkpoint_raw(operation_id)
                 if raw is None:
                     raise
-        checkpoint = _ActionCheckpoint.from_canonical_bytes(raw, key)
+        checkpoint = _ActionCheckpoint.from_canonical_bytes(
+            raw, key, lifecycle_limits=self.lifecycle_limits
+        )
         if (
             checkpoint.evidence_digest != evidence_digest
             or checkpoint.action is not action
@@ -457,7 +494,7 @@ class _Reconciler:
             "completed",
             key,
         )
-        raw = completed.canonical_bytes()
+        raw = completed.canonical_bytes(lifecycle_limits=self.lifecycle_limits)
         self.store.lifecycle.operation_repository.checkpoint_reconciliation_if_exact(
             checkpoint.operation_id,
             expected_raw=expected_raw,
@@ -723,9 +760,10 @@ class _Reconciler:
     ) -> str | None:
         if priority is None:
             return None
-        # The token is encrypted-and-authenticated with the existing manifest
-        # key so reports do not disclose backend logical-key cursors.
-        key = self.store._manifest_key()
+        # The token is AEAD-protected with a domain-separated key derived from
+        # the existing manifest key. A fresh nonce is mandatory: cursor tokens
+        # must not reveal relations between independent logical-key cursors.
+        key = self._token_key()
         payload = json.dumps(
             {
                 "manifest": None if manifest_cursor is None else manifest_cursor.key,
@@ -737,10 +775,13 @@ class _Reconciler:
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
-        mask = self._mask(key, len(payload))
-        encrypted = bytes(left ^ right for left, right in zip(payload, mask))
-        signature = hmac.new(key, self._TOKEN_DOMAIN + encrypted, hashlib.sha256).digest()
-        return base64.urlsafe_b64encode(signature + encrypted).decode("ascii")
+        if len(payload) > self.lifecycle_limits.max_operation_field_bytes:
+            raise ValueError("reconciliation resume token payload exceeds the byte limit")
+        nonce = os.urandom(self._TOKEN_NONCE_BYTES)
+        encrypted = ChaCha20Poly1305(key).encrypt(nonce, payload, self._TOKEN_DOMAIN)
+        return base64.urlsafe_b64encode(
+            bytes((self._TOKEN_VERSION,)) + nonce + encrypted
+        ).decode("ascii")
 
     def _decode_resume_token(
         self, token: str | None
@@ -749,17 +790,25 @@ class _Reconciler:
             return None, None, "manifest"
         if not isinstance(token, str) or not token:
             raise ValueError("reconciliation resume token must be a non-empty string")
+        maximum = self.lifecycle_limits.max_operation_field_bytes
+        max_encoded = 4 * ((1 + self._TOKEN_NONCE_BYTES + maximum + self._TOKEN_TAG_BYTES + 2) // 3)
+        if len(token) > max_encoded:
+            raise ValueError("reconciliation resume token exceeds the byte limit")
         try:
             packed = base64.urlsafe_b64decode(token.encode("ascii"))
-            signature, encrypted = packed[:32], packed[32:]
-            key = self.store._manifest_key()
-            expected = hmac.new(
-                key, self._TOKEN_DOMAIN + encrypted, hashlib.sha256
-            ).digest()
-            if not hmac.compare_digest(signature, expected):
+            minimum = 1 + self._TOKEN_NONCE_BYTES + self._TOKEN_TAG_BYTES
+            if len(packed) < minimum or len(packed) > minimum + maximum:
                 raise ValueError("reconciliation resume token is invalid")
-            mask = self._mask(key, len(encrypted))
-            payload = bytes(left ^ right for left, right in zip(encrypted, mask))
+            version = packed[0]
+            if version != self._TOKEN_VERSION:
+                raise ValueError("reconciliation resume token is invalid")
+            nonce_end = 1 + self._TOKEN_NONCE_BYTES
+            nonce = packed[1:nonce_end]
+            payload = ChaCha20Poly1305(self._token_key()).decrypt(
+                nonce, packed[nonce_end:], self._TOKEN_DOMAIN
+            )
+            if len(payload) > maximum:
+                raise ValueError("reconciliation resume token is invalid")
             decoded = json.loads(payload)
             if set(decoded) != {"manifest", "operation", "priority"}:
                 raise ValueError("reconciliation resume token is malformed")
@@ -773,16 +822,13 @@ class _Reconciler:
                 None if operation is None else OperationCursor(operation),
                 priority,
             )
-        except (UnicodeError, ValueError, json.JSONDecodeError) as exc:
+        except (InvalidTag, UnicodeError, ValueError, json.JSONDecodeError) as exc:
             raise ValueError("reconciliation resume token is invalid") from exc
 
-    @classmethod
-    def _mask(cls, key: bytes, length: int) -> bytes:
-        blocks = []
-        counter = 0
-        while sum(len(block) for block in blocks) < length:
-            blocks.append(
-                hashlib.sha256(cls._TOKEN_DOMAIN + key + counter.to_bytes(4)).digest()
-            )
-            counter += 1
-        return b"".join(blocks)[:length]
+    def _token_key(self) -> bytes:
+        """Derive the token-only AEAD key without reusing manifest signatures."""
+        return hmac.new(
+            self.store._manifest_key(),
+            self._TOKEN_DOMAIN + b"chacha20-poly1305-key",
+            hashlib.sha256,
+        ).digest()

@@ -696,6 +696,27 @@ def test_list_authenticates_every_selected_manifest_before_returning(tmp_path):
         store.close()
 
 
+def test_list_reports_a_selected_concurrent_disappearance_as_typed_conflict(
+    tmp_path, monkeypatch
+):
+    """List never leaks an assertion when selected authority disappears."""
+    store = BlobStore(tmp_path / "list-disappeared", backend="json")
+    try:
+        store.put("payload", key="selected-key")
+        original_load = store._load_authenticated_manifest
+
+        def absent_during_selection(key, *, operation, **kwargs):
+            if operation == "list":
+                return None
+            return original_load(key, operation=operation, **kwargs)
+
+        monkeypatch.setattr(store, "_load_authenticated_manifest", absent_during_selection)
+        with pytest.raises(CacheBlobLifecycleConflictError):
+            store.list()
+    finally:
+        store.close()
+
+
 def test_update_metadata_resigns_only_user_metadata_and_rejects_structure(
     tmp_path, monkeypatch
 ):

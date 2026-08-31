@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -30,6 +31,8 @@ from cacheness.storage.operation_record import (
     OperationTransition,
     store_identity,
 )
+from cacheness.storage.operation_repository import FileOperationRecordRepository
+from cacheness.storage import reconciliation as reconciliation_module
 
 
 def _record(root: Path, **overrides: object) -> LifecycleOperationRecord:
@@ -229,13 +232,13 @@ def test_operation_repository_uses_configured_bounded_stable_pages(
             repository.create_exclusive(record, record.canonical_bytes())
 
         calls: list[Path] = []
-        original_read = repository.file_ops.read_bytes
+        original_read = repository.file_ops.read_bytes_bounded
 
-        def counting_read(locator: Path) -> bytes:
+        def counting_read(locator: Path, *, max_bytes: int) -> bytes:
             calls.append(locator)
-            return original_read(locator)
+            return original_read(locator, max_bytes=max_bytes)
 
-        monkeypatch.setattr(repository.file_ops, "read_bytes", counting_read)
+        monkeypatch.setattr(repository.file_ops, "read_bytes_bounded", counting_read)
         first_page = repository.list_page()
 
         assert [operation_id for operation_id, _ in first_page.entries] == [
@@ -562,6 +565,136 @@ def test_reconcile_resume_interleaves_manifest_and_operation_pages(tmp_path: Pat
 
         assert second.findings[0].action is ReconciliationAction.DELETE_CANDIDATE
         assert candidate.exists()
+    finally:
+        store.close()
+
+
+def test_independent_operation_repositories_have_one_exact_checkpoint_winner(
+    tmp_path: Path,
+) -> None:
+    """Exact evidence CAS is shared by independent repository instances."""
+    root = tmp_path / "operation-cas-independent"
+    store = BlobStore(root, backend="json")
+    try:
+        key = store._manifest_key(initialize_new_store=True)
+        record = _reconciliation_record(store, root, key, "a" * 32)
+        initial = record.canonical_bytes(lifecycle_limits=store.lifecycle_limits)
+        first = FileOperationRecordRepository(
+            store.guarded_handler_io.file_ops, lifecycle_limits=store.lifecycle_limits
+        )
+        second = FileOperationRecordRepository(
+            store.guarded_handler_io.file_ops, lifecycle_limits=store.lifecycle_limits
+        )
+        first.create_exclusive(record, initial)
+        updated_record = record.at_checkpoint(OperationCheckpoint.CANDIDATE_PUBLISHED)
+        updated = updated_record.canonical_bytes(lifecycle_limits=store.lifecycle_limits)
+        gate = threading.Barrier(2)
+        outcomes: list[str] = []
+        errors: list[BaseException] = []
+
+        def checkpoint(repository: FileOperationRecordRepository) -> None:
+            try:
+                gate.wait(timeout=5)
+                repository.checkpoint_if_exact(
+                    updated_record, expected_raw=initial, raw_record=updated
+                )
+                outcomes.append("won")
+            except BaseException as exc:  # pragma: no cover - asserted below.
+                errors.append(exc)
+
+        workers = [threading.Thread(target=checkpoint, args=(repository,)) for repository in (first, second)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=5)
+            assert not worker.is_alive()
+
+        assert outcomes == ["won"]
+        assert len(errors) == 1
+        assert isinstance(errors[0], CacheBlobLifecycleConflictError)
+        assert first.get_raw(record.operation_id) == updated
+    finally:
+        store.close()
+
+
+def test_evidence_limit_is_enforced_before_any_unbounded_raw_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The configured instance limit rejects raw evidence before full reads."""
+    root = tmp_path / "bounded-evidence"
+    limits = LifecycleLimits(
+        max_operation_record_bytes=64,
+        max_operation_field_bytes=32,
+        manifest_page_size=1,
+        operation_page_size=1,
+        max_reconcile_actions=1,
+        orphan_grace_seconds=1,
+        close_wait_seconds=1,
+    )
+    store = BlobStore(
+        config=CacheConfig(cache_dir=str(root), lifecycle_limits=limits), backend="json"
+    )
+    try:
+        repository = store.lifecycle.operation_repository
+        operation_id = "a" * 32
+        locator = repository.locator_for(operation_id)
+        repository.file_ops.write_bytes_durable(locator, b"x" * 65)
+        monkeypatch.setattr(
+            repository.file_ops,
+            "read_bytes",
+            lambda _locator: (_ for _ in ()).throw(
+                AssertionError("must not make an unbounded evidence read")
+            ),
+        )
+
+        with pytest.raises(CacheManifestIntegrityError):
+            repository.get_raw(operation_id)
+    finally:
+        store.close()
+
+
+def test_reconciliation_tokens_are_nonce_random_authenticated_and_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Resume cursors are opaque AEAD values and reject abuse before decoding."""
+    root = tmp_path / "opaque-resume-token"
+    store = BlobStore(
+        config=CacheConfig(
+            cache_dir=str(root), lifecycle_limits=_small_lifecycle_limits()
+        ),
+        backend="json",
+    )
+    try:
+        key = store._manifest_key(initialize_new_store=True)
+        for operation_id in ("a" * 32, "b" * 32):
+            record = _reconciliation_record(store, root, key, operation_id)
+            store.lifecycle.operation_repository.create_exclusive(
+                record, record.canonical_bytes(lifecycle_limits=store.lifecycle_limits)
+            )
+
+        first = store.reconcile(now=datetime(2026, 8, 31, tzinfo=timezone.utc))
+        second = store.reconcile(now=datetime(2026, 8, 31, tzinfo=timezone.utc))
+        assert first.resume_token is not None
+        assert second.resume_token is not None
+        assert first.resume_token != second.resume_token
+        assert store._reconciler._decode_resume_token(first.resume_token) == (
+            store._reconciler._decode_resume_token(second.resume_token)
+        )
+        tampered = first.resume_token[:-1] + (
+            "A" if first.resume_token[-1] != "A" else "B"
+        )
+        with pytest.raises(ValueError, match="invalid"):
+            store._reconciler._decode_resume_token(tampered)
+
+        monkeypatch.setattr(
+            reconciliation_module.base64,
+            "urlsafe_b64decode",
+            lambda _token: (_ for _ in ()).throw(AssertionError("must not decode")),
+        )
+        with pytest.raises(ValueError, match="byte limit"):
+            store._reconciler._decode_resume_token(
+                "x" * (store.lifecycle_limits.max_operation_field_bytes * 4)
+            )
     finally:
         store.close()
 

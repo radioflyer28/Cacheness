@@ -55,7 +55,12 @@ class LifecycleEngine:
         )
         self.test_hook: Callable[[str, LifecycleOperationRecord], None] | None = None
         self.fault_hook: Callable[[str, LifecycleOperationRecord], None] | None = None
-        self.recover()
+        if self.store._legacy_identity is not None:
+            return
+        # Opening a second process must not interpret and advance a clear
+        # record while its creator still owns the snapshot boundary.
+        with self.store._admission_barrier.aggregate_admission():
+            self.recover(_snapshot_admitted=True)
 
     def _emit(self, step: str, record: LifecycleOperationRecord) -> None:
         if self.test_hook is not None:
@@ -74,27 +79,31 @@ class LifecycleEngine:
     ) -> LifecycleOperationRecord:
         return record.with_signature(
             sign_hmac_sha256(
-                record.signing_bytes(),
+                record.signing_bytes(lifecycle_limits=self.lifecycle_limits),
                 self.store._manifest_key(initialize_new_store=initialize_new_store),
             )
         )
 
+    def _record_raw(self, record: LifecycleOperationRecord) -> bytes:
+        """Encode one record through the caller-owned evidence policy."""
+        return record.canonical_bytes(lifecycle_limits=self.lifecycle_limits)
+
     def _checkpoint(
         self, record: LifecycleOperationRecord, checkpoint: OperationCheckpoint
     ) -> LifecycleOperationRecord:
-        expected_raw = record.canonical_bytes()
+        expected_raw = self._record_raw(record)
         updated = self._signed_record(record.at_checkpoint(checkpoint))
         self.operation_repository.checkpoint_if_exact(
             updated,
             expected_raw=expected_raw,
-            raw_record=updated.canonical_bytes(),
+            raw_record=self._record_raw(updated),
         )
         return updated
 
     def _retire(self, record: LifecycleOperationRecord) -> None:
         """Retire only the exact terminal evidence observed by this lifecycle."""
         self.operation_repository.retire_if_exact(
-            record, expected_raw=record.canonical_bytes()
+            record, expected_raw=self._record_raw(record)
         )
 
     def _signed_clear_target_page(
@@ -102,7 +111,10 @@ class LifecycleEngine:
     ) -> ClearTargetPage:
         """Authenticate one bounded clear inventory before it becomes control data."""
         return page.with_signature(
-            sign_hmac_sha256(page.signing_bytes(), self.store._manifest_key())
+            sign_hmac_sha256(
+                page.signing_bytes(lifecycle_limits=self.lifecycle_limits),
+                self.store._manifest_key(),
+            )
         )
 
     def _signed_clear_target_checkpoint(
@@ -110,8 +122,19 @@ class LifecycleEngine:
     ) -> ClearTargetCheckpoint:
         """Authenticate monotonic clear progress independently of manifest bytes."""
         return checkpoint.with_signature(
-            sign_hmac_sha256(checkpoint.signing_bytes(), self.store._manifest_key())
+            sign_hmac_sha256(
+                checkpoint.signing_bytes(lifecycle_limits=self.lifecycle_limits),
+                self.store._manifest_key(),
+            )
         )
+
+    def _clear_page_raw(self, page: ClearTargetPage) -> bytes:
+        """Encode bounded clear inventory through the same caller policy."""
+        return page.canonical_bytes(lifecycle_limits=self.lifecycle_limits)
+
+    def _clear_checkpoint_raw(self, checkpoint: ClearTargetCheckpoint) -> bytes:
+        """Encode bounded clear progress through the same caller policy."""
+        return checkpoint.canonical_bytes(lifecycle_limits=self.lifecycle_limits)
 
     def _clear_page_id(self, operation_id: str, source_cursor: str | None) -> str:
         """Derive a resumable opaque page identifier from its exact source cursor."""
@@ -127,22 +150,60 @@ class LifecycleEngine:
         operation_id: str,
         page_id: str,
         source_cursor: str | None,
+        resolve_references: bool = True,
+        validate_source_cursor: bool = True,
     ) -> ClearTargetPage:
         """Decode one exact page only after its signature and identity agree."""
-        page = ClearTargetPage.from_canonical_bytes(raw_page)
-        if page.canonical_bytes() != raw_page:
+        page = ClearTargetPage.from_canonical_bytes(
+            raw_page, lifecycle_limits=self.lifecycle_limits
+        )
+        if self._clear_page_raw(page) != raw_page:
             raise CacheManifestIntegrityError("Clear target page bytes are not canonical")
         if (
             page.operation_id != operation_id
             or page.page_id != page_id
-            or page.source_cursor != source_cursor
+            or (validate_source_cursor and page.source_cursor != source_cursor)
+            or self._clear_page_id(page.operation_id, page.source_cursor)
+            != page.page_id
         ):
             raise CacheManifestIntegrityError("Clear target page identity is inconsistent")
         if not verify_hmac_sha256(
-            page.signing_bytes(), page.signature, self.store._manifest_key()
+            page.signing_bytes(lifecycle_limits=self.lifecycle_limits),
+            page.signature,
+            self.store._manifest_key(),
         ):
             raise CacheManifestIntegrityError("Clear target page signature is invalid")
-        return page
+        return self._resolve_clear_target_references(page) if resolve_references else page
+
+    def _clear_target_reference_id(
+        self, operation_id: str, raw_record: bytes
+    ) -> str:
+        """Derive a stable opaque sidecar identity from exact manifest bytes."""
+        return hashlib.sha256(
+            operation_id.encode("ascii") + b"\x00" + raw_record
+        ).hexdigest()[:32]
+
+    def _resolve_clear_target_references(
+        self, page: ClearTargetPage
+    ) -> ClearTargetPage:
+        """Attach page-bound oversized records only after page authentication.
+
+        The signed page binds a sidecar identifier and digest.  The sidecar is
+        still treated as untrusted until its exact bytes match that digest, so
+        a filename alone never becomes deletion authority.
+        """
+        resolved: list[ClearTarget] = []
+        for target in page.targets:
+            if target.raw_record_reference is None:
+                resolved.append(target)
+                continue
+            raw_record = self.operation_repository.get_clear_target_reference_raw(
+                page.operation_id, target.raw_record_reference
+            )
+            if raw_record is None:
+                raise CacheManifestIntegrityError("Clear target reference is missing")
+            resolved.append(target.with_resolved_raw(raw_record))
+        return replace(page, targets=tuple(resolved))
 
     def _authenticated_clear_target_checkpoint(
         self,
@@ -151,8 +212,10 @@ class LifecycleEngine:
         page: ClearTargetPage,
     ) -> ClearTargetCheckpoint:
         """Decode page-bound progress only after exact control-data authentication."""
-        checkpoint = ClearTargetCheckpoint.from_canonical_bytes(raw_checkpoint)
-        if checkpoint.canonical_bytes() != raw_checkpoint:
+        checkpoint = ClearTargetCheckpoint.from_canonical_bytes(
+            raw_checkpoint, lifecycle_limits=self.lifecycle_limits
+        )
+        if self._clear_checkpoint_raw(checkpoint) != raw_checkpoint:
             raise CacheManifestIntegrityError(
                 "Clear target checkpoint bytes are not canonical"
             )
@@ -160,11 +223,11 @@ class LifecycleEngine:
             checkpoint.operation_id != page.operation_id
             or checkpoint.page_id != page.page_id
             or checkpoint.page_record_digest
-            != hashlib.sha256(page.canonical_bytes()).hexdigest()
+            != hashlib.sha256(self._clear_page_raw(page)).hexdigest()
         ):
             raise CacheManifestIntegrityError("Clear target checkpoint is not page-bound")
         if not verify_hmac_sha256(
-            checkpoint.signing_bytes(),
+            checkpoint.signing_bytes(lifecycle_limits=self.lifecycle_limits),
             checkpoint.signature,
             self.store._manifest_key(),
         ):
@@ -240,9 +303,11 @@ class LifecycleEngine:
         )
         if raw_checkpoint is None:
             checkpoint = self._signed_clear_target_checkpoint(
-                ClearTargetCheckpoint.initial_for(page)
+                ClearTargetCheckpoint.initial_for(
+                    page, lifecycle_limits=self.lifecycle_limits
+                )
             )
-            raw_checkpoint = checkpoint.canonical_bytes()
+            raw_checkpoint = self._clear_checkpoint_raw(checkpoint)
             try:
                 self.operation_repository.create_clear_target_checkpoint_exclusive(
                     page.operation_id, page.page_id, raw_checkpoint
@@ -281,28 +346,82 @@ class LifecycleEngine:
                             "Clear manifest page has an empty non-terminal cursor"
                         )
                     break
-                targets = []
-                for key, raw_manifest in page.entries:
+                targets: list[ClearTarget] = []
+                next_cursor: str | None = None
+                for index, (key, raw_manifest) in enumerate(page.entries):
                     manifest = BlobManifestV1.from_canonical_bytes(raw_manifest)
                     target = ClearTarget.from_raw(
                         key, manifest.generation, raw_manifest
                     )
                     self._authenticated_clear_target(target)
+                    candidate_targets = tuple([*targets, target])
+                    has_remaining = (
+                        index + 1 < len(page.entries) or page.next_cursor is not None
+                    )
+                    candidate_cursor = key if has_remaining else None
+                    candidate = ClearTargetPage(
+                        operation_id=record.operation_id,
+                        page_id=page_id,
+                        source_cursor=source_cursor,
+                        next_cursor=candidate_cursor,
+                        targets=candidate_targets,
+                    )
+                    try:
+                        # Page limits are encoded-byte limits, not a manifest
+                        # count heuristic.  Keep individually valid manifests
+                        # in immutable bounded sidecars when needed.
+                        self._clear_page_raw(self._signed_clear_target_page(candidate))
+                    except CacheManifestIntegrityError:
+                        reference = self._clear_target_reference_id(
+                            record.operation_id, raw_manifest
+                        )
+                        try:
+                            self.operation_repository.create_clear_target_reference_exclusive(
+                                record.operation_id, reference, raw_manifest
+                            )
+                        except CacheBlobLifecycleConflictError:
+                            existing = self.operation_repository.get_clear_target_reference_raw(
+                                record.operation_id, reference
+                            )
+                            if existing != raw_manifest:
+                                raise
+                        target = ClearTarget.from_reference(
+                            key, manifest.generation, raw_manifest, reference
+                        )
+                        candidate_targets = tuple([*targets, target])
+                        candidate = ClearTargetPage(
+                            operation_id=record.operation_id,
+                            page_id=page_id,
+                            source_cursor=source_cursor,
+                            next_cursor=candidate_cursor,
+                            targets=candidate_targets,
+                        )
+                        try:
+                            self._clear_page_raw(
+                                self._signed_clear_target_page(candidate)
+                            )
+                        except CacheManifestIntegrityError:
+                            # A reference page is deliberately tiny. If it
+                            # cannot fit, the configured evidence limit is
+                            # internally inconsistent and clear must fail
+                            # before any destructive action.
+                            if targets:
+                                break
+                            raise
                     targets.append(target)
+                    next_cursor = candidate_cursor
+                if not targets:
+                    raise CacheManifestIntegrityError("Clear target page has no bounded target")
                 page = self._signed_clear_target_page(
                     ClearTargetPage(
                         operation_id=record.operation_id,
                         page_id=page_id,
                         source_cursor=source_cursor,
-                        next_cursor=(
-                            None
-                            if page.next_cursor is None
-                            else page.next_cursor.key
-                        ),
+                        next_cursor=next_cursor,
                         targets=tuple(targets),
                     )
                 )
-                raw_page = page.canonical_bytes()
+                raw_page = self._clear_page_raw(page)
                 try:
                     self.operation_repository.create_clear_target_page_exclusive(
                         record.operation_id, page_id, raw_page
@@ -350,7 +469,7 @@ class LifecycleEngine:
         if complete_page:
             updated = updated.complete_page(len(page.targets))
         updated = self._signed_clear_target_checkpoint(updated)
-        updated_raw = updated.canonical_bytes()
+        updated_raw = self._clear_checkpoint_raw(updated)
         self.operation_repository.checkpoint_clear_target_if_exact(
             page.operation_id,
             page.page_id,
@@ -377,7 +496,23 @@ class LifecycleEngine:
         )
 
     def _continue_clear(self, record: LifecycleOperationRecord) -> int:
+        """Serialize one clear resume and reload its exact current evidence."""
+        with self.operation_repository.operation_transition(record.operation_id):
+            raw_current = self.operation_repository.get_raw(record.operation_id)
+            if raw_current is None:
+                return 0
+            recovered = self._recoverable_record(record.operation_id, raw_current)
+            if recovered is None:
+                raise CacheManifestIntegrityError("Clear operation evidence is untrusted")
+            current, _candidate, _previous = recovered
+            return self._continue_clear_locked(current)
+
+    def _continue_clear_locked(self, record: LifecycleOperationRecord) -> int:
         """Reclaim exact snapshot targets after aggregate admission is released."""
+        if record.checkpoint is OperationCheckpoint.TERMINAL:
+            self._retire_clear_control_artifacts(record)
+            self._retire(record)
+            return 0
         if record.checkpoint is OperationCheckpoint.CANDIDATE_PUBLISHED:
             record = self._advance_to(record, OperationCheckpoint.AUTHORITY_PUBLISHED)
         if record.checkpoint is OperationCheckpoint.AUTHORITY_PUBLISHED:
@@ -430,14 +565,84 @@ class LifecycleEngine:
             source_cursor = page.next_cursor
         if record.checkpoint is not OperationCheckpoint.TERMINAL:
             record = self._advance_to(record, OperationCheckpoint.TERMINAL)
+        self._retire_clear_control_artifacts(record)
         self._retire(record)
         return cleared
 
-    def _recover_clear(self, record: LifecycleOperationRecord) -> None:
+    def _retire_clear_control_artifacts(
+        self, record: LifecycleOperationRecord
+    ) -> None:
+        """Retire only completed signed clear artifacts, before the main record.
+
+        Directory names are candidate inventory only.  A page must validate
+        against the terminal operation and, when present, its checkpoint must
+        prove every target completed.  Retiring checkpoint, referenced bytes,
+        and page independently is idempotent; a crash at any point resumes
+        from the remaining exact evidence.  The primary operation record is
+        intentionally retired last, so no valid clear artifact becomes an
+        unowned filename after interruption.
+        """
+        if record.checkpoint is not OperationCheckpoint.TERMINAL:
+            raise CacheManifestIntegrityError("Clear control cleanup requires terminal evidence")
+        for page_id in self.operation_repository.iter_clear_target_page_ids(
+            record.operation_id
+        ):
+            raw_page = self.operation_repository.get_clear_target_page_raw(
+                record.operation_id, page_id
+            )
+            if raw_page is None:
+                continue
+            page = self._authenticated_clear_target_page(
+                raw_page,
+                operation_id=record.operation_id,
+                page_id=page_id,
+                source_cursor=None,
+                resolve_references=False,
+                validate_source_cursor=False,
+            )
+            raw_checkpoint = self.operation_repository.get_clear_target_checkpoint_raw(
+                record.operation_id, page_id
+            )
+            if raw_checkpoint is not None:
+                checkpoint = self._authenticated_clear_target_checkpoint(
+                    raw_checkpoint, page=page
+                )
+                if not checkpoint.page_complete:
+                    raise CacheManifestIntegrityError(
+                        "Clear target checkpoint is incomplete during retirement"
+                    )
+                self.operation_repository.retire_clear_target_checkpoint_if_exact(
+                    record.operation_id, page_id, expected_raw=raw_checkpoint
+                )
+            for target in page.targets:
+                reference = target.raw_record_reference
+                if reference is None:
+                    continue
+                raw_reference = self.operation_repository.get_clear_target_reference_raw(
+                    record.operation_id, reference
+                )
+                if raw_reference is None:
+                    continue
+                # The signed page supplies the reference digest.  Authenticate
+                # it before removing the independently persisted bytes.
+                target.with_resolved_raw(raw_reference)
+                self.operation_repository.retire_clear_target_reference_if_exact(
+                    record.operation_id, reference, expected_raw=raw_reference
+                )
+            self.operation_repository.retire_clear_target_page_if_exact(
+                record.operation_id, page_id, expected_raw=raw_page
+            )
+
+    def _recover_clear(
+        self, record: LifecycleOperationRecord, *, snapshot_admitted: bool = False
+    ) -> None:
         """Resume a retained clear from authenticated snapshot/progress evidence."""
         if record.checkpoint is OperationCheckpoint.PREPARED:
-            with self.store._admission_barrier.aggregate_admission():
+            if snapshot_admitted:
                 record = self._snapshot_clear_targets(record)
+            else:
+                with self.store._admission_barrier.aggregate_admission():
+                    record = self._snapshot_clear_targets(record)
         if record.checkpoint is not OperationCheckpoint.PREPARED:
             self._continue_clear(record)
 
@@ -445,7 +650,7 @@ class LifecycleEngine:
         """Clear one authenticated finite target snapshot through tombstone deletion."""
         record = self._new_clear_record()
         with self.store._admission_barrier.aggregate_admission():
-            self.operation_repository.create_exclusive(record, record.canonical_bytes())
+            self.operation_repository.create_exclusive(record, self._record_raw(record))
             record = self._snapshot_clear_targets(record)
             self._fault("clear_snapshot_complete", record)
         return self._continue_clear(record)
@@ -500,12 +705,14 @@ class LifecycleEngine:
     ) -> tuple[LifecycleOperationRecord, Path, Path | None] | None:
         """Authenticate and validate one record before any recovery mutation."""
         try:
-            record = LifecycleOperationRecord.from_canonical_bytes(raw)
+            record = LifecycleOperationRecord.from_canonical_bytes(
+                raw, lifecycle_limits=self.lifecycle_limits
+            )
         except CacheManifestIntegrityError:
             return None
         if record.operation_id != operation_id:
             return None
-        if record.canonical_bytes() != raw:
+        if self._record_raw(record) != raw:
             return None
         if record.store_id != store_identity(str(self.store.guarded_handler_io.root)):
             return None
@@ -517,7 +724,7 @@ class LifecycleEngine:
         }:
             return None
         if not verify_hmac_sha256(
-            record.signing_bytes(),
+            record.signing_bytes(lifecycle_limits=self.lifecycle_limits),
             record.signature,
             self.store._manifest_key(),
         ):
@@ -546,10 +753,12 @@ class LifecycleEngine:
         record: LifecycleOperationRecord,
         candidate_locator: Path,
         previous_locator: Path | None,
+        *,
+        snapshot_admitted: bool = False,
     ) -> None:
         """Converge one authenticated record without guessing manifest authority."""
         if record.transition is OperationTransition.CLEAR:
-            self._recover_clear(record)
+            self._recover_clear(record, snapshot_admitted=snapshot_admitted)
             return
         if record.transition is OperationTransition.TOMBSTONE:
             self._recover_tombstone(record, candidate_locator)
@@ -689,7 +898,7 @@ class LifecycleEngine:
             cursor = page.next_cursor
         return None
 
-    def recover(self) -> None:
+    def recover(self, *, _snapshot_admitted: bool = False) -> None:
         """Resume authenticated lifecycle debt during store initialization.
 
         Normal reads never call this method.  A record that is malformed,
@@ -715,7 +924,12 @@ class LifecycleEngine:
                     continue
                 record, candidate_locator, previous_locator = recovered
                 try:
-                    self._recover_record(record, candidate_locator, previous_locator)
+                    self._recover_record(
+                        record,
+                        candidate_locator,
+                        previous_locator,
+                        snapshot_admitted=_snapshot_admitted,
+                    )
                 except (CacheStorageError, OSError) as exc:
                     raise CacheBlobRecoverableCleanupError(
                         "BlobStore lifecycle recovery needs another cleanup attempt",
@@ -815,7 +1029,7 @@ class LifecycleEngine:
                 initialize_new_store=previous_manifest is None,
             )
             self._fault("evidence_create", record)
-            self.operation_repository.create_exclusive(record, record.canonical_bytes())
+            self.operation_repository.create_exclusive(record, self._record_raw(record))
             self._emit("evidence_created", record)
 
             self._fault("candidate_publish", record)
@@ -997,7 +1211,7 @@ class LifecycleEngine:
         )
         record = self._signed_record(record)
         self._fault("evidence_create", record)
-        self.operation_repository.create_exclusive(record, record.canonical_bytes())
+        self.operation_repository.create_exclusive(record, self._record_raw(record))
         self._emit("evidence_created", record)
 
         tombstone = replace(

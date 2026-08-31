@@ -8,32 +8,48 @@ from enum import Enum
 from pathlib import Path
 from threading import Condition, Lock, get_ident
 import time
-from typing import Callable, Iterator
+from typing import BinaryIO, Callable, Iterator
 
 from cacheness.config import LifecycleLimits
 from cacheness.error_handling import (
+    CacheBlobBackendError,
     CacheBlobCloseTimeoutError,
     CacheBlobStoreClosedError,
 )
 
+from .path_security import ManagedFileOps, resolve_managed_locator
+
 
 class StoreAdmissionBarrier:
-    """Coordinate only the finite clear-snapshot admission boundary.
+    """Coordinate one finite clear-snapshot admission boundary across processes.
 
     Ordinary operations share admission and remain concurrent with one another.
     A clear obtains aggregate admission long enough to persist its complete,
     authenticated target inventory, then releases it before reclaiming payloads.
-    The barrier is process-local; manifest CAS remains the cross-process
-    authority boundary.
+    A root-scoped POSIX advisory lock extends that reader/writer boundary to
+    independent ``BlobStore`` processes which share the local metadata store.
+    Per-key manifest CAS remains the authority boundary for every individual
+    generation transition.
     """
 
     _instances_guard = Lock()
     _instances: dict[str, "StoreAdmissionBarrier"] = {}
 
-    def __init__(self) -> None:
+    def __init__(self, root: Path) -> None:
         self._condition = Condition(Lock())
         self._aggregate_active = False
         self._ordinary_active = 0
+        # The barrier owns this separate descriptor boundary.  A BlobStore
+        # instance can close while another same-root instance remains active;
+        # retaining an individual instance's ManagedFileOps would make the
+        # shared barrier unusable after that close.
+        self._file_ops = ManagedFileOps(root)
+        self._lock_locator = resolve_managed_locator(
+            self._file_ops.root,
+            ".cacheness-lifecycle-admission.lock",
+            operation="lifecycle_admission_lock",
+            allow_missing_leaf=True,
+        )
 
     @classmethod
     def for_root(cls, root: Path) -> "StoreAdmissionBarrier":
@@ -42,9 +58,43 @@ class StoreAdmissionBarrier:
         with cls._instances_guard:
             barrier = cls._instances.get(identity)
             if barrier is None:
-                barrier = cls()
+                barrier = cls(root)
                 cls._instances[identity] = barrier
             return barrier
+
+    @contextmanager
+    def _advisory_admission(self, *, exclusive: bool) -> Iterator[None]:
+        """Hold the root-wide shared/exclusive lock for one admitted operation."""
+        try:
+            import fcntl
+        except ImportError as exc:  # pragma: no cover - non-POSIX topology.
+            raise CacheBlobBackendError(
+                "BlobStore lifecycle admission requires POSIX advisory locking",
+                context={"operation": "lifecycle_admission"},
+            ) from exc
+
+        try:
+            self._file_ops.create_bytes_durable_exclusive(self._lock_locator, b"lock\n")
+        except FileExistsError:
+            pass
+
+        handle: BinaryIO | None = None
+        try:
+            handle = self._file_ops.open_read(self._lock_locator)
+            mode = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+            fcntl.flock(handle.fileno(), mode)
+            yield
+        except OSError as exc:
+            raise CacheBlobBackendError(
+                "BlobStore lifecycle admission lock could not be acquired",
+                context={"operation": "lifecycle_admission"},
+            ) from exc
+        finally:
+            if handle is not None:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                finally:
+                    handle.close()
 
     @contextmanager
     def ordinary_admission(self) -> Iterator[None]:
@@ -54,7 +104,8 @@ class StoreAdmissionBarrier:
                 self._condition.wait()
             self._ordinary_active += 1
         try:
-            yield
+            with self._advisory_admission(exclusive=False):
+                yield
         finally:
             with self._condition:
                 self._ordinary_active -= 1
@@ -71,7 +122,8 @@ class StoreAdmissionBarrier:
             while self._ordinary_active:
                 self._condition.wait()
         try:
-            yield
+            with self._advisory_admission(exclusive=True):
+                yield
         finally:
             with self._condition:
                 self._aggregate_active = False

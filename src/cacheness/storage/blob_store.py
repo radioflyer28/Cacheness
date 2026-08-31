@@ -77,7 +77,11 @@ from .manifest import (
     canonical_signing_bytes_from_record,
     decode_canonical_manifest_record,
 )
-from .manifest_repository import ManifestExpectation, create_manifest_repository
+from .manifest_repository import (
+    ManifestCursor,
+    ManifestExpectation,
+    create_manifest_repository,
+)
 from .legacy_manifest import LegacyManifestIdentity, recognize_legacy_fixture_tree
 from .lifecycle import LifecycleEngine
 from .path_security import encode_physical_name, resolve_managed_locator
@@ -123,6 +127,9 @@ def _ordinary_admitted(method: Callable) -> Callable:
 
     @wraps(method)
     def wrapped(self, *args, **kwargs):
+        # Legacy fixtures must fail before an admission sidecar can mutate the
+        # exact evidence tree an operator is being asked to migrate.
+        self._require_canonical_store()
         with self._instance_admission.operation():
             with self._admission_barrier.ordinary_admission():
                 self._refresh_metadata_view_for_lifecycle()
@@ -568,34 +575,54 @@ class BlobStore:
         """
         self._require_canonical_store()
         with self._key_coordinator.hold(self._storage_id_for_key(key)):
-            authenticated = self._load_authenticated_manifest(
-                key,
-                operation="exists",
-                require_payload_contract=True,
-                require_locator=True,
-            )
-            if authenticated is None:
-                return False
-            manifest, _handler, actual_path = authenticated
-            assert actual_path is not None
-            try:
-                with self.guarded_handler_io.open_snapshot(actual_path, {}) as snapshot:
-                    digest, byte_size = sha256_and_size(snapshot.path)
-                    if digest != manifest.digest or byte_size != manifest.byte_size:
-                        raise CacheBlobPayloadTamperedError(
-                            "Canonical BlobStore payload integrity check failed"
-                        )
-            except FileNotFoundError as exc:
-                raise CacheBlobPayloadMissingError(
-                    "Canonical BlobStore payload is missing"
-                ) from exc
-            except CacheBlobPayloadTamperedError:
-                raise
-            except OSError as exc:
-                raise CacheBlobPayloadTamperedError(
-                    "Canonical BlobStore payload could not be verified"
-                ) from exc
-            return True
+            for attempt in range(2):
+                authenticated = self._load_authenticated_manifest(
+                    key,
+                    operation="exists",
+                    require_payload_contract=True,
+                    require_locator=True,
+                )
+                if authenticated is None:
+                    return False
+                manifest, _handler, actual_path = authenticated
+                assert actual_path is not None
+                try:
+                    with self.guarded_handler_io.open_snapshot(
+                        actual_path, {}
+                    ) as snapshot:
+                        if not self._read_generation_is_stable(
+                            key, manifest, attempt, operation="exists"
+                        ):
+                            continue
+                        digest, byte_size = sha256_and_size(snapshot.path)
+                        if digest != manifest.digest or byte_size != manifest.byte_size:
+                            raise CacheBlobPayloadTamperedError(
+                                "Canonical BlobStore payload integrity check failed"
+                            )
+                        return True
+                except FileNotFoundError as exc:
+                    if not self._read_generation_is_stable(
+                        key, manifest, attempt, operation="exists"
+                    ):
+                        continue
+                    raise CacheBlobPayloadMissingError(
+                        "Canonical BlobStore payload is missing"
+                    ) from exc
+                except CacheBlobPayloadTamperedError:
+                    raise
+                except OSError as exc:
+                    if not self._read_generation_is_stable(
+                        key, manifest, attempt, operation="exists"
+                    ):
+                        continue
+                    raise CacheBlobPayloadTamperedError(
+                        "Canonical BlobStore payload could not be verified"
+                    ) from exc
+
+        raise CacheBlobLifecycleConflictError(
+            "Canonical BlobStore existence check exhausted its bounded generation retry",
+            context={"key": key, "operation": "exists"},
+        )
     
     @_ordinary_admitted
     def list(
@@ -617,30 +644,51 @@ class BlobStore:
         entries = self._list_backend_entries(operation="list")
         keys = []
 
-        for key in self.manifest_repository.list_keys():
-            if prefix and not key.startswith(prefix):
-                continue
-
-            authenticated = self._load_authenticated_manifest(
-                key,
-                operation="list",
-                require_locator=True,
+        cursor: ManifestCursor | None = None
+        while True:
+            page = self.manifest_repository.list_page(
+                cursor, page_size=self.lifecycle_limits.manifest_page_size
             )
-            assert authenticated is not None
-            manifest, _handler, _locator = authenticated
-            if metadata_filter:
-                metadata = self._manifest_entry_data(manifest)
-                searchable_metadata = {
-                    **dict(manifest.user_metadata),
-                    **dict(manifest.handler_metadata),
-                    **metadata,
-                }
-                if any(
-                    searchable_metadata.get(field) != value
-                    for field, value in metadata_filter.items()
-                ):
+            for key, expected_raw in page.entries:
+                if prefix and not key.startswith(prefix):
                     continue
-            keys.append(key)
+
+                authenticated = self._load_authenticated_manifest(
+                    key,
+                    operation="list",
+                    require_locator=True,
+                )
+                if authenticated is None:
+                    raise CacheBlobLifecycleConflictError(
+                        "Canonical BlobStore list authority disappeared during selection",
+                        context={"key": key, "operation": "list"},
+                    )
+                manifest, _handler, _locator = authenticated
+                observed_raw = self.manifest_repository.get_raw(key)
+                if (
+                    observed_raw != expected_raw
+                    or manifest.canonical_bytes() != expected_raw
+                ):
+                    raise CacheBlobLifecycleConflictError(
+                        "Canonical BlobStore list authority changed during selection",
+                        context={"key": key, "operation": "list"},
+                    )
+                if metadata_filter:
+                    metadata = self._manifest_entry_data(manifest)
+                    searchable_metadata = {
+                        **dict(manifest.user_metadata),
+                        **dict(manifest.handler_metadata),
+                        **metadata,
+                    }
+                    if any(
+                        searchable_metadata.get(field) != value
+                        for field, value in metadata_filter.items()
+                    ):
+                        continue
+                keys.append(key)
+            if page.next_cursor is None:
+                break
+            cursor = page.next_cursor
 
         # Legacy projections are never returned or used as authoritative
         # metadata, but their locators remain a containment tripwire for this
@@ -1097,18 +1145,20 @@ class BlobStore:
         key: str,
         first_manifest: BlobManifestV1,
         attempt: int,
+        *,
+        operation: str = "get",
     ) -> bool:
         """Reauthenticate M2 and allow only one retry for a newer generation."""
         authenticated = self._load_authenticated_manifest(
             key,
-            operation="get_reauthenticate",
+            operation=f"{operation}_reauthenticate",
             require_payload_contract=True,
             require_locator=True,
         )
         if authenticated is None:
             raise CacheBlobLifecycleConflictError(
                 "Canonical BlobStore authority disappeared after a committed snapshot",
-                context={"key": key, "operation": "get"},
+                context={"key": key, "operation": operation},
             )
         second_manifest, _handler, _locator = authenticated
         if second_manifest.generation == first_manifest.generation:
@@ -1117,7 +1167,7 @@ class BlobStore:
             return False
         raise CacheBlobLifecycleConflictError(
             "Canonical BlobStore authority changed during both read attempts",
-            context={"key": key, "operation": "get"},
+            context={"key": key, "operation": operation},
         )
 
     def _resolve_payload_handler(self, manifest: BlobManifestV1) -> Any:

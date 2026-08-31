@@ -18,6 +18,7 @@ from pathlib import PurePath
 from types import MappingProxyType
 from typing import Any, Mapping
 
+from cacheness.config import LifecycleLimits
 from cacheness.error_handling import (
     CacheManifestIntegrityError,
     CacheManifestUnsupportedVersionError,
@@ -170,13 +171,14 @@ def _bounded_string(
     *,
     allow_none: bool = False,
     allow_empty: bool = False,
+    max_field_bytes: int = MAX_OPERATION_FIELD_BYTES,
 ) -> str | None:
     """Validate one bounded string field before semantic interpretation."""
     if value is None and allow_none:
         return None
     if not isinstance(value, str) or (not value and not allow_empty):
         raise CacheManifestIntegrityError(f"Operation record {field} must be non-empty")
-    if len(value.encode("utf-8")) > MAX_OPERATION_FIELD_BYTES:
+    if len(value.encode("utf-8")) > max_field_bytes:
         raise CacheManifestIntegrityError(
             f"Operation record {field} exceeds the byte limit",
             reason=CacheReason.MANIFEST_BOUNDS,
@@ -184,7 +186,13 @@ def _bounded_string(
     return value
 
 
-def _validate_json_value(value: Any, *, depth: int, nodes: list[int]) -> None:
+def _validate_json_value(
+    value: Any,
+    *,
+    depth: int,
+    nodes: list[int],
+    max_field_bytes: int = MAX_OPERATION_FIELD_BYTES,
+) -> None:
     """Reject unbounded or non-canonical nested control values before use."""
     if depth > MAX_OPERATION_NESTING_DEPTH:
         raise CacheManifestIntegrityError(
@@ -205,7 +213,9 @@ def _validate_json_value(value: Any, *, depth: int, nodes: list[int]) -> None:
             )
         return
     if isinstance(value, str):
-        _bounded_string(value, "value")
+        _bounded_string(
+            value, "value", allow_empty=True, max_field_bytes=max_field_bytes
+        )
         return
     if isinstance(value, Mapping):
         if len(value) > len(_RECORD_FIELDS):
@@ -216,15 +226,55 @@ def _validate_json_value(value: Any, *, depth: int, nodes: list[int]) -> None:
         for key, item in value.items():
             if not isinstance(key, str):
                 raise CacheManifestIntegrityError("Operation record topology keys must be strings")
-            _validate_json_value(key, depth=depth + 1, nodes=nodes)
-            _validate_json_value(item, depth=depth + 1, nodes=nodes)
+            _validate_json_value(
+                key,
+                depth=depth + 1,
+                nodes=nodes,
+                max_field_bytes=max_field_bytes,
+            )
+            _validate_json_value(
+                item,
+                depth=depth + 1,
+                nodes=nodes,
+                max_field_bytes=max_field_bytes,
+            )
+        return
+    if isinstance(value, list):
+        if len(value) > 4_096:
+            raise CacheManifestIntegrityError(
+                "Operation record collection field limit exceeded",
+                reason=CacheReason.MANIFEST_BOUNDS,
+            )
+        for item in value:
+            _validate_json_value(
+                item,
+                depth=depth + 1,
+                nodes=nodes,
+                max_field_bytes=max_field_bytes,
+            )
         return
     raise CacheManifestIntegrityError("Operation record is not JSON-compatible")
 
 
-def _canonical_bytes(record: Mapping[str, Any]) -> bytes:
+def _canonical_bytes(
+    record: Mapping[str, Any],
+    *,
+    lifecycle_limits: LifecycleLimits | None = None,
+) -> bytes:
     """Encode the exact bounded evidence projection deterministically."""
-    _validate_json_value(record, depth=1, nodes=[0])
+    max_record_bytes = (
+        MAX_OPERATION_RECORD_BYTES
+        if lifecycle_limits is None
+        else lifecycle_limits.max_operation_record_bytes
+    )
+    max_field_bytes = (
+        MAX_OPERATION_FIELD_BYTES
+        if lifecycle_limits is None
+        else lifecycle_limits.max_operation_field_bytes
+    )
+    _validate_json_value(
+        record, depth=1, nodes=[0], max_field_bytes=max_field_bytes
+    )
     try:
         encoded = json.dumps(
             record,
@@ -235,7 +285,7 @@ def _canonical_bytes(record: Mapping[str, Any]) -> bytes:
         ).encode("utf-8")
     except (TypeError, ValueError) as exc:
         raise CacheManifestIntegrityError("Operation record is not JSON-compatible") from exc
-    if len(encoded) > MAX_OPERATION_RECORD_BYTES:
+    if len(encoded) > max_record_bytes:
         raise CacheManifestIntegrityError(
             "Operation record exceeds the byte limit",
             reason=CacheReason.MANIFEST_BOUNDS,
@@ -298,8 +348,17 @@ def _validate_timestamp(value: object, field: str) -> str:
     return timestamp
 
 
-def _canonical_clear_bytes(record: Mapping[str, Any]) -> bytes:
+def _canonical_clear_bytes(
+    record: Mapping[str, Any],
+    *,
+    lifecycle_limits: LifecycleLimits | None = None,
+) -> bytes:
     """Encode bounded clear control evidence without reusing payload codecs."""
+    max_record_bytes = (
+        MAX_OPERATION_RECORD_BYTES
+        if lifecycle_limits is None
+        else lifecycle_limits.max_operation_record_bytes
+    )
     try:
         encoded = json.dumps(
             record,
@@ -310,7 +369,7 @@ def _canonical_clear_bytes(record: Mapping[str, Any]) -> bytes:
         ).encode("utf-8")
     except (TypeError, ValueError) as exc:
         raise CacheManifestIntegrityError("Clear control evidence is not JSON-compatible") from exc
-    if len(encoded) > MAX_OPERATION_RECORD_BYTES:
+    if len(encoded) > max_record_bytes:
         raise CacheManifestIntegrityError(
             "Clear control evidence exceeds the byte limit",
             reason=CacheReason.MANIFEST_BOUNDS,
@@ -318,9 +377,20 @@ def _canonical_clear_bytes(record: Mapping[str, Any]) -> bytes:
     return encoded
 
 
-def _decode_clear_mapping(raw: bytes, fields: frozenset[str], label: str) -> dict[str, Any]:
+def _decode_clear_mapping(
+    raw: bytes,
+    fields: frozenset[str],
+    label: str,
+    *,
+    lifecycle_limits: LifecycleLimits | None = None,
+) -> dict[str, Any]:
     """Decode one strict clear evidence projection without assigning authority."""
-    if not isinstance(raw, bytes) or not raw or len(raw) > MAX_OPERATION_RECORD_BYTES:
+    max_record_bytes = (
+        MAX_OPERATION_RECORD_BYTES
+        if lifecycle_limits is None
+        else lifecycle_limits.max_operation_record_bytes
+    )
+    if not isinstance(raw, bytes) or not raw or len(raw) > max_record_bytes:
         raise CacheManifestIntegrityError(f"{label} bytes are invalid")
     try:
         decoded = json.loads(
@@ -336,6 +406,16 @@ def _decode_clear_mapping(raw: bytes, fields: frozenset[str], label: str) -> dic
         raise CacheManifestIntegrityError(f"{label} is not valid JSON") from exc
     if not isinstance(decoded, dict) or set(decoded) != fields:
         raise CacheManifestIntegrityError(f"{label} has an unknown or missing field")
+    _validate_json_value(
+        decoded,
+        depth=1,
+        nodes=[0],
+        max_field_bytes=(
+            MAX_OPERATION_RECORD_BYTES
+            if lifecycle_limits is None
+            else lifecycle_limits.max_operation_record_bytes
+        ),
+    )
     return decoded
 
 
@@ -351,7 +431,8 @@ class ClearTarget:
     key: str
     generation: str
     record_digest: str
-    raw_record: bytes
+    raw_record: bytes | None
+    raw_record_reference: str | None = None
 
     def __post_init__(self) -> None:
         """Bind the persisted target to its exact opaque manifest bytes."""
@@ -363,15 +444,27 @@ class ClearTarget:
             allow_none=False,
             pattern=_HEX_SHA256,
         )
-        if not isinstance(self.raw_record, bytes) or not self.raw_record:
-            raise CacheManifestIntegrityError("Clear target record must be non-empty bytes")
-        if len(self.raw_record) > MAX_OPERATION_RECORD_BYTES:
-            raise CacheManifestIntegrityError(
-                "Clear target record exceeds the byte limit",
-                reason=CacheReason.MANIFEST_BOUNDS,
+        if self.raw_record is None and self.raw_record_reference is None:
+            raise CacheManifestIntegrityError("Clear target record is missing")
+        if self.raw_record is not None:
+            if not isinstance(self.raw_record, bytes) or not self.raw_record:
+                raise CacheManifestIntegrityError("Clear target record must be non-empty bytes")
+            if len(self.raw_record) > MAX_OPERATION_RECORD_BYTES:
+                raise CacheManifestIntegrityError(
+                    "Clear target record exceeds the byte limit",
+                    reason=CacheReason.MANIFEST_BOUNDS,
+                )
+            if hashlib.sha256(self.raw_record).hexdigest() != self.record_digest:
+                raise CacheManifestIntegrityError(
+                    "Clear target digest does not match exact record"
+                )
+        if self.raw_record_reference is not None:
+            _validated_hex(
+                self.raw_record_reference,
+                "clear_target.raw_record_reference",
+                allow_none=False,
+                pattern=_HEX_UUID,
             )
-        if hashlib.sha256(self.raw_record).hexdigest() != self.record_digest:
-            raise CacheManifestIntegrityError("Clear target digest does not match exact record")
 
     @classmethod
     def from_raw(cls, key: str, generation: str, raw_record: bytes) -> "ClearTarget":
@@ -383,32 +476,116 @@ class ClearTarget:
             raw_record=raw_record,
         )
 
-    def to_mapping(self) -> dict[str, str]:
+    @classmethod
+    def from_reference(
+        cls,
+        key: str,
+        generation: str,
+        raw_record: bytes,
+        reference: str,
+    ) -> "ClearTarget":
+        """Persist a bounded reference when a valid record cannot fit inline."""
+        return cls(
+            key=key,
+            generation=generation,
+            record_digest=hashlib.sha256(raw_record).hexdigest(),
+            raw_record=None,
+            raw_record_reference=reference,
+        )
+
+    def with_resolved_raw(self, raw_record: bytes) -> "ClearTarget":
+        """Attach independently persisted exact bytes without changing page bytes."""
+        if self.raw_record_reference is None:
+            raise CacheManifestIntegrityError("Clear target does not reference external bytes")
+        if hashlib.sha256(raw_record).hexdigest() != self.record_digest:
+            raise CacheManifestIntegrityError(
+                "Clear target reference does not match exact record"
+            )
+        return replace(self, raw_record=raw_record)
+
+    def to_mapping(self) -> dict[str, str | None]:
         """Return a reversible JSON-safe representation of one exact target."""
         return {
             "generation": self.generation,
             "key": self.key,
-            "raw_record": base64.b64encode(self.raw_record).decode("ascii"),
+            "raw_record": (
+                None
+                if self.raw_record_reference is not None
+                else base64.b64encode(self.raw_record or b"").decode("ascii")
+            ),
+            "raw_record_reference": self.raw_record_reference,
             "record_digest": self.record_digest,
         }
 
     @classmethod
-    def from_mapping(cls, value: object) -> "ClearTarget":
+    def from_mapping(
+        cls,
+        value: object,
+        *,
+        lifecycle_limits: LifecycleLimits | None = None,
+    ) -> "ClearTarget":
         """Decode one strict target without authenticating it as authority."""
-        if not isinstance(value, Mapping) or set(value) != {
+        supported_fields = {
             "generation",
             "key",
             "raw_record",
             "record_digest",
-        }:
+        }
+        extended_fields = supported_fields | {"raw_record_reference"}
+        if not isinstance(value, Mapping) or (
+            set(value) != supported_fields and set(value) != extended_fields
+        ):
             raise CacheManifestIntegrityError("Clear target fields are invalid")
+        max_field_bytes = (
+            MAX_OPERATION_FIELD_BYTES
+            if lifecycle_limits is None
+            else lifecycle_limits.max_operation_field_bytes
+        )
+        for field in ("key", "generation", "record_digest"):
+            _bounded_string(
+                value[field],
+                f"clear_target.{field}",
+                max_field_bytes=max_field_bytes,
+            )
         encoded = value["raw_record"]
-        if not isinstance(encoded, str):
+        reference = value.get("raw_record_reference")
+        if encoded is None:
+            if not isinstance(reference, str):
+                raise CacheManifestIntegrityError("Clear target raw record is invalid")
+            _bounded_string(
+                reference,
+                "clear_target.raw_record_reference",
+                max_field_bytes=max_field_bytes,
+            )
+            return cls(
+                key=value["key"],
+                generation=value["generation"],
+                record_digest=value["record_digest"],
+                raw_record=None,
+                raw_record_reference=reference,
+            )
+        if not isinstance(encoded, str) or reference is not None:
             raise CacheManifestIntegrityError("Clear target raw record is invalid")
+        max_record_bytes = (
+            MAX_OPERATION_RECORD_BYTES
+            if lifecycle_limits is None
+            else lifecycle_limits.max_operation_record_bytes
+        )
+        max_encoded_bytes = 4 * ((max_record_bytes + 2) // 3)
+        if len(encoded) > max_encoded_bytes:
+            raise CacheManifestIntegrityError(
+                "Clear target raw record exceeds the byte limit",
+                reason=CacheReason.MANIFEST_BOUNDS,
+            )
         try:
             raw_record = base64.b64decode(encoded, validate=True)
         except (ValueError, UnicodeEncodeError) as exc:
             raise CacheManifestIntegrityError("Clear target raw record is invalid") from exc
+        if len(raw_record) > max_record_bytes:
+            raise CacheManifestIntegrityError(
+                "Clear target raw record exceeds the byte limit",
+                reason=CacheReason.MANIFEST_BOUNDS,
+            )
         return cls(
             key=value["key"],
             generation=value["generation"],
@@ -472,31 +649,72 @@ class ClearTargetPage:
             result["signature"] = self.signature
         return result
 
-    def canonical_bytes(self, *, include_signature: bool = True) -> bytes:
+    def canonical_bytes(
+        self,
+        *,
+        include_signature: bool = True,
+        lifecycle_limits: LifecycleLimits | None = None,
+    ) -> bytes:
         """Encode exact target evidence for conditional durable persistence."""
-        return _canonical_clear_bytes(self.to_mapping(include_signature=include_signature))
+        return _canonical_clear_bytes(
+            self.to_mapping(include_signature=include_signature),
+            lifecycle_limits=lifecycle_limits,
+        )
 
-    def signing_bytes(self) -> bytes:
+    def signing_bytes(self, *, lifecycle_limits: LifecycleLimits | None = None) -> bytes:
         """Domain-separate page authentication from manifests and operations."""
-        return CLEAR_TARGET_PAGE_SIGNING_DOMAIN + self.canonical_bytes(include_signature=False)
+        return CLEAR_TARGET_PAGE_SIGNING_DOMAIN + self.canonical_bytes(
+            include_signature=False, lifecycle_limits=lifecycle_limits
+        )
 
     def with_signature(self, signature: str) -> "ClearTargetPage":
         """Return a signed page without mutating its immutable target set."""
         return replace(self, signature=signature)
 
     @classmethod
-    def from_canonical_bytes(cls, raw: bytes) -> "ClearTargetPage":
+    def from_canonical_bytes(
+        cls, raw: bytes, *, lifecycle_limits: LifecycleLimits | None = None
+    ) -> "ClearTargetPage":
         """Decode exact page bytes without assigning them lifecycle authority."""
-        decoded = _decode_clear_mapping(raw, _CLEAR_TARGET_PAGE_FIELDS, "Clear target page")
+        decoded = _decode_clear_mapping(
+            raw,
+            _CLEAR_TARGET_PAGE_FIELDS,
+            "Clear target page",
+            lifecycle_limits=lifecycle_limits,
+        )
         targets = decoded["targets"]
         if not isinstance(targets, list):
             raise CacheManifestIntegrityError("Clear target page targets are invalid")
+        max_field_bytes = (
+            MAX_OPERATION_FIELD_BYTES
+            if lifecycle_limits is None
+            else lifecycle_limits.max_operation_field_bytes
+        )
+        for field in ("operation_id", "page_id", "signature_algorithm", "signature"):
+            _bounded_string(
+                decoded[field],
+                f"clear_target_page.{field}",
+                allow_empty=field == "signature",
+                max_field_bytes=max_field_bytes,
+            )
+        for field in ("source_cursor", "next_cursor"):
+            _bounded_string(
+                decoded[field],
+                f"clear_target_page.{field}",
+                allow_none=True,
+                max_field_bytes=max_field_bytes,
+            )
         return cls(
             operation_id=decoded["operation_id"],
             page_id=decoded["page_id"],
             source_cursor=decoded["source_cursor"],
             next_cursor=decoded["next_cursor"],
-            targets=tuple(ClearTarget.from_mapping(target) for target in targets),
+            targets=tuple(
+                ClearTarget.from_mapping(
+                    target, lifecycle_limits=lifecycle_limits
+                )
+                for target in targets
+            ),
             signature_algorithm=decoded["signature_algorithm"],
             signature=decoded["signature"],
             schema_version=decoded["schema_version"],
@@ -545,12 +763,19 @@ class ClearTargetCheckpoint:
             raise CacheManifestIntegrityError("Clear target checkpoint signature is invalid")
 
     @classmethod
-    def initial_for(cls, page: ClearTargetPage) -> "ClearTargetCheckpoint":
+    def initial_for(
+        cls,
+        page: ClearTargetPage,
+        *,
+        lifecycle_limits: LifecycleLimits | None = None,
+    ) -> "ClearTargetCheckpoint":
         """Bind zero progress to one exact persisted target page."""
         return cls(
             operation_id=page.operation_id,
             page_id=page.page_id,
-            page_record_digest=hashlib.sha256(page.canonical_bytes()).hexdigest(),
+            page_record_digest=hashlib.sha256(
+                page.canonical_bytes(lifecycle_limits=lifecycle_limits)
+            ).hexdigest(),
             completed_target_indices=(),
             page_complete=False,
         )
@@ -592,15 +817,25 @@ class ClearTargetCheckpoint:
             result["signature"] = self.signature
         return result
 
-    def canonical_bytes(self, *, include_signature: bool = True) -> bytes:
+    def canonical_bytes(
+        self,
+        *,
+        include_signature: bool = True,
+        lifecycle_limits: LifecycleLimits | None = None,
+    ) -> bytes:
         """Encode immutable checkpoint bytes for exact replacement."""
-        return _canonical_clear_bytes(self.to_mapping(include_signature=include_signature))
+        return _canonical_clear_bytes(
+            self.to_mapping(include_signature=include_signature),
+            lifecycle_limits=lifecycle_limits,
+        )
 
-    def signing_bytes(self) -> bytes:
+    def signing_bytes(self, *, lifecycle_limits: LifecycleLimits | None = None) -> bytes:
         """Domain-separate checkpoint authentication from all other records."""
         return (
             CLEAR_TARGET_CHECKPOINT_SIGNING_DOMAIN
-            + self.canonical_bytes(include_signature=False)
+            + self.canonical_bytes(
+                include_signature=False, lifecycle_limits=lifecycle_limits
+            )
         )
 
     def with_signature(self, signature: str) -> "ClearTargetCheckpoint":
@@ -608,14 +843,37 @@ class ClearTargetCheckpoint:
         return replace(self, signature=signature)
 
     @classmethod
-    def from_canonical_bytes(cls, raw: bytes) -> "ClearTargetCheckpoint":
+    def from_canonical_bytes(
+        cls, raw: bytes, *, lifecycle_limits: LifecycleLimits | None = None
+    ) -> "ClearTargetCheckpoint":
         """Decode a strict checkpoint without treating it as authority."""
         decoded = _decode_clear_mapping(
-            raw, _CLEAR_TARGET_CHECKPOINT_FIELDS, "Clear target checkpoint"
+            raw,
+            _CLEAR_TARGET_CHECKPOINT_FIELDS,
+            "Clear target checkpoint",
+            lifecycle_limits=lifecycle_limits,
         )
         indices = decoded["completed_target_indices"]
         if not isinstance(indices, list):
             raise CacheManifestIntegrityError("Clear target checkpoint indices are invalid")
+        max_field_bytes = (
+            MAX_OPERATION_FIELD_BYTES
+            if lifecycle_limits is None
+            else lifecycle_limits.max_operation_field_bytes
+        )
+        for field in (
+            "operation_id",
+            "page_id",
+            "page_record_digest",
+            "signature_algorithm",
+            "signature",
+        ):
+            _bounded_string(
+                decoded[field],
+                f"clear_target_checkpoint.{field}",
+                allow_empty=field == "signature",
+                max_field_bytes=max_field_bytes,
+            )
         return cls(
             operation_id=decoded["operation_id"],
             page_id=decoded["page_id"],
@@ -733,13 +991,23 @@ class LifecycleOperationRecord:
             result["signature"] = self.signature
         return result
 
-    def canonical_bytes(self, *, include_signature: bool = True) -> bytes:
+    def canonical_bytes(
+        self,
+        *,
+        include_signature: bool = True,
+        lifecycle_limits: LifecycleLimits | None = None,
+    ) -> bytes:
         """Encode bounded persisted operation evidence deterministically."""
-        return _canonical_bytes(self.to_mapping(include_signature=include_signature))
+        return _canonical_bytes(
+            self.to_mapping(include_signature=include_signature),
+            lifecycle_limits=lifecycle_limits,
+        )
 
-    def signing_bytes(self) -> bytes:
+    def signing_bytes(self, *, lifecycle_limits: LifecycleLimits | None = None) -> bytes:
         """Domain-separate evidence signatures from all manifest signatures."""
-        return OPERATION_SIGNING_DOMAIN + self.canonical_bytes(include_signature=False)
+        return OPERATION_SIGNING_DOMAIN + self.canonical_bytes(
+            include_signature=False, lifecycle_limits=lifecycle_limits
+        )
 
     def with_signature(self, signature: str) -> "LifecycleOperationRecord":
         """Return a signed copy without mutating durable evidence."""
@@ -762,11 +1030,23 @@ class LifecycleOperationRecord:
         return replace(self, checkpoint=checkpoint, updated_at=next_timestamp, signature="")
 
     @classmethod
-    def from_canonical_bytes(cls, raw: bytes) -> "LifecycleOperationRecord":
+    def from_canonical_bytes(
+        cls, raw: bytes, *, lifecycle_limits: LifecycleLimits | None = None
+    ) -> "LifecycleOperationRecord":
         """Decode one bounded, exact-schema record without assigning authority."""
+        max_record_bytes = (
+            MAX_OPERATION_RECORD_BYTES
+            if lifecycle_limits is None
+            else lifecycle_limits.max_operation_record_bytes
+        )
+        max_field_bytes = (
+            MAX_OPERATION_FIELD_BYTES
+            if lifecycle_limits is None
+            else lifecycle_limits.max_operation_field_bytes
+        )
         if not isinstance(raw, bytes) or not raw:
             raise CacheManifestIntegrityError("Operation record bytes must be non-empty")
-        if len(raw) > MAX_OPERATION_RECORD_BYTES:
+        if len(raw) > max_record_bytes:
             raise CacheManifestIntegrityError(
                 "Operation record exceeds the byte limit", reason=CacheReason.MANIFEST_BOUNDS
             )
@@ -784,7 +1064,9 @@ class LifecycleOperationRecord:
             raise CacheManifestIntegrityError("Operation record is not valid JSON") from exc
         if not isinstance(decoded, dict) or set(decoded) != _RECORD_FIELDS:
             raise CacheManifestIntegrityError("Operation record has an unknown or missing field")
-        _validate_json_value(decoded, depth=1, nodes=[0])
+        _validate_json_value(
+            decoded, depth=1, nodes=[0], max_field_bytes=max_field_bytes
+        )
         try:
             return cls(
                 schema_version=decoded["schema_version"],

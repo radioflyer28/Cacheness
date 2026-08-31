@@ -746,6 +746,25 @@ class ManagedFileOps:
             prepared = self._prepare_locator(locator, operation="read")
             return self._fallback_read(prepared)
 
+    def read_bytes_bounded(self, locator: Union[str, Path], *, max_bytes: int) -> bytes:
+        """Read one contained file without allocating more than ``max_bytes + 1``.
+
+        Control evidence is attacker-influenced at the filesystem boundary.  A
+        size check alone is not sufficient because a concurrent writer could
+        enlarge the file after ``stat`` and before a conventional ``read()``.
+        The descriptor-backed stream read therefore caps the allocation as
+        well as rejecting an already-oversized descriptor before parsing.
+        """
+        if type(max_bytes) is not int or max_bytes <= 0:
+            raise ValueError("max_bytes must be a positive integer")
+        with self.open_read(locator) as source:
+            if os.fstat(source.fileno()).st_size > max_bytes:
+                raise ValueError("managed file exceeds the byte limit")
+            data = source.read(max_bytes + 1)
+        if len(data) > max_bytes:
+            raise ValueError("managed file exceeds the byte limit")
+        return data
+
     def open_read(self, locator: Union[str, Path]) -> BinaryIO:
         """Open a contained locator for streaming reads."""
         if self._descriptor_mode:

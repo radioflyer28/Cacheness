@@ -313,6 +313,79 @@ def test_new_clear_uses_only_current_lifecycle_evidence(
         store.close()
 
 
+def test_clear_pages_spill_large_valid_manifests_and_retire_control_evidence(
+    tmp_path: Path,
+) -> None:
+    """Clear bounds encoded pages without rejecting valid large manifests."""
+    root = tmp_path / "large-clear-pages"
+    store = BlobStore(root, backend="json")
+    try:
+        for index in range(4):
+            store.put(
+                {"index": index},
+                key=f"large-{index}",
+                metadata={"large": "x" * 200_000},
+            )
+
+        assert store.clear() == 4
+        assert store.list() == []
+        operations = root / "operations"
+        assert not list(operations.glob("clear-target-page-*.json"))
+        assert not list(operations.glob("clear-target-checkpoint-*.json"))
+        assert not list(operations.glob("clear-target-reference-*.json"))
+    finally:
+        store.close()
+
+    reopened = BlobStore(root, backend="json")
+    try:
+        assert reopened.list() == []
+        assert not list((root / "operations").glob("clear-target-*.json"))
+    finally:
+        reopened.close()
+
+
+def test_terminal_clear_retires_pages_resumably_before_main_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A crash during page retirement reopens and finishes exact cleanup."""
+    root = tmp_path / "resumable-clear-retirement"
+    store = BlobStore(root, backend="json")
+    try:
+        store.put(
+            {"large": True},
+            key="large",
+            metadata={"large": "x" * 200_000},
+        )
+        original_retire = store.lifecycle.operation_repository.retire_clear_target_page_if_exact
+        calls = 0
+
+        def interrupt_once(*args: object, **kwargs: object) -> bool:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("simulated interruption after sidecar retirement")
+            return original_retire(*args, **kwargs)
+
+        monkeypatch.setattr(
+            store.lifecycle.operation_repository,
+            "retire_clear_target_page_if_exact",
+            interrupt_once,
+        )
+        with pytest.raises(RuntimeError, match="simulated interruption"):
+            store.clear()
+        assert list((root / "operations").glob("clear-target-page-*.json"))
+    finally:
+        store.close()
+
+    reopened = BlobStore(root, backend="json")
+    try:
+        assert reopened.list() == []
+        assert not list((root / "operations").glob("clear-target-*.json"))
+        assert not list((root / "operations").glob("[0-9a-f]" * 32 + ".json"))
+    finally:
+        reopened.close()
+
+
 def test_stale_overwrite_conflict_reclaims_only_loser_candidate(
     tmp_path: Path,
 ) -> None:
