@@ -61,7 +61,7 @@ from ..error_handling import (
 )
 from .backends import MetadataBackend, JsonBackend
 from .clear_recovery import ClearRecoveryCoordinator, LegacyClearEvidenceAdapter
-from .coordination import StoreAdmissionBarrier
+from .coordination import KeyCoordinatorRegistry, StoreAdmissionBarrier
 from .guarded_handler_io import GuardedHandlerIO
 from .handlers import HandlerRegistry
 from .integrity import (
@@ -262,6 +262,9 @@ class BlobStore:
         self._admission_barrier = StoreAdmissionBarrier.for_root(
             self.guarded_handler_io.root
         )
+        # This is intentionally per instance.  Same-process independent
+        # stores still exercise the manifest repository's CAS authority.
+        self._key_coordinator = KeyCoordinatorRegistry()
         
         # Initialize metadata backend
         if self._legacy_identity is not None:
@@ -372,7 +375,8 @@ class BlobStore:
         else:
             blob_key = self._generate_unique_key()
 
-        stored_key = self.lifecycle.put(data, key=blob_key, metadata=metadata)
+        with self._key_coordinator.hold(self._storage_id_for_key(blob_key)):
+            stored_key = self.lifecycle.put(data, key=blob_key, metadata=metadata)
         logger.debug(f"Stored blob {stored_key} through the lifecycle engine")
         return stored_key
     
@@ -388,43 +392,44 @@ class BlobStore:
             The stored data, or None if not found
         """
         self._require_canonical_store()
-        authenticated = self._load_authenticated_manifest(
-            key,
-            operation="get",
-            require_payload_contract=True,
-            require_locator=True,
-        )
-        if authenticated is None:
-            logger.debug(f"Blob not found: {key}")
-            return None
-        manifest, handler, actual_path = authenticated
-        assert handler is not None
-        assert actual_path is not None
-        handler_metadata = self._handler_metadata(manifest)
+        with self._key_coordinator.hold(self._storage_id_for_key(key)):
+            authenticated = self._load_authenticated_manifest(
+                key,
+                operation="get",
+                require_payload_contract=True,
+                require_locator=True,
+            )
+            if authenticated is None:
+                logger.debug(f"Blob not found: {key}")
+                return None
+            manifest, handler, actual_path = authenticated
+            assert handler is not None
+            assert actual_path is not None
+            handler_metadata = self._handler_metadata(manifest)
 
-        # The resolved handler receives only this private snapshot. It is
-        # hashed and size-checked inside the same live context before any
-        # trusted-payload deserialization can begin.
-        try:
-            with self.guarded_handler_io.open_snapshot(
-                actual_path, handler_metadata
-            ) as snapshot:
-                digest, byte_size = sha256_and_size(snapshot.path)
-                if digest != manifest.digest or byte_size != manifest.byte_size:
-                    raise CacheBlobPayloadTamperedError(
-                        "Canonical BlobStore payload integrity check failed"
-                    )
-                data = handler.get(snapshot.path, snapshot.metadata)
-        except FileNotFoundError as exc:
-            raise CacheBlobPayloadMissingError(
-                "Canonical BlobStore payload is missing"
-            ) from exc
-        except CacheBlobPayloadTamperedError:
-            raise
-        except OSError as exc:
-            raise CacheBlobPayloadTamperedError(
-                "Canonical BlobStore payload could not be verified"
-            ) from exc
+            # The resolved handler receives only this private snapshot. It is
+            # hashed and size-checked inside the same live context before any
+            # trusted-payload deserialization can begin.
+            try:
+                with self.guarded_handler_io.open_snapshot(
+                    actual_path, handler_metadata
+                ) as snapshot:
+                    digest, byte_size = sha256_and_size(snapshot.path)
+                    if digest != manifest.digest or byte_size != manifest.byte_size:
+                        raise CacheBlobPayloadTamperedError(
+                            "Canonical BlobStore payload integrity check failed"
+                        )
+                    data = handler.get(snapshot.path, snapshot.metadata)
+            except FileNotFoundError as exc:
+                raise CacheBlobPayloadMissingError(
+                    "Canonical BlobStore payload is missing"
+                ) from exc
+            except CacheBlobPayloadTamperedError:
+                raise
+            except OSError as exc:
+                raise CacheBlobPayloadTamperedError(
+                    "Canonical BlobStore payload could not be verified"
+                ) from exc
         
         return data
     
@@ -440,15 +445,16 @@ class BlobStore:
             Metadata dictionary, or None if not found
         """
         self._require_canonical_store()
-        authenticated = self._load_authenticated_manifest(
-            key,
-            operation="get_metadata",
-            require_locator=True,
-        )
-        if authenticated is None:
-            return None
-        manifest, _handler, _locator = authenticated
-        return self._manifest_entry_data(manifest)
+        with self._key_coordinator.hold(self._storage_id_for_key(key)):
+            authenticated = self._load_authenticated_manifest(
+                key,
+                operation="get_metadata",
+                require_locator=True,
+            )
+            if authenticated is None:
+                return None
+            manifest, _handler, _locator = authenticated
+            return self._manifest_entry_data(manifest)
     
     @_ordinary_admitted
     def update_metadata(self, key: str, metadata: Dict[str, Any]) -> bool:
@@ -463,50 +469,51 @@ class BlobStore:
             True if successful, False if blob not found
         """
         self._require_canonical_store()
-        if not isinstance(metadata, dict):
-            raise CacheBlobManifestMalformedError(
-                "BlobStore metadata patches must be dictionaries"
-            )
-        immutable_fields = _IMMUTABLE_METADATA_PATCH_FIELDS.intersection(metadata)
-        if immutable_fields:
-            raise CacheBlobLifecycleConflictError(
-                "BlobStore metadata patches cannot change canonical structural fields",
-                context={"fields": sorted(immutable_fields)},
-            )
+        with self._key_coordinator.hold(self._storage_id_for_key(key)):
+            if not isinstance(metadata, dict):
+                raise CacheBlobManifestMalformedError(
+                    "BlobStore metadata patches must be dictionaries"
+                )
+            immutable_fields = _IMMUTABLE_METADATA_PATCH_FIELDS.intersection(metadata)
+            if immutable_fields:
+                raise CacheBlobLifecycleConflictError(
+                    "BlobStore metadata patches cannot change canonical structural fields",
+                    context={"fields": sorted(immutable_fields)},
+                )
 
-        authenticated = self._load_authenticated_manifest(
-            key,
-            operation="update_metadata",
-            require_locator=True,
-        )
-        if authenticated is None:
-            return False
-        manifest, _handler, _locator = authenticated
-        observed_record = self.manifest_repository.get_raw(key)
-        if observed_record is None or observed_record != manifest.canonical_bytes():
-            raise CacheBlobLifecycleConflictError(
-                "BlobStore metadata authority changed before conditional patch",
-                context={"key": key, "operation": "update_metadata"},
+            authenticated = self._load_authenticated_manifest(
+                key,
+                operation="update_metadata",
+                require_locator=True,
             )
-        expected = ManifestExpectation.from_authenticated_record(
-            manifest.generation,
-            observed_record,
-        )
-        user_metadata = {**dict(manifest.user_metadata), **metadata}
-        updated_manifest = replace(manifest, user_metadata=user_metadata)
-        signed_manifest = updated_manifest.with_signature(
-            sign_hmac_sha256(
-                updated_manifest.signing_bytes(),
-                self._manifest_key(),
+            if authenticated is None:
+                return False
+            manifest, _handler, _locator = authenticated
+            observed_record = self.manifest_repository.get_raw(key)
+            if observed_record is None or observed_record != manifest.canonical_bytes():
+                raise CacheBlobLifecycleConflictError(
+                    "BlobStore metadata authority changed before conditional patch",
+                    context={"key": key, "operation": "update_metadata"},
+                )
+            expected = ManifestExpectation.from_authenticated_record(
+                manifest.generation,
+                observed_record,
             )
-        )
-        self.manifest_repository.publish_if_expected(
-            key,
-            expected,
-            signed_manifest.canonical_bytes(),
-            entry_data=self._manifest_entry_data(signed_manifest),
-        )
-        return True
+            user_metadata = {**dict(manifest.user_metadata), **metadata}
+            updated_manifest = replace(manifest, user_metadata=user_metadata)
+            signed_manifest = updated_manifest.with_signature(
+                sign_hmac_sha256(
+                    updated_manifest.signing_bytes(),
+                    self._manifest_key(),
+                )
+            )
+            self.manifest_repository.publish_if_expected(
+                key,
+                expected,
+                signed_manifest.canonical_bytes(),
+                entry_data=self._manifest_entry_data(signed_manifest),
+            )
+            return True
     
     @_ordinary_admitted
     def delete(self, key: str) -> bool:
@@ -520,7 +527,8 @@ class BlobStore:
             True if deleted, False if not found
         """
         self._require_canonical_store()
-        deleted = self.lifecycle.delete(key=key)
+        with self._key_coordinator.hold(self._storage_id_for_key(key)):
+            deleted = self.lifecycle.delete(key=key)
         if deleted:
             logger.debug(f"Deleted blob {key} through the lifecycle engine")
         return deleted
@@ -537,34 +545,35 @@ class BlobStore:
             True if the blob exists
         """
         self._require_canonical_store()
-        authenticated = self._load_authenticated_manifest(
-            key,
-            operation="exists",
-            require_payload_contract=True,
-            require_locator=True,
-        )
-        if authenticated is None:
-            return False
-        manifest, _handler, actual_path = authenticated
-        assert actual_path is not None
-        try:
-            with self.guarded_handler_io.open_snapshot(actual_path, {}) as snapshot:
-                digest, byte_size = sha256_and_size(snapshot.path)
-                if digest != manifest.digest or byte_size != manifest.byte_size:
-                    raise CacheBlobPayloadTamperedError(
-                        "Canonical BlobStore payload integrity check failed"
-                    )
-        except FileNotFoundError as exc:
-            raise CacheBlobPayloadMissingError(
-                "Canonical BlobStore payload is missing"
-            ) from exc
-        except CacheBlobPayloadTamperedError:
-            raise
-        except OSError as exc:
-            raise CacheBlobPayloadTamperedError(
-                "Canonical BlobStore payload could not be verified"
-            ) from exc
-        return True
+        with self._key_coordinator.hold(self._storage_id_for_key(key)):
+            authenticated = self._load_authenticated_manifest(
+                key,
+                operation="exists",
+                require_payload_contract=True,
+                require_locator=True,
+            )
+            if authenticated is None:
+                return False
+            manifest, _handler, actual_path = authenticated
+            assert actual_path is not None
+            try:
+                with self.guarded_handler_io.open_snapshot(actual_path, {}) as snapshot:
+                    digest, byte_size = sha256_and_size(snapshot.path)
+                    if digest != manifest.digest or byte_size != manifest.byte_size:
+                        raise CacheBlobPayloadTamperedError(
+                            "Canonical BlobStore payload integrity check failed"
+                        )
+            except FileNotFoundError as exc:
+                raise CacheBlobPayloadMissingError(
+                    "Canonical BlobStore payload is missing"
+                ) from exc
+            except CacheBlobPayloadTamperedError:
+                raise
+            except OSError as exc:
+                raise CacheBlobPayloadTamperedError(
+                    "Canonical BlobStore payload could not be verified"
+                ) from exc
+            return True
     
     @_ordinary_admitted
     def list(

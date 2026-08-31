@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Condition, Lock
 from typing import Iterator
@@ -69,4 +70,61 @@ class StoreAdmissionBarrier:
                 self._condition.notify_all()
 
 
-__all__ = ["StoreAdmissionBarrier"]
+@dataclass
+class _KeyCoordinatorEntry:
+    """One exact physical key's lock and in-flight acquisition count."""
+
+    lock: Lock = field(default_factory=Lock)
+    users: int = 0
+
+
+class KeyCoordinatorRegistry:
+    """Coordinate same-key local operations without serializing unrelated keys.
+
+    The registry is deliberately owned by one ``BlobStore`` instance.  It
+    supplies a cheap, deterministic in-process ordering boundary, while the
+    manifest repository's exact compare-and-swap remains the authority for
+    independent store instances and processes.  Entries are retained while a
+    caller waits for the key lock, preventing a release/reacquire race from
+    creating two locks for the same physical key.
+    """
+
+    def __init__(self) -> None:
+        self._guard = Lock()
+        self._entries: dict[str, _KeyCoordinatorEntry] = {}
+
+    @property
+    def size(self) -> int:
+        """Return the number of currently acquired or awaited physical keys."""
+        with self._guard:
+            return len(self._entries)
+
+    @contextmanager
+    def hold(self, physical_key: str) -> Iterator[None]:
+        """Acquire exactly one physical key and retire its entry after use."""
+        with self._guard:
+            entry = self._entries.get(physical_key)
+            if entry is None:
+                entry = _KeyCoordinatorEntry()
+                self._entries[physical_key] = entry
+            entry.users += 1
+
+        try:
+            with entry.lock:
+                yield
+        finally:
+            with self._guard:
+                entry.users -= 1
+                if entry.users == 0 and self._entries.get(physical_key) is entry:
+                    del self._entries[physical_key]
+
+    @contextmanager
+    def hold_many(self, physical_keys: Iterator[str]) -> Iterator[None]:
+        """Acquire a set of keys in sorted order to avoid lock-order cycles."""
+        with ExitStack() as stack:
+            for physical_key in sorted(set(physical_keys)):
+                stack.enter_context(self.hold(physical_key))
+            yield
+
+
+__all__ = ["KeyCoordinatorRegistry", "StoreAdmissionBarrier"]
