@@ -53,6 +53,9 @@ class CacheReason(str, Enum):
     BLOB_BACKEND_FAILURE = "blob_backend_failure"
     BLOB_MIGRATION_REQUIRED = "blob_migration_required"
     BLOB_RECOVERABLE_CLEANUP = "blob_recoverable_cleanup"
+    BLOB_RECONCILIATION_BLOCKED = "blob_reconciliation_blocked"
+    BLOB_RECONCILIATION_CONFLICT = "blob_reconciliation_conflict"
+    BLOB_RECONCILIATION_CHECKPOINT_INVALID = "blob_reconciliation_checkpoint_invalid"
 
 
 class CacheError(Exception):
@@ -309,6 +312,45 @@ class CacheBlobRecoverableCleanupError(CacheStorageError):
         context: Optional[Dict[str, Any]] = None,
         *,
         reason: CacheReason = CacheReason.BLOB_RECOVERABLE_CLEANUP,
+    ):
+        super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheBlobReconciliationError(CacheStorageError):
+    """Raised when reconciliation cannot safely apply a requested repair."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_RECONCILIATION_BLOCKED,
+    ):
+        super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheBlobReconciliationConflictError(CacheStorageError):
+    """Raised when exact evidence changes during reconciliation revalidation."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_RECONCILIATION_CONFLICT,
+    ):
+        super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheBlobReconciliationCheckpointError(CacheBlobIntegrityError):
+    """Raised when persisted reconciliation action progress is malformed."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_RECONCILIATION_CHECKPOINT_INVALID,
     ):
         super().__init__(message, _context_with_reason(context, reason))
 

@@ -21,6 +21,8 @@ from typing import Any
 from cacheness.config import LifecycleLimits
 from cacheness.error_handling import (
     CacheBlobLifecycleConflictError,
+    CacheBlobReconciliationCheckpointError,
+    CacheBlobReconciliationConflictError,
     CacheBlobManifestUnauthenticatedError,
     CacheManifestIntegrityError,
     CacheManifestUnsupportedVersionError,
@@ -208,7 +210,7 @@ class _ActionCheckpoint:
             ):
                 raise ValueError
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise CacheManifestIntegrityError(
+            raise CacheBlobReconciliationCheckpointError(
                 "Reconciliation checkpoint is invalid"
             ) from exc
         return checkpoint
@@ -404,7 +406,7 @@ class _Reconciler:
             checkpoint.evidence_digest != evidence_digest
             or checkpoint.action is not action
         ):
-            raise CacheBlobLifecycleConflictError(
+            raise CacheBlobReconciliationConflictError(
                 "Reconciliation checkpoint is bound to different evidence",
                 context={"operation_id": operation_id, "operation": "reconcile"},
             )

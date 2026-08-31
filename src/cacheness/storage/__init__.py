@@ -58,6 +58,12 @@ from .security import CacheEntrySigner
 # Import BlobStore
 from .blob_store import BlobStore
 from .manifest import BlobManifestV1
+from .reconciliation import (
+    ReconciliationAction,
+    ReconciliationFinding,
+    ReconciliationReport,
+    ReconciliationStatus,
+)
 from cacheness.error_handling import (
     CacheBlobBackendError,
     CacheBlobManifestMalformedError,
@@ -70,6 +76,9 @@ from cacheness.error_handling import (
     CacheBlobPayloadUnsupportedVersionError,
     CacheManifestIntegrityError,
     CacheManifestUnsupportedVersionError,
+    CacheBlobReconciliationCheckpointError,
+    CacheBlobReconciliationConflictError,
+    CacheBlobReconciliationError,
 )
 
 # Conditionally import SqliteBackend
@@ -96,6 +105,13 @@ __all__ = [
     "CacheBlobLifecycleConflictError",
     "CacheBlobBackendError",
     "CacheBlobMigrationRequiredError",
+    "CacheBlobReconciliationError",
+    "CacheBlobReconciliationConflictError",
+    "CacheBlobReconciliationCheckpointError",
+    "ReconciliationStatus",
+    "ReconciliationAction",
+    "ReconciliationFinding",
+    "ReconciliationReport",
     # Backends
     "MetadataBackend",
     "JsonBackend", 
