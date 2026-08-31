@@ -17,6 +17,8 @@ from cacheness.config import CacheConfig
 from cacheness.core import UnifiedCache
 from cacheness.error_handling import (
     CacheBlobBackendError,
+    CacheBlobLifecycleConflictError,
+    CacheBlobRecoverableCleanupError,
     CacheReason,
     CacheStorageError,
     CacheUnsafePathError,
@@ -554,10 +556,10 @@ def test_blob_store_keeps_logical_key_while_handlers_only_see_private_paths(tmp_
 
 
 @pytest.mark.parametrize("handler_index", [0, 1])
-def test_blob_store_first_write_metadata_failure_removes_candidate(
+def test_blob_store_first_write_authority_conflict_removes_candidate(
     tmp_path, monkeypatch, handler_index
 ):
-    """A first-write metadata failure leaves no entry or unowned payload bytes."""
+    """A first-write CAS loss leaves no entry, candidate, or operation residue."""
     root = tmp_path / "blob-root"
     handlers = _format_handlers()
     registry = _SwitchingHandlerRegistry(*handlers)
@@ -565,25 +567,30 @@ def test_blob_store_first_write_metadata_failure_removes_candidate(
     store = BlobStore(root)
     store.handlers = registry
 
-    def fail_metadata_write(_key: str, _entry: dict[str, Any]) -> None:
-        raise RuntimeError("metadata unavailable")
+    def reject_authority_publish(*_args: Any, **_kwargs: Any) -> None:
+        raise CacheBlobLifecycleConflictError("authority publish lost")
 
     try:
-        monkeypatch.setattr(store.backend, "put_entry", fail_metadata_write)
+        monkeypatch.setattr(
+            store.manifest_repository,
+            "publish_if_expected",
+            reject_authority_publish,
+        )
 
-        with pytest.raises(RuntimeError, match="metadata unavailable"):
+        with pytest.raises(CacheBlobLifecycleConflictError, match="authority publish lost"):
             store.put("replacement", key="first-write")
 
         assert store.get_metadata("first-write") is None
         assert _payloads_for_key(store, "first-write") == []
+        assert not list((root / "operations").glob("*.json"))
     finally:
         store.close()
 
 
-def test_blob_store_cross_format_overwrite_metadata_failure_preserves_prior_evidence(
+def test_blob_store_cross_format_authority_conflict_preserves_prior_evidence(
     tmp_path, monkeypatch
 ):
-    """A failed replacement preserves exact old metadata, bytes, and readability."""
+    """A failed replacement CAS preserves exact old bytes and authority."""
     root = tmp_path / "blob-root"
     old_handler, replacement_handler = _format_handlers()
     registry = _SwitchingHandlerRegistry(old_handler, replacement_handler)
@@ -595,8 +602,8 @@ def test_blob_store_cross_format_overwrite_metadata_failure_preserves_prior_evid
         "handler_compression": old_handler.compression,
     }
 
-    def fail_metadata_write(_key: str, _entry: dict[str, Any]) -> None:
-        raise RuntimeError("metadata unavailable")
+    def reject_authority_publish(*_args: Any, **_kwargs: Any) -> None:
+        raise CacheBlobLifecycleConflictError("authority publish lost")
 
     try:
         store.put("old value", key=key, metadata=initial_metadata)
@@ -614,9 +621,13 @@ def test_blob_store_cross_format_overwrite_metadata_failure_preserves_prior_evid
         )
 
         registry.current = replacement_handler
-        monkeypatch.setattr(store.backend, "put_entry", fail_metadata_write)
+        monkeypatch.setattr(
+            store.manifest_repository,
+            "publish_if_expected",
+            reject_authority_publish,
+        )
 
-        with pytest.raises(RuntimeError, match="metadata unavailable"):
+        with pytest.raises(CacheBlobLifecycleConflictError, match="authority publish lost"):
             store.put(
                 "replacement value",
                 key=key,
@@ -630,6 +641,7 @@ def test_blob_store_cross_format_overwrite_metadata_failure_preserves_prior_evid
         assert old_path.read_bytes() == old_bytes
         assert _payloads_for_key(store, key) == [old_path]
         assert store.get(key) == "old value"
+        assert not list((root / "operations").glob("*.json"))
     finally:
         store.close()
 
@@ -638,15 +650,15 @@ def test_blob_store_cross_format_overwrite_metadata_failure_preserves_prior_evid
 def test_blob_store_candidate_cleanup_failure_is_explicit_and_chained(
     tmp_path, monkeypatch, cleanup_outcome
 ):
-    """An unprovable candidate deletion is never silently converted to a miss."""
+    """A CAS-loser candidate remains recoverable when cleanup cannot be proved."""
     root = tmp_path / "blob-root"
     handler, _ = _format_handlers()
     store = BlobStore(root)
     store.handlers = _SwitchingHandlerRegistry(handler)
     cleanup_attempts: list[Path] = []
 
-    def fail_metadata_write(_key: str, _entry: dict[str, Any]) -> None:
-        raise RuntimeError("metadata unavailable")
+    def reject_authority_publish(*_args: Any, **_kwargs: Any) -> None:
+        raise CacheBlobLifecycleConflictError("authority publish lost")
 
     def cannot_prove_cleanup(locator: Path | str) -> bool:
         cleanup_attempts.append(Path(locator))
@@ -655,20 +667,30 @@ def test_blob_store_candidate_cleanup_failure_is_explicit_and_chained(
         return False
 
     try:
-        monkeypatch.setattr(store.backend, "put_entry", fail_metadata_write)
+        monkeypatch.setattr(
+            store.manifest_repository,
+            "publish_if_expected",
+            reject_authority_publish,
+        )
         monkeypatch.setattr(
             store.guarded_handler_io.file_ops,
             "delete",
             cannot_prove_cleanup,
         )
 
-        with pytest.raises(CacheStorageError) as exc_info:
+        with pytest.raises(CacheBlobRecoverableCleanupError) as exc_info:
             store.put("replacement", key="cleanup-proof")
 
-        assert isinstance(exc_info.value.__cause__, RuntimeError)
-        assert "metadata unavailable" in str(exc_info.value.__cause__)
+        assert exc_info.value.context["key"] == "cleanup-proof"
+        assert exc_info.value.context["operation_id"]
         assert len(cleanup_attempts) == 1
         assert store.get_metadata("cleanup-proof") is None
+        candidates = _payloads_for_key(store, "cleanup-proof")
+        assert len(candidates) == 1
+        assert "-generation-" in candidates[0].name
+        records = list(store.lifecycle.operation_repository.iter_raw())
+        assert len(records) == 1
+        assert str(candidates[0].relative_to(root)).encode() in records[0][1]
     finally:
         store.close()
 
