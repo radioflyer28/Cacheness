@@ -284,6 +284,35 @@ def test_cleanup_failure_keeps_new_authority_and_resumes_after_reopen(
         reopened.close()
 
 
+def test_new_clear_uses_only_current_lifecycle_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A new clear cannot revive the predecessor journal coordinator."""
+    root = tmp_path / "new-clear-current-evidence"
+    store = BlobStore(root, backend="json")
+    try:
+        store.put({"state": "present"}, key="clear-key")
+        legacy_adapter = store._legacy_clear_evidence
+        assert legacy_adapter is not None
+        legacy_coordinator = store._clear_recovery
+        assert legacy_coordinator is not None
+
+        def reject_predecessor_clear(*_args: Any, **_kwargs: Any) -> None:
+            raise AssertionError("new clear must not use predecessor coordination")
+
+        monkeypatch.setattr(legacy_coordinator, "clear", reject_predecessor_clear)
+        observed: list[str] = []
+        store.lifecycle.test_hook = lambda step, _record: observed.append(step)
+
+        assert store.clear() == 1
+
+        assert not legacy_adapter.has_evidence()
+        assert "evidence_created" in observed
+        assert not (root / ".cacheness-clear-journal-v1.json").exists()
+    finally:
+        store.close()
+
+
 def test_stale_overwrite_conflict_reclaims_only_loser_candidate(
     tmp_path: Path,
 ) -> None:
