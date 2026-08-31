@@ -254,7 +254,9 @@ class _Reconciler:
         if observed_at.tzinfo is None:
             raise ValueError("reconciliation requires a timezone-aware clock")
 
-        manifest_cursor, operation_cursor = self._decode_resume_token(resume_token)
+        manifest_cursor, operation_cursor, priority = self._decode_resume_token(
+            resume_token
+        )
         manifest_page = self._manifest_page(manifest_cursor)
         operation_page = self._operation_page(operation_cursor)
         findings: list[ReconciliationFinding] = []
@@ -264,31 +266,60 @@ class _Reconciler:
         consumed_manifest = 0
         consumed_operation = 0
 
-        # A fixed source order makes reports stable.  Each repository page is
-        # independently bounded; a combined action budget controls reporting
-        # and any later apply work.
-        for key, raw in manifest_page.entries:
+        # Alternate the source that receives the first bounded slot.  This
+        # preserves deterministic reports while preventing a long manifest
+        # inventory from starving lifecycle-operation evidence forever.
+        sources = (
+            ("manifest", manifest_page.entries)
+            if priority == "manifest"
+            else ("operation", operation_page.entries),
+            ("operation", operation_page.entries)
+            if priority == "manifest"
+            else ("manifest", manifest_page.entries),
+        )
+        for source, entries in sources:
+            for identifier, raw in entries:
+                if remaining == 0:
+                    break
+                if source == "manifest":
+                    findings.append(self._classify_manifest(identifier, raw))
+                    manifest_seen += 1
+                    consumed_manifest += 1
+                else:
+                    findings.append(
+                        self._classify_operation(identifier, raw, observed_at)
+                    )
+                    operation_seen += 1
+                    consumed_operation += 1
+                remaining -= 1
             if remaining == 0:
                 break
-            findings.append(self._classify_manifest(key, raw))
-            remaining -= 1
-            manifest_seen += 1
-            consumed_manifest += 1
-        for operation_id, raw in operation_page.entries:
-            if remaining == 0:
-                break
-            findings.append(self._classify_operation(operation_id, raw, observed_at))
-            remaining -= 1
-            operation_seen += 1
-            consumed_operation += 1
 
         next_manifest = self._next_manifest_cursor(
-            manifest_page, consumed_manifest
+            manifest_page, manifest_cursor, consumed_manifest
         )
         next_operation = self._next_operation_cursor(
-            operation_page, consumed_operation
+            operation_page, operation_cursor, consumed_operation
         )
-        token = self._encode_resume_token(next_manifest, next_operation)
+        pending_manifest = (
+            consumed_manifest < len(manifest_page.entries)
+            or next_manifest is not None
+        )
+        pending_operation = (
+            consumed_operation < len(operation_page.entries)
+            or next_operation is not None
+        )
+        next_priority = None
+        if pending_manifest or pending_operation:
+            if priority == "manifest" and pending_operation:
+                next_priority = "operation"
+            elif priority == "operation" and pending_manifest:
+                next_priority = "manifest"
+            else:
+                next_priority = priority
+        token = self._encode_resume_token(
+            next_manifest, next_operation, next_priority
+        )
         if apply:
             self._apply_findings(findings, observed_at)
         return ReconciliationReport(
@@ -448,18 +479,22 @@ class _Reconciler:
 
     @staticmethod
     def _next_manifest_cursor(
-        page: ManifestPage, consumed: int
+        page: ManifestPage, current: ManifestCursor | None, consumed: int
     ) -> ManifestCursor | None:
+        if consumed == 0:
+            return current
         if consumed < len(page.entries):
-            return ManifestCursor(page.entries[consumed - 1][0]) if consumed else None
+            return ManifestCursor(page.entries[consumed - 1][0])
         return page.next_cursor
 
     @staticmethod
     def _next_operation_cursor(
-        page: OperationPage, consumed: int
+        page: OperationPage, current: OperationCursor | None, consumed: int
     ) -> OperationCursor | None:
+        if consumed == 0:
+            return current
         if consumed < len(page.entries):
-            return OperationCursor(page.entries[consumed - 1][0]) if consumed else None
+            return OperationCursor(page.entries[consumed - 1][0])
         return page.next_cursor
 
     def _classify_manifest(self, key: str, raw: bytes) -> ReconciliationFinding:
@@ -684,8 +719,9 @@ class _Reconciler:
         self,
         manifest_cursor: ManifestCursor | None,
         operation_cursor: OperationCursor | None,
+        priority: str | None,
     ) -> str | None:
-        if manifest_cursor is None and operation_cursor is None:
+        if priority is None:
             return None
         # The token is encrypted-and-authenticated with the existing manifest
         # key so reports do not disclose backend logical-key cursors.
@@ -696,6 +732,7 @@ class _Reconciler:
                 "operation": (
                     None if operation_cursor is None else operation_cursor.operation_id
                 ),
+                "priority": priority,
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -707,9 +744,9 @@ class _Reconciler:
 
     def _decode_resume_token(
         self, token: str | None
-    ) -> tuple[ManifestCursor | None, OperationCursor | None]:
+    ) -> tuple[ManifestCursor | None, OperationCursor | None, str]:
         if token is None:
-            return None, None
+            return None, None, "manifest"
         if not isinstance(token, str) or not token:
             raise ValueError("reconciliation resume token must be a non-empty string")
         try:
@@ -724,13 +761,17 @@ class _Reconciler:
             mask = self._mask(key, len(encrypted))
             payload = bytes(left ^ right for left, right in zip(encrypted, mask))
             decoded = json.loads(payload)
-            if set(decoded) != {"manifest", "operation"}:
+            if set(decoded) != {"manifest", "operation", "priority"}:
                 raise ValueError("reconciliation resume token is malformed")
             manifest = decoded["manifest"]
             operation = decoded["operation"]
+            priority = decoded["priority"]
+            if priority not in {"manifest", "operation"}:
+                raise ValueError("reconciliation resume token is malformed")
             return (
                 None if manifest is None else ManifestCursor(manifest),
                 None if operation is None else OperationCursor(operation),
+                priority,
             )
         except (UnicodeError, ValueError, json.JSONDecodeError) as exc:
             raise ValueError("reconciliation resume token is invalid") from exc

@@ -329,7 +329,7 @@ class CacheBlobReconciliationError(CacheStorageError):
         super().__init__(message, _context_with_reason(context, reason))
 
 
-class CacheBlobReconciliationConflictError(CacheStorageError):
+class CacheBlobReconciliationConflictError(CacheBlobReconciliationError):
     """Raised when exact evidence changes during reconciliation revalidation."""
 
     def __init__(

@@ -536,6 +536,36 @@ def test_reconcile_apply_resumes_bounded_actions_from_opaque_token(tmp_path: Pat
         store.close()
 
 
+def test_reconcile_resume_interleaves_manifest_and_operation_pages(tmp_path: Path) -> None:
+    """An authenticated manifest page cannot starve a later operation page."""
+    root = tmp_path / "reconcile-interleave"
+    store = BlobStore(
+        config=CacheConfig(cache_dir=str(root), lifecycle_limits=_small_lifecycle_limits()),
+        backend="json",
+    )
+    try:
+        store.put("committed", key="live-manifest")
+        key = store._manifest_key()
+        record = _reconciliation_record(store, root, key, "a" * 32)
+        candidate = store.guarded_handler_io.root / record.candidate_locator
+        store.guarded_handler_io.file_ops.write_bytes_durable(candidate, b"candidate")
+        store.lifecycle.operation_repository.create_exclusive(
+            record, record.canonical_bytes()
+        )
+
+        first = store.reconcile(now=datetime(2026, 8, 31, tzinfo=timezone.utc))
+        assert first.resume_token is not None
+        second = store.reconcile(
+            resume_token=first.resume_token,
+            now=datetime(2026, 8, 31, tzinfo=timezone.utc),
+        )
+
+        assert second.findings[0].action is ReconciliationAction.DELETE_CANDIDATE
+        assert candidate.exists()
+    finally:
+        store.close()
+
+
 def test_reconciliation_public_types_and_reason_coded_errors_are_narrow() -> None:
     """Storage exports report values and exact reconciliation error boundaries."""
     from cacheness.storage import (
