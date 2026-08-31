@@ -107,6 +107,58 @@ def test_independent_write_write_race_has_one_cas_winner(tmp_path):
         first.close()
 
 
+def test_independent_write_delete_race_has_one_cas_winner(tmp_path):
+    """A write and delete from independent stores cannot both replace authority."""
+    root = tmp_path / "write-delete"
+    seed = BlobStore(root, backend="json")
+    key = "same-key"
+    try:
+        seed.put("original", key=key)
+    finally:
+        seed.close()
+
+    writer = BlobStore(root, backend="json")
+    deleter = BlobStore(root, backend="json")
+    barrier = threading.Barrier(2)
+    results: list[tuple[str, object]] = []
+    errors: list[BaseException] = []
+
+    def pause_before_authority(seam, _record) -> None:
+        if seam in {"manifest_publish", "tombstone_publish"}:
+            barrier.wait(timeout=5)
+
+    writer.lifecycle.fault_hook = pause_before_authority
+    deleter.lifecycle.fault_hook = pause_before_authority
+
+    def overwrite() -> None:
+        try:
+            results.append(("write", writer.put("replacement", key=key)))
+        except BaseException as exc:  # pragma: no cover - asserted below.
+            errors.append(exc)
+
+    def delete() -> None:
+        try:
+            results.append(("delete", deleter.delete(key)))
+        except BaseException as exc:  # pragma: no cover - asserted below.
+            errors.append(exc)
+
+    writer_thread = threading.Thread(target=overwrite)
+    deleter_thread = threading.Thread(target=delete)
+    try:
+        writer_thread.start()
+        deleter_thread.start()
+        _join(writer_thread)
+        _join(deleter_thread)
+
+        assert len(results) == 1
+        assert len(errors) == 1
+        assert isinstance(errors[0], CacheBlobLifecycleConflictError)
+        assert writer.get(key) in {None, "replacement"}
+    finally:
+        deleter.close()
+        writer.close()
+
+
 def test_distinct_key_put_completes_while_another_key_is_pre_cas(tmp_path):
     """A per-key holder never serializes an unrelated ordinary write."""
     store = BlobStore(tmp_path / "distinct", backend="json")
@@ -149,8 +201,56 @@ def test_distinct_key_put_completes_while_another_key_is_pre_cas(tmp_path):
     assert errors == []
 
 
-def test_read_retries_once_when_an_independent_writer_commits_new_generation(
-    tmp_path,
+def test_clear_snapshot_does_not_delete_a_post_snapshot_key(tmp_path):
+    """Clear's finite target inventory excludes a key committed after snapshot."""
+    store = BlobStore(tmp_path / "clear-post-snapshot", backend="json")
+    snapshot_complete = threading.Event()
+    release_clear = threading.Event()
+    post_snapshot_done = threading.Event()
+    errors: list[BaseException] = []
+    try:
+        store.put("before", key="before-key")
+
+        def pause_after_snapshot(seam, _record) -> None:
+            if seam == "clear_snapshot_complete":
+                snapshot_complete.set()
+                assert release_clear.wait(timeout=5)
+
+        store.lifecycle.fault_hook = pause_after_snapshot
+
+        def clear() -> None:
+            try:
+                assert store.clear() == 1
+            except BaseException as exc:  # pragma: no cover - asserted below.
+                errors.append(exc)
+
+        def put_after_snapshot() -> None:
+            try:
+                store.put("after", key="after-key")
+            except BaseException as exc:  # pragma: no cover - asserted below.
+                errors.append(exc)
+            finally:
+                post_snapshot_done.set()
+
+        clear_thread = threading.Thread(target=clear)
+        clear_thread.start()
+        assert snapshot_complete.wait(timeout=5)
+        put_thread = threading.Thread(target=put_after_snapshot)
+        put_thread.start()
+        release_clear.set()
+        assert post_snapshot_done.wait(timeout=5)
+        _join(clear_thread)
+        _join(put_thread)
+
+        assert errors == []
+        assert store.get("before-key") is None
+        assert store.get("after-key") == "after"
+    finally:
+        store.close()
+
+
+def test_read_write_retry_once_when_an_independent_writer_commits_new_generation(
+    tmp_path, monkeypatch
 ):
     """A read discards its first snapshot when M2 proves a newer commit."""
     root = tmp_path / "read-write"
@@ -158,9 +258,27 @@ def test_read_retries_once_when_an_independent_writer_commits_new_generation(
     writer = BlobStore(root, backend="json")
     key = "race-key"
     snapshots = 0
+    repository_reads = 0
     try:
         reader.put("first", key=key)
         original_snapshot = reader.guarded_handler_io.open_snapshot
+        original_get_raw = reader.manifest_repository.get_raw
+
+        def count_reader_authority_reads(blob_key: str):
+            nonlocal repository_reads
+            repository_reads += 1
+            return original_get_raw(blob_key)
+
+        monkeypatch.setattr(
+            reader.manifest_repository, "get_raw", count_reader_authority_reads
+        )
+        monkeypatch.setattr(
+            reader.lifecycle.operation_repository,
+            "list_page",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("reads must not consult operation evidence")
+            ),
+        )
 
         @contextmanager
         def replace_before_first_snapshot(locator, metadata):
@@ -175,6 +293,7 @@ def test_read_retries_once_when_an_independent_writer_commits_new_generation(
 
         assert reader.get(key) == "second"
         assert snapshots == 2
+        assert repository_reads == 4
     finally:
         writer.close()
         reader.close()
