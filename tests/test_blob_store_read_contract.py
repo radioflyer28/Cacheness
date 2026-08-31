@@ -352,32 +352,23 @@ def test_all_direct_operations_translate_json_admission_refresh_failures(
 
 
 @pytest.mark.parametrize("state", ("active", "prepared", "poisoned"))
-def test_recovery_conflicts_translate_to_lifecycle_failures(
+def test_direct_reads_do_not_reenter_predecessor_clear_recovery(
     tmp_path: Path, state: str
 ) -> None:
-    """Active, prepared, and poisoned recovery evidence blocks direct reads stably."""
+    """Direct reads use committed manifest authority, not predecessor recovery state."""
     store = BlobStore(tmp_path / state, backend="json")
     coordinator = store._clear_recovery
     assert coordinator is not None
     try:
         if state == "active":
             with coordinator.admission(blocking=True):
-                with pytest.raises(CacheBlobLifecycleConflictError) as error:
-                    store.get("blocked")
+                assert store.get("blocked") is None
         elif state == "prepared":
             coordinator._create_journal(coordinator._new_prepared_journal([]))
-            with pytest.raises(CacheBlobLifecycleConflictError) as error:
-                store.get("blocked")
+            assert store.get("blocked") is None
         else:
             coordinator._poisoned = True
-            with pytest.raises(CacheBlobLifecycleConflictError) as error:
-                store.get("blocked")
-
-        assert isinstance(error.value.__cause__, CacheStorageError)
-        assert (
-            classify_cache_read_failure(error.value)
-            is CacheReadFailureCategory.LIFECYCLE_CONFLICT
-        )
+            assert store.get("blocked") is None
     finally:
         store.close()
 
@@ -390,7 +381,7 @@ def test_clear_translates_rolled_back_operational_failures(
     backend_name: str,
     failure_site: str,
 ) -> None:
-    """Rolled-back clear faults stay typed at every supported local API boundary."""
+    """Pre-authority lifecycle clear faults preserve current data and taxonomy."""
     root = tmp_path / f"clear-{backend_name}-{failure_site}"
     backend = InMemoryBackend() if backend_name == "memory" else backend_name
     store = BlobStore(root, backend=backend)
@@ -400,22 +391,26 @@ def test_clear_translates_rolled_back_operational_failures(
         assert entry_before is not None
         payload_path = Path(entry_before["metadata"]["actual_path"])
         payload_before = payload_path.read_bytes()
-        coordinator = store._clear_recovery
-        assert coordinator is not None
         failure = OSError(f"{failure_site} unavailable")
 
+        def typed_lifecycle_failure(*_args: Any, **_kwargs: Any) -> None:
+            raise CacheBlobBackendError(
+                "injected lifecycle clear backend failure",
+                context={"operation": "clear"},
+            ) from failure
+
         if failure_site == "stage":
-
-            def fail_staging(_mapping: dict[str, Any]) -> None:
-                raise failure
-
-            monkeypatch.setattr(coordinator, "_stage_mapping", fail_staging)
+            monkeypatch.setattr(
+                store.lifecycle.operation_repository,
+                "create_exclusive",
+                typed_lifecycle_failure,
+            )
         else:
-
-            def fail_backend_clear() -> int:
-                raise failure
-
-            monkeypatch.setattr(store.backend, "clear_all", fail_backend_clear)
+            monkeypatch.setattr(
+                store.manifest_repository,
+                "list_page",
+                typed_lifecycle_failure,
+            )
 
         with pytest.raises(CacheBlobBackendError) as error:
             store.clear()
@@ -429,7 +424,6 @@ def test_clear_translates_rolled_back_operational_failures(
         assert store.get_metadata(key) == entry_before
         assert payload_path.read_bytes() == payload_before
         assert store.get(key) == "preserved payload"
-        assert not coordinator.journal_path.exists()
         assert not list(root.glob("clear-tombstone-*"))
     finally:
         store.close()
@@ -447,24 +441,21 @@ def test_clear_translates_committed_tombstone_reclamation_failure(
         entry = store.get_metadata(key)
         assert entry is not None
         payload_path = Path(entry["metadata"]["actual_path"])
-        coordinator = store._clear_recovery
-        assert coordinator is not None
-        delete_durable = store.guarded_handler_io.file_ops.delete_durable
         failure = OSError("tombstone reclamation unavailable")
         failed = False
 
-        def fail_one_tombstone_reclamation(locator: Path | str) -> bool:
+        def fail_one_clear_target(
+            seam: str, _record: object
+        ) -> None:
             nonlocal failed
-            if not failed and Path(locator).name.startswith("clear-tombstone-"):
+            if not failed and seam == "clear_target_delete":
                 failed = True
-                raise failure
-            return delete_durable(locator)
+                raise CacheBlobBackendError(
+                    "injected clear target deletion failure",
+                    context={"operation": "clear"},
+                ) from failure
 
-        monkeypatch.setattr(
-            store.guarded_handler_io.file_ops,
-            "delete_durable",
-            fail_one_tombstone_reclamation,
-        )
+        monkeypatch.setattr(store.lifecycle, "fault_hook", fail_one_clear_target)
 
         with pytest.raises(CacheBlobBackendError) as error:
             store.clear()
@@ -475,7 +466,6 @@ def test_clear_translates_committed_tombstone_reclamation_failure(
             classify_cache_read_failure(error.value)
             is CacheReadFailureCategory.BACKEND_FAILURE
         )
-        assert coordinator.journal_path.exists()
     finally:
         store.close()
 
@@ -483,26 +473,23 @@ def test_clear_translates_committed_tombstone_reclamation_failure(
     try:
         assert reopened.get(key) is None
         assert not payload_path.exists()
-        assert not reopened._clear_recovery.journal_path.exists()
         assert not list(root.glob("clear-tombstone-*"))
     finally:
         reopened.close()
 
 
-def test_clear_does_not_rewrap_already_typed_coordinator_failure(
+def test_clear_does_not_rewrap_already_typed_lifecycle_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The direct boundary preserves an existing public BlobStore error object."""
     store = BlobStore(tmp_path / "pretyped-clear", backend="json")
     try:
-        coordinator = store._clear_recovery
-        assert coordinator is not None
         typed_failure = CacheBlobBackendError("already classified")
 
-        def raise_typed_failure(_mappings: list[tuple[str, Path]]) -> int:
+        def raise_typed_failure() -> int:
             raise typed_failure
 
-        monkeypatch.setattr(coordinator, "clear", raise_typed_failure)
+        monkeypatch.setattr(store.lifecycle, "clear", raise_typed_failure)
 
         with pytest.raises(CacheBlobBackendError) as error:
             store.clear()
@@ -885,13 +872,6 @@ def test_delete_and_clear_preflight_authenticated_manifests_before_mutation(
         first = store.put("first clear", key="clear-first")
         second = store.put("second clear", key="clear-second")
         _replace_signed_manifest(store, second, state="prepared")
-        monkeypatch.setattr(
-            store._clear_recovery,
-            "clear",
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                AssertionError("clear must not begin before full manifest preflight")
-            ),
-        )
 
         with pytest.raises(CacheBlobLifecycleConflictError):
             store.clear()
@@ -999,11 +979,18 @@ def test_projection_backend_failures_are_typed_on_every_direct_surface(
         key = store.put({"operation": operation}, key="projection-key")
         monkeypatch.setattr(store.manifest_repository, "list_keys", lambda: [key])
         failure = OSError("metadata projection unavailable")
-        monkeypatch.setattr(
-            store.manifest_repository,
-            "list_backend_entries",
-            lambda: (_ for _ in ()).throw(failure),
-        )
+        if operation == "list":
+            monkeypatch.setattr(
+                store.manifest_repository,
+                "list_backend_entries",
+                lambda: (_ for _ in ()).throw(failure),
+            )
+        else:
+            monkeypatch.setattr(
+                store.manifest_repository,
+                "list_page",
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(failure),
+            )
 
         with pytest.raises(CacheBlobBackendError) as error:
             getattr(store, operation)()
