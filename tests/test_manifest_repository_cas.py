@@ -487,7 +487,7 @@ def test_json_authority_lock_rejects_regular_inode_replacement(
 def test_json_repository_uses_native_windows_control_durability(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The simulated Windows path uses only the injectable native directory API."""
+    """The simulated Windows path uses documented file and move primitives."""
     root = tmp_path / "windows-json"
     root.mkdir()
     backend = JsonBackend(root / "metadata.json")
@@ -501,9 +501,13 @@ def test_json_repository_uses_native_windows_control_durability(
                 raise FileExistsError(destination)
             os.rename(temporary, destination)
 
-        def flush_directory(self, directory: Path) -> None:
-            assert directory == root
-            calls.append("flush_directory")
+        def replace_write_through(self, temporary: Path, destination: Path) -> None:
+            calls.append("replace_write_through")
+            os.replace(temporary, destination)
+
+        def flush_regular_file(self, locator: Path) -> None:
+            assert locator.parent == root
+            calls.append("flush_regular_file")
 
     class FakeWindowsRegistryAuthorityApi:
         def ensure(self, name: str, value: bytes) -> None:
@@ -523,7 +527,7 @@ def test_json_repository_uses_native_windows_control_durability(
                 "key", ManifestExpectation.absent(), _record("windows-control")
             )
             assert repository.get_raw("key") == _record("windows-control")
-            assert "flush_directory" in calls
+            assert "flush_regular_file" in calls
             assert authorities
         finally:
             repository.close()
@@ -546,10 +550,10 @@ def test_native_windows_already_exists_errors_preserve_fileexists_contract(
     assert error.value.errno == error_number
 
 
-def test_native_windows_directory_flush_requests_write_access_and_closes_handle(
+def test_native_windows_regular_file_flush_uses_documented_handle_and_closes(
     tmp_path: Path,
 ) -> None:
-    """The native directory durability adapter uses its documented handle mode."""
+    """The native adapter flushes an ordinary file, never a directory handle."""
     api = object.__new__(path_security._WindowsFileApi)
     calls: list[object] = []
     api._create_file = lambda *args: calls.append(args) or ctypes.c_void_p(101).value
@@ -557,12 +561,32 @@ def test_native_windows_directory_flush_requests_write_access_and_closes_handle(
     api._close_handle = lambda handle: calls.append(("close", handle)) or 1
     api._last_error = lambda: 5
 
-    api.flush_directory(tmp_path)
+    api.flush_regular_file(tmp_path / "control.json")
 
     create_arguments = calls[0]
-    assert create_arguments[1] == api._GENERIC_READ | api._GENERIC_WRITE
+    assert create_arguments[1] == api._GENERIC_WRITE
+    assert create_arguments[5] == api._FILE_FLAG_OPEN_REPARSE_POINT
     assert ("flush", ctypes.c_void_p(101).value) in calls
     assert ("close", ctypes.c_void_p(101).value) in calls
+
+
+def test_native_windows_no_replace_move_requests_documented_write_through() -> None:
+    """No-replace control publication asks MoveFileExW to acknowledge the move."""
+    api = object.__new__(path_security._WindowsFileApi)
+    calls: list[tuple[str, str, int]] = []
+    api._move_file_ex = lambda source, destination, flags: calls.append(
+        (source, destination, flags)
+    ) or 1
+
+    api.rename_no_replace(Path("candidate"), Path("final"))
+
+    assert calls == [
+        (
+            "candidate",
+            "final",
+            path_security._WindowsFileApi._MOVEFILE_WRITE_THROUGH,
+        )
+    ]
 
 
 def test_windows_fallback_promotes_exact_pending_control_after_process_loss(
@@ -580,7 +604,7 @@ def test_windows_fallback_promotes_exact_pending_control_after_process_loss(
     pending = final.parent / pending_name
     pending.parent.mkdir()
     pending.write_bytes(payload)
-    flushes: list[Path] = []
+    flushed: list[Path] = []
 
     class FakeWindowsFileApi:
         def rename_no_replace(self, temporary: Path, destination: Path) -> None:
@@ -588,8 +612,8 @@ def test_windows_fallback_promotes_exact_pending_control_after_process_loss(
                 raise FileExistsError(destination)
             os.rename(temporary, destination)
 
-        def flush_directory(self, directory: Path) -> None:
-            flushes.append(directory)
+        def flush_regular_file(self, locator: Path) -> None:
+            flushed.append(locator)
 
     monkeypatch.setattr(path_security, "_platform_name", lambda: "nt")
     monkeypatch.setattr(path_security, "_windows_file_api", FakeWindowsFileApi)
@@ -599,7 +623,53 @@ def test_windows_fallback_promotes_exact_pending_control_after_process_loss(
         )
         assert final.read_bytes() == payload
         assert not pending.exists()
-        assert flushes == [final.parent]
+        assert flushed == [final]
+    finally:
+        file_ops.close()
+
+
+def test_windows_fallback_leaves_substituted_pending_control_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A final-record race never authorizes pathname deletion of a new pending file."""
+    root = tmp_path / "windows-pending-substitution"
+    root.mkdir()
+    file_ops = ManagedFileOps(root)
+    file_ops._descriptor_mode = False
+    final = root / "operations" / "operation.json"
+    payload = b'{"exact":"control"}'
+    digest = hashlib.sha256(payload).hexdigest()
+    pending_name = f".{final.name}.pending.{digest}.{'b' * 32}.tmp"
+    pending = final.parent / pending_name
+    final.parent.mkdir()
+    pending.write_bytes(payload)
+    final.write_bytes(payload)
+    victim = final.parent / "victim.json"
+    victim.write_bytes(b"victim")
+
+    class ExistingFinalWindowsFileApi:
+        def rename_no_replace(self, _temporary: Path, _destination: Path) -> None:
+            raise FileExistsError("final already exists")
+
+    original_read = file_ops.read_bytes_bounded
+
+    def swap_pending_after_final_read(locator: Path, *, max_bytes: int) -> bytes:
+        observed = original_read(locator, max_bytes=max_bytes)
+        if locator == final:
+            os.replace(victim, pending)
+        return observed
+
+    monkeypatch.setattr(path_security, "_platform_name", lambda: "nt")
+    monkeypatch.setattr(
+        path_security, "_windows_file_api", ExistingFinalWindowsFileApi
+    )
+    monkeypatch.setattr(file_ops, "read_bytes_bounded", swap_pending_after_final_read)
+    try:
+        assert not file_ops.promote_durable_pending_control(
+            final, payload, pending_name=pending_name
+        )
+        assert final.read_bytes() == payload
+        assert pending.read_bytes() == b"victim"
     finally:
         file_ops.close()
 

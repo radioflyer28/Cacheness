@@ -68,6 +68,9 @@ class _WindowsFileApi:
     _FILE_SHARE_DELETE = 0x00000004
     _OPEN_EXISTING = 3
     _FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+    _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+    _MOVEFILE_REPLACE_EXISTING = 0x00000001
+    _MOVEFILE_WRITE_THROUGH = 0x00000008
     _ERROR_FILE_EXISTS = 80
     _ERROR_ALREADY_EXISTS = 183
 
@@ -117,18 +120,36 @@ class _WindowsFileApi:
         """Atomically consume ``temporary`` only when ``destination`` is absent."""
         # Omitting MOVEFILE_REPLACE_EXISTING makes MoveFileEx fail if a
         # destination already exists while consuming the source on success.
-        if not self._move_file_ex(str(temporary), str(destination), 0):
+        # MOVEFILE_WRITE_THROUGH is the documented acknowledgement boundary
+        # for this transition; directory FlushFileBuffers is not documented.
+        if not self._move_file_ex(
+            str(temporary), str(destination), self._MOVEFILE_WRITE_THROUGH
+        ):
             self._raise_last_error("MoveFileExW")
 
-    def flush_directory(self, directory: Path) -> None:
-        """Acknowledge the directory entry update through a directory handle."""
+    def replace_write_through(self, temporary: Path, destination: Path) -> None:
+        """Replace one regular file through documented write-through semantics."""
+        if not self._move_file_ex(
+            str(temporary),
+            str(destination),
+            self._MOVEFILE_REPLACE_EXISTING | self._MOVEFILE_WRITE_THROUGH,
+        ):
+            self._raise_last_error("MoveFileExW")
+
+    def delete_write_through(self, locator: Path) -> None:
+        """Delete a regular managed file through the documented move primitive."""
+        if not self._move_file_ex(str(locator), None, self._MOVEFILE_WRITE_THROUGH):
+            self._raise_last_error("MoveFileExW")
+
+    def flush_regular_file(self, locator: Path) -> None:
+        """Flush an existing regular file through documented file-handle semantics."""
         handle = self._create_file(
-            str(directory),
-            self._GENERIC_READ | self._GENERIC_WRITE,
+            str(locator),
+            self._GENERIC_WRITE,
             self._FILE_SHARE_READ | self._FILE_SHARE_WRITE | self._FILE_SHARE_DELETE,
             None,
             self._OPEN_EXISTING,
-            self._FILE_FLAG_BACKUP_SEMANTICS,
+            self._FILE_FLAG_OPEN_REPARSE_POINT,
             None,
         )
         invalid_handle = ctypes.c_void_p(-1).value
@@ -900,7 +921,10 @@ class ManagedFileOps:
             locator = resolve_managed_locator(
                 self.root, locator, operation="publish", allow_missing_leaf=True
             )
-            os.replace(temporary, locator)
+            if _platform_name() == "nt":
+                _windows_file_api().replace_write_through(temporary, locator)
+            else:
+                os.replace(temporary, locator)
         except Exception:
             try:
                 temporary.unlink()
@@ -1283,8 +1307,8 @@ class ManagedFileOps:
                 self._assert_root_identity()
                 _windows_file_api().rename_no_replace(temporary, locator)
                 self._run_control_durability_hook("control_rename_completed", locator)
-                _windows_file_api().flush_directory(locator.parent)
-                self._run_control_durability_hook("control_directory_fsynced", locator)
+                _windows_file_api().flush_regular_file(locator)
+                self._run_control_durability_hook("control_file_flushed", locator)
                 return locator
             except BaseException:
                 try:
@@ -1400,7 +1424,11 @@ class ManagedFileOps:
                 allow_missing_leaf=True,
             )
             if _platform_name() == "nt":
-                _windows_file_api().flush_directory(prepared.parent)
+                # Windows does not document FlushFileBuffers for directory
+                # handles.  A surviving regular file can instead be flushed
+                # through a documented ordinary file handle; deletions use
+                # MoveFileExW's WRITE_THROUGH transition in delete_durable.
+                _windows_file_api().flush_regular_file(prepared)
                 return
             directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
             directory_fd = os.open(prepared.parent, directory_flags)
@@ -1449,8 +1477,9 @@ class ManagedFileOps:
         a process loss before native no-replace installation leaves recoverable
         evidence rather than an anonymous temporary.  This helper never uses a
         pattern as deletion authority: the candidate bytes must match the
-        digest encoded in its exact locator, and an existing final must match
-        byte-for-byte before its pending counterpart is retired.
+        digest encoded in its exact locator.  On the Windows fallback, an
+        already-present identical final leaves the pending name blocked rather
+        than deleting a pathname after its verified handle was released.
         """
         if not isinstance(data, bytes) or not data:
             raise ValueError("pending control evidence must be non-empty bytes")
@@ -1551,9 +1580,12 @@ class ManagedFileOps:
         """Converge exact Win32 pending evidence after process loss.
 
         The Windows writer emits a digest-bound candidate before the consuming
-        ``MoveFileExW`` transition.  Reopen verifies those exact bytes before
-        either promoting the candidate or retiring it beside an identical final
-        record; it never uses a glob as deletion authority.
+        ``MoveFileExW`` transition. Reopen verifies those exact bytes before
+        promoting the candidate. If an identical final already exists, this
+        portable fallback leaves the candidate blocked: Python cannot retain a
+        no-follow Windows handle through a path-free destructive disposition,
+        so unlinking the name would let a concurrent substitution delete an
+        unrelated managed file.
         """
         with self._lock:
             prepared = self._prepare_locator(
@@ -1575,13 +1607,8 @@ class ManagedFileOps:
                 final_bytes = self.read_bytes_bounded(prepared, max_bytes=len(data))
                 if final_bytes != data:
                     _unsafe_path(CacheReason.PATH_RACE)
-                try:
-                    pending.unlink()
-                except FileNotFoundError:
-                    return False
-                _windows_file_api().flush_directory(prepared.parent)
-                return True
-            _windows_file_api().flush_directory(prepared.parent)
+                return False
+            _windows_file_api().flush_regular_file(prepared)
             return True
 
     def create_stream_durable_exclusive(
@@ -1650,6 +1677,22 @@ class ManagedFileOps:
 
     def delete_durable(self, locator: Union[str, Path]) -> bool:
         """Delete a contained locator and acknowledge the directory when it existed."""
+        if not self._descriptor_mode and _platform_name() == "nt":
+            # ``FlushFileBuffers`` is documented for ordinary file handles,
+            # not directories.  MoveFileExW with WRITE_THROUGH is the native
+            # acknowledgement boundary for a pathname deletion.  We verify a
+            # regular single-linked managed leaf before issuing that call;
+            # unsupported filesystems surface a typed backend failure through
+            # the caller's normal OSError translation rather than pretending
+            # a directory flush succeeded.
+            with self._lock:
+                prepared = self._prepare_locator(locator, operation="delete_durable")
+                try:
+                    self.file_identity(prepared)
+                    _windows_file_api().delete_write_through(prepared)
+                except FileNotFoundError:
+                    return False
+                return True
         deleted = self.delete(locator)
         if deleted:
             self._fsync_containing_directory(locator)
