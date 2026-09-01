@@ -38,7 +38,14 @@ from .integrity import verify_hmac_sha256
 from .manifest import BlobManifestV1
 from .manifest_repository import ManifestCursor, ManifestPage
 from .operation_record import OperationCheckpoint, OperationTransition
-from .operation_repository import OperationCursor, OperationPage
+from .operation_repository import (
+    OperationCursor,
+    OperationPage,
+    PendingControlCursor,
+    PendingControlPage,
+    ReconciliationCheckpointCursor,
+    ReconciliationCheckpointPage,
+)
 from .path_security import resolve_managed_locator
 
 
@@ -275,7 +282,7 @@ class _Reconciler:
     """Private coordinator for bounded, non-deserializing evidence analysis."""
 
     _TOKEN_DOMAIN = b"cacheness.reconciliation.cursor.v1\x00"
-    _TOKEN_VERSION = 1
+    _TOKEN_VERSION = 2
     _TOKEN_NONCE_BYTES = 12
     _TOKEN_TAG_BYTES = 16
 
@@ -299,28 +306,47 @@ class _Reconciler:
         if observed_at.tzinfo is None:
             raise ValueError("reconciliation requires a timezone-aware clock")
 
-        manifest_cursor, operation_cursor, priority = self._decode_resume_token(
+        (
+            manifest_cursor,
+            operation_cursor,
+            sidecar_cursor,
+            pending_cursor,
+            priority,
+        ) = self._decode_resume_token(
             resume_token
         )
         manifest_page = self._manifest_page(manifest_cursor)
         operation_page = self._operation_page(operation_cursor)
+        sidecar_page = self._sidecar_page(sidecar_cursor)
+        pending_page = self._pending_control_page(pending_cursor)
         findings: list[ReconciliationFinding] = []
         remaining = self.lifecycle_limits.max_reconcile_actions
         manifest_seen = 0
         operation_seen = 0
         consumed_manifest = 0
         consumed_operation = 0
+        consumed_sidecar = 0
+        # Pending controls are non-authoritative scheduling residue.  Inventory
+        # them on every report page, but do not let malformed or blocked bytes
+        # consume an unrelated reconciliation action slot.
+        findings.extend(
+            self._classify_pending_control(name, raw)
+            for name, raw in pending_page.entries
+        )
 
         # Alternate the source that receives the first bounded slot.  This
         # preserves deterministic reports while preventing a long manifest
         # inventory from starving lifecycle-operation evidence forever.
-        sources = (
-            ("manifest", manifest_page.entries)
-            if priority == "manifest"
-            else ("operation", operation_page.entries),
-            ("operation", operation_page.entries)
-            if priority == "manifest"
-            else ("manifest", manifest_page.entries),
+        source_pages = {
+            "manifest": manifest_page.entries,
+            "operation": operation_page.entries,
+            "sidecar": sidecar_page.entries,
+        }
+        source_order = ("manifest", "operation", "sidecar")
+        first_index = source_order.index(priority)
+        sources = tuple(
+            (source, source_pages[source])
+            for source in source_order[first_index:] + source_order[:first_index]
         )
         for source, entries in sources:
             for identifier, raw in entries:
@@ -331,11 +357,22 @@ class _Reconciler:
                     manifest_seen += 1
                     consumed_manifest += 1
                 else:
-                    findings.append(
-                        self._classify_operation(identifier, raw, observed_at)
-                    )
-                    operation_seen += 1
-                    consumed_operation += 1
+                    if source == "operation":
+                        findings.append(
+                            self._classify_operation(identifier, raw, observed_at)
+                        )
+                        operation_seen += 1
+                        consumed_operation += 1
+                    else:
+                        sidecar_finding = self._classify_sidecar(identifier, raw)
+                        findings.append(sidecar_finding)
+                        consumed_sidecar += 1
+                        # A blocked private sidecar is reportable scan evidence,
+                        # not an authorized mutation.  It must not consume the
+                        # one shared action budget and starve a later completed
+                        # orphan on the same bounded sidecar page.
+                        if sidecar_finding.status is ReconciliationStatus.BLOCKED:
+                            continue
                 remaining -= 1
             if remaining == 0:
                 break
@@ -346,6 +383,10 @@ class _Reconciler:
         next_operation = self._next_operation_cursor(
             operation_page, operation_cursor, consumed_operation
         )
+        next_sidecar = self._next_sidecar_cursor(
+            sidecar_page, sidecar_cursor, consumed_sidecar
+        )
+        next_pending = self._next_pending_cursor(pending_page, pending_cursor)
         pending_manifest = (
             consumed_manifest < len(manifest_page.entries)
             or next_manifest is not None
@@ -354,19 +395,30 @@ class _Reconciler:
             consumed_operation < len(operation_page.entries)
             or next_operation is not None
         )
+        pending_sidecar = (
+            consumed_sidecar < len(sidecar_page.entries) or next_sidecar is not None
+        )
         next_priority = None
-        if pending_manifest or pending_operation:
-            if priority == "manifest" and pending_operation:
-                next_priority = "operation"
-            elif priority == "operation" and pending_manifest:
-                next_priority = "manifest"
-            else:
-                next_priority = priority
+        if pending_manifest or pending_operation or pending_sidecar or next_pending is not None:
+            pending_sources = {
+                "manifest": pending_manifest,
+                "operation": pending_operation,
+                "sidecar": pending_sidecar,
+            }
+            for offset in range(1, len(source_order) + 1):
+                candidate = source_order[(first_index + offset) % len(source_order)]
+                if pending_sources[candidate]:
+                    next_priority = candidate
+                    break
         token = self._encode_resume_token(
-            next_manifest, next_operation, next_priority
+            next_manifest, next_operation, next_sidecar, next_pending, next_priority
         )
         if apply:
-            findings.extend(self._apply_findings(findings, observed_at))
+            findings.extend(
+                self._apply_findings(
+                    findings, observed_at, sidecar_page.entries[:consumed_sidecar]
+                )
+            )
         return ReconciliationReport(
             findings=tuple(findings),
             resume_token=token,
@@ -379,22 +431,41 @@ class _Reconciler:
         self,
         findings: list[ReconciliationFinding],
         observed_at: datetime,
+        sidecar_entries: tuple[tuple[str, bytes | None], ...],
     ) -> tuple[ReconciliationFinding, ...]:
         """Revalidate and checkpoint every authorized action under one snapshot gate."""
         # Reconciliation uses aggregate admission only while it reloads exact
         # authority and applies a bounded report. Ordinary operations retain
         # their per-key lifecycle/CAS concurrency contract.
         with self.store._admission_barrier.aggregate_admission():
-            blocked_sidecars = self._retire_orphaned_completed_checkpoints()
+            remaining = self.lifecycle_limits.max_reconcile_actions
+            _blocked_sidecars, sidecar_actions = self._retire_orphaned_completed_checkpoints(
+                sidecar_entries, remaining
+            )
+            remaining -= sidecar_actions
             for finding in findings:
+                if remaining <= 0:
+                    break
                 if (
                     finding.status is not ReconciliationStatus.SAFE
                     or finding.evidence_id is None
                     or finding.evidence_digest is None
                 ):
                     continue
-                self._apply_finding(finding, observed_at)
-        return tuple(blocked_sidecars)
+                try:
+                    self._apply_finding(finding, observed_at)
+                except CacheBlobReconciliationCheckpointError:
+                    # The matching sidecar was already reported as blocked.
+                    # It cannot turn into recovery authority or prevent a
+                    # later independently authenticated finding from running.
+                    logger.warning(
+                        "BlobStore reconciliation action has an untrusted checkpoint",
+                        extra={"operation_id": finding.evidence_id, "operation": "reconcile"},
+                    )
+                remaining -= 1
+        # Every sidecar examined above already has a dry-run finding.  Do not
+        # duplicate it merely because this call also requested apply.
+        return ()
 
     def _apply_finding(
         self,
@@ -489,6 +560,9 @@ class _Reconciler:
         after a crash.  It stays durable until the primary evidence is safely
         retired, then its exact bytes are removed as the final sidecar step.
         """
+        self.store.lifecycle._fault(
+            "reconcile_tombstone_before_primary_retire", record
+        )
         if checkpoint.action is ReconciliationAction.DELETE_CANDIDATE:
             if self.store.guarded_handler_io.file_ops.exists(candidate):
                 raise CacheBlobReconciliationConflictError(
@@ -504,8 +578,23 @@ class _Reconciler:
             # evidence retire; a crash before this point retains the exact
             # record needed to resume without replaying the payload delete.
             if self.store.lifecycle.operation_repository.get_raw(record.operation_id) is not None:
+                self.store.lifecycle._fault(
+                    "reconcile_tombstone_inside_primary_retire", record
+                )
                 self.store.lifecycle._retire(record)
+        self.store.lifecycle._fault(
+            "reconcile_tombstone_after_primary_retire", record
+        )
+        self.store.lifecycle._fault(
+            "reconcile_tombstone_before_sidecar_retire", record
+        )
+        self.store.lifecycle._fault(
+            "reconcile_tombstone_inside_sidecar_retire", record
+        )
         self._retire_completed_checkpoint(checkpoint, checkpoint_raw)
+        self.store.lifecycle._fault(
+            "reconcile_tombstone_after_sidecar_retire", record
+        )
 
     def _retire_completed_checkpoint(
         self, checkpoint: _ActionCheckpoint, checkpoint_raw: bytes
@@ -519,18 +608,32 @@ class _Reconciler:
             checkpoint.operation_id, expected_raw=checkpoint_raw
         )
 
-    def _retire_orphaned_completed_checkpoints(self) -> list[ReconciliationFinding]:
+    def _retire_orphaned_completed_checkpoints(
+        self,
+        entries: tuple[tuple[str, bytes | None], ...],
+        remaining_actions: int,
+    ) -> tuple[list[ReconciliationFinding], int]:
         """Authenticate and remove completed sidecars orphaned after a crash."""
         repository = self.store.lifecycle.operation_repository
-        key = self.store._manifest_key()
         retired = 0
         blocked: list[ReconciliationFinding] = []
-        for operation_id, raw in repository.list_reconciliation_checkpoint_raws():
+        for operation_id, raw in entries:
+            if raw is None:
+                blocked.append(
+                    ReconciliationFinding(
+                        ReconciliationStatus.BLOCKED,
+                        ReconciliationAction.REPORT_ONLY,
+                        "reconciliation_checkpoint_untrusted",
+                        evidence_id=operation_id,
+                    )
+                )
+                continue
             try:
+                key = self.store._manifest_key()
                 checkpoint = _ActionCheckpoint.from_canonical_bytes(
                     raw, key, lifecycle_limits=self.lifecycle_limits
                 )
-            except CacheBlobReconciliationCheckpointError:
+            except (CacheBlobReconciliationCheckpointError, CacheStorageError):
                 # Invalid evidence is intentionally left untouched. It is a
                 # blocked operator finding, not authority and not a permanent
                 # consumer of every later completed-checkpoint work slot.
@@ -538,16 +641,15 @@ class _Reconciler:
                     "BlobStore reconciliation checkpoint is blocked and was not retired",
                     extra={"operation_id": operation_id, "operation": "reconcile"},
                 )
-                if len(blocked) < self.lifecycle_limits.max_reconcile_actions:
-                    blocked.append(
-                        ReconciliationFinding(
-                            ReconciliationStatus.BLOCKED,
-                            ReconciliationAction.REPORT_ONLY,
-                            "reconciliation_checkpoint_untrusted",
-                            evidence_id=operation_id,
-                            evidence_digest=hashlib.sha256(raw).hexdigest(),
-                        )
+                blocked.append(
+                    ReconciliationFinding(
+                        ReconciliationStatus.BLOCKED,
+                        ReconciliationAction.REPORT_ONLY,
+                        "reconciliation_checkpoint_untrusted",
+                        evidence_id=operation_id,
+                        evidence_digest=hashlib.sha256(raw).hexdigest(),
                     )
+                )
                 continue
             if checkpoint.operation_id != operation_id or checkpoint.state != "completed":
                 continue
@@ -556,11 +658,11 @@ class _Reconciler:
             # destructive action: authenticate then retire only this exact
             # private checkpoint.
             if repository.get_raw(operation_id) is None:
+                if retired >= remaining_actions:
+                    break
                 self._retire_completed_checkpoint(checkpoint, raw)
                 retired += 1
-                if retired >= self.lifecycle_limits.max_reconcile_actions:
-                    return blocked
-        return blocked
+        return blocked, retired
 
     def _advance_action_checkpoint(
         self,
@@ -605,59 +707,93 @@ class _Reconciler:
             self.store.lifecycle._fault(
                 "reconcile_tombstone_before_payload_delete", record
             )
-            self.store._delete_or_prove_absent(candidate)
-            self.store.lifecycle._fault(
-                "reconcile_tombstone_after_payload_delete", record
-            )
-            checkpoint, checkpoint_raw = self._advance_action_checkpoint(
-                checkpoint, checkpoint_raw, "payload_deleted"
+            try:
+                self.store.lifecycle._fault(
+                    "reconcile_tombstone_inside_payload_delete", record
+                )
+                self.store._delete_or_prove_absent(candidate)
+                self.store.lifecycle._fault(
+                    "reconcile_tombstone_after_payload_delete", record
+                )
+            except BaseException:
+                # The effect may have crossed the filesystem boundary before
+                # a signal or injected fault.  Prove absence and record it
+                # before re-raising so a reopen never reissues the delete.
+                if not self.store.guarded_handler_io.file_ops.exists(candidate):
+                    checkpoint, checkpoint_raw = self._advance_tombstone_checkpoint(
+                        record, checkpoint, checkpoint_raw, "payload_deleted"
+                    )
+                raise
+            checkpoint, checkpoint_raw = self._advance_tombstone_checkpoint(
+                record, checkpoint, checkpoint_raw, "payload_deleted"
             )
 
         if checkpoint.state == "payload_deleted":
             self.store.lifecycle._fault(
                 "reconcile_tombstone_before_manifest_remove", record
             )
-            current = self.store._load_authenticated_manifest_with_raw(
-                record.key,
-                operation="reconcile_tombstone",
-                require_locator=True,
-                allowed_states=frozenset({"committed", "tombstoned"}),
-            )
-            if current is not None:
-                manifest, raw_manifest, _handler, locator = current
-                if (
-                    manifest.state == "tombstoned"
-                    and manifest.generation == record.generation
-                    and locator == candidate
-                ):
-                    expectation = self.store.lifecycle._tombstone_expectation(
-                        manifest, raw_manifest
-                    )
-                    try:
-                        self.store.manifest_repository.remove_if_expected(
-                            record.key, expectation
+            try:
+                self.store.lifecycle._fault(
+                    "reconcile_tombstone_inside_manifest_remove", record
+                )
+                current = self.store._load_authenticated_manifest_with_raw(
+                    record.key,
+                    operation="reconcile_tombstone",
+                    require_locator=True,
+                    allowed_states=frozenset({"committed", "tombstoned"}),
+                )
+                if current is not None:
+                    manifest, raw_manifest, _handler, locator = current
+                    if (
+                        manifest.state == "tombstoned"
+                        and manifest.generation == record.generation
+                        and locator == candidate
+                    ):
+                        expectation = self.store.lifecycle._tombstone_expectation(
+                            manifest, raw_manifest
                         )
-                    except CacheBlobLifecycleConflictError:
-                        # A later winner is already authoritative.  This
-                        # action must not retry its removal; the sidecar still
-                        # records that this tombstone's removal step is no
-                        # longer required before primary retirement.
-                        pass
-                elif manifest.generation == record.generation:
-                    raise CacheBlobReconciliationConflictError(
-                        "Tombstone reconciliation locator changed before retirement",
-                        context={"operation_id": record.operation_id},
+                        try:
+                            self.store.manifest_repository.remove_if_expected(
+                                record.key, expectation
+                            )
+                        except CacheBlobLifecycleConflictError:
+                            # A later winner is already authoritative.  This
+                            # action must not retry its removal; the sidecar still
+                            # records that this tombstone's removal step is no
+                            # longer required before primary retirement.
+                            pass
+                    elif manifest.generation == record.generation:
+                        raise CacheBlobReconciliationConflictError(
+                            "Tombstone reconciliation locator changed before retirement",
+                            context={"operation_id": record.operation_id},
+                        )
+                self.store.lifecycle._fault(
+                    "reconcile_tombstone_after_manifest_remove", record
+                )
+            except BaseException:
+                # A matching tombstone may already be gone (or a later winner
+                # may have won) even though the post-effect seam interrupted.
+                current = self.store._load_authenticated_manifest_with_raw(
+                    record.key,
+                    operation="reconcile_tombstone_effect_probe",
+                    require_locator=True,
+                    allowed_states=frozenset({"committed", "tombstoned"}),
+                )
+                if current is None or current[0].generation != record.generation:
+                    checkpoint, checkpoint_raw = self._advance_tombstone_checkpoint(
+                        record, checkpoint, checkpoint_raw, "tombstone_removed"
                     )
-            self.store.lifecycle._fault(
-                "reconcile_tombstone_after_manifest_remove", record
-            )
-            checkpoint, checkpoint_raw = self._advance_action_checkpoint(
-                checkpoint, checkpoint_raw, "tombstone_removed"
+                raise
+            checkpoint, checkpoint_raw = self._advance_tombstone_checkpoint(
+                record, checkpoint, checkpoint_raw, "tombstone_removed"
             )
 
         if checkpoint.state == "tombstone_removed":
             self.store.lifecycle._fault(
                 "reconcile_tombstone_before_checkpoint_complete", record
+            )
+            self.store.lifecycle._fault(
+                "reconcile_tombstone_inside_checkpoint_complete", record
             )
             checkpoint, checkpoint_raw = self._complete_action_checkpoint(
                 checkpoint, checkpoint_raw
@@ -670,6 +806,28 @@ class _Reconciler:
             self._finish_completed_checkpoint(
                 record, candidate, checkpoint, checkpoint_raw
             )
+
+    def _advance_tombstone_checkpoint(
+        self,
+        record: Any,
+        checkpoint: _ActionCheckpoint,
+        checkpoint_raw: bytes,
+        state: str,
+    ) -> tuple[_ActionCheckpoint, bytes]:
+        """Advance one tombstone stage with explicit pre/inside/post seams."""
+        self.store.lifecycle._fault(
+            f"reconcile_tombstone_before_{state}_checkpoint", record
+        )
+        self.store.lifecycle._fault(
+            f"reconcile_tombstone_inside_{state}_checkpoint", record
+        )
+        advanced, advanced_raw = self._advance_action_checkpoint(
+            checkpoint, checkpoint_raw, state
+        )
+        self.store.lifecycle._fault(
+            f"reconcile_tombstone_after_{state}_checkpoint", record
+        )
+        return advanced, advanced_raw
 
     def _prepare_action_checkpoint(
         self,
@@ -739,6 +897,21 @@ class _Reconciler:
             page_size=self.lifecycle_limits.operation_page_size,
         )
 
+    def _sidecar_page(
+        self, cursor: ReconciliationCheckpointCursor | None
+    ) -> ReconciliationCheckpointPage:
+        """Page sidecars independently so malformed prefixes cannot starve debt."""
+        return self.store.lifecycle.operation_repository.list_reconciliation_checkpoint_page(
+            cursor,
+            page_size=self.lifecycle_limits.operation_page_size,
+        )
+
+    def _pending_control_page(
+        self, cursor: PendingControlCursor | None
+    ) -> PendingControlPage:
+        """Page pending scheduling residue without treating it as authority."""
+        return self.store.lifecycle.operation_repository.list_pending_control_page(cursor)
+
     @staticmethod
     def _next_manifest_cursor(
         page: ManifestPage, current: ManifestCursor | None, consumed: int
@@ -757,6 +930,27 @@ class _Reconciler:
             return current
         if consumed < len(page.entries):
             return OperationCursor(page.entries[consumed - 1][0])
+        return page.next_cursor
+
+    @staticmethod
+    def _next_sidecar_cursor(
+        page: ReconciliationCheckpointPage,
+        current: ReconciliationCheckpointCursor | None,
+        consumed: int,
+    ) -> ReconciliationCheckpointCursor | None:
+        if consumed == 0:
+            return current
+        if consumed < len(page.entries):
+            return ReconciliationCheckpointCursor(page.entries[consumed - 1][0])
+        return page.next_cursor
+
+    @staticmethod
+    def _next_pending_cursor(
+        page: PendingControlPage, current: PendingControlCursor | None
+    ) -> PendingControlCursor | None:
+        """Every pending page entry is reportable, so its page cursor advances."""
+        if not page.entries:
+            return page.next_cursor
         return page.next_cursor
 
     def _classify_manifest(self, key: str, raw: bytes) -> ReconciliationFinding:
@@ -880,6 +1074,22 @@ class _Reconciler:
                     manifest_digest=hashlib.sha256(current.raw).hexdigest(),
                     **base,
                 )
+            if (
+                current is None
+                and self._tombstone_checkpoint_has_durable_effect(record, digest)
+            ):
+                # A post-remove interruption can leave the primary tombstone
+                # behind after its matching manifest is gone.  Only a signed
+                # sidecar that binds these exact primary bytes and has already
+                # crossed a destructive-effect checkpoint may resume the
+                # non-destructive terminal stages.  A merely named or
+                # ``prepared`` sidecar remains blocked below.
+                return ReconciliationFinding(
+                    ReconciliationStatus.SAFE,
+                    ReconciliationAction.COMPLETE_TOMBSTONE,
+                    "authenticated_tombstone_checkpoint_debt",
+                    **base,
+                )
             return ReconciliationFinding(
                 ReconciliationStatus.BLOCKED,
                 ReconciliationAction.REPORT_ONLY,
@@ -968,6 +1178,103 @@ class _Reconciler:
             **base,
         )
 
+    def _tombstone_checkpoint_has_durable_effect(
+        self, record: Any, evidence_digest: str
+    ) -> bool:
+        """Accept only a bound post-effect tombstone sidecar for no-manifest resume."""
+        raw = self.store.lifecycle.operation_repository.get_reconciliation_checkpoint_raw(
+            record.operation_id
+        )
+        if raw is None:
+            return False
+        try:
+            checkpoint = _ActionCheckpoint.from_canonical_bytes(
+                raw,
+                self.store._manifest_key(),
+                lifecycle_limits=self.lifecycle_limits,
+            )
+        except (CacheBlobReconciliationCheckpointError, CacheStorageError):
+            return False
+        return (
+            checkpoint.operation_id == record.operation_id
+            and checkpoint.evidence_digest == evidence_digest
+            and checkpoint.action is ReconciliationAction.COMPLETE_TOMBSTONE
+            and checkpoint.state
+            in {"payload_deleted", "tombstone_removed", "completed"}
+        )
+
+    def _classify_sidecar(
+        self, operation_id: str, raw: bytes | None
+    ) -> ReconciliationFinding:
+        """Report private checkpoint state without letting it become authority."""
+        if raw is None:
+            return ReconciliationFinding(
+                ReconciliationStatus.BLOCKED,
+                ReconciliationAction.REPORT_ONLY,
+                "reconciliation_checkpoint_untrusted",
+                evidence_id=operation_id,
+            )
+        try:
+            checkpoint = _ActionCheckpoint.from_canonical_bytes(
+                raw,
+                self.store._manifest_key(),
+                lifecycle_limits=self.lifecycle_limits,
+            )
+        except (CacheBlobReconciliationCheckpointError, CacheStorageError):
+            return ReconciliationFinding(
+                ReconciliationStatus.BLOCKED,
+                ReconciliationAction.REPORT_ONLY,
+                "reconciliation_checkpoint_untrusted",
+                evidence_id=operation_id,
+                evidence_digest=hashlib.sha256(raw).hexdigest(),
+            )
+        if checkpoint.operation_id != operation_id:
+            return ReconciliationFinding(
+                ReconciliationStatus.BLOCKED,
+                ReconciliationAction.REPORT_ONLY,
+                "reconciliation_checkpoint_untrusted",
+                evidence_id=operation_id,
+                evidence_digest=hashlib.sha256(raw).hexdigest(),
+            )
+        if checkpoint.state == "completed" and self.store.lifecycle.operation_repository.get_raw(
+            operation_id
+        ) is None:
+            return ReconciliationFinding(
+                ReconciliationStatus.SAFE,
+                ReconciliationAction.RETIRE_EVIDENCE,
+                "completed_reconciliation_checkpoint_orphan",
+                evidence_id=operation_id,
+                evidence_digest=hashlib.sha256(raw).hexdigest(),
+            )
+        return ReconciliationFinding(
+            ReconciliationStatus.REQUIRES_CONFIRMATION,
+            ReconciliationAction.REPORT_ONLY,
+            "reconciliation_checkpoint_attached",
+            evidence_id=operation_id,
+            evidence_digest=hashlib.sha256(raw).hexdigest(),
+        )
+
+    @staticmethod
+    def _classify_pending_control(
+        name: str, raw: bytes | None
+    ) -> ReconciliationFinding:
+        """Expose pending residue without granting a filename destructive authority."""
+        digest = name[1:-4].rsplit(".pending.", 1)[1].rsplit(".", 1)[0]
+        if raw is None or hashlib.sha256(raw).hexdigest() != digest:
+            return ReconciliationFinding(
+                ReconciliationStatus.BLOCKED,
+                ReconciliationAction.REPORT_ONLY,
+                "pending_control_untrusted",
+                locator_fingerprint=_fingerprint(name),
+            )
+        return ReconciliationFinding(
+            ReconciliationStatus.SAFE,
+            ReconciliationAction.REPORT_ONLY,
+            "pending_control_recovery_scheduled",
+            evidence_digest=hashlib.sha256(raw).hexdigest(),
+            locator_fingerprint=_fingerprint(name),
+        )
+
     def _try_authenticated_manifest(
         self, key: str, raw: bytes | None
     ) -> _AuthenticatedManifest | None:
@@ -997,6 +1304,8 @@ class _Reconciler:
         self,
         manifest_cursor: ManifestCursor | None,
         operation_cursor: OperationCursor | None,
+        sidecar_cursor: ReconciliationCheckpointCursor | None,
+        pending_cursor: PendingControlCursor | None,
         priority: str | None,
     ) -> str | None:
         if priority is None:
@@ -1011,6 +1320,10 @@ class _Reconciler:
                 "operation": (
                     None if operation_cursor is None else operation_cursor.operation_id
                 ),
+                "sidecar": (
+                    None if sidecar_cursor is None else sidecar_cursor.operation_id
+                ),
+                "pending": None if pending_cursor is None else pending_cursor.name,
                 "priority": priority,
             },
             sort_keys=True,
@@ -1026,9 +1339,18 @@ class _Reconciler:
 
     def _decode_resume_token(
         self, token: str | None
-    ) -> tuple[ManifestCursor | None, OperationCursor | None, str]:
+    ) -> tuple[
+        ManifestCursor | None,
+        OperationCursor | None,
+        ReconciliationCheckpointCursor | None,
+        PendingControlCursor | None,
+        str,
+    ]:
         if token is None:
-            return None, None, "manifest"
+            # Sidecars are inspected first.  Empty stores therefore avoid
+            # loading a key, while malformed sidecars become visible in the
+            # first dry run instead of being hidden behind primary paging.
+            return None, None, None, None, "sidecar"
         if not isinstance(token, str) or not token:
             raise ValueError("reconciliation resume token must be a non-empty string")
         maximum = self.lifecycle_limits.max_operation_field_bytes
@@ -1041,7 +1363,7 @@ class _Reconciler:
             if len(packed) < minimum or len(packed) > minimum + maximum:
                 raise ValueError("reconciliation resume token is invalid")
             version = packed[0]
-            if version != self._TOKEN_VERSION:
+            if version not in {1, self._TOKEN_VERSION}:
                 raise ValueError("reconciliation resume token is invalid")
             nonce_end = 1 + self._TOKEN_NONCE_BYTES
             nonce = packed[1:nonce_end]
@@ -1051,16 +1373,25 @@ class _Reconciler:
             if len(payload) > maximum:
                 raise ValueError("reconciliation resume token is invalid")
             decoded = json.loads(payload)
-            if set(decoded) != {"manifest", "operation", "priority"}:
+            expected_fields = (
+                {"manifest", "operation", "sidecar", "priority"}
+                if version == 1
+                else {"manifest", "operation", "sidecar", "pending", "priority"}
+            )
+            if set(decoded) != expected_fields:
                 raise ValueError("reconciliation resume token is malformed")
             manifest = decoded["manifest"]
             operation = decoded["operation"]
+            sidecar = decoded["sidecar"]
+            pending = None if version == 1 else decoded["pending"]
             priority = decoded["priority"]
-            if priority not in {"manifest", "operation"}:
+            if priority not in {"manifest", "operation", "sidecar"}:
                 raise ValueError("reconciliation resume token is malformed")
             return (
                 None if manifest is None else ManifestCursor(manifest),
                 None if operation is None else OperationCursor(operation),
+                None if sidecar is None else ReconciliationCheckpointCursor(sidecar),
+                None if pending is None else PendingControlCursor(pending),
                 priority,
             )
         except (InvalidTag, UnicodeError, ValueError, json.JSONDecodeError) as exc:

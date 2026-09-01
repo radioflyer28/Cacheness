@@ -14,6 +14,7 @@ from threading import Event, Thread
 import pytest
 
 from cacheness.config import CacheConfig, LifecycleLimits
+from cacheness.metadata import InMemoryBackend
 from cacheness.error_handling import (
     CacheBlobIntegrityError,
     CacheStorageError,
@@ -1027,6 +1028,70 @@ def test_digest_invalid_pending_control_does_not_consume_recovery_action_budget(
         store.close()
 
 
+def test_pending_recovery_pages_past_large_invalid_prefix_without_unbounded_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each recovery call reads one page and durable cursor progress reaches valid work."""
+    root = tmp_path / "pending-cursor"
+    limits = _small_lifecycle_limits()
+    store = BlobStore(
+        config=CacheConfig(cache_dir=str(root), lifecycle_limits=limits), backend="json"
+    )
+    try:
+        repository = store.lifecycle.operation_repository
+        operations = root / "operations"
+        operations.mkdir(exist_ok=True)
+        for index in range(6):
+            operation_id = f"{index:032x}"
+            (operations / f".{operation_id}.json.pending.{'0' * 64}.{index:032x}.tmp").write_bytes(
+                b"bad-digest"
+            )
+        valid_id = "f" * 32
+        raw = b"valid-control"
+        digest = hashlib.sha256(raw).hexdigest()
+        (operations / f".{valid_id}.json.pending.{digest}.{'f' * 32}.tmp").write_bytes(raw)
+
+        calls: list[Path] = []
+        original_read = repository.file_ops.read_bytes_bounded
+
+        def count_reads(locator: Path, *, max_bytes: int) -> bytes:
+            calls.append(locator)
+            return original_read(locator, max_bytes=max_bytes)
+
+        monkeypatch.setattr(repository.file_ops, "read_bytes_bounded", count_reads)
+        for _ in range(4):
+            repository.recover_pending_operation_records()
+            assert len(calls) <= limits.operation_page_size * (_ + 1) + (_ + 1)
+        assert repository.get_raw(valid_id) == raw
+        assert (operations / ".pending-recovery.cursor").exists()
+    finally:
+        store.close()
+
+
+def test_dry_run_reports_blocked_pending_control_residue(tmp_path: Path) -> None:
+    """A digest-invalid pending candidate is visible without becoming authority."""
+    root = tmp_path / "pending-dry-run"
+    store = BlobStore(root, backend="json")
+    try:
+        operations = root / "operations"
+        operations.mkdir(exist_ok=True)
+        operation_id = "a" * 32
+        pending = operations / (
+            f".{operation_id}.json.pending.{'0' * 64}.{'b' * 32}.tmp"
+        )
+        pending.write_bytes(b"wrong-digest")
+
+        report = store.reconcile(now=datetime(2026, 8, 31, tzinfo=timezone.utc))
+
+        assert any(
+            finding.reason == "pending_control_untrusted" for finding in report.findings
+        )
+        assert pending.read_bytes() == b"wrong-digest"
+        assert not (root / "blob_manifest_hmac_key.bin").exists()
+    finally:
+        store.close()
+
+
 def test_invalid_checkpoint_does_not_starve_later_completed_orphan(
     tmp_path: Path,
 ) -> None:
@@ -1071,6 +1136,55 @@ def test_invalid_checkpoint_does_not_starve_later_completed_orphan(
         store.close()
 
 
+@pytest.mark.parametrize("backend", ("memory", "json", "sqlite"))
+def test_pristine_reconcile_apply_is_an_idempotent_noop(tmp_path: Path, backend: str) -> None:
+    """Apply does not create a manifest key merely to inspect an empty store."""
+    root = tmp_path / f"pristine-{backend}"
+    store = BlobStore(root, backend=InMemoryBackend() if backend == "memory" else backend)
+    try:
+        first = store.reconcile(apply=True, now=datetime(2026, 8, 31, tzinfo=timezone.utc))
+        second = store.reconcile(apply=True, now=datetime(2026, 8, 31, tzinfo=timezone.utc))
+        assert first.findings == second.findings == ()
+        assert not (root / "blob_manifest_hmac_key.bin").exists()
+    finally:
+        store.close()
+
+
+def test_dry_run_reports_malformed_matching_sidecar_without_deferring_startup(
+    tmp_path: Path,
+) -> None:
+    """A pathname-only sidecar remains inert while valid tombstone recovery proceeds."""
+    root = tmp_path / "matching-malformed-sidecar"
+    store = BlobStore(root, backend="json")
+    try:
+        store.put({"value": "delete"}, key="tombstone-key")
+        original_cleanup = store._delete_or_prove_absent
+        store._delete_or_prove_absent = lambda _locator: (_ for _ in ()).throw(
+            OSError("defer tombstone cleanup")
+        )  # type: ignore[method-assign]
+        with pytest.raises(CacheStorageError):
+            store.delete("tombstone-key")
+        store._delete_or_prove_absent = original_cleanup  # type: ignore[method-assign]
+        operation_id, _raw = next(iter(store.lifecycle.operation_repository.list_page().entries))
+        store.lifecycle.operation_repository.file_ops.write_bytes_durable(
+            store.lifecycle.operation_repository.reconciliation_checkpoint_locator(operation_id),
+            b"{",
+        )
+        report = store.reconcile(now=datetime(2026, 8, 31, tzinfo=timezone.utc))
+        assert any(
+            finding.reason == "reconciliation_checkpoint_untrusted"
+            for finding in report.findings
+        )
+    finally:
+        store.close()
+
+    reopened = BlobStore(root, backend="json")
+    try:
+        assert reopened.manifest_repository.get_raw("tombstone-key") is None
+    finally:
+        reopened.close()
+
+
 def test_tombstone_reconciliation_checkpoints_each_destructive_stage(
     tmp_path: Path,
 ) -> None:
@@ -1111,6 +1225,109 @@ def test_tombstone_reconciliation_checkpoints_each_destructive_stage(
     reopened = BlobStore(root, backend="json")
     try:
         reopened.reconcile(apply=True, now=datetime(2026, 8, 31, tzinfo=timezone.utc))
+        assert reopened.manifest_repository.get_raw("tombstone-key") is None
+        assert reopened.lifecycle.operation_repository.list_page().entries == ()
+        assert not list((root / "operations").glob("reconcile-action-*.json"))
+    finally:
+        reopened.close()
+
+
+@pytest.mark.parametrize(
+    "seam",
+    (
+        "reconcile_tombstone_before_payload_delete",
+        "reconcile_tombstone_inside_payload_delete",
+        "reconcile_tombstone_after_payload_delete",
+        "reconcile_tombstone_before_manifest_remove",
+        "reconcile_tombstone_inside_manifest_remove",
+        "reconcile_tombstone_after_manifest_remove",
+        "reconcile_tombstone_before_payload_deleted_checkpoint",
+        "reconcile_tombstone_inside_payload_deleted_checkpoint",
+        "reconcile_tombstone_after_payload_deleted_checkpoint",
+        "reconcile_tombstone_before_tombstone_removed_checkpoint",
+        "reconcile_tombstone_inside_tombstone_removed_checkpoint",
+        "reconcile_tombstone_after_tombstone_removed_checkpoint",
+        "reconcile_tombstone_before_checkpoint_complete",
+        "reconcile_tombstone_inside_checkpoint_complete",
+        "reconcile_tombstone_after_checkpoint_complete",
+        "reconcile_tombstone_before_primary_retire",
+        "reconcile_tombstone_inside_primary_retire",
+        "reconcile_tombstone_after_primary_retire",
+        "reconcile_tombstone_before_sidecar_retire",
+        "reconcile_tombstone_inside_sidecar_retire",
+        "reconcile_tombstone_after_sidecar_retire",
+    ),
+)
+def test_tombstone_fault_seams_converge_without_replaying_effects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seam: str,
+) -> None:
+    """Every lifecycle seam leaves one resumable destructive-effect history."""
+    class Interrupted(BaseException):
+        pass
+
+    root = tmp_path / seam
+    payload_deletes = 0
+    manifest_removals = 0
+    payload_locator: Path | None = None
+
+    def count_effects(active_store: BlobStore) -> None:
+        nonlocal payload_deletes, manifest_removals
+        original_delete = active_store.guarded_handler_io.file_ops.delete_durable
+        original_remove = active_store.manifest_repository.remove_if_expected
+
+        def delete_once(locator: Path) -> bool:
+            nonlocal payload_deletes
+            deleted = original_delete(locator)
+            if locator == payload_locator:
+                payload_deletes += int(deleted)
+            return deleted
+
+        def remove_once(key: str, expectation: object) -> object:
+            nonlocal manifest_removals
+            manifest_removals += 1
+            return original_remove(key, expectation)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(
+            active_store.guarded_handler_io.file_ops, "delete_durable", delete_once
+        )
+        monkeypatch.setattr(active_store.manifest_repository, "remove_if_expected", remove_once)
+
+    store = BlobStore(root, backend="json")
+    try:
+        store.put({"value": "delete"}, key="tombstone-key")
+        original_cleanup = store._delete_or_prove_absent
+        store._delete_or_prove_absent = lambda _locator: (_ for _ in ()).throw(
+            OSError("defer tombstone cleanup")
+        )  # type: ignore[method-assign]
+        with pytest.raises(CacheStorageError):
+            store.delete("tombstone-key")
+        store._delete_or_prove_absent = original_cleanup  # type: ignore[method-assign]
+        operation_id, raw = next(
+            iter(store.lifecycle.operation_repository.list_page().entries)
+        )
+        recovered = store.lifecycle._recoverable_record(operation_id, raw)
+        assert recovered is not None
+        _record, payload_locator, _previous = recovered
+        count_effects(store)
+
+        def interrupt(step: str, _record: LifecycleOperationRecord) -> None:
+            if step == seam:
+                raise Interrupted(seam)
+
+        store.lifecycle.fault_hook = interrupt
+        with pytest.raises(Interrupted, match=seam):
+            store.reconcile(apply=True, now=datetime(2026, 8, 31, tzinfo=timezone.utc))
+    finally:
+        store.close()
+
+    reopened = BlobStore(root, backend="json")
+    try:
+        count_effects(reopened)
+        reopened.reconcile(apply=True, now=datetime(2026, 8, 31, tzinfo=timezone.utc))
+        assert payload_deletes == 1
+        assert manifest_removals == 1
         assert reopened.manifest_repository.get_raw("tombstone-key") is None
         assert reopened.lifecycle.operation_repository.list_page().entries == ()
         assert not list((root / "operations").glob("reconcile-action-*.json"))

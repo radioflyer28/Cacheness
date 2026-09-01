@@ -231,8 +231,21 @@ class _WindowsFileApi:
                 self._raise_last_error("CloseHandle")
         return identity
 
-    def flush_regular_file(self, locator: Path) -> None:
-        """Flush an existing regular file through documented file-handle semantics."""
+    def flush_regular_file(
+        self,
+        locator: Path,
+        *,
+        expected_identity: tuple[int, int] | None = None,
+    ) -> None:
+        """Flush one retained, reparse-safe regular-file handle.
+
+        ``expected_identity`` is the portable ``stat`` identity captured by
+        the caller.  Win32 file IDs use a different representation, so this
+        adapter validates the opened handle's reparse/link invariants and the
+        caller re-checks its portable identity after close.  Keeping both
+        checks around *this* flush handle prevents a pathname-only durability
+        acknowledgement from silently accepting a substituted key object.
+        """
         handle = self._create_file(
             str(locator),
             self._GENERIC_WRITE,
@@ -247,6 +260,23 @@ class _WindowsFileApi:
             self._raise_last_error("CreateFileW")
         flush_failure: BaseException | None = None
         try:
+            information = self._ByHandleFileInformation()
+            if not self._get_file_information(handle, ctypes.byref(information)):
+                self._raise_last_error("GetFileInformationByHandle")
+            if (
+                information.FileAttributes & self._FILE_ATTRIBUTE_REPARSE_POINT
+                or information.NumberOfLinks != 1
+            ):
+                _unsafe_path(CacheReason.PATH_RACE)
+            if expected_identity is not None:
+                current = os.lstat(locator)
+                if (
+                    (current.st_dev, current.st_ino) != expected_identity
+                    or _is_link_or_reparse(current)
+                    or not stat.S_ISREG(current.st_mode)
+                    or current.st_nlink != 1
+                ):
+                    _unsafe_path(CacheReason.PATH_RACE)
             if not self._flush_file_buffers(handle):
                 self._raise_last_error("FlushFileBuffers")
         except BaseException as exc:

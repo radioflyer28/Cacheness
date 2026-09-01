@@ -52,6 +52,39 @@ class OperationPage:
     next_cursor: OperationCursor | None
 
 
+@dataclass(frozen=True)
+class ReconciliationCheckpointCursor:
+    """Opaque stable position after one reconciliation-sidecar page."""
+
+    operation_id: str
+
+    def __post_init__(self) -> None:
+        validate_blob_id(self.operation_id)
+
+
+@dataclass(frozen=True)
+class ReconciliationCheckpointPage:
+    """Bounded opaque inventory of private reconciliation sidecars."""
+
+    entries: tuple[tuple[str, bytes | None], ...]
+    next_cursor: ReconciliationCheckpointCursor | None
+
+
+@dataclass(frozen=True)
+class PendingControlCursor:
+    """Opaque durable scheduling position for digest-bound pending controls."""
+
+    name: str
+
+
+@dataclass(frozen=True)
+class PendingControlPage:
+    """A bounded page of exact pending control candidates and their bytes."""
+
+    entries: tuple[tuple[str, bytes | None], ...]
+    next_cursor: PendingControlCursor | None
+
+
 class OperationRecordRepository(Protocol):
     """Exact-byte evidence storage used by lifecycle and recovery code."""
 
@@ -86,6 +119,14 @@ class OperationRecordRepository(Protocol):
         page_size: int | None = None,
     ) -> OperationPage:
         """Return a stable, bounded inventory page without interpreting evidence."""
+
+    def list_reconciliation_checkpoint_page(
+        self,
+        cursor: ReconciliationCheckpointCursor | None = None,
+        *,
+        page_size: int | None = None,
+    ) -> ReconciliationCheckpointPage:
+        """Return bounded private-sidecar bytes without assigning authority."""
 
     def create_clear_target_page_exclusive(
         self, operation_id: str, page_id: str, raw_record: bytes
@@ -445,6 +486,43 @@ class FileOperationRecordRepository:
             allow_missing_leaf=True,
         )
 
+    def _pending_recovery_cursor_locator(self) -> Path:
+        """Return private, non-authoritative progress for pending control scans."""
+        return resolve_managed_locator(
+            self.file_ops.root,
+            Path("operations") / ".pending-recovery.cursor",
+            operation="pending_recovery_cursor",
+            allow_missing_leaf=True,
+        )
+
+    def _pending_recovery_cursor(self) -> PendingControlCursor | None:
+        """Read bounded scheduler progress; malformed progress safely restarts."""
+        try:
+            raw = self.file_ops.read_bytes_bounded(
+                self._pending_recovery_cursor_locator(),
+                max_bytes=self.lifecycle_limits.max_operation_field_bytes,
+            )
+        except (FileNotFoundError, OSError, ValueError):
+            return None
+        try:
+            name = raw.decode("ascii")
+        except UnicodeDecodeError:
+            return None
+        return PendingControlCursor(name) if self._is_eligible_pending_name(name) else None
+
+    def _checkpoint_pending_recovery_cursor(
+        self, cursor: PendingControlCursor | None
+    ) -> None:
+        """Durably advance opaque scan scheduling without granting authority."""
+        locator = self._pending_recovery_cursor_locator()
+        if cursor is None:
+            try:
+                self.file_ops.delete_durable(locator)
+            except FileNotFoundError:
+                pass
+            return
+        self.file_ops.write_bytes_durable(locator, cursor.name.encode("ascii"))
+
     def get_reconciliation_checkpoint_raw(self, operation_id: str) -> bytes | None:
         """Read opaque reconciliation progress without granting it authority."""
         return self._read_bounded(
@@ -452,13 +530,22 @@ class FileOperationRecordRepository:
             operation="get_reconcile",
         )
 
-    def list_reconciliation_checkpoint_raws(self) -> tuple[tuple[str, bytes], ...]:
-        """Return a bounded inventory of exact reconciliation sidecars.
+    def list_reconciliation_checkpoint_page(
+        self,
+        cursor: ReconciliationCheckpointCursor | None = None,
+        *,
+        page_size: int | None = None,
+    ) -> ReconciliationCheckpointPage:
+        """Return one stable bounded page of reconciliation sidecar bytes.
 
-        These names are excluded from normal operation evidence pages, so a
-        completed sidecar orphaned after its primary retirement needs its own
-        authenticated recovery inventory.
+        Sidecars are opaque scheduling evidence until the reconciler validates
+        their exact canonical bytes.  The repository therefore advances past
+        malformed candidates instead of repeatedly reading an invalid lexical
+        prefix, and reports an unreadable/oversized candidate as ``None``.
         """
+        if cursor is not None and not isinstance(cursor, ReconciliationCheckpointCursor):
+            raise TypeError("reconciliation checkpoint cursor is invalid")
+        limit = self._page_size(page_size)
         operations_directory = resolve_managed_locator(
             self.file_ops.root,
             "operations",
@@ -468,26 +555,57 @@ class FileOperationRecordRepository:
         prefix = "reconcile-action-"
         suffix = ".json"
         try:
-            # Do not spend the reconciliation action budget on a name alone.
-            # Every candidate below still receives a bounded, no-follow read,
-            # but malformed or unauthenticated sidecars are later reported as
-            # blocked rather than permanently hiding a valid completed orphan
-            # behind the same lexical first page.
-            operation_ids = sorted(
-                name[len(prefix) : -len(suffix)]
-                for name in (path.name for path in operations_directory.iterdir())
-                if name.startswith(prefix)
-                and name.endswith(suffix)
-                and self._is_hex_identifier(name[len(prefix) : -len(suffix)])
+            operation_ids = nsmallest(
+                limit + 1,
+                (
+                    operation_id
+                    for name in (path.name for path in operations_directory.iterdir())
+                    if name.startswith(prefix)
+                    and name.endswith(suffix)
+                    for operation_id in (name[len(prefix) : -len(suffix)],)
+                    if self._is_hex_identifier(operation_id)
+                    and (cursor is None or operation_id > cursor.operation_id)
+                ),
             )
         except FileNotFoundError:
-            return ()
+            return ReconciliationCheckpointPage(entries=(), next_cursor=None)
+        except OSError as exc:
+            raise CacheBlobBackendError(
+                "Reconciliation checkpoint directory could not be listed",
+                context={"operation": "list_reconciliation_checkpoints"},
+            ) from exc
+        has_more = len(operation_ids) > limit
+        page_ids = operation_ids[:limit]
+        records: list[tuple[str, bytes | None]] = []
+        for operation_id in page_ids:
+            try:
+                raw = self.get_reconciliation_checkpoint_raw(operation_id)
+            except (CacheManifestIntegrityError, CacheBlobBackendError):
+                raw = None
+            records.append((operation_id, raw))
+        return ReconciliationCheckpointPage(
+            entries=tuple(records),
+            next_cursor=(
+                ReconciliationCheckpointCursor(page_ids[-1])
+                if has_more and page_ids
+                else None
+            ),
+        )
+
+    def list_reconciliation_checkpoint_raws(self) -> tuple[tuple[str, bytes], ...]:
+        """Compatibility iterator composed from bounded sidecar pages."""
+        cursor: ReconciliationCheckpointCursor | None = None
         records: list[tuple[str, bytes]] = []
-        for operation_id in operation_ids:
-            raw = self.get_reconciliation_checkpoint_raw(operation_id)
-            if raw is not None:
-                records.append((operation_id, raw))
-        return tuple(records)
+        while True:
+            page = self.list_reconciliation_checkpoint_page(cursor)
+            records.extend(
+                (operation_id, raw)
+                for operation_id, raw in page.entries
+                if raw is not None
+            )
+            if page.next_cursor is None:
+                return tuple(records)
+            cursor = page.next_cursor
 
     def create_reconciliation_checkpoint_exclusive(
         self, operation_id: str, raw_record: bytes
@@ -1122,52 +1240,38 @@ class FileOperationRecordRepository:
                 ), None
         return None
 
-    def recover_pending_operation_records(self) -> tuple[str, ...]:
-        """Promote digest-bound interrupted lifecycle control candidates.
-
-        A candidate name binds one exact final control name and SHA-256 of its
-        contents. Malformed names, oversized bytes, and digest mismatches remain
-        untouched for reconciliation reporting; no broad temporary-file sweep
-        is ever used as ownership evidence.
-        """
+    def list_pending_control_page(
+        self, cursor: PendingControlCursor | None
+    ) -> PendingControlPage:
+        """Read at most one configured page of digest-bound pending controls."""
         operations_directory = resolve_managed_locator(
             self.file_ops.root,
             "operations",
-            operation="recover_pending_operation_records",
+            operation="list_pending_operation_records",
             allow_missing_leaf=True,
         )
-        recovered: list[str] = []
+        limit = self.lifecycle_limits.operation_page_size
         try:
-            names = sorted(
-                path.name
-                for path in operations_directory.iterdir()
-                if self._is_eligible_pending_name(path.name)
+            names = nsmallest(
+                limit + 1,
+                (
+                    path.name
+                    for path in operations_directory.iterdir()
+                    if self._is_eligible_pending_name(path.name)
+                    and (cursor is None or path.name > cursor.name)
+                ),
             )
         except FileNotFoundError:
-            return ()
-        eligible_actions = 0
-        for name in names:
-            if not (name.startswith(".") and name.endswith(".tmp")):
-                continue
-            pending_parts = name[1:-4].rsplit(".pending.", 1)
-            if len(pending_parts) != 2:
-                continue
-            base, digest_and_token = pending_parts
-            resolved_final = self._recoverable_pending_final(base)
-            if resolved_final is None:
-                continue
-            final_locator, operation_id = resolved_final
-            digest_parts = digest_and_token.rsplit(".", 1)
-            if len(digest_parts) != 2:
-                continue
-            digest, token = digest_parts
-            if (
-                len(digest) != 64
-                or any(character not in "0123456789abcdef" for character in digest)
-                or len(token) != 32
-                or any(character not in "0123456789abcdef" for character in token)
-            ):
-                continue
+            return PendingControlPage(entries=(), next_cursor=None)
+        except OSError as exc:
+            raise CacheBlobBackendError(
+                "Interrupted lifecycle control directory could not be listed",
+                context={"operation": "recover_pending"},
+            ) from exc
+        has_more = len(names) > limit
+        page_names = names[:limit]
+        entries: list[tuple[str, bytes | None]] = []
+        for name in page_names:
             pending = resolve_managed_locator(
                 self.file_ops.root,
                 Path("operations") / name,
@@ -1177,9 +1281,63 @@ class FileOperationRecordRepository:
                 raw = self.file_ops.read_bytes_bounded(
                     pending, max_bytes=self.lifecycle_limits.max_operation_record_bytes
                 )
-            except (FileNotFoundError, ValueError):
+            except (FileNotFoundError, ValueError, OSError):
+                raw = None
+            entries.append((name, raw))
+        return PendingControlPage(
+            entries=tuple(entries),
+            next_cursor=(
+                PendingControlCursor(page_names[-1])
+                if has_more and page_names
+                else None
+            ),
+        )
+
+    def recover_pending_operation_records(self) -> tuple[str, ...]:
+        """Promote digest-bound interrupted lifecycle control candidates.
+
+        A candidate name binds one exact final control name and SHA-256 of its
+        contents. Malformed names, oversized bytes, and digest mismatches remain
+        untouched for reconciliation reporting; no broad temporary-file sweep
+        is ever used as ownership evidence.
+        """
+        cursor = self._pending_recovery_cursor()
+        page = self.list_pending_control_page(cursor)
+        recovered: list[str] = []
+        eligible_actions = 0
+        last_processed: str | None = None
+        for name, raw in page.entries:
+            if not (name.startswith(".") and name.endswith(".tmp")):
+                last_processed = name
+                continue
+            pending_parts = name[1:-4].rsplit(".pending.", 1)
+            if len(pending_parts) != 2:
+                last_processed = name
+                continue
+            base, digest_and_token = pending_parts
+            resolved_final = self._recoverable_pending_final(base)
+            if resolved_final is None:
+                last_processed = name
+                continue
+            final_locator, operation_id = resolved_final
+            digest_parts = digest_and_token.rsplit(".", 1)
+            if len(digest_parts) != 2:
+                last_processed = name
+                continue
+            digest, token = digest_parts
+            if (
+                len(digest) != 64
+                or any(character not in "0123456789abcdef" for character in digest)
+                or len(token) != 32
+                or any(character not in "0123456789abcdef" for character in token)
+            ):
+                last_processed = name
+                continue
+            if raw is None:
+                last_processed = name
                 continue
             if hashlib.sha256(raw).hexdigest() != digest:
+                last_processed = name
                 continue
             if eligible_actions >= self.lifecycle_limits.max_reconcile_actions:
                 break
@@ -1199,6 +1357,18 @@ class FileOperationRecordRepository:
             # Syntax-valid bytes with the wrong digest deliberately do not
             # consume this budget and remain untouched/reportable.
             eligible_actions += 1
+            last_processed = name
+        # A pending candidate is scheduling evidence, never lifecycle
+        # authority.  Persisting its opaque name lets later invocations move
+        # past invalid or Windows-blocked prefixes without deleting them.
+        next_cursor = (
+            PendingControlCursor(last_processed)
+            if last_processed is not None
+            and (eligible_actions >= self.lifecycle_limits.max_reconcile_actions
+                 or last_processed != page.entries[-1][0])
+            else page.next_cursor
+        )
+        self._checkpoint_pending_recovery_cursor(next_cursor)
         return tuple(recovered)
 
     def _is_eligible_pending_name(self, name: str) -> bool:
@@ -1413,4 +1583,8 @@ __all__ = [
     "OperationCursor",
     "OperationPage",
     "OperationRecordRepository",
+    "PendingControlCursor",
+    "PendingControlPage",
+    "ReconciliationCheckpointCursor",
+    "ReconciliationCheckpointPage",
 ]

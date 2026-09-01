@@ -12,6 +12,7 @@ from typing import Any, Callable
 from cacheness.config import LifecycleLimits
 from cacheness.error_handling import (
     CacheBlobLifecycleConflictError,
+    CacheBlobReconciliationCheckpointError,
     CacheBlobRecoverableCleanupError,
     CacheManifestIntegrityError,
     CacheStorageError,
@@ -1047,12 +1048,7 @@ class LifecycleEngine:
         # startup recovery must not retire the record underneath a prepared
         # sidecar.  Invalid sidecars remain inert evidence and cannot grant
         # deletion authority; reconciliation reports them separately.
-        if (
-            self.operation_repository.get_reconciliation_checkpoint_raw(
-                record.operation_id
-            )
-            is not None
-        ):
+        if self._has_authenticated_tombstone_checkpoint(record):
             return
         current = self.store._load_authenticated_manifest_with_raw(
             record.key,
@@ -1097,6 +1093,37 @@ class LifecycleEngine:
             )
             return
         self._retire(record)
+
+    def _has_authenticated_tombstone_checkpoint(
+        self, record: LifecycleOperationRecord
+    ) -> bool:
+        """Return whether a bound sidecar, not its pathname, owns this tombstone."""
+        raw = self.operation_repository.get_reconciliation_checkpoint_raw(
+            record.operation_id
+        )
+        if raw is None:
+            return False
+        primary_raw = self.operation_repository.get_raw(record.operation_id)
+        if primary_raw is None:
+            return False
+        # Import lazily to avoid the lifecycle/reconciliation construction
+        # cycle.  A private sidecar can defer startup only when its signature,
+        # operation ID, action, and digest all bind this exact primary record.
+        from .reconciliation import _ActionCheckpoint, ReconciliationAction
+
+        try:
+            checkpoint = _ActionCheckpoint.from_canonical_bytes(
+                raw,
+                self.store._manifest_key(),
+                lifecycle_limits=self.lifecycle_limits,
+            )
+        except CacheBlobReconciliationCheckpointError:
+            return False
+        return (
+            checkpoint.operation_id == record.operation_id
+            and checkpoint.action is ReconciliationAction.COMPLETE_TOMBSTONE
+            and checkpoint.evidence_digest == hashlib.sha256(primary_raw).hexdigest()
+        )
 
     def _find_tombstone_record(
         self,

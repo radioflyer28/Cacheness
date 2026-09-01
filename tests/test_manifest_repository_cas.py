@@ -823,6 +823,16 @@ def test_native_windows_regular_file_flush_uses_documented_handle_and_closes(
     api._close_handle = lambda handle: calls.append(("close", handle)) or 1
     api._last_error = lambda: 5
 
+    def get_information(_handle, information) -> int:
+        contents = ctypes.cast(
+            information, ctypes.POINTER(api._ByHandleFileInformation)
+        ).contents
+        contents.FileAttributes = 0
+        contents.NumberOfLinks = 1
+        return 1
+
+    api._get_file_information = get_information
+
     api.flush_regular_file(tmp_path / "control.json")
 
     create_arguments = calls[0]

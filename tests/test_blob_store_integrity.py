@@ -6,6 +6,7 @@ import logging
 import json
 import os
 import inspect
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -82,7 +83,7 @@ def test_key_provider_returns_the_attested_winner_of_a_first_write_race(
     original_open = integrity_module.os.open
 
     def winner_open(path, flags, *args):
-        if flags & os.O_EXCL:
+        if flags & os.O_EXCL and Path(path) == key_path:
             Path(path).write_bytes(_KEY)
             Path(path).chmod(0o600)
             raise FileExistsError
@@ -125,6 +126,100 @@ def test_key_provider_acknowledges_the_exact_new_trust_root_before_return(
     assert acknowledged_path == key_path
     assert expected_identity == (stat_result.st_dev, stat_result.st_ino)
     assert isinstance(durability, ManifestKeyDurabilityProvider)
+
+
+def test_concurrent_first_key_call_waits_for_acknowledged_ready_record(tmp_path: Path) -> None:
+    """No concurrent initializer receives a visible key before acknowledgement."""
+    entered = threading.Event()
+    release = threading.Event()
+    results: list[bytes] = []
+
+    class BlockingDurability:
+        def acknowledge_new_key(self, _path: Path, _identity: tuple[int, int]) -> None:
+            entered.set()
+            assert release.wait(timeout=5)
+
+    provider = ManifestKeyProvider(
+        tmp_path / "blob_manifest_hmac_key.bin", durability_provider=BlockingDurability()
+    )
+    winner = threading.Thread(target=lambda: results.append(provider.get_or_initialize_new_store()))
+    loser = threading.Thread(target=lambda: results.append(provider.get_or_initialize_new_store()))
+    winner.start()
+    assert entered.wait(timeout=5)
+    loser.start()
+    loser.join(timeout=0.05)
+    assert loser.is_alive()
+    assert results == []
+    release.set()
+    winner.join(timeout=5)
+    loser.join(timeout=5)
+    assert results == [provider.get_key(), provider.get_key()]
+
+
+def test_unacknowledged_key_is_resumed_after_provider_failure(tmp_path: Path) -> None:
+    """A failed acknowledgement leaves an exact retryable inode, never authority."""
+    calls = 0
+
+    class FailOnceDurability:
+        def acknowledge_new_key(self, _path: Path, _identity: tuple[int, int]) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise OSError("acknowledgement unavailable")
+
+    provider = ManifestKeyProvider(
+        tmp_path / "blob_manifest_hmac_key.bin", durability_provider=FailOnceDurability()
+    )
+    with pytest.raises(ManifestKeyError):
+        provider.initialize_new_store()
+    with pytest.raises(ManifestKeyError):
+        provider.get_key()
+    resumed = provider.get_or_initialize_new_store()
+    assert resumed == provider.get_key()
+    assert calls == 2
+
+
+def test_unacknowledged_key_is_resumed_after_close_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A close failure leaves an exact but unusable key that a retry completes."""
+    import cacheness.storage.integrity as integrity_module
+
+    provider = ManifestKeyProvider(tmp_path / "blob_manifest_hmac_key.bin")
+    original_close = integrity_module.os.close
+    failed = False
+
+    def fail_first_close(descriptor: int) -> None:
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise OSError("close uncertain")
+        original_close(descriptor)
+
+    monkeypatch.setattr(integrity_module.os, "close", fail_first_close)
+    with pytest.raises(ManifestKeyError):
+        provider.initialize_new_store()
+    monkeypatch.setattr(integrity_module.os, "close", original_close)
+    assert provider.get_or_initialize_new_store() == provider.get_key()
+
+
+def test_custom_manifest_key_provider_exception_is_translated(tmp_path: Path) -> None:
+    """Every ordinary application-provider exception stays inside the public boundary."""
+    class CustomProviderError(Exception):
+        pass
+
+    class ExplodingProvider:
+        def get_key(self) -> bytes:
+            raise CustomProviderError("keystore policy")
+
+    store = BlobStore(tmp_path, manifest_key_provider=ExplodingProvider())
+    try:
+        with pytest.raises(CacheBlobManifestUnauthenticatedError) as error:
+            store.put({"value": "blocked"}, key="blocked")
+        assert isinstance(error.value.__cause__, CustomProviderError)
+        assert error.value.context["provider"] == "ExplodingProvider"
+    finally:
+        store.close()
 
 
 def test_injected_key_provider_operational_failure_is_typed(tmp_path: Path) -> None:

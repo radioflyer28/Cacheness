@@ -987,34 +987,43 @@ class BlobStore:
 
     def _manifest_key(self, *, initialize_new_store: bool = False) -> bytes:
         """Return the strict persistent key without silently downgrading signing."""
-        if initialize_new_store and not self.manifest_repository.list_page(
-            page_size=1
-        ).entries:
+        operation = "get_manifest_key"
+        if initialize_new_store:
+            # Repository availability is a storage boundary, not a key-provider
+            # failure.  Preserve its typed cause instead of misreporting an
+            # unavailable metadata projection as unauthenticated key material.
             try:
+                has_manifest = bool(
+                    self.manifest_repository.list_page(page_size=1).entries
+                )
+            except CacheStorageError:
+                raise
+        else:
+            has_manifest = True
+        try:
+            if initialize_new_store and not has_manifest:
+                operation = "initialize_manifest_key"
                 initializer = getattr(
                     self._manifest_key_provider, "get_or_initialize_new_store", None
                 )
                 if callable(initializer):
-                    return initializer()
-                # An injected provider owns its trust-root provisioning.  It
-                # may expose only the narrow public ``get_key`` protocol.
-                return self._manifest_key_provider.get_key()
-            except (ManifestKeyError, OSError, RuntimeError) as exc:
-                raise CacheBlobManifestUnauthenticatedError(
-                    "Canonical BlobStore signing key is unavailable",
-                    context={
-                        "operation": "initialize_manifest_key",
-                        "provider": type(self._manifest_key_provider).__name__,
-                    },
-                    reason=CacheReason.MANIFEST_SIGNING_KEY_INVALID,
-                ) from exc
-        try:
-            return self._manifest_key_provider.get_key()
-        except (ManifestKeyError, OSError, RuntimeError) as exc:
+                    key = initializer()
+                else:
+                    # An injected provider owns its trust-root provisioning.
+                    # It may expose only the narrow public ``get_key`` protocol.
+                    key = self._manifest_key_provider.get_key()
+            else:
+                key = self._manifest_key_provider.get_key()
+            if type(key) is not bytes or len(key) != 32:
+                raise ManifestKeyError(
+                    "Canonical manifest key provider returned invalid key material"
+                )
+            return key
+        except Exception as exc:
             raise CacheBlobManifestUnauthenticatedError(
                 "Canonical BlobStore signing key is unavailable",
                 context={
-                    "operation": "get_manifest_key",
+                    "operation": operation,
                     "provider": type(self._manifest_key_provider).__name__,
                 },
                 reason=CacheReason.MANIFEST_SIGNING_KEY_INVALID,
