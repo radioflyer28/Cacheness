@@ -16,6 +16,7 @@ from cacheness.config import LifecycleLimits
 from cacheness.error_handling import (
     CacheBlobLifecycleConflictError,
     CacheBlobRecoverableCleanupError,
+    CacheUnsafePathError,
 )
 from cacheness.storage import BlobStore
 from cacheness.storage.manifest import BlobManifestV1
@@ -25,6 +26,7 @@ from cacheness.storage.operation_record import (
     ClearTargetPage,
 )
 from cacheness.storage.operation_repository import FileOperationRecordRepository
+from cacheness.storage.path_security import ManagedFileOps, resolve_managed_locator
 
 
 class _NativeJsonHandler:
@@ -103,6 +105,24 @@ def _exit_during_control_durability_step(
         store.put({"interrupted": step}, key="interrupted-control-record")
 
 
+def _exit_during_fixed_lock_creation(root: str, relative_locator: str) -> None:
+    """Model process loss while directly creating one non-authoritative lock inode."""
+    file_ops = ManagedFileOps(root)
+    locator = resolve_managed_locator(
+        file_ops.root,
+        relative_locator,
+        operation="fixed_lock_process_loss",
+        allow_missing_leaf=True,
+    )
+
+    def stop(step: str, _locator: Path) -> None:
+        if step == "lock_file_bytes_fsynced":
+            os._exit(23)
+
+    file_ops.after_control_durability_step = stop
+    file_ops.ensure_lifecycle_lock(locator)
+
+
 class _FailingSerializationHandler(_NativeJsonHandler):
     """Prove private handler serialization precedes lifecycle evidence."""
 
@@ -168,6 +188,42 @@ def test_tracer_json_put_uses_immutable_generation_cas_and_native_bytes(
             "private_serialization",
             "handler_read",
         ]
+    finally:
+        store.close()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="special-node substitution fixture")
+@pytest.mark.parametrize("replacement_kind", ("symlink", "hard_link", "fifo", "inode"))
+def test_candidate_verification_rejects_every_substituted_inode_before_manifest_cas(
+    tmp_path: Path, replacement_kind: str
+) -> None:
+    """Candidate verification never follows or commits a substituted payload inode."""
+    root = tmp_path / f"candidate-substitution-{replacement_kind}"
+    outside = tmp_path / f"outside-{replacement_kind}"
+    outside.write_bytes(b"outside bytes must never be hashed")
+    store = BlobStore(root, backend="json")
+    key = "candidate-key"
+
+    def replace_candidate(seam: str, record: object) -> None:
+        if seam != "candidate_verification":
+            return
+        candidate = root / getattr(record, "candidate_locator")
+        candidate.unlink()
+        if replacement_kind == "symlink":
+            candidate.symlink_to(outside)
+        elif replacement_kind == "hard_link":
+            os.link(outside, candidate)
+        elif replacement_kind == "fifo":
+            os.mkfifo(candidate)
+        else:
+            candidate.write_bytes(b"replacement inode")
+
+    store.lifecycle.fault_hook = replace_candidate
+    try:
+        with pytest.raises(CacheUnsafePathError):
+            store.put({"payload": replacement_kind}, key=key)
+        assert store.manifest_repository.get_raw(key) is None
+        assert outside.read_bytes() == b"outside bytes must never be hashed"
     finally:
         store.close()
 
@@ -919,11 +975,9 @@ def test_partial_clear_control_publish_never_installs_a_poisoned_final_record(
 @pytest.mark.parametrize(
     "step",
     (
-        "control_temp_created",
-        "control_final_installed",
-        "control_first_directory_flush",
-        "control_temp_retired",
-        "control_second_directory_flush",
+        "control_temp_fsynced",
+        "control_rename_completed",
+        "control_directory_fsynced",
     ),
 )
 @pytest.mark.parametrize("control_prefix", ("", "clear-target-"))
@@ -950,3 +1004,46 @@ def test_process_loss_at_control_publish_boundaries_leaves_no_operation_residue(
         assert not list(operations.glob("clear-target-*.json"))
     finally:
         reopened.close()
+
+
+@pytest.mark.parametrize(
+    "relative_locator",
+    (
+        ".cacheness-lifecycle-admission.lock",
+        ".cache_metadata.json.manifest-cas.lock",
+        "operations/.clear-resume.lock",
+        "operations/.conditional-locks/00.lock",
+    ),
+)
+def test_process_loss_during_fixed_lock_creation_leaves_no_pending_residue(
+    tmp_path: Path, relative_locator: str
+) -> None:
+    """Lock files use direct final-name creation, not unreconciled pending names.
+
+    ``os._exit`` models process loss only; it does not claim physical power-loss
+    durability. Reopening must still accept/recreate the non-authoritative
+    regular inode without accumulating any pending candidate files.
+    """
+    root = tmp_path / f"fixed-lock-loss-{relative_locator.replace('/', '-')}"
+    root.mkdir()
+    context = multiprocessing.get_context("spawn")
+    worker = context.Process(
+        target=_exit_during_fixed_lock_creation,
+        args=(str(root), relative_locator),
+    )
+    worker.start()
+    worker.join(timeout=15)
+    assert worker.exitcode == 23
+
+    file_ops = ManagedFileOps(root)
+    try:
+        locator = resolve_managed_locator(
+            file_ops.root,
+            relative_locator,
+            operation="fixed_lock_reopen",
+            allow_missing_leaf=True,
+        )
+        file_ops.ensure_lifecycle_lock(locator)
+        assert not list(root.rglob("*.pending.*.tmp"))
+    finally:
+        file_ops.close()

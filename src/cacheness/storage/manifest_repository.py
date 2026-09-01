@@ -230,13 +230,7 @@ class _MetadataManifestRepository:
                     operation="manifest_repository_authority_lock",
                     allow_missing_leaf=True,
                 )
-                try:
-                    self._json_lock_file_ops.create_bytes_durable_exclusive(
-                        self._json_lock_locator, b"lock\n"
-                    )
-                except FileExistsError:
-                    pass
-                expected_lock_identity = self._json_lock_file_ops.retain_lock_identity(
+                expected_lock_identity = self._json_lock_file_ops.ensure_lifecycle_lock(
                     self._json_lock_locator
                 )
                 self._json_lock_handle = self._json_lock_file_ops.open_verified_regular_file(

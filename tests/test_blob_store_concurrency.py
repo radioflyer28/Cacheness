@@ -4,13 +4,15 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import multiprocessing
+import os
 import threading
+from pathlib import Path
 
 import pytest
 
 from cacheness.error_handling import CacheBlobLifecycleConflictError
 from cacheness.storage.blob_store import BlobStore
-from cacheness.storage.coordination import KeyCoordinatorRegistry
+from cacheness.storage.coordination import KeyCoordinatorRegistry, StoreAdmissionBarrier
 
 
 def _put_from_independent_process(
@@ -35,6 +37,53 @@ def _join(thread: threading.Thread) -> None:
     """Join one deterministic test worker without hiding a deadlock."""
     thread.join(timeout=5)
     assert not thread.is_alive(), "worker did not finish within the bounded wait"
+
+
+def _try_external_exclusive_admission(lock_path: str, outcomes: multiprocessing.queues.Queue) -> None:
+    """Report whether a fresh process can take the barrier's exclusive lock."""
+    import fcntl
+
+    descriptor = os.open(lock_path, os.O_RDONLY)
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            outcomes.put(False)
+        else:
+            outcomes.put(True)
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX advisory-lock contract")
+def test_two_local_readers_hold_shared_admission_until_the_last_exit(tmp_path: Path) -> None:
+    """One reader exit must not unlock the shared OS admission for another."""
+    root = tmp_path / "aggregate-shared-admission"
+    root.mkdir()
+    barrier = StoreAdmissionBarrier.acquire(root)
+    outcomes = multiprocessing.get_context("spawn").Queue()
+
+    def can_take_exclusive() -> bool:
+        process = multiprocessing.get_context("spawn").Process(
+            target=_try_external_exclusive_admission,
+            args=(str(barrier._lock_locator), outcomes),
+        )
+        process.start()
+        process.join(timeout=10)
+        assert process.exitcode == 0
+        return outcomes.get(timeout=5)
+
+    try:
+        with barrier.ordinary_admission():
+            with barrier.ordinary_admission():
+                assert can_take_exclusive() is False
+            # The inner reader has exited, but the outer reader still owns the
+            # same aggregate OS shared lock.
+            assert can_take_exclusive() is False
+        assert can_take_exclusive() is True
+    finally:
+        barrier.release()
 
 
 def test_key_registry_retires_entries_after_exception_and_high_cardinality():

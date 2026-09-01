@@ -237,9 +237,7 @@ def interprocess_file_lock(
     store authority uses retained descriptors instead.
     """
     try:
-        file_ops.create_bytes_durable_exclusive(locator, b"lock\n")
-    except FileExistsError:
-        pass
+        expected_identity = file_ops.ensure_lifecycle_lock(locator)
     except OSError as exc:
         raise CacheBlobBackendError(
             "BlobStore lifecycle lock could not be acquired",
@@ -247,7 +245,6 @@ def interprocess_file_lock(
         ) from exc
 
     try:
-        expected_identity = file_ops.retain_lock_identity(locator)
         handle = file_ops.open_verified_regular_file(locator)
         if (os.fstat(handle.fileno()).st_dev, os.fstat(handle.fileno()).st_ino) != expected_identity:
             handle.close()
@@ -308,6 +305,12 @@ class StoreAdmissionBarrier:
         self._condition = Condition(Lock())
         self._aggregate_active = False
         self._ordinary_active = 0
+        # One retained file description owns the process-wide OS shared lock.
+        # Context-manager entries are therefore reference-counted separately:
+        # flock/LockFileEx is acquired on 0 -> 1 and released on 1 -> 0 only.
+        self._ordinary_lock_opening = False
+        self._ordinary_lock_closing = False
+        self._ordinary_lock_context: object | None = None
         # The barrier owns this separate descriptor boundary.  A BlobStore
         # instance can close while another same-root instance remains active;
         # retaining an individual instance's ManagedFileOps would make the
@@ -324,11 +327,9 @@ class StoreAdmissionBarrier:
         )
         self._lock_handle = None
         try:
-            try:
-                self._file_ops.create_bytes_durable_exclusive(self._lock_locator, b"lock\n")
-            except FileExistsError:
-                pass
-            self._lock_identity = self._file_ops.retain_lock_identity(self._lock_locator)
+            self._lock_identity = self._file_ops.ensure_lifecycle_lock(
+                self._lock_locator
+            )
             self._lock_handle = self._file_ops.open_verified_regular_file(
                 self._lock_locator
             )
@@ -442,27 +443,76 @@ class StoreAdmissionBarrier:
     @contextmanager
     def ordinary_admission(self) -> Iterator[None]:
         """Admit one normal operation unless a snapshot is being established."""
+        acquire_shared = False
         with self._condition:
-            while self._aggregate_active:
+            while self._aggregate_active or self._ordinary_lock_opening:
                 self._condition.wait()
+            acquire_shared = self._ordinary_active == 0
             self._ordinary_active += 1
+            if acquire_shared:
+                self._ordinary_lock_opening = True
+        body_failure: BaseException | None = None
         try:
-            with self._advisory_admission(exclusive=False):
-                yield
+            if acquire_shared:
+                lock_context = self._advisory_admission(exclusive=False)
+                try:
+                    lock_context.__enter__()
+                except BaseException:
+                    with self._condition:
+                        self._ordinary_active -= 1
+                        self._ordinary_lock_opening = False
+                        self._condition.notify_all()
+                    raise
+                with self._condition:
+                    self._ordinary_lock_context = lock_context
+                    self._ordinary_lock_opening = False
+                    self._condition.notify_all()
+            else:
+                # A second reader must not enter until the first has acquired
+                # the shared OS lock; otherwise a clear could pass externally
+                # while the local reader count says it is protected.
+                with self._condition:
+                    while self._ordinary_lock_opening:
+                        self._condition.wait()
+            yield
+        except BaseException as exc:
+            body_failure = exc
+            raise
         finally:
+            release_shared = False
+            lock_context: object | None = None
             with self._condition:
                 self._ordinary_active -= 1
                 if self._ordinary_active == 0:
-                    self._condition.notify_all()
+                    self._ordinary_lock_closing = True
+                    release_shared = True
+                    lock_context = self._ordinary_lock_context
+                    self._ordinary_lock_context = None
+            if release_shared:
+                try:
+                    if lock_context is not None:
+                        lock_context.__exit__(  # type: ignore[attr-defined]
+                            None if body_failure is None else type(body_failure),
+                            body_failure,
+                            None if body_failure is None else body_failure.__traceback__,
+                        )
+                finally:
+                    with self._condition:
+                        self._ordinary_lock_closing = False
+                        self._condition.notify_all()
 
     @contextmanager
     def aggregate_admission(self) -> Iterator[None]:
         """Exclude ordinary work only while creating a finite clear snapshot."""
         with self._condition:
-            while self._aggregate_active:
+            while (
+                self._aggregate_active
+                or self._ordinary_lock_opening
+                or self._ordinary_lock_closing
+            ):
                 self._condition.wait()
             self._aggregate_active = True
-            while self._ordinary_active:
+            while self._ordinary_active or self._ordinary_lock_closing:
                 self._condition.wait()
         try:
             with self._advisory_admission(exclusive=True):

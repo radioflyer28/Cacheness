@@ -61,6 +61,53 @@ def _race_json_manifest_cas_process(
         backend.close()
 
 
+def _publish_json_while_parent_swaps_lock_name(
+    metadata_path: str,
+    ready: multiprocessing.synchronize.Event,
+    release: multiprocessing.synchronize.Event,
+    outcomes: multiprocessing.queues.Queue,
+) -> None:
+    """Hold the original descriptor while a parent swaps only its lock pathname."""
+    backend = JsonBackend(metadata_path)
+    repository = JsonManifestRepository(backend)
+    repository.after_json_lock_acquisition = lambda: (ready.set(), release.wait(timeout=10))
+    try:
+        repository.publish_if_expected(
+            "key", ManifestExpectation.absent(), _record("original-authority")
+        )
+        outcomes.put("original-won")
+    except BaseException as exc:  # pragma: no cover - surfaced by parent assertion.
+        outcomes.put(f"original-error:{exc!r}")
+    finally:
+        repository.close()
+        backend.close()
+
+
+def _attempt_json_publish_after_lock_swap(
+    metadata_path: str, outcomes: multiprocessing.queues.Queue
+) -> None:
+    """A later opener must reject the replacement lock before it can enter CAS."""
+    backend = JsonBackend(metadata_path)
+    try:
+        repository = JsonManifestRepository(backend)
+    except CacheUnsafePathError:
+        outcomes.put("replacement-blocked")
+    except BaseException as exc:  # pragma: no cover - surfaced by parent assertion.
+        outcomes.put(f"replacement-error:{exc!r}")
+    else:
+        try:
+            repository.publish_if_expected(
+                "key", ManifestExpectation.absent(), _record("replacement-authority")
+            )
+            outcomes.put("replacement-won")
+        except CacheBlobLifecycleConflictError:
+            outcomes.put("replacement-conflict")
+        finally:
+            repository.close()
+    finally:
+        backend.close()
+
+
 def _repository_pair(tmp_path: Path, backend_name: str):
     """Build independently constructed repositories over one local topology."""
     if backend_name == "memory":
@@ -176,6 +223,54 @@ def test_json_cas_has_one_exact_cross_process_winner(tmp_path: Path) -> None:
             if worker.is_alive():
                 worker.terminate()
                 worker.join(timeout=5)
+
+
+def test_json_lock_name_swap_cannot_create_a_second_cross_process_authority(
+    tmp_path: Path,
+) -> None:
+    """A replacement opener is rejected while the original descriptor publishes."""
+    root = tmp_path / "json-lock-swap-process"
+    root.mkdir()
+    metadata_path = root / "metadata.json"
+    context = multiprocessing.get_context("spawn")
+    ready = context.Event()
+    release = context.Event()
+    outcomes = context.Queue()
+    original = context.Process(
+        target=_publish_json_while_parent_swaps_lock_name,
+        args=(str(metadata_path), ready, release, outcomes),
+    )
+    original.start()
+    assert ready.wait(timeout=10)
+
+    lock_path = root / ".metadata.json.manifest-cas.lock"
+    replacement = root / ".replacement-lock"
+    replacement.write_bytes(b"lock\n")
+    os.replace(replacement, lock_path)
+    contender = context.Process(
+        target=_attempt_json_publish_after_lock_swap,
+        args=(str(metadata_path), outcomes),
+    )
+    contender.start()
+    contender.join(timeout=10)
+    assert contender.exitcode == 0
+
+    release.set()
+    original.join(timeout=10)
+    assert original.exitcode == 0
+    assert sorted(outcomes.get(timeout=5) for _ in range(2)) == [
+        "original-won",
+        "replacement-blocked",
+    ]
+
+    # The old descriptor was permitted to finish; the intentionally replaced
+    # name is then a fail-closed topology, never a new authority to adopt.
+    backend = JsonBackend(metadata_path)
+    try:
+        with pytest.raises(CacheUnsafePathError):
+            JsonManifestRepository(backend)
+    finally:
+        backend.close()
 
 
 def test_json_cas_uses_the_win32_adapter_when_fcntl_is_unavailable(
@@ -381,25 +476,38 @@ def test_json_authority_lock_rejects_regular_inode_replacement(
         backend.close()
 
 
-def test_json_repository_refuses_windows_without_native_control_durability(
+def test_json_repository_uses_native_windows_control_durability(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The actual Windows control branch fails before CRT directory fsync calls."""
-    root = tmp_path / "unsupported-windows-json"
+    """The simulated Windows path uses only the injectable native directory API."""
+    root = tmp_path / "windows-json"
     root.mkdir()
     backend = JsonBackend(root / "metadata.json")
-    called: list[str] = []
+    calls: list[str] = []
 
-    def unexpected_directory_io(*_args: object, **_kwargs: object) -> int:
-        called.append("directory_io")
-        raise AssertionError("Windows fallback must not call POSIX directory I/O")
+    class FakeWindowsFileApi:
+        def rename_no_replace(self, temporary: Path, destination: Path) -> None:
+            calls.append("rename")
+            if destination.exists():
+                raise FileExistsError(destination)
+            os.rename(temporary, destination)
+
+        def flush_directory(self, directory: Path) -> None:
+            assert directory == root or directory == root / ".cacheness-lock-authorities"
+            calls.append("flush_directory")
 
     monkeypatch.setattr(path_security, "_platform_name", lambda: "nt")
-    monkeypatch.setattr(path_security.os, "fsync", unexpected_directory_io)
+    monkeypatch.setattr(path_security, "_windows_file_api", FakeWindowsFileApi)
     try:
-        with pytest.raises(CacheBlobBackendError, match="Windows"):
-            JsonManifestRepository(backend)
-        assert called == []
+        repository = JsonManifestRepository(backend)
+        try:
+            repository.publish_if_expected(
+                "key", ManifestExpectation.absent(), _record("windows-control")
+            )
+            assert repository.get_raw("key") == _record("windows-control")
+            assert "flush_directory" in calls
+        finally:
+            repository.close()
     finally:
         backend.close()
 
@@ -426,11 +534,11 @@ def test_failed_direct_json_repository_construction_closes_its_owned_root(
     monkeypatch.setattr(file_ops, "close", track_close)
     monkeypatch.setattr(manifest_repository_module, "ManagedFileOps", lambda _root: file_ops)
     if failure == "create":
-        monkeypatch.setattr(file_ops, "create_bytes_durable_exclusive", fail)
+        monkeypatch.setattr(file_ops, "ensure_lifecycle_lock", fail)
     elif failure == "open":
         monkeypatch.setattr(file_ops, "open_verified_regular_file", fail)
     else:
-        monkeypatch.setattr(file_ops, "retain_lock_identity", fail)
+        monkeypatch.setattr(file_ops, "ensure_lifecycle_lock", fail)
     try:
         with pytest.raises(OSError, match=failure):
             JsonManifestRepository(backend)

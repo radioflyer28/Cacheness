@@ -177,7 +177,12 @@ class GuardedHandlerIO:
         """Exclusively publish a staged native payload at an immutable locator."""
         with staged.open() as (source, file_size):
             final_path = self.file_ops.create_stream_durable_exclusive(locator, source)
-        return staged.result_for(final_path, file_size)
+        result = staged.result_for(final_path, file_size)
+        # This internal identity binds lifecycle verification to the exact
+        # inode the managed exclusive publication installed. It never becomes
+        # handler metadata or a persisted manifest field.
+        result["_managed_generation_identity"] = self.file_ops.file_identity(final_path)
+        return result
 
     @contextmanager
     def _private_stage(self) -> Iterator[Path]:

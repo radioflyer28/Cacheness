@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import shutil
+import socket
+import stat
 import subprocess
 import threading
 from copy import deepcopy
@@ -387,6 +389,65 @@ def test_backend_preserves_valid_sharded_atomic_stream_lifecycle(tmp_path):
     assert backend.delete_blob(second_locator)
     assert not backend.exists(second_locator)
     assert not list(backend.base_dir.rglob("*.tmp"))
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX special-node fixtures")
+@pytest.mark.parametrize("node_kind", ("fifo", "socket", "directory"))
+def test_managed_reads_reject_special_nodes_before_they_can_block(
+    tmp_path: Path, node_kind: str
+) -> None:
+    """No managed read, size check, or existence check accepts a special node."""
+    root = tmp_path / f"special-{node_kind}"
+    root.mkdir()
+    locator = root / "control"
+    socket_handle: socket.socket | None = None
+    if node_kind == "fifo":
+        os.mkfifo(locator)
+    elif node_kind == "socket":
+        socket_handle = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        original_directory = Path.cwd()
+        try:
+            os.chdir(root)
+            socket_handle.bind(locator.name)
+        finally:
+            os.chdir(original_directory)
+    else:
+        locator.mkdir()
+
+    operations = ManagedFileOps(root)
+    try:
+        for action in (
+            lambda: operations.read_bytes(locator),
+            lambda: operations.read_bytes_bounded(locator, max_bytes=128),
+            lambda: operations.open_read(locator),
+            lambda: operations.exists(locator),
+            lambda: operations.get_size(locator),
+        ):
+            with pytest.raises(CacheUnsafePathError):
+                action()
+    finally:
+        operations.close()
+        if socket_handle is not None:
+            socket_handle.close()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX device-node fixture")
+def test_managed_reads_reject_a_device_before_evidence_parsing(tmp_path: Path) -> None:
+    """A device authority node cannot reach a parser or block initialization."""
+    root = tmp_path / "special-device"
+    root.mkdir()
+    locator = root / "device"
+    try:
+        os.mknod(locator, stat.S_IFCHR | 0o600, os.makedev(1, 3))
+    except (AttributeError, OSError, PermissionError):
+        pytest.skip("device-node creation is unavailable to this test user")
+
+    operations = ManagedFileOps(root)
+    try:
+        with pytest.raises(CacheUnsafePathError):
+            operations.read_bytes_bounded(locator, max_bytes=128)
+    finally:
+        operations.close()
 
 
 # =============================================================================

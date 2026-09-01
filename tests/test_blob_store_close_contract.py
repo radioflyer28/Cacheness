@@ -21,6 +21,7 @@ from cacheness.error_handling import (
 from cacheness.metadata import InMemoryBackend
 from cacheness.storage import BlobStore
 from cacheness.storage import coordination
+from cacheness.storage import path_security
 from cacheness.storage.coordination import StoreAdmissionBarrier, interprocess_file_lock
 from cacheness.storage.path_security import ManagedFileOps
 
@@ -365,6 +366,45 @@ def test_windows_lock_path_keeps_canonical_blobstore_constructible(
         store.close()
 
 
+@pytest.mark.parametrize("backend_name", ("json", "sqlite"))
+def test_default_blobstore_runs_the_native_windows_fallback_contract(
+    tmp_path, monkeypatch, backend_name: str
+):
+    """Default stores exercise the real fallback routing instead of refusing Windows."""
+    directory_flushes: list[Path] = []
+
+    class FakeWindowsFileApi:
+        def rename_no_replace(self, temporary: Path, destination: Path) -> None:
+            if destination.exists():
+                raise FileExistsError(destination)
+            os.rename(temporary, destination)
+
+        def flush_directory(self, directory: Path) -> None:
+            directory_flushes.append(directory)
+
+    class FakeWindowsLockApi:
+        def lock(self, _descriptor: int, *, exclusive: bool) -> object:
+            return (exclusive, object())
+
+        def unlock(self, _descriptor: int, _token: object) -> object:
+            return None
+
+    monkeypatch.setattr(path_security, "_platform_name", lambda: "nt")
+    monkeypatch.setattr(path_security, "_windows_file_api", FakeWindowsFileApi)
+    monkeypatch.setattr(coordination, "_platform_name", lambda: "nt")
+    monkeypatch.setattr(coordination, "_windows_lock_api", FakeWindowsLockApi)
+    store = BlobStore(tmp_path / f"windows-default-{backend_name}", backend=backend_name)
+    try:
+        store.put({"value": backend_name}, key="entry")
+        assert store.get("entry") == {"value": backend_name}
+        assert store.delete("entry") is True
+        store.put({"value": "clear"}, key="clear-entry")
+        assert store.clear() == 1
+        assert directory_flushes
+    finally:
+        store.close()
+
+
 def test_barrier_registration_uses_its_descriptor_identity_after_root_replacement(
     tmp_path, monkeypatch
 ):
@@ -434,7 +474,11 @@ def test_lock_release_failure_never_masks_the_lifecycle_body_and_closes_handle(
                 file_ops, locator, exclusive=True, operation="release_body_test"
             ):
                 raise RuntimeError("body failure")
-        assert closed == [True]
+        # Lock-authority validation also opens and closes its bounded marker;
+        # the short-lived advisory descriptor still must be closed on the
+        # body-failure path.
+        first_close_count = len(closed)
+        assert first_close_count >= 1
 
         with pytest.raises(CacheBlobLockReleaseError, match="could not be released") as error:
             with interprocess_file_lock(
@@ -442,7 +486,7 @@ def test_lock_release_failure_never_masks_the_lifecycle_body_and_closes_handle(
             ):
                 pass
         assert isinstance(error.value.__cause__, OSError)
-        assert closed == [True, True]
+        assert len(closed) > first_close_count
     finally:
         file_ops.close()
 

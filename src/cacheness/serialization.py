@@ -262,39 +262,35 @@ def _serialize_with_config(
 
         if isinstance(obj, dict):
             # Sort by keys for deterministic ordering
-            items = [
-                f"{
-                    _serialize_with_config(
-                        k,
-                        config,
-                        enable_basic,
-                        enable_special,
-                        enable_collections,
-                        enable_introspection,
-                        enable_hashable,
-                        enable_string,
-                        max_tuple_length,
-                        max_depth,
-                        depth + 1,
-                    )
-                }:"
-                f"{
-                    _serialize_with_config(
-                        v,
-                        config,
-                        enable_basic,
-                        enable_special,
-                        enable_collections,
-                        enable_introspection,
-                        enable_hashable,
-                        enable_string,
-                        max_tuple_length,
-                        max_depth,
-                        depth + 1,
-                    )
-                }"
-                for k, v in sorted(obj.items(), key=lambda x: str(x[0]))
-            ]
+            items = []
+            for key, value in sorted(obj.items(), key=lambda item: str(item[0])):
+                serialized_key = _serialize_with_config(
+                    key,
+                    config,
+                    enable_basic,
+                    enable_special,
+                    enable_collections,
+                    enable_introspection,
+                    enable_hashable,
+                    enable_string,
+                    max_tuple_length,
+                    max_depth,
+                    depth + 1,
+                )
+                serialized_value = _serialize_with_config(
+                    value,
+                    config,
+                    enable_basic,
+                    enable_special,
+                    enable_collections,
+                    enable_introspection,
+                    enable_hashable,
+                    enable_string,
+                    max_tuple_length,
+                    max_depth,
+                    depth + 1,
+                )
+                items.append(f"{serialized_key}:{serialized_value}")
             return f"dict:[{','.join(items)}]"
 
         if isinstance(obj, set):

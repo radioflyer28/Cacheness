@@ -18,7 +18,7 @@ from cacheness.error_handling import (
     CacheUnsafePathError,
 )
 
-from .integrity import sha256_and_size, sign_hmac_sha256, verify_hmac_sha256
+from .integrity import sign_hmac_sha256, verify_hmac_sha256
 from .manifest import MAX_MANIFEST_BYTES, BlobManifestV1
 from .manifest_repository import ManifestCursor, ManifestExpectation
 from .operation_record import (
@@ -1202,9 +1202,18 @@ class LifecycleEngine:
 
             self._fault("candidate_verification", record)
             published_locator = Path(result["actual_path"])
-            digest, byte_size = sha256_and_size(published_locator)
             if published_locator != candidate_locator:
                 raise RuntimeError("Immutable generation publication changed its locator")
+            published_identity = result.pop("_managed_generation_identity", None)
+            if (
+                not isinstance(published_identity, tuple)
+                or len(published_identity) != 2
+                or not all(type(part) is int for part in published_identity)
+            ):
+                raise RuntimeError("Immutable generation publication did not bind a file identity")
+            digest, byte_size = self.store.guarded_handler_io.file_ops.sha256_and_size(
+                candidate_locator, expected_identity=published_identity
+            )
             self._emit("candidate_verified", record)
 
             handler_metadata = dict(result.get("metadata", {}) or {})

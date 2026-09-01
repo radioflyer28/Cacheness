@@ -200,11 +200,7 @@ class FileOperationRecordRepository:
             cached = self._lock_handles.get(cache_identity)
             if cached is not None:
                 return cached
-            try:
-                self.file_ops.create_bytes_durable_exclusive(locator, b"lock\n")
-            except FileExistsError:
-                pass
-            expected = self.file_ops.retain_lock_identity(locator)
+            expected = self.file_ops.ensure_lifecycle_lock(locator)
             handle = self.file_ops.open_verified_regular_file(locator)
             try:
                 observed = (os.fstat(handle.fileno()).st_dev, os.fstat(handle.fileno()).st_ino)
