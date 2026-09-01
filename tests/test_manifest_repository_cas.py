@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import builtins
+import ctypes
+import hashlib
 import multiprocessing
 import os
 from pathlib import Path
@@ -228,7 +230,13 @@ def test_json_cas_has_one_exact_cross_process_winner(tmp_path: Path) -> None:
 def test_json_lock_name_swap_cannot_create_a_second_cross_process_authority(
     tmp_path: Path,
 ) -> None:
-    """A replacement opener is rejected while the original descriptor publishes."""
+    """Replacing every JSON lock control name cannot form a new authority.
+
+    The actual lock pathname is mutable by design.  The authoritative lock
+    identity is instead attached to the root object, so a contender that sees
+    a replacement file is rejected before it can enter JSON CAS even while the
+    original retained descriptor remains in its critical section.
+    """
     root = tmp_path / "json-lock-swap-process"
     root.mkdir()
     metadata_path = root / "metadata.json"
@@ -484,6 +492,7 @@ def test_json_repository_uses_native_windows_control_durability(
     root.mkdir()
     backend = JsonBackend(root / "metadata.json")
     calls: list[str] = []
+    authorities: dict[str, bytes] = {}
 
     class FakeWindowsFileApi:
         def rename_no_replace(self, temporary: Path, destination: Path) -> None:
@@ -493,11 +502,20 @@ def test_json_repository_uses_native_windows_control_durability(
             os.rename(temporary, destination)
 
         def flush_directory(self, directory: Path) -> None:
-            assert directory == root or directory == root / ".cacheness-lock-authorities"
+            assert directory == root
             calls.append("flush_directory")
+
+    class FakeWindowsRegistryAuthorityApi:
+        def ensure(self, name: str, value: bytes) -> None:
+            assert authorities.setdefault(name, value) == value
 
     monkeypatch.setattr(path_security, "_platform_name", lambda: "nt")
     monkeypatch.setattr(path_security, "_windows_file_api", FakeWindowsFileApi)
+    monkeypatch.setattr(
+        path_security,
+        "_windows_registry_authority_api",
+        FakeWindowsRegistryAuthorityApi,
+    )
     try:
         repository = JsonManifestRepository(backend)
         try:
@@ -506,10 +524,84 @@ def test_json_repository_uses_native_windows_control_durability(
             )
             assert repository.get_raw("key") == _record("windows-control")
             assert "flush_directory" in calls
+            assert authorities
         finally:
             repository.close()
     finally:
         backend.close()
+
+
+@pytest.mark.parametrize("error_number", (80, 183))
+def test_native_windows_already_exists_errors_preserve_fileexists_contract(
+    monkeypatch: pytest.MonkeyPatch, error_number: int
+) -> None:
+    """Cross-platform exclusive-create callers receive ``FileExistsError``."""
+    monkeypatch.setattr(
+        path_security._WindowsFileApi,
+        "_last_error",
+        staticmethod(lambda: error_number),
+    )
+    with pytest.raises(FileExistsError) as error:
+        path_security._WindowsFileApi._raise_last_error("MoveFileExW")
+    assert error.value.errno == error_number
+
+
+def test_native_windows_directory_flush_requests_write_access_and_closes_handle(
+    tmp_path: Path,
+) -> None:
+    """The native directory durability adapter uses its documented handle mode."""
+    api = object.__new__(path_security._WindowsFileApi)
+    calls: list[object] = []
+    api._create_file = lambda *args: calls.append(args) or ctypes.c_void_p(101).value
+    api._flush_file_buffers = lambda handle: calls.append(("flush", handle)) or 1
+    api._close_handle = lambda handle: calls.append(("close", handle)) or 1
+    api._last_error = lambda: 5
+
+    api.flush_directory(tmp_path)
+
+    create_arguments = calls[0]
+    assert create_arguments[1] == api._GENERIC_READ | api._GENERIC_WRITE
+    assert ("flush", ctypes.c_void_p(101).value) in calls
+    assert ("close", ctypes.c_void_p(101).value) in calls
+
+
+def test_windows_fallback_promotes_exact_pending_control_after_process_loss(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Windows fallback promotes only its digest-bound pending evidence."""
+    root = tmp_path / "windows-pending-recovery"
+    root.mkdir()
+    file_ops = ManagedFileOps(root)
+    file_ops._descriptor_mode = False
+    final = root / "operations" / "operation.json"
+    payload = b'{"exact":"control"}'
+    digest = hashlib.sha256(payload).hexdigest()
+    pending_name = f".{final.name}.pending.{digest}.{'a' * 32}.tmp"
+    pending = final.parent / pending_name
+    pending.parent.mkdir()
+    pending.write_bytes(payload)
+    flushes: list[Path] = []
+
+    class FakeWindowsFileApi:
+        def rename_no_replace(self, temporary: Path, destination: Path) -> None:
+            if destination.exists():
+                raise FileExistsError(destination)
+            os.rename(temporary, destination)
+
+        def flush_directory(self, directory: Path) -> None:
+            flushes.append(directory)
+
+    monkeypatch.setattr(path_security, "_platform_name", lambda: "nt")
+    monkeypatch.setattr(path_security, "_windows_file_api", FakeWindowsFileApi)
+    try:
+        assert file_ops.promote_durable_pending_control(
+            final, payload, pending_name=pending_name
+        )
+        assert final.read_bytes() == payload
+        assert not pending.exists()
+        assert flushes == [final.parent]
+    finally:
+        file_ops.close()
 
 
 @pytest.mark.parametrize("failure", ("create", "open", "identity"))

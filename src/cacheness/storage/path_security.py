@@ -41,8 +41,9 @@ from cacheness.error_handling import (
 _BLOB_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}\Z")
 _MAX_BLOB_ID_LENGTH = 256
 _PHYSICAL_NAME_DOMAIN = b"cacheness.physical-name.v1\x00"
-_LOCK_AUTHORITY_DIRECTORY = ".cacheness-lock-authorities"
 _LOCK_AUTHORITY_VERSION = b"cacheness.lock-authority.v1\x00"
+_ROOT_AUTHORITY_XATTR_PREFIX = "user.cacheness.lifecycle-lock."
+_DARWIN_ROOT_AUTHORITY_XATTR_PREFIX = "com.cacheness.lifecycle-lock."
 
 
 def _platform_name() -> str:
@@ -61,11 +62,14 @@ class _WindowsFileApi:
     """
 
     _GENERIC_READ = 0x80000000
+    _GENERIC_WRITE = 0x40000000
     _FILE_SHARE_READ = 0x00000001
     _FILE_SHARE_WRITE = 0x00000002
     _FILE_SHARE_DELETE = 0x00000004
     _OPEN_EXISTING = 3
     _FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+    _ERROR_FILE_EXISTS = 80
+    _ERROR_ALREADY_EXISTS = 183
 
     def __init__(self) -> None:
         try:
@@ -98,8 +102,15 @@ class _WindowsFileApi:
         self._close_handle.restype = ctypes.c_int
 
     @staticmethod
-    def _raise_last_error(operation: str) -> NoReturn:
-        error_number = ctypes.get_last_error()
+    def _last_error() -> int:
+        """Return the native error through a seam that unit tests can exercise."""
+        return ctypes.get_last_error()
+
+    @classmethod
+    def _raise_last_error(cls, operation: str) -> NoReturn:
+        error_number = cls._last_error()
+        if error_number in {cls._ERROR_FILE_EXISTS, cls._ERROR_ALREADY_EXISTS}:
+            raise FileExistsError(error_number, f"{operation} failed")
         raise OSError(error_number, f"{operation} failed")
 
     def rename_no_replace(self, temporary: Path, destination: Path) -> None:
@@ -113,7 +124,7 @@ class _WindowsFileApi:
         """Acknowledge the directory entry update through a directory handle."""
         handle = self._create_file(
             str(directory),
-            self._GENERIC_READ,
+            self._GENERIC_READ | self._GENERIC_WRITE,
             self._FILE_SHARE_READ | self._FILE_SHARE_WRITE | self._FILE_SHARE_DELETE,
             None,
             self._OPEN_EXISTING,
@@ -123,16 +134,186 @@ class _WindowsFileApi:
         invalid_handle = ctypes.c_void_p(-1).value
         if handle == invalid_handle:
             self._raise_last_error("CreateFileW")
+        flush_failure: BaseException | None = None
         try:
             if not self._flush_file_buffers(handle):
                 self._raise_last_error("FlushFileBuffers")
+        except BaseException as exc:
+            flush_failure = exc
+            raise
         finally:
-            self._close_handle(handle)
+            if not self._close_handle(handle) and flush_failure is None:
+                self._raise_last_error("CloseHandle")
+
+
+class _WindowsRegistryAuthorityApi:
+    """Persist one root-inode lock binding outside mutable store pathnames.
+
+    A registry value is attached to the current user's Windows authority
+    namespace rather than to a replaceable file below the managed root.  A
+    short-lived named mutex makes first publication exclusive and is abandoned
+    safely by Windows when its publisher dies.  The value is only ever created
+    or compared; it is never rewritten, so a later control-file swap cannot
+    rebind an active store to a second advisory-lock inode.
+    """
+
+    _HKEY_CURRENT_USER = 0x80000001
+    _KEY_QUERY_VALUE = 0x0001
+    _KEY_SET_VALUE = 0x0002
+    _REG_BINARY = 3
+    _REG_OPTION_NON_VOLATILE = 0
+    _ERROR_FILE_NOT_FOUND = 2
+    _WAIT_OBJECT_0 = 0
+    _WAIT_ABANDONED = 0x00000080
+    _INFINITE = 0xFFFFFFFF
+
+    def __init__(self) -> None:
+        try:
+            self._advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+            self._kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        except (AttributeError, OSError) as exc:  # pragma: no cover - Windows only.
+            raise CacheBlobBackendError(
+                "BlobStore lifecycle authority is unavailable on this Windows runtime",
+                context={"operation": "windows_lifecycle_authority"},
+            ) from exc
+
+        self._reg_create = self._advapi32.RegCreateKeyExW
+        self._reg_create.argtypes = (
+            ctypes.c_void_p,
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(ctypes.c_uint32),
+        )
+        self._reg_create.restype = ctypes.c_long
+        self._reg_query = self._advapi32.RegQueryValueExW
+        self._reg_query.argtypes = (
+            ctypes.c_void_p,
+            ctypes.c_wchar_p,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_uint32),
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_uint32),
+        )
+        self._reg_query.restype = ctypes.c_long
+        self._reg_set = self._advapi32.RegSetValueExW
+        self._reg_set.argtypes = (
+            ctypes.c_void_p,
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+        )
+        self._reg_set.restype = ctypes.c_long
+        self._reg_close = self._advapi32.RegCloseKey
+        self._reg_close.argtypes = (ctypes.c_void_p,)
+        self._reg_close.restype = ctypes.c_long
+        self._create_mutex = self._kernel32.CreateMutexW
+        self._create_mutex.argtypes = (ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p)
+        self._create_mutex.restype = ctypes.c_void_p
+        self._wait_for_single_object = self._kernel32.WaitForSingleObject
+        self._wait_for_single_object.argtypes = (ctypes.c_void_p, ctypes.c_uint32)
+        self._wait_for_single_object.restype = ctypes.c_uint32
+        self._release_mutex = self._kernel32.ReleaseMutex
+        self._release_mutex.argtypes = (ctypes.c_void_p,)
+        self._release_mutex.restype = ctypes.c_int
+        self._close_handle = self._kernel32.CloseHandle
+        self._close_handle.argtypes = (ctypes.c_void_p,)
+        self._close_handle.restype = ctypes.c_int
+
+    @staticmethod
+    def _raise_status(status: int, operation: str) -> NoReturn:
+        raise OSError(status, f"{operation} failed")
+
+    def ensure(self, name: str, value: bytes) -> None:
+        """Create or verify an immutable exact binding under a crash-safe mutex."""
+        digest = hashlib.sha256(name.encode("utf-8")).hexdigest()
+        mutex = self._create_mutex(None, False, f"Local\\CachenessAuthority-{digest}")
+        if not mutex:
+            _WindowsFileApi._raise_last_error("CreateMutexW")
+        acquired = False
+        key = ctypes.c_void_p()
+        try:
+            result = self._wait_for_single_object(mutex, self._INFINITE)
+            if result not in {self._WAIT_OBJECT_0, self._WAIT_ABANDONED}:
+                _WindowsFileApi._raise_last_error("WaitForSingleObject")
+            acquired = True
+            disposition = ctypes.c_uint32()
+            status = self._reg_create(
+                ctypes.c_void_p(self._HKEY_CURRENT_USER),
+                r"Software\Cacheness\LifecycleAuthorities",
+                0,
+                None,
+                self._REG_OPTION_NON_VOLATILE,
+                self._KEY_QUERY_VALUE | self._KEY_SET_VALUE,
+                None,
+                ctypes.byref(key),
+                ctypes.byref(disposition),
+            )
+            if status != 0:
+                self._raise_status(status, "RegCreateKeyExW")
+            value_name = digest
+            value_type = ctypes.c_uint32()
+            value_size = ctypes.c_uint32()
+            status = self._reg_query(
+                key,
+                value_name,
+                None,
+                ctypes.byref(value_type),
+                None,
+                ctypes.byref(value_size),
+            )
+            if status == self._ERROR_FILE_NOT_FOUND:
+                buffer = (ctypes.c_ubyte * len(value)).from_buffer_copy(value)
+                status = self._reg_set(
+                    key,
+                    value_name,
+                    0,
+                    self._REG_BINARY,
+                    ctypes.cast(buffer, ctypes.c_void_p),
+                    len(value),
+                )
+                if status != 0:
+                    self._raise_status(status, "RegSetValueExW")
+                return
+            if status != 0:
+                self._raise_status(status, "RegQueryValueExW")
+            if value_type.value != self._REG_BINARY or value_size.value != len(value):
+                _unsafe_path(CacheReason.PATH_RACE)
+            buffer = (ctypes.c_ubyte * value_size.value)()
+            status = self._reg_query(
+                key,
+                value_name,
+                None,
+                ctypes.byref(value_type),
+                ctypes.cast(buffer, ctypes.c_void_p),
+                ctypes.byref(value_size),
+            )
+            if status != 0:
+                self._raise_status(status, "RegQueryValueExW")
+            if value_type.value != self._REG_BINARY or bytes(buffer) != value:
+                _unsafe_path(CacheReason.PATH_RACE)
+        finally:
+            if key.value:
+                self._reg_close(key)
+            if acquired:
+                self._release_mutex(mutex)
+            self._close_handle(mutex)
 
 
 def _windows_file_api() -> _WindowsFileApi:
     """Construct the production Win32 durability adapter only when required."""
     return _WindowsFileApi()
+
+
+def _windows_registry_authority_api() -> _WindowsRegistryAuthorityApi:
+    """Construct the production root-authority adapter only when required."""
+    return _WindowsRegistryAuthorityApi()
 
 
 def _atomic_rename_no_replace(
@@ -844,21 +1025,10 @@ class ManagedFileOps:
             except FileExistsError:
                 pass
 
-    def _lock_authority_locator(self, locator: Path) -> Path:
-        """Return a root-scoped immutable binding record for one lock pathname."""
-        relative = "/".join(self._relative_parts(locator)).encode("utf-8")
-        name = hashlib.sha256(relative).hexdigest()
-        return resolve_managed_locator(
-            self.root,
-            Path(_LOCK_AUTHORITY_DIRECTORY) / f"{name}.authority",
-            operation="lock_authority",
-            allow_missing_leaf=True,
-        )
-
     def _lock_authority_bytes(
         self, locator: Path, identity: tuple[int, int]
     ) -> bytes:
-        """Bind one accepted lock inode to this immutable managed-root identity."""
+        """Bind one accepted lock inode to the managed-root object identity."""
         relative = "/".join(self._relative_parts(locator)).encode("utf-8")
         return (
             _LOCK_AUTHORITY_VERSION
@@ -869,32 +1039,229 @@ class ManagedFileOps:
             + identity[1].to_bytes(8, "big", signed=False)
         )
 
+    def _root_authority_name(self, locator: Path) -> str:
+        """Return a root-object attribute name for one logical lock locator.
+
+        The name deliberately contains only a digest.  The authoritative
+        content includes the root and lock identities; attaching it to the
+        anchored root object prevents a child-control pathname swap from
+        creating a new authority domain.
+        """
+        relative = "/".join(self._relative_parts(locator)).encode("utf-8")
+        digest = hashlib.sha256(
+            self._root_identity[0].to_bytes(8, "big", signed=False)
+            + self._root_identity[1].to_bytes(8, "big", signed=False)
+            + relative
+        ).hexdigest()
+        prefix = (
+            _DARWIN_ROOT_AUTHORITY_XATTR_PREFIX
+            if sys.platform == "darwin"
+            else _ROOT_AUTHORITY_XATTR_PREFIX
+        )
+        return f"{prefix}{digest}"
+
+    def _root_authority_target(self) -> int | Path:
+        """Address the anchored root inode rather than a replaceable child name."""
+        if self._root_fd is not None:
+            return self._root_fd
+        return self.root
+
+    @staticmethod
+    def _is_xattr_unsupported(exc: OSError) -> bool:
+        """Classify platforms/filesystems that cannot preserve root bindings."""
+        unsupported = {errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOSYS}
+        return exc.errno in unsupported
+
+    def _set_root_authority_xattr(self, name: str, authority: bytes) -> None:
+        """Create one root-directory attribute without a mutable child path."""
+        if hasattr(os, "setxattr"):
+            os.setxattr(
+                self._root_authority_target(), name, authority, os.XATTR_CREATE
+            )
+            return
+        if sys.platform != "darwin":
+            raise AttributeError("root-object extended attributes are unavailable")
+        root_fd = self._root_fd
+        close_root_fd = False
+        if root_fd is None:
+            root_fd = os.open(
+                self.root,
+                os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+            )
+            close_root_fd = True
+        libc = ctypes.CDLL(None, use_errno=True)
+        setter = libc.fsetxattr
+        setter.argtypes = (
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_void_p,
+            ctypes.c_size_t,
+            ctypes.c_uint32,
+            ctypes.c_int,
+        )
+        setter.restype = ctypes.c_int
+        buffer = (ctypes.c_ubyte * len(authority)).from_buffer_copy(authority)
+        try:
+            if setter(
+                root_fd,
+                os.fsencode(name),
+                ctypes.cast(buffer, ctypes.c_void_p),
+                len(authority),
+                0,
+                0x0002,  # Darwin XATTR_CREATE (0x0001 is XATTR_NOFOLLOW)
+            ) != 0:
+                error_number = ctypes.get_errno()
+                raise OSError(error_number, os.strerror(error_number), name)
+        finally:
+            if close_root_fd:
+                os.close(root_fd)
+
+    def _get_root_authority_xattr(self, name: str) -> bytes:
+        """Read one bounded root-directory attribute through its descriptor."""
+        if hasattr(os, "getxattr"):
+            return os.getxattr(self._root_authority_target(), name)
+        if sys.platform != "darwin":
+            raise AttributeError("root-object extended attributes are unavailable")
+        root_fd = self._root_fd
+        close_root_fd = False
+        if root_fd is None:
+            root_fd = os.open(
+                self.root,
+                os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+            )
+            close_root_fd = True
+        libc = ctypes.CDLL(None, use_errno=True)
+        getter = libc.fgetxattr
+        getter.argtypes = (
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_void_p,
+            ctypes.c_size_t,
+            ctypes.c_uint32,
+            ctypes.c_int,
+        )
+        getter.restype = ctypes.c_ssize_t
+        encoded_name = os.fsencode(name)
+        try:
+            size = getter(root_fd, encoded_name, None, 0, 0, 0)
+            if size < 0:
+                error_number = ctypes.get_errno()
+                raise OSError(error_number, os.strerror(error_number), name)
+            if size > 512:
+                _unsafe_path(CacheReason.PATH_RACE)
+            buffer = (ctypes.c_ubyte * size)()
+            observed = getter(
+                root_fd,
+                encoded_name,
+                ctypes.cast(buffer, ctypes.c_void_p),
+                size,
+                0,
+                0,
+            )
+            if observed < 0:
+                error_number = ctypes.get_errno()
+                raise OSError(error_number, os.strerror(error_number), name)
+            return bytes(buffer[:observed])
+        finally:
+            if close_root_fd:
+                os.close(root_fd)
+
+    def _sync_root_authority_binding(self) -> None:
+        """Acknowledge root-object authority publication before it is usable."""
+        if self._root_fd is not None:
+            os.fsync(self._root_fd)
+
+    def _ensure_root_authority_binding(self, locator: Path, authority: bytes) -> None:
+        """Create or verify one exact immutable root-object lock binding.
+
+        Descriptor-capable POSIX systems use an extended attribute on the
+        already-open root directory.  The kernel publishes an xattr as one
+        complete value, so a process loss leaves either no binding or the full
+        binding—never a direct-written partial sidecar.  Windows uses an HKCU
+        registry value guarded by an abandon-safe named mutex for the same
+        create-or-compare contract.  Neither representation is a mutable path
+        below the storage root.
+        """
+        name = self._root_authority_name(locator)
+        # Xattr/registry publication is one kernel operation.  The pre/post
+        # seams model process loss on either side of that indivisible boundary;
+        # there is intentionally no direct final-name write that could expose
+        # a partial authoritative byte sequence in between.
+        self._run_control_durability_hook("lock_authority_before_publish", locator)
+        if _platform_name() == "nt":
+            _windows_registry_authority_api().ensure(name, authority)
+            self._run_control_durability_hook("lock_authority_published", locator)
+            return
+
+        try:
+            self._set_root_authority_xattr(name, authority)
+        except AttributeError as exc:  # pragma: no cover - Python platform capability.
+            raise CacheBlobBackendError(
+                "BlobStore lifecycle authority requires root-object attributes",
+                context={"operation": "lifecycle_lock_authority"},
+            ) from exc
+        except OSError as exc:
+            if exc.errno != errno.EEXIST:
+                if self._is_xattr_unsupported(exc):
+                    raise CacheBlobBackendError(
+                        "BlobStore lifecycle authority requires root-object attributes",
+                        context={"operation": "lifecycle_lock_authority"},
+                    ) from exc
+                raise
+            try:
+                persisted = self._get_root_authority_xattr(name)
+            except OSError as read_exc:
+                if self._is_xattr_unsupported(read_exc):
+                    raise CacheBlobBackendError(
+                        "BlobStore lifecycle authority requires root-object attributes",
+                        context={"operation": "lifecycle_lock_authority"},
+                    ) from read_exc
+                raise
+            if persisted != authority:
+                _unsafe_path(CacheReason.PATH_RACE)
+        self._sync_root_authority_binding()
+        self._assert_root_identity()
+        self._run_control_durability_hook("lock_authority_published", locator)
+
+    def _assert_root_authority_binding(self, locator: Path, authority: bytes) -> None:
+        """Reject a lock inode that no longer matches the root-bound authority."""
+        name = self._root_authority_name(locator)
+        if _platform_name() == "nt":
+            _windows_registry_authority_api().ensure(name, authority)
+            return
+        try:
+            persisted = self._get_root_authority_xattr(name)
+        except AttributeError as exc:  # pragma: no cover - Python platform capability.
+            raise CacheBlobBackendError(
+                "BlobStore lifecycle authority requires root-object attributes",
+                context={"operation": "lifecycle_lock_authority"},
+            ) from exc
+        except OSError as exc:
+            if self._is_xattr_unsupported(exc):
+                raise CacheBlobBackendError(
+                    "BlobStore lifecycle authority requires root-object attributes",
+                    context={"operation": "lifecycle_lock_authority"},
+                ) from exc
+            _unsafe_path(CacheReason.PATH_RACE)
+        if persisted != authority:
+            _unsafe_path(CacheReason.PATH_RACE)
+        self._assert_root_identity()
+
     def ensure_lifecycle_lock(self, locator: Union[str, Path]) -> tuple[int, int]:
         """Create and persist one root-bound lock identity before it is usable.
 
-        A later opener validates the separate root-scoped binding record before
-        locking the name. Replacing only a lock pathname therefore cannot form
-        a second authority partition while an earlier descriptor is active.
+        The accepted identity is attached to the root object itself before the
+        lock is usable. Replacing any child lock/control pathname therefore
+        cannot form a second authority partition while an earlier descriptor
+        is active.
         """
         prepared = self._prepare_locator(
             locator, operation="lifecycle_lock_create", allow_missing_leaf=True
         )
         self.ensure_fixed_lock_file(prepared)
         identity = self.file_identity(prepared)
-        authority_locator = self._lock_authority_locator(prepared)
         authority = self._lock_authority_bytes(prepared, identity)
-        try:
-            if self._descriptor_mode:
-                self._create_bytes_direct_exclusive_descriptor(authority_locator, authority)
-            else:
-                with self._lock:
-                    self._create_bytes_direct_exclusive_fallback(authority_locator, authority)
-        except FileExistsError:
-            existing = self.read_bytes_bounded(
-                authority_locator, max_bytes=len(authority)
-            )
-            if existing != authority:
-                _unsafe_path(CacheReason.PATH_RACE)
+        self._ensure_root_authority_binding(prepared, authority)
         return identity
 
     def _create_bytes_durable_exclusive_fallback(
@@ -1088,9 +1455,13 @@ class ManagedFileOps:
         if not isinstance(data, bytes) or not data:
             raise ValueError("pending control evidence must be non-empty bytes")
         if not self._descriptor_mode:
-            raise CacheBlobBackendError(
-                "BlobStore durable control recovery requires descriptor-backed publication",
-                context={"operation": "promote_pending_control"},
+            if _platform_name() != "nt":
+                raise CacheBlobBackendError(
+                    "BlobStore durable control recovery requires descriptor-backed publication",
+                    context={"operation": "promote_pending_control"},
+                )
+            return self._promote_durable_pending_control_fallback(
+                locator, data, pending_name=pending_name
             )
         prepared = self._prepare_locator(
             locator, operation="promote_pending_control", allow_missing_leaf=True
@@ -1147,6 +1518,70 @@ class ManagedFileOps:
                 _unsafe_path(CacheReason.PATH_RACE)
             os.unlink(temporary_name, dir_fd=parent_fd)
             os.fsync(parent_fd)
+            return True
+
+    def _pending_control_name(
+        self,
+        locator: Path,
+        data: bytes,
+        pending_name: str | None,
+    ) -> str:
+        """Validate the exact digest-bound name for one pending control record."""
+        parts = self._relative_parts(locator)
+        digest = hashlib.sha256(data).hexdigest()
+        if pending_name is None:
+            return f".{parts[-1]}.pending.{digest}.tmp"
+        expected_prefix = f".{parts[-1]}.pending.{digest}."
+        token = pending_name.removeprefix(expected_prefix).removesuffix(".tmp")
+        if (
+            not pending_name.startswith(expected_prefix)
+            or len(token) != 32
+            or any(character not in "0123456789abcdef" for character in token)
+        ):
+            _unsafe_path(CacheReason.PATH_RACE)
+        return pending_name
+
+    def _promote_durable_pending_control_fallback(
+        self,
+        locator: Union[str, Path],
+        data: bytes,
+        *,
+        pending_name: str | None,
+    ) -> bool:
+        """Converge exact Win32 pending evidence after process loss.
+
+        The Windows writer emits a digest-bound candidate before the consuming
+        ``MoveFileExW`` transition.  Reopen verifies those exact bytes before
+        either promoting the candidate or retiring it beside an identical final
+        record; it never uses a glob as deletion authority.
+        """
+        with self._lock:
+            prepared = self._prepare_locator(
+                locator,
+                operation="promote_pending_control",
+                allow_missing_leaf=True,
+            )
+            temporary_name = self._pending_control_name(prepared, data, pending_name)
+            pending = prepared.parent / temporary_name
+            try:
+                pending_bytes = self.read_bytes_bounded(pending, max_bytes=len(data))
+            except FileNotFoundError:
+                return False
+            if pending_bytes != data:
+                _unsafe_path(CacheReason.PATH_RACE)
+            try:
+                _windows_file_api().rename_no_replace(pending, prepared)
+            except FileExistsError:
+                final_bytes = self.read_bytes_bounded(prepared, max_bytes=len(data))
+                if final_bytes != data:
+                    _unsafe_path(CacheReason.PATH_RACE)
+                try:
+                    pending.unlink()
+                except FileNotFoundError:
+                    return False
+                _windows_file_api().flush_directory(prepared.parent)
+                return True
+            _windows_file_api().flush_directory(prepared.parent)
             return True
 
     def create_stream_durable_exclusive(
@@ -1354,14 +1789,8 @@ class ManagedFileOps:
         prepared = self._prepare_locator(locator, operation="retain_lock_identity")
         parts = self._relative_parts(prepared)
         identity = self.file_identity(prepared)
-        authority_locator = self._lock_authority_locator(prepared)
         authority = self._lock_authority_bytes(prepared, identity)
-        try:
-            persisted = self.read_bytes_bounded(authority_locator, max_bytes=len(authority))
-        except FileNotFoundError:
-            _unsafe_path(CacheReason.PATH_RACE)
-        if persisted != authority:
-            _unsafe_path(CacheReason.PATH_RACE)
+        self._assert_root_authority_binding(prepared, authority)
         with self._lock:
             expected = self._lock_identities.setdefault(parts, identity)
         if expected != identity:

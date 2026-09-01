@@ -105,8 +105,8 @@ def _exit_during_control_durability_step(
         store.put({"interrupted": step}, key="interrupted-control-record")
 
 
-def _exit_during_fixed_lock_creation(root: str, relative_locator: str) -> None:
-    """Model process loss while directly creating one non-authoritative lock inode."""
+def _exit_during_fixed_lock_creation(root: str, relative_locator: str, step: str) -> None:
+    """Model process loss around lock and root-authority publication."""
     file_ops = ManagedFileOps(root)
     locator = resolve_managed_locator(
         file_ops.root,
@@ -115,8 +115,8 @@ def _exit_during_fixed_lock_creation(root: str, relative_locator: str) -> None:
         allow_missing_leaf=True,
     )
 
-    def stop(step: str, _locator: Path) -> None:
-        if step == "lock_file_bytes_fsynced":
+    def stop(observed_step: str, _locator: Path) -> None:
+        if observed_step == step:
             os._exit(23)
 
     file_ops.after_control_durability_step = stop
@@ -1015,21 +1015,31 @@ def test_process_loss_at_control_publish_boundaries_leaves_no_operation_residue(
         "operations/.conditional-locks/00.lock",
     ),
 )
-def test_process_loss_during_fixed_lock_creation_leaves_no_pending_residue(
-    tmp_path: Path, relative_locator: str
+@pytest.mark.parametrize(
+    "step",
+    (
+        "lock_file_bytes_fsynced",
+        "lock_file_directory_fsynced",
+        "lock_authority_before_publish",
+        "lock_authority_published",
+    ),
+)
+def test_process_loss_during_lock_authority_publication_converges_without_sidecars(
+    tmp_path: Path, relative_locator: str, step: str
 ) -> None:
-    """Lock files use direct final-name creation, not unreconciled pending names.
+    """Lock authority is root-bound and remains reopenable at every crash seam.
 
     ``os._exit`` models process loss only; it does not claim physical power-loss
-    durability. Reopening must still accept/recreate the non-authoritative
-    regular inode without accumulating any pending candidate files.
+    durability. Reopening must accept the fixed lock and either create or read
+    its complete root-object binding without direct-written authority sidecars
+    or pending control residue.
     """
-    root = tmp_path / f"fixed-lock-loss-{relative_locator.replace('/', '-')}"
+    root = tmp_path / f"lock-authority-loss-{relative_locator.replace('/', '-')}-{step}"
     root.mkdir()
     context = multiprocessing.get_context("spawn")
     worker = context.Process(
         target=_exit_during_fixed_lock_creation,
-        args=(str(root), relative_locator),
+        args=(str(root), relative_locator, step),
     )
     worker.start()
     worker.join(timeout=15)
@@ -1043,7 +1053,33 @@ def test_process_loss_during_fixed_lock_creation_leaves_no_pending_residue(
             operation="fixed_lock_reopen",
             allow_missing_leaf=True,
         )
-        file_ops.ensure_lifecycle_lock(locator)
+        identity = file_ops.ensure_lifecycle_lock(locator)
+        assert file_ops.retain_lock_identity(locator) == identity
         assert not list(root.rglob("*.pending.*.tmp"))
+        assert not (root / ".cacheness-lock-authorities").exists()
+    finally:
+        file_ops.close()
+
+
+def test_truncated_legacy_lock_sidecar_never_bricks_root_bound_authority(
+    tmp_path: Path,
+) -> None:
+    """Ambiguous legacy sidecar bytes are ignored, not deleted or trusted."""
+    root = tmp_path / "legacy-lock-sidecar"
+    root.mkdir()
+    legacy = root / ".cacheness-lock-authorities" / "truncated.authority"
+    legacy.parent.mkdir()
+    legacy.write_bytes(b"partial")
+    file_ops = ManagedFileOps(root)
+    try:
+        locator = resolve_managed_locator(
+            file_ops.root,
+            "authority.lock",
+            operation="legacy_lock_authority",
+            allow_missing_leaf=True,
+        )
+        identity = file_ops.ensure_lifecycle_lock(locator)
+        assert file_ops.retain_lock_identity(locator) == identity
+        assert legacy.read_bytes() == b"partial"
     finally:
         file_ops.close()
