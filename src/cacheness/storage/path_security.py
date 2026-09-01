@@ -236,7 +236,7 @@ class _WindowsFileApi:
         locator: Path,
         *,
         expected_identity: tuple[int, int] | None = None,
-    ) -> None:
+    ) -> tuple[int, int, int]:
         """Flush one retained, reparse-safe regular-file handle.
 
         ``expected_identity`` is the portable ``stat`` identity captured by
@@ -277,6 +277,7 @@ class _WindowsFileApi:
                     or current.st_nlink != 1
                 ):
                     _unsafe_path(CacheReason.PATH_RACE)
+            native_identity = self._native_identity(information)
             if not self._flush_file_buffers(handle):
                 self._raise_last_error("FlushFileBuffers")
         except BaseException as exc:
@@ -285,6 +286,65 @@ class _WindowsFileApi:
         finally:
             if not self._close_handle(handle) and flush_failure is None:
                 self._raise_last_error("CloseHandle")
+        return native_identity
+
+    @staticmethod
+    def _native_identity(
+        information: _ByHandleFileInformation,
+    ) -> tuple[int, int, int]:
+        """Return the immutable Win32 volume/file identity from one handle."""
+        return (
+            int(information.VolumeSerialNumber),
+            int(information.FileIndexHigh),
+            int(information.FileIndexLow),
+        )
+
+    def _descriptor_regular_file_information(
+        self, file_descriptor: int
+    ) -> tuple[ctypes.c_void_p, _ByHandleFileInformation]:
+        """Return one checked native handle identity without reopening a path."""
+        try:
+            import msvcrt
+        except ImportError as exc:  # pragma: no cover - Windows only.
+            raise CacheBlobBackendError(
+                "BlobStore lifecycle durability is unavailable on this Windows runtime",
+                context={"operation": "GetFileInformationByHandle"},
+            ) from exc
+        handle = ctypes.c_void_p(msvcrt.get_osfhandle(file_descriptor))
+        information = self._ByHandleFileInformation()
+        if not self._get_file_information(handle, ctypes.byref(information)):
+            self._raise_last_error("GetFileInformationByHandle")
+        if (
+            information.FileAttributes & self._FILE_ATTRIBUTE_REPARSE_POINT
+            or information.NumberOfLinks != 1
+        ):
+            _unsafe_path(CacheReason.PATH_RACE)
+        return handle, information
+
+    def native_regular_file_identity(self, file_descriptor: int) -> tuple[int, int, int]:
+        """Read the native identity of an already-open verified descriptor."""
+        _handle, information = self._descriptor_regular_file_information(file_descriptor)
+        return self._native_identity(information)
+
+    def flush_regular_file_descriptor(
+        self,
+        file_descriptor: int,
+        *,
+        expected_native_identity: tuple[int, int, int],
+    ) -> tuple[int, int, int]:
+        """Flush the exact retained file handle used for authority admission.
+
+        Unlike the pathname form, this does not reopen or restat a name.  The
+        native volume/file identity and the flush therefore apply to precisely
+        the descriptor that the integrity provider identity-checked and locked.
+        """
+        handle, information = self._descriptor_regular_file_information(file_descriptor)
+        native_identity = self._native_identity(information)
+        if native_identity != expected_native_identity:
+            _unsafe_path(CacheReason.PATH_RACE)
+        if not self._flush_file_buffers(handle):
+            self._raise_last_error("FlushFileBuffers")
+        return native_identity
 
 
 class _WindowsRegistryAuthorityApi:
@@ -821,6 +881,73 @@ class ManagedFileOps:
         """Expose process-loss seams only after a concrete control transition."""
         if self.after_control_durability_step is not None:
             self.after_control_durability_step(step, locator)
+
+    def list_directory_names_bounded(
+        self,
+        locator: Union[str, Path],
+        *,
+        cursor: str | None,
+        max_names: int,
+        operation: str,
+        name_filter: Callable[[str], bool] | None = None,
+    ) -> tuple[tuple[str, ...], str | None]:
+        """Return one bounded forward directory slice with an opaque cursor.
+
+        Directory enumeration is deliberately streaming: callers receive no
+        sorted materialization and this method examines at most ``max_names``
+        names beyond the encrypted resume cursor.  The cursor is a directory
+        position, not lifecycle authority; callers must still validate every
+        returned name and exact record before acting on it.  Filesystem order
+        is stable for a live directory between mutations on supported local
+        stores.  A restart that encounters an insertion before a cursor wraps
+        through a fresh inventory rather than silently granting it authority.
+        """
+        if type(max_names) is not int or max_names <= 0:
+            raise ValueError("directory page size must be a positive integer")
+        if cursor is not None and (
+            not isinstance(cursor, str)
+            or not cursor
+            or len(cursor.encode("utf-8")) > 8_192
+        ):
+            raise ValueError("directory enumeration cursor is invalid")
+        prepared = self._prepare_locator(locator, operation=operation)
+        try:
+            directory_stat = os.lstat(prepared)
+            if not stat.S_ISDIR(directory_stat.st_mode) or _is_link_or_reparse(directory_stat):
+                _unsafe_path(CacheReason.PATH_RACE)
+            names: list[str] = []
+            exhausted = True
+            # scandir is lazy on supported local filesystem implementations.
+            # Never call listdir/nsmallest here: their full materialization
+            # makes a bounded page inspect an unbounded crash-residue set.
+            with os.scandir(prepared) as entries:
+                for entry in entries:
+                    name = entry.name
+                    if name in {".", ".."}:
+                        continue
+                    if name_filter is not None and not name_filter(name):
+                        continue
+                    if cursor is not None and name <= cursor:
+                        continue
+                    names.append(name)
+                    if len(names) >= max_names:
+                        exhausted = False
+                        break
+            # Sorting only this already-bounded slice gives deterministic
+            # source ordering without recreating nsmallest's whole-directory
+            # materialization.  The maximum inspected name is the stable
+            # forward cursor for the next lexical slice.
+            names.sort()
+            return tuple(names), None if exhausted else (None if not names else names[-1])
+        except FileNotFoundError:
+            return (), None
+        except CacheUnsafePathError:
+            raise
+        except OSError as exc:
+            raise CacheBlobBackendError(
+                "Managed directory could not be enumerated",
+                context={"operation": operation},
+            ) from exc
 
     def _prepare_locator(
         self,

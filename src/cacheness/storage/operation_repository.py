@@ -59,7 +59,18 @@ class ReconciliationCheckpointCursor:
     operation_id: str
 
     def __post_init__(self) -> None:
-        validate_blob_id(self.operation_id)
+        # This is an encrypted, opaque directory position rather than an
+        # evidence identifier.  It may therefore represent a malformed name
+        # that was inspected and skipped on a bounded page.
+        if (
+            not isinstance(self.operation_id, str)
+            or not self.operation_id
+            or len(self.operation_id.encode("utf-8")) > MAX_MANIFEST_BYTES
+            or "/" in self.operation_id
+            or "\\" in self.operation_id
+            or "\x00" in self.operation_id
+        ):
+            raise ValueError("reconciliation checkpoint cursor is invalid")
 
 
 @dataclass(frozen=True)
@@ -75,6 +86,19 @@ class PendingControlCursor:
     """Opaque durable scheduling position for digest-bound pending controls."""
 
     name: str
+
+    def __post_init__(self) -> None:
+        # Pending paging must advance across malformed prefixes too.  The
+        # cursor is encrypted scheduling state, never a filename authority.
+        if (
+            not isinstance(self.name, str)
+            or not self.name
+            or len(self.name.encode("utf-8")) > MAX_MANIFEST_BYTES
+            or "/" in self.name
+            or "\\" in self.name
+            or "\x00" in self.name
+        ):
+            raise ValueError("pending control cursor is invalid")
 
 
 @dataclass(frozen=True)
@@ -508,7 +532,10 @@ class FileOperationRecordRepository:
             name = raw.decode("ascii")
         except UnicodeDecodeError:
             return None
-        return PendingControlCursor(name) if self._is_eligible_pending_name(name) else None
+        try:
+            return PendingControlCursor(name)
+        except ValueError:
+            return None
 
     def _checkpoint_pending_recovery_cursor(
         self, cursor: PendingControlCursor | None
@@ -554,28 +581,24 @@ class FileOperationRecordRepository:
         )
         prefix = "reconcile-action-"
         suffix = ".json"
-        try:
-            operation_ids = nsmallest(
-                limit + 1,
-                (
-                    operation_id
-                    for name in (path.name for path in operations_directory.iterdir())
-                    if name.startswith(prefix)
-                    and name.endswith(suffix)
-                    for operation_id in (name[len(prefix) : -len(suffix)],)
-                    if self._is_hex_identifier(operation_id)
-                    and (cursor is None or operation_id > cursor.operation_id)
-                ),
-            )
-        except FileNotFoundError:
-            return ReconciliationCheckpointPage(entries=(), next_cursor=None)
-        except OSError as exc:
-            raise CacheBlobBackendError(
-                "Reconciliation checkpoint directory could not be listed",
-                context={"operation": "list_reconciliation_checkpoints"},
-            ) from exc
-        has_more = len(operation_ids) > limit
-        page_ids = operation_ids[:limit]
+        names, next_name = self.file_ops.list_directory_names_bounded(
+            operations_directory,
+            cursor=None if cursor is None else cursor.operation_id,
+            max_names=limit,
+            operation="list_reconciliation_checkpoints",
+            name_filter=lambda name: (
+                name.startswith(prefix)
+                and name.endswith(suffix)
+                and self._is_hex_identifier(name[len(prefix) : -len(suffix)])
+            ),
+        )
+        page_ids = tuple(
+            name[len(prefix) : -len(suffix)]
+            for name in names
+            if name.startswith(prefix)
+            and name.endswith(suffix)
+            and self._is_hex_identifier(name[len(prefix) : -len(suffix)])
+        )
         records: list[tuple[str, bytes | None]] = []
         for operation_id in page_ids:
             try:
@@ -586,8 +609,8 @@ class FileOperationRecordRepository:
         return ReconciliationCheckpointPage(
             entries=tuple(records),
             next_cursor=(
-                ReconciliationCheckpointCursor(page_ids[-1])
-                if has_more and page_ids
+                ReconciliationCheckpointCursor(next_name)
+                if next_name is not None
                 else None
             ),
         )
@@ -1251,25 +1274,14 @@ class FileOperationRecordRepository:
             allow_missing_leaf=True,
         )
         limit = self.lifecycle_limits.operation_page_size
-        try:
-            names = nsmallest(
-                limit + 1,
-                (
-                    path.name
-                    for path in operations_directory.iterdir()
-                    if self._is_eligible_pending_name(path.name)
-                    and (cursor is None or path.name > cursor.name)
-                ),
-            )
-        except FileNotFoundError:
-            return PendingControlPage(entries=(), next_cursor=None)
-        except OSError as exc:
-            raise CacheBlobBackendError(
-                "Interrupted lifecycle control directory could not be listed",
-                context={"operation": "recover_pending"},
-            ) from exc
-        has_more = len(names) > limit
-        page_names = names[:limit]
+        names, next_name = self.file_ops.list_directory_names_bounded(
+            operations_directory,
+            cursor=None if cursor is None else cursor.name,
+            max_names=limit,
+            operation="recover_pending",
+            name_filter=self._is_eligible_pending_name,
+        )
+        page_names = tuple(name for name in names if self._is_eligible_pending_name(name))
         entries: list[tuple[str, bytes | None]] = []
         for name in page_names:
             pending = resolve_managed_locator(
@@ -1287,9 +1299,7 @@ class FileOperationRecordRepository:
         return PendingControlPage(
             entries=tuple(entries),
             next_cursor=(
-                PendingControlCursor(page_names[-1])
-                if has_more and page_names
-                else None
+                PendingControlCursor(next_name) if next_name is not None else None
             ),
         )
 

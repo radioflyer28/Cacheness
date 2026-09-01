@@ -10,7 +10,7 @@ import stat
 from contextlib import contextmanager
 from pathlib import Path
 from threading import RLock
-from typing import BinaryIO, Protocol, runtime_checkable
+from typing import BinaryIO, Iterator, Protocol, runtime_checkable
 
 from cacheness.error_handling import (
     CacheBlobManifestUnauthenticatedError,
@@ -21,7 +21,9 @@ from cacheness.error_handling import (
 HMAC_SHA256_KEY_BYTES = 32
 _INITIALIZATION_GUARD = RLock()
 _KEY_READY_SUFFIX = ".ready"
+_KEY_INITIALIZATION_LOCK_SUFFIX = ".initializing.lock"
 _MAX_READY_RECORD_BYTES = 256
+_MAX_KEY_INITIALIZATION_ATTEMPTS = 4
 
 
 class ManifestKeyError(CacheBlobManifestUnauthenticatedError, ValueError):
@@ -134,9 +136,10 @@ class ManifestKeyProvider:
         """
         if self._provided_key is not None:
             return self._provided_key
-        # This guard serializes same-process first-use.  Cross-process callers
-        # still converge through the no-replace ready record: no caller returns
-        # a visible key until that record binds the exact inode and bytes.
+        # This guard serializes same-process first-use.  The separate stable
+        # initialization lock serializes *all* cross-process key observations.
+        # In particular, an EEXIST loser never reads a winner's partially
+        # written key before it has acquired the same authority.
         with _INITIALIZATION_GUARD:
             try:
                 self.key_path.parent.mkdir(parents=True, exist_ok=True)
@@ -145,66 +148,151 @@ class ManifestKeyProvider:
                 raise ManifestKeyError(
                     "Unable to create canonical manifest key directory"
                 ) from exc
-            key: bytes
-            identity: tuple[int, int]
-            try:
-                descriptor = os.open(
-                    self.key_path,
-                    os.O_WRONLY
-                    | os.O_CREAT
-                    | os.O_EXCL
-                    | getattr(os, "O_NOFOLLOW", 0),
-                    0o600,
-                )
-            except FileExistsError:
-                # The owner may have crashed or failed after publication.  An
-                # exact, regular, single-link key can be *acknowledged*, but
-                # it can never be consumed before the ready record exists.
-                key, identity = self._read_existing_key_and_identity()
-            except OSError as exc:
-                raise ManifestKeyError("Unable to create canonical manifest key") from exc
-            else:
-                created_metadata: os.stat_result | None = None
-                persistence_failure: BaseException | None = None
-                try:
-                    created_metadata = os.fstat(descriptor)
-                    self._assert_safe_key_metadata(created_metadata)
-                    self._write_all(descriptor, secrets.token_bytes(HMAC_SHA256_KEY_BYTES))
-                    os.fsync(descriptor)
-                except (ManifestKeyError, OSError) as exc:
-                    persistence_failure = exc
-                    if isinstance(exc, OSError) and created_metadata is not None:
-                        self._remove_partial_key(created_metadata)
-                    if isinstance(exc, OSError):
-                        raise ManifestKeyError(
-                            "Unable to persist canonical manifest key"
-                        ) from exc
-                    raise
-                finally:
+            with self._initialization_lock():
+                for _attempt in range(_MAX_KEY_INITIALIZATION_ATTEMPTS):
+                    key: bytes
+                    identity: tuple[int, int]
                     try:
-                        os.close(descriptor)
+                        descriptor = os.open(
+                            self.key_path,
+                            os.O_WRONLY
+                            | os.O_CREAT
+                            | os.O_EXCL
+                            | getattr(os, "O_NOFOLLOW", 0),
+                            0o600,
+                        )
+                    except FileExistsError:
+                        # A prior process may have died before its single
+                        # write completed.  We own the initialization lock, so
+                        # only this exact, verified inode may be retired.
+                        key, identity = self._read_existing_key_and_identity(
+                            allow_partial=True
+                        )
+                        assert identity is not None
+                        if len(key) != HMAC_SHA256_KEY_BYTES:
+                            self._retire_exact_unacknowledged_key(identity)
+                            continue
+                        _validate_key(key)
                     except OSError as exc:
-                        if persistence_failure is None:
-                            # Preserve the exact unacknowledged inode.  A
-                            # later initializer can resume acknowledgement;
-                            # ordinary reads reject it until then.
+                        raise ManifestKeyError(
+                            "Unable to create canonical manifest key"
+                        ) from exc
+                    else:
+                        created_metadata: os.stat_result | None = None
+                        persistence_failure: BaseException | None = None
+                        try:
+                            created_metadata = os.fstat(descriptor)
+                            self._assert_safe_key_metadata(created_metadata)
+                            self._write_all(
+                                descriptor, secrets.token_bytes(HMAC_SHA256_KEY_BYTES)
+                            )
+                            os.fsync(descriptor)
+                        except (ManifestKeyError, OSError) as exc:
+                            persistence_failure = exc
+                            if isinstance(exc, OSError) and created_metadata is not None:
+                                self._remove_partial_key(created_metadata)
+                            if isinstance(exc, OSError):
+                                raise ManifestKeyError(
+                                    "Unable to persist canonical manifest key"
+                                ) from exc
+                            raise
+                        finally:
+                            try:
+                                os.close(descriptor)
+                            except OSError as exc:
+                                if persistence_failure is None:
+                                    # Preserve the exact unacknowledged inode.
+                                    # A later initializer owns the same lock
+                                    # before it can resume or retire it.
+                                    raise ManifestKeyError(
+                                        "Unable to close canonical manifest key"
+                                    ) from exc
+                        assert created_metadata is not None
+                        identity = (created_metadata.st_dev, created_metadata.st_ino)
+                        key, observed_identity = self._read_existing_key_and_identity()
+                        if observed_identity != identity:
                             raise ManifestKeyError(
-                                "Unable to close canonical manifest key"
-                            ) from exc
-                assert created_metadata is not None
-                identity = (created_metadata.st_dev, created_metadata.st_ino)
-                # Re-read only through the ordinary no-follow boundary after
-                # close, never from a writable descriptor.
-                key, observed_identity = self._read_existing_key_and_identity()
-                if observed_identity != identity:
-                    raise ManifestKeyError("Canonical manifest key changed after creation")
-            self._complete_key_acknowledgement(key, identity)
-            return self._read_existing_key(require_ready=True)
+                                "Canonical manifest key changed after creation"
+                            )
+                    self._complete_key_acknowledgement(key, identity)
+                    return self._read_existing_key(require_ready=True)
+        raise ManifestKeyError("Canonical manifest key initialization did not converge")
 
     @property
     def _ready_path(self) -> Path:
         """Return the private completion record paired with the key inode."""
         return self.key_path.with_name(f"{self.key_path.name}{_KEY_READY_SUFFIX}")
+
+    @property
+    def _initialization_lock_path(self) -> Path:
+        """Return the stable authority used before any key-byte observation."""
+        return self.key_path.with_name(
+            f"{self.key_path.name}{_KEY_INITIALIZATION_LOCK_SUFFIX}"
+        )
+
+    @contextmanager
+    def _initialization_lock(self) -> Iterator[None]:
+        """Acquire the exact key-publication authority before inspecting a key.
+
+        The lock is deliberately independent of the key inode: a process can
+        die after O_EXCL creation while the key is short, so using that partial
+        object as the first lock would let a loser mistake an active write for
+        crash residue.  The fixed lock is only an admission primitive; key and
+        ready records remain the sole signing authority.
+        """
+        descriptor: int | None = None
+        handle: BinaryIO | None = None
+        try:
+            descriptor = os.open(
+                self._initialization_lock_path,
+                os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+            metadata = os.fstat(descriptor)
+            self._assert_safe_key_metadata(metadata)
+            handle = os.fdopen(descriptor, "r+b", closefd=True)
+            descriptor = None
+            from .coordination import interprocess_open_file_lock
+
+            with interprocess_open_file_lock(
+                handle,
+                exclusive=True,
+                operation="manifest_key_initialization",
+                close_handle=True,
+            ):
+                handle = None
+                self._assert_safe_parent()
+                current = os.lstat(self._initialization_lock_path)
+                self._assert_safe_key_metadata(current)
+                if (current.st_dev, current.st_ino) != (
+                    metadata.st_dev,
+                    metadata.st_ino,
+                ):
+                    raise ManifestKeyError(
+                        "Canonical manifest key initialization authority changed"
+                    )
+                yield
+        except ManifestKeyError:
+            raise
+        except OSError as exc:
+            raise ManifestKeyError(
+                "Unable to lock canonical manifest key initialization"
+            ) from exc
+        finally:
+            if handle is not None:
+                try:
+                    handle.close()
+                except OSError as exc:
+                    raise ManifestKeyError(
+                        "Unable to close canonical manifest key initialization lock"
+                    ) from exc
+            elif descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError as exc:
+                    raise ManifestKeyError(
+                        "Unable to close canonical manifest key initialization lock"
+                    ) from exc
 
     def _complete_key_acknowledgement(
         self, key: bytes, expected_identity: tuple[int, int]
@@ -214,16 +302,27 @@ class ManifestKeyProvider:
         # initialization mutex.  A second process that lost ``O_EXCL`` cannot
         # observe or acknowledge a different inode while the winner publishes
         # the ready record.
-        with self._acknowledgement_lock(expected_identity):
+        with self._acknowledgement_lock(expected_identity) as retained_handle:
             current_key, current_identity = self._read_existing_key_and_identity()
             if current_key != key or current_identity != expected_identity:
                 raise ManifestKeyError("Canonical manifest key changed before acknowledgement")
-            if self._ready_matches(key, expected_identity, missing_ok=True):
-                return
             try:
-                self._acknowledge_new_key(expected_identity)
+                if self._ready_matches(key, expected_identity, missing_ok=True):
+                    return
+            except ManifestKeyError:
+                # The initialization lock and this exact key lock make a
+                # short/crash-partial readiness record recoverable.  Retire
+                # only the observed safe inode; a later record is never
+                # selected by pathname alone.
+                self._retire_exact_unacknowledged_ready()
+            try:
+                self._acknowledge_new_key(expected_identity, retained_handle)
                 ready = self._ready_bytes(key, expected_identity)
                 self._publish_ready_record(ready)
+                if not self._ready_matches(key, expected_identity, missing_ok=False):
+                    raise ManifestKeyError(
+                        "Canonical manifest key readiness was not published"
+                    )
             except ManifestKeyError:
                 raise
             except OSError as exc:
@@ -232,13 +331,15 @@ class ManifestKeyProvider:
                 ) from exc
 
     @contextmanager
-    def _acknowledgement_lock(self, expected_identity: tuple[int, int]):
+    def _acknowledgement_lock(
+        self, expected_identity: tuple[int, int]
+    ) -> Iterator[BinaryIO]:
         """Lock the one verified key inode across first-use acknowledgement."""
         descriptor: int | None = None
         handle: BinaryIO | None = None
         try:
             descriptor = os.open(
-                self.key_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                self.key_path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
             )
             metadata = os.fstat(descriptor)
             self._assert_safe_key_metadata(metadata)
@@ -251,13 +352,14 @@ class ManifestKeyProvider:
             with interprocess_open_file_lock(
                 handle, exclusive=True, operation="manifest_key_initialization", close_handle=True
             ):
+                retained_handle = handle
                 handle = None
                 self._assert_safe_parent()
                 current = os.lstat(self.key_path)
                 self._assert_safe_key_metadata(current)
                 if (current.st_dev, current.st_ino) != expected_identity:
                     raise ManifestKeyError("Canonical manifest key changed during acknowledgement")
-                yield
+                yield retained_handle
         except ManifestKeyError:
             raise
         except OSError as exc:
@@ -299,8 +401,9 @@ class ManifestKeyProvider:
                 0o600,
             )
         except FileExistsError:
-            # Another converging initializer may have published it.  Its bytes
-            # are verified by the caller before any key is returned.
+            # The caller re-reads and re-acknowledges it while holding the
+            # exact initialization authority.  A partial stale record is
+            # therefore never trusted merely because its pathname exists.
             return
         except OSError as exc:
             raise ManifestKeyError("Unable to publish canonical manifest key readiness") from exc
@@ -314,15 +417,10 @@ class ManifestKeyProvider:
                 raise ManifestKeyError(
                     "Unable to close canonical manifest key readiness"
                 ) from exc
-        ready_metadata = os.lstat(ready_path)
-        self._assert_safe_key_metadata(ready_metadata)
-        identity = (ready_metadata.st_dev, ready_metadata.st_ino)
-        if os.name == "posix":
-            self._fsync_parent_entry_for(ready_path, identity)
-        else:
-            from .path_security import _windows_file_api
-
-            _windows_file_api().flush_regular_file(ready_path, expected_identity=identity)
+        # Readiness bytes are not completion until _ready_matches re-executes
+        # the platform acknowledgement against their exact identity.  Keeping
+        # that step at the shared read boundary also retries a previous
+        # close/directory-ack failure without accepting the visible bytes.
 
     def _ready_matches(
         self,
@@ -367,9 +465,50 @@ class ManifestKeyProvider:
                     ) from exc
         if raw != self._ready_bytes(key, expected_identity):
             raise ManifestKeyError("Canonical manifest key readiness does not bind its key")
+        self._acknowledge_ready_record((opened.st_dev, opened.st_ino))
         return True
 
-    def _acknowledge_new_key(self, expected_identity: tuple[int, int]) -> None:
+    def _acknowledge_ready_record(self, expected_identity: tuple[int, int]) -> None:
+        """Re-execute the readiness durability boundary for exact ready bytes."""
+        if os.name == "posix":
+            self._fsync_parent_entry_for(self._ready_path, expected_identity)
+            return
+        from .path_security import _windows_file_api
+
+        _windows_file_api().flush_regular_file(
+            self._ready_path, expected_identity=expected_identity
+        )
+
+    def _retire_exact_unacknowledged_ready(self) -> None:
+        """Retire only the current malformed readiness inode while locked."""
+        try:
+            metadata = os.lstat(self._ready_path)
+        except FileNotFoundError:
+            return
+        self._assert_safe_key_metadata(metadata)
+        expected = (metadata.st_dev, metadata.st_ino)
+        current = os.lstat(self._ready_path)
+        self._assert_safe_key_metadata(current)
+        if (current.st_dev, current.st_ino) != expected:
+            raise ManifestKeyError("Canonical manifest key readiness changed during recovery")
+        try:
+            os.unlink(self._ready_path)
+        except OSError as exc:
+            raise ManifestKeyError(
+                "Unable to retire incomplete canonical manifest key readiness"
+            ) from exc
+        if os.name == "posix":
+            self._fsync_parent_entry_for(self._initialization_lock_path, self._lock_identity())
+
+    def _lock_identity(self) -> tuple[int, int]:
+        """Return the exact stable initialization-lock identity while held."""
+        metadata = os.lstat(self._initialization_lock_path)
+        self._assert_safe_key_metadata(metadata)
+        return metadata.st_dev, metadata.st_ino
+
+    def _acknowledge_new_key(
+        self, expected_identity: tuple[int, int], retained_handle: BinaryIO
+    ) -> None:
         """Make the sole file trust root durable before any manifest is signed.
 
         POSIX acknowledges the identity-checked *parent directory entry* after
@@ -388,7 +527,7 @@ class ManifestKeyProvider:
         if os.name == "posix":
             self._fsync_parent_entry(expected_identity)
             return
-        self._flush_windows_key_entry(expected_identity)
+        self._flush_windows_key_entry(expected_identity, retained_handle)
 
     def _fsync_parent_entry(self, expected_identity: tuple[int, int]) -> None:
         """Fsync the same safe POSIX parent that names the generated key."""
@@ -434,7 +573,9 @@ class ManifestKeyProvider:
         if (current.st_dev, current.st_ino) != expected_identity:
             raise ManifestKeyError("Canonical manifest key entry changed after directory sync")
 
-    def _flush_windows_key_entry(self, expected_identity: tuple[int, int]) -> None:
+    def _flush_windows_key_entry(
+        self, expected_identity: tuple[int, int], retained_handle: BinaryIO
+    ) -> None:
         """Use the D-22 documented regular-handle flush provider on Windows."""
         current = os.lstat(self.key_path)
         self._assert_safe_key_metadata(current)
@@ -443,11 +584,17 @@ class ManifestKeyProvider:
         # Imported lazily to keep the integrity primitive dependency-light on
         # POSIX. The native adapter opens and flushes a reparse-safe regular
         # handle, the documented acknowledgement we can truthfully claim for
-        # the D-22 one-user/session file-provider topology.
+        # the D-22 one-user/session file-provider topology.  Both the expected
+        # native volume/file ID and the flush are taken from the same retained
+        # descriptor that was identity-checked before admission.
         from .path_security import _windows_file_api
 
-        _windows_file_api().flush_regular_file(
-            self.key_path, expected_identity=expected_identity
+        windows_api = _windows_file_api()
+        native_identity = windows_api.native_regular_file_identity(
+            retained_handle.fileno()
+        )
+        windows_api.flush_regular_file_descriptor(
+            retained_handle.fileno(), expected_native_identity=native_identity
         )
         current = os.lstat(self.key_path)
         self._assert_safe_key_metadata(current)
@@ -463,14 +610,9 @@ class ManifestKeyProvider:
         """
         if self._provided_key is not None:
             return self._provided_key
-        existing, identity = self._read_existing_key_and_identity(missing_ok=True)
-        if existing is not None:
-            assert identity is not None
-            if self._ready_matches(existing, identity, missing_ok=True):
-                return existing
-        # A visible but unacknowledged key is deliberately treated exactly as
-        # first-use work.  ``initialize_new_store`` resumes its exact
-        # acknowledgement rather than consuming it or generating a replacement.
+        # Initialization owns every EEXIST read.  It is cheap for an already
+        # ready key and prevents a concurrent normal open from consuming a
+        # short winner record outside the exact publication lock.
         return self.initialize_new_store()
 
     @staticmethod
@@ -497,6 +639,25 @@ class ManifestKeyProvider:
             # later open verifies any surviving evidence fail-closed.
             pass
 
+    def _retire_exact_unacknowledged_key(self, expected_identity: tuple[int, int]) -> None:
+        """Retire one short key only after exact identity revalidation."""
+        try:
+            current = os.lstat(self.key_path)
+            self._assert_safe_key_metadata(current)
+            if (current.st_dev, current.st_ino) != expected_identity:
+                raise ManifestKeyError("Canonical manifest key changed during recovery")
+            os.unlink(self.key_path)
+            if os.name == "posix":
+                self._fsync_parent_entry_for(
+                    self._initialization_lock_path, self._lock_identity()
+                )
+        except ManifestKeyError:
+            raise
+        except OSError as exc:
+            raise ManifestKeyError(
+                "Unable to retire incomplete canonical manifest key"
+            ) from exc
+
     def _read_existing_key(
         self, *, missing_ok: bool = False, require_ready: bool = True
     ) -> bytes | None:
@@ -509,7 +670,7 @@ class ManifestKeyProvider:
         return key
 
     def _read_existing_key_and_identity(
-        self, *, missing_ok: bool = False
+        self, *, missing_ok: bool = False, allow_partial: bool = False
     ) -> tuple[bytes | None, tuple[int, int] | None]:
         """Read a safe key snapshot without assigning it authority yet."""
         descriptor: int | None = None
@@ -554,7 +715,8 @@ class ManifestKeyProvider:
                         raise ManifestKeyError(
                             "Unable to close canonical manifest key"
                         ) from exc
-        _validate_key(key)
+        if not allow_partial:
+            _validate_key(key)
         return key, (metadata.st_dev, metadata.st_ino)
 
     def _assert_safe_parent(self) -> None:

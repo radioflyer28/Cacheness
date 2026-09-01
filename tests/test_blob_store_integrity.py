@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import json
+import multiprocessing
 import os
 import inspect
 import threading
@@ -35,6 +36,19 @@ from cacheness.storage.manifest import BlobManifestV1
 
 
 _KEY = b"0123456789abcdef0123456789abcdef"
+
+
+def _leave_crash_partial_key(path: str) -> None:
+    """Persist a short key in a child and terminate without cleanup."""
+    key_path = Path(path)
+    key_path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(descriptor, b"short")
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    os._exit(0)
 
 
 class _InjectedManifestKeyProvider:
@@ -201,6 +215,37 @@ def test_unacknowledged_key_is_resumed_after_close_failure(
         provider.initialize_new_store()
     monkeypatch.setattr(integrity_module.os, "close", original_close)
     assert provider.get_or_initialize_new_store() == provider.get_key()
+
+
+def test_cross_process_crash_partial_key_is_retired_under_initialization_authority(
+    tmp_path: Path,
+) -> None:
+    """A crash-short EEXIST key is repaired only after the shared lock is held."""
+    key_path = tmp_path / "blob_manifest_hmac_key.bin"
+    context = multiprocessing.get_context("spawn")
+    child = context.Process(target=_leave_crash_partial_key, args=(str(key_path),))
+    child.start()
+    child.join(timeout=10)
+    assert child.exitcode == 0
+
+    provider = ManifestKeyProvider(key_path)
+    assert provider.get_or_initialize_new_store() == provider.get_key()
+    assert len(key_path.read_bytes()) == 32
+
+
+def test_partial_ready_record_is_replaced_and_reacknowledged(tmp_path: Path) -> None:
+    """Visible ready bytes are not completion until their durability step runs."""
+    key_path = tmp_path / "blob_manifest_hmac_key.bin"
+    provider = ManifestKeyProvider(key_path)
+    key_path.write_bytes(_KEY)
+    key_path.chmod(0o600)
+    ready_path = key_path.with_name(f"{key_path.name}.ready")
+    ready_path.write_bytes(b"partial")
+    ready_path.chmod(0o600)
+
+    assert provider.get_or_initialize_new_store() == _KEY
+    assert provider.get_key() == _KEY
+    assert ready_path.read_bytes() == provider._ready_bytes(_KEY, provider._read_existing_key_and_identity()[1])
 
 
 def test_custom_manifest_key_provider_exception_is_translated(tmp_path: Path) -> None:

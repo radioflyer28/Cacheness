@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import multiprocessing
+import base64
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -12,6 +13,7 @@ from pathlib import Path
 from threading import Event, Thread
 
 import pytest
+from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
 from cacheness.config import CacheConfig, LifecycleLimits
 from cacheness.metadata import InMemoryBackend
@@ -23,7 +25,11 @@ from cacheness.error_handling import (
 )
 from cacheness.storage import BlobStore
 from cacheness.storage.reconciliation import ReconciliationAction, ReconciliationStatus
-from cacheness.storage.integrity import sign_hmac_sha256, verify_hmac_sha256
+from cacheness.storage.integrity import (
+    ManifestKeyProvider,
+    sign_hmac_sha256,
+    verify_hmac_sha256,
+)
 from cacheness.storage.operation_record import (
     MAX_OPERATION_FIELD_BYTES,
     MAX_OPERATION_RECORD_BYTES,
@@ -966,6 +972,39 @@ def test_reconciliation_tokens_are_nonce_random_authenticated_and_bounded(
         store.close()
 
 
+def test_released_v1_reconciliation_token_vector_remains_resumable(tmp_path: Path) -> None:
+    """The three-field token emitted before v2 decodes without sidecar state."""
+    key = b"v1-reconciliation-token-key-0001"
+    assert len(key) == 32
+    root = tmp_path / "v1-token-vector"
+    store = BlobStore(
+        root,
+        backend="json",
+        manifest_key_provider=ManifestKeyProvider(root / "key.bin", key=key),
+    )
+    try:
+        payload = json.dumps(
+            {"manifest": "tenant/asset", "operation": "a" * 32, "priority": "operation"},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        nonce = bytes(range(12))
+        encrypted = ChaCha20Poly1305(store._reconciler._token_key()).encrypt(
+            nonce, payload, store._reconciler._TOKEN_DOMAIN
+        )
+        vector = base64.urlsafe_b64encode(b"\x01" + nonce + encrypted).decode("ascii")
+        assert vector == "AQABAgMEBQYHCAkKC6sC_5JPawWEAAeYChAEswIHp59Y0d-ZC8ycrixRmUeMdutGTss6Fcsw20KBPym3lBfPb3-sLf8yxzU8lQ3CnDaJRANQyq1k73Mo4LMCSYmsEm_A2iHxwJtgywpf5M3UBBa0-KImxny7-8MW4okhIZTG"
+        assert store._reconciler._decode_resume_token(vector) == (
+            reconciliation_module.ManifestCursor("tenant/asset"),
+            reconciliation_module.OperationCursor("a" * 32),
+            None,
+            None,
+            "operation",
+        )
+    finally:
+        store.close()
+
+
 def test_reconciliation_public_types_and_reason_coded_errors_are_narrow() -> None:
     """Storage exports report values and exact reconciliation error boundaries."""
     from cacheness.storage import (
@@ -1092,6 +1131,40 @@ def test_dry_run_reports_blocked_pending_control_residue(tmp_path: Path) -> None
         store.close()
 
 
+def test_pending_only_reconciliation_page_emits_and_resumes_its_cursor(
+    tmp_path: Path,
+) -> None:
+    """Pending residue alone is truthful incomplete work, not a terminal page."""
+    root = tmp_path / "pending-only-resume"
+    store = BlobStore(
+        config=CacheConfig(cache_dir=str(root), lifecycle_limits=_small_lifecycle_limits()),
+        backend="json",
+    )
+    try:
+        store._manifest_key(initialize_new_store=True)
+        operations = root / "operations"
+        operations.mkdir(exist_ok=True)
+        for index in range(3):
+            operation_id = f"{index:032x}"
+            (operations / (
+                f".{operation_id}.json.pending.{'0' * 64}.{index:032x}.tmp"
+            )).write_bytes(b"invalid")
+
+        first = store.reconcile(now=datetime(2026, 8, 31, tzinfo=timezone.utc))
+        assert first.resume_token is not None
+        decoded = store._reconciler._decode_resume_token(first.resume_token)
+        assert decoded[3] is not None
+        second = store.reconcile(
+            resume_token=first.resume_token,
+            now=datetime(2026, 8, 31, tzinfo=timezone.utc),
+        )
+        assert len(first.findings) == 2
+        assert len(second.findings) == 1
+        assert second.resume_token is None
+    finally:
+        store.close()
+
+
 def test_invalid_checkpoint_does_not_starve_later_completed_orphan(
     tmp_path: Path,
 ) -> None:
@@ -1132,6 +1205,59 @@ def test_invalid_checkpoint_does_not_starve_later_completed_orphan(
             finding.reason == "reconciliation_checkpoint_untrusted"
             for finding in report.findings
         )
+    finally:
+        store.close()
+
+
+def test_signed_primary_mismatched_sidecar_blocks_only_its_primary(
+    tmp_path: Path,
+) -> None:
+    """A signed foreign checkpoint cannot starve a later safe action."""
+    from cacheness.storage.reconciliation import _ActionCheckpoint
+
+    root = tmp_path / "mismatched-sidecar"
+    store = BlobStore(
+        config=CacheConfig(cache_dir=str(root), lifecycle_limits=_small_lifecycle_limits()),
+        backend="json",
+    )
+    try:
+        key = store._manifest_key(initialize_new_store=True)
+        repository = store.lifecycle.operation_repository
+        blocked = _reconciliation_record(store, root, key, "a" * 32)
+        safe = _reconciliation_record(store, root, key, "f" * 32)
+        blocked_candidate = store.guarded_handler_io.root / blocked.candidate_locator
+        safe_candidate = store.guarded_handler_io.root / safe.candidate_locator
+        store.guarded_handler_io.file_ops.write_bytes_durable(blocked_candidate, b"blocked")
+        store.guarded_handler_io.file_ops.write_bytes_durable(safe_candidate, b"safe")
+        blocked_raw = blocked.canonical_bytes(lifecycle_limits=store.lifecycle_limits)
+        repository.create_exclusive(blocked, blocked_raw)
+        repository.create_exclusive(
+            safe, safe.canonical_bytes(lifecycle_limits=store.lifecycle_limits)
+        )
+        foreign = _ActionCheckpoint.new(
+            blocked.operation_id,
+            "0" * 64,
+            ReconciliationAction.DELETE_CANDIDATE,
+            "prepared",
+            key,
+        )
+        foreign_raw = foreign.canonical_bytes(lifecycle_limits=store.lifecycle_limits)
+        repository.create_reconciliation_checkpoint_exclusive(
+            blocked.operation_id, foreign_raw
+        )
+
+        report = store.reconcile(
+            apply=True, now=datetime(2026, 8, 31, tzinfo=timezone.utc)
+        )
+
+        assert any(
+            finding.reason == "reconciliation_checkpoint_primary_mismatch"
+            for finding in report.findings
+        )
+        assert repository.get_raw(blocked.operation_id) == blocked_raw
+        assert repository.get_reconciliation_checkpoint_raw(blocked.operation_id) == foreign_raw
+        assert not safe_candidate.exists()
+        assert repository.get_raw(safe.operation_id) is None
     finally:
         store.close()
 
@@ -1269,16 +1395,19 @@ def test_tombstone_fault_seams_converge_without_replaying_effects(
 
     root = tmp_path / seam
     payload_deletes = 0
+    payload_delete_calls = 0
     manifest_removals = 0
     payload_locator: Path | None = None
 
     def count_effects(active_store: BlobStore) -> None:
-        nonlocal payload_deletes, manifest_removals
+        nonlocal payload_deletes, payload_delete_calls, manifest_removals
         original_delete = active_store.guarded_handler_io.file_ops.delete_durable
         original_remove = active_store.manifest_repository.remove_if_expected
 
         def delete_once(locator: Path) -> bool:
-            nonlocal payload_deletes
+            nonlocal payload_deletes, payload_delete_calls
+            if locator == payload_locator:
+                payload_delete_calls += 1
             deleted = original_delete(locator)
             if locator == payload_locator:
                 payload_deletes += int(deleted)
@@ -1327,6 +1456,7 @@ def test_tombstone_fault_seams_converge_without_replaying_effects(
         count_effects(reopened)
         reopened.reconcile(apply=True, now=datetime(2026, 8, 31, tzinfo=timezone.utc))
         assert payload_deletes == 1
+        assert payload_delete_calls == 1
         assert manifest_removals == 1
         assert reopened.manifest_repository.get_raw("tombstone-key") is None
         assert reopened.lifecycle.operation_repository.list_page().entries == ()
