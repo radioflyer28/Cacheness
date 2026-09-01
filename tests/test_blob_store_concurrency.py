@@ -86,6 +86,87 @@ def test_two_local_readers_hold_shared_admission_until_the_last_exit(tmp_path: P
         barrier.release()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX advisory-lock contract")
+def test_replacement_reader_waits_for_final_unlock_without_losing_shared_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The closing-to-opening handoff never exposes an active reader to clear.
+
+    Pause the last reader immediately before its retained descriptor unlocks,
+    begin a replacement reader, then resume the unlock.  The replacement must
+    wait for that closing state and acquire a new shared lock only afterwards;
+    an external exclusive contender remains blocked while it is active.
+    """
+    root = tmp_path / "ordinary-closing-handoff"
+    root.mkdir()
+    barrier = StoreAdmissionBarrier.acquire(root)
+    final_unlock_entered = threading.Event()
+    allow_final_unlock = threading.Event()
+    replacement_entered = threading.Event()
+    release_replacement = threading.Event()
+    errors: list[BaseException] = []
+    original_admission = barrier._advisory_admission
+
+    @contextmanager
+    def pause_final_unlock(*, exclusive: bool):
+        with original_admission(exclusive=exclusive):
+            try:
+                yield
+            finally:
+                if not exclusive:
+                    final_unlock_entered.set()
+                    assert allow_final_unlock.wait(timeout=5)
+
+    monkeypatch.setattr(barrier, "_advisory_admission", pause_final_unlock)
+    outcomes = multiprocessing.get_context("spawn").Queue()
+
+    def can_take_exclusive() -> bool:
+        contender = multiprocessing.get_context("spawn").Process(
+            target=_try_external_exclusive_admission,
+            args=(str(barrier._lock_locator), outcomes),
+        )
+        contender.start()
+        contender.join(timeout=10)
+        assert contender.exitcode == 0
+        return outcomes.get(timeout=5)
+
+    def first_reader() -> None:
+        try:
+            with barrier.ordinary_admission():
+                pass
+        except BaseException as exc:  # pragma: no cover - asserted by parent.
+            errors.append(exc)
+
+    def replacement_reader() -> None:
+        try:
+            with barrier.ordinary_admission():
+                replacement_entered.set()
+                assert release_replacement.wait(timeout=5)
+        except BaseException as exc:  # pragma: no cover - asserted by parent.
+            errors.append(exc)
+
+    first = threading.Thread(target=first_reader)
+    replacement = threading.Thread(target=replacement_reader)
+    try:
+        first.start()
+        assert final_unlock_entered.wait(timeout=5)
+        replacement.start()
+        assert not replacement_entered.wait(timeout=0.2)
+        allow_final_unlock.set()
+        assert replacement_entered.wait(timeout=5)
+        assert can_take_exclusive() is False
+        release_replacement.set()
+        _join(first)
+        _join(replacement)
+        assert errors == []
+    finally:
+        allow_final_unlock.set()
+        release_replacement.set()
+        _join(first)
+        _join(replacement)
+        barrier.release()
+
+
 def test_key_registry_retires_entries_after_exception_and_high_cardinality():
     """Refcounted entries are removed after every normal and exceptional holder."""
     registry = KeyCoordinatorRegistry()

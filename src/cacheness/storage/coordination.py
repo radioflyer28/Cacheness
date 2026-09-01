@@ -445,7 +445,16 @@ class StoreAdmissionBarrier:
         """Admit one normal operation unless a snapshot is being established."""
         acquire_shared = False
         with self._condition:
-            while self._aggregate_active or self._ordinary_lock_opening:
+            # ``_ordinary_lock_closing`` is an explicit transition state, not
+            # merely diagnostic.  The final reader still owns the retained OS
+            # lock until its context exits.  Admitting a new 0 -> 1 reader in
+            # that interval would let the old context unlock the replacement
+            # reader's freshly acquired shared lock.
+            while (
+                self._aggregate_active
+                or self._ordinary_lock_opening
+                or self._ordinary_lock_closing
+            ):
                 self._condition.wait()
             acquire_shared = self._ordinary_active == 0
             self._ordinary_active += 1
