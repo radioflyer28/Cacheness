@@ -2,7 +2,22 @@
 
 ## Overview
 
-Cacheness is fully compatible with Windows, Linux, and macOS. This document describes the Windows-specific considerations and fixes that were implemented to ensure reliable operation on Windows systems.
+Cacheness supports the documented Windows local-store topology alongside Linux
+and macOS. This document describes Windows-specific behavior and the lifecycle
+constraints that deployments must satisfy. Adapter tests exercise the shared
+Python/Win32 call contract on non-Windows hosts; native Windows filesystem,
+ACL, session, and crash/reopen execution remains a later CI/platform
+verification gate rather than a claim made by those simulated tests.
+
+### Local-store sharing scope
+
+Windows compatibility covers local stores opened by processes running as one OS
+user within one interactive or service session. Sharing the same local store
+across different users, services, or sessions is unsupported in the current
+milestone. Store ACLs must exclude other principals; deployments must also not
+configure the same local store for multiple sessions. Use an external
+transactional backend when cross-principal or cross-session coordination is
+required.
 
 ## Windows-Specific Challenges
 
@@ -210,7 +225,12 @@ steps:
 
 ## Known Limitations
 
-None! All features work identically on Windows, Linux, and macOS after the compatibility fixes.
+- Lifecycle coordination for a Windows local store is limited to one OS user
+  and one interactive or service session. Cross-user, cross-service, and
+  cross-session sharing is unsupported in this milestone.
+- The automated adapter suite proves the source-level Windows call contract;
+  it is not native Windows filesystem, ACL, session, or crash/reopen evidence.
+  That execution coverage is required from the later CI/platform phase.
 
 ## Performance Notes
 

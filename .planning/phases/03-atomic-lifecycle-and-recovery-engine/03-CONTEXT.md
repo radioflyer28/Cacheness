@@ -53,6 +53,11 @@ does not yet implement the complete PostgreSQL/S3 backend matrix, rewire
 - **D-19:** Same-key write/write races have one conditional-publication winner; losers receive a typed conflict and clean or report only their own candidate residue. Write/delete races obey the same expected-generation rule. Reads return a complete committed generation or a typed lifecycle/conflict outcome, never mixed bytes and metadata.
 - **D-20:** Operations on distinct keys proceed independently except for an explicit store-wide clear/reconciliation admission barrier. Lock acquisition order for multi-key work is deterministic to avoid deadlocks.
 
+### Local Authority Trust and Windows Scope
+
+- **D-21:** The OS principal that owns a local store is inside the trusted deployment boundary for lifecycle-control availability. Cacheness validates control-object type, containment, identity, and authenticated contents and fails closed when observable substitution occurs, but it does not promise continued operation or immutable per-key authority if that same principal deliberately deletes or rebinds every lifecycle authority object while the store is live. Ordinary Cacheness processes never perform such rebinding. — **Reversibility:** costly — Defending against a hostile store owner would require an external coordinator, privileged mandatory controls, or store-wide serialization and therefore changes the architecture or deployment model.
+- **D-22:** In this milestone, Windows local-store coordination is supported only among processes running as one OS user in one interactive or service session. Cross-user, cross-service, and cross-session access to the same local store is unsupported and must fail or be prevented by deployment ACLs; supporting it later requires an explicit global authority namespace, ACL/security-descriptor contract, and native Windows validation. Advertised Windows compatibility otherwise remains in force. — **Reversibility:** reversible — A later milestone may broaden the topology after implementing and validating that authority contract.
+
 ### the agent's Discretion
 
 - Exact class/module names for lifecycle operations, journals, reconciliation reports, and coordination registries.

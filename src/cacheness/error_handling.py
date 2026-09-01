@@ -51,6 +51,7 @@ class CacheReason(str, Enum):
     BLOB_PAYLOAD_UNSUPPORTED_VERSION = MANIFEST_UNSUPPORTED_VERSION
     BLOB_LIFECYCLE_CONFLICT = "blob_lifecycle_conflict"
     BLOB_BACKEND_FAILURE = "blob_backend_failure"
+    BLOB_BACKEND_CAPABILITY_UNSUPPORTED = "blob_backend_capability_unsupported"
     BLOB_MIGRATION_REQUIRED = "blob_migration_required"
     BLOB_RECOVERABLE_CLEANUP = "blob_recoverable_cleanup"
     BLOB_RECONCILIATION_BLOCKED = "blob_reconciliation_blocked"

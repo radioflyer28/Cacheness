@@ -66,6 +66,7 @@ class TestPublicExports:
             "manifest_signing_key_invalid",
             "blob_lifecycle_conflict",
             "blob_backend_failure",
+            "blob_backend_capability_unsupported",
             "blob_migration_required",
             "blob_recoverable_cleanup",
             "blob_reconciliation_blocked",

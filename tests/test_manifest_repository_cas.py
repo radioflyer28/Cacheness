@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import builtins
 import ctypes
+import errno
 import hashlib
 import multiprocessing
 import os
@@ -16,6 +17,7 @@ from cacheness.config import LifecycleLimits
 from cacheness.error_handling import (
     CacheBlobBackendError,
     CacheBlobLifecycleConflictError,
+    CacheReason,
     CacheUnsafePathError,
 )
 from cacheness.metadata import InMemoryBackend, JsonBackend, SqliteBackend
@@ -227,6 +229,203 @@ def test_json_cas_has_one_exact_cross_process_winner(tmp_path: Path) -> None:
                 worker.join(timeout=5)
 
 
+@pytest.mark.parametrize(
+    "error_number",
+    (
+        errno.ENOTSUP,
+        errno.EOPNOTSUPP,
+        errno.ENOSYS,
+        errno.ENOTTY,
+        errno.EINVAL,
+        errno.EACCES,
+        errno.EPERM,
+        errno.EROFS,
+    ),
+)
+def test_root_xattr_capability_and_policy_failures_are_typed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error_number: int
+) -> None:
+    """Required root-xattr capability failures never escape as raw OS errors."""
+    root = tmp_path / "xattr-capability"
+    root.mkdir()
+    file_ops = ManagedFileOps(root)
+    locator = root / ".authority.lock"
+    injected = OSError(error_number, "xattr unavailable")
+
+    def fail_set(_name: str, _authority: bytes) -> None:
+        raise injected
+
+    monkeypatch.setattr(file_ops, "_set_root_authority_xattr", fail_set)
+    try:
+        with pytest.raises(CacheBlobBackendError) as error:
+            file_ops._ensure_root_authority_binding(locator, b"authority")
+        assert error.value.context["reason"] == (
+            CacheReason.BLOB_BACKEND_CAPABILITY_UNSUPPORTED.value
+        )
+        assert error.value.context["capability"] == "root_xattr"
+        assert error.value.context["errno"] == error_number
+        assert error.value.__cause__ is injected
+    finally:
+        file_ops.close()
+
+
+def test_root_xattr_api_unavailability_is_a_typed_capability_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Python runtime without xattr APIs has the same stable public outcome."""
+    root = tmp_path / "xattr-api-unavailable"
+    root.mkdir()
+    file_ops = ManagedFileOps(root)
+    locator = root / ".authority.lock"
+    injected = AttributeError("setxattr unavailable")
+
+    def fail_set(_name: str, _authority: bytes) -> None:
+        raise injected
+
+    monkeypatch.setattr(file_ops, "_set_root_authority_xattr", fail_set)
+    try:
+        with pytest.raises(CacheBlobBackendError) as error:
+            file_ops._ensure_root_authority_binding(locator, b"authority")
+        assert error.value.context == {
+            "operation": "lifecycle_lock_authority",
+            "capability": "root_xattr",
+            "reason": CacheReason.BLOB_BACKEND_CAPABILITY_UNSUPPORTED.value,
+        }
+        assert error.value.__cause__ is injected
+    finally:
+        file_ops.close()
+
+
+def test_root_xattr_operational_failure_is_a_typed_backend_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unexpected xattr I/O is still stable at the BlobStore boundary."""
+    root = tmp_path / "xattr-operational-failure"
+    root.mkdir()
+    file_ops = ManagedFileOps(root)
+    locator = root / ".authority.lock"
+    injected = OSError(errno.EIO, "xattr I/O failed")
+
+    def fail_set(_name: str, _authority: bytes) -> None:
+        raise injected
+
+    monkeypatch.setattr(file_ops, "_set_root_authority_xattr", fail_set)
+    try:
+        with pytest.raises(CacheBlobBackendError) as error:
+            file_ops._ensure_root_authority_binding(locator, b"authority")
+        assert error.value.context["reason"] == CacheReason.BLOB_BACKEND_FAILURE.value
+        assert error.value.context["capability"] == "root_xattr"
+        assert error.value.__cause__ is injected
+    finally:
+        file_ops.close()
+
+
+def test_existing_root_xattr_failure_is_typed_without_rebinding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Policy denial while verifying a prior binding cannot adopt a new lock."""
+    root = tmp_path / "xattr-verify-policy"
+    root.mkdir()
+    file_ops = ManagedFileOps(root)
+    locator = root / ".authority.lock"
+    injected = OSError(errno.EACCES, "xattr read denied")
+
+    def existing_set(_name: str, _authority: bytes) -> None:
+        raise FileExistsError(errno.EEXIST, "already bound")
+
+    def denied_read(_name: str) -> bytes:
+        raise injected
+
+    monkeypatch.setattr(file_ops, "_set_root_authority_xattr", existing_set)
+    monkeypatch.setattr(file_ops, "_get_root_authority_xattr", denied_read)
+    try:
+        with pytest.raises(CacheBlobBackendError) as error:
+            file_ops._ensure_root_authority_binding(locator, b"authority")
+        assert error.value.context["reason"] == (
+            CacheReason.BLOB_BACKEND_CAPABILITY_UNSUPPORTED.value
+        )
+        assert error.value.__cause__ is injected
+    finally:
+        file_ops.close()
+
+
+def test_existing_root_xattr_disappearance_fails_closed_without_rebinding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only initial create may initialize a missing D-21 root binding."""
+    root = tmp_path / "xattr-missing"
+    root.mkdir()
+    file_ops = ManagedFileOps(root)
+    locator = root / ".authority.lock"
+    missing_errno = getattr(errno, "ENODATA", errno.ENOENT)
+
+    def existing_set(_name: str, _authority: bytes) -> None:
+        raise FileExistsError(errno.EEXIST, "already bound")
+
+    def missing_read(_name: str) -> bytes:
+        raise OSError(missing_errno, "binding disappeared")
+
+    monkeypatch.setattr(file_ops, "_set_root_authority_xattr", existing_set)
+    monkeypatch.setattr(file_ops, "_get_root_authority_xattr", missing_read)
+    try:
+        with pytest.raises(CacheUnsafePathError) as error:
+            file_ops._ensure_root_authority_binding(locator, b"authority")
+        assert error.value.context["reason"] == CacheReason.PATH_RACE.value
+    finally:
+        file_ops.close()
+
+
+def test_existing_root_xattr_mismatch_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An extant authority value must match exactly rather than be replaced."""
+    root = tmp_path / "xattr-mismatch"
+    root.mkdir()
+    file_ops = ManagedFileOps(root)
+    locator = root / ".authority.lock"
+
+    def existing_set(_name: str, _authority: bytes) -> None:
+        raise FileExistsError(errno.EEXIST, "already bound")
+
+    monkeypatch.setattr(file_ops, "_set_root_authority_xattr", existing_set)
+    monkeypatch.setattr(
+        file_ops, "_get_root_authority_xattr", lambda _name: b"other-authority"
+    )
+    try:
+        with pytest.raises(CacheUnsafePathError) as error:
+            file_ops._ensure_root_authority_binding(locator, b"authority")
+        assert error.value.context["reason"] == CacheReason.PATH_RACE.value
+    finally:
+        file_ops.close()
+
+
+def test_root_xattr_initialization_is_only_the_create_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fresh trusted-store root binds exactly once without a verification read."""
+    root = tmp_path / "xattr-initialization"
+    root.mkdir()
+    file_ops = ManagedFileOps(root)
+    locator = root / ".authority.lock"
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        file_ops,
+        "_set_root_authority_xattr",
+        lambda _name, _authority: calls.append("create"),
+    )
+    monkeypatch.setattr(
+        file_ops,
+        "_get_root_authority_xattr",
+        lambda _name: calls.append("read") or b"authority",
+    )
+    try:
+        file_ops._ensure_root_authority_binding(locator, b"authority")
+        assert calls == ["create"]
+    finally:
+        file_ops.close()
+
+
 def test_json_lock_name_swap_cannot_create_a_second_cross_process_authority(
     tmp_path: Path,
 ) -> None:
@@ -284,7 +483,7 @@ def test_json_lock_name_swap_cannot_create_a_second_cross_process_authority(
 def test_json_cas_uses_the_win32_adapter_when_fcntl_is_unavailable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The simulated Windows path never imports POSIX locking and has one winner."""
+    """The simulated one-user/session Windows path never imports POSIX locking."""
     shared_lock = Lock()
     calls: list[str] = []
 
@@ -487,7 +686,7 @@ def test_json_authority_lock_rejects_regular_inode_replacement(
 def test_json_repository_uses_native_windows_control_durability(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The simulated Windows path uses documented file and move primitives."""
+    """The simulated one-user/session path uses documented file/move primitives."""
     root = tmp_path / "windows-json"
     root.mkdir()
     backend = JsonBackend(root / "metadata.json")
@@ -533,6 +732,17 @@ def test_json_repository_uses_native_windows_control_durability(
             repository.close()
     finally:
         backend.close()
+
+
+def test_windows_local_authority_scope_is_not_cross_principal() -> None:
+    """The implementation documents its deliberately local Windows namespace."""
+    assert path_security._WINDOWS_LOCAL_STORE_COORDINATION_SCOPE == (
+        "one_os_user_one_session"
+    )
+    assert (
+        path_security._WindowsRegistryAuthorityApi._HKEY_CURRENT_USER
+        == 0x80000001
+    )
 
 
 @pytest.mark.parametrize("error_number", (80, 183))

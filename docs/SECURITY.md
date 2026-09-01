@@ -14,6 +14,28 @@ validated and malformed metadata or a malformed legacy header fails closed.
 Application payloads are trusted only when they come from a producer that your
 application trusts.
 
+### Local store-owner boundary
+
+For filesystem-backed stores, the OS principal that owns the store is also part
+of the trusted deployment boundary. Cacheness validates lifecycle-control files,
+contained paths, signatures, digests, and file identities and fails closed when
+it observes substitution. It cannot preserve per-key coordination if that same
+principal deliberately deletes or rebinds every live coordination object.
+
+Do not modify `.cacheness-*` control objects, lifecycle lock files, metadata
+authority files, or their platform authority records while a store is open.
+Use filesystem permissions to prevent other principals from modifying the store.
+Applications that require protection from the store owner or coordination across
+different security principals need an external transactional authority rather
+than the local filesystem topology.
+
+On Windows, this local-store boundary is additionally limited to processes in
+one OS user and one interactive or service session. The current-user registry
+authority and local mutex are intentionally not a cross-user, cross-service, or
+cross-session coordinator. Deployment ACLs must exclude other principals, and
+deployments must not configure the same local store for more than one session.
+Use an external transactional authority whenever that topology is required.
+
 ### Pickle and dill are executable serialization
 
 `pickle` and `dill` can execute arbitrary code while deserializing. Do not load

@@ -44,6 +44,7 @@ _PHYSICAL_NAME_DOMAIN = b"cacheness.physical-name.v1\x00"
 _LOCK_AUTHORITY_VERSION = b"cacheness.lock-authority.v1\x00"
 _ROOT_AUTHORITY_XATTR_PREFIX = "user.cacheness.lifecycle-lock."
 _DARWIN_ROOT_AUTHORITY_XATTR_PREFIX = "com.cacheness.lifecycle-lock."
+_WINDOWS_LOCAL_STORE_COORDINATION_SCOPE = "one_os_user_one_session"
 
 
 def _platform_name() -> str:
@@ -168,14 +169,15 @@ class _WindowsFileApi:
 
 
 class _WindowsRegistryAuthorityApi:
-    """Persist one root-inode lock binding outside mutable store pathnames.
+    """Persist one root-inode lock binding for one Windows user/session.
 
-    A registry value is attached to the current user's Windows authority
-    namespace rather than to a replaceable file below the managed root.  A
-    short-lived named mutex makes first publication exclusive and is abandoned
-    safely by Windows when its publisher dies.  The value is only ever created
-    or compared; it is never rewritten, so a later control-file swap cannot
-    rebind an active store to a second advisory-lock inode.
+    The current user's registry hive and a ``Local\\`` named mutex deliberately
+    scope this adapter to processes running as one OS user in one interactive
+    or service session.  That is the supported Windows local-store topology in
+    this milestone; deployments must use ACLs to prevent cross-user, service,
+    or session sharing.  The value is only created or compared within that
+    scope, so an ordinary control-file swap cannot rebind an active store to a
+    second advisory-lock inode.
     """
 
     _HKEY_CURRENT_USER = 0x80000001
@@ -194,8 +196,13 @@ class _WindowsRegistryAuthorityApi:
             self._kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         except (AttributeError, OSError) as exc:  # pragma: no cover - Windows only.
             raise CacheBlobBackendError(
-                "BlobStore lifecycle authority is unavailable on this Windows runtime",
-                context={"operation": "windows_lifecycle_authority"},
+                "BlobStore one-user/session lifecycle authority is unavailable "
+                "on this Windows runtime",
+                context={
+                    "operation": "windows_lifecycle_authority",
+                    "scope": _WINDOWS_LOCAL_STORE_COORDINATION_SCOPE,
+                },
+                reason=CacheReason.BLOB_BACKEND_CAPABILITY_UNSUPPORTED,
             ) from exc
 
         self._reg_create = self._advapi32.RegCreateKeyExW
@@ -252,7 +259,7 @@ class _WindowsRegistryAuthorityApi:
         raise OSError(status, f"{operation} failed")
 
     def ensure(self, name: str, value: bytes) -> None:
-        """Create or verify an immutable exact binding under a crash-safe mutex."""
+        """Create or verify an exact binding under a one-user/session mutex."""
         digest = hashlib.sha256(name.encode("utf-8")).hexdigest()
         mutex = self._create_mutex(None, False, f"Local\\CachenessAuthority-{digest}")
         if not mutex:
@@ -1091,10 +1098,65 @@ class ManagedFileOps:
         return self.root
 
     @staticmethod
-    def _is_xattr_unsupported(exc: OSError) -> bool:
-        """Classify platforms/filesystems that cannot preserve root bindings."""
-        unsupported = {errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOSYS}
-        return exc.errno in unsupported
+    def _is_xattr_capability_or_policy_failure(exc: OSError) -> bool:
+        """Classify xattr capability and deployment-policy failures.
+
+        The root binding is a required lifecycle capability.  Unsupported
+        filesystems, unavailable kernel APIs, read-only roots, and deployment
+        policy that denies xattrs are therefore never leaked as raw ``OSError``
+        values or misreported as an unsafe payload path.
+        """
+        unavailable = {
+            errno.ENOTSUP,
+            errno.EOPNOTSUPP,
+            errno.ENOSYS,
+            errno.ENOTTY,
+            errno.EINVAL,
+        }
+        policy = {errno.EACCES, errno.EPERM, errno.EROFS}
+        return exc.errno in unavailable | policy
+
+    @staticmethod
+    def _is_xattr_missing(exc: OSError) -> bool:
+        """Return whether an existing binding disappeared during verification."""
+        missing = {
+            getattr(errno, "ENODATA", errno.ENOENT),
+            getattr(errno, "ENOATTR", errno.ENOENT),
+        }
+        return exc.errno in missing
+
+    def _raise_root_authority_xattr_error(
+        self, exc: AttributeError | OSError
+    ) -> NoReturn:
+        """Translate root-xattr failures to stable lifecycle boundary errors."""
+        if isinstance(exc, OSError) and self._is_xattr_missing(exc):
+            # A missing binding is initialized only by the initial
+            # XATTR_CREATE call in _ensure_root_authority_binding.  Once an
+            # operation observed an existing binding, its disappearance is an
+            # observable substitution and must never be repaired in place.
+            _unsafe_path(CacheReason.PATH_RACE)
+
+        unsupported = isinstance(exc, AttributeError) or (
+            isinstance(exc, OSError)
+            and self._is_xattr_capability_or_policy_failure(exc)
+        )
+        reason = (
+            CacheReason.BLOB_BACKEND_CAPABILITY_UNSUPPORTED
+            if unsupported
+            else CacheReason.BLOB_BACKEND_FAILURE
+        )
+        message = (
+            "BlobStore lifecycle authority requires available root-object attributes"
+            if unsupported
+            else "BlobStore lifecycle authority could not access root-object attributes"
+        )
+        context = {
+            "operation": "lifecycle_lock_authority",
+            "capability": "root_xattr",
+        }
+        if isinstance(exc, OSError) and exc.errno is not None:
+            context["errno"] = exc.errno
+        raise CacheBlobBackendError(message, context=context, reason=reason) from exc
 
     def _set_root_authority_xattr(self, name: str, authority: bytes) -> None:
         """Create one root-directory attribute without a mutable child path."""
@@ -1195,16 +1257,31 @@ class ManagedFileOps:
         if self._root_fd is not None:
             os.fsync(self._root_fd)
 
+    def _read_root_authority_binding(self, name: str) -> bytes:
+        """Read an existing root binding without turning loss into rebind.
+
+        Only the initial create-or-compare step may establish a missing
+        binding under D-21's trusted-store-owner deployment boundary.  Any
+        later read is verification, where disappearance and a mismatched value
+        remain fail-closed authority failures.
+        """
+        try:
+            return self._get_root_authority_xattr(name)
+        except (AttributeError, OSError) as exc:
+            self._raise_root_authority_xattr_error(exc)
+
     def _ensure_root_authority_binding(self, locator: Path, authority: bytes) -> None:
-        """Create or verify one exact immutable root-object lock binding.
+        """Create or verify one exact root-object lock binding.
 
         Descriptor-capable POSIX systems use an extended attribute on the
         already-open root directory.  The kernel publishes an xattr as one
         complete value, so a process loss leaves either no binding or the full
-        binding—never a direct-written partial sidecar.  Windows uses an HKCU
-        registry value guarded by an abandon-safe named mutex for the same
-        create-or-compare contract.  Neither representation is a mutable path
-        below the storage root.
+        binding—never a direct-written partial sidecar.  The initial
+        create-or-compare is permitted by D-21's trusted-store-owner boundary;
+        later observable removal or mismatch is rejected rather than repaired.
+        Windows uses an HKCU registry value guarded by an abandon-safe local
+        mutex for the documented one-user/session contract.  Neither
+        representation is a mutable path below the storage root.
         """
         name = self._root_authority_name(locator)
         # Xattr/registry publication is one kernel operation.  The pre/post
@@ -1219,30 +1296,14 @@ class ManagedFileOps:
 
         try:
             self._set_root_authority_xattr(name, authority)
-        except AttributeError as exc:  # pragma: no cover - Python platform capability.
-            raise CacheBlobBackendError(
-                "BlobStore lifecycle authority requires root-object attributes",
-                context={"operation": "lifecycle_lock_authority"},
-            ) from exc
         except OSError as exc:
             if exc.errno != errno.EEXIST:
-                if self._is_xattr_unsupported(exc):
-                    raise CacheBlobBackendError(
-                        "BlobStore lifecycle authority requires root-object attributes",
-                        context={"operation": "lifecycle_lock_authority"},
-                    ) from exc
-                raise
-            try:
-                persisted = self._get_root_authority_xattr(name)
-            except OSError as read_exc:
-                if self._is_xattr_unsupported(read_exc):
-                    raise CacheBlobBackendError(
-                        "BlobStore lifecycle authority requires root-object attributes",
-                        context={"operation": "lifecycle_lock_authority"},
-                    ) from read_exc
-                raise
+                self._raise_root_authority_xattr_error(exc)
+            persisted = self._read_root_authority_binding(name)
             if persisted != authority:
                 _unsafe_path(CacheReason.PATH_RACE)
+        except AttributeError as exc:  # pragma: no cover - Python platform capability.
+            self._raise_root_authority_xattr_error(exc)
         self._sync_root_authority_binding()
         self._assert_root_identity()
         self._run_control_durability_hook("lock_authority_published", locator)
@@ -1253,20 +1314,7 @@ class ManagedFileOps:
         if _platform_name() == "nt":
             _windows_registry_authority_api().ensure(name, authority)
             return
-        try:
-            persisted = self._get_root_authority_xattr(name)
-        except AttributeError as exc:  # pragma: no cover - Python platform capability.
-            raise CacheBlobBackendError(
-                "BlobStore lifecycle authority requires root-object attributes",
-                context={"operation": "lifecycle_lock_authority"},
-            ) from exc
-        except OSError as exc:
-            if self._is_xattr_unsupported(exc):
-                raise CacheBlobBackendError(
-                    "BlobStore lifecycle authority requires root-object attributes",
-                    context={"operation": "lifecycle_lock_authority"},
-                ) from exc
-            _unsafe_path(CacheReason.PATH_RACE)
+        persisted = self._read_root_authority_binding(name)
         if persisted != authority:
             _unsafe_path(CacheReason.PATH_RACE)
         self._assert_root_identity()

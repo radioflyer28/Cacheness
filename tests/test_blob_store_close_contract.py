@@ -370,7 +370,7 @@ def test_windows_lock_path_keeps_canonical_blobstore_constructible(
 def test_default_blobstore_runs_the_native_windows_fallback_contract(
     tmp_path, monkeypatch, backend_name: str
 ):
-    """Default stores exercise the real fallback routing instead of refusing Windows."""
+    """Default stores exercise the one-user/session Windows fallback routing."""
     flushed_files: list[Path] = []
     authorities: dict[str, bytes] = {}
 
