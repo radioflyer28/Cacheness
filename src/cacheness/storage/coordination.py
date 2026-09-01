@@ -194,12 +194,8 @@ def interprocess_open_file_lock(
             context={"operation": operation},
         ) from exc
 
-    body_failure: BaseException | None = None
     try:
         yield
-    except BaseException as exc:
-        body_failure = exc
-        raise
     finally:
         release_failure: OSError | None = None
         try:
@@ -214,7 +210,12 @@ def interprocess_open_file_lock(
             except OSError as exc:
                 if release_failure is None:
                     release_failure = exc
-        if release_failure is not None and body_failure is None:
+        if release_failure is not None:
+            # An unlock error leaves ownership of the kernel lock unknown.  In
+            # particular, suppressing it behind an error raised by the guarded
+            # body would let a retained admission barrier advertise a state it
+            # cannot prove.  Callers must poison that barrier and require a
+            # close/reconstruction before admitting further work.
             raise CacheBlobLockReleaseError(
                 "BlobStore lifecycle lock could not be released",
                 context={"operation": operation},
@@ -311,6 +312,13 @@ class StoreAdmissionBarrier:
         self._ordinary_lock_opening = False
         self._ordinary_lock_closing = False
         self._ordinary_lock_context: object | None = None
+        # A failed unlock has an intentionally terminal meaning for this
+        # barrier.  Releasing an advisory lock is not idempotent from the
+        # caller's perspective: after an error, another process may still be
+        # excluded or the OS may have released only part of the requested
+        # range.  The final owning BlobStore releases this object; a future
+        # construction then receives a fresh retained descriptor.
+        self._release_uncertain: CacheBlobLockReleaseError | None = None
         # The barrier owns this separate descriptor boundary.  A BlobStore
         # instance can close while another same-root instance remains active;
         # retaining an individual instance's ManagedFileOps would make the
@@ -456,6 +464,7 @@ class StoreAdmissionBarrier:
                 or self._ordinary_lock_closing
             ):
                 self._condition.wait()
+            self._raise_if_release_uncertain()
             acquire_shared = self._ordinary_active == 0
             self._ordinary_active += 1
             if acquire_shared:
@@ -505,6 +514,10 @@ class StoreAdmissionBarrier:
                             body_failure,
                             None if body_failure is None else body_failure.__traceback__,
                         )
+                except CacheBlobLockReleaseError as exc:
+                    with self._condition:
+                        self._release_uncertain = exc
+                    raise
                 finally:
                     with self._condition:
                         self._ordinary_lock_closing = False
@@ -520,16 +533,30 @@ class StoreAdmissionBarrier:
                 or self._ordinary_lock_closing
             ):
                 self._condition.wait()
+            self._raise_if_release_uncertain()
             self._aggregate_active = True
             while self._ordinary_active or self._ordinary_lock_closing:
                 self._condition.wait()
         try:
             with self._advisory_admission(exclusive=True):
                 yield
+        except CacheBlobLockReleaseError as exc:
+            with self._condition:
+                self._release_uncertain = exc
+            raise
         finally:
             with self._condition:
                 self._aggregate_active = False
                 self._condition.notify_all()
+
+    def _raise_if_release_uncertain(self) -> None:
+        """Reject a barrier whose last retained OS unlock was not confirmed."""
+        if self._release_uncertain is None:
+            return
+        raise CacheBlobLockReleaseError(
+            "BlobStore lifecycle admission is unavailable after an uncertain lock release",
+            context={"operation": "lifecycle_admission"},
+        ) from self._release_uncertain
 
 
 @dataclass

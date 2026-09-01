@@ -801,11 +801,21 @@ class LifecycleEngine:
         """Clear one authenticated finite target snapshot through tombstone deletion."""
         record = self._new_clear_record()
         self._validate_clear_evidence_contract(record)
-        with self.store._admission_barrier.aggregate_admission():
-            self.operation_repository.create_exclusive(record, self._record_raw(record))
-            record = self._snapshot_clear_targets(record)
-            self._fault("clear_snapshot_complete", record)
-        return self._continue_clear(record)
+        # A live clear owns its continuation lease before it publishes the
+        # target snapshot.  Constructor recovery may observe the snapshot as
+        # soon as aggregate admission is released, but it must wait for this
+        # creator to finish rather than stealing the public return value.
+        # Process loss naturally releases the advisory lease, leaving the
+        # authenticated record available for a later opener to resume.
+        with self.operation_repository.clear_operation_transition(record.operation_id):
+            with self.store._admission_barrier.aggregate_admission():
+                self.operation_repository.create_exclusive(
+                    record, self._record_raw(record)
+                )
+                record = self._snapshot_clear_targets(record)
+                self._fault("clear_snapshot_complete", record)
+            self._fault("clear_snapshot_admission_released", record)
+            return self._continue_clear_locked(record)
 
     def is_pre_authority_candidate_eligible(
         self,

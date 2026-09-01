@@ -10,7 +10,10 @@ from pathlib import Path
 
 import pytest
 
-from cacheness.error_handling import CacheBlobLifecycleConflictError
+from cacheness.error_handling import (
+    CacheBlobLifecycleConflictError,
+    CacheBlobLockReleaseError,
+)
 from cacheness.storage.blob_store import BlobStore
 from cacheness.storage.coordination import KeyCoordinatorRegistry, StoreAdmissionBarrier
 
@@ -164,6 +167,42 @@ def test_replacement_reader_waits_for_final_unlock_without_losing_shared_lock(
         release_replacement.set()
         _join(first)
         _join(replacement)
+        barrier.release()
+
+
+def test_uncertain_final_reader_unlock_poisoned_barrier_rejects_re_admission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed final unlock never reopens admission under unknown OS ownership."""
+    root = tmp_path / "poisoned-admission"
+    root.mkdir()
+    barrier = StoreAdmissionBarrier.acquire(root)
+
+    @contextmanager
+    def uncertain_release(*, exclusive: bool):
+        assert exclusive is False
+        try:
+            yield
+        finally:
+            raise CacheBlobLockReleaseError(
+                "injected unlock failure", context={"operation": "test"}
+            )
+
+    monkeypatch.setattr(barrier, "_advisory_admission", uncertain_release)
+    try:
+        # The guarded body also fails.  The release uncertainty is still
+        # surfaced and must poison the shared barrier.
+        with pytest.raises(CacheBlobLockReleaseError):
+            with barrier.ordinary_admission():
+                raise RuntimeError("body failure")
+
+        with pytest.raises(CacheBlobLockReleaseError):
+            with barrier.ordinary_admission():
+                pass
+        with pytest.raises(CacheBlobLockReleaseError):
+            with barrier.aggregate_admission():
+                pass
+    finally:
         barrier.release()
 
 
@@ -396,6 +435,62 @@ def test_clear_snapshot_does_not_delete_a_post_snapshot_key(tmp_path):
         assert store.get("after-key") == "after"
     finally:
         store.close()
+
+
+def test_live_clear_transition_lease_preserves_creator_return_count(tmp_path: Path) -> None:
+    """Constructor recovery waits for a live clearer after snapshot admission ends."""
+    root = tmp_path / "live-clear-transition-lease"
+    owner = BlobStore(root, backend="json")
+    snapshot_released = threading.Event()
+    allow_creator_continue = threading.Event()
+    constructor_finished = threading.Event()
+    clear_result: list[int] = []
+    errors: list[BaseException] = []
+
+    def pause_after_admission_release(seam: str, _record: object) -> None:
+        if seam == "clear_snapshot_admission_released":
+            snapshot_released.set()
+            assert allow_creator_continue.wait(timeout=5)
+
+    def clear_owner() -> None:
+        try:
+            clear_result.append(owner.clear())
+        except BaseException as exc:  # pragma: no cover - asserted by parent.
+            errors.append(exc)
+
+    def reopen_during_live_clear() -> None:
+        reopened: BlobStore | None = None
+        try:
+            reopened = BlobStore(root, backend="json")
+        except BaseException as exc:  # pragma: no cover - asserted by parent.
+            errors.append(exc)
+        finally:
+            if reopened is not None:
+                reopened.close()
+            constructor_finished.set()
+
+    try:
+        owner.put("present", key="present")
+        owner.lifecycle.fault_hook = pause_after_admission_release
+        clearer = threading.Thread(target=clear_owner)
+        clearer.start()
+        assert snapshot_released.wait(timeout=5)
+
+        reopening = threading.Thread(target=reopen_during_live_clear)
+        reopening.start()
+        # Reopen may pass aggregate admission, but it must remain blocked on
+        # the already-held clear continuation lease rather than consume the
+        # record and changing the initiating ``clear()`` result.
+        assert not constructor_finished.wait(timeout=0.2)
+
+        allow_creator_continue.set()
+        _join(clearer)
+        _join(reopening)
+        assert clear_result == [1]
+        assert errors == []
+    finally:
+        allow_creator_continue.set()
+        owner.close()
 
 
 def test_clear_snapshot_excludes_a_later_independent_process_write(tmp_path):
