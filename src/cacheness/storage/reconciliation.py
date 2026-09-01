@@ -12,6 +12,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -39,6 +40,9 @@ from .manifest_repository import ManifestCursor, ManifestPage
 from .operation_record import OperationCheckpoint, OperationTransition
 from .operation_repository import OperationCursor, OperationPage
 from .path_security import resolve_managed_locator
+
+
+logger = logging.getLogger(__name__)
 
 
 class ReconciliationStatus(str, Enum):
@@ -220,7 +224,13 @@ class _ActionCheckpoint:
             )
             if (
                 mapping["version"] != 1
-                or checkpoint.state not in {"prepared", "completed"}
+                or checkpoint.state
+                not in {
+                    "prepared",
+                    "payload_deleted",
+                    "tombstone_removed",
+                    "completed",
+                }
                 or len(checkpoint.operation_id) != 32
                 or any(char not in "0123456789abcdef" for char in checkpoint.operation_id)
                 or len(checkpoint.evidence_digest) != 64
@@ -356,7 +366,7 @@ class _Reconciler:
             next_manifest, next_operation, next_priority
         )
         if apply:
-            self._apply_findings(findings, observed_at)
+            findings.extend(self._apply_findings(findings, observed_at))
         return ReconciliationReport(
             findings=tuple(findings),
             resume_token=token,
@@ -369,13 +379,13 @@ class _Reconciler:
         self,
         findings: list[ReconciliationFinding],
         observed_at: datetime,
-    ) -> None:
+    ) -> tuple[ReconciliationFinding, ...]:
         """Revalidate and checkpoint every authorized action under one snapshot gate."""
         # Reconciliation uses aggregate admission only while it reloads exact
         # authority and applies a bounded report. Ordinary operations retain
         # their per-key lifecycle/CAS concurrency contract.
         with self.store._admission_barrier.aggregate_admission():
-            self._retire_orphaned_completed_checkpoints()
+            blocked_sidecars = self._retire_orphaned_completed_checkpoints()
             for finding in findings:
                 if (
                     finding.status is not ReconciliationStatus.SAFE
@@ -384,6 +394,7 @@ class _Reconciler:
                 ):
                     continue
                 self._apply_finding(finding, observed_at)
+        return tuple(blocked_sidecars)
 
     def _apply_finding(
         self,
@@ -426,11 +437,9 @@ class _Reconciler:
                 record, candidate, completed, completed_raw
             )
         elif finding.action is ReconciliationAction.COMPLETE_TOMBSTONE:
-            self.store.lifecycle._recover_tombstone(record, candidate)
-            completed, completed_raw = self._complete_action_checkpoint(
-                checkpoint, checkpoint_raw
+            self._apply_complete_tombstone(
+                record, candidate, checkpoint, checkpoint_raw
             )
-            self._retire_completed_checkpoint(completed, completed_raw)
 
     def _apply_candidate_delete(
         self,
@@ -490,12 +499,12 @@ class _Reconciler:
         elif checkpoint.action is ReconciliationAction.RETIRE_EVIDENCE:
             self.store.lifecycle._retire(record)
         elif checkpoint.action is ReconciliationAction.COMPLETE_TOMBSTONE:
-            self.store.lifecycle._recover_tombstone(record, candidate)
-            if (
-                self.store.lifecycle.operation_repository.get_raw(record.operation_id)
-                is not None
-            ):
-                return
+            # A completed tombstone checkpoint is the durable proof that both
+            # destructive stages have finished.  Only now may its primary
+            # evidence retire; a crash before this point retains the exact
+            # record needed to resume without replaying the payload delete.
+            if self.store.lifecycle.operation_repository.get_raw(record.operation_id) is not None:
+                self.store.lifecycle._retire(record)
         self._retire_completed_checkpoint(checkpoint, checkpoint_raw)
 
     def _retire_completed_checkpoint(
@@ -510,14 +519,36 @@ class _Reconciler:
             checkpoint.operation_id, expected_raw=checkpoint_raw
         )
 
-    def _retire_orphaned_completed_checkpoints(self) -> None:
+    def _retire_orphaned_completed_checkpoints(self) -> list[ReconciliationFinding]:
         """Authenticate and remove completed sidecars orphaned after a crash."""
         repository = self.store.lifecycle.operation_repository
         key = self.store._manifest_key()
+        retired = 0
+        blocked: list[ReconciliationFinding] = []
         for operation_id, raw in repository.list_reconciliation_checkpoint_raws():
-            checkpoint = _ActionCheckpoint.from_canonical_bytes(
-                raw, key, lifecycle_limits=self.lifecycle_limits
-            )
+            try:
+                checkpoint = _ActionCheckpoint.from_canonical_bytes(
+                    raw, key, lifecycle_limits=self.lifecycle_limits
+                )
+            except CacheBlobReconciliationCheckpointError:
+                # Invalid evidence is intentionally left untouched. It is a
+                # blocked operator finding, not authority and not a permanent
+                # consumer of every later completed-checkpoint work slot.
+                logger.warning(
+                    "BlobStore reconciliation checkpoint is blocked and was not retired",
+                    extra={"operation_id": operation_id, "operation": "reconcile"},
+                )
+                if len(blocked) < self.lifecycle_limits.max_reconcile_actions:
+                    blocked.append(
+                        ReconciliationFinding(
+                            ReconciliationStatus.BLOCKED,
+                            ReconciliationAction.REPORT_ONLY,
+                            "reconciliation_checkpoint_untrusted",
+                            evidence_id=operation_id,
+                            evidence_digest=hashlib.sha256(raw).hexdigest(),
+                        )
+                    )
+                continue
             if checkpoint.operation_id != operation_id or checkpoint.state != "completed":
                 continue
             # A completed sidecar with no primary evidence has already crossed
@@ -526,6 +557,119 @@ class _Reconciler:
             # private checkpoint.
             if repository.get_raw(operation_id) is None:
                 self._retire_completed_checkpoint(checkpoint, raw)
+                retired += 1
+                if retired >= self.lifecycle_limits.max_reconcile_actions:
+                    return blocked
+        return blocked
+
+    def _advance_action_checkpoint(
+        self,
+        checkpoint: _ActionCheckpoint,
+        expected_raw: bytes,
+        state: str,
+    ) -> tuple[_ActionCheckpoint, bytes]:
+        """Persist one monotonic reconciliation stage from exact sidecar bytes."""
+        if checkpoint.state == state:
+            return checkpoint, expected_raw
+        updated = _ActionCheckpoint.new(
+            checkpoint.operation_id,
+            checkpoint.evidence_digest,
+            checkpoint.action,
+            state,
+            self.store._manifest_key(),
+        )
+        raw = updated.canonical_bytes(lifecycle_limits=self.lifecycle_limits)
+        self.store.lifecycle.operation_repository.checkpoint_reconciliation_if_exact(
+            checkpoint.operation_id,
+            expected_raw=expected_raw,
+            raw_record=raw,
+        )
+        return updated, raw
+
+    def _apply_complete_tombstone(
+        self,
+        record: Any,
+        candidate: Path,
+        checkpoint: _ActionCheckpoint,
+        checkpoint_raw: bytes,
+    ) -> None:
+        """Resume tombstone cleanup without retiring its only primary evidence.
+
+        The action sidecar is an explicit durable state machine.  It records
+        each destructive effect before the primary lifecycle record can retire:
+        payload removal, tombstone retirement, and finally completion.  Thus a
+        ``BaseException`` at any seam leaves enough authenticated evidence for
+        an apply/reopen to continue forward without deleting the payload twice.
+        """
+        if checkpoint.state == "prepared":
+            self.store.lifecycle._fault(
+                "reconcile_tombstone_before_payload_delete", record
+            )
+            self.store._delete_or_prove_absent(candidate)
+            self.store.lifecycle._fault(
+                "reconcile_tombstone_after_payload_delete", record
+            )
+            checkpoint, checkpoint_raw = self._advance_action_checkpoint(
+                checkpoint, checkpoint_raw, "payload_deleted"
+            )
+
+        if checkpoint.state == "payload_deleted":
+            self.store.lifecycle._fault(
+                "reconcile_tombstone_before_manifest_remove", record
+            )
+            current = self.store._load_authenticated_manifest_with_raw(
+                record.key,
+                operation="reconcile_tombstone",
+                require_locator=True,
+                allowed_states=frozenset({"committed", "tombstoned"}),
+            )
+            if current is not None:
+                manifest, raw_manifest, _handler, locator = current
+                if (
+                    manifest.state == "tombstoned"
+                    and manifest.generation == record.generation
+                    and locator == candidate
+                ):
+                    expectation = self.store.lifecycle._tombstone_expectation(
+                        manifest, raw_manifest
+                    )
+                    try:
+                        self.store.manifest_repository.remove_if_expected(
+                            record.key, expectation
+                        )
+                    except CacheBlobLifecycleConflictError:
+                        # A later winner is already authoritative.  This
+                        # action must not retry its removal; the sidecar still
+                        # records that this tombstone's removal step is no
+                        # longer required before primary retirement.
+                        pass
+                elif manifest.generation == record.generation:
+                    raise CacheBlobReconciliationConflictError(
+                        "Tombstone reconciliation locator changed before retirement",
+                        context={"operation_id": record.operation_id},
+                    )
+            self.store.lifecycle._fault(
+                "reconcile_tombstone_after_manifest_remove", record
+            )
+            checkpoint, checkpoint_raw = self._advance_action_checkpoint(
+                checkpoint, checkpoint_raw, "tombstone_removed"
+            )
+
+        if checkpoint.state == "tombstone_removed":
+            self.store.lifecycle._fault(
+                "reconcile_tombstone_before_checkpoint_complete", record
+            )
+            checkpoint, checkpoint_raw = self._complete_action_checkpoint(
+                checkpoint, checkpoint_raw
+            )
+            self.store.lifecycle._fault(
+                "reconcile_tombstone_after_checkpoint_complete", record
+            )
+
+        if checkpoint.state == "completed":
+            self._finish_completed_checkpoint(
+                record, candidate, checkpoint, checkpoint_raw
+            )
 
     def _prepare_action_checkpoint(
         self,

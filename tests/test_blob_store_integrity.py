@@ -13,6 +13,7 @@ import pytest
 
 from cacheness.error_handling import (
     CacheBlobLifecycleConflictError,
+    CacheBlobManifestMalformedError,
     CacheBlobManifestUnauthenticatedError,
     CacheBlobPayloadMissingError,
     CacheBlobPayloadTamperedError,
@@ -24,6 +25,7 @@ from cacheness.error_handling import (
 from cacheness.storage.blob_store import BlobStore
 from cacheness.storage.integrity import (
     ManifestKeyError,
+    ManifestKeyDurabilityProvider,
     ManifestKeyProvider,
     sign_hmac_sha256,
     verify_hmac_sha256,
@@ -39,6 +41,18 @@ class _InjectedManifestKeyProvider:
 
     def get_key(self) -> bytes:
         return _KEY
+
+
+class _RecordingKeyDurabilityProvider:
+    """Application-owned first-key acknowledgement probe."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[Path, tuple[int, int]]] = []
+
+    def acknowledge_new_key(
+        self, key_path: Path, expected_identity: tuple[int, int]
+    ) -> None:
+        self.calls.append((key_path, expected_identity))
 
 
 def test_strict_key_provider_requires_explicit_initialization(tmp_path):
@@ -94,6 +108,67 @@ def test_key_provider_removes_its_partial_key_when_persistence_fails(
         provider.initialize_new_store()
 
     assert not key_path.exists()
+
+
+def test_key_provider_acknowledges_the_exact_new_trust_root_before_return(
+    tmp_path: Path,
+) -> None:
+    """A file provider cannot return a new key before its owner acks it."""
+    key_path = tmp_path / "blob_manifest_hmac_key.bin"
+    durability = _RecordingKeyDurabilityProvider()
+    provider = ManifestKeyProvider(key_path, durability_provider=durability)
+
+    assert provider.initialize_new_store() == provider.get_key()
+    assert len(durability.calls) == 1
+    acknowledged_path, expected_identity = durability.calls[0]
+    stat_result = key_path.stat()
+    assert acknowledged_path == key_path
+    assert expected_identity == (stat_result.st_dev, stat_result.st_ino)
+    assert isinstance(durability, ManifestKeyDurabilityProvider)
+
+
+def test_injected_key_provider_operational_failure_is_typed(tmp_path: Path) -> None:
+    """Keystore outages cannot leak an untyped failure from a lifecycle put."""
+    class UnavailableProvider:
+        def get_key(self) -> bytes:
+            raise OSError("keystore unavailable")
+
+    store = BlobStore(tmp_path, manifest_key_provider=UnavailableProvider())
+    try:
+        with pytest.raises(CacheBlobManifestUnauthenticatedError) as error:
+            store.put({"value": "unavailable"}, key="unavailable")
+        assert isinstance(error.value.__cause__, OSError)
+        assert error.value.context["operation"] == "initialize_manifest_key"
+    finally:
+        store.close()
+
+
+def test_noncanonical_signed_manifest_is_rejected_by_every_normal_boundary(
+    signed_store: BlobStore,
+) -> None:
+    """Whitespace-only JSON rewrites must not split normal and reconcile policy."""
+    store = signed_store
+    key = "integrity-key"
+    raw = store.manifest_repository.get_raw(key)
+    assert raw is not None
+    noncanonical = json.dumps(json.loads(raw), indent=2).encode("utf-8")
+    assert noncanonical != raw
+    store.manifest_repository.put_raw(key, noncanonical)
+
+    operations = (
+        lambda: store.get(key),
+        lambda: store.put({"replacement": True}, key=key),
+        lambda: store.delete(key),
+        lambda: store.update_metadata(key, {"metadata": "rewrite"}),
+        lambda: store.exists(key),
+        lambda: store.list(),
+    )
+    for operation in operations:
+        with pytest.raises(CacheBlobManifestMalformedError):
+            operation()
+
+    report = store.reconcile()
+    assert any(finding.reason == "manifest_untrusted" for finding in report.findings)
 
 
 def test_first_store_initialization_does_not_log_an_expected_missing_key(

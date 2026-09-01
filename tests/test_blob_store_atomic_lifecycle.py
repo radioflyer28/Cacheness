@@ -1248,3 +1248,92 @@ def test_truncated_legacy_lock_sidecar_never_bricks_root_bound_authority(
         assert legacy.read_bytes() == b"partial"
     finally:
         file_ops.close()
+
+
+def test_lifecycle_payload_cleanup_uses_durable_delete_primitive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Overwrite and delete reach the same durable cleanup authority path."""
+    store = BlobStore(tmp_path / "durable-lifecycle-delete", backend="json")
+    try:
+        store.put({"generation": 1}, key="durable-key")
+        file_ops = store.guarded_handler_io.file_ops
+        original = file_ops.delete_durable
+        calls: list[Path] = []
+
+        def durable_delete(locator: Path) -> bool:
+            calls.append(locator)
+            return original(locator)
+
+        monkeypatch.setattr(file_ops, "delete_durable", durable_delete)
+        store.put({"generation": 2}, key="durable-key")
+        assert store.delete("durable-key")
+        assert len(calls) >= 2
+    finally:
+        store.close()
+
+
+def test_clear_lifecycle_payload_cleanup_uses_durable_delete_primitive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Clear delegates each tombstone payload reclamation to durable deletion."""
+    store = BlobStore(tmp_path / "durable-clear-delete", backend="json")
+    try:
+        store.put({"generation": 1}, key="clear-one")
+        store.put({"generation": 2}, key="clear-two")
+        file_ops = store.guarded_handler_io.file_ops
+        original = file_ops.delete_durable
+        calls: list[Path] = []
+
+        def durable_delete(locator: Path) -> bool:
+            calls.append(locator)
+            return original(locator)
+
+        monkeypatch.setattr(file_ops, "delete_durable", durable_delete)
+        assert store.clear() == 2
+        assert len(calls) >= 2
+    finally:
+        store.close()
+
+
+def test_recovered_tombstone_preserves_conflict_when_evidence_retirement_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A later winner remains explicit when reopen cleanup cannot retire debt."""
+    store = BlobStore(tmp_path / "recover-tombstone-conflict", backend="json")
+    try:
+        store.put({"value": "delete"}, key="tombstone-key")
+        original_cleanup = store._delete_or_prove_absent
+
+        def defer_cleanup(_locator: Path) -> None:
+            raise OSError("defer")
+
+        monkeypatch.setattr(store, "_delete_or_prove_absent", defer_cleanup)
+        with pytest.raises(CacheBlobRecoverableCleanupError):
+            store.delete("tombstone-key")
+        monkeypatch.setattr(store, "_delete_or_prove_absent", original_cleanup)
+
+        operation_id, raw = next(iter(store.lifecycle.operation_repository.list_page().entries))
+        recovered = store.lifecycle._recoverable_record(operation_id, raw)
+        assert recovered is not None
+        record, candidate, _previous = recovered
+        conflict = CacheBlobLifecycleConflictError("later winner")
+        monkeypatch.setattr(
+            store.manifest_repository,
+            "remove_if_expected",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(conflict),
+        )
+        monkeypatch.setattr(
+            store.lifecycle,
+            "_retire",
+            lambda _record: (_ for _ in ()).throw(OSError("retire failed")),
+        )
+
+        with pytest.raises(CacheBlobRecoverableCleanupError) as error:
+            store.lifecycle._recover_tombstone(record, candidate)
+        assert error.value.context["post_authority"] is True
+        assert error.value.context["later_winner_preserved"] is True
+        assert error.value.context["conflict_type"] == "CacheBlobLifecycleConflictError"
+        assert error.value.__cause__ is conflict
+    finally:
+        store.close()

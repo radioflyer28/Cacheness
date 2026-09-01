@@ -174,7 +174,7 @@ class _WindowsFileApi:
         ):
             self._raise_last_error("MoveFileExW")
 
-    def delete_write_through(self, locator: Path) -> None:
+    def delete_write_through(self, locator: Path) -> tuple[int, int, int]:
         """Immediately unlink one verified managed leaf through its handle.
 
         ``MoveFileExW(path, NULL, WRITE_THROUGH)`` is not an immediate-delete
@@ -205,6 +205,16 @@ class _WindowsFileApi:
                 or information.NumberOfLinks != 1
             ):
                 _unsafe_path(CacheReason.PATH_RACE)
+            # The exact object selected by this one retained handle is the
+            # deletion authority.  Do not verify by pathname, close, then
+            # unlink by pathname: a substitution in that gap could dispose of
+            # a different managed leaf.  Keeping this identity locally also
+            # makes the native adapter's contract explicit to callers/tests.
+            identity = (
+                int(information.VolumeSerialNumber),
+                int(information.FileIndexHigh),
+                int(information.FileIndexLow),
+            )
             disposition = self._FileDispositionInfo(1)
             if not self._set_file_information(
                 handle,
@@ -219,6 +229,7 @@ class _WindowsFileApi:
         finally:
             if not self._close_handle(handle) and failure is None:
                 self._raise_last_error("CloseHandle")
+        return identity
 
     def flush_regular_file(self, locator: Path) -> None:
         """Flush an existing regular file through documented file-handle semantics."""
@@ -1844,13 +1855,13 @@ class ManagedFileOps:
         """Delete a contained locator and acknowledge the directory when it existed."""
         if not self._descriptor_mode and _platform_name() == "nt":
             # Windows uses a reparse-safe DELETE handle and documented
-            # FileDispositionInfo acknowledgement. We verify the managed
-            # regular leaf before opening it; the native adapter repeats
-            # reparse/link checks on the retained handle before deletion.
+            # FileDispositionInfo acknowledgement. The native adapter opens,
+            # validates, identifies, disposes, and closes the *same* handle.
+            # A prior pathname identity check would introduce a
+            # verify-close-delete-by-name substitution gap.
             with self._lock:
                 prepared = self._prepare_locator(locator, operation="delete_durable")
                 try:
-                    self.file_identity(prepared)
                     _windows_file_api().delete_write_through(prepared)
                 except FileNotFoundError:
                     return False

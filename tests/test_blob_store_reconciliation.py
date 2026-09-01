@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import multiprocessing
 from contextlib import contextmanager
@@ -513,6 +514,37 @@ def test_reconcile_apply_revalidates_and_removes_only_authenticated_candidate(
         store.close()
 
 
+def test_reconciliation_candidate_cleanup_uses_durable_delete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reconciliation cannot bypass the durable lifecycle cleanup primitive."""
+    root = tmp_path / "reconcile-durable-delete"
+    store = BlobStore(root, backend="json")
+    try:
+        key = store._manifest_key(initialize_new_store=True)
+        record = _reconciliation_record(store, root, key, "a" * 32)
+        candidate = store.guarded_handler_io.root / record.candidate_locator
+        store.guarded_handler_io.file_ops.write_bytes_durable(candidate, b"candidate")
+        store.lifecycle.operation_repository.create_exclusive(
+            record, record.canonical_bytes()
+        )
+        file_ops = store.guarded_handler_io.file_ops
+        original = file_ops.delete_durable
+        calls: list[Path] = []
+
+        def durable_delete(locator: Path) -> bool:
+            calls.append(locator)
+            return original(locator)
+
+        monkeypatch.setattr(file_ops, "delete_durable", durable_delete)
+        store.reconcile(
+            apply=True, now=datetime(2026, 8, 31, tzinfo=timezone.utc)
+        )
+        assert candidate in calls
+    finally:
+        store.close()
+
+
 def test_reconcile_apply_base_exception_checkpoints_without_repeating_delete(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -964,3 +996,123 @@ def test_reconciliation_public_types_and_reason_coded_errors_are_narrow() -> Non
     assert CacheBlobReconciliationError("blocked").context["reason"] == (
         "blob_reconciliation_blocked"
     )
+
+
+def test_digest_invalid_pending_control_does_not_consume_recovery_action_budget(
+    tmp_path: Path,
+) -> None:
+    """A syntax-valid bad digest stays untouched while a later valid control advances."""
+    root = tmp_path / "pending-digest-budget"
+    limits = _small_lifecycle_limits()
+    store = BlobStore(
+        config=CacheConfig(cache_dir=str(root), lifecycle_limits=limits), backend="json"
+    )
+    try:
+        repository = store.lifecycle.operation_repository
+        operations = root / "operations"
+        operations.mkdir(exist_ok=True)
+        invalid_id = "0" * 32
+        valid_id = "f" * 32
+        invalid = operations / f".{invalid_id}.json.pending.{'0' * 64}.{'a' * 32}.tmp"
+        invalid.write_bytes(b"digest-mismatch")
+        valid_raw = b"valid-control"
+        valid_digest = hashlib.sha256(valid_raw).hexdigest()
+        valid = operations / f".{valid_id}.json.pending.{valid_digest}.{'b' * 32}.tmp"
+        valid.write_bytes(valid_raw)
+
+        assert repository.recover_pending_operation_records() == (valid_id,)
+        assert invalid.read_bytes() == b"digest-mismatch"
+        assert repository.get_raw(valid_id) == valid_raw
+    finally:
+        store.close()
+
+
+def test_invalid_checkpoint_does_not_starve_later_completed_orphan(
+    tmp_path: Path,
+) -> None:
+    """Malformed sidecars remain blocked while eligible completed work converges."""
+    from cacheness.storage.reconciliation import _ActionCheckpoint
+
+    root = tmp_path / "checkpoint-budget"
+    store = BlobStore(
+        config=CacheConfig(cache_dir=str(root), lifecycle_limits=_small_lifecycle_limits()),
+        backend="json",
+    )
+    try:
+        repository = store.lifecycle.operation_repository
+        key = store._manifest_key(initialize_new_store=True)
+        bad_id = "0" * 32
+        good_id = "f" * 32
+        repository.file_ops.write_bytes_durable(
+            repository.reconciliation_checkpoint_locator(bad_id), b"{"
+        )
+        completed = _ActionCheckpoint.new(
+            good_id,
+            "a" * 64,
+            ReconciliationAction.RETIRE_EVIDENCE,
+            "completed",
+            key,
+        )
+        raw = completed.canonical_bytes(lifecycle_limits=store.lifecycle_limits)
+        repository.file_ops.write_bytes_durable(
+            repository.reconciliation_checkpoint_locator(good_id), raw
+        )
+
+        report = store.reconcile(
+            apply=True, now=datetime(2026, 8, 31, tzinfo=timezone.utc)
+        )
+        assert repository.get_reconciliation_checkpoint_raw(bad_id) == b"{"
+        assert repository.get_reconciliation_checkpoint_raw(good_id) is None
+        assert any(
+            finding.reason == "reconciliation_checkpoint_untrusted"
+            for finding in report.findings
+        )
+    finally:
+        store.close()
+
+
+def test_tombstone_reconciliation_checkpoints_each_destructive_stage(
+    tmp_path: Path,
+) -> None:
+    """A BaseException after deletion leaves primary evidence for a reopen resume."""
+    class Interrupted(BaseException):
+        pass
+
+    root = tmp_path / "tombstone-checkpoint-stages"
+    store = BlobStore(root, backend="json")
+    try:
+        store.put({"value": "delete"}, key="tombstone-key")
+        original_cleanup = store._delete_or_prove_absent
+
+        def leave_post_authority_debt(locator: Path) -> None:
+            raise OSError("defer tombstone cleanup")
+
+        store._delete_or_prove_absent = leave_post_authority_debt  # type: ignore[method-assign]
+        with pytest.raises(CacheStorageError):
+            store.delete("tombstone-key")
+        store._delete_or_prove_absent = original_cleanup  # type: ignore[method-assign]
+
+        def interrupt_after_payload(step: str, _record: LifecycleOperationRecord) -> None:
+            if step == "reconcile_tombstone_after_payload_delete":
+                raise Interrupted("after durable payload deletion")
+
+        store.lifecycle.fault_hook = interrupt_after_payload
+        with pytest.raises(Interrupted):
+            store.reconcile(apply=True, now=datetime(2026, 8, 31, tzinfo=timezone.utc))
+        operation_id, raw = next(iter(store.lifecycle.operation_repository.list_page().entries))
+        assert raw
+        checkpoint = store.lifecycle.operation_repository.get_reconciliation_checkpoint_raw(
+            operation_id
+        )
+        assert checkpoint is not None
+    finally:
+        store.close()
+
+    reopened = BlobStore(root, backend="json")
+    try:
+        reopened.reconcile(apply=True, now=datetime(2026, 8, 31, tzinfo=timezone.utc))
+        assert reopened.manifest_repository.get_raw("tombstone-key") is None
+        assert reopened.lifecycle.operation_repository.list_page().entries == ()
+        assert not list((root / "operations").glob("reconcile-action-*.json"))
+    finally:
+        reopened.close()

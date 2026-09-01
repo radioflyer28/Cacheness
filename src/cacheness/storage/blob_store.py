@@ -999,16 +999,24 @@ class BlobStore:
                 # An injected provider owns its trust-root provisioning.  It
                 # may expose only the narrow public ``get_key`` protocol.
                 return self._manifest_key_provider.get_key()
-            except ManifestKeyError as exc:
+            except (ManifestKeyError, OSError, RuntimeError) as exc:
                 raise CacheBlobManifestUnauthenticatedError(
                     "Canonical BlobStore signing key is unavailable",
+                    context={
+                        "operation": "initialize_manifest_key",
+                        "provider": type(self._manifest_key_provider).__name__,
+                    },
                     reason=CacheReason.MANIFEST_SIGNING_KEY_INVALID,
                 ) from exc
         try:
             return self._manifest_key_provider.get_key()
-        except ManifestKeyError as exc:
+        except (ManifestKeyError, OSError, RuntimeError) as exc:
             raise CacheBlobManifestUnauthenticatedError(
                 "Canonical BlobStore signing key is unavailable",
+                context={
+                    "operation": "get_manifest_key",
+                    "provider": type(self._manifest_key_provider).__name__,
+                },
                 reason=CacheReason.MANIFEST_SIGNING_KEY_INVALID,
             ) from exc
 
@@ -1016,7 +1024,11 @@ class BlobStore:
         """Remove a contained payload only when deletion is conclusively known."""
         cleanup_error: Exception | None = None
         try:
-            if self.guarded_handler_io.file_ops.delete(locator):
+            # Lifecycle cleanup is a post-authority transition.  It must use
+            # the durable deletion primitive rather than the compatibility
+            # ``delete`` helper so the Windows backend keeps deletion bound to
+            # its reparse-safe disposition handle as well.
+            if self.guarded_handler_io.file_ops.delete_durable(locator):
                 return
         except Exception as exc:
             cleanup_error = exc
@@ -1158,6 +1170,15 @@ class BlobStore:
             raise CacheBlobManifestMalformedError(
                 "Canonical BlobStore manifest is malformed"
             ) from exc
+        # A valid signature covers the canonical semantic projection, not an
+        # arbitrary JSON spelling.  The repository record itself is authority,
+        # so accepting reordered or whitespace-padded bytes here would make
+        # normal operations disagree with reconciliation and could turn a
+        # later exact-CAS expectation into a representation rewrite.
+        if manifest.canonical_bytes() != raw_manifest:
+            raise CacheBlobManifestMalformedError(
+                "Canonical BlobStore manifest bytes are not canonical"
+            )
         if manifest.key != key:
             raise CacheBlobLifecycleConflictError(
                 "Canonical BlobStore manifest key conflicts with lookup"

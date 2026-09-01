@@ -853,7 +853,7 @@ def test_native_windows_delete_uses_a_reparse_safe_disposition_handle(
     api._close_handle = lambda handle: calls.append(("close", handle)) or 1
     api._last_error = lambda: 5
 
-    api.delete_write_through(tmp_path / "control.json")
+    identity = api.delete_write_through(tmp_path / "control.json")
 
     create_arguments = calls[0]
     assert create_arguments[1] & api._DELETE
@@ -861,6 +861,7 @@ def test_native_windows_delete_uses_a_reparse_safe_disposition_handle(
     disposition_call = next(call for call in calls if call[0] == "disposition")[1]
     assert disposition_call[1] == api._FILE_DISPOSITION_INFO
     assert ("close", ctypes.c_void_p(202).value) in calls
+    assert identity == (0, 0, 0)
 
 
 def test_native_windows_no_replace_move_requests_documented_write_through() -> None:

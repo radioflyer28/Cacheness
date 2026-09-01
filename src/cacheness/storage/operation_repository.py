@@ -468,15 +468,17 @@ class FileOperationRecordRepository:
         prefix = "reconcile-action-"
         suffix = ".json"
         try:
-            operation_ids = nsmallest(
-                self.lifecycle_limits.max_reconcile_actions,
-                (
-                    name[len(prefix) : -len(suffix)]
-                    for name in (path.name for path in operations_directory.iterdir())
-                    if name.startswith(prefix)
-                    and name.endswith(suffix)
-                    and self._is_hex_identifier(name[len(prefix) : -len(suffix)])
-                ),
+            # Do not spend the reconciliation action budget on a name alone.
+            # Every candidate below still receives a bounded, no-follow read,
+            # but malformed or unauthenticated sidecars are later reported as
+            # blocked rather than permanently hiding a valid completed orphan
+            # behind the same lexical first page.
+            operation_ids = sorted(
+                name[len(prefix) : -len(suffix)]
+                for name in (path.name for path in operations_directory.iterdir())
+                if name.startswith(prefix)
+                and name.endswith(suffix)
+                and self._is_hex_identifier(name[len(prefix) : -len(suffix)])
             )
         except FileNotFoundError:
             return ()
@@ -1136,16 +1138,14 @@ class FileOperationRecordRepository:
         )
         recovered: list[str] = []
         try:
-            names = nsmallest(
-                self.lifecycle_limits.max_reconcile_actions,
-                (
-                    path.name
-                    for path in operations_directory.iterdir()
-                    if self._is_eligible_pending_name(path.name)
-                ),
+            names = sorted(
+                path.name
+                for path in operations_directory.iterdir()
+                if self._is_eligible_pending_name(path.name)
             )
         except FileNotFoundError:
             return ()
+        eligible_actions = 0
         for name in names:
             if not (name.startswith(".") and name.endswith(".tmp")):
                 continue
@@ -1181,6 +1181,8 @@ class FileOperationRecordRepository:
                 continue
             if hashlib.sha256(raw).hexdigest() != digest:
                 continue
+            if eligible_actions >= self.lifecycle_limits.max_reconcile_actions:
+                break
             try:
                 promoted = self.file_ops.promote_durable_pending_control(
                     final_locator, raw, pending_name=name
@@ -1192,6 +1194,11 @@ class FileOperationRecordRepository:
                 ) from exc
             if promoted and operation_id is not None:
                 recovered.append(operation_id)
+            # A digest-valid candidate is real bounded recovery work even if
+            # a concurrent winner already installed the same final record.
+            # Syntax-valid bytes with the wrong digest deliberately do not
+            # consume this budget and remain untouched/reportable.
+            eligible_actions += 1
         return tuple(recovered)
 
     def _is_eligible_pending_name(self, name: str) -> bool:

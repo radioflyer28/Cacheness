@@ -37,6 +37,25 @@ class ManifestSigningKeyProvider(Protocol):
         """Return exactly 32 bytes of already-authorized key material."""
 
 
+@runtime_checkable
+class ManifestKeyDurabilityProvider(Protocol):
+    """Acknowledge first key publication before signed evidence may exist.
+
+    An application-owned Windows keystore may implement this protocol when it
+    has a stronger platform-specific namespace acknowledgement than the
+    default single-user/session file provider. Implementations must verify
+    ``expected_identity`` and return only after their documented persistence
+    boundary succeeds.
+    """
+
+    def acknowledge_new_key(
+        self,
+        key_path: Path,
+        expected_identity: tuple[int, int],
+    ) -> None:
+        """Durably acknowledge one exact newly created trust-root object."""
+
+
 def sha256_and_size(path: Path) -> tuple[str, int]:
     """Return the SHA-256 digest and exact byte size of one payload file."""
     with Path(path).open("rb") as source:
@@ -80,9 +99,16 @@ class ManifestKeyProvider:
     key; reopens therefore cannot manufacture a replacement trust root.
     """
 
-    def __init__(self, key_path: Path, key: bytes | None = None):
+    def __init__(
+        self,
+        key_path: Path,
+        key: bytes | None = None,
+        *,
+        durability_provider: ManifestKeyDurabilityProvider | None = None,
+    ):
         self.key_path = Path(key_path)
         self._provided_key = key
+        self._durability_provider = durability_provider
         if key is not None:
             _validate_key(key)
 
@@ -115,17 +141,120 @@ class ManifestKeyProvider:
             return self._read_existing_key()
         except OSError as exc:
             raise ManifestKeyError("Unable to create canonical manifest key") from exc
-        created_metadata = os.fstat(descriptor)
+        created_metadata: os.stat_result | None = None
+        persistence_failure: BaseException | None = None
         try:
+            created_metadata = os.fstat(descriptor)
             self._assert_safe_key_metadata(created_metadata)
             self._write_all(descriptor, key)
             os.fsync(descriptor)
-        except OSError as exc:
-            self._remove_partial_key(created_metadata)
-            raise ManifestKeyError("Unable to persist canonical manifest key") from exc
+        except (ManifestKeyError, OSError) as exc:
+            persistence_failure = exc
+            if isinstance(exc, OSError):
+                if created_metadata is not None:
+                    self._remove_partial_key(created_metadata)
+                raise ManifestKeyError("Unable to persist canonical manifest key") from exc
+            raise
         finally:
-            os.close(descriptor)
+            try:
+                os.close(descriptor)
+            except OSError as exc:
+                # Close is part of the durable-key acknowledgement contract.
+                # Preserve an earlier typed persistence failure, otherwise
+                # surface the close uncertainty through the same boundary.
+                if persistence_failure is None:
+                    raise ManifestKeyError(
+                        "Unable to close canonical manifest key"
+                    ) from exc
+        assert created_metadata is not None
+        try:
+            self._acknowledge_new_key(
+                (created_metadata.st_dev, created_metadata.st_ino)
+            )
+        except ManifestKeyError:
+            raise
+        except OSError as exc:
+            raise ManifestKeyError(
+                "Unable to acknowledge canonical manifest key publication"
+            ) from exc
         return self._read_existing_key()
+
+    def _acknowledge_new_key(self, expected_identity: tuple[int, int]) -> None:
+        """Make the sole file trust root durable before any manifest is signed.
+
+        POSIX acknowledges the identity-checked *parent directory entry* after
+        the synced key file closes. Windows has no documented directory-handle
+        flush contract; under D-22's one-user/session topology the default
+        primitive flushes a verified regular key handle via ``FlushFileBuffers``
+        and checks the original file identity before and after that operation.
+        Deployments requiring a stronger namespace acknowledgement inject a
+        ``ManifestKeyDurabilityProvider`` owned by their keystore.
+        """
+        if self._durability_provider is not None:
+            self._durability_provider.acknowledge_new_key(
+                self.key_path, expected_identity
+            )
+            return
+        if os.name == "posix":
+            self._fsync_parent_entry(expected_identity)
+            return
+        self._flush_windows_key_entry(expected_identity)
+
+    def _fsync_parent_entry(self, expected_identity: tuple[int, int]) -> None:
+        """Fsync the same safe POSIX parent that names the generated key."""
+        self._assert_safe_parent()
+        parent_before = os.lstat(self.key_path.parent)
+        current = os.lstat(self.key_path)
+        self._assert_safe_key_metadata(current)
+        if (current.st_dev, current.st_ino) != expected_identity:
+            raise ManifestKeyError("Canonical manifest key changed before directory sync")
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(
+                self.key_path.parent,
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+            )
+            parent_opened = os.fstat(descriptor)
+            if (parent_opened.st_dev, parent_opened.st_ino) != (
+                parent_before.st_dev,
+                parent_before.st_ino,
+            ):
+                raise ManifestKeyError(
+                    "Canonical manifest key directory changed during sync"
+                )
+            os.fsync(descriptor)
+        finally:
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError as exc:
+                    raise ManifestKeyError(
+                        "Unable to close canonical manifest key directory"
+                    ) from exc
+        current = os.lstat(self.key_path)
+        self._assert_safe_key_metadata(current)
+        if (current.st_dev, current.st_ino) != expected_identity:
+            raise ManifestKeyError("Canonical manifest key changed after directory sync")
+
+    def _flush_windows_key_entry(self, expected_identity: tuple[int, int]) -> None:
+        """Use the D-22 documented regular-handle flush provider on Windows."""
+        current = os.lstat(self.key_path)
+        self._assert_safe_key_metadata(current)
+        if (current.st_dev, current.st_ino) != expected_identity:
+            raise ManifestKeyError("Canonical manifest key changed before Windows flush")
+        # Imported lazily to keep the integrity primitive dependency-light on
+        # POSIX. The native adapter opens and flushes a reparse-safe regular
+        # handle, the documented acknowledgement we can truthfully claim for
+        # the D-22 one-user/session file-provider topology.
+        from .path_security import _windows_file_api
+
+        _windows_file_api().flush_regular_file(self.key_path)
+        current = os.lstat(self.key_path)
+        self._assert_safe_key_metadata(current)
+        if (current.st_dev, current.st_ino) != expected_identity:
+            raise ManifestKeyError("Canonical manifest key changed after Windows flush")
 
     def get_or_initialize_new_store(self) -> bytes:
         """Read a current key or atomically initialize a proven-empty store.
@@ -198,7 +327,16 @@ class ManifestKeyProvider:
             raise ManifestKeyError("Unable to read canonical manifest key") from exc
         finally:
             if descriptor is not None:
-                os.close(descriptor)
+                try:
+                    os.close(descriptor)
+                except OSError as exc:
+                    # A successful read followed by a failed close has an
+                    # unknown descriptor outcome; preserve the strict typed
+                    # manifest boundary rather than leaking raw OSError.
+                    if "key" in locals():
+                        raise ManifestKeyError(
+                            "Unable to close canonical manifest key"
+                        ) from exc
         _validate_key(key)
         return key
 
@@ -229,6 +367,7 @@ class ManifestKeyProvider:
 __all__ = [
     "HMAC_SHA256_KEY_BYTES",
     "ManifestKeyError",
+    "ManifestKeyDurabilityProvider",
     "ManifestKeyProvider",
     "ManifestSigningKeyProvider",
     "sha256_and_size",

@@ -131,6 +131,9 @@ class LifecycleEngine:
                     "key": record.key,
                     "operation": operation,
                     "conflict_reason": conflict.context.get("reason"),
+                    "conflict_type": type(conflict).__name__,
+                    "post_authority": True,
+                    "later_winner_preserved": True,
                     "retirement_error": type(cleanup_error).__name__,
                 },
             ) from conflict
@@ -1038,6 +1041,19 @@ class LifecycleEngine:
         payload_locator: Path,
     ) -> None:
         """Resume only the signed tombstone created by this operation."""
+        # Reconciliation owns a tombstone once it has durably written its
+        # action checkpoint.  Its state machine retains this primary record
+        # until after payload/tombstone progress is checkpointed, so normal
+        # startup recovery must not retire the record underneath a prepared
+        # sidecar.  Invalid sidecars remain inert evidence and cannot grant
+        # deletion authority; reconciliation reports them separately.
+        if (
+            self.operation_repository.get_reconciliation_checkpoint_raw(
+                record.operation_id
+            )
+            is not None
+        ):
+            return
         current = self.store._load_authenticated_manifest_with_raw(
             record.key,
             operation="recover_delete",
@@ -1070,11 +1086,15 @@ class LifecycleEngine:
         record = self._advance_to(record, OperationCheckpoint.TERMINAL)
         try:
             self.store.manifest_repository.remove_if_expected(record.key, expectation)
-        except CacheBlobLifecycleConflictError:
+        except CacheBlobLifecycleConflictError as conflict:
             # A later generation survived a stale tombstone finalizer. The old
             # payload is already reclaimed, so the exact operation evidence
             # can safely retire without touching the new authority.
-            self._retire(record)
+            self._retire_after_conflict(
+                record,
+                conflict,
+                operation="recover_tombstone_retire_conflict",
+            )
             return
         self._retire(record)
 
@@ -1146,6 +1166,11 @@ class LifecycleEngine:
                         previous_locator,
                         snapshot_admitted=_snapshot_admitted,
                     )
+                except CacheBlobRecoverableCleanupError:
+                    # Conflict-aware cleanup carries the authoritative winner
+                    # and post-authority context.  Do not wrap it into a
+                    # generic recovery failure and erase that distinction.
+                    raise
                 except (CacheStorageError, OSError) as exc:
                     raise CacheBlobRecoverableCleanupError(
                         "BlobStore lifecycle recovery needs another cleanup attempt",
