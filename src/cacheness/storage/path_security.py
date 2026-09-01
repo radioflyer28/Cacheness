@@ -64,16 +64,39 @@ class _WindowsFileApi:
 
     _GENERIC_READ = 0x80000000
     _GENERIC_WRITE = 0x40000000
+    _DELETE = 0x00010000
     _FILE_SHARE_READ = 0x00000001
     _FILE_SHARE_WRITE = 0x00000002
     _FILE_SHARE_DELETE = 0x00000004
     _OPEN_EXISTING = 3
     _FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
     _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+    _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
+    _FILE_DISPOSITION_INFO = 4
     _MOVEFILE_REPLACE_EXISTING = 0x00000001
     _MOVEFILE_WRITE_THROUGH = 0x00000008
     _ERROR_FILE_EXISTS = 80
     _ERROR_ALREADY_EXISTS = 183
+
+    class _FileDispositionInfo(ctypes.Structure):
+        _fields_ = [("DeleteFile", ctypes.c_int)]
+
+    class _ByHandleFileInformation(ctypes.Structure):
+        _fields_ = [
+            ("FileAttributes", ctypes.c_uint32),
+            ("CreationTimeLow", ctypes.c_uint32),
+            ("CreationTimeHigh", ctypes.c_uint32),
+            ("LastAccessTimeLow", ctypes.c_uint32),
+            ("LastAccessTimeHigh", ctypes.c_uint32),
+            ("LastWriteTimeLow", ctypes.c_uint32),
+            ("LastWriteTimeHigh", ctypes.c_uint32),
+            ("VolumeSerialNumber", ctypes.c_uint32),
+            ("FileSizeHigh", ctypes.c_uint32),
+            ("FileSizeLow", ctypes.c_uint32),
+            ("NumberOfLinks", ctypes.c_uint32),
+            ("FileIndexHigh", ctypes.c_uint32),
+            ("FileIndexLow", ctypes.c_uint32),
+        ]
 
     def __init__(self) -> None:
         try:
@@ -104,6 +127,20 @@ class _WindowsFileApi:
         self._close_handle = self._kernel32.CloseHandle
         self._close_handle.argtypes = (ctypes.c_void_p,)
         self._close_handle.restype = ctypes.c_int
+        self._set_file_information = self._kernel32.SetFileInformationByHandle
+        self._set_file_information.argtypes = (
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+        )
+        self._set_file_information.restype = ctypes.c_int
+        self._get_file_information = self._kernel32.GetFileInformationByHandle
+        self._get_file_information.argtypes = (
+            ctypes.c_void_p,
+            ctypes.POINTER(self._ByHandleFileInformation),
+        )
+        self._get_file_information.restype = ctypes.c_int
 
     @staticmethod
     def _last_error() -> int:
@@ -138,9 +175,50 @@ class _WindowsFileApi:
             self._raise_last_error("MoveFileExW")
 
     def delete_write_through(self, locator: Path) -> None:
-        """Delete a regular managed file through the documented move primitive."""
-        if not self._move_file_ex(str(locator), None, self._MOVEFILE_WRITE_THROUGH):
-            self._raise_last_error("MoveFileExW")
+        """Immediately unlink one verified managed leaf through its handle.
+
+        ``MoveFileExW(path, NULL, WRITE_THROUGH)`` is not an immediate-delete
+        contract.  A ``FileDispositionInfo`` request on a reparse-safe handle
+        is the documented acknowledgement boundary: success marks the exact
+        opened object for deletion and it disappears when this final handle
+        closes. Windows exposes no truthful directory-fsync promise.
+        """
+        handle = self._create_file(
+            str(locator),
+            self._DELETE | self._GENERIC_READ,
+            self._FILE_SHARE_READ | self._FILE_SHARE_WRITE | self._FILE_SHARE_DELETE,
+            None,
+            self._OPEN_EXISTING,
+            self._FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle == invalid_handle:
+            self._raise_last_error("CreateFileW")
+        failure: BaseException | None = None
+        try:
+            information = self._ByHandleFileInformation()
+            if not self._get_file_information(handle, ctypes.byref(information)):
+                self._raise_last_error("GetFileInformationByHandle")
+            if (
+                information.FileAttributes & self._FILE_ATTRIBUTE_REPARSE_POINT
+                or information.NumberOfLinks != 1
+            ):
+                _unsafe_path(CacheReason.PATH_RACE)
+            disposition = self._FileDispositionInfo(1)
+            if not self._set_file_information(
+                handle,
+                self._FILE_DISPOSITION_INFO,
+                ctypes.byref(disposition),
+                ctypes.sizeof(disposition),
+            ):
+                self._raise_last_error("SetFileInformationByHandle")
+        except BaseException as exc:
+            failure = exc
+            raise
+        finally:
+            if not self._close_handle(handle) and failure is None:
+                self._raise_last_error("CloseHandle")
 
     def flush_regular_file(self, locator: Path) -> None:
         """Flush an existing regular file through documented file-handle semantics."""
@@ -189,6 +267,7 @@ class _WindowsRegistryAuthorityApi:
     _WAIT_OBJECT_0 = 0
     _WAIT_ABANDONED = 0x00000080
     _INFINITE = 0xFFFFFFFF
+    _CAPABILITY_STATUSES = frozenset({1, 5, 50, 120, 1314})
 
     def __init__(self) -> None:
         try:
@@ -254,22 +333,46 @@ class _WindowsRegistryAuthorityApi:
         self._close_handle.argtypes = (ctypes.c_void_p,)
         self._close_handle.restype = ctypes.c_int
 
-    @staticmethod
-    def _raise_status(status: int, operation: str) -> NoReturn:
-        raise OSError(status, f"{operation} failed")
+    @classmethod
+    def _status_error(cls, status: int, operation: str) -> CacheBlobBackendError:
+        """Map every native authority failure into the public taxonomy."""
+        native_error = OSError(status, f"{operation} failed")
+        reason = (
+            CacheReason.BLOB_BACKEND_CAPABILITY_UNSUPPORTED
+            if status in cls._CAPABILITY_STATUSES
+            else CacheReason.BLOB_BACKEND_FAILURE
+        )
+        error = CacheBlobBackendError(
+            "BlobStore one-user/session lifecycle authority failed",
+            context={
+                "operation": operation,
+                "scope": _WINDOWS_LOCAL_STORE_COORDINATION_SCOPE,
+                "native_status": status,
+            },
+            reason=reason,
+        )
+        error.__cause__ = native_error
+        return error
+
+    @classmethod
+    def _raise_status(cls, status: int, operation: str) -> NoReturn:
+        raise cls._status_error(status, operation)
+
+    def _raise_last_status(self, operation: str) -> NoReturn:
+        self._raise_status(_WindowsFileApi._last_error(), operation)
 
     def ensure(self, name: str, value: bytes) -> None:
         """Create or verify an exact binding under a one-user/session mutex."""
         digest = hashlib.sha256(name.encode("utf-8")).hexdigest()
         mutex = self._create_mutex(None, False, f"Local\\CachenessAuthority-{digest}")
         if not mutex:
-            _WindowsFileApi._raise_last_error("CreateMutexW")
+            self._raise_last_status("CreateMutexW")
         acquired = False
         key = ctypes.c_void_p()
         try:
             result = self._wait_for_single_object(mutex, self._INFINITE)
             if result not in {self._WAIT_OBJECT_0, self._WAIT_ABANDONED}:
-                _WindowsFileApi._raise_last_error("WaitForSingleObject")
+                self._raise_last_status("WaitForSingleObject")
             acquired = True
             disposition = ctypes.c_uint32()
             status = self._reg_create(
@@ -327,11 +430,25 @@ class _WindowsRegistryAuthorityApi:
             if value_type.value != self._REG_BINARY or bytes(buffer) != value:
                 _unsafe_path(CacheReason.PATH_RACE)
         finally:
+            cleanup_error: CacheBlobBackendError | None = None
             if key.value:
-                self._reg_close(key)
+                status = self._reg_close(key)
+                if status != 0:
+                    cleanup_error = self._status_error(status, "RegCloseKey")
             if acquired:
-                self._release_mutex(mutex)
-            self._close_handle(mutex)
+                if not self._release_mutex(mutex):
+                    cleanup_error = self._status_error(
+                        _WindowsFileApi._last_error(), "ReleaseMutex"
+                    )
+            if not self._close_handle(mutex):
+                cleanup_error = self._status_error(
+                    _WindowsFileApi._last_error(), "CloseHandle"
+                )
+            if cleanup_error is not None:
+                active_error = sys.exc_info()[1]
+                if active_error is None:
+                    raise cleanup_error
+                raise cleanup_error from active_error
 
 
 def _windows_file_api() -> _WindowsFileApi:
@@ -1726,13 +1843,10 @@ class ManagedFileOps:
     def delete_durable(self, locator: Union[str, Path]) -> bool:
         """Delete a contained locator and acknowledge the directory when it existed."""
         if not self._descriptor_mode and _platform_name() == "nt":
-            # ``FlushFileBuffers`` is documented for ordinary file handles,
-            # not directories.  MoveFileExW with WRITE_THROUGH is the native
-            # acknowledgement boundary for a pathname deletion.  We verify a
-            # regular single-linked managed leaf before issuing that call;
-            # unsupported filesystems surface a typed backend failure through
-            # the caller's normal OSError translation rather than pretending
-            # a directory flush succeeded.
+            # Windows uses a reparse-safe DELETE handle and documented
+            # FileDispositionInfo acknowledgement. We verify the managed
+            # regular leaf before opening it; the native adapter repeats
+            # reparse/link checks on the retained handle before deletion.
             with self._lock:
                 prepared = self._prepare_locator(locator, operation="delete_durable")
                 try:

@@ -375,6 +375,7 @@ class _Reconciler:
         # authority and applies a bounded report. Ordinary operations retain
         # their per-key lifecycle/CAS concurrency contract.
         with self.store._admission_barrier.aggregate_admission():
+            self._retire_orphaned_completed_checkpoints()
             for finding in findings:
                 if (
                     finding.status is not ReconciliationStatus.SAFE
@@ -411,15 +412,25 @@ class _Reconciler:
             finding.action,
         )
         if checkpoint.state == "completed":
+            self._finish_completed_checkpoint(
+                record, candidate, checkpoint, checkpoint_raw
+            )
             return
         if finding.action is ReconciliationAction.DELETE_CANDIDATE:
             self._apply_candidate_delete(record, candidate, checkpoint, checkpoint_raw)
         elif finding.action is ReconciliationAction.RETIRE_EVIDENCE:
-            self.store.lifecycle._retire(record)
-            self._complete_action_checkpoint(checkpoint, checkpoint_raw)
+            completed, completed_raw = self._complete_action_checkpoint(
+                checkpoint, checkpoint_raw
+            )
+            self._finish_completed_checkpoint(
+                record, candidate, completed, completed_raw
+            )
         elif finding.action is ReconciliationAction.COMPLETE_TOMBSTONE:
             self.store.lifecycle._recover_tombstone(record, candidate)
-            self._complete_action_checkpoint(checkpoint, checkpoint_raw)
+            completed, completed_raw = self._complete_action_checkpoint(
+                checkpoint, checkpoint_raw
+            )
+            self._retire_completed_checkpoint(completed, completed_raw)
 
     def _apply_candidate_delete(
         self,
@@ -430,8 +441,12 @@ class _Reconciler:
     ) -> None:
         """Delete one exact candidate and make post-delete cancellation resumable."""
         if not self.store.guarded_handler_io.file_ops.exists(candidate):
-            completed, _ = self._complete_action_checkpoint(checkpoint, checkpoint_raw)
-            self.store.lifecycle._retire(record)
+            completed, completed_raw = self._complete_action_checkpoint(
+                checkpoint, checkpoint_raw
+            )
+            self._finish_completed_checkpoint(
+                record, candidate, completed, completed_raw
+            )
             return
         try:
             self.store._delete_or_prove_absent(candidate)
@@ -440,11 +455,77 @@ class _Reconciler:
             # absence is now proven, finish durable progress before preserving
             # the interruption; a fresh store will not call delete again.
             if not self.store.guarded_handler_io.file_ops.exists(candidate):
-                self._complete_action_checkpoint(checkpoint, checkpoint_raw)
-                self.store.lifecycle._retire(record)
+                completed, completed_raw = self._complete_action_checkpoint(
+                    checkpoint, checkpoint_raw
+                )
+                self._finish_completed_checkpoint(
+                    record, candidate, completed, completed_raw
+                )
             raise
-        self._complete_action_checkpoint(checkpoint, checkpoint_raw)
-        self.store.lifecycle._retire(record)
+        completed, completed_raw = self._complete_action_checkpoint(
+            checkpoint, checkpoint_raw
+        )
+        self._finish_completed_checkpoint(record, candidate, completed, completed_raw)
+
+    def _finish_completed_checkpoint(
+        self,
+        record: Any,
+        candidate: Path,
+        checkpoint: _ActionCheckpoint,
+        checkpoint_raw: bytes,
+    ) -> None:
+        """Finish only the non-destructive terminal steps after a checkpoint.
+
+        A completed checkpoint means its destructive action must never repeat
+        after a crash.  It stays durable until the primary evidence is safely
+        retired, then its exact bytes are removed as the final sidecar step.
+        """
+        if checkpoint.action is ReconciliationAction.DELETE_CANDIDATE:
+            if self.store.guarded_handler_io.file_ops.exists(candidate):
+                raise CacheBlobReconciliationConflictError(
+                    "Completed reconciliation checkpoint still has its candidate",
+                    context={"operation_id": checkpoint.operation_id},
+                )
+            self.store.lifecycle._retire(record)
+        elif checkpoint.action is ReconciliationAction.RETIRE_EVIDENCE:
+            self.store.lifecycle._retire(record)
+        elif checkpoint.action is ReconciliationAction.COMPLETE_TOMBSTONE:
+            self.store.lifecycle._recover_tombstone(record, candidate)
+            if (
+                self.store.lifecycle.operation_repository.get_raw(record.operation_id)
+                is not None
+            ):
+                return
+        self._retire_completed_checkpoint(checkpoint, checkpoint_raw)
+
+    def _retire_completed_checkpoint(
+        self, checkpoint: _ActionCheckpoint, checkpoint_raw: bytes
+    ) -> None:
+        """Retire one exact completed checkpoint after terminal ordering."""
+        if checkpoint.state != "completed":
+            raise CacheBlobReconciliationCheckpointError(
+                "Only completed reconciliation checkpoints may be retired"
+            )
+        self.store.lifecycle.operation_repository.retire_reconciliation_checkpoint_if_exact(
+            checkpoint.operation_id, expected_raw=checkpoint_raw
+        )
+
+    def _retire_orphaned_completed_checkpoints(self) -> None:
+        """Authenticate and remove completed sidecars orphaned after a crash."""
+        repository = self.store.lifecycle.operation_repository
+        key = self.store._manifest_key()
+        for operation_id, raw in repository.list_reconciliation_checkpoint_raws():
+            checkpoint = _ActionCheckpoint.from_canonical_bytes(
+                raw, key, lifecycle_limits=self.lifecycle_limits
+            )
+            if checkpoint.operation_id != operation_id or checkpoint.state != "completed":
+                continue
+            # A completed sidecar with no primary evidence has already crossed
+            # the recoverable terminal boundary.  Do not infer or repeat the
+            # destructive action: authenticate then retire only this exact
+            # private checkpoint.
+            if repository.get_raw(operation_id) is None:
+                self._retire_completed_checkpoint(checkpoint, raw)
 
     def _prepare_action_checkpoint(
         self,
@@ -717,6 +798,22 @@ class _Reconciler:
                 ReconciliationStatus.SAFE,
                 ReconciliationAction.DELETE_CANDIDATE,
                 "authenticated_stale_candidate",
+                manifest_digest=hashlib.sha256(current.raw).hexdigest(),
+                **base,
+            )
+        if (
+            current is not None
+            and current.manifest.generation != record.generation
+            and candidate != current.locator
+        ):
+            # A later authority at a distinct locator proves this signed,
+            # immutable candidate lost before CAS.  It is safe to converge
+            # only this operation's own residue; the same-locator case stays
+            # blocked because it may be a later generation's payload.
+            return ReconciliationFinding(
+                ReconciliationStatus.SAFE,
+                ReconciliationAction.DELETE_CANDIDATE,
+                "authenticated_superseded_candidate",
                 manifest_digest=hashlib.sha256(current.raw).hexdigest(),
                 **base,
             )

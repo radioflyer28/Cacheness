@@ -18,6 +18,7 @@ from cacheness.error_handling import (
     CacheBlobCloseTimeoutError,
     CacheBlobLockReleaseError,
     CacheBlobStoreClosedError,
+    CacheReason,
 )
 
 from .path_security import ManagedFileOps, resolve_managed_locator
@@ -41,6 +42,7 @@ class _NativeWindowsLockApi:
 
     _LOCKFILE_EXCLUSIVE_LOCK = 0x00000002
     _MAX_DWORD = 0xFFFFFFFF
+    _CAPABILITY_STATUSES = frozenset({1, 5, 50, 120, 1314})
 
     class _Overlapped(ctypes.Structure):
         _fields_ = [
@@ -96,7 +98,7 @@ class _NativeWindowsLockApi:
             self._MAX_DWORD,
             ctypes.byref(overlapped),
         ):
-            raise OSError(ctypes.get_last_error(), "LockFileEx failed")
+            self._raise_native_error(ctypes.get_last_error(), "LockFileEx")
         return overlapped
 
     def unlock(self, file_descriptor: int, token: object) -> object:
@@ -111,8 +113,23 @@ class _NativeWindowsLockApi:
             self._MAX_DWORD,
             ctypes.byref(token),
         ):
-            raise OSError(ctypes.get_last_error(), "UnlockFileEx failed")
+            self._raise_native_error(ctypes.get_last_error(), "UnlockFileEx")
         return None
+
+    @classmethod
+    def _raise_native_error(cls, status: int, operation: str) -> None:
+        """Keep Win32 policy/capability failures inside BlobStore taxonomy."""
+        native_error = OSError(status, f"{operation} failed")
+        reason = (
+            CacheReason.BLOB_BACKEND_CAPABILITY_UNSUPPORTED
+            if status in cls._CAPABILITY_STATUSES
+            else CacheReason.BLOB_BACKEND_FAILURE
+        )
+        raise CacheBlobBackendError(
+            "BlobStore Windows lifecycle lock failed",
+            context={"operation": operation, "native_status": status},
+            reason=reason,
+        ) from native_error
 
 
 def _platform_name() -> str:
@@ -202,11 +219,11 @@ def interprocess_open_file_lock(
         body_failure = exc
         raise
     finally:
-        release_failure: OSError | None = None
+        release_failure: BaseException | None = None
         try:
             if unlock is not None:
                 unlock()
-        except OSError as exc:
+        except (OSError, CacheBlobBackendError) as exc:
             release_failure = exc
         finally:
             try:
@@ -416,7 +433,6 @@ class StoreAdmissionBarrier:
 
     def release(self) -> None:
         """Release one owning-store lease and close the final root descriptor."""
-        close_file_ops = False
         with self._instances_guard:
             registry_identity = self._registry_identity
             if registry_identity is None:
@@ -426,15 +442,20 @@ class StoreAdmissionBarrier:
                 return
             if self._leases <= 0:
                 return
-            self._leases -= 1
-            if self._leases == 0:
-                del self._instances[registry_identity]
-                close_file_ops = True
-        if close_file_ops:
+            if self._leases > 1:
+                self._leases -= 1
+                return
+
+            # Keep the final registry lease visible until both retained
+            # resources close successfully.  This serializes a final close
+            # against same-root construction and, more importantly, leaves
+            # failed resources reachable for the caller's retry.
             if self._lock_handle is not None:
                 self._lock_handle.close()
                 self._lock_handle = None
             self._file_ops.close()
+            self._leases = 0
+            del self._instances[registry_identity]
 
     @contextmanager
     def _advisory_admission(self, *, exclusive: bool) -> Iterator[None]:

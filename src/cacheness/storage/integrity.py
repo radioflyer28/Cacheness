@@ -96,19 +96,16 @@ class ManifestKeyProvider:
         """Create a key exactly once for an explicitly initialized empty store."""
         if self._provided_key is not None:
             return self._provided_key
-        if os.name != "posix":
-            raise ManifestKeyError(
-                "File-backed canonical manifest keys are unsupported on this platform"
-            )
         try:
             self.key_path.parent.mkdir(parents=True, exist_ok=True)
+            self._assert_safe_parent()
         except OSError as exc:
             raise ManifestKeyError("Unable to create canonical manifest key directory") from exc
         key = secrets.token_bytes(HMAC_SHA256_KEY_BYTES)
         try:
             descriptor = os.open(
                 self.key_path,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
                 0o600,
             )
         except FileExistsError:
@@ -120,6 +117,7 @@ class ManifestKeyProvider:
             raise ManifestKeyError("Unable to create canonical manifest key") from exc
         created_metadata = os.fstat(descriptor)
         try:
+            self._assert_safe_key_metadata(created_metadata)
             self._write_all(descriptor, key)
             os.fsync(descriptor)
         except OSError as exc:
@@ -168,20 +166,22 @@ class ManifestKeyProvider:
             pass
 
     def _read_existing_key(self, *, missing_ok: bool = False) -> bytes | None:
-        if os.name != "posix":
-            raise ManifestKeyError(
-                "File-backed canonical manifest keys are unsupported on this platform"
-            )
         descriptor: int | None = None
         try:
-            descriptor = os.open(self.key_path, os.O_RDONLY | os.O_NOFOLLOW)
+            self._assert_safe_parent()
+            before_open = os.lstat(self.key_path)
+            self._assert_safe_key_metadata(before_open)
+            descriptor = os.open(
+                self.key_path,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            )
             metadata = os.fstat(descriptor)
-            if not stat.S_ISREG(metadata.st_mode):
-                raise ManifestKeyError("Canonical manifest key must be a regular file")
-            if metadata.st_uid != os.geteuid():
-                raise ManifestKeyError("Canonical manifest key owner is unsafe")
-            if stat.S_IMODE(metadata.st_mode) & 0o077:
-                raise ManifestKeyError("Canonical manifest key permissions are unsafe")
+            self._assert_safe_key_metadata(metadata)
+            if (metadata.st_dev, metadata.st_ino) != (
+                before_open.st_dev,
+                before_open.st_ino,
+            ):
+                raise ManifestKeyError("Canonical manifest key changed during open")
             key = b""
             while len(key) <= HMAC_SHA256_KEY_BYTES:
                 chunk = os.read(descriptor, HMAC_SHA256_KEY_BYTES + 1 - len(key))
@@ -201,6 +201,29 @@ class ManifestKeyProvider:
                 os.close(descriptor)
         _validate_key(key)
         return key
+
+    def _assert_safe_parent(self) -> None:
+        """Reject a reparse/symlink key directory before creating or reopening."""
+        metadata = os.lstat(self.key_path.parent)
+        if not stat.S_ISDIR(metadata.st_mode) or self._is_reparse_point(metadata):
+            raise ManifestKeyError("Canonical manifest key directory is unsafe")
+
+    def _assert_safe_key_metadata(self, metadata: os.stat_result) -> None:
+        """Apply strict POSIX checks and Windows same-user/session reparse checks."""
+        if not stat.S_ISREG(metadata.st_mode) or self._is_reparse_point(metadata):
+            raise ManifestKeyError("Canonical manifest key must be a regular file")
+        if metadata.st_nlink != 1:
+            raise ManifestKeyError("Canonical manifest key must not be linked")
+        if os.name == "posix":
+            if metadata.st_uid != os.geteuid():
+                raise ManifestKeyError("Canonical manifest key owner is unsafe")
+            if stat.S_IMODE(metadata.st_mode) & 0o077:
+                raise ManifestKeyError("Canonical manifest key permissions are unsafe")
+
+    @staticmethod
+    def _is_reparse_point(metadata: os.stat_result) -> bool:
+        """Recognize Windows reparse points without treating normal files as links."""
+        return bool(getattr(metadata, "st_file_attributes", 0) & 0x0400)
 
 
 __all__ = [

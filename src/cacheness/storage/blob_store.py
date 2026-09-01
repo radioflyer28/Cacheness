@@ -67,6 +67,7 @@ from .handlers import HandlerRegistry
 from .integrity import (
     ManifestKeyError,
     ManifestKeyProvider,
+    ManifestSigningKeyProvider,
     sha256_and_size,
     sign_hmac_sha256,
     verify_hmac_sha256,
@@ -193,6 +194,7 @@ class BlobStore:
         content_addressable: bool = False,
         *,
         config: CacheConfig | None = None,
+        manifest_key_provider: ManifestSigningKeyProvider | None = None,
     ):
         """
         Initialize a BlobStore.
@@ -225,8 +227,9 @@ class BlobStore:
                 backend,
                 compression,
                 compression_level,
-                content_addressable,
-                config,
+            content_addressable,
+            config,
+            manifest_key_provider,
             )
         except BaseException:
             # Cancellation must not retain a partially initialized owner and
@@ -243,6 +246,7 @@ class BlobStore:
         compression_level: int,
         content_addressable: bool,
         config: CacheConfig | None,
+        manifest_key_provider: ManifestSigningKeyProvider | None,
     ) -> None:
         """Finish initialization after the managed-root descriptor is acquired."""
         self._legacy_identity: LegacyManifestIdentity | None = None
@@ -308,8 +312,10 @@ class BlobStore:
             self.backend,
             lifecycle_limits=self.lifecycle_limits,
         )
-        self._manifest_key_provider = ManifestKeyProvider(
-            self.cache_dir / "blob_manifest_hmac_key.bin"
+        self._manifest_key_provider = (
+            ManifestKeyProvider(self.cache_dir / "blob_manifest_hmac_key.bin")
+            if manifest_key_provider is None
+            else manifest_key_provider
         )
         self.lifecycle = LifecycleEngine(self, lifecycle_limits=self.lifecycle_limits)
         self._reconciler = _Reconciler(self, lifecycle_limits=self.lifecycle_limits)
@@ -503,7 +509,7 @@ class BlobStore:
         """
         self._require_canonical_store()
         with self._key_coordinator.hold(self._storage_id_for_key(key)):
-            authenticated = self._load_authenticated_manifest(
+            authenticated = self._load_authenticated_manifest_with_raw(
                 key,
                 operation="get_metadata",
                 require_locator=True,
@@ -545,13 +551,7 @@ class BlobStore:
             )
             if authenticated is None:
                 return False
-            manifest, _handler, _locator = authenticated
-            observed_record = self.manifest_repository.get_raw(key)
-            if observed_record is None or observed_record != manifest.canonical_bytes():
-                raise CacheBlobLifecycleConflictError(
-                    "BlobStore metadata authority changed before conditional patch",
-                    context={"key": key, "operation": "update_metadata"},
-                )
+            manifest, observed_record, _handler, _locator = authenticated
             expected = ManifestExpectation.from_authenticated_record(
                 manifest.generation,
                 observed_record,
@@ -991,7 +991,14 @@ class BlobStore:
             page_size=1
         ).entries:
             try:
-                return self._manifest_key_provider.get_or_initialize_new_store()
+                initializer = getattr(
+                    self._manifest_key_provider, "get_or_initialize_new_store", None
+                )
+                if callable(initializer):
+                    return initializer()
+                # An injected provider owns its trust-root provisioning.  It
+                # may expose only the narrow public ``get_key`` protocol.
+                return self._manifest_key_provider.get_key()
             except ManifestKeyError as exc:
                 raise CacheBlobManifestUnauthenticatedError(
                     "Canonical BlobStore signing key is unavailable",
@@ -1100,7 +1107,7 @@ class BlobStore:
             self._storage_id_for_key(logical_key), shard_chars=0
         )
 
-    def _load_authenticated_manifest(
+    def _load_authenticated_manifest_with_raw(
         self,
         key: str,
         *,
@@ -1108,8 +1115,8 @@ class BlobStore:
         require_payload_contract: bool = False,
         require_locator: bool = False,
         allowed_states: frozenset[str] | None = None,
-    ) -> tuple[BlobManifestV1, Any | None, Path | None] | None:
-        """Load one committed manifest before any direct public operation.
+    ) -> tuple[BlobManifestV1, bytes, Any | None, Path | None] | None:
+        """Load one committed manifest and retain its exact authority bytes.
 
         A raw repository miss is the only absence outcome. Every other record
         is decoded, authenticated, and checked for key/state consistency before
@@ -1179,6 +1186,28 @@ class BlobStore:
                 manifest.locator,
                 operation=operation,
             )
+        return manifest, raw_manifest, handler, actual_path
+
+    def _load_authenticated_manifest(
+        self,
+        key: str,
+        *,
+        operation: str,
+        require_payload_contract: bool = False,
+        require_locator: bool = False,
+        allowed_states: frozenset[str] | None = None,
+    ) -> tuple[BlobManifestV1, Any | None, Path | None] | None:
+        """Load a manifest without exposing its private exact-record snapshot."""
+        authenticated = self._load_authenticated_manifest_with_raw(
+            key,
+            operation=operation,
+            require_payload_contract=require_payload_contract,
+            require_locator=require_locator,
+            allowed_states=allowed_states,
+        )
+        if authenticated is None:
+            return None
+        manifest, _raw_manifest, handler, actual_path = authenticated
         return manifest, handler, actual_path
 
     def _read_generation_is_stable(

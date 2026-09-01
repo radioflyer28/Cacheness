@@ -130,11 +130,24 @@ class FileOperationRecordRepository:
 
     def close(self) -> None:
         """Release retained bounded evidence-lock descriptors on store close."""
+        first_error: Exception | None = None
         with self._lock_handle_guard:
-            handles = tuple(self._lock_handles.values())
-            self._lock_handles.clear()
-        for _locator, handle, _identity in handles:
-            handle.close()
+            # Do not discard a descriptor from retry bookkeeping until its
+            # close has a known successful outcome.  A failed close may leave
+            # a process-scoped advisory lock live, so a later BlobStore.close
+            # must retry rather than reporting a fictional terminal state.
+            for lock_identity, (_locator, handle, _identity) in tuple(
+                self._lock_handles.items()
+            ):
+                try:
+                    handle.close()
+                except Exception as exc:
+                    if first_error is None:
+                        first_error = exc
+                    continue
+                self._lock_handles.pop(lock_identity, None)
+        if first_error is not None:
+            raise first_error
 
     def _conditional_lock_for(self, operation_id: str) -> RLock:
         """Return a shared bounded in-process stripe for one evidence ID.
@@ -438,6 +451,41 @@ class FileOperationRecordRepository:
             self.reconciliation_checkpoint_locator(operation_id),
             operation="get_reconcile",
         )
+
+    def list_reconciliation_checkpoint_raws(self) -> tuple[tuple[str, bytes], ...]:
+        """Return a bounded inventory of exact reconciliation sidecars.
+
+        These names are excluded from normal operation evidence pages, so a
+        completed sidecar orphaned after its primary retirement needs its own
+        authenticated recovery inventory.
+        """
+        operations_directory = resolve_managed_locator(
+            self.file_ops.root,
+            "operations",
+            operation="list_reconciliation_checkpoints",
+            allow_missing_leaf=True,
+        )
+        prefix = "reconcile-action-"
+        suffix = ".json"
+        try:
+            operation_ids = nsmallest(
+                self.lifecycle_limits.max_reconcile_actions,
+                (
+                    name[len(prefix) : -len(suffix)]
+                    for name in (path.name for path in operations_directory.iterdir())
+                    if name.startswith(prefix)
+                    and name.endswith(suffix)
+                    and self._is_hex_identifier(name[len(prefix) : -len(suffix)])
+                ),
+            )
+        except FileNotFoundError:
+            return ()
+        records: list[tuple[str, bytes]] = []
+        for operation_id in operation_ids:
+            raw = self.get_reconciliation_checkpoint_raw(operation_id)
+            if raw is not None:
+                records.append((operation_id, raw))
+        return tuple(records)
 
     def create_reconciliation_checkpoint_exclusive(
         self, operation_id: str, raw_record: bytes
@@ -1090,7 +1138,11 @@ class FileOperationRecordRepository:
         try:
             names = nsmallest(
                 self.lifecycle_limits.max_reconcile_actions,
-                (path.name for path in operations_directory.iterdir()),
+                (
+                    path.name
+                    for path in operations_directory.iterdir()
+                    if self._is_eligible_pending_name(path.name)
+                ),
             )
         except FileNotFoundError:
             return ()
@@ -1141,6 +1193,32 @@ class FileOperationRecordRepository:
             if promoted and operation_id is not None:
                 recovered.append(operation_id)
         return tuple(recovered)
+
+    def _is_eligible_pending_name(self, name: str) -> bool:
+        """Recognize only exact digest-bound pending evidence candidates.
+
+        Inventory bounds apply after this grammar filter.  Ordinary files,
+        malformed controls, and clear/reconciliation sidecars must never
+        consume a lifecycle recovery action slot indefinitely.
+        """
+        if not (name.startswith(".") and name.endswith(".tmp")):
+            return False
+        pending_parts = name[1:-4].rsplit(".pending.", 1)
+        if len(pending_parts) != 2:
+            return False
+        base, digest_and_token = pending_parts
+        if self._recoverable_pending_final(base) is None:
+            return False
+        digest_parts = digest_and_token.rsplit(".", 1)
+        if len(digest_parts) != 2:
+            return False
+        digest, token = digest_parts
+        return (
+            len(digest) == 64
+            and all(character in "0123456789abcdef" for character in digest)
+            and len(token) == 32
+            and all(character in "0123456789abcdef" for character in token)
+        )
 
     def _require_exact_current(
         self, record: LifecycleOperationRecord, expected_raw: bytes, *, operation: str

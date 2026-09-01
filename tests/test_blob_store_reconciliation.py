@@ -508,6 +508,7 @@ def test_reconcile_apply_revalidates_and_removes_only_authenticated_candidate(
         assert report.findings[0].action is ReconciliationAction.DELETE_CANDIDATE
         assert not candidate.exists()
         assert store.lifecycle.operation_repository.get_raw(record.operation_id) is None
+        assert not list((root / "operations").glob("reconcile-action-*.json"))
     finally:
         store.close()
 
@@ -545,6 +546,56 @@ def test_reconcile_apply_base_exception_checkpoints_without_repeating_delete(
         assert store.lifecycle.operation_repository.get_raw(record.operation_id) is None
     finally:
         store.close()
+
+
+def test_reopen_retires_an_orphaned_completed_reconciliation_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A completed action sidecar is exact-retired after a post-action crash."""
+    root = tmp_path / "reconcile-orphaned-completed-checkpoint"
+    store = BlobStore(root, backend="json")
+    operation_id = "a" * 32
+    try:
+        key = store._manifest_key(initialize_new_store=True)
+        record = _reconciliation_record(store, root, key, operation_id)
+        candidate = store.guarded_handler_io.root / record.candidate_locator
+        store.guarded_handler_io.file_ops.write_bytes_durable(candidate, b"candidate")
+        store.lifecycle.operation_repository.create_exclusive(
+            record, record.canonical_bytes()
+        )
+        original_retire = (
+            store.lifecycle.operation_repository.retire_reconciliation_checkpoint_if_exact
+        )
+
+        def interrupt_checkpoint_retirement(*args: object, **kwargs: object) -> None:
+            raise RuntimeError("interrupted after primary evidence retirement")
+
+        monkeypatch.setattr(
+            store.lifecycle.operation_repository,
+            "retire_reconciliation_checkpoint_if_exact",
+            interrupt_checkpoint_retirement,
+        )
+        with pytest.raises(RuntimeError, match="interrupted after primary"):
+            store.reconcile(
+                apply=True, now=datetime(2026, 8, 31, tzinfo=timezone.utc)
+            )
+        assert not candidate.exists()
+        assert store.lifecycle.operation_repository.get_raw(operation_id) is None
+        assert list((root / "operations").glob("reconcile-action-*.json"))
+        monkeypatch.setattr(
+            store.lifecycle.operation_repository,
+            "retire_reconciliation_checkpoint_if_exact",
+            original_retire,
+        )
+    finally:
+        store.close()
+
+    reopened = BlobStore(root, backend="json")
+    try:
+        reopened.reconcile(apply=True, now=datetime(2026, 8, 31, tzinfo=timezone.utc))
+        assert not list((root / "operations").glob("reconcile-action-*.json"))
+    finally:
+        reopened.close()
 
 
 def test_reconcile_apply_resumes_bounded_actions_from_opaque_token(tmp_path: Path) -> None:

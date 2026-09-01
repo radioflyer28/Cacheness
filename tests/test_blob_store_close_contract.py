@@ -24,6 +24,7 @@ from cacheness.storage import coordination
 from cacheness.storage import path_security
 from cacheness.storage.coordination import StoreAdmissionBarrier, interprocess_file_lock
 from cacheness.storage.path_security import ManagedFileOps
+from cacheness.storage.operation_repository import FileOperationRecordRepository
 
 
 def _join(thread: Thread) -> None:
@@ -250,6 +251,85 @@ def test_partial_owned_resource_failure_is_typed_and_retries_without_double_clos
     store.close()
     assert guarded_close_calls == [None]
     assert backend_close_calls == [None, None]
+
+
+@pytest.mark.parametrize("failing_index", (0, 1, 2))
+def test_operation_repository_retains_every_failed_lock_close_for_retry(
+    tmp_path: Path, failing_index: int
+) -> None:
+    """First, middle, and final retained evidence handles are not forgotten."""
+    file_ops = ManagedFileOps(tmp_path)
+    repository = FileOperationRecordRepository(
+        file_ops, lifecycle_limits=LifecycleLimits()
+    )
+
+    class Handle:
+        def __init__(self, index: int) -> None:
+            self.index = index
+            self.calls = 0
+
+        def close(self) -> None:
+            self.calls += 1
+            if self.index == failing_index and self.calls == 1:
+                raise OSError("injected retained lock close failure")
+
+    handles = [Handle(index) for index in range(3)]
+    repository._lock_handles = {
+        f"lock-{index}": (tmp_path / f"lock-{index}", handle, (1, index))
+        for index, handle in enumerate(handles)
+    }
+    try:
+        with pytest.raises(OSError, match="retained lock close failure"):
+            repository.close()
+        assert set(repository._lock_handles) == {f"lock-{failing_index}"}
+        repository.close()
+        assert repository._lock_handles == {}
+        assert handles[failing_index].calls == 2
+    finally:
+        repository.close()
+        file_ops.close()
+
+
+@pytest.mark.parametrize("resource", ("lock", "root"))
+def test_final_barrier_release_keeps_its_registry_lease_until_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resource: str
+) -> None:
+    """A failed final barrier close cannot let a later store report CLOSED."""
+    root = tmp_path / f"barrier-retry-{resource}"
+    root.mkdir()
+    barrier = StoreAdmissionBarrier.acquire(root)
+    original_lock_close = barrier._lock_handle.close
+    original_root_close = barrier._file_ops.close
+    calls = 0
+
+    def fail_once_lock() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("injected barrier lock close failure")
+        original_lock_close()
+
+    def fail_once_root() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("injected barrier root close failure")
+        original_root_close()
+
+    if resource == "lock":
+        monkeypatch.setattr(barrier._lock_handle, "close", fail_once_lock)
+    else:
+        monkeypatch.setattr(barrier._file_ops, "close", fail_once_root)
+    try:
+        with pytest.raises(OSError):
+            barrier.release()
+        assert StoreAdmissionBarrier._instances[barrier._registry_identity] is barrier
+        assert barrier._leases == 1
+        barrier.release()
+        assert barrier._registry_identity not in StoreAdmissionBarrier._instances
+    finally:
+        if barrier._registry_identity in StoreAdmissionBarrier._instances:
+            barrier.release()
 
 
 def test_concurrent_close_waiter_does_not_repeat_owned_release(tmp_path, monkeypatch):

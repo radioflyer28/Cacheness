@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import json
 import os
+import inspect
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -31,6 +32,13 @@ from cacheness.storage.manifest import BlobManifestV1
 
 
 _KEY = b"0123456789abcdef0123456789abcdef"
+
+
+class _InjectedManifestKeyProvider:
+    """Minimal application-owned provider for platform key-store integrations."""
+
+    def get_key(self) -> bytes:
+        return _KEY
 
 
 def test_strict_key_provider_requires_explicit_initialization(tmp_path):
@@ -141,6 +149,25 @@ def test_canonical_hmac_requires_exact_material_and_rejects_bad_signature(tmp_pa
         assert error.value.context["reason"] == (
             CacheReason.MANIFEST_SIGNING_KEY_INVALID.value
         )
+
+
+def test_manifest_key_provider_has_no_non_posix_rejection_branch():
+    """The one-user/session Windows topology can reach the file-key contract."""
+    source = inspect.getsource(ManifestKeyProvider)
+
+    assert 'os.name != "posix"' not in source
+    assert "reparse" in source
+
+
+def test_blob_store_accepts_an_injected_manifest_key_provider(tmp_path):
+    """A platform key-store adapter can supply the narrow signing-key contract."""
+    provider = _InjectedManifestKeyProvider()
+    store = BlobStore(tmp_path, manifest_key_provider=provider)
+    try:
+        assert store.put({"value": "injected"}, key="provider-key") == "provider-key"
+        assert store.get("provider-key") == {"value": "injected"}
+    finally:
+        store.close()
 
 
 def test_reopen_with_missing_key_never_creates_a_replacement_key(tmp_path):

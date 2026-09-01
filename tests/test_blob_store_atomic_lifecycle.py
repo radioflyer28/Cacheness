@@ -496,6 +496,39 @@ def test_stale_overwrite_conflict_reclaims_only_loser_candidate(
         winner.close()
 
 
+def test_overwrite_snapshot_cas_never_adopts_a_winner_published_after_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An overwrite CAS remains bound to the exact authenticated first read."""
+    root = tmp_path / "overwrite-snapshot-cas"
+    contender = BlobStore(root, backend="json")
+    winner = BlobStore(root, backend="json")
+    try:
+        key = contender.put({"generation": "old"}, key="snapshot-key")
+        original_load = contender._load_authenticated_manifest_with_raw
+        published_winner = False
+
+        def load_then_publish(*args: object, **kwargs: object):
+            nonlocal published_winner
+            snapshot = original_load(*args, **kwargs)
+            if kwargs.get("operation") == "overwrite" and not published_winner:
+                published_winner = True
+                winner.put({"generation": "winner"}, key=key)
+            return snapshot
+
+        monkeypatch.setattr(
+            contender, "_load_authenticated_manifest_with_raw", load_then_publish
+        )
+        with pytest.raises(CacheBlobLifecycleConflictError):
+            contender.put({"generation": "stale"}, key=key)
+
+        assert contender.get(key) == {"generation": "winner"}
+        assert winner.get(key) == {"generation": "winner"}
+    finally:
+        contender.close()
+        winner.close()
+
+
 def test_delete_publishes_signed_tombstone_before_payload_reclamation(
     tmp_path: Path,
 ) -> None:
@@ -595,6 +628,138 @@ def test_stale_delete_conflict_preserves_newer_committed_generation(
     finally:
         contender.close()
         winner.close()
+
+
+def test_delete_snapshot_cas_never_adopts_a_winner_published_after_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A delete tombstone CAS remains bound to its authenticated snapshot."""
+    root = tmp_path / "delete-snapshot-cas"
+    contender = BlobStore(root, backend="json")
+    winner = BlobStore(root, backend="json")
+    try:
+        key = contender.put({"generation": "old"}, key="snapshot-delete-key")
+        original_load = contender._load_authenticated_manifest_with_raw
+        published_winner = False
+
+        def load_then_publish(*args: object, **kwargs: object):
+            nonlocal published_winner
+            snapshot = original_load(*args, **kwargs)
+            if kwargs.get("operation") == "delete" and not published_winner:
+                published_winner = True
+                winner.put({"generation": "winner"}, key=key)
+            return snapshot
+
+        monkeypatch.setattr(
+            contender, "_load_authenticated_manifest_with_raw", load_then_publish
+        )
+        with pytest.raises(CacheBlobLifecycleConflictError):
+            contender.delete(key)
+
+        assert contender.get(key) == {"generation": "winner"}
+        assert winner.get(key) == {"generation": "winner"}
+    finally:
+        contender.close()
+        winner.close()
+
+
+def test_tombstone_publication_conflict_reports_recoverable_evidence_debt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A loser-retirement failure retains the winner-preserving conflict as cause."""
+    root = tmp_path / "tombstone-conflict-retirement"
+    contender = BlobStore(root, backend="json")
+    winner = BlobStore(root, backend="json")
+    try:
+        key = contender.put({"generation": "old"}, key="conflict-key")
+
+        def publish_winner(seam: str, _record: Any) -> None:
+            if seam == "tombstone_publish":
+                winner.put({"generation": "winner"}, key=key)
+
+        contender.lifecycle.fault_hook = publish_winner
+        monkeypatch.setattr(
+            contender.lifecycle,
+            "_retire",
+            lambda _record: (_ for _ in ()).throw(OSError("retirement failed")),
+        )
+        with pytest.raises(CacheBlobRecoverableCleanupError) as error:
+            contender.delete(key)
+
+        assert isinstance(error.value.__cause__, CacheBlobLifecycleConflictError)
+        assert error.value.context["operation"] == "tombstone_publish_conflict"
+        assert contender.get(key) == {"generation": "winner"}
+    finally:
+        contender.close()
+        winner.close()
+
+
+def test_post_authority_tombstone_conflict_reports_recoverable_evidence_debt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Post-authority terminal debt cannot be masked by evidence retirement."""
+    store = BlobStore(tmp_path / "tombstone-final-conflict", backend="json")
+    try:
+        key = store.put({"generation": "old"}, key="post-authority-key")
+        monkeypatch.setattr(
+            store.manifest_repository,
+            "remove_if_expected",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                CacheBlobLifecycleConflictError("later authority won")
+            ),
+        )
+        monkeypatch.setattr(
+            store.lifecycle,
+            "_retire",
+            lambda _record: (_ for _ in ()).throw(OSError("retirement failed")),
+        )
+        with pytest.raises(CacheBlobRecoverableCleanupError) as error:
+            store.delete(key)
+
+        assert isinstance(error.value.__cause__, CacheBlobLifecycleConflictError)
+        assert error.value.context["operation"] == "tombstone_retire_conflict"
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("replacement", [False, True])
+def test_pre_cas_put_residue_converges_after_a_later_distinct_winner(
+    tmp_path: Path, replacement: bool
+) -> None:
+    """Signed create/replace candidates do not remain blocked after losing CAS."""
+    root = tmp_path / f"pre-cas-residue-{replacement}"
+    contender = BlobStore(root, backend="json")
+    winner = BlobStore(root, backend="json")
+    candidate_locator: Path | None = None
+    try:
+        key = "replace-key" if replacement else "create-key"
+        if replacement:
+            contender.put({"generation": "old"}, key=key)
+
+        def interrupt_before_cas(seam: str, record: Any) -> None:
+            nonlocal candidate_locator
+            if seam == "manifest_publish":
+                candidate_locator = root / record.candidate_locator
+                raise RuntimeError("interrupted before manifest CAS")
+
+        contender.lifecycle.fault_hook = interrupt_before_cas
+        with pytest.raises(RuntimeError, match="interrupted before manifest CAS"):
+            contender.put({"generation": "interrupted"}, key=key)
+        assert candidate_locator is not None and candidate_locator.exists()
+
+        winner.put({"generation": "winner"}, key=key)
+        assert winner.get(key) == {"generation": "winner"}
+    finally:
+        contender.close()
+        winner.close()
+
+    reopened = BlobStore(root, backend="json")
+    try:
+        assert reopened.get(key) == {"generation": "winner"}
+        assert candidate_locator is not None and not candidate_locator.exists()
+        assert not list((root / "operations").glob("[0-9a-f]" * 32 + ".json"))
+    finally:
+        reopened.close()
 
 
 def test_clear_target_page_and_checkpoint_preserve_exact_progress_after_reopen(

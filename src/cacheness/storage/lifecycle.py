@@ -106,6 +106,35 @@ class LifecycleEngine:
             record, expected_raw=self._record_raw(record)
         )
 
+    def _retire_after_conflict(
+        self,
+        record: LifecycleOperationRecord,
+        conflict: CacheBlobLifecycleConflictError,
+        *,
+        operation: str,
+    ) -> None:
+        """Retire exact loser evidence without masking a failed cleanup.
+
+        The winner-preserving CAS conflict remains the causal event.  If its
+        loser evidence cannot be retired, surface recoverable cleanup debt
+        rather than leaking an untyped retirement failure or pretending the
+        terminal state was completely converged.
+        """
+        try:
+            self._retire(record)
+        except (CacheStorageError, OSError) as cleanup_error:
+            raise CacheBlobRecoverableCleanupError(
+                "BlobStore conflict left lifecycle evidence requiring cleanup",
+                context={
+                    "operation_id": record.operation_id,
+                    "generation": record.generation,
+                    "key": record.key,
+                    "operation": operation,
+                    "conflict_reason": conflict.context.get("reason"),
+                    "retirement_error": type(cleanup_error).__name__,
+                },
+            ) from conflict
+
     def _signed_clear_target_page(
         self, page: ClearTargetPage
     ) -> ClearTargetPage:
@@ -970,16 +999,34 @@ class LifecycleEngine:
         ):
             self.store._delete_or_prove_absent(candidate_locator)
             self._retire(record)
+            return
 
+        if (
+            manifest.generation != record.generation
+            and current_locator != candidate_locator
+        ):
+            # A different authoritative generation at a different contained
+            # immutable locator proves this operation never became authority.
+            # The candidate is signed evidence-owned by this exact operation;
+            # remove only that residue.  Same-locator/different-generation is
+            # deliberately not safe: it may name a later operation's payload.
+            if record.checkpoint is OperationCheckpoint.PREPARED:
+                record = self._advance_to(
+                    record, OperationCheckpoint.CANDIDATE_PUBLISHED
+                )
+            self.store._delete_or_prove_absent(candidate_locator)
+            self._retire(record)
+
+    @staticmethod
     def _tombstone_expectation(
-        self,
-        key: str,
         manifest: BlobManifestV1,
-    ) -> ManifestExpectation | None:
-        """Return an exact expectation only for still-current authenticated bytes."""
-        raw_manifest = self.store.manifest_repository.get_raw(key)
-        if raw_manifest != manifest.canonical_bytes():
-            return None
+        raw_manifest: bytes,
+    ) -> ManifestExpectation:
+        """Bind a recovery removal to the exact authenticated snapshot.
+
+        A recovery operation must never perform a second repository read and
+        accidentally adopt an intervening winner as its removal expectation.
+        """
         return ManifestExpectation.from_authenticated_record(
             manifest.generation,
             raw_manifest,
@@ -991,7 +1038,7 @@ class LifecycleEngine:
         payload_locator: Path,
     ) -> None:
         """Resume only the signed tombstone created by this operation."""
-        current = self.store._load_authenticated_manifest(
+        current = self.store._load_authenticated_manifest_with_raw(
             record.key,
             operation="recover_delete",
             require_locator=True,
@@ -1003,7 +1050,7 @@ class LifecycleEngine:
             # reconciliation instead of inferring ownership from a path.
             return
 
-        manifest, _handler, current_locator = current
+        manifest, raw_manifest, _handler, current_locator = current
         assert current_locator is not None
         if manifest.state == "committed":
             # The tombstone never became authority (or a newer writer won).
@@ -1016,9 +1063,7 @@ class LifecycleEngine:
         ):
             return
 
-        expectation = self._tombstone_expectation(record.key, manifest)
-        if expectation is None:
-            return
+        expectation = self._tombstone_expectation(manifest, raw_manifest)
         record = self._advance_to(record, OperationCheckpoint.AUTHORITY_PUBLISHED)
         record = self._advance_to(record, OperationCheckpoint.RECLAIMING)
         self.store._delete_or_prove_absent(payload_locator)
@@ -1127,22 +1172,26 @@ class LifecycleEngine:
         """Privately serialize, conditionally publish, and clean one generation."""
         handler = self.store.handlers.get_handler(data)
         with self.store.guarded_handler_io.stage(handler, data, self.store.config) as staged:
-            existing = self.store._load_authenticated_manifest(
+            existing = self.store._load_authenticated_manifest_with_raw(
                 key,
                 operation="overwrite",
                 require_locator=True,
             )
             previous_manifest = None if existing is None else existing[0]
-            previous_locator = None if existing is None else existing[2]
-            raw_expected = self.store.manifest_repository.get_raw(key)
+            raw_expected = None if existing is None else existing[1]
+            previous_locator = None if existing is None else existing[3]
             if existing is None:
                 expected = ManifestExpectation.absent()
-                if raw_expected is not None:
-                    # A record appeared after the initial authenticated absence.
-                    expected = ManifestExpectation("changed", "changed")
             else:
-                assert raw_expected is not None
-                assert previous_manifest is not None
+                # ``raw_expected`` is the exact authenticated authority read
+                # above.  Do not reread: an intervening winner must make this
+                # operation's CAS conflict rather than becoming its expected
+                # record.
+                if raw_expected is None or previous_manifest is None:
+                    raise CacheBlobLifecycleConflictError(
+                        "BlobStore overwrite authority disappeared before expectation",
+                        context={"key": key, "operation": "put"},
+                    )
                 expected = ManifestExpectation.from_authenticated_record(
                     previous_manifest.generation,
                     raw_expected,
@@ -1321,7 +1370,7 @@ class LifecycleEngine:
         """Publish signed deletion intent before reclaiming one payload generation."""
         if (expected_raw is None) != (expected_generation is None):
             raise ValueError("Clear deletion expectations require bytes and generation")
-        current = self.store._load_authenticated_manifest(
+        current = self.store._load_authenticated_manifest_with_raw(
             key,
             operation="delete",
             require_locator=True,
@@ -1329,11 +1378,14 @@ class LifecycleEngine:
         )
         if current is None:
             return False
-        manifest, _handler, payload_locator = current
-        assert payload_locator is not None
+        manifest, observed_raw, _handler, payload_locator = current
+        if payload_locator is None:
+            raise CacheBlobLifecycleConflictError(
+                "BlobStore delete authority has no managed payload locator",
+                context={"key": key, "operation": "delete"},
+            )
 
         if expected_raw is not None:
-            observed_raw = self.store.manifest_repository.get_raw(key)
             if (
                 observed_raw != expected_raw
                 or manifest.generation != expected_generation
@@ -1354,12 +1406,6 @@ class LifecycleEngine:
             self._recover_tombstone(record, owned_payload)
             return True
 
-        observed_raw = self.store.manifest_repository.get_raw(key)
-        if observed_raw != manifest.canonical_bytes():
-            raise CacheBlobLifecycleConflictError(
-                "BlobStore delete authority changed before tombstone publication",
-                context={"key": key, "operation": "delete"},
-            )
         expected = ManifestExpectation.from_authenticated_record(
             manifest.generation,
             observed_raw,
@@ -1415,8 +1461,10 @@ class LifecycleEngine:
                 signed_tombstone.canonical_bytes(),
                 entry_data=self.store._manifest_entry_data(signed_tombstone),
             )
-        except CacheBlobLifecycleConflictError:
-            self._retire(record)
+        except CacheBlobLifecycleConflictError as conflict:
+            self._retire_after_conflict(
+                record, conflict, operation="tombstone_publish_conflict"
+            )
             raise
         self._fault("authority_checkpoint", record)
         record = self._checkpoint(record, OperationCheckpoint.CANDIDATE_PUBLISHED)
@@ -1432,11 +1480,13 @@ class LifecycleEngine:
             self.store.manifest_repository.remove_if_expected(key, tombstone_expectation)
             self._retire(record)
             self._emit("evidence_retired", record)
-        except CacheBlobLifecycleConflictError:
+        except CacheBlobLifecycleConflictError as conflict:
             # A later generation won after tombstone authority. Never retry its
             # removal; the payload for this exact tombstone was already safe to
             # reclaim and only our terminal evidence is retired.
-            self._retire(record)
+            self._retire_after_conflict(
+                record, conflict, operation="tombstone_retire_conflict"
+            )
         except Exception as exc:
             raise CacheBlobRecoverableCleanupError(
                 "BlobStore tombstone authority was published but cleanup needs recovery",

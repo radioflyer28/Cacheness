@@ -32,11 +32,42 @@ from cacheness.storage import coordination
 from cacheness.storage import path_security
 from cacheness.storage import manifest_repository as manifest_repository_module
 from cacheness.storage.path_security import ManagedFileOps, resolve_managed_locator
+from cacheness.storage.operation_repository import FileOperationRecordRepository
 
 
 def _record(label: str) -> bytes:
     """Return deliberately opaque canonical-record stand-ins for repository tests."""
     return f"canonical-manifest-record::{label}".encode("utf-8")
+
+
+def test_pending_recovery_filters_unrelated_names_before_its_action_bound(
+    tmp_path: Path,
+) -> None:
+    """Malformed and ordinary siblings cannot starve one valid pending record."""
+    root = tmp_path / "pending-recovery-filter"
+    root.mkdir()
+    limits = LifecycleLimits(max_reconcile_actions=1)
+    file_ops = ManagedFileOps(root)
+    repository = FileOperationRecordRepository(file_ops, lifecycle_limits=limits)
+    operation_id = "f" * 32
+    raw = b'{"pending":"exact"}'
+    digest = hashlib.sha256(raw).hexdigest()
+    operations = root / "operations"
+    operations.mkdir()
+    # These sort before the valid pending name but are not eligible controls.
+    (operations / ".000-malformed.tmp").write_bytes(b"noise")
+    (operations / ".111.json.pending.not-a-digest.tmp").write_bytes(b"noise")
+    (operations / "clear-target-page-not-an-operation.json").write_bytes(b"noise")
+    pending = operations / f".{operation_id}.json.pending.{digest}.{'a' * 32}.tmp"
+    pending.write_bytes(raw)
+    try:
+        assert repository.recover_pending_operation_records() == (operation_id,)
+        assert repository.get_raw(operation_id) == raw
+        # Repeated bounded reopen/recovery calls do not get stuck on siblings.
+        assert repository.recover_pending_operation_records() == ()
+    finally:
+        repository.close()
+        file_ops.close()
 
 
 def _race_json_manifest_cas_process(
@@ -739,6 +770,27 @@ def test_windows_local_authority_scope_is_not_cross_principal() -> None:
     assert path_security._WINDOWS_LOCAL_STORE_COORDINATION_SCOPE == (
         "one_os_user_one_session"
     )
+
+
+@pytest.mark.parametrize(
+    ("status", "reason"),
+    (
+        (5, CacheReason.BLOB_BACKEND_CAPABILITY_UNSUPPORTED),
+        (258, CacheReason.BLOB_BACKEND_FAILURE),
+    ),
+)
+def test_windows_registry_authority_statuses_use_the_typed_backend_taxonomy(
+    status: int, reason: CacheReason
+) -> None:
+    """Registry/mutex policy and operational failures never escape as OSError."""
+    with pytest.raises(CacheBlobBackendError) as error:
+        path_security._WindowsRegistryAuthorityApi._raise_status(
+            status, "ReleaseMutex"
+        )
+
+    assert error.value.context["reason"] == reason.value
+    assert error.value.context["operation"] == "ReleaseMutex"
+    assert isinstance(error.value.__cause__, OSError)
     assert (
         path_security._WindowsRegistryAuthorityApi._HKEY_CURRENT_USER
         == 0x80000001
@@ -778,6 +830,37 @@ def test_native_windows_regular_file_flush_uses_documented_handle_and_closes(
     assert create_arguments[5] == api._FILE_FLAG_OPEN_REPARSE_POINT
     assert ("flush", ctypes.c_void_p(101).value) in calls
     assert ("close", ctypes.c_void_p(101).value) in calls
+
+
+def test_native_windows_delete_uses_a_reparse_safe_disposition_handle(
+    tmp_path: Path,
+) -> None:
+    """Immediate deletion does not use MoveFileExW with a NULL destination."""
+    api = object.__new__(path_security._WindowsFileApi)
+    calls: list[object] = []
+    api._create_file = lambda *args: calls.append(args) or ctypes.c_void_p(202).value
+
+    def get_information(_handle, information) -> int:
+        contents = ctypes.cast(
+            information, ctypes.POINTER(api._ByHandleFileInformation)
+        ).contents
+        contents.FileAttributes = 0
+        contents.NumberOfLinks = 1
+        return 1
+
+    api._get_file_information = get_information
+    api._set_file_information = lambda *args: calls.append(("disposition", args)) or 1
+    api._close_handle = lambda handle: calls.append(("close", handle)) or 1
+    api._last_error = lambda: 5
+
+    api.delete_write_through(tmp_path / "control.json")
+
+    create_arguments = calls[0]
+    assert create_arguments[1] & api._DELETE
+    assert create_arguments[5] == api._FILE_FLAG_OPEN_REPARSE_POINT
+    disposition_call = next(call for call in calls if call[0] == "disposition")[1]
+    assert disposition_call[1] == api._FILE_DISPOSITION_INFO
+    assert ("close", ctypes.c_void_p(202).value) in calls
 
 
 def test_native_windows_no_replace_move_requests_documented_write_through() -> None:
