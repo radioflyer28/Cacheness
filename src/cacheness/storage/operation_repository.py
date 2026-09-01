@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import hashlib
 from heapq import nsmallest
 from pathlib import Path
-from threading import RLock
+from threading import RLock, local
 from typing import Protocol
 
 from cacheness.config import LifecycleLimits
@@ -30,6 +30,7 @@ from .path_security import ManagedFileOps, resolve_managed_locator, validate_blo
 
 
 _CONDITIONAL_LOCK_STRIPES = tuple(RLock() for _ in range(64))
+_OPERATION_LEASES = local()
 
 
 @dataclass(frozen=True)
@@ -131,9 +132,36 @@ class FileOperationRecordRepository:
         file lock.  It only orders evidence transitions; it is never an
         authority substitute for the cross-process compare-and-mutate lock.
         """
-        identity = f"{self.file_ops.root}\x00{operation_id}".encode("utf-8")
-        stripe = hashlib.sha256(identity).digest()[0]
-        return _CONDITIONAL_LOCK_STRIPES[stripe % len(_CONDITIONAL_LOCK_STRIPES)]
+        stripe = lock_stripe_index(self.file_ops.root, operation_id)
+        return _CONDITIONAL_LOCK_STRIPES[stripe]
+
+    def _operation_lease_key(self, operation_id: str) -> tuple[tuple[int, int], str]:
+        """Identify one descriptor-root-scoped lease in this calling thread."""
+        return self.file_ops.root_identity, operation_id
+
+    @staticmethod
+    def _held_operation_leases() -> dict[tuple[tuple[int, int], str], int]:
+        """Return the current thread's reentrant operation-lease depths."""
+        leases = getattr(_OPERATION_LEASES, "leases", None)
+        if leases is None:
+            leases = {}
+            _OPERATION_LEASES.leases = leases
+        return leases
+
+    def _has_held_operation_lease(self) -> bool:
+        """Return whether this root already has an outer operation lease.
+
+        Clear recovery invokes individual delete operations under its own
+        operation lease. Those child operation IDs must not open a second
+        independently striped OS lock: a same-stripe child self-deadlocks and
+        A→B/B→A children form a cross-clear cycle. The outer lease is already
+        the root-scoped ordering authority for this calling thread.
+        """
+        root_identity = self.file_ops.root_identity
+        return any(
+            leased_root == root_identity and depth > 0
+            for (leased_root, _operation_id), depth in self._held_operation_leases().items()
+        )
 
     def _conditional_lock_locator(self, operation_id: str) -> Path:
         """Return one of a fixed number of durable evidence-CAS lock stripes."""
@@ -146,15 +174,28 @@ class FileOperationRecordRepository:
         )
 
     @contextmanager
-    def _conditional_transition(self, operation_id: str) -> Iterator[None]:
+    def _conditional_transition(
+        self, transition_id: str, *, operation_id: str | None = None
+    ) -> Iterator[None]:
         """Serialize one exact evidence CAS across repository objects/processes.
 
         ``flock`` is acquired only around read/compare/replace-or-delete.  It
         never spans handler serialization, manifest publication, or unrelated
         operation IDs, preserving the phase's no-global-normal-lock contract.
         """
-        lock_locator = self._conditional_lock_locator(operation_id)
-        with self._conditional_lock_for(operation_id):
+        if operation_id is not None and self._has_held_operation_lease():
+            # Clear recovery may invoke a child delete operation while it owns
+            # the parent clear lease. Any child stripe would be independently
+            # hashed, so acquiring it can self-deadlock or form an A/B cycle.
+            # The outer root/operation lease is the ordering authority here.
+            yield
+            return
+
+        lock_identity = (
+            f"operation:{operation_id}" if operation_id is not None else transition_id
+        )
+        lock_locator = self._conditional_lock_locator(lock_identity)
+        with self._conditional_lock_for(lock_identity):
             with interprocess_file_lock(
                 self.file_ops,
                 lock_locator,
@@ -166,8 +207,24 @@ class FileOperationRecordRepository:
     @contextmanager
     def operation_transition(self, operation_id: str) -> Iterator[None]:
         """Hold a narrow cross-process lease for one resumable operation."""
-        with self._conditional_transition(f"operation-run:{operation_id}"):
-            yield
+        key = self._operation_lease_key(operation_id)
+        leases = self._held_operation_leases()
+        if leases.get(key, 0):
+            leases[key] += 1
+            try:
+                yield
+            finally:
+                leases[key] -= 1
+            return
+
+        with self._conditional_transition(
+            f"operation:{operation_id}", operation_id=operation_id
+        ):
+            leases[key] = 1
+            try:
+                yield
+            finally:
+                del leases[key]
 
     def _read_bounded(self, locator: Path, *, operation: str) -> bytes | None:
         """Read exact evidence only after enforced descriptor-bounded limits."""
@@ -329,7 +386,9 @@ class FileOperationRecordRepository:
         if not isinstance(expected_raw, bytes) or not isinstance(raw_record, bytes):
             raise TypeError("Reconciliation checkpoints require exact bytes")
         try:
-            with self._conditional_transition(f"reconcile:{operation_id}"):
+            with self._conditional_transition(
+                f"reconcile:{operation_id}", operation_id=operation_id
+            ):
                 current = self.get_reconciliation_checkpoint_raw(operation_id)
                 if current != expected_raw:
                     raise CacheBlobLifecycleConflictError(
@@ -355,7 +414,9 @@ class FileOperationRecordRepository:
     ) -> None:
         """Remove private progress only after the exact completed bytes remain."""
         try:
-            with self._conditional_transition(f"reconcile:{operation_id}"):
+            with self._conditional_transition(
+                f"reconcile:{operation_id}", operation_id=operation_id
+            ):
                 if self.get_reconciliation_checkpoint_raw(operation_id) != expected_raw:
                     raise CacheBlobLifecycleConflictError(
                         "Reconciliation checkpoint no longer matches",
@@ -640,7 +701,9 @@ class FileOperationRecordRepository:
         chunk_count, _byte_length, chunk_digests = self._reference_chunk_contract(
             chunk_count, byte_length, chunk_digests
         )
-        with self._conditional_transition(f"clear-reference:{operation_id}:{reference}"):
+        with self._conditional_transition(
+            f"clear-reference:{operation_id}:{reference}", operation_id=operation_id
+        ):
             for chunk_index in range(chunk_count):
                 locator = self._clear_target_reference_chunk_locator(
                     operation_id, reference, chunk_index
@@ -671,7 +734,9 @@ class FileOperationRecordRepository:
         """
         if not isinstance(expected_raw, bytes):
             raise TypeError("Control artifact retirement requires exact bytes")
-        with self._conditional_transition(transition_id):
+        with self._conditional_transition(
+            transition_id, operation_id=context["operation_id"]
+        ):
             current = self._read_bounded(locator, operation=context["operation"])
             if current is None:
                 return False
@@ -734,7 +799,9 @@ class FileOperationRecordRepository:
                     "operation": "retire_clear_target_reference",
                 },
             )
-        with self._conditional_transition(f"clear-reference:{operation_id}:{reference}"):
+        with self._conditional_transition(
+            f"clear-reference:{operation_id}:{reference}", operation_id=operation_id
+        ):
             current = self.get_clear_target_reference_raw(
                 operation_id,
                 reference,
@@ -810,7 +877,9 @@ class FileOperationRecordRepository:
             raise TypeError("Clear target checkpoints require exact bytes")
         locator = self.clear_target_checkpoint_locator(operation_id, page_id)
         try:
-            with self._conditional_transition(f"clear:{operation_id}:{page_id}"):
+            with self._conditional_transition(
+                f"clear:{operation_id}:{page_id}", operation_id=operation_id
+            ):
                 current = self.get_clear_target_checkpoint_raw(operation_id, page_id)
                 if current != expected_raw:
                     raise CacheBlobLifecycleConflictError(
@@ -884,7 +953,9 @@ class FileOperationRecordRepository:
         if not isinstance(expected_raw, bytes) or not isinstance(raw_record, bytes):
             raise TypeError("Operation evidence transitions require exact bytes")
         try:
-            with self._conditional_transition(f"operation:{record.operation_id}"):
+            with self._conditional_transition(
+                f"operation:{record.operation_id}", operation_id=record.operation_id
+            ):
                 self._require_exact_current(
                     record, expected_raw, operation="checkpoint_if_exact"
                 )
@@ -919,7 +990,9 @@ class FileOperationRecordRepository:
         if not isinstance(expected_raw, bytes):
             raise TypeError("Operation evidence retirement requires exact bytes")
         try:
-            with self._conditional_transition(f"operation:{record.operation_id}"):
+            with self._conditional_transition(
+                f"operation:{record.operation_id}", operation_id=record.operation_id
+            ):
                 self._require_exact_current(
                     record, expected_raw, operation="retire_if_exact"
                 )

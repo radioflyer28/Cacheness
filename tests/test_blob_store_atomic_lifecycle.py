@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from pathlib import Path
 from typing import Any
@@ -807,3 +808,87 @@ def test_clear_empty_store_initializes_authenticated_control_evidence(
         assert store.list() == []
     finally:
         store.close()
+
+
+@pytest.mark.parametrize(
+    ("control_name", "chunk_index", "payload"),
+    (
+        ("clear-target-page-", None, {"value": "page"}),
+        ("clear-target-checkpoint-", None, {"value": "checkpoint"}),
+        ("clear-target-reference-", 0, {"value": "chunk-zero"}),
+        ("clear-target-reference-", 1, {"value": "chunk-one"}),
+    ),
+)
+def test_partial_clear_control_publish_never_installs_a_poisoned_final_record(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    control_name: str,
+    chunk_index: int | None,
+    payload: dict[str, str],
+) -> None:
+    """A process-loss write leaves no partial page, checkpoint, or chunk final."""
+    root = tmp_path / control_name.rstrip("-")
+    limits = LifecycleLimits(
+        max_operation_record_bytes=10_000,
+        max_operation_field_bytes=8_192,
+        manifest_page_size=1,
+    )
+    config = CacheConfig(cache_dir=str(root), lifecycle_limits=limits)
+    store = BlobStore(root, backend="json", config=config)
+    file_ops = store.lifecycle.operation_repository.file_ops
+    if not file_ops.descriptor_mode:
+        pytest.skip("partial-write injection requires descriptor-backed managed I/O")
+
+    armed = False
+    original_write_all = file_ops._write_all
+
+    def arm_on_control_create(operation: str, locator: Path) -> None:
+        nonlocal armed
+        is_target_chunk = (
+            chunk_index is None
+            or locator.name.endswith(f"-part-{chunk_index:04x}.json")
+        )
+        if (
+            operation == "exclusive_create"
+            and control_name in locator.name
+            and is_target_chunk
+        ):
+            armed = True
+
+    def write_prefix_then_lose_process(descriptor: int, data: bytes) -> None:
+        if armed:
+            os.write(descriptor, data[:1])
+            raise _SimulatedProcessLoss(f"lost while writing {control_name}")
+        original_write_all(descriptor, data)
+
+    monkeypatch.setattr(file_ops, "before_operation", arm_on_control_create)
+    monkeypatch.setattr(file_ops, "_write_all", write_prefix_then_lose_process)
+    try:
+        store.put(
+            payload,
+            key="survivor",
+            metadata=(
+                {"large": "x" * 15_000}
+                if control_name == "clear-target-reference-"
+                else None
+            ),
+        )
+        with pytest.raises(_SimulatedProcessLoss):
+            store.clear()
+        assert armed
+        expected_partial = (
+            f"{control_name}*-part-{chunk_index:04x}.json"
+            if chunk_index is not None
+            else f"{control_name}*.json"
+        )
+        assert not list((root / "operations").glob(expected_partial))
+    finally:
+        store.close()
+
+    reopened = BlobStore(root, backend="json", config=config)
+    try:
+        assert reopened.get("survivor") == payload
+        assert not list((root / "operations").glob("clear-target-*.json"))
+        assert not list((root / "operations").glob("[0-9a-f]" * 32 + ".json"))
+    finally:
+        reopened.close()

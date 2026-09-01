@@ -9,12 +9,13 @@ import ctypes
 from pathlib import Path
 from threading import Condition, Lock, get_ident
 import time
-from typing import BinaryIO, Callable, Iterator, Protocol
+from typing import BinaryIO, Callable, ClassVar, Iterator, Protocol
 
 from cacheness.config import LifecycleLimits
 from cacheness.error_handling import (
     CacheBlobBackendError,
     CacheBlobCloseTimeoutError,
+    CacheBlobLockReleaseError,
     CacheBlobStoreClosedError,
 )
 
@@ -134,29 +135,24 @@ def lock_stripe_index(root: Path, identity: str) -> int:
 
 
 @contextmanager
-def interprocess_file_lock(
-    file_ops: ManagedFileOps,
-    locator: Path,
+def interprocess_open_file_lock(
+    handle: BinaryIO,
     *,
     exclusive: bool,
     operation: str,
+    close_handle: bool = False,
 ) -> Iterator[None]:
-    """Acquire one truthful cross-process file lock on every supported OS.
+    """Lock one already-open managed descriptor on every supported OS.
 
     POSIX uses ``flock`` for shared/exclusive admission. Windows uses Win32
     ``LockFileEx`` over the same durable lock file, preserving shared ordinary
     admission instead of silently turning all normal operations into a global
-    exclusive mutex. Unsupported runtimes fail at this narrow topology seam.
+    exclusive mutex. ``close_handle`` is reserved for short-lived lock
+    descriptors; authority owners retain their descriptor for its whole
+    lifetime and pass the default.
     """
-    try:
-        file_ops.create_bytes_durable_exclusive(locator, b"lock\n")
-    except FileExistsError:
-        pass
-
-    handle: BinaryIO | None = None
     unlock: Callable[[], object] | None = None
     try:
-        handle = file_ops.open_read(locator)
         if _platform_name() == "nt":
             api = _windows_lock_api()
             token = api.lock(handle.fileno(), exclusive=exclusive)
@@ -179,19 +175,90 @@ def interprocess_file_lock(
                 return fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
             unlock = unlock_posix_lock
-        yield
     except CacheBlobBackendError:
+        if close_handle:
+            try:
+                handle.close()
+            except OSError:
+                pass
         raise
+    except OSError as exc:
+        if close_handle:
+            try:
+                handle.close()
+            except OSError:
+                pass
+        raise CacheBlobBackendError(
+            "BlobStore lifecycle lock could not be acquired",
+            context={"operation": operation},
+        ) from exc
+
+    body_failure: BaseException | None = None
+    try:
+        yield
+    except BaseException as exc:
+        body_failure = exc
+        raise
+    finally:
+        release_failure: OSError | None = None
+        try:
+            if unlock is not None:
+                unlock()
+        except OSError as exc:
+            release_failure = exc
+        finally:
+            try:
+                if close_handle:
+                    handle.close()
+            except OSError as exc:
+                if release_failure is None:
+                    release_failure = exc
+        if release_failure is not None and body_failure is None:
+            raise CacheBlobLockReleaseError(
+                "BlobStore lifecycle lock could not be released",
+                context={"operation": operation},
+            ) from release_failure
+
+
+@contextmanager
+def interprocess_file_lock(
+    file_ops: ManagedFileOps,
+    locator: Path,
+    *,
+    exclusive: bool,
+    operation: str,
+) -> Iterator[None]:
+    """Create and lock one short-lived contained descriptor.
+
+    Persistent authority owners should create their lock file and retain a
+    managed descriptor themselves, then call :func:`interprocess_open_file_lock`.
+    The short-lived form is appropriate for striped operation evidence and
+    admission transitions.
+    """
+    try:
+        file_ops.create_bytes_durable_exclusive(locator, b"lock\n")
+    except FileExistsError:
+        pass
     except OSError as exc:
         raise CacheBlobBackendError(
             "BlobStore lifecycle lock could not be acquired",
             context={"operation": operation},
         ) from exc
-    finally:
-        if unlock is not None:
-            unlock()
-        if handle is not None:
-            handle.close()
+
+    try:
+        handle = file_ops.open_read(locator)
+    except OSError as exc:
+        raise CacheBlobBackendError(
+            "BlobStore lifecycle lock could not be acquired",
+            context={"operation": operation},
+        ) from exc
+    with interprocess_open_file_lock(
+        handle,
+        exclusive=exclusive,
+        operation=operation,
+        close_handle=True,
+    ):
+        yield
 
 
 class StoreAdmissionBarrier:
@@ -208,6 +275,9 @@ class StoreAdmissionBarrier:
 
     _instances_guard = Lock()
     _instances: dict[tuple[int, int], "StoreAdmissionBarrier"] = {}
+    _before_registry_insert: ClassVar[
+        Callable[["StoreAdmissionBarrier"], None] | None
+    ] = None
 
     def __init__(self, root: Path) -> None:
         self._condition = Condition(Lock())
@@ -218,7 +288,8 @@ class StoreAdmissionBarrier:
         # retaining an individual instance's ManagedFileOps would make the
         # shared barrier unusable after that close.
         self._file_ops = ManagedFileOps(root)
-        self._root_identity = self._identity_for(root)
+        self._root_identity = self._file_ops.root_identity
+        self._registry_identity: tuple[int, int] | None = None
         self._leases = 0
         self._lock_locator = resolve_managed_locator(
             self._file_ops.root,
@@ -236,14 +307,20 @@ class StoreAdmissionBarrier:
     @classmethod
     def acquire(cls, root: Path) -> "StoreAdmissionBarrier":
         """Lease the root's shared barrier until its owning store closes."""
-        identity = cls._identity_for(root)
+        candidate = cls(root)
+        if cls._before_registry_insert is not None:
+            cls._before_registry_insert(candidate)
+        identity = candidate._root_identity
         with cls._instances_guard:
             barrier = cls._instances.get(identity)
             if barrier is None:
-                barrier = cls(root)
-                cls._instances[identity] = barrier
+                candidate._registry_identity = identity
+                candidate._leases = 1
+                cls._instances[identity] = candidate
+                return candidate
             barrier._leases += 1
-            return barrier
+        candidate._file_ops.close()
+        return barrier
 
     @classmethod
     def for_root(cls, root: Path) -> "StoreAdmissionBarrier":
@@ -252,26 +329,34 @@ class StoreAdmissionBarrier:
         Production ``BlobStore`` instances use :meth:`acquire` and pair it with
         :meth:`release`; this helper retains the prior shared-lookup behavior.
         """
-        identity = cls._identity_for(root)
+        candidate = cls(root)
+        if cls._before_registry_insert is not None:
+            cls._before_registry_insert(candidate)
+        identity = candidate._root_identity
         with cls._instances_guard:
             barrier = cls._instances.get(identity)
             if barrier is None:
-                barrier = cls(root)
-                cls._instances[identity] = barrier
-            return barrier
+                candidate._registry_identity = identity
+                cls._instances[identity] = candidate
+                return candidate
+        candidate._file_ops.close()
+        return barrier
 
     def release(self) -> None:
         """Release one owning-store lease and close the final root descriptor."""
         close_file_ops = False
         with self._instances_guard:
-            current = self._instances.get(self._root_identity)
+            registry_identity = self._registry_identity
+            if registry_identity is None:
+                return
+            current = self._instances.get(registry_identity)
             if current is not self:
                 return
             if self._leases <= 0:
                 return
             self._leases -= 1
             if self._leases == 0:
-                del self._instances[self._root_identity]
+                del self._instances[registry_identity]
                 close_file_ops = True
         if close_file_ops:
             self._file_ops.close()

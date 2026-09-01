@@ -71,6 +71,7 @@ class TestPublicExports:
             "blob_reconciliation_blocked",
             "blob_reconciliation_conflict",
             "blob_reconciliation_checkpoint_invalid",
+            "blob_lock_release_failure",
             "blob_store_closed",
             "blob_close_timeout",
         }

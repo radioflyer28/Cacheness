@@ -58,6 +58,7 @@ class CacheReason(str, Enum):
     BLOB_RECONCILIATION_CHECKPOINT_INVALID = "blob_reconciliation_checkpoint_invalid"
     BLOB_STORE_CLOSED = "blob_store_closed"
     BLOB_CLOSE_TIMEOUT = "blob_close_timeout"
+    BLOB_LOCK_RELEASE_FAILURE = "blob_lock_release_failure"
 
 
 class CacheError(Exception):
@@ -288,6 +289,19 @@ class CacheBlobBackendError(CacheStorageError):
         context: Optional[Dict[str, Any]] = None,
         *,
         reason: CacheReason = CacheReason.BLOB_BACKEND_FAILURE,
+    ):
+        super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheBlobLockReleaseError(CacheStorageError):
+    """Raised when an otherwise successful lifecycle lock cannot be released."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_LOCK_RELEASE_FAILURE,
     ):
         super().__init__(message, _context_with_reason(context, reason))
 

@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import multiprocessing
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import Event, Thread
 
 import pytest
 
@@ -32,6 +34,7 @@ from cacheness.storage.operation_record import (
     store_identity,
 )
 from cacheness.storage.operation_repository import FileOperationRecordRepository
+from cacheness.storage import operation_repository as operation_repository_module
 from cacheness.storage.path_security import ManagedFileOps
 from cacheness.storage import reconciliation as reconciliation_module
 
@@ -705,6 +708,73 @@ def test_evidence_transition_lock_files_are_fixed_bounded_stripes(tmp_path: Path
         assert 0 < len(lock_files) <= 64
         assert all(path.name[:-5].isalnum() and len(path.name) == 7 for path in lock_files)
     finally:
+        store.close()
+
+
+@pytest.mark.parametrize("same_stripe", (True, False))
+def test_clear_operation_lease_avoids_nested_same_stripe_and_opposite_order_deadlocks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, same_stripe: bool
+) -> None:
+    """An outer clear lease prevents same-stripe and A/B child lock cycles."""
+    store = BlobStore(tmp_path / "operation-scoped-clear-lease", backend="json")
+    repository = store.lifecycle.operation_repository
+    original_lock = operation_repository_module.interprocess_file_lock
+    lock_calls: list[str] = []
+
+    @contextmanager
+    def count_file_locks(*args, **kwargs):
+        lock_calls.append(kwargs["operation"])
+        with original_lock(*args, **kwargs):
+            yield
+
+    def forced_stripe(_root: Path, identity: str) -> int:
+        if same_stripe:
+            return 0
+        return 0 if identity.endswith("a" * 32) else 1
+
+    # Force an outer A→child B / outer B→child A topology. On one stripe it
+    # catches self-deadlock through a second descriptor; on two stripes it
+    # catches the classic opposite-order cycle.
+    monkeypatch.setattr(operation_repository_module, "lock_stripe_index", forced_stripe)
+    monkeypatch.setattr(operation_repository_module, "interprocess_file_lock", count_file_locks)
+    first_entered = Event()
+    release_first = Event()
+    errors: list[BaseException] = []
+
+    def run(operation_id: str, child_operation_id: str, entered: Event) -> None:
+        try:
+            with repository.operation_transition(operation_id):
+                with repository.operation_transition(child_operation_id):
+                    entered.set()
+                    if operation_id == "a" * 32:
+                        assert release_first.wait(timeout=5)
+        except BaseException as exc:  # pragma: no cover - surfaced below.
+            errors.append(exc)
+
+    first = Thread(
+        target=run,
+        args=("a" * 32, "b" * 32, first_entered),
+    )
+    second_entered = Event()
+    second = Thread(
+        target=run,
+        args=("b" * 32, "a" * 32, second_entered),
+    )
+    try:
+        first.start()
+        assert first_entered.wait(timeout=5)
+        second.start()
+        release_first.set()
+        first.join(timeout=5)
+        second.join(timeout=5)
+        assert not first.is_alive()
+        assert not second.is_alive()
+        assert second_entered.is_set()
+        assert errors == []
+        # One outer lease each; neither nested child operation opens a file lock.
+        assert lock_calls == ["conditional_evidence", "conditional_evidence"]
+    finally:
+        release_first.set()
         store.close()
 
 

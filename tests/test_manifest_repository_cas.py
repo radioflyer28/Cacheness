@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import builtins
+import multiprocessing
 from pathlib import Path
+from threading import Barrier, Lock, Thread
 
 import pytest
 
 from cacheness.config import LifecycleLimits
-from cacheness.error_handling import CacheBlobBackendError, CacheBlobLifecycleConflictError
+from cacheness.error_handling import (
+    CacheBlobBackendError,
+    CacheBlobLifecycleConflictError,
+    CacheUnsafePathError,
+)
 from cacheness.metadata import InMemoryBackend, JsonBackend, SqliteBackend
 from cacheness.storage.manifest_repository import (
     InMemoryManifestRepository,
@@ -16,11 +23,39 @@ from cacheness.storage.manifest_repository import (
     ManifestExpectation,
     SqliteManifestRepository,
 )
+from cacheness.storage import coordination
+from cacheness.storage.path_security import ManagedFileOps, resolve_managed_locator
 
 
 def _record(label: str) -> bytes:
     """Return deliberately opaque canonical-record stand-ins for repository tests."""
     return f"canonical-manifest-record::{label}".encode("utf-8")
+
+
+def _race_json_manifest_cas_process(
+    metadata_path: str,
+    record: bytes,
+    ready: multiprocessing.queues.Queue,
+    release: multiprocessing.synchronize.Event,
+    outcomes: multiprocessing.queues.Queue,
+) -> None:
+    """Race a fresh JSON authority repository without shared Python locks."""
+    backend = JsonBackend(metadata_path)
+    repository = JsonManifestRepository(backend)
+    try:
+        ready.put("ready")
+        if not release.wait(timeout=10):
+            outcomes.put("timeout")
+            return
+        repository.publish_if_expected("key", ManifestExpectation.absent(), record)
+        outcomes.put("won")
+    except CacheBlobLifecycleConflictError:
+        outcomes.put("conflict")
+    except BaseException as exc:  # pragma: no cover - surfaced by parent assertion.
+        outcomes.put(f"error:{exc!r}")
+    finally:
+        repository.close()
+        backend.close()
 
 
 def _repository_pair(tmp_path: Path, backend_name: str):
@@ -98,6 +133,175 @@ def test_exact_record_cas_rejects_same_generation_stale_patch(
     finally:
         for backend in backends:
             backend.close()
+
+
+def test_json_cas_has_one_exact_cross_process_winner(tmp_path: Path) -> None:
+    """The JSON authority boundary is a real interprocess winner selection."""
+    metadata_path = tmp_path / "concurrent.json"
+    context = multiprocessing.get_context("spawn")
+    ready = context.Queue()
+    release = context.Event()
+    outcomes = context.Queue()
+    records = (_record("process-a"), _record("process-b"))
+    workers = [
+        context.Process(
+            target=_race_json_manifest_cas_process,
+            args=(str(metadata_path), record, ready, release, outcomes),
+        )
+        for record in records
+    ]
+    for worker in workers:
+        worker.start()
+    try:
+        assert ready.get(timeout=10) == "ready"
+        assert ready.get(timeout=10) == "ready"
+        release.set()
+        for worker in workers:
+            worker.join(timeout=10)
+            assert worker.exitcode == 0
+        assert sorted(outcomes.get(timeout=10) for _ in workers) == ["conflict", "won"]
+
+        backend = JsonBackend(metadata_path)
+        repository = JsonManifestRepository(backend)
+        try:
+            assert repository.get_raw("key") in records
+        finally:
+            repository.close()
+            backend.close()
+    finally:
+        for worker in workers:
+            if worker.is_alive():
+                worker.terminate()
+                worker.join(timeout=5)
+
+
+def test_json_cas_uses_the_win32_adapter_when_fcntl_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The simulated Windows path never imports POSIX locking and has one winner."""
+    shared_lock = Lock()
+    calls: list[str] = []
+
+    class FakeWindowsLockApi:
+        def lock(self, _descriptor: int, *, exclusive: bool) -> object:
+            assert exclusive
+            shared_lock.acquire()
+            calls.append("lock")
+            return object()
+
+        def unlock(self, _descriptor: int, _token: object) -> object:
+            calls.append("unlock")
+            shared_lock.release()
+            return None
+
+    original_import = builtins.__import__
+
+    def reject_fcntl(name: str, *args: object, **kwargs: object):
+        if name == "fcntl":
+            raise ImportError("fcntl is unavailable on Windows")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(coordination, "_platform_name", lambda: "nt")
+    monkeypatch.setattr(coordination, "_windows_lock_api", FakeWindowsLockApi)
+    monkeypatch.setattr(builtins, "__import__", reject_fcntl)
+
+    metadata_path = tmp_path / "windows.json"
+    first_backend = JsonBackend(metadata_path)
+    second_backend = JsonBackend(metadata_path)
+    first = JsonManifestRepository(first_backend)
+    second = JsonManifestRepository(second_backend)
+    gate = Barrier(2)
+    outcomes: list[str] = []
+
+    def contender(repository: JsonManifestRepository, record: bytes) -> None:
+        gate.wait(timeout=5)
+        try:
+            repository.publish_if_expected("key", ManifestExpectation.absent(), record)
+            outcomes.append("won")
+        except CacheBlobLifecycleConflictError:
+            outcomes.append("conflict")
+
+    threads = [
+        Thread(target=contender, args=(first, _record("windows-a"))),
+        Thread(target=contender, args=(second, _record("windows-b"))),
+    ]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=5)
+            assert not thread.is_alive()
+        assert sorted(outcomes) == ["conflict", "won"]
+        assert calls.count("lock") >= 2
+        assert calls.count("unlock") == calls.count("lock")
+    finally:
+        first.close()
+        second.close()
+        first_backend.close()
+        second_backend.close()
+
+
+@pytest.mark.parametrize("substitute_during_open", (False, True))
+def test_json_authority_lock_rejects_symlink_substitution_without_escape(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    substitute_during_open: bool,
+) -> None:
+    """A lock symlink cannot win before or between managed create/open checks."""
+    outside = tmp_path / "outside-lock"
+    root = tmp_path / "inside"
+    root.mkdir()
+    backend = JsonBackend(root / "metadata.json")
+    file_ops = ManagedFileOps(root)
+    lock_locator = resolve_managed_locator(
+        root,
+        ".metadata.json.manifest-cas.lock",
+        operation="manifest_repository_authority_lock",
+        allow_missing_leaf=True,
+    )
+    try:
+        if substitute_during_open:
+            def swap_lock(operation: str, locator: Path) -> None:
+                if operation == "read_stream" and locator == lock_locator:
+                    lock_locator.unlink()
+                    lock_locator.symlink_to(outside)
+
+            monkeypatch.setattr(file_ops, "before_operation", swap_lock)
+        else:
+            lock_locator.symlink_to(outside)
+
+        with pytest.raises(CacheUnsafePathError):
+            JsonManifestRepository(backend, file_ops=file_ops)
+        assert not outside.exists()
+        assert backend._metadata.get("entries", {}).get("key") is None
+    finally:
+        file_ops.close()
+        backend.close()
+
+
+def test_json_authority_lock_rejects_a_live_lock_name_replacement(
+    tmp_path: Path,
+) -> None:
+    """A retained lock descriptor rejects later name/inode substitution."""
+    root = tmp_path / "live-lock-substitution"
+    root.mkdir()
+    outside = tmp_path / "outside-lock"
+    backend = JsonBackend(root / "metadata.json")
+    repository = JsonManifestRepository(backend)
+    assert repository._json_lock_locator is not None
+    lock_locator = repository._json_lock_locator
+    try:
+        lock_locator.unlink()
+        lock_locator.symlink_to(outside)
+        with pytest.raises(CacheBlobBackendError):
+            repository.publish_if_expected(
+                "key", ManifestExpectation.absent(), _record("blocked")
+            )
+        assert not outside.exists()
+        assert backend._metadata.get("entries", {}).get("key") is None
+    finally:
+        repository.close()
+        backend.close()
 
 
 @pytest.mark.parametrize("backend_name", ("memory", "json", "sqlite"))

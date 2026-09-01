@@ -264,6 +264,11 @@ class ManagedFileOps:
         """Expose whether operations are anchored by Unix directory descriptors."""
         return self._descriptor_mode
 
+    @property
+    def root_identity(self) -> tuple[int, int]:
+        """Return the identity verified while this managed root was opened."""
+        return self._root_identity
+
     def close(self) -> None:
         """Close the anchored root descriptor, if one was acquired."""
         if self._root_fd is not None:
@@ -522,6 +527,90 @@ class ManagedFileOps:
             raise
         return locator
 
+    def _publish_no_replace_descriptor(
+        self, parent_fd: int, temporary_name: str, name: str
+    ) -> None:
+        """Install a fully durable temporary as a new name without replacement."""
+        try:
+            os.link(
+                temporary_name,
+                name,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+        except FileExistsError:
+            raise
+        except OSError:
+            # A no-replace primitive is mandatory for authenticated control
+            # evidence.  Falling back to check-then-rename would reintroduce a
+            # writer race, so surface the unsupported filesystem instead.
+            raise
+        os.fsync(parent_fd)
+        os.unlink(temporary_name, dir_fd=parent_fd)
+        os.fsync(parent_fd)
+
+    def _create_bytes_durable_exclusive_descriptor(
+        self, locator: Path, data: bytes
+    ) -> Path:
+        """Crash-atomically create control bytes through an unguessable temp."""
+        parts = self._relative_parts(locator)
+        with self._descriptor_parent(parts, create=True) as (parent_fd, name):
+            temporary_name = f".{name}.{uuid.uuid4().hex}.tmp"
+            temporary_fd: int | None = None
+            try:
+                temporary_fd = os.open(
+                    temporary_name,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=parent_fd,
+                )
+                self._write_all(temporary_fd, data)
+                os.fsync(temporary_fd)
+                os.close(temporary_fd)
+                temporary_fd = None
+                self._assert_root_identity()
+                self._publish_no_replace_descriptor(parent_fd, temporary_name, name)
+            except BaseException:
+                if temporary_fd is not None:
+                    os.close(temporary_fd)
+                try:
+                    os.unlink(temporary_name, dir_fd=parent_fd)
+                except FileNotFoundError:
+                    pass
+                raise
+        return locator
+
+    def _create_bytes_durable_exclusive_fallback(
+        self, locator: Path, data: bytes
+    ) -> Path:
+        """Use the same no-replace publication protocol without dir-fd support."""
+        self._ensure_fallback_parent(locator)
+        locator = resolve_managed_locator(
+            self.root, locator, operation="exclusive_create", allow_missing_leaf=True
+        )
+        temporary = locator.parent / f".{locator.name}.{uuid.uuid4().hex}.tmp"
+        try:
+            with open(temporary, "xb") as destination:
+                destination.write(data)
+                destination.flush()
+                os.fsync(destination.fileno())
+            self._assert_root_identity()
+            locator = resolve_managed_locator(
+                self.root, locator, operation="exclusive_create", allow_missing_leaf=True
+            )
+            os.link(temporary, locator, follow_symlinks=False)
+            self._fsync_containing_directory(locator)
+            temporary.unlink()
+            self._fsync_containing_directory(locator)
+            return locator
+        except BaseException:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+            raise
+
     def _fallback_read(self, locator: Path) -> bytes:
         locator = resolve_managed_locator(self.root, locator, operation="read")
         try:
@@ -628,21 +717,7 @@ class ManagedFileOps:
                 operation="exclusive_create",
                 allow_missing_leaf=True,
             )
-            parts = self._relative_parts(prepared)
-            with self._descriptor_parent(parts, create=True) as (parent_fd, name):
-                descriptor = os.open(
-                    name,
-                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                    0o600,
-                    dir_fd=parent_fd,
-                )
-                try:
-                    self._write_all(descriptor, data)
-                    os.fsync(descriptor)
-                finally:
-                    os.close(descriptor)
-                os.fsync(parent_fd)
-            return prepared
+            return self._create_bytes_durable_exclusive_descriptor(prepared, data)
 
         with self._lock:
             prepared = self._prepare_locator(
@@ -650,19 +725,7 @@ class ManagedFileOps:
                 operation="exclusive_create",
                 allow_missing_leaf=True,
             )
-            self._ensure_fallback_parent(prepared)
-            prepared = resolve_managed_locator(
-                self.root,
-                prepared,
-                operation="exclusive_create",
-                allow_missing_leaf=True,
-            )
-            with open(prepared, "xb") as destination:
-                destination.write(data)
-                destination.flush()
-                os.fsync(destination.fileno())
-            self._fsync_containing_directory(prepared)
-            return prepared
+            return self._create_bytes_durable_exclusive_fallback(prepared, data)
 
     def create_stream_durable_exclusive(
         self, locator: Union[str, Path], stream: BinaryIO
@@ -817,6 +880,31 @@ class ManagedFileOps:
             prepared = self._prepare_locator(locator, operation="exists")
             prepared = resolve_managed_locator(self.root, prepared, operation="exists")
             return prepared.exists()
+
+    def file_identity(self, locator: Union[str, Path]) -> tuple[int, int]:
+        """Return a contained regular file's device/inode identity.
+
+        Authority owners retain this identity alongside a managed descriptor so
+        a name replacement cannot silently move a process onto a different
+        lock inode.
+        """
+        if self._descriptor_mode:
+            prepared = self._prepare_locator(locator, operation="file_identity")
+            file_stat = self._descriptor_stat(prepared)
+        else:
+            with self._lock:
+                prepared = self._prepare_locator(locator, operation="file_identity")
+                try:
+                    file_stat = os.lstat(prepared)
+                except FileNotFoundError:
+                    file_stat = None
+                if file_stat is not None and _is_link_or_reparse(file_stat):
+                    _unsafe_path(CacheReason.PATH_RACE)
+        if file_stat is None:
+            raise FileNotFoundError(f"Blob not found: {locator}")
+        if not stat.S_ISREG(file_stat.st_mode):
+            _unsafe_path(CacheReason.PATH_RACE)
+        return file_stat.st_dev, file_stat.st_ino
 
     def get_size(self, locator: Union[str, Path]) -> int:
         """Return the size of a contained locator, or ``-1`` for a safe miss."""

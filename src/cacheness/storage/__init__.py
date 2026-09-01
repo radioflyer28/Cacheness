@@ -67,6 +67,7 @@ from .reconciliation import (
 from cacheness.error_handling import (
     CacheBlobBackendError,
     CacheBlobCloseTimeoutError,
+    CacheBlobLockReleaseError,
     CacheBlobManifestMalformedError,
     CacheBlobManifestUnauthenticatedError,
     CacheBlobManifestUnsupportedVersionError,
@@ -106,6 +107,7 @@ __all__ = [
     "CacheManifestUnsupportedVersionError",
     "CacheBlobLifecycleConflictError",
     "CacheBlobBackendError",
+    "CacheBlobLockReleaseError",
     "CacheBlobCloseTimeoutError",
     "CacheBlobStoreClosedError",
     "CacheBlobMigrationRequiredError",

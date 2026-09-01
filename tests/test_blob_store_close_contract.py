@@ -13,12 +13,14 @@ from cacheness.config import LifecycleLimits
 from cacheness.error_handling import (
     CacheBlobBackendError,
     CacheBlobCloseTimeoutError,
+    CacheBlobLockReleaseError,
     CacheBlobStoreClosedError,
 )
 from cacheness.metadata import InMemoryBackend
 from cacheness.storage import BlobStore
 from cacheness.storage import coordination
-from cacheness.storage.coordination import StoreAdmissionBarrier
+from cacheness.storage.coordination import StoreAdmissionBarrier, interprocess_file_lock
+from cacheness.storage.path_security import ManagedFileOps
 
 
 def _join(thread: Thread) -> None:
@@ -359,3 +361,85 @@ def test_windows_lock_path_keeps_canonical_blobstore_constructible(
         assert ("lock", True) in calls
     finally:
         store.close()
+
+
+def test_barrier_registration_uses_its_descriptor_identity_after_root_replacement(
+    tmp_path, monkeypatch
+):
+    """A candidate created before root replacement never registers under a stale path stat."""
+    root = tmp_path / "replace-between-barrier-construction-and-registration"
+    root.mkdir()
+    retired = tmp_path / "retired-root"
+    calls = 0
+
+    def replace_root(_candidate: StoreAdmissionBarrier) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            root.rename(retired)
+            root.mkdir()
+
+    monkeypatch.setattr(StoreAdmissionBarrier, "_before_registry_insert", replace_root)
+    first = StoreAdmissionBarrier.acquire(root)
+    second = StoreAdmissionBarrier.acquire(root)
+    try:
+        assert first is not second
+        assert first._registry_identity == first._root_identity
+        assert second._registry_identity == second._root_identity
+        assert first._root_identity != second._root_identity
+    finally:
+        first.release()
+        second.release()
+        StoreAdmissionBarrier._before_registry_insert = None
+    assert first._file_ops._root_fd is None
+    assert second._file_ops._root_fd is None
+
+
+def test_lock_release_failure_never_masks_the_lifecycle_body_and_closes_handle(
+    tmp_path, monkeypatch
+):
+    """Body failures win over unlock failures; standalone release errors stay typed."""
+    file_ops = ManagedFileOps(tmp_path)
+    locator = file_ops.root / "lock-release.lock"
+    closed: list[bool] = []
+    original_open_read = file_ops.open_read
+
+    class TrackingHandle:
+        def __init__(self, handle) -> None:
+            self._handle = handle
+
+        def __getattr__(self, name):
+            return getattr(self._handle, name)
+
+        def close(self) -> None:
+            closed.append(True)
+            self._handle.close()
+
+    class FailingWindowsLockApi:
+        def lock(self, _descriptor: int, *, exclusive: bool) -> object:
+            assert exclusive
+            return object()
+
+        def unlock(self, _descriptor: int, _token: object) -> object:
+            raise OSError("injected unlock failure")
+
+    monkeypatch.setattr(file_ops, "open_read", lambda path: TrackingHandle(original_open_read(path)))
+    monkeypatch.setattr(coordination, "_platform_name", lambda: "nt")
+    monkeypatch.setattr(coordination, "_windows_lock_api", FailingWindowsLockApi)
+    try:
+        with pytest.raises(RuntimeError, match="body failure"):
+            with interprocess_file_lock(
+                file_ops, locator, exclusive=True, operation="release_body_test"
+            ):
+                raise RuntimeError("body failure")
+        assert closed == [True]
+
+        with pytest.raises(CacheBlobLockReleaseError, match="could not be released") as error:
+            with interprocess_file_lock(
+                file_ops, locator, exclusive=True, operation="release_only_test"
+            ):
+                pass
+        assert isinstance(error.value.__cause__, OSError)
+        assert closed == [True, True]
+    finally:
+        file_ops.close()

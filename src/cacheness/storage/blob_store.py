@@ -215,6 +215,7 @@ class BlobStore:
         self.guarded_handler_io = GuardedHandlerIO(self.cache_dir)
         self._owns_backend = False
         self._released_resources = {
+            "manifest_repository": False,
             "guarded_handler_io": False,
             "backend": False,
             "admission_barrier": False,
@@ -335,6 +336,14 @@ class BlobStore:
 
     def _close_failed_initialization_resources(self) -> None:
         """Release only resources this incomplete store has taken ownership of."""
+        repository_close = getattr(
+            getattr(self, "manifest_repository", None), "close", None
+        )
+        if callable(repository_close):
+            try:
+                repository_close()
+            except Exception:
+                logger.exception("Failed to close BlobStore manifest repository lock root")
         if self._owns_backend and hasattr(self, "backend"):
             try:
                 self.backend.close()
@@ -894,6 +903,12 @@ class BlobStore:
         flush = getattr(operation_repository, "flush", None)
         if callable(flush):
             flush()
+
+        if not self._released_resources["manifest_repository"]:
+            repository_close = getattr(self.manifest_repository, "close", None)
+            if callable(repository_close):
+                repository_close()
+            self._released_resources["manifest_repository"] = True
 
         if not self._released_resources["guarded_handler_io"]:
             self.guarded_handler_io.close()

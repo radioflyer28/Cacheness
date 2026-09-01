@@ -9,13 +9,15 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import os
 from copy import deepcopy
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from heapq import nsmallest
 from pathlib import Path
-from typing import Any, Mapping, Optional, Protocol
+from threading import RLock
+from typing import Any, BinaryIO, Mapping, Optional, Protocol
 
 from cacheness.config import LifecycleLimits
 from cacheness.error_handling import (
@@ -25,6 +27,9 @@ from cacheness.error_handling import (
     CacheError,
 )
 from cacheness.metadata import InMemoryBackend, JsonBackend, SqliteBackend
+
+from .coordination import interprocess_open_file_lock
+from .path_security import ManagedFileOps, resolve_managed_locator
 
 try:
     from sqlalchemy.exc import SQLAlchemyError
@@ -179,11 +184,65 @@ class _MetadataManifestRepository:
         backend: InMemoryBackend | JsonBackend,
         *,
         lifecycle_limits: LifecycleLimits | None = None,
+        file_ops: ManagedFileOps | None = None,
     ):
         self.backend = backend
         self.lifecycle_limits = (
             LifecycleLimits() if lifecycle_limits is None else lifecycle_limits
         )
+        self._json_lock_file_ops: ManagedFileOps | None = None
+        self._owns_json_lock_file_ops = False
+        self._json_lock_locator: Path | None = None
+        self._json_lock_handle: BinaryIO | None = None
+        self._json_lock_identity: tuple[int, int] | None = None
+        self._json_lock_guard = RLock()
+        if type(backend) is JsonBackend:
+            lock_root = Path(backend.metadata_file).parent
+            if file_ops is None:
+                self._json_lock_file_ops = ManagedFileOps(lock_root)
+                self._owns_json_lock_file_ops = True
+            else:
+                if file_ops.root != lock_root.resolve():
+                    raise ValueError(
+                        "JSON manifest authority lock must share the metadata root"
+                    )
+                self._json_lock_file_ops = file_ops
+            self._json_lock_locator = resolve_managed_locator(
+                self._json_lock_file_ops.root,
+                f".{Path(backend.metadata_file).name}.manifest-cas.lock",
+                operation="manifest_repository_authority_lock",
+                allow_missing_leaf=True,
+            )
+            try:
+                self._json_lock_file_ops.create_bytes_durable_exclusive(
+                    self._json_lock_locator, b"lock\n"
+                )
+            except FileExistsError:
+                pass
+            try:
+                self._json_lock_handle = self._json_lock_file_ops.open_read(
+                    self._json_lock_locator
+                )
+                lock_stat = os.fstat(self._json_lock_handle.fileno())
+                self._json_lock_identity = (lock_stat.st_dev, lock_stat.st_ino)
+            except BaseException:
+                if self._json_lock_handle is not None:
+                    self._json_lock_handle.close()
+                    self._json_lock_handle = None
+                if self._owns_json_lock_file_ops:
+                    self._json_lock_file_ops.close()
+                    self._json_lock_file_ops = None
+                raise
+
+    def close(self) -> None:
+        """Release only a lock root that this direct repository constructed."""
+        if self._json_lock_handle is not None:
+            self._json_lock_handle.close()
+            self._json_lock_handle = None
+            self._json_lock_identity = None
+        if self._owns_json_lock_file_ops and self._json_lock_file_ops is not None:
+            self._json_lock_file_ops.close()
+            self._json_lock_file_ops = None
 
     def _page_size(self, page_size: int | None) -> int:
         """Resolve one caller page without bypassing the configured bound."""
@@ -278,25 +337,32 @@ class _MetadataManifestRepository:
         if type(self.backend) is not JsonBackend:
             yield
             return
-        try:
-            import fcntl
-        except ImportError as exc:  # pragma: no cover - POSIX is required here.
+        if (
+            self._json_lock_file_ops is None
+            or self._json_lock_locator is None
+            or self._json_lock_handle is None
+            or self._json_lock_identity is None
+        ):
             raise CacheBlobBackendError(
-                "JSON canonical manifest CAS requires POSIX file locking",
+                "JSON canonical manifest authority lock is unavailable",
                 context={"backend": type(self.backend).__name__},
-            ) from exc
-
-        lock_path = Path(self.backend.metadata_file).with_name(
-            f".{self.backend.metadata_file.name}.manifest-cas.lock"
-        )
+            )
         try:
-            lock_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(lock_path, "a+b") as lock_file:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-                try:
+            with self._json_lock_guard:
+                current_identity = self._json_lock_file_ops.file_identity(
+                    self._json_lock_locator
+                )
+                if current_identity != self._json_lock_identity:
+                    raise CacheBlobBackendError(
+                        "JSON canonical manifest authority lock changed during use",
+                        context={"backend": type(self.backend).__name__},
+                    )
+                with interprocess_open_file_lock(
+                    self._json_lock_handle,
+                    exclusive=True,
+                    operation="json_manifest_authority",
+                ):
                     yield
-                finally:
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
         except CacheBlobBackendError:
             raise
         except OSError as exc:
@@ -478,18 +544,26 @@ class InMemoryManifestRepository(_MetadataManifestRepository):
     """Exact raw records backed by one process-local metadata identity."""
 
     def __init__(
-        self, backend: InMemoryBackend, *, lifecycle_limits: LifecycleLimits | None = None
+        self,
+        backend: InMemoryBackend,
+        *,
+        lifecycle_limits: LifecycleLimits | None = None,
+        file_ops: ManagedFileOps | None = None,
     ):
-        super().__init__(backend, lifecycle_limits=lifecycle_limits)
+        super().__init__(backend, lifecycle_limits=lifecycle_limits, file_ops=file_ops)
 
 
 class JsonManifestRepository(_MetadataManifestRepository):
     """Exact raw records persisted by JsonBackend's durable document protocol."""
 
     def __init__(
-        self, backend: JsonBackend, *, lifecycle_limits: LifecycleLimits | None = None
+        self,
+        backend: JsonBackend,
+        *,
+        lifecycle_limits: LifecycleLimits | None = None,
+        file_ops: ManagedFileOps | None = None,
     ):
-        super().__init__(backend, lifecycle_limits=lifecycle_limits)
+        super().__init__(backend, lifecycle_limits=lifecycle_limits, file_ops=file_ops)
 
 
 class SqliteManifestRepository:
@@ -788,13 +862,20 @@ class SqliteManifestRepository:
 
 
 def create_manifest_repository(
-    backend: object, *, lifecycle_limits: LifecycleLimits | None = None
+    backend: object,
+    *,
+    lifecycle_limits: LifecycleLimits | None = None,
+    file_ops: ManagedFileOps | None = None,
 ) -> ManifestRepository:
     """Select the exact local adapter that can preserve canonical record bytes."""
     if type(backend) is InMemoryBackend:
-        return InMemoryManifestRepository(backend, lifecycle_limits=lifecycle_limits)
+        return InMemoryManifestRepository(
+            backend, lifecycle_limits=lifecycle_limits, file_ops=file_ops
+        )
     if type(backend) is JsonBackend:
-        return JsonManifestRepository(backend, lifecycle_limits=lifecycle_limits)
+        return JsonManifestRepository(
+            backend, lifecycle_limits=lifecycle_limits, file_ops=file_ops
+        )
     if type(backend) is SqliteBackend:
         return SqliteManifestRepository(backend, lifecycle_limits=lifecycle_limits)
     raise CacheBlobBackendError(
@@ -811,10 +892,14 @@ class MetadataManifestRepository:
     """Compatibility facade for callers of the original Phase 2 repository seam."""
 
     def __init__(
-        self, backend: object, *, lifecycle_limits: LifecycleLimits | None = None
+        self,
+        backend: object,
+        *,
+        lifecycle_limits: LifecycleLimits | None = None,
+        file_ops: ManagedFileOps | None = None,
     ):
         self._repository = create_manifest_repository(
-            backend, lifecycle_limits=lifecycle_limits
+            backend, lifecycle_limits=lifecycle_limits, file_ops=file_ops
         )
 
     def get_raw(self, key: str) -> Optional[bytes]:
