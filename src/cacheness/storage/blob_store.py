@@ -509,7 +509,7 @@ class BlobStore:
         """
         self._require_canonical_store()
         with self._key_coordinator.hold(self._storage_id_for_key(key)):
-            authenticated = self._load_authenticated_manifest_with_raw(
+            authenticated = self._load_authenticated_manifest(
                 key,
                 operation="get_metadata",
                 require_locator=True,
@@ -544,7 +544,7 @@ class BlobStore:
                     context={"fields": sorted(immutable_fields)},
                 )
 
-            authenticated = self._load_authenticated_manifest(
+            authenticated = self._load_authenticated_manifest_with_raw(
                 key,
                 operation="update_metadata",
                 require_locator=True,
