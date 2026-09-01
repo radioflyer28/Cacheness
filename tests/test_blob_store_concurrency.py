@@ -14,6 +14,7 @@ from cacheness.error_handling import (
     CacheBlobLifecycleConflictError,
     CacheBlobLockReleaseError,
 )
+from cacheness.storage import coordination
 from cacheness.storage.blob_store import BlobStore
 from cacheness.storage.coordination import KeyCoordinatorRegistry, StoreAdmissionBarrier
 
@@ -178,21 +179,21 @@ def test_uncertain_final_reader_unlock_poisoned_barrier_rejects_re_admission(
     root.mkdir()
     barrier = StoreAdmissionBarrier.acquire(root)
 
-    @contextmanager
-    def uncertain_release(*, exclusive: bool):
-        assert exclusive is False
-        try:
-            yield
-        finally:
-            raise CacheBlobLockReleaseError(
-                "injected unlock failure", context={"operation": "test"}
-            )
+    class FailingWindowsLockApi:
+        def lock(self, _descriptor: int, *, exclusive: bool) -> object:
+            assert exclusive is False
+            return object()
 
-    monkeypatch.setattr(barrier, "_advisory_admission", uncertain_release)
+        def unlock(self, _descriptor: int, _token: object) -> object:
+            raise OSError("injected unlock failure")
+
+    monkeypatch.setattr(coordination, "_platform_name", lambda: "nt")
+    monkeypatch.setattr(coordination, "_windows_lock_api", FailingWindowsLockApi)
     try:
         # The guarded body also fails.  The release uncertainty is still
-        # surfaced and must poison the shared barrier.
-        with pytest.raises(CacheBlobLockReleaseError):
+        # recorded by the barrier, while the primary body failure preserves
+        # the public exception contract.
+        with pytest.raises(RuntimeError, match="body failure"):
             with barrier.ordinary_admission():
                 raise RuntimeError("body failure")
 

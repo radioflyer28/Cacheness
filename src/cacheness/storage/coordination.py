@@ -142,6 +142,7 @@ def interprocess_open_file_lock(
     exclusive: bool,
     operation: str,
     close_handle: bool = False,
+    on_release_failure: Callable[[CacheBlobLockReleaseError], None] | None = None,
 ) -> Iterator[None]:
     """Lock one already-open managed descriptor on every supported OS.
 
@@ -194,8 +195,12 @@ def interprocess_open_file_lock(
             context={"operation": operation},
         ) from exc
 
+    body_failure: BaseException | None = None
     try:
         yield
+    except BaseException as exc:
+        body_failure = exc
+        raise
     finally:
         release_failure: OSError | None = None
         try:
@@ -216,10 +221,14 @@ def interprocess_open_file_lock(
             # body would let a retained admission barrier advertise a state it
             # cannot prove.  Callers must poison that barrier and require a
             # close/reconstruction before admitting further work.
-            raise CacheBlobLockReleaseError(
+            release_error = CacheBlobLockReleaseError(
                 "BlobStore lifecycle lock could not be released",
                 context={"operation": operation},
-            ) from release_failure
+            )
+            if on_release_failure is not None:
+                on_release_failure(release_error)
+            if body_failure is None:
+                raise release_error from release_failure
 
 
 @contextmanager
@@ -438,10 +447,16 @@ class StoreAdmissionBarrier:
                 "BlobStore lifecycle admission lock is unavailable",
                 context={"operation": "lifecycle_admission"},
             )
+
+        def poison_release(error: CacheBlobLockReleaseError) -> None:
+            with self._condition:
+                self._release_uncertain = error
+
         with interprocess_open_file_lock(
             self._lock_handle,
             exclusive=exclusive,
             operation="lifecycle_admission",
+            on_release_failure=poison_release,
         ):
             self._file_ops.assert_retained_lock_identity(
                 self._lock_locator, self._lock_identity
