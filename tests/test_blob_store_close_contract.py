@@ -371,7 +371,7 @@ def test_default_blobstore_runs_the_native_windows_fallback_contract(
     tmp_path, monkeypatch, backend_name: str
 ):
     """Default stores exercise the real fallback routing instead of refusing Windows."""
-    directory_flushes: list[Path] = []
+    flushed_files: list[Path] = []
     authorities: dict[str, bytes] = {}
 
     class FakeWindowsFileApi:
@@ -380,8 +380,14 @@ def test_default_blobstore_runs_the_native_windows_fallback_contract(
                 raise FileExistsError(destination)
             os.rename(temporary, destination)
 
-        def flush_directory(self, directory: Path) -> None:
-            directory_flushes.append(directory)
+        def replace_write_through(self, temporary: Path, destination: Path) -> None:
+            os.replace(temporary, destination)
+
+        def delete_write_through(self, locator: Path) -> None:
+            locator.unlink()
+
+        def flush_regular_file(self, locator: Path) -> None:
+            flushed_files.append(locator)
 
     class FakeWindowsRegistryAuthorityApi:
         def ensure(self, name: str, value: bytes) -> None:
@@ -410,7 +416,7 @@ def test_default_blobstore_runs_the_native_windows_fallback_contract(
         assert store.delete("entry") is True
         store.put({"value": "clear"}, key="clear-entry")
         assert store.clear() == 1
-        assert directory_flushes
+        assert flushed_files
         assert authorities
     finally:
         store.close()
