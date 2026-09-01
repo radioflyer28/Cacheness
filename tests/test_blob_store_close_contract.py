@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import shutil
 from threading import Event, Thread
@@ -15,6 +16,7 @@ from cacheness.error_handling import (
     CacheBlobCloseTimeoutError,
     CacheBlobLockReleaseError,
     CacheBlobStoreClosedError,
+    CacheUnsafePathError,
 )
 from cacheness.metadata import InMemoryBackend
 from cacheness.storage import BlobStore
@@ -441,5 +443,38 @@ def test_lock_release_failure_never_masks_the_lifecycle_body_and_closes_handle(
                 pass
         assert isinstance(error.value.__cause__, OSError)
         assert closed == [True, True]
+    finally:
+        file_ops.close()
+
+
+def test_short_lived_admission_lock_rejects_hard_links_and_later_inode_swaps(tmp_path):
+    """Admission lock names retain one single-linked inode for the root lifetime."""
+    root = tmp_path / "short-lived-lock-root"
+    root.mkdir()
+    outside = tmp_path / "outside-admission-lock"
+    outside.write_bytes(b"lock\n")
+    file_ops = ManagedFileOps(root)
+    lock_locator = root / "admission.lock"
+    try:
+        os.link(outside, lock_locator)
+        with pytest.raises(CacheUnsafePathError):
+            with interprocess_file_lock(
+                file_ops, lock_locator, exclusive=True, operation="hard_link"
+            ):
+                pass
+        lock_locator.unlink()
+
+        with interprocess_file_lock(
+            file_ops, lock_locator, exclusive=True, operation="establish_identity"
+        ):
+            pass
+        replacement = tmp_path / "replacement-admission-lock"
+        replacement.write_bytes(b"lock\n")
+        os.replace(replacement, lock_locator)
+        with pytest.raises(CacheUnsafePathError):
+            with interprocess_file_lock(
+                file_ops, lock_locator, exclusive=True, operation="regular_swap"
+            ):
+                pass
     finally:
         file_ops.close()

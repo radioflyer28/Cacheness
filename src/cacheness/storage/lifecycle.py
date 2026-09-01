@@ -553,8 +553,14 @@ class LifecycleEngine:
         )
 
     def _continue_clear(self, record: LifecycleOperationRecord) -> int:
-        """Serialize one clear resume and reload its exact current evidence."""
-        with self.operation_repository.operation_transition(record.operation_id):
+        """Resume one clear under a dedicated aggregate-control lease.
+
+        The aggregate lease serializes clear progress and recovery but is
+        distinct from bounded evidence-CAS stripes. Each target deletion and
+        checkpoint obtains its own exact child operation lease, so parent clear
+        evidence never grants child CAS authority.
+        """
+        with self.operation_repository.clear_operation_transition(record.operation_id):
             raw_current = self.operation_repository.get_raw(record.operation_id)
             if raw_current is None:
                 return 0
@@ -917,6 +923,14 @@ class LifecycleEngine:
         if current is None:
             if record.expected_generation is not None:
                 return
+            if not self.store.guarded_handler_io.file_ops.exists(candidate_locator):
+                # A signed PREPARED record whose immutable candidate never
+                # appeared has no externally persistent payload side effect.
+                # It can retire immediately after an interrupted evidence
+                # promotion; waiting for orphan grace would retain control
+                # residue even though there is no candidate to reconcile.
+                self._retire(record)
+                return
             if not self.is_pre_authority_candidate_eligible(record):
                 return
             self.store._delete_or_prove_absent(candidate_locator)
@@ -1051,6 +1065,7 @@ class LifecycleEngine:
         unauthenticated, from another store, or locator-invalid remains
         untouched rather than becoming authority or a deletion target.
         """
+        self.operation_repository.recover_pending_operation_records()
         cursor = None
         remaining_actions = self.lifecycle_limits.max_reconcile_actions
         while remaining_actions > 0:

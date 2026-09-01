@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from heapq import nsmallest
 from pathlib import Path
 from threading import RLock
-from typing import Any, BinaryIO, Mapping, Optional, Protocol
+from typing import Any, BinaryIO, Callable, Mapping, Optional, Protocol
 
 from cacheness.config import LifecycleLimits
 from cacheness.error_handling import (
@@ -27,6 +27,8 @@ from cacheness.error_handling import (
     CacheError,
 )
 from cacheness.metadata import InMemoryBackend, JsonBackend, SqliteBackend
+from cacheness.json_utils import dumps as json_dumps
+from cacheness.json_utils import loads as json_loads
 
 from .coordination import interprocess_open_file_lock
 from .path_security import ManagedFileOps, resolve_managed_locator
@@ -120,6 +122,9 @@ class ManifestPage:
 class ManifestRepository(Protocol):
     """Persistence contract for exact canonical manifest bytes."""
 
+    def refresh_authoritative_view(self) -> None:
+        """Synchronize a repository view through its canonical authority path."""
+
     def get_raw(self, key: str) -> Optional[bytes]:
         """Return exact manifest bytes, or ``None`` only when the key is absent."""
 
@@ -195,43 +200,57 @@ class _MetadataManifestRepository:
         self._json_lock_locator: Path | None = None
         self._json_lock_handle: BinaryIO | None = None
         self._json_lock_identity: tuple[int, int] | None = None
+        self._json_metadata_locator: Path | None = None
         self._json_lock_guard = RLock()
+        # Deterministic race seams used only by containment regressions.  They
+        # deliberately run while the retained descriptor remains authoritative.
+        self.after_json_lock_validation: Callable[[], None] | None = None
+        self.after_json_lock_acquisition: Callable[[], None] | None = None
         if type(backend) is JsonBackend:
-            lock_root = Path(backend.metadata_file).parent
-            if file_ops is None:
-                self._json_lock_file_ops = ManagedFileOps(lock_root)
-                self._owns_json_lock_file_ops = True
-            else:
-                if file_ops.root != lock_root.resolve():
-                    raise ValueError(
-                        "JSON manifest authority lock must share the metadata root"
-                    )
-                self._json_lock_file_ops = file_ops
-            self._json_lock_locator = resolve_managed_locator(
-                self._json_lock_file_ops.root,
-                f".{Path(backend.metadata_file).name}.manifest-cas.lock",
-                operation="manifest_repository_authority_lock",
-                allow_missing_leaf=True,
-            )
             try:
-                self._json_lock_file_ops.create_bytes_durable_exclusive(
-                    self._json_lock_locator, b"lock\n"
+                lock_root = Path(backend.metadata_file).parent
+                if file_ops is None:
+                    self._json_lock_file_ops = ManagedFileOps(lock_root)
+                    self._owns_json_lock_file_ops = True
+                else:
+                    if file_ops.root != lock_root.resolve():
+                        raise ValueError(
+                            "JSON manifest authority lock must share the metadata root"
+                        )
+                    self._json_lock_file_ops = file_ops
+                self._json_metadata_locator = resolve_managed_locator(
+                    self._json_lock_file_ops.root,
+                    Path(backend.metadata_file).name,
+                    operation="manifest_repository_metadata",
+                    allow_missing_leaf=True,
                 )
-            except FileExistsError:
-                pass
-            try:
-                self._json_lock_handle = self._json_lock_file_ops.open_read(
+                self._json_lock_locator = resolve_managed_locator(
+                    self._json_lock_file_ops.root,
+                    f".{Path(backend.metadata_file).name}.manifest-cas.lock",
+                    operation="manifest_repository_authority_lock",
+                    allow_missing_leaf=True,
+                )
+                try:
+                    self._json_lock_file_ops.create_bytes_durable_exclusive(
+                        self._json_lock_locator, b"lock\n"
+                    )
+                except FileExistsError:
+                    pass
+                expected_lock_identity = self._json_lock_file_ops.retain_lock_identity(
+                    self._json_lock_locator
+                )
+                self._json_lock_handle = self._json_lock_file_ops.open_verified_regular_file(
                     self._json_lock_locator
                 )
                 lock_stat = os.fstat(self._json_lock_handle.fileno())
                 self._json_lock_identity = (lock_stat.st_dev, lock_stat.st_ino)
+                if self._json_lock_identity != expected_lock_identity:
+                    raise CacheBlobBackendError(
+                        "JSON canonical manifest authority lock changed during construction",
+                        context={"backend": type(self.backend).__name__},
+                    )
             except BaseException:
-                if self._json_lock_handle is not None:
-                    self._json_lock_handle.close()
-                    self._json_lock_handle = None
-                if self._owns_json_lock_file_ops:
-                    self._json_lock_file_ops.close()
-                    self._json_lock_file_ops = None
+                self.close()
                 raise
 
     def close(self) -> None:
@@ -243,6 +262,7 @@ class _MetadataManifestRepository:
         if self._owns_json_lock_file_ops and self._json_lock_file_ops is not None:
             self._json_lock_file_ops.close()
             self._json_lock_file_ops = None
+        self._json_metadata_locator = None
 
     def _page_size(self, page_size: int | None) -> int:
         """Resolve one caller page without bypassing the configured bound."""
@@ -266,7 +286,7 @@ class _MetadataManifestRepository:
                 # direct repository reads cannot report a superseded authority.
                 with self.backend._lock, self._json_compare_publish_lock():
                     self._refresh_json_for_conditional_operation()
-                entry = self.backend.get_entry(key)
+                    entry = self.backend.get_entry(key)
             else:
                 entry = self.backend.get_entry(key)
         except _BACKEND_OPERATION_ERRORS as exc:
@@ -288,6 +308,22 @@ class _MetadataManifestRepository:
             return base64.b64decode(encoded, validate=True)
         except (ValueError, UnicodeEncodeError) as exc:
             raise _backend_failure("get_raw", self.backend, exc) from exc
+
+    def refresh_authoritative_view(self) -> None:
+        """Refresh JSON through the retained descriptor authority boundary.
+
+        Ordinary BlobStore admission needs a current JSON projection before it
+        builds lifecycle evidence.  Delegating that refresh here prevents a
+        path-based ``JsonBackend`` read from switching roots between admission
+        and the following canonical compare/publish transition.
+        """
+        if type(self.backend) is not JsonBackend:
+            return
+        try:
+            with self.backend._lock, self._json_compare_publish_lock():
+                self._refresh_json_for_conditional_operation()
+        except _BACKEND_OPERATION_ERRORS as exc:
+            raise _backend_failure("refresh_authority", self.backend, exc) from exc
 
     @staticmethod
     def _raw_from_entry(entry: object) -> bytes | None:
@@ -325,8 +361,13 @@ class _MetadataManifestRepository:
         """Write one exact byte sequence through existing durable backend storage."""
         if not isinstance(record, bytes):
             raise TypeError("Canonical manifest records must be bytes")
-        projection = self._projection(key, record, entry_data)
         try:
+            if type(self.backend) is JsonBackend:
+                with self.backend._lock, self._json_compare_publish_lock():
+                    self._refresh_json_for_conditional_operation()
+                    self._publish_projection(key, record, entry_data)
+                return
+            projection = self._projection(key, record, entry_data)
             self.backend.put_entry(key, projection)
         except _BACKEND_OPERATION_ERRORS as exc:
             raise _backend_failure("put_raw", self.backend, exc) from exc
@@ -347,40 +388,71 @@ class _MetadataManifestRepository:
                 "JSON canonical manifest authority lock is unavailable",
                 context={"backend": type(self.backend).__name__},
             )
-        try:
-            with self._json_lock_guard:
-                current_identity = self._json_lock_file_ops.file_identity(
-                    self._json_lock_locator
+        # Do not translate exceptions around ``yield`` here: a backend failure
+        # raised by the caller's compare/publish body must retain its original
+        # operation and cause rather than being mislabeled as lock acquisition.
+        with self._json_lock_guard:
+            self._json_lock_file_ops.assert_retained_lock_identity(
+                self._json_lock_locator, self._json_lock_identity
+            )
+            if self.after_json_lock_validation is not None:
+                self.after_json_lock_validation()
+            with interprocess_open_file_lock(
+                self._json_lock_handle,
+                exclusive=True,
+                operation="json_manifest_authority",
+            ):
+                # The lock descriptor and the managed root are authority data.
+                # Checking again after OS acquisition prevents a contender from
+                # proceeding under an inode that a later repository no longer
+                # uses.
+                self._json_lock_file_ops.assert_retained_lock_identity(
+                    self._json_lock_locator, self._json_lock_identity
                 )
-                if current_identity != self._json_lock_identity:
-                    raise CacheBlobBackendError(
-                        "JSON canonical manifest authority lock changed during use",
-                        context={"backend": type(self.backend).__name__},
-                    )
-                with interprocess_open_file_lock(
-                    self._json_lock_handle,
-                    exclusive=True,
-                    operation="json_manifest_authority",
-                ):
-                    yield
-        except CacheBlobBackendError:
-            raise
-        except OSError as exc:
-            raise _backend_failure("conditional_lock", self.backend, exc) from exc
+                if self.after_json_lock_acquisition is not None:
+                    self.after_json_lock_acquisition()
+                self._json_lock_file_ops.assert_root_identity()
+                yield
 
     def _refresh_json_for_conditional_operation(self) -> None:
-        """Refresh cached JSON only while the shared CAS lock is held."""
+        """Refresh JSON through the retained root descriptor while CAS is held."""
         if type(self.backend) is not JsonBackend:
             return
+        if self._json_lock_file_ops is None or self._json_metadata_locator is None:
+            raise CacheBlobBackendError(
+                "JSON canonical manifest root descriptor is unavailable",
+                context={"backend": type(self.backend).__name__},
+            )
         self.backend._ensure_writable()
-        if self.backend.metadata_file.exists():
-            self.backend._metadata = self.backend._read_live_document()
-            return
-        self.backend._metadata = {
-            "entries": {},
-            "cache_hits": 0,
-            "cache_misses": 0,
-        }
+        self._json_lock_file_ops.assert_root_identity()
+        try:
+            raw_document = self._json_lock_file_ops.read_bytes(self._json_metadata_locator)
+        except FileNotFoundError:
+            document: object = {
+                "entries": {},
+                "cache_hits": 0,
+                "cache_misses": 0,
+            }
+        else:
+            document = json_loads(raw_document)
+        if not isinstance(document, dict):
+            raise ValueError("JSON metadata document must be an object")
+        # Legacy normalization is pure document validation; no metadata path is
+        # consulted after the retained root was verified.
+        self.backend._metadata = self.backend._normalize_legacy_split_map(document)
+
+    def _publish_json_document(self, candidate: dict[str, Any]) -> None:
+        """Durably publish JSON authority through the retained root descriptor."""
+        if self._json_lock_file_ops is None or self._json_metadata_locator is None:
+            raise CacheBlobBackendError(
+                "JSON canonical manifest root descriptor is unavailable",
+                context={"backend": type(self.backend).__name__},
+            )
+        self._json_lock_file_ops.assert_root_identity()
+        encoded = json_dumps(candidate, default=str).encode("utf-8")
+        self._json_lock_file_ops.write_bytes_durable(self._json_metadata_locator, encoded)
+        self._json_lock_file_ops.assert_root_identity()
+        self.backend._metadata = candidate
 
     def _current_entry(self, key: str) -> object:
         """Return the current projection while the caller holds the backend lock."""
@@ -405,8 +477,7 @@ class _MetadataManifestRepository:
                 "file_size": projection.get("file_size", 0),
                 "metadata": projection["metadata"].copy(),
             }
-            self.backend._save_to_disk(candidate)
-            self.backend._metadata = candidate
+            self._publish_json_document(candidate)
             return
         self.backend.put_entry(key, projection)
 
@@ -415,8 +486,7 @@ class _MetadataManifestRepository:
         if type(self.backend) is JsonBackend:
             candidate = deepcopy(self.backend._metadata)
             candidate.get("entries", {}).pop(key, None)
-            self.backend._save_to_disk(candidate)
-            self.backend._metadata = candidate
+            self._publish_json_document(candidate)
             return
         self.backend._entries.pop(key, None)
 
@@ -449,6 +519,11 @@ class _MetadataManifestRepository:
     def remove(self, key: str) -> None:
         """Remove the record and its compatibility metadata projection together."""
         try:
+            if type(self.backend) is JsonBackend:
+                with self.backend._lock, self._json_compare_publish_lock():
+                    self._refresh_json_for_conditional_operation()
+                    self._remove_projection(key)
+                return
             self.backend.remove_entry(key)
         except _BACKEND_OPERATION_ERRORS as exc:
             raise _backend_failure("remove", self.backend, exc) from exc
@@ -535,6 +610,15 @@ class _MetadataManifestRepository:
     def list_backend_entries(self) -> list[dict[str, Any]]:
         """Read backend projections without allowing operational failures to leak."""
         try:
+            if type(self.backend) is JsonBackend:
+                with self.backend._lock, self._json_compare_publish_lock():
+                    self._refresh_json_for_conditional_operation()
+                    entries = self.backend._metadata.get("entries", {})
+                    return [
+                        {"cache_key": key, **deepcopy(entry)}
+                        for key, entry in entries.items()
+                        if isinstance(key, str) and isinstance(entry, Mapping)
+                    ]
             return self.backend.list_entries()
         except _BACKEND_OPERATION_ERRORS as exc:
             raise _backend_failure("list_entries", self.backend, exc) from exc
@@ -601,6 +685,9 @@ class SqliteManifestRepository:
                 )
         except _BACKEND_OPERATION_ERRORS as exc:
             raise _backend_failure("initialize", self.backend, exc) from exc
+
+    def refresh_authoritative_view(self) -> None:
+        """SQLite reads are transactional and require no cached view refresh."""
 
     def get_raw(self, key: str) -> Optional[bytes]:
         """Load one BLOB without decoding or authenticating it."""
@@ -904,6 +991,9 @@ class MetadataManifestRepository:
 
     def get_raw(self, key: str) -> Optional[bytes]:
         return self._repository.get_raw(key)
+
+    def refresh_authoritative_view(self) -> None:
+        self._repository.refresh_authoritative_view()
 
     def put_raw(
         self,

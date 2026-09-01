@@ -274,8 +274,13 @@ class BlobStore:
         )
         self.lifecycle_limits = self.config.lifecycle_limits
         self._instance_admission = InstanceAdmission(self.lifecycle_limits)
-        self._admission_barrier = StoreAdmissionBarrier.acquire(
-            self.guarded_handler_io.root
+        # Exact legacy fixtures are read-only migration evidence. They reject
+        # every public operation before admission, so creating a lifecycle lock
+        # for them would itself mutate the fixture merely by opening it.
+        self._admission_barrier = (
+            None
+            if self._legacy_identity is not None
+            else StoreAdmissionBarrier.acquire(self.guarded_handler_io.root)
         )
         # This is intentionally per instance.  Same-process independent
         # stores still exercise the manifest repository's CAS authority.
@@ -336,6 +341,14 @@ class BlobStore:
 
     def _close_failed_initialization_resources(self) -> None:
         """Release only resources this incomplete store has taken ownership of."""
+        lifecycle = getattr(self, "lifecycle", None)
+        operation_repository = getattr(lifecycle, "operation_repository", None)
+        operation_close = getattr(operation_repository, "close", None)
+        if callable(operation_close):
+            try:
+                operation_close()
+            except Exception:
+                logger.exception("Failed to close BlobStore lifecycle operation locks")
         repository_close = getattr(
             getattr(self, "manifest_repository", None), "close", None
         )
@@ -353,7 +366,7 @@ class BlobStore:
             self.guarded_handler_io.close()
         except Exception:
             logger.exception("Failed to close BlobStore managed-root descriptor")
-        if hasattr(self, "_admission_barrier"):
+        if getattr(self, "_admission_barrier", None) is not None:
             try:
                 self._admission_barrier.release()
             except Exception:
@@ -894,15 +907,17 @@ class BlobStore:
     def _release_owned_resources(self) -> None:
         """Release successful owned resources once, leaving failed work retryable.
 
-        The lifecycle operation repository is file-backed through the same
-        managed descriptor as ``GuardedHandlerIO``.  It has no independent
-        handle to close; a future repository may offer a narrow ``flush``
-        hook, which is invoked before its shared descriptor is released.
+        The lifecycle operation repository retains bounded authority-lock
+        descriptors.  Flush and close them before the shared managed-root
+        descriptor is released.
         """
         operation_repository = self.lifecycle.operation_repository
         flush = getattr(operation_repository, "flush", None)
         if callable(flush):
             flush()
+        operation_close = getattr(operation_repository, "close", None)
+        if callable(operation_close):
+            operation_close()
 
         if not self._released_resources["manifest_repository"]:
             repository_close = getattr(self.manifest_repository, "close", None)
@@ -919,7 +934,8 @@ class BlobStore:
             self._released_resources["backend"] = True
 
         if not self._released_resources["admission_barrier"]:
-            self._admission_barrier.release()
+            if self._admission_barrier is not None:
+                self._admission_barrier.release()
             self._released_resources["admission_barrier"] = True
     
     def __enter__(self):
@@ -948,7 +964,7 @@ class BlobStore:
             self._legacy_identity.require_explicit_migration()
 
     def _refresh_metadata_view_for_lifecycle(self) -> None:
-        """Refresh a live JSON view without reacquiring global clear admission.
+        """Refresh a live JSON view through canonical descriptor authority.
 
         The Phase 1 clear coordinator used one exclusive admission lock around
         every ordinary operation.  Lifecycle publication now relies on exact
@@ -958,7 +974,7 @@ class BlobStore:
         if type(self.backend) is not JsonBackend:
             return
         try:
-            self.backend._refresh_from_disk_for_clear_admission()
+            self.manifest_repository.refresh_authoritative_view()
         except CacheStorageError as exc:
             raise CacheBlobBackendError(
                 "BlobStore lifecycle could not refresh metadata state",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import builtins
 import multiprocessing
+import os
 from pathlib import Path
 from threading import Barrier, Lock, Thread
 
@@ -24,6 +25,8 @@ from cacheness.storage.manifest_repository import (
     SqliteManifestRepository,
 )
 from cacheness.storage import coordination
+from cacheness.storage import path_security
+from cacheness.storage import manifest_repository as manifest_repository_module
 from cacheness.storage.path_security import ManagedFileOps, resolve_managed_locator
 
 
@@ -301,6 +304,138 @@ def test_json_authority_lock_rejects_a_live_lock_name_replacement(
         assert backend._metadata.get("entries", {}).get("key") is None
     finally:
         repository.close()
+        backend.close()
+
+
+@pytest.mark.parametrize("seam", ("validation", "acquisition"))
+def test_json_authority_never_publishes_into_a_replaced_root(
+    tmp_path: Path, seam: str
+) -> None:
+    """Descriptor-anchored JSON CAS rejects either root-replacement boundary."""
+    root = tmp_path / f"replaced-json-root-{seam}"
+    root.mkdir()
+    retired = tmp_path / f"retired-json-root-{seam}"
+    backend = JsonBackend(root / "metadata.json")
+    repository = JsonManifestRepository(backend)
+
+    def replace_root() -> None:
+        root.rename(retired)
+        root.mkdir()
+
+    if seam == "validation":
+        repository.after_json_lock_validation = replace_root
+    else:
+        repository.after_json_lock_acquisition = replace_root
+    try:
+        with pytest.raises(CacheBlobBackendError):
+            repository.publish_if_expected(
+                "key", ManifestExpectation.absent(), _record(f"blocked-{seam}")
+            )
+        assert not (root / "metadata.json").exists()
+        assert not (retired / "metadata.json").exists()
+    finally:
+        repository.close()
+        backend.close()
+
+
+def test_json_authority_lock_rejects_a_hard_link_from_outside_the_store(
+    tmp_path: Path,
+) -> None:
+    """An outside hard link cannot become the canonical JSON authority inode."""
+    root = tmp_path / "hard-linked-json-lock"
+    root.mkdir()
+    outside = tmp_path / "outside-lock"
+    outside.write_bytes(b"lock\n")
+    backend = JsonBackend(root / "metadata.json")
+    lock_locator = root / ".metadata.json.manifest-cas.lock"
+    os.link(outside, lock_locator)
+    try:
+        with pytest.raises(CacheUnsafePathError):
+            JsonManifestRepository(backend)
+        assert outside.stat().st_nlink == 2
+        assert not (root / "metadata.json").exists()
+    finally:
+        backend.close()
+
+
+def test_json_authority_lock_rejects_regular_inode_replacement(
+    tmp_path: Path,
+) -> None:
+    """A regular-file swap cannot partition a retained authority descriptor."""
+    root = tmp_path / "regular-json-lock-swap"
+    root.mkdir()
+    backend = JsonBackend(root / "metadata.json")
+    repository = JsonManifestRepository(backend)
+    assert repository._json_lock_locator is not None
+    replacement = tmp_path / "replacement-lock"
+    replacement.write_bytes(b"replacement\n")
+    try:
+        os.replace(replacement, repository._json_lock_locator)
+        with pytest.raises(CacheBlobBackendError):
+            repository.publish_if_expected(
+                "key", ManifestExpectation.absent(), _record("regular-swap")
+            )
+        assert not (root / "metadata.json").exists()
+    finally:
+        repository.close()
+        backend.close()
+
+
+def test_json_repository_refuses_windows_without_native_control_durability(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The actual Windows control branch fails before CRT directory fsync calls."""
+    root = tmp_path / "unsupported-windows-json"
+    root.mkdir()
+    backend = JsonBackend(root / "metadata.json")
+    called: list[str] = []
+
+    def unexpected_directory_io(*_args: object, **_kwargs: object) -> int:
+        called.append("directory_io")
+        raise AssertionError("Windows fallback must not call POSIX directory I/O")
+
+    monkeypatch.setattr(path_security, "_platform_name", lambda: "nt")
+    monkeypatch.setattr(path_security.os, "fsync", unexpected_directory_io)
+    try:
+        with pytest.raises(CacheBlobBackendError, match="Windows"):
+            JsonManifestRepository(backend)
+        assert called == []
+    finally:
+        backend.close()
+
+
+@pytest.mark.parametrize("failure", ("create", "open", "identity"))
+def test_failed_direct_json_repository_construction_closes_its_owned_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    """Every direct-construction failure releases the repository-owned descriptor."""
+    root = tmp_path / f"owned-root-close-{failure}"
+    root.mkdir()
+    backend = JsonBackend(root / "metadata.json")
+    file_ops = ManagedFileOps(root)
+    closed: list[bool] = []
+    original_close = file_ops.close
+
+    def track_close() -> None:
+        closed.append(True)
+        original_close()
+
+    def fail(*_args: object, **_kwargs: object) -> None:
+        raise OSError(f"injected {failure} failure")
+
+    monkeypatch.setattr(file_ops, "close", track_close)
+    monkeypatch.setattr(manifest_repository_module, "ManagedFileOps", lambda _root: file_ops)
+    if failure == "create":
+        monkeypatch.setattr(file_ops, "create_bytes_durable_exclusive", fail)
+    elif failure == "open":
+        monkeypatch.setattr(file_ops, "open_verified_regular_file", fail)
+    else:
+        monkeypatch.setattr(file_ops, "retain_lock_identity", fail)
+    try:
+        with pytest.raises(OSError, match=failure):
+            JsonManifestRepository(backend)
+        assert closed == [True]
+    finally:
         backend.close()
 
 

@@ -6,6 +6,7 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 import ctypes
+import os
 from pathlib import Path
 from threading import Condition, Lock, get_ident
 import time
@@ -232,8 +233,8 @@ def interprocess_file_lock(
 
     Persistent authority owners should create their lock file and retain a
     managed descriptor themselves, then call :func:`interprocess_open_file_lock`.
-    The short-lived form is appropriate for striped operation evidence and
-    admission transitions.
+    The short-lived form is appropriate for isolated direct callers. Persistent
+    store authority uses retained descriptors instead.
     """
     try:
         file_ops.create_bytes_durable_exclusive(locator, b"lock\n")
@@ -246,19 +247,43 @@ def interprocess_file_lock(
         ) from exc
 
     try:
-        handle = file_ops.open_read(locator)
+        expected_identity = file_ops.retain_lock_identity(locator)
+        handle = file_ops.open_verified_regular_file(locator)
+        if (os.fstat(handle.fileno()).st_dev, os.fstat(handle.fileno()).st_ino) != expected_identity:
+            handle.close()
+            raise CacheBlobBackendError(
+                "BlobStore lifecycle lock authority changed during acquisition",
+                context={"operation": operation},
+            )
     except OSError as exc:
         raise CacheBlobBackendError(
             "BlobStore lifecycle lock could not be acquired",
             context={"operation": operation},
         ) from exc
-    with interprocess_open_file_lock(
-        handle,
-        exclusive=exclusive,
-        operation=operation,
-        close_handle=True,
-    ):
-        yield
+    try:
+        file_ops.assert_retained_lock_identity(locator, expected_identity)
+    except BaseException:
+        handle.close()
+        raise
+    try:
+        with interprocess_open_file_lock(
+            handle,
+            exclusive=exclusive,
+            operation=operation,
+            close_handle=True,
+        ):
+            # Name identity must be checked after acquisition as well: another
+            # opener must never lock a replacement inode while this caller
+            # proceeds under the retired descriptor.
+            file_ops.assert_retained_lock_identity(locator, expected_identity)
+            yield
+    except CacheBlobBackendError:
+        raise
+    except OSError as exc:
+        raise CacheBlobBackendError(
+            "BlobStore lifecycle lock authority changed during acquisition",
+            context={"operation": operation},
+        ) from exc
 
 
 class StoreAdmissionBarrier:
@@ -297,6 +322,35 @@ class StoreAdmissionBarrier:
             operation="lifecycle_admission_lock",
             allow_missing_leaf=True,
         )
+        self._lock_handle = None
+        try:
+            try:
+                self._file_ops.create_bytes_durable_exclusive(self._lock_locator, b"lock\n")
+            except FileExistsError:
+                pass
+            self._lock_identity = self._file_ops.retain_lock_identity(self._lock_locator)
+            self._lock_handle = self._file_ops.open_verified_regular_file(
+                self._lock_locator
+            )
+            observed_identity = (
+                os.fstat(self._lock_handle.fileno()).st_dev,
+                os.fstat(self._lock_handle.fileno()).st_ino,
+            )
+            if observed_identity != self._lock_identity:
+                raise CacheBlobBackendError(
+                    "BlobStore lifecycle admission lock changed during construction",
+                    context={"operation": "lifecycle_admission"},
+                )
+        except BaseException:
+            self._discard_unregistered()
+            raise
+
+    def _discard_unregistered(self) -> None:
+        """Close a candidate barrier that was never accepted by the registry."""
+        if self._lock_handle is not None:
+            self._lock_handle.close()
+            self._lock_handle = None
+        self._file_ops.close()
 
     @staticmethod
     def _identity_for(root: Path) -> tuple[int, int]:
@@ -319,7 +373,7 @@ class StoreAdmissionBarrier:
                 cls._instances[identity] = candidate
                 return candidate
             barrier._leases += 1
-        candidate._file_ops.close()
+        candidate._discard_unregistered()
         return barrier
 
     @classmethod
@@ -339,7 +393,7 @@ class StoreAdmissionBarrier:
                 candidate._registry_identity = identity
                 cls._instances[identity] = candidate
                 return candidate
-        candidate._file_ops.close()
+        candidate._discard_unregistered()
         return barrier
 
     def release(self) -> None:
@@ -359,17 +413,30 @@ class StoreAdmissionBarrier:
                 del self._instances[registry_identity]
                 close_file_ops = True
         if close_file_ops:
+            if self._lock_handle is not None:
+                self._lock_handle.close()
+                self._lock_handle = None
             self._file_ops.close()
 
     @contextmanager
     def _advisory_admission(self, *, exclusive: bool) -> Iterator[None]:
         """Hold the root-wide shared/exclusive lock for one admitted operation."""
-        with interprocess_file_lock(
-            self._file_ops,
-            self._lock_locator,
+        self._file_ops.assert_retained_lock_identity(
+            self._lock_locator, self._lock_identity
+        )
+        if self._lock_handle is None:
+            raise CacheBlobBackendError(
+                "BlobStore lifecycle admission lock is unavailable",
+                context={"operation": "lifecycle_admission"},
+            )
+        with interprocess_open_file_lock(
+            self._lock_handle,
             exclusive=exclusive,
             operation="lifecycle_admission",
         ):
+            self._file_ops.assert_retained_lock_identity(
+                self._lock_locator, self._lock_identity
+            )
             yield
 
     @contextmanager

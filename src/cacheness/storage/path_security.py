@@ -17,11 +17,13 @@ descriptor-capable Unix filesystem.
 from __future__ import annotations
 
 import errno
+import ctypes
 import hashlib
 from io import BytesIO
 import os
 import re
 import stat
+import sys
 import threading
 import uuid
 from collections.abc import Callable, Iterable
@@ -29,12 +31,74 @@ from contextlib import contextmanager
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import BinaryIO, Iterator, NoReturn, Union
 
-from cacheness.error_handling import CacheReason, CacheUnsafePathError
+from cacheness.error_handling import (
+    CacheBlobBackendError,
+    CacheReason,
+    CacheUnsafePathError,
+)
 
 
 _BLOB_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}\Z")
 _MAX_BLOB_ID_LENGTH = 256
 _PHYSICAL_NAME_DOMAIN = b"cacheness.physical-name.v1\x00"
+
+
+def _platform_name() -> str:
+    """Resolve filesystem topology through a narrow test seam."""
+    return os.name
+
+
+def _atomic_rename_no_replace(
+    parent_fd: int, temporary_name: str, name: str
+) -> None:
+    """Move a fully synced candidate without replacing an existing name.
+
+    A hard-link install leaves two directory entries during the transition, so
+    a process loss can strand an unaccounted temporary.  The native primitives
+    below consume the temporary as part of the successful no-replace move.  A
+    platform that cannot supply that property is not a truthful topology for
+    durable lifecycle control evidence.
+    """
+    encoded_temporary = os.fsencode(temporary_name)
+    encoded_name = os.fsencode(name)
+    if sys.platform == "darwin":
+        try:
+            renameatx_np = ctypes.CDLL(None, use_errno=True).renameatx_np
+        except AttributeError as exc:  # pragma: no cover - platform capability.
+            raise OSError(errno.ENOTSUP, "renameatx_np is unavailable") from exc
+        # Darwin's RENAME_EXCL fails when the destination already exists.
+        renameatx_np.argtypes = (
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        )
+        renameatx_np.restype = ctypes.c_int
+        if renameatx_np(parent_fd, encoded_temporary, parent_fd, encoded_name, 0x0004) == 0:
+            return
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number), name)
+
+    if sys.platform.startswith("linux"):
+        try:
+            renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
+        except AttributeError as exc:  # pragma: no cover - old libc/kernel topology.
+            raise OSError(errno.ENOTSUP, "renameat2 is unavailable") from exc
+        renameat2.argtypes = (
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        )
+        renameat2.restype = ctypes.c_int
+        if renameat2(parent_fd, encoded_temporary, parent_fd, encoded_name, 1) == 0:
+            return
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number), name)
+
+    raise OSError(errno.ENOTSUP, "atomic no-replace rename is unavailable")
 
 
 def _unsafe_path(reason: CacheReason) -> NoReturn:
@@ -234,8 +298,10 @@ class ManagedFileOps:
         self._root_identity = (root_stat.st_dev, root_stat.st_ino)
         self._lock = lock or threading.RLock()
         self.before_operation: Callable[[str, Path], None] | None = None
+        self.after_control_durability_step: Callable[[str, Path], None] | None = None
         self._root_fd: int | None = None
         self._descriptor_mode = self._open_root_descriptor()
+        self._lock_identities: dict[tuple[str, ...], tuple[int, int]] = {}
 
     def _open_root_descriptor(self) -> bool:
         """Anchor the resolved root to a descriptor when Python supports it."""
@@ -243,7 +309,7 @@ class ManagedFileOps:
         # POSIX and, unlike ``replace``, is advertised in macOS dir_fd support.
         required_functions = (os.open, os.stat, os.mkdir, os.unlink, os.rename)
         if (
-            os.name == "nt"
+            _platform_name() == "nt"
             or not hasattr(os, "O_NOFOLLOW")
             or not hasattr(os, "O_DIRECTORY")
             or not all(function in os.supports_dir_fd for function in required_functions)
@@ -271,6 +337,7 @@ class ManagedFileOps:
 
     def close(self) -> None:
         """Close the anchored root descriptor, if one was acquired."""
+        self._lock_identities.clear()
         if self._root_fd is not None:
             os.close(self._root_fd)
             self._root_fd = None
@@ -287,10 +354,19 @@ class ManagedFileOps:
         if (current.st_dev, current.st_ino) != self._root_identity:
             _unsafe_path(CacheReason.PATH_RACE)
 
+    def assert_root_identity(self) -> None:
+        """Fail closed when the configured root pathname no longer names this root."""
+        self._assert_root_identity()
+
     def _run_hook(self, operation: str, locator: Path) -> None:
         """Run the deterministic test seam without exposing it to callers."""
         if self.before_operation is not None:
             self.before_operation(operation, locator)
+
+    def _run_control_durability_hook(self, step: str, locator: Path) -> None:
+        """Expose process-loss seams only after a concrete control transition."""
+        if self.after_control_durability_step is not None:
+            self.after_control_durability_step(step, locator)
 
     def _prepare_locator(
         self,
@@ -488,6 +564,17 @@ class ManagedFileOps:
             written = os.write(file_descriptor, view)
             view = view[written:]
 
+    @staticmethod
+    def _read_bounded_descriptor(file_descriptor: int, maximum: int) -> bytes:
+        """Read through a descriptor despite short reads without over-allocating."""
+        chunks = bytearray()
+        while len(chunks) < maximum:
+            chunk = os.read(file_descriptor, maximum - len(chunks))
+            if not chunk:
+                break
+            chunks.extend(chunk)
+        return bytes(chunks)
+
     def _ensure_fallback_parent(self, locator: Path) -> None:
         """Create missing parents only after every existing component is verified."""
         current = self.root
@@ -530,33 +617,24 @@ class ManagedFileOps:
     def _publish_no_replace_descriptor(
         self, parent_fd: int, temporary_name: str, name: str
     ) -> None:
-        """Install a fully durable temporary as a new name without replacement."""
-        try:
-            os.link(
-                temporary_name,
-                name,
-                src_dir_fd=parent_fd,
-                dst_dir_fd=parent_fd,
-                follow_symlinks=False,
-            )
-        except FileExistsError:
-            raise
-        except OSError:
-            # A no-replace primitive is mandatory for authenticated control
-            # evidence.  Falling back to check-then-rename would reintroduce a
-            # writer race, so surface the unsupported filesystem instead.
-            raise
-        os.fsync(parent_fd)
-        os.unlink(temporary_name, dir_fd=parent_fd)
+        """Install a fully durable temporary through one consuming no-replace move."""
+        _atomic_rename_no_replace(parent_fd, temporary_name, name)
+        # The successful move has consumed the temporary name.  A process loss
+        # can therefore leave either a recoverable pre-install candidate or the
+        # final record, never two hard links to the same control evidence.
         os.fsync(parent_fd)
 
     def _create_bytes_durable_exclusive_descriptor(
         self, locator: Path, data: bytes
     ) -> Path:
-        """Crash-atomically create control bytes through an unguessable temp."""
+        """Crash-atomically create control bytes through a bound candidate."""
         parts = self._relative_parts(locator)
         with self._descriptor_parent(parts, create=True) as (parent_fd, name):
-            temporary_name = f".{name}.{uuid.uuid4().hex}.tmp"
+            digest = hashlib.sha256(data).hexdigest()
+            # This exact locator is deterministically bound to the control
+            # bytes, so recovery can validate and promote an interrupted
+            # pre-install candidate without relying on a loose filename glob.
+            temporary_name = f".{name}.pending.{digest}.{uuid.uuid4().hex}.tmp"
             temporary_fd: int | None = None
             try:
                 temporary_fd = os.open(
@@ -569,8 +647,14 @@ class ManagedFileOps:
                 os.fsync(temporary_fd)
                 os.close(temporary_fd)
                 temporary_fd = None
+                self._run_control_durability_hook("control_temp_created", locator)
                 self._assert_root_identity()
                 self._publish_no_replace_descriptor(parent_fd, temporary_name, name)
+                self._run_control_durability_hook("control_final_installed", locator)
+                self._run_control_durability_hook("control_first_directory_flush", locator)
+                # Native no-replace move has already consumed the candidate.
+                self._run_control_durability_hook("control_temp_retired", locator)
+                self._run_control_durability_hook("control_second_directory_flush", locator)
             except BaseException:
                 if temporary_fd is not None:
                     os.close(temporary_fd)
@@ -584,32 +668,21 @@ class ManagedFileOps:
     def _create_bytes_durable_exclusive_fallback(
         self, locator: Path, data: bytes
     ) -> Path:
-        """Use the same no-replace publication protocol without dir-fd support."""
-        self._ensure_fallback_parent(locator)
-        locator = resolve_managed_locator(
-            self.root, locator, operation="exclusive_create", allow_missing_leaf=True
-        )
-        temporary = locator.parent / f".{locator.name}.{uuid.uuid4().hex}.tmp"
-        try:
-            with open(temporary, "xb") as destination:
-                destination.write(data)
-                destination.flush()
-                os.fsync(destination.fileno())
-            self._assert_root_identity()
-            locator = resolve_managed_locator(
-                self.root, locator, operation="exclusive_create", allow_missing_leaf=True
+        """Fail rather than claim durable evidence on an unanchored topology."""
+        if _platform_name() == "nt":
+            raise CacheBlobBackendError(
+                "BlobStore durable lifecycle control records require native Windows "
+                "directory durability and no-replace publication support",
+                context={"operation": "exclusive_create"},
             )
-            os.link(temporary, locator, follow_symlinks=False)
-            self._fsync_containing_directory(locator)
-            temporary.unlink()
-            self._fsync_containing_directory(locator)
-            return locator
-        except BaseException:
-            try:
-                temporary.unlink()
-            except FileNotFoundError:
-                pass
-            raise
+        # A portable fallback cannot atomically consume a candidate without a
+        # directory descriptor.  Check-then-rename and hard-link install are
+        # intentionally not acceptable for authenticated control evidence.
+        raise CacheBlobBackendError(
+            "BlobStore durable lifecycle control records require descriptor-backed "
+            "atomic no-replace publication",
+            context={"operation": "exclusive_create"},
+        )
 
     def _fallback_read(self, locator: Path) -> bytes:
         locator = resolve_managed_locator(self.root, locator, operation="read")
@@ -726,6 +799,86 @@ class ManagedFileOps:
                 allow_missing_leaf=True,
             )
             return self._create_bytes_durable_exclusive_fallback(prepared, data)
+
+    def promote_durable_pending_control(
+        self,
+        locator: Union[str, Path],
+        data: bytes,
+        *,
+        pending_name: str | None = None,
+    ) -> bool:
+        """Promote or retire one exact interrupted control candidate.
+
+        ``create_bytes_durable_exclusive`` uses a digest-bound pending name so
+        a process loss before native no-replace installation leaves recoverable
+        evidence rather than an anonymous temporary.  This helper never uses a
+        pattern as deletion authority: the candidate bytes must match the
+        digest encoded in its exact locator, and an existing final must match
+        byte-for-byte before its pending counterpart is retired.
+        """
+        if not isinstance(data, bytes) or not data:
+            raise ValueError("pending control evidence must be non-empty bytes")
+        if not self._descriptor_mode:
+            raise CacheBlobBackendError(
+                "BlobStore durable control recovery requires descriptor-backed publication",
+                context={"operation": "promote_pending_control"},
+            )
+        prepared = self._prepare_locator(
+            locator, operation="promote_pending_control", allow_missing_leaf=True
+        )
+        parts = self._relative_parts(prepared)
+        digest = hashlib.sha256(data).hexdigest()
+        if pending_name is None:
+            temporary_name = f".{parts[-1]}.pending.{digest}.tmp"
+        else:
+            expected_prefix = f".{parts[-1]}.pending.{digest}."
+            token = pending_name.removeprefix(expected_prefix).removesuffix(".tmp")
+            if (
+                not pending_name.startswith(expected_prefix)
+                or len(token) != 32
+                or any(character not in "0123456789abcdef" for character in token)
+            ):
+                _unsafe_path(CacheReason.PATH_RACE)
+            temporary_name = pending_name
+        with self._descriptor_parent(parts, create=False) as (parent_fd, name):
+            try:
+                temporary_fd = os.open(
+                    temporary_name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd
+                )
+            except FileNotFoundError:
+                return False
+            try:
+                temporary_stat = os.fstat(temporary_fd)
+                if not stat.S_ISREG(temporary_stat.st_mode) or temporary_stat.st_nlink != 1:
+                    _unsafe_path(CacheReason.PATH_RACE)
+                temporary_bytes = self._read_bounded_descriptor(
+                    temporary_fd, len(data) + 1
+                )
+                if temporary_bytes != data:
+                    _unsafe_path(CacheReason.PATH_RACE)
+            finally:
+                os.close(temporary_fd)
+            try:
+                final_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+            except FileNotFoundError:
+                self._assert_root_identity()
+                try:
+                    _atomic_rename_no_replace(parent_fd, temporary_name, name)
+                except FileExistsError:
+                    return self.promote_durable_pending_control(
+                        prepared, data, pending_name=temporary_name
+                    )
+                os.fsync(parent_fd)
+                return True
+            try:
+                final_bytes = self._read_bounded_descriptor(final_fd, len(data) + 1)
+            finally:
+                os.close(final_fd)
+            if final_bytes != data:
+                _unsafe_path(CacheReason.PATH_RACE)
+            os.unlink(temporary_name, dir_fd=parent_fd)
+            os.fsync(parent_fd)
+            return True
 
     def create_stream_durable_exclusive(
         self, locator: Union[str, Path], stream: BinaryIO
@@ -902,9 +1055,62 @@ class ManagedFileOps:
                     _unsafe_path(CacheReason.PATH_RACE)
         if file_stat is None:
             raise FileNotFoundError(f"Blob not found: {locator}")
-        if not stat.S_ISREG(file_stat.st_mode):
+        if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
             _unsafe_path(CacheReason.PATH_RACE)
         return file_stat.st_dev, file_stat.st_ino
+
+    def assert_file_identity(
+        self, locator: Union[str, Path], expected: tuple[int, int]
+    ) -> None:
+        """Prove a managed authority filename still names one verified inode."""
+        if self.file_identity(locator) != expected:
+            _unsafe_path(CacheReason.PATH_RACE)
+
+    def retain_lock_identity(self, locator: Union[str, Path]) -> tuple[int, int]:
+        """Bind one managed lock name to the first verified inode it may use.
+
+        Lock names are control-plane authority.  Once a store has accepted one,
+        accepting a replacement inode would partition later participants from
+        work already in flight.  The bounded callers use fixed lock stripes;
+        entries are released with the managed root descriptor at close.
+        """
+        prepared = self._prepare_locator(locator, operation="retain_lock_identity")
+        parts = self._relative_parts(prepared)
+        identity = self.file_identity(prepared)
+        with self._lock:
+            expected = self._lock_identities.setdefault(parts, identity)
+        if expected != identity:
+            _unsafe_path(CacheReason.PATH_RACE)
+        return expected
+
+    def assert_retained_lock_identity(
+        self, locator: Union[str, Path], expected: tuple[int, int]
+    ) -> None:
+        """Verify both the root and this store's retained lock authority."""
+        self.assert_root_identity()
+        current = self.retain_lock_identity(locator)
+        if current != expected:
+            _unsafe_path(CacheReason.PATH_RACE)
+
+    def open_verified_regular_file(self, locator: Union[str, Path]) -> BinaryIO:
+        """Open one single-linked regular authority file and retain its descriptor.
+
+        The returned descriptor is intentionally owned by the caller.  Its
+        identity is checked against the managed name before the caller can use
+        it as an advisory authority boundary, so a symlink, hard link, or name
+        replacement cannot silently split lock participants.
+        """
+        handle = self.open_read(locator)
+        try:
+            file_stat = os.fstat(handle.fileno())
+            if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
+                _unsafe_path(CacheReason.PATH_RACE)
+            identity = (file_stat.st_dev, file_stat.st_ino)
+            self.assert_file_identity(locator, identity)
+            return handle
+        except BaseException:
+            handle.close()
+            raise
 
     def get_size(self, locator: Union[str, Path]) -> int:
         """Return the size of a contained locator, or ``-1`` for a safe miss."""

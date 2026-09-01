@@ -781,7 +781,12 @@ class JsonBackend(MetadataBackend):
 
     def __init__(self, metadata_file: Path):
         self.metadata_file = Path(metadata_file)
-        self._lock = threading.Lock()
+        # The descriptor-anchored manifest repository composes this local guard
+        # with its retained cross-process authority lock and intentionally uses
+        # the public read boundary while refreshing the same JSON document.
+        # Reentrancy preserves that typed backend-error boundary without
+        # releasing either authority guard between refresh and read.
+        self._lock = threading.RLock()
         self._legacy_layout: Optional[str] = None
         self.legacy_compat_hits = 0
         self.legacy_compat_access_times: Dict[str, str] = {}

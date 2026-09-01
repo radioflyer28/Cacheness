@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 import os
 import threading
 from pathlib import Path
@@ -79,6 +80,27 @@ class _SingleHandlerRegistry:
 
 class _SimulatedProcessLoss(BaseException):
     """Model a crash that skips the ordinary-exception cleanup path."""
+
+
+def _exit_during_control_durability_step(
+    root: str, step: str, control_prefix: str
+) -> None:
+    """Stop a fresh process at one real durable-control boundary."""
+    store = BlobStore(root, backend="json")
+    file_ops = store.lifecycle.operation_repository.file_ops
+
+    if control_prefix:
+        store.put({"survivor": True}, key="control-process-survivor")
+
+    def stop(observed_step: str, locator: Path) -> None:
+        if observed_step == step and locator.name.startswith(control_prefix):
+            os._exit(23)
+
+    file_ops.after_control_durability_step = stop
+    if control_prefix:
+        store.clear()
+    else:
+        store.put({"interrupted": step}, key="interrupted-control-record")
 
 
 class _FailingSerializationHandler(_NativeJsonHandler):
@@ -890,5 +912,41 @@ def test_partial_clear_control_publish_never_installs_a_poisoned_final_record(
         assert reopened.get("survivor") == payload
         assert not list((root / "operations").glob("clear-target-*.json"))
         assert not list((root / "operations").glob("[0-9a-f]" * 32 + ".json"))
+    finally:
+        reopened.close()
+
+
+@pytest.mark.parametrize(
+    "step",
+    (
+        "control_temp_created",
+        "control_final_installed",
+        "control_first_directory_flush",
+        "control_temp_retired",
+        "control_second_directory_flush",
+    ),
+)
+@pytest.mark.parametrize("control_prefix", ("", "clear-target-"))
+def test_process_loss_at_control_publish_boundaries_leaves_no_operation_residue(
+    tmp_path: Path, step: str, control_prefix: str
+) -> None:
+    """Native control publication recovers operation and clear-sidecar crashes."""
+    label = "operation" if not control_prefix else "clear-sidecar"
+    root = tmp_path / f"control-process-loss-{label}-{step}"
+    context = multiprocessing.get_context("spawn")
+    worker = context.Process(
+        target=_exit_during_control_durability_step,
+        args=(str(root), step, control_prefix),
+    )
+    worker.start()
+    worker.join(timeout=15)
+    assert worker.exitcode == 23
+
+    reopened = BlobStore(root, backend="json")
+    try:
+        operations = root / "operations"
+        assert not list(operations.glob("*.tmp"))
+        assert not list(operations.glob("[0-9a-f]" * 32 + ".json"))
+        assert not list(operations.glob("clear-target-*.json"))
     finally:
         reopened.close()

@@ -712,13 +712,13 @@ def test_evidence_transition_lock_files_are_fixed_bounded_stripes(tmp_path: Path
 
 
 @pytest.mark.parametrize("same_stripe", (True, False))
-def test_clear_operation_lease_avoids_nested_same_stripe_and_opposite_order_deadlocks(
+def test_operation_leases_complete_after_releasing_parent_before_child(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, same_stripe: bool
 ) -> None:
-    """An outer clear lease prevents same-stripe and A/B child lock cycles."""
+    """Same/opposite stripes complete when child work never nests a parent lease."""
     store = BlobStore(tmp_path / "operation-scoped-clear-lease", backend="json")
     repository = store.lifecycle.operation_repository
-    original_lock = operation_repository_module.interprocess_file_lock
+    original_lock = operation_repository_module.interprocess_open_file_lock
     lock_calls: list[str] = []
 
     @contextmanager
@@ -732,11 +732,13 @@ def test_clear_operation_lease_avoids_nested_same_stripe_and_opposite_order_dead
             return 0
         return 0 if identity.endswith("a" * 32) else 1
 
-    # Force an outer A→child B / outer B→child A topology. On one stripe it
-    # catches self-deadlock through a second descriptor; on two stripes it
-    # catches the classic opposite-order cycle.
+    # Force an A→B / B→A schedule.  Each parent lease is released before its
+    # child begins, so even one physical stripe cannot self-deadlock and two
+    # stripes cannot form an opposite-order cycle.
     monkeypatch.setattr(operation_repository_module, "lock_stripe_index", forced_stripe)
-    monkeypatch.setattr(operation_repository_module, "interprocess_file_lock", count_file_locks)
+    monkeypatch.setattr(
+        operation_repository_module, "interprocess_open_file_lock", count_file_locks
+    )
     first_entered = Event()
     release_first = Event()
     errors: list[BaseException] = []
@@ -744,10 +746,11 @@ def test_clear_operation_lease_avoids_nested_same_stripe_and_opposite_order_dead
     def run(operation_id: str, child_operation_id: str, entered: Event) -> None:
         try:
             with repository.operation_transition(operation_id):
-                with repository.operation_transition(child_operation_id):
-                    entered.set()
-                    if operation_id == "a" * 32:
-                        assert release_first.wait(timeout=5)
+                entered.set()
+                if operation_id == "a" * 32:
+                    assert release_first.wait(timeout=5)
+            with repository.operation_transition(child_operation_id):
+                pass
         except BaseException as exc:  # pragma: no cover - surfaced below.
             errors.append(exc)
 
@@ -771,10 +774,29 @@ def test_clear_operation_lease_avoids_nested_same_stripe_and_opposite_order_dead
         assert not second.is_alive()
         assert second_entered.is_set()
         assert errors == []
-        # One outer lease each; neither nested child operation opens a file lock.
-        assert lock_calls == ["conditional_evidence", "conditional_evidence"]
+        # Each distinct record takes its own exact advisory authority lock.
+        assert lock_calls == ["conditional_evidence"] * 4
     finally:
         release_first.set()
+        store.close()
+
+
+def test_operation_lease_reentrancy_is_exact_and_rejects_unordered_child(
+    tmp_path: Path,
+) -> None:
+    """Only the same operation record may reuse an already-held authority lease."""
+    store = BlobStore(tmp_path / "exact-operation-reentrancy", backend="json")
+    repository = store.lifecycle.operation_repository
+    parent = "a" * 32
+    child = "b" * 32
+    try:
+        with repository.operation_transition(parent):
+            with repository.operation_transition(parent):
+                pass
+            with pytest.raises(CacheBlobLifecycleConflictError, match="releasing the parent"):
+                with repository.operation_transition(child):
+                    pass
+    finally:
         store.close()
 
 

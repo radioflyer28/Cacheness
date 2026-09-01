@@ -6,10 +6,11 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
+import os
 from heapq import nsmallest
 from pathlib import Path
 from threading import RLock, local
-from typing import Protocol
+from typing import BinaryIO, Protocol
 
 from cacheness.config import LifecycleLimits
 from cacheness.error_handling import (
@@ -20,7 +21,7 @@ from cacheness.error_handling import (
     CacheUnsafePathError,
 )
 
-from .coordination import interprocess_file_lock, lock_stripe_index
+from .coordination import interprocess_open_file_lock, lock_stripe_index
 from .manifest import MAX_MANIFEST_BYTES
 from .operation_record import (
     MAX_CLEAR_TARGET_REFERENCE_CHUNKS,
@@ -124,6 +125,17 @@ class FileOperationRecordRepository:
         self.file_ops = file_ops
         # Retain the one caller-owned policy object; no field copies are used.
         self.lifecycle_limits = lifecycle_limits
+        self._lock_handle_guard = RLock()
+        self._lock_handles: dict[str, tuple[Path, BinaryIO, tuple[int, int]]] = {}
+
+    def close(self) -> None:
+        """Release retained bounded evidence-lock descriptors on store close."""
+        with self._lock_handle_guard:
+            handles = tuple(self._lock_handles.values())
+            self._lock_handles.clear()
+        for _locator, handle, _identity in handles:
+            handle.close()
+
     def _conditional_lock_for(self, operation_id: str) -> RLock:
         """Return a shared bounded in-process stripe for one evidence ID.
 
@@ -148,20 +160,15 @@ class FileOperationRecordRepository:
             _OPERATION_LEASES.leases = leases
         return leases
 
-    def _has_held_operation_lease(self) -> bool:
-        """Return whether this root already has an outer operation lease.
+    def _has_held_operation_lease(self, operation_id: str) -> bool:
+        """Return whether this exact operation already owns its lease.
 
-        Clear recovery invokes individual delete operations under its own
-        operation lease. Those child operation IDs must not open a second
-        independently striped OS lock: a same-stripe child self-deadlocks and
-        A→B/B→A children form a cross-clear cycle. The outer lease is already
-        the root-scoped ordering authority for this calling thread.
+        Reentrancy is safe only for the same record and the same retained
+        authority lock.  A parent clear record is not an authority lease for a
+        child delete record: treating it as one loses the child's cross-process
+        exact-CAS exclusion.
         """
-        root_identity = self.file_ops.root_identity
-        return any(
-            leased_root == root_identity and depth > 0
-            for (leased_root, _operation_id), depth in self._held_operation_leases().items()
-        )
+        return self._held_operation_leases().get(self._operation_lease_key(operation_id), 0) > 0
 
     def _conditional_lock_locator(self, operation_id: str) -> Path:
         """Return one of a fixed number of durable evidence-CAS lock stripes."""
@@ -173,6 +180,76 @@ class FileOperationRecordRepository:
             allow_missing_leaf=True,
         )
 
+    def _retained_conditional_lock(
+        self, lock_identity: str
+    ) -> tuple[Path, BinaryIO, tuple[int, int]]:
+        """Return one retained descriptor for a fixed bounded lock stripe."""
+        return self._retained_lock(
+            lock_identity, self._conditional_lock_locator(lock_identity)
+        )
+
+    def _retained_lock(
+        self, lock_identity: str, locator: Path
+    ) -> tuple[Path, BinaryIO, tuple[int, int]]:
+        """Create and retain one single-linked managed control-lock descriptor."""
+        # Operation IDs intentionally share a fixed number of lock stripes.
+        # Cache by the contained stripe pathname, not the caller's identity, so
+        # a long-lived store retains only the bounded stripe set.
+        cache_identity = str(locator.relative_to(self.file_ops.root))
+        with self._lock_handle_guard:
+            cached = self._lock_handles.get(cache_identity)
+            if cached is not None:
+                return cached
+            try:
+                self.file_ops.create_bytes_durable_exclusive(locator, b"lock\n")
+            except FileExistsError:
+                pass
+            expected = self.file_ops.retain_lock_identity(locator)
+            handle = self.file_ops.open_verified_regular_file(locator)
+            try:
+                observed = (os.fstat(handle.fileno()).st_dev, os.fstat(handle.fileno()).st_ino)
+                if observed != expected:
+                    raise CacheBlobLifecycleConflictError(
+                        "Lifecycle evidence lock changed during descriptor retention",
+                        context={"operation": "conditional_evidence"},
+                    )
+            except BaseException:
+                handle.close()
+                raise
+            cached = (locator, handle, expected)
+            self._lock_handles[cache_identity] = cached
+            return cached
+
+    def _clear_resume_lock_locator(self) -> Path:
+        """Return the one store-wide clear-resume lease, distinct from CAS stripes."""
+        return resolve_managed_locator(
+            self.file_ops.root,
+            Path("operations") / ".clear-resume.lock",
+            operation="clear_resume_lock",
+            allow_missing_leaf=True,
+        )
+
+    @contextmanager
+    def clear_operation_transition(self, operation_id: str) -> Iterator[None]:
+        """Serialize clear continuation without inheriting child record authority.
+
+        Clear is the one aggregate operation allowed to use a store-wide lease.
+        It guards resume/recovery of the clear control flow only; each target's
+        delete/checkpoint still takes its own exact evidence lease.
+        """
+        del operation_id
+        lock_identity = "clear-resume"
+        with self._conditional_lock_for(lock_identity):
+            locator, handle, expected_identity = self._retained_lock(
+                lock_identity, self._clear_resume_lock_locator()
+            )
+            self.file_ops.assert_retained_lock_identity(locator, expected_identity)
+            with interprocess_open_file_lock(
+                handle, exclusive=True, operation="clear_resume"
+            ):
+                self.file_ops.assert_retained_lock_identity(locator, expected_identity)
+                yield
+
     @contextmanager
     def _conditional_transition(
         self, transition_id: str, *, operation_id: str | None = None
@@ -183,25 +260,28 @@ class FileOperationRecordRepository:
         never spans handler serialization, manifest publication, or unrelated
         operation IDs, preserving the phase's no-global-normal-lock contract.
         """
-        if operation_id is not None and self._has_held_operation_lease():
-            # Clear recovery may invoke a child delete operation while it owns
-            # the parent clear lease. Any child stripe would be independently
-            # hashed, so acquiring it can self-deadlock or form an A/B cycle.
-            # The outer root/operation lease is the ordering authority here.
+        if operation_id is not None and self._has_held_operation_lease(operation_id):
+            # This is true reentrancy for the exact record whose advisory lock
+            # is already held.  No other operation ID can bypass the file lock.
             yield
             return
 
         lock_identity = (
             f"operation:{operation_id}" if operation_id is not None else transition_id
         )
-        lock_locator = self._conditional_lock_locator(lock_identity)
         with self._conditional_lock_for(lock_identity):
-            with interprocess_file_lock(
-                self.file_ops,
-                lock_locator,
+            lock_locator, handle, expected_identity = self._retained_conditional_lock(
+                lock_identity
+            )
+            self.file_ops.assert_retained_lock_identity(lock_locator, expected_identity)
+            with interprocess_open_file_lock(
+                handle,
                 exclusive=True,
                 operation="conditional_evidence",
             ):
+                self.file_ops.assert_retained_lock_identity(
+                    lock_locator, expected_identity
+                )
                 yield
 
     @contextmanager
@@ -216,6 +296,15 @@ class FileOperationRecordRepository:
             finally:
                 leases[key] -= 1
             return
+
+        if any(
+            leased_root == self.file_ops.root_identity and depth > 0
+            for (leased_root, _leased_operation_id), depth in leases.items()
+        ):
+            raise CacheBlobLifecycleConflictError(
+                "Nested lifecycle operation leases require releasing the parent first",
+                context={"operation_id": operation_id, "operation": "operation_transition"},
+            )
 
         with self._conditional_transition(
             f"operation:{operation_id}", operation_id=operation_id
@@ -931,6 +1020,131 @@ class FileOperationRecordRepository:
         return self._read_bounded(
             self.locator_for(operation_id), operation="get_raw"
         )
+
+    @staticmethod
+    def _is_hex_identifier(value: str) -> bool:
+        """Return whether ``value`` is the fixed opaque evidence identifier."""
+        return len(value) == 32 and all(character in "0123456789abcdef" for character in value)
+
+    def _recoverable_pending_final(self, name: str) -> tuple[Path, str | None] | None:
+        """Resolve one strictly named lifecycle control final without guessing.
+
+        Recovery only promotes candidates for the finite set of direct control
+        records this repository creates.  Their payloads remain opaque here;
+        digest-bound provenance and later authenticated lifecycle parsing supply
+        the separate integrity boundaries.
+        """
+        if not name.endswith(".json"):
+            return None
+        base = name[:-5]
+        if self._is_hex_identifier(base):
+            return self.locator_for(base), base
+        if base.startswith("reconcile-action-"):
+            operation_id = base.removeprefix("reconcile-action-")
+            if self._is_hex_identifier(operation_id):
+                return self.reconciliation_checkpoint_locator(operation_id), None
+            return None
+        for kind in ("page", "checkpoint"):
+            prefix = f"clear-target-{kind}-"
+            if base.startswith(prefix):
+                parts = base.removeprefix(prefix).split("-")
+                if len(parts) == 2 and all(self._is_hex_identifier(part) for part in parts):
+                    return (
+                        self._clear_target_locator(
+                            parts[0], parts[1], checkpoint=kind == "checkpoint"
+                        ),
+                        None,
+                    )
+                return None
+        prefix = "clear-target-reference-"
+        if not base.startswith(prefix):
+            return None
+        parts = base.removeprefix(prefix).split("-")
+        if len(parts) == 2 and all(self._is_hex_identifier(part) for part in parts):
+            return self._clear_target_reference_locator(parts[0], parts[1]), None
+        if (
+            len(parts) == 4
+            and all(self._is_hex_identifier(part) for part in parts[:2])
+            and parts[2] == "part"
+            and len(parts[3]) == 4
+            and all(character in "0123456789abcdef" for character in parts[3])
+        ):
+            chunk_index = int(parts[3], 16)
+            if chunk_index < MAX_CLEAR_TARGET_REFERENCE_CHUNKS:
+                return self._clear_target_reference_chunk_locator(
+                    parts[0], parts[1], chunk_index
+                ), None
+        return None
+
+    def recover_pending_operation_records(self) -> tuple[str, ...]:
+        """Promote digest-bound interrupted lifecycle control candidates.
+
+        A candidate name binds one exact final control name and SHA-256 of its
+        contents. Malformed names, oversized bytes, and digest mismatches remain
+        untouched for reconciliation reporting; no broad temporary-file sweep
+        is ever used as ownership evidence.
+        """
+        operations_directory = resolve_managed_locator(
+            self.file_ops.root,
+            "operations",
+            operation="recover_pending_operation_records",
+            allow_missing_leaf=True,
+        )
+        recovered: list[str] = []
+        try:
+            names = nsmallest(
+                self.lifecycle_limits.max_reconcile_actions,
+                (path.name for path in operations_directory.iterdir()),
+            )
+        except FileNotFoundError:
+            return ()
+        for name in names:
+            if not (name.startswith(".") and name.endswith(".tmp")):
+                continue
+            pending_parts = name[1:-4].rsplit(".pending.", 1)
+            if len(pending_parts) != 2:
+                continue
+            base, digest_and_token = pending_parts
+            resolved_final = self._recoverable_pending_final(base)
+            if resolved_final is None:
+                continue
+            final_locator, operation_id = resolved_final
+            digest_parts = digest_and_token.rsplit(".", 1)
+            if len(digest_parts) != 2:
+                continue
+            digest, token = digest_parts
+            if (
+                len(digest) != 64
+                or any(character not in "0123456789abcdef" for character in digest)
+                or len(token) != 32
+                or any(character not in "0123456789abcdef" for character in token)
+            ):
+                continue
+            pending = resolve_managed_locator(
+                self.file_ops.root,
+                Path("operations") / name,
+                operation="recover_pending_operation_record",
+            )
+            try:
+                raw = self.file_ops.read_bytes_bounded(
+                    pending, max_bytes=self.lifecycle_limits.max_operation_record_bytes
+                )
+            except (FileNotFoundError, ValueError):
+                continue
+            if hashlib.sha256(raw).hexdigest() != digest:
+                continue
+            try:
+                promoted = self.file_ops.promote_durable_pending_control(
+                    final_locator, raw, pending_name=name
+                )
+            except OSError as exc:
+                raise CacheBlobBackendError(
+                    "Interrupted lifecycle control evidence could not be recovered",
+                    context={"operation_id": operation_id or "sidecar", "operation": "recover_pending"},
+                ) from exc
+            if promoted and operation_id is not None:
+                recovered.append(operation_id)
+        return tuple(recovered)
 
     def _require_exact_current(
         self, record: LifecycleOperationRecord, expected_raw: bytes, *, operation: str
