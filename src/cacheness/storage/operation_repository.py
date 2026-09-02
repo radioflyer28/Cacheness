@@ -894,10 +894,11 @@ class FileOperationRecordRepository:
                 continue
             name, digest = event
             last_name = name
-            try:
-                current = read_current(name)
-            except (CacheBlobBackendError, CacheManifestIntegrityError):
-                current = None
+            # A missing record or digest mismatch makes this immutable
+            # scheduling event stale.  A typed bounded-read, decode, or
+            # integrity failure is not absence and must never be silently
+            # converted into a clean-looking terminal page.
+            current = read_current(name)
             if current is not None and hashlib.sha256(current).hexdigest() == digest:
                 entries.append((name, current))
                 # ``position`` already includes all stale events inspected

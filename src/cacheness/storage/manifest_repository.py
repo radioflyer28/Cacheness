@@ -886,10 +886,12 @@ class _MetadataManifestRepository:
                     event_key, event_digest = event
                     last_key = event_key
                     entry = entries.get(event_key)
-                    try:
-                        current_raw = self._raw_from_entry(entry)
-                    except (TypeError, ValueError, CacheBlobMigrationRequiredError):
-                        current_raw = None
+                    # ``None`` is a proven absent/stale scheduling member.
+                    # A malformed current authority projection is different:
+                    # treating it as a miss would let reconciliation report a
+                    # false-clean terminal inventory.  Let the typed failure
+                    # cross the repository boundary and fail closed instead.
+                    current_raw = self._raw_from_entry(entry)
                     if (
                         current_raw is not None
                         and hashlib.sha256(current_raw).hexdigest() == event_digest

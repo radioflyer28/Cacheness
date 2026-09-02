@@ -18,6 +18,7 @@ from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cacheness.config import CacheConfig, LifecycleLimits
 from cacheness.metadata import InMemoryBackend
 from cacheness.error_handling import (
+    CacheBlobBackendError,
     CacheBlobIntegrityError,
     CacheStorageError,
     CacheBlobLifecycleConflictError,
@@ -309,6 +310,61 @@ def test_operation_repository_uses_configured_bounded_stable_pages(
         assert [operation_id for operation_id, _ in second_page.entries] == ["b" * 32]
         assert second_page.next_cursor is None
         assert len(calls) == 8
+    finally:
+        store.close()
+
+
+def test_reconcile_fails_closed_for_a_malformed_current_manifest_projection(
+    tmp_path: Path,
+) -> None:
+    """An indexed malformed current authority cannot become a stale inventory gap."""
+    root = tmp_path / "malformed-current-manifest"
+    backend = InMemoryBackend()
+    store = BlobStore(root, backend=backend)
+    try:
+        store.put({"value": "current"}, key="current")
+        backend._entries["current"]["metadata"]["canonical_manifest_v1"] = "not-base64"
+
+        with pytest.raises(CacheBlobBackendError, match="list_page failed"):
+            store.reconcile(now=datetime(2026, 8, 31, tzinfo=timezone.utc))
+    finally:
+        store.close()
+
+
+def test_reconcile_fails_closed_for_a_typed_current_sidecar_read_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sidecar read fault is not evidence absence or a terminal clean report."""
+    from cacheness.storage.reconciliation import _ActionCheckpoint
+
+    root = tmp_path / "sidecar-read-failure"
+    store = BlobStore(root, backend="json")
+    try:
+        repository = store.lifecycle.operation_repository
+        operation_id = "a" * 32
+        checkpoint = _ActionCheckpoint.new(
+            operation_id,
+            "a" * 64,
+            ReconciliationAction.RETIRE_EVIDENCE,
+            "completed",
+            store._manifest_key(initialize_new_store=True),
+        )
+        repository.create_reconciliation_checkpoint_exclusive(
+            operation_id,
+            checkpoint.canonical_bytes(lifecycle_limits=store.lifecycle_limits),
+        )
+        original_read = repository.get_reconciliation_checkpoint_raw
+
+        def fail_exact_read(candidate: str) -> bytes | None:
+            if candidate == operation_id:
+                raise CacheBlobBackendError("injected sidecar read failure")
+            return original_read(candidate)
+
+        monkeypatch.setattr(
+            repository, "get_reconciliation_checkpoint_raw", fail_exact_read
+        )
+        with pytest.raises(CacheBlobBackendError, match="injected sidecar read failure"):
+            store.reconcile(now=datetime(2026, 8, 31, tzinfo=timezone.utc))
     finally:
         store.close()
 
