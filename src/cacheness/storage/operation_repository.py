@@ -669,6 +669,124 @@ class FileOperationRecordRepository:
             )
         return state
 
+    def _read_present_inventory_head(self, family: str) -> dict[str, int] | None:
+        """Return a validated present head, keeping a missing head distinct."""
+        try:
+            raw = self.file_ops.read_bytes_bounded(
+                self._inventory_head_locator(family),
+                max_bytes=_INVENTORY_HEAD_MAX_BYTES,
+            )
+        except FileNotFoundError:
+            return None
+        return self._decode_inventory_head(family, raw)
+
+    def _has_current_inventory_initialization(self) -> bool:
+        """Return whether a fresh v2 store durably entered family-head setup."""
+        try:
+            raw = self.file_ops.read_bytes_bounded(
+                self._inventory_initialization_locator(),
+                max_bytes=len(_INVENTORY_INITIALIZATION_BYTES),
+            )
+        except FileNotFoundError:
+            return False
+        except ValueError as exc:
+            raise CacheBlobBackendError(
+                "Lifecycle inventory initialization marker exceeds its bound",
+                context={"operation": "inventory"},
+            ) from exc
+        if raw != _INVENTORY_INITIALIZATION_BYTES:
+            raise CacheBlobBackendError(
+                "Lifecycle inventory initialization marker is invalid",
+                context={"operation": "inventory"},
+            )
+        return True
+
+    def _has_current_v2_sibling_head(self, family: str) -> bool:
+        """Recognize an older current-v2 store with lazily absent siblings.
+
+        Earlier v2 releases wrote family heads lazily.  A validated sibling
+        head is durable evidence that this store is already indexed, so an
+        absent family cannot be proven "legacy" by scanning the shared
+        operations namespace.  The head remains non-authoritative scheduling
+        metadata; exact current bytes are still revalidated on every page.
+        """
+        for sibling in _INVENTORY_FAMILIES:
+            if sibling != family and self._read_present_inventory_head(sibling) is not None:
+                return True
+        return False
+
+    def initialize_new_store(self) -> None:
+        """Durably establish all empty v2 family heads before first evidence.
+
+        This is called only after a fresh BlobStore signing key is safely
+        acknowledged.  The marker is written first so a crash at any later
+        head write remains a current-v2 initialization on reopen rather than a
+        false legacy migration requirement.  Existing heads are never
+        overwritten, preserving exact current stores and old-head recovery.
+        """
+        with self._conditional_transition("inventory:initialize"):
+            marker = self._inventory_initialization_locator()
+            if not self._has_current_inventory_initialization():
+                try:
+                    self.file_ops.create_bytes_durable_exclusive(
+                        marker, _INVENTORY_INITIALIZATION_BYTES
+                    )
+                except FileExistsError:
+                    if not self._has_current_inventory_initialization():
+                        raise CacheBlobBackendError(
+                            "Lifecycle inventory initialization marker changed during creation",
+                            context={"operation": "inventory"},
+                        )
+            for family in _INVENTORY_FAMILIES:
+                if self._read_present_inventory_head(family) is not None:
+                    continue
+                state = self._empty_inventory_head()
+                encoded = json.dumps(
+                    state, sort_keys=True, separators=(",", ":")
+                ).encode("utf-8")
+                try:
+                    self.file_ops.create_bytes_durable_exclusive(
+                        self._inventory_head_locator(family), encoded
+                    )
+                except FileExistsError:
+                    if self._read_present_inventory_head(family) is None:
+                        raise CacheBlobBackendError(
+                            "Lifecycle inventory head disappeared during initialization",
+                            context={"operation": "inventory", "family": family},
+                        )
+
+    def _read_inventory(self, family: str) -> dict[str, int]:
+        """Read one bounded v2 sequence head, never the event history."""
+        state = self._read_present_inventory_head(family)
+        if state is not None:
+            return state
+        if (
+            self._has_current_inventory_initialization()
+            or self._has_current_v2_sibling_head(family)
+        ):
+            return self._empty_inventory_head()
+        # A v1 history cannot be safely reinterpreted as a v2 sparse sequence,
+        # and a raw legacy record must never look like no debt.  Only a store
+        # with neither the fresh marker nor another validated v2 head reaches
+        # this bounded compatibility proof.
+        try:
+            legacy_size = self.file_ops.get_size(self._legacy_inventory_locator(family))
+        except FileNotFoundError:
+            legacy_size = -1
+        if legacy_size < 0:
+            if self._has_preindex_evidence(family):
+                if family == "pending":
+                    return self._bootstrap_pending_inventory()
+                raise CacheBlobMigrationRequiredError(
+                    "Lifecycle evidence predates its durable inventory",
+                    context={"family": family, "operation": "inventory_migration"},
+                )
+            return self._empty_inventory_head()
+        raise CacheBlobMigrationRequiredError(
+            "Lifecycle inventory v1 requires an explicit migration",
+            context={"family": family, "operation": "inventory_migration"},
+        )
+
     def _bootstrap_pending_inventory(self) -> dict[str, int]:
         """Safely index one bounded legacy pending namespace exactly once.
 
@@ -836,7 +954,12 @@ class FileOperationRecordRepository:
                     pass
             elif first_remaining is None:
                 first_remaining = sequence
-        if state["first_live_sequence"] == start:
+        # The compacting cursor can wrap before a previously established live
+        # floor.  Advancing only when ``start == floor`` strands that floor
+        # after it is retired in a later window.  Any window that covers the
+        # floor has exactly revalidated the contiguous subrange beginning
+        # there, so it can safely move the monotonic lower bound forward.
+        if start <= state["first_live_sequence"] < stop:
             if first_remaining is not None:
                 state["first_live_sequence"] = first_remaining
             else:
@@ -938,7 +1061,19 @@ class FileOperationRecordRepository:
         inspected = 0
         entries: list[tuple[str, bytes | None]] = []
         entry_next_cursors: list[object] = []
-        last_name = cursor.operation_id if cursor is not None and hasattr(cursor, "operation_id") else (cursor.name if cursor is not None else "~")
+        if cursor is not None and hasattr(cursor, "operation_id"):
+            last_name = cursor.operation_id
+        elif cursor is not None:
+            last_name = cursor.name
+        elif cursor_type is OperationCursor:
+            # Primary cursors validate their compatibility projection as a
+            # canonical operation ID.  An empty sparse window can be
+            # nonterminal without having inspected a real name, so use the
+            # valid before-first projection rather than the sidecar/pending
+            # ``~`` scheduling sentinel.
+            last_name = OperationCursor.before_first(high_water).operation_id
+        else:
+            last_name = "~"
         while (
             position <= high_water
             and inspected < self.lifecycle_limits.max_inventory_items
