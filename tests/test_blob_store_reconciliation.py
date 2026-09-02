@@ -1150,6 +1150,130 @@ def test_evidence_transition_lock_files_are_fixed_bounded_stripes(tmp_path: Path
         store.close()
 
 
+def test_checkpoint_scheduling_never_nests_a_record_cas_lease(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Prospective scheduling runs before, rather than inside, an exact CAS lease.
+
+    Record and inventory transitions use a bounded shared stripe set.  Holding
+    a record lease while acquiring inventory stripes can make two otherwise
+    unrelated writers wait in inverse stripe order.  A failed exact CAS may
+    leave a stale digest-bound inventory member, which is safe because page
+    readers revalidate it against current control bytes.
+    """
+    root = tmp_path / "checkpoint-scheduling-order"
+    store = BlobStore(root, backend="json")
+    repository = store.lifecycle.operation_repository
+    key = store._manifest_key(initialize_new_store=True)
+    active_operation_ids: set[str] = set()
+    original_transition = repository._conditional_transition
+    original_append = repository._append_inventory_event
+
+    @contextmanager
+    def tracked_transition(
+        transition_id: str, *, operation_id: str | None = None
+    ):
+        with original_transition(transition_id, operation_id=operation_id):
+            if operation_id is not None:
+                active_operation_ids.add(operation_id)
+            try:
+                yield
+            finally:
+                if operation_id is not None:
+                    active_operation_ids.remove(operation_id)
+
+    def assert_unleased_append(family: str, name: str, raw: bytes) -> None:
+        assert not active_operation_ids
+        original_append(family, name, raw)
+
+    monkeypatch.setattr(repository, "_conditional_transition", tracked_transition)
+    monkeypatch.setattr(repository, "_append_inventory_event", assert_unleased_append)
+    try:
+        operation_id = "a" * 32
+        record = _reconciliation_record(store, root, key, operation_id)
+        initial = record.canonical_bytes(lifecycle_limits=store.lifecycle_limits)
+        updated_record = record.at_checkpoint(OperationCheckpoint.CANDIDATE_PUBLISHED)
+        updated = updated_record.canonical_bytes(lifecycle_limits=store.lifecycle_limits)
+        repository.create_exclusive(record, initial)
+        repository.checkpoint_if_exact(
+            updated_record, expected_raw=initial, raw_record=updated
+        )
+
+        sidecar_id = "b" * 32
+        sidecar_initial = b'{"checkpoint":"initial"}'
+        sidecar_updated = b'{"checkpoint":"updated"}'
+        repository.create_reconciliation_checkpoint_exclusive(
+            sidecar_id, sidecar_initial
+        )
+        repository.checkpoint_reconciliation_if_exact(
+            sidecar_id,
+            expected_raw=sidecar_initial,
+            raw_record=sidecar_updated,
+        )
+    finally:
+        store.close()
+
+
+def test_clear_resume_lease_cannot_alias_inventory_transition_stripes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A live clear and append complete when their physical lock names differ.
+
+    Force the clear-resume identity and primary-inventory identity onto the
+    same stripe number.  They still need separate in-process namespaces
+    because their retained file locks are distinct and a clear can acquire
+    inventory work while another writer holds initialization authority.
+    """
+    store = BlobStore(tmp_path / "clear-resume-lock-namespace", backend="json")
+    repository = store.lifecycle.operation_repository
+    inventory_initialized = Event()
+    attempt_primary = Event()
+    inventory_completed = Event()
+    clear_completed = Event()
+    errors: list[BaseException] = []
+
+    def forced_stripe(_root: Path, identity: str) -> int:
+        return 1 if identity == "inventory:initialize" else 0
+
+    monkeypatch.setattr(operation_repository_module, "lock_stripe_index", forced_stripe)
+
+    def append_inventory() -> None:
+        try:
+            with repository._conditional_transition("inventory:initialize"):
+                inventory_initialized.set()
+                assert attempt_primary.wait(timeout=5)
+                with repository._conditional_transition("inventory:primary"):
+                    inventory_completed.set()
+        except BaseException as exc:  # pragma: no cover - surfaced below.
+            errors.append(exc)
+
+    def clear_resume() -> None:
+        try:
+            with repository.clear_operation_transition("clear"):
+                assert inventory_initialized.wait(timeout=5)
+                attempt_primary.set()
+                with repository._conditional_transition("inventory:initialize"):
+                    clear_completed.set()
+        except BaseException as exc:  # pragma: no cover - surfaced below.
+            errors.append(exc)
+
+    inventory_thread = Thread(target=append_inventory, daemon=True)
+    clear_thread = Thread(target=clear_resume, daemon=True)
+    try:
+        inventory_thread.start()
+        assert inventory_initialized.wait(timeout=5)
+        clear_thread.start()
+        inventory_thread.join(timeout=5)
+        clear_thread.join(timeout=5)
+        assert not inventory_thread.is_alive()
+        assert not clear_thread.is_alive()
+        assert inventory_completed.is_set()
+        assert clear_completed.is_set()
+        assert errors == []
+    finally:
+        store.close()
+
+
 @pytest.mark.parametrize("same_stripe", (True, False))
 def test_operation_leases_complete_after_releasing_parent_before_child(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, same_stripe: bool

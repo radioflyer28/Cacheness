@@ -34,6 +34,11 @@ from .path_security import ManagedFileOps, resolve_managed_locator, validate_blo
 
 
 _CONDITIONAL_LOCK_STRIPES = tuple(RLock() for _ in range(64))
+# Clear continuation has its own durable ``.clear-resume.lock`` namespace.  Its
+# in-process locks must be separate too: sharing the ordinary evidence-stripe
+# tuple lets an unrelated inventory stripe alias the clear lease and form a
+# lock-order cycle while clear is deleting its finite snapshot.
+_CLEAR_RESUME_LOCK_STRIPES = tuple(RLock() for _ in range(64))
 _OPERATION_LEASES = local()
 _CLEAR_OPERATION_LEASES = local()
 # Scheduling metadata is control authority: a head can truncate a snapshot
@@ -344,6 +349,17 @@ class FileOperationRecordRepository:
         stripe = lock_stripe_index(self.file_ops.root, operation_id)
         return _CONDITIONAL_LOCK_STRIPES[stripe]
 
+    def _clear_resume_lock_for(self) -> RLock:
+        """Return the bounded in-process companion for the clear-only lease.
+
+        This lock deliberately does not share the ordinary conditional stripe
+        array.  The two arrays protect distinct durable lock locators, so
+        aliasing them would invent a false authority dependency and permit a
+        clear-vs-append lock-order cycle.
+        """
+        stripe = lock_stripe_index(self.file_ops.root, "clear-resume")
+        return _CLEAR_RESUME_LOCK_STRIPES[stripe]
+
     def _operation_lease_key(self, operation_id: str) -> tuple[tuple[int, int], str]:
         """Identify one descriptor-root-scoped lease in this calling thread."""
         return self.file_ops.root_identity, operation_id
@@ -460,7 +476,7 @@ class FileOperationRecordRepository:
             finally:
                 leases[lease_key] -= 1
             return
-        with self._conditional_lock_for(lock_identity):
+        with self._clear_resume_lock_for():
             locator, handle, expected_identity = self._retained_lock(
                 lock_identity, self._clear_resume_lock_locator()
             )
@@ -2079,6 +2095,14 @@ class FileOperationRecordRepository:
         if not isinstance(expected_raw, bytes) or not isinstance(raw_record, bytes):
             raise TypeError("Reconciliation checkpoints require exact bytes")
         try:
+            # Schedule the prospective replacement before taking the exact
+            # record-CAS lease.  If another writer wins before the following
+            # compare, the inventory member remains a digest-bound stale slot
+            # and is therefore non-authoritative.  Keeping scheduling outside
+            # the per-record lease is essential: inventory publication takes
+            # its own bounded striped leases, and nesting independently striped
+            # leases can form a cross-thread lock-order cycle.
+            self._append_inventory_event("sidecar", operation_id, raw_record)
             with self._conditional_transition(
                 f"reconcile:{operation_id}", operation_id=operation_id
             ):
@@ -2091,7 +2115,6 @@ class FileOperationRecordRepository:
                             "operation": "checkpoint_reconcile",
                         },
                     )
-                self._append_inventory_event("sidecar", operation_id, raw_record)
                 self.file_ops.write_bytes_durable(
                     self.reconciliation_checkpoint_locator(operation_id), raw_record
                 )
@@ -2871,14 +2894,20 @@ class FileOperationRecordRepository:
         if not isinstance(expected_raw, bytes) or not isinstance(raw_record, bytes):
             raise TypeError("Operation evidence transitions require exact bytes")
         try:
+            # A lifecycle operation's per-record CAS lease and the inventory
+            # publisher use different bounded stripe namespaces.  Publish this
+            # candidate member before taking the exact record lease, so two
+            # unrelated operations cannot hold colliding record stripes while
+            # waiting in opposite order for the shared inventory stripes.  A
+            # contender that loses the later exact compare leaves only a
+            # digest-bound stale member; inventory pages revalidate it against
+            # current bytes and never treat it as authority.
+            self._append_inventory_event("primary", record.operation_id, raw_record)
             with self._conditional_transition(
                 f"operation:{record.operation_id}", operation_id=record.operation_id
             ):
                 self._require_exact_current(
                     record, expected_raw, operation="checkpoint_if_exact"
-                )
-                self._append_inventory_event(
-                    "primary", record.operation_id, raw_record
                 )
                 self.file_ops.write_bytes_durable(
                     self.locator_for(record.operation_id), raw_record
