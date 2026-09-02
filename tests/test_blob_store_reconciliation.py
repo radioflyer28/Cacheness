@@ -137,6 +137,7 @@ def _reconciliation_record(
 
 def _race_exact_evidence_transition_in_process(
     root: str,
+    initialization_key: bytes,
     initial: bytes,
     updated: bytes,
     transition: str,
@@ -146,7 +147,11 @@ def _race_exact_evidence_transition_in_process(
 ) -> None:
     """Race a fresh managed root/repository without sharing interpreter locks."""
     file_ops = ManagedFileOps(root)
-    repository = FileOperationRecordRepository(file_ops, lifecycle_limits=LifecycleLimits())
+    repository = FileOperationRecordRepository(
+        file_ops,
+        lifecycle_limits=LifecycleLimits(),
+        initialization_key_provider=lambda: initialization_key,
+    )
     try:
         # Pass only canonical evidence across the process boundary.  The
         # immutable record intentionally contains a MappingProxyType topology,
@@ -1069,7 +1074,9 @@ def test_independent_processes_have_one_exact_evidence_transition_winner(
             OperationCheckpoint.CANDIDATE_PUBLISHED
         ).canonical_bytes(lifecycle_limits=store.lifecycle_limits)
         repository = FileOperationRecordRepository(
-            store.guarded_handler_io.file_ops, lifecycle_limits=store.lifecycle_limits
+            store.guarded_handler_io.file_ops,
+            lifecycle_limits=store.lifecycle_limits,
+            initialization_key_provider=store._initialize_inventory_provenance_key,
         )
         repository.create_exclusive(record, initial)
 
@@ -1081,6 +1088,7 @@ def test_independent_processes_have_one_exact_evidence_transition_winner(
                 target=_race_exact_evidence_transition_in_process,
                 args=(
                     str(root),
+                    key,
                     initial,
                     updated,
                     transition,
@@ -1560,12 +1568,12 @@ def test_pending_inventory_compaction_skips_a_lifetime_stale_prefix(
 
 
 @pytest.mark.parametrize("max_inventory_items", (1, 2))
-def test_successful_blob_lifecycle_retirement_never_leaves_sparse_primary_history(
+def test_successful_blob_lifecycle_retirement_converges_sparse_primary_history(
     tmp_path: Path,
     max_inventory_items: int,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Normal create/replace/delete traffic compacts faster than it appends."""
+    """Durable bounded maintenance converges completed primary history."""
     root = tmp_path / f"success-history-{max_inventory_items}"
     limits = replace(
         _small_lifecycle_limits(), max_inventory_items=max_inventory_items
@@ -1579,6 +1587,11 @@ def test_successful_blob_lifecycle_retirement_never_leaves_sparse_primary_histor
             assert store.delete("stable")
 
         repository = store.lifecycle.operation_repository
+        state = repository._read_inventory("primary")
+        maintenance_calls = 0
+        while not repository.compact_inventory_for_recovery():
+            maintenance_calls += 1
+            assert maintenance_calls < state["next_sequence"]
         state = repository._read_inventory("primary")
         assert state["first_live_sequence"] == state["next_sequence"]
         assert repository.list_page(page_size=1).entries == ()
@@ -1671,10 +1684,10 @@ def test_manifest_compaction_debt_recovers_after_post_authority_failures(
 
 @pytest.mark.parametrize("max_inventory_items", (1, 2))
 @pytest.mark.parametrize("family", ("primary", "sidecar", "pending"))
-def test_current_v2_lone_family_head_never_uses_shared_legacy_scan(
+def test_markerless_lone_v2_family_head_requires_explicit_migration(
     tmp_path: Path, family: str, max_inventory_items: int
 ) -> None:
-    """Older lazy v2 siblings remain empty despite unrelated operations names."""
+    """A lazy sibling head cannot prove one all-family compatibility decision."""
     root = tmp_path / f"lone-{family}-{max_inventory_items}"
     limits = replace(
         _small_lifecycle_limits(), max_inventory_items=max_inventory_items
@@ -1698,8 +1711,9 @@ def test_current_v2_lone_family_head_never_uses_shared_legacy_scan(
         current_locator = root / "operations" / name
     try:
         # Enter the fresh-store path once, then model a current-v2 store made
-        # by the lazy-head implementation that preceded the initialization
-        # marker.  The remaining validated head is sufficient provenance.
+        # by the lazy-head implementation that preceded signed all-family
+        # provenance.  Removing the marker means the remaining head is not
+        # sufficient evidence that absent sibling families were proven empty.
         store._manifest_key(initialize_new_store=True)
         repository._append_inventory_event(family, name, raw)
         current_locator.write_bytes(raw)
@@ -1713,22 +1727,8 @@ def test_current_v2_lone_family_head_never_uses_shared_legacy_scan(
     finally:
         store.close()
 
-    reopened = BlobStore(root, backend="json", config=config)
-    try:
-        # Startup recovery and public reconciliation both read all three
-        # families.  Neither may reinterpret unrelated names as a migration
-        # requirement merely because two current-v2 sibling heads are absent.
-        for inventory_family in ("primary", "sidecar", "pending"):
-            assert (
-                reopened.lifecycle.operation_repository._read_inventory(
-                    inventory_family
-                )["next_sequence"]
-                >= 1
-            )
-        report = reopened.reconcile(now=datetime(2026, 9, 2, tzinfo=timezone.utc))
-        assert report is not None
-    finally:
-        reopened.close()
+    with pytest.raises(CacheBlobMigrationRequiredError, match="explicit migration"):
+        BlobStore(root, backend="json", config=config)
 
 
 @pytest.mark.parametrize("interrupted_family", ("primary", "sidecar", "pending"))
@@ -1765,6 +1765,7 @@ def test_crash_during_new_store_inventory_initialization_keeps_reopen_current_v2
                 "next_sequence": 1,
                 "compact_next_sequence": 1,
                 "first_live_sequence": 1,
+                "maintenance_target_sequence": 0,
             }
         assert reopened.reconcile(now=datetime(2026, 9, 2, tzinfo=timezone.utc)) is not None
     finally:
@@ -1817,6 +1818,7 @@ def test_inventory_floor_advances_after_wrap_and_sparse_pages_keep_valid_cursors
         repository._compact_inventory_after_retirement(family)
         repository._compact_inventory_after_retirement(family)
         first_locator.unlink()
+        repository._compact_inventory_after_retirement(family)
         repository._compact_inventory_after_retirement(family)
         repository._compact_inventory_after_retirement(family)
         state = repository._read_inventory(family)
@@ -1975,6 +1977,8 @@ def test_dry_run_reports_blocked_pending_control_residue(tmp_path: Path) -> None
         pending_raw = b"wrong-digest"
         repository._append_inventory_event("pending", pending.name, pending_raw)
         pending.write_bytes(pending_raw)
+        key_path = root / "blob_manifest_hmac_key.bin"
+        key_before = key_path.read_bytes()
 
         report = store.reconcile(now=datetime(2026, 8, 31, tzinfo=timezone.utc))
 
@@ -1982,7 +1986,10 @@ def test_dry_run_reports_blocked_pending_control_residue(tmp_path: Path) -> None
             finding.reason == "pending_control_untrusted" for finding in report.findings
         )
         assert pending.read_bytes() == b"wrong-digest"
-        assert not (root / "blob_manifest_hmac_key.bin").exists()
+        # Signed all-family provenance creates the trust root during explicit
+        # initialization; dry-run reconciliation does not rotate or replace
+        # that existing key while reporting untrusted scheduling residue.
+        assert key_path.read_bytes() == key_before
     finally:
         store.close()
 
