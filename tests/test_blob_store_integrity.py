@@ -34,6 +34,7 @@ from cacheness.storage.integrity import (
     sign_hmac_sha256,
     verify_hmac_sha256,
 )
+from cacheness.storage import coordination
 from cacheness.storage.manifest import BlobManifestV1
 from cacheness.config import LifecycleLimits
 
@@ -317,6 +318,33 @@ def test_initialization_guards_are_store_scoped_and_retire_after_parallel_use(
     assert entered == 2
     assert len(results) == 2
     assert integrity_module._KeyInitializationGuardRegistry._entries == {}
+
+
+def test_initialization_authority_uses_the_injected_nonblocking_win32_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Windows retry path requests FAIL_IMMEDIATELY before key inspection."""
+    calls: list[tuple[bool, bool]] = []
+
+    class FakeWindowsLockApi:
+        def lock(
+            self, _descriptor: int, *, exclusive: bool, nonblocking: bool = False
+        ) -> object:
+            calls.append((exclusive, nonblocking))
+            return object()
+
+        def unlock(self, _descriptor: int, _token: object) -> object:
+            return None
+
+    provider = ManifestKeyProvider(tmp_path / "blob_manifest_hmac_key.bin")
+    provider.key_path.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(coordination, "_platform_name", lambda: "nt")
+    monkeypatch.setattr(coordination, "_windows_lock_api", FakeWindowsLockApi)
+
+    with provider._initialization_lock():
+        pass
+
+    assert calls == [(True, True)]
 
 
 def test_unacknowledged_key_is_resumed_after_provider_failure(tmp_path: Path) -> None:
