@@ -132,6 +132,15 @@ class ManifestPage:
 
     entries: tuple[tuple[str, bytes], ...]
     next_cursor: ManifestCursor | None
+    # For a page that must be split into smaller durable clear sidecars, this
+    # records the exact generation-bound cursor immediately after each yielded
+    # record.  It avoids reconstructing a mutable lexical position from a key.
+    entry_next_cursors: tuple[ManifestCursor, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Require each yielded record to have one exact continuation cursor."""
+        if self.entry_next_cursors and len(self.entry_next_cursors) != len(self.entries):
+            raise ValueError("manifest entry cursors must align with page entries")
 
 
 class ManifestRepository(Protocol):
@@ -684,6 +693,7 @@ class _MetadataManifestRepository:
                 )
                 inspected = 0
                 page_entries: list[tuple[str, bytes]] = []
+                entry_next_cursors: list[ManifestCursor] = []
                 last_key = cursor.key if cursor is not None else "~"
                 # ``max_inventory_items`` is now a per-call inspected-name
                 # budget.  It is never a total-store eligibility ceiling.
@@ -706,6 +716,13 @@ class _MetadataManifestRepository:
                         and hashlib.sha256(current_raw).hexdigest() == event_digest
                     ):
                         page_entries.append((event_key, current_raw))
+                        entry_next_cursors.append(
+                            ManifestCursor(
+                                event_key,
+                                snapshot_high_water=high_water,
+                                next_sequence=position,
+                            )
+                        )
                 next_cursor = (
                     ManifestCursor(
                         last_key,
@@ -720,6 +737,7 @@ class _MetadataManifestRepository:
         return ManifestPage(
             entries=tuple(page_entries),
             next_cursor=next_cursor,
+            entry_next_cursors=tuple(entry_next_cursors),
         )
 
     def list_backend_entries(self) -> list[dict[str, Any]]:
@@ -1092,6 +1110,7 @@ class SqliteManifestRepository:
         except _BACKEND_OPERATION_ERRORS as exc:
             raise _backend_failure("list_page", self.backend, exc) from exc
         entries_list: list[tuple[str, bytes]] = []
+        entry_next_cursors: list[ManifestCursor] = []
         next_position = position
         last_key = cursor.key if cursor is not None else "~"
         for row in rows:
@@ -1102,6 +1121,13 @@ class SqliteManifestRepository:
                 canonical = bytes(raw)
                 if hashlib.sha256(canonical).hexdigest() == digest:
                     entries_list.append((key, canonical))
+                    entry_next_cursors.append(
+                        ManifestCursor(
+                            key,
+                            snapshot_high_water=int(high_water),
+                            next_sequence=next_position,
+                        )
+                    )
                     if len(entries_list) == resolved:
                         break
         entries = tuple(entries_list)
@@ -1116,6 +1142,7 @@ class SqliteManifestRepository:
                 if next_position <= int(high_water)
                 else None
             ),
+            entry_next_cursors=tuple(entry_next_cursors),
         )
 
     def list_backend_entries(self) -> list[dict[str, Any]]:

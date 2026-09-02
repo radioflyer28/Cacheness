@@ -169,12 +169,98 @@ class LifecycleEngine:
         """Encode bounded clear progress through the same caller policy."""
         return checkpoint.canonical_bytes(lifecycle_limits=self.lifecycle_limits)
 
-    def _clear_page_id(self, operation_id: str, source_cursor: str | None) -> str:
-        """Derive a resumable opaque page identifier from its exact source cursor."""
-        source = "" if source_cursor is None else source_cursor
+    def _clear_page_id(
+        self,
+        operation_id: str,
+        source_cursor: ManifestCursor | str | None,
+    ) -> str:
+        """Derive a resumable opaque identifier from an exact snapshot position.
+
+        Legacy v1 pages only carried a key, so their identifiers retain the
+        original preimage. New high-water cursors add a domain marker and both
+        sequence components; a same-key event cannot be mistaken for an older
+        page after a delete-and-reinsert cycle.
+        """
+        if source_cursor is None:
+            source = ""
+            high_water = None
+            next_sequence = None
+        elif isinstance(source_cursor, str):
+            source = source_cursor
+            high_water = None
+            next_sequence = None
+        else:
+            source = source_cursor.key
+            high_water = source_cursor.snapshot_high_water
+            next_sequence = source_cursor.next_sequence
+        if high_water is None and next_sequence is None:
+            preimage = f"{operation_id}\x00{source}"
+        elif high_water is not None and next_sequence is not None:
+            preimage = (
+                f"{operation_id}\x00clear-snapshot-v2\x00{source}\x00"
+                f"{high_water}\x00{next_sequence}"
+            )
+        else:
+            raise CacheManifestIntegrityError("Clear page cursor state is incomplete")
         return hashlib.sha256(
-            f"{operation_id}\x00{source}".encode("utf-8")
+            preimage.encode("utf-8")
         ).hexdigest()[:32]
+
+    @staticmethod
+    def _clear_page_cursor(
+        key: str | None,
+        snapshot_high_water: int | None,
+        next_sequence: int | None,
+    ) -> ManifestCursor | None:
+        """Recover one manifest position from signed clear-page control data."""
+        if key is None:
+            if snapshot_high_water is not None or next_sequence is not None:
+                raise CacheManifestIntegrityError(
+                    "Terminal clear page cannot carry a snapshot cursor"
+                )
+            return None
+        try:
+            return ManifestCursor(key, snapshot_high_water, next_sequence)
+        except ValueError as exc:
+            raise CacheManifestIntegrityError(
+                "Clear page snapshot cursor is invalid"
+            ) from exc
+
+    @staticmethod
+    def _clear_page_components(
+        cursor: ManifestCursor | None,
+    ) -> tuple[str | None, int | None, int | None]:
+        """Project a manifest cursor onto the versioned clear-page schema."""
+        if cursor is None:
+            return None, None, None
+        return cursor.key, cursor.snapshot_high_water, cursor.next_sequence
+
+    def _new_clear_target_page(
+        self,
+        *,
+        operation_id: str,
+        source_cursor: ManifestCursor | None,
+        next_cursor: ManifestCursor | None,
+        targets: tuple[ClearTarget, ...],
+    ) -> ClearTargetPage:
+        """Build one v2 page without losing its generation-bound continuations."""
+        source_key, source_high_water, source_next_sequence = self._clear_page_components(
+            source_cursor
+        )
+        next_key, next_high_water, next_next_sequence = self._clear_page_components(
+            next_cursor
+        )
+        return ClearTargetPage(
+            operation_id=operation_id,
+            page_id=self._clear_page_id(operation_id, source_cursor),
+            source_cursor=source_key,
+            next_cursor=next_key,
+            targets=targets,
+            source_snapshot_high_water=source_high_water,
+            source_next_sequence=source_next_sequence,
+            next_snapshot_high_water=next_high_water,
+            next_next_sequence=next_next_sequence,
+        )
 
     def _authenticated_clear_target_page(
         self,
@@ -182,7 +268,7 @@ class LifecycleEngine:
         *,
         operation_id: str,
         page_id: str,
-        source_cursor: str | None,
+        source_cursor: ManifestCursor | None,
         resolve_references: bool = True,
         validate_source_cursor: bool = True,
     ) -> ClearTargetPage:
@@ -195,8 +281,28 @@ class LifecycleEngine:
         if (
             page.operation_id != operation_id
             or page.page_id != page_id
-            or (validate_source_cursor and page.source_cursor != source_cursor)
-            or self._clear_page_id(page.operation_id, page.source_cursor)
+            or (
+                validate_source_cursor
+                and page.source_cursor
+                != (None if source_cursor is None else source_cursor.key)
+            )
+            or (
+                validate_source_cursor
+                and self._clear_page_cursor(
+                    page.source_cursor,
+                    page.source_snapshot_high_water,
+                    page.source_next_sequence,
+                )
+                != source_cursor
+            )
+            or self._clear_page_id(
+                page.operation_id,
+                self._clear_page_cursor(
+                    page.source_cursor,
+                    page.source_snapshot_high_water,
+                    page.source_next_sequence,
+                ),
+            )
             != page.page_id
         ):
             raise CacheManifestIntegrityError("Clear target page identity is inconsistent")
@@ -415,27 +521,31 @@ class LifecycleEngine:
         self, record: LifecycleOperationRecord
     ) -> LifecycleOperationRecord:
         """Write every bounded authenticated page before releasing admission."""
-        source_cursor: str | None = None
+        source_cursor: ManifestCursor | None = None
         while True:
             page_id = self._clear_page_id(record.operation_id, source_cursor)
             raw_page = self.operation_repository.get_clear_target_page_raw(
                 record.operation_id, page_id
             )
             if raw_page is None:
-                page = self.store.manifest_repository.list_page(
-                    None if source_cursor is None else ManifestCursor(source_cursor),
+                manifest_page = self.store.manifest_repository.list_page(
+                    source_cursor,
                     page_size=self.lifecycle_limits.manifest_page_size,
                 )
-                if not page.entries:
-                    if page.next_cursor is not None:
+                if not manifest_page.entries:
+                    if manifest_page.next_cursor is not None:
                         raise CacheManifestIntegrityError(
                             "Clear manifest page has an empty non-terminal cursor"
                         )
                     break
+                if len(manifest_page.entry_next_cursors) != len(manifest_page.entries):
+                    raise CacheManifestIntegrityError(
+                        "Clear manifest page lacks exact entry continuations"
+                    )
                 targets: list[ClearTarget] = []
                 referenced_manifests: list[tuple[ClearTarget, bytes]] = []
-                next_cursor: str | None = None
-                for index, (key, raw_manifest) in enumerate(page.entries):
+                next_cursor: ManifestCursor | None = None
+                for index, (key, raw_manifest) in enumerate(manifest_page.entries):
                     manifest = BlobManifestV1.from_canonical_bytes(raw_manifest)
                     target = ClearTarget.from_raw(
                         key, manifest.generation, raw_manifest
@@ -443,12 +553,16 @@ class LifecycleEngine:
                     self._authenticated_clear_target(target)
                     candidate_targets = tuple([*targets, target])
                     has_remaining = (
-                        index + 1 < len(page.entries) or page.next_cursor is not None
+                        index + 1 < len(manifest_page.entries)
+                        or manifest_page.next_cursor is not None
                     )
-                    candidate_cursor = key if has_remaining else None
-                    candidate = ClearTargetPage(
+                    candidate_cursor = (
+                        manifest_page.entry_next_cursors[index]
+                        if has_remaining
+                        else None
+                    )
+                    candidate = self._new_clear_target_page(
                         operation_id=record.operation_id,
-                        page_id=page_id,
                         source_cursor=source_cursor,
                         next_cursor=candidate_cursor,
                         targets=candidate_targets,
@@ -466,9 +580,8 @@ class LifecycleEngine:
                             operation_id=record.operation_id,
                         )
                         candidate_targets = tuple([*targets, target])
-                        candidate = ClearTargetPage(
+                        candidate = self._new_clear_target_page(
                             operation_id=record.operation_id,
-                            page_id=page_id,
                             source_cursor=source_cursor,
                             next_cursor=candidate_cursor,
                             targets=candidate_targets,
@@ -491,9 +604,8 @@ class LifecycleEngine:
                 if not targets:
                     raise CacheManifestIntegrityError("Clear target page has no bounded target")
                 page = self._signed_clear_target_page(
-                    ClearTargetPage(
+                    self._new_clear_target_page(
                         operation_id=record.operation_id,
-                        page_id=page_id,
                         source_cursor=source_cursor,
                         next_cursor=next_cursor,
                         targets=tuple(targets),
@@ -538,7 +650,11 @@ class LifecycleEngine:
             self._load_or_create_clear_checkpoint(page)
             if page.next_cursor is None:
                 break
-            source_cursor = page.next_cursor
+            source_cursor = self._clear_page_cursor(
+                page.next_cursor,
+                page.next_snapshot_high_water,
+                page.next_next_sequence,
+            )
         if record.checkpoint is OperationCheckpoint.PREPARED:
             record = self._advance_to(record, OperationCheckpoint.CANDIDATE_PUBLISHED)
         return record
@@ -615,7 +731,7 @@ class LifecycleEngine:
             record = self._advance_to(record, OperationCheckpoint.RECLAIMING)
 
         cleared = 0
-        source_cursor: str | None = None
+        source_cursor: ManifestCursor | None = None
         while True:
             page_id = self._clear_page_id(record.operation_id, source_cursor)
             raw_page = self.operation_repository.get_clear_target_page_raw(
@@ -658,7 +774,11 @@ class LifecycleEngine:
                 )
             if page.next_cursor is None:
                 break
-            source_cursor = page.next_cursor
+            source_cursor = self._clear_page_cursor(
+                page.next_cursor,
+                page.next_snapshot_high_water,
+                page.next_next_sequence,
+            )
         if record.checkpoint is not OperationCheckpoint.TERMINAL:
             record = self._advance_to(record, OperationCheckpoint.TERMINAL)
         self._retire_clear_control_artifacts(record)

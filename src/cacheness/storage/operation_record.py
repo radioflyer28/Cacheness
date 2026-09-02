@@ -105,7 +105,7 @@ _RECORD_FIELDS = frozenset(
         "updated_at",
     }
 )
-_CLEAR_TARGET_PAGE_FIELDS = frozenset(
+_CLEAR_TARGET_PAGE_V1_FIELDS = frozenset(
     {
         "next_cursor",
         "operation_id",
@@ -115,6 +115,14 @@ _CLEAR_TARGET_PAGE_FIELDS = frozenset(
         "signature_algorithm",
         "source_cursor",
         "targets",
+    }
+)
+_CLEAR_TARGET_PAGE_V2_FIELDS = _CLEAR_TARGET_PAGE_V1_FIELDS | frozenset(
+    {
+        "next_next_sequence",
+        "next_snapshot_high_water",
+        "source_next_sequence",
+        "source_snapshot_high_water",
     }
 )
 _CLEAR_TARGET_CHECKPOINT_FIELDS = frozenset(
@@ -129,7 +137,8 @@ _CLEAR_TARGET_CHECKPOINT_FIELDS = frozenset(
         "signature_algorithm",
     }
 )
-CLEAR_TARGET_SCHEMA_VERSION = 1
+CLEAR_TARGET_SCHEMA_VERSION = 2
+CLEAR_TARGET_LEGACY_SCHEMA_VERSION = 1
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -714,13 +723,23 @@ class ClearTargetPage:
     source_cursor: str | None
     next_cursor: str | None
     targets: tuple[ClearTarget, ...]
+    # Schema v2 binds page-to-page movement to the manifest inventory high
+    # water and next sequence.  The string fields above remain the v1
+    # compatibility projection and continue to participate in opaque page IDs.
+    source_snapshot_high_water: int | None = None
+    source_next_sequence: int | None = None
+    next_snapshot_high_water: int | None = None
+    next_next_sequence: int | None = None
     signature_algorithm: str = OPERATION_SIGNATURE_ALGORITHM
     signature: str = ""
     schema_version: int = CLEAR_TARGET_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
         """Reject ambiguous, unbounded, or malformed page values."""
-        if self.schema_version != CLEAR_TARGET_SCHEMA_VERSION:
+        if self.schema_version not in {
+            CLEAR_TARGET_LEGACY_SCHEMA_VERSION,
+            CLEAR_TARGET_SCHEMA_VERSION,
+        }:
             raise CacheManifestUnsupportedVersionError(
                 f"Unsupported clear target page schema version: {self.schema_version}"
             )
@@ -728,6 +747,18 @@ class ClearTargetPage:
         _validated_hex(self.page_id, "clear_target_page.page_id", allow_none=False, pattern=_HEX_UUID)
         _validated_clear_cursor(self.source_cursor, "clear_target_page.source_cursor")
         _validated_clear_cursor(self.next_cursor, "clear_target_page.next_cursor")
+        self._validate_snapshot_cursor(
+            self.source_cursor,
+            self.source_snapshot_high_water,
+            self.source_next_sequence,
+            "source",
+        )
+        self._validate_snapshot_cursor(
+            self.next_cursor,
+            self.next_snapshot_high_water,
+            self.next_next_sequence,
+            "next",
+        )
         if not isinstance(self.targets, tuple) or not self.targets:
             raise CacheManifestIntegrityError("Clear target page must contain targets")
         if len(self.targets) > 4_096 or any(not isinstance(target, ClearTarget) for target in self.targets):
@@ -741,6 +772,44 @@ class ClearTargetPage:
         if self.signature and not _HEX_SHA256.fullmatch(self.signature):
             raise CacheManifestIntegrityError("Clear target page signature is invalid")
 
+    def _validate_snapshot_cursor(
+        self,
+        key: str | None,
+        high_water: int | None,
+        next_sequence: int | None,
+        label: str,
+    ) -> None:
+        """Validate one v2 generation-bound clear-page cursor projection."""
+        if self.schema_version == CLEAR_TARGET_LEGACY_SCHEMA_VERSION:
+            if high_water is not None or next_sequence is not None:
+                raise CacheManifestIntegrityError(
+                    "Legacy clear target pages cannot carry snapshot cursor state"
+                )
+            return
+        if key is None:
+            if high_water is not None or next_sequence is not None:
+                raise CacheManifestIntegrityError(
+                    f"Clear target page {label} cursor state requires a cursor"
+                )
+            return
+        if (high_water is None) != (next_sequence is None):
+            raise CacheManifestIntegrityError(
+                f"Clear target page {label} cursor state is incomplete"
+            )
+        if high_water is None:
+            raise CacheManifestIntegrityError(
+                f"Clear target page {label} cursor lacks snapshot state"
+            )
+        if (
+            type(high_water) is not int
+            or type(next_sequence) is not int
+            or high_water < 0
+            or next_sequence <= 0
+        ):
+            raise CacheManifestIntegrityError(
+                f"Clear target page {label} cursor state is invalid"
+            )
+
     def to_mapping(self, *, include_signature: bool = True) -> dict[str, Any]:
         """Return the deterministic bounded target-page projection."""
         result = {
@@ -752,6 +821,15 @@ class ClearTargetPage:
             "source_cursor": self.source_cursor,
             "targets": [target.to_mapping() for target in self.targets],
         }
+        if self.schema_version == CLEAR_TARGET_SCHEMA_VERSION:
+            result.update(
+                {
+                    "next_next_sequence": self.next_next_sequence,
+                    "next_snapshot_high_water": self.next_snapshot_high_water,
+                    "source_next_sequence": self.source_next_sequence,
+                    "source_snapshot_high_water": self.source_snapshot_high_water,
+                }
+            )
         if include_signature:
             result["signature"] = self.signature
         return result
@@ -783,12 +861,20 @@ class ClearTargetPage:
         cls, raw: bytes, *, lifecycle_limits: LifecycleLimits | None = None
     ) -> "ClearTargetPage":
         """Decode exact page bytes without assigning them lifecycle authority."""
-        decoded = _decode_clear_mapping(
-            raw,
-            _CLEAR_TARGET_PAGE_FIELDS,
-            "Clear target page",
-            lifecycle_limits=lifecycle_limits,
-        )
+        try:
+            decoded = _decode_clear_mapping(
+                raw,
+                _CLEAR_TARGET_PAGE_V2_FIELDS,
+                "Clear target page",
+                lifecycle_limits=lifecycle_limits,
+            )
+        except CacheManifestIntegrityError:
+            decoded = _decode_clear_mapping(
+                raw,
+                _CLEAR_TARGET_PAGE_V1_FIELDS,
+                "Clear target page",
+                lifecycle_limits=lifecycle_limits,
+            )
         targets = decoded["targets"]
         if not isinstance(targets, list):
             raise CacheManifestIntegrityError("Clear target page targets are invalid")
@@ -822,6 +908,10 @@ class ClearTargetPage:
                 )
                 for target in targets
             ),
+            source_snapshot_high_water=decoded.get("source_snapshot_high_water"),
+            source_next_sequence=decoded.get("source_next_sequence"),
+            next_snapshot_high_water=decoded.get("next_snapshot_high_water"),
+            next_next_sequence=decoded.get("next_next_sequence"),
             signature_algorithm=decoded["signature_algorithm"],
             signature=decoded["signature"],
             schema_version=decoded["schema_version"],

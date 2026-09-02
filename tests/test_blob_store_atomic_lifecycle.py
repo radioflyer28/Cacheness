@@ -20,6 +20,7 @@ from cacheness.error_handling import (
 )
 from cacheness.storage import BlobStore
 from cacheness.storage.manifest import BlobManifestV1
+from cacheness.storage.manifest_repository import ManifestCursor, ManifestPage
 from cacheness.storage.operation_record import (
     ClearTarget,
     ClearTargetCheckpoint,
@@ -781,6 +782,8 @@ def test_clear_target_page_and_checkpoint_preserve_exact_progress_after_reopen(
             ClearTarget.from_raw("first", "c" * 32, raw_first),
             ClearTarget.from_raw("second", "d" * 32, raw_second),
         ),
+        # Existing pages remain parseable as the v1 cursor-only form.
+        schema_version=1,
     )
     repository = FileOperationRecordRepository(
         store.guarded_handler_io.file_ops,
@@ -925,9 +928,32 @@ def test_clear_resume_does_not_repeat_completed_targets_after_reopen(
         config=CacheConfig(cache_dir=str(root), lifecycle_limits=limits),
     )
     completed_once = False
+    observed_cursors: list[tuple[str | None, int | None, int | None]] = []
     try:
         store.put({"generation": "first"}, key="first")
         store.put({"generation": "second"}, key="second")
+
+        original_list_page = store.manifest_repository.list_page
+
+        def bounded_list_page(
+            cursor: ManifestCursor | None = None,
+            *,
+            page_size: int | None = None,
+        ) -> ManifestPage:
+            observed_cursors.append(
+                (
+                    None if cursor is None else cursor.key,
+                    None if cursor is None else cursor.snapshot_high_water,
+                    None if cursor is None else cursor.next_sequence,
+                )
+            )
+            # The initial key-provider existence check is followed by exactly
+            # two snapshot pages. A reset to the first high-water page exceeds
+            # this budget and fails deterministically.
+            assert len(observed_cursors) <= 3
+            return original_list_page(cursor, page_size=page_size)
+
+        store.manifest_repository.list_page = bounded_list_page  # type: ignore[method-assign]
 
         def interrupt_after_checkpoint(seam: str, _record: Any) -> None:
             nonlocal completed_once
@@ -938,6 +964,11 @@ def test_clear_resume_does_not_repeat_completed_targets_after_reopen(
         store.lifecycle.fault_hook = interrupt_after_checkpoint
         with pytest.raises(_SimulatedProcessLoss):
             store.clear()
+        assert observed_cursors == [
+            (None, None, None),
+            (None, None, None),
+            ("first", 2, 2),
+        ]
     finally:
         store.close()
 
@@ -960,9 +991,31 @@ def test_prepared_clear_inventory_is_aborted_after_process_loss_before_next_page
     owner = BlobStore(root, backend="json", config=config)
     independent_writer = BlobStore(root, backend="json", config=config)
     page_persisted = False
+    observed_cursors: list[tuple[str | None, int | None, int | None]] = []
     try:
         owner.put({"generation": "a"}, key="a")
         owner.put({"generation": "z"}, key="z")
+
+        original_list_page = owner.manifest_repository.list_page
+
+        def record_first_high_water_page(
+            cursor: ManifestCursor | None = None,
+            *,
+            page_size: int | None = None,
+        ) -> ManifestPage:
+            observed_cursors.append(
+                (
+                    None if cursor is None else cursor.key,
+                    None if cursor is None else cursor.snapshot_high_water,
+                    None if cursor is None else cursor.next_sequence,
+                )
+            )
+            # One key-provider existence read precedes the first snapshot
+            # page. The injected process loss must prevent a second page.
+            assert len(observed_cursors) <= 2
+            return original_list_page(cursor, page_size=page_size)
+
+        owner.manifest_repository.list_page = record_first_high_water_page  # type: ignore[method-assign]
 
         def interrupt_after_first_page(seam: str, _record: Any) -> None:
             nonlocal page_persisted
@@ -974,6 +1027,7 @@ def test_prepared_clear_inventory_is_aborted_after_process_loss_before_next_page
         with pytest.raises(_SimulatedProcessLoss):
             owner.clear()
         assert page_persisted
+        assert observed_cursors == [(None, None, None), (None, None, None)]
 
         # This store existed before the interrupted clear and only gains its
         # ordinary admission after the simulated owner process releases it.
