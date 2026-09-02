@@ -134,7 +134,9 @@ def test_failed_initialization_closes_only_internally_owned_backend(
 
     monkeypatch.setattr(SqliteBackend, "__init__", tracked_init)
     monkeypatch.setattr(SqliteBackend, "close", tracked_close)
-    def fail_repository_setup(_backend: object, *, lifecycle_limits: object) -> None:
+    def fail_repository_setup(
+        _backend: object, *, lifecycle_limits: object, **_kwargs: object
+    ) -> None:
         assert lifecycle_limits is not None
         raise RuntimeError("repository setup failed")
 
@@ -208,7 +210,7 @@ def test_constructor_cancellation_closes_owned_resources_after_backend_creation(
         original_backend_close(backend)
 
     def interrupt_repository_setup(
-        backend: object, *, lifecycle_limits: object
+        backend: object, *, lifecycle_limits: object, **_kwargs: object
     ) -> None:
         initialized_backends.append(backend)
         assert lifecycle_limits is not None
