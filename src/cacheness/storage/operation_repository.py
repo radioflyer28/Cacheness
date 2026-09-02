@@ -33,6 +33,7 @@ from .path_security import ManagedFileOps, resolve_managed_locator, validate_blo
 
 _CONDITIONAL_LOCK_STRIPES = tuple(RLock() for _ in range(64))
 _OPERATION_LEASES = local()
+_CLEAR_OPERATION_LEASES = local()
 _INVENTORY_SCHEMA_VERSION = 2
 _INVENTORY_HEAD_MAX_BYTES = 4_096
 _INVENTORY_EVENT_MIN_BYTES = 32 * 1024
@@ -332,6 +333,21 @@ class FileOperationRecordRepository:
             _OPERATION_LEASES.leases = leases
         return leases
 
+    @staticmethod
+    def _held_clear_operation_leases() -> dict[tuple[int, int], int]:
+        """Return the current thread's reentrant store-wide clear-lease depths.
+
+        Clear continuation is an aggregate scheduling lease, not authority for
+        any individual lifecycle record.  It must therefore be tracked apart
+        from ``_OPERATION_LEASES``: a clear may legitimately checkpoint its
+        independently locked child records while it owns this store-wide lease.
+        """
+        leases = getattr(_CLEAR_OPERATION_LEASES, "leases", None)
+        if leases is None:
+            leases = {}
+            _CLEAR_OPERATION_LEASES.leases = leases
+        return leases
+
     def _has_held_operation_lease(self, operation_id: str) -> bool:
         """Return whether this exact operation already owns its lease.
 
@@ -407,8 +423,8 @@ class FileOperationRecordRepository:
         """
         del operation_id
         lock_identity = "clear-resume"
-        lease_key = self._operation_lease_key(lock_identity)
-        leases = self._held_operation_leases()
+        lease_key = self.file_ops.root_identity
+        leases = self._held_clear_operation_leases()
         if leases.get(lease_key, 0):
             # Constructor recovery can hold the store-wide clear continuation
             # lease while it authenticates inventory state, then re-enter this
