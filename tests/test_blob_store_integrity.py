@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from cacheness.error_handling import (
+    CacheBlobBackendError,
     CacheBlobLifecycleConflictError,
     CacheBlobLifecycleTimeoutError,
     CacheBlobManifestMalformedError,
@@ -420,6 +421,74 @@ def test_initialization_authority_uses_the_injected_nonblocking_win32_contract(
         pass
 
     assert calls == [(True, True)]
+
+
+def test_local_initialization_guard_never_retries_after_expiry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lock released by the scheduler after expiry cannot win a second probe."""
+    import cacheness.storage.integrity as integrity_module
+
+    clock = {"now": 0.0}
+
+    class FakeTime:
+        @staticmethod
+        def monotonic() -> float:
+            return clock["now"]
+
+        @staticmethod
+        def sleep(_duration: float) -> None:
+            # Model a holder releasing exactly after the shared deadline.
+            clock["now"] = 11.0
+            lock.available = True
+
+    class FakeLock:
+        available = False
+        attempts = 0
+
+        def acquire(self, *, blocking: bool) -> bool:
+            assert blocking is False
+            self.attempts += 1
+            return self.available
+
+        def release(self) -> None:
+            raise AssertionError("expired retry must not acquire the local guard")
+
+    lock = FakeLock()
+    identity = "deterministic-expiry"
+    monkeypatch.setattr(integrity_module, "time", FakeTime)
+    integrity_module._KeyInitializationGuardRegistry._entries[identity] = (lock, 0)
+    try:
+        with pytest.raises(CacheBlobLifecycleTimeoutError):
+            with integrity_module._KeyInitializationGuardRegistry.acquire(
+                identity, deadline=10.0
+            ):
+                raise AssertionError("expired retry must not enter the guard")
+        assert lock.attempts == 1
+    finally:
+        integrity_module._KeyInitializationGuardRegistry._entries.pop(identity, None)
+
+
+def test_windows_initialization_rejects_adapter_without_nonblocking_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An old adapter cannot silently convert a deadline-bound retry to blocking."""
+    class BlockingOnlyWindowsLockApi:
+        def lock(self, _descriptor: int, *, exclusive: bool) -> object:
+            return object()
+
+        def unlock(self, _descriptor: int, _token: object) -> object:
+            return None
+
+    provider = ManifestKeyProvider(tmp_path / "blob_manifest_hmac_key.bin")
+    provider.key_path.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(coordination, "_platform_name", lambda: "nt")
+    monkeypatch.setattr(coordination, "_windows_lock_api", BlockingOnlyWindowsLockApi)
+
+    with pytest.raises(CacheBlobBackendError) as error:
+        with provider._initialization_lock(deadline=1.0):
+            pass
+    assert error.value.context["reason"] == CacheReason.BLOB_BACKEND_CAPABILITY_UNSUPPORTED.value
 
 
 def test_unacknowledged_key_is_resumed_after_provider_failure(tmp_path: Path) -> None:

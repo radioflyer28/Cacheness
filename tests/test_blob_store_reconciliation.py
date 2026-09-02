@@ -1114,7 +1114,9 @@ def test_pending_recovery_pages_past_large_invalid_prefix_without_unbounded_read
                 else 2 + (2 * limits.operation_page_size)
             )
         assert repository.get_raw(valid_id) == raw
-        assert (operations / ".pending-recovery.cursor").exists()
+        # The exact high-water sequence is terminal after the valid candidate;
+        # retaining a lexical cursor here would replay the finished snapshot.
+        assert not (operations / ".pending-recovery.cursor").exists()
     finally:
         store.close()
 

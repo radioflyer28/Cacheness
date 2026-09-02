@@ -17,6 +17,7 @@ from cacheness.config import LifecycleLimits
 from cacheness.error_handling import (
     CacheBlobBackendError,
     CacheBlobLifecycleConflictError,
+    CacheBlobMigrationRequiredError,
     CacheReason,
     CacheUnsafePathError,
 )
@@ -100,6 +101,28 @@ def test_directory_inventory_is_lexical_after_reverse_creation_and_has_a_distinc
         assert second == ("z.json",)
         assert terminal is None
     finally:
+        file_ops.close()
+
+
+def test_preindex_inventory_refuses_unbounded_unrelated_legacy_namespace(
+    tmp_path: Path,
+) -> None:
+    """An upgrade never scans an unbounded directory merely to prove it empty."""
+    root = tmp_path / "legacy-unrelated-namespace"
+    root.mkdir()
+    operations = root / "operations"
+    operations.mkdir()
+    for index in range(3):
+        (operations / f"unrelated-{index}").write_bytes(b"noise")
+    file_ops = ManagedFileOps(root)
+    repository = FileOperationRecordRepository(
+        file_ops, lifecycle_limits=LifecycleLimits(max_inventory_items=2)
+    )
+    try:
+        with pytest.raises(CacheBlobMigrationRequiredError):
+            repository.list_page()
+    finally:
+        repository.close()
         file_ops.close()
 
 
@@ -1170,3 +1193,40 @@ def test_memory_manifest_inventory_pages_a_store_above_the_former_hard_cap() -> 
     page = repository.list_page()
     assert len(page.entries) == 2
     assert page.next_cursor is not None
+
+
+def test_json_manifest_inventory_is_external_bounded_and_reopens(tmp_path: Path) -> None:
+    """JSON authority never carries an append/rewrite history field on reopen."""
+    metadata_path = tmp_path / "metadata.json"
+    backend = JsonBackend(metadata_path)
+    repository = JsonManifestRepository(
+        backend, lifecycle_limits=LifecycleLimits(manifest_page_size=2)
+    )
+    try:
+        for key in ("a", "b", "c"):
+            repository.put_raw(key, _record(key))
+        assert "_cacheness_manifest_inventory_v1" not in backend._metadata
+        assert (
+            tmp_path / ".metadata.json.manifest-inventory-v2-head.json"
+        ).is_file()
+        assert len(
+            list(tmp_path.glob(".metadata.json.manifest-inventory-v2-event-*.json"))
+        ) == 3
+    finally:
+        repository.close()
+        backend.close()
+
+    reopened_backend = JsonBackend(metadata_path)
+    reopened = JsonManifestRepository(
+        reopened_backend, lifecycle_limits=LifecycleLimits(manifest_page_size=2)
+    )
+    try:
+        first = reopened.list_page()
+        assert [key for key, _raw in first.entries] == ["a", "b"]
+        assert first.next_cursor is not None
+        second = reopened.list_page(first.next_cursor)
+        assert [key for key, _raw in second.entries] == ["c"]
+        assert second.next_cursor is None
+    finally:
+        reopened.close()
+        reopened_backend.close()

@@ -40,8 +40,13 @@ except ImportError:  # pragma: no cover - SQLite support is optional at runtime.
 
 _RAW_MANIFEST_FIELD = "canonical_manifest_v1"
 _MANIFEST_INVENTORY_FIELD = "_cacheness_manifest_inventory_v1"
+_MANIFEST_INVENTORY_SCHEMA_VERSION = 2
+_MANIFEST_INVENTORY_HEAD_MAX_BYTES = 4_096
+_MANIFEST_INVENTORY_EVENT_MIN_BYTES = 32 * 1024
+_MANIFEST_INVENTORY_COMPACTION_WINDOW = 64
 _SQLITE_MANIFEST_TABLE = "cacheness_manifest_records_v1"
 _SQLITE_MANIFEST_INVENTORY_TABLE = "cacheness_manifest_inventory_v1"
+_SQLITE_MANIFEST_INVENTORY_STATE_TABLE = "cacheness_manifest_inventory_state_v2"
 _BACKEND_OPERATION_ERRORS = (
     CacheError,
     OSError,
@@ -225,6 +230,7 @@ class _MetadataManifestRepository:
         self._json_lock_handle: BinaryIO | None = None
         self._json_lock_identity: tuple[int, int] | None = None
         self._json_metadata_locator: Path | None = None
+        self._json_inventory_head_locator: Path | None = None
         self._json_lock_guard = RLock()
         # Deterministic race seams used only by containment regressions.  They
         # deliberately run while the retained descriptor remains authoritative.
@@ -254,6 +260,12 @@ class _MetadataManifestRepository:
                     operation="manifest_repository_authority_lock",
                     allow_missing_leaf=True,
                 )
+                self._json_inventory_head_locator = resolve_managed_locator(
+                    self._json_lock_file_ops.root,
+                    f".{Path(backend.metadata_file).name}.manifest-inventory-v2-head.json",
+                    operation="manifest_inventory",
+                    allow_missing_leaf=True,
+                )
                 expected_lock_identity = self._json_lock_file_ops.ensure_lifecycle_lock(
                     self._json_lock_locator
                 )
@@ -281,6 +293,7 @@ class _MetadataManifestRepository:
             self._json_lock_file_ops.close()
             self._json_lock_file_ops = None
         self._json_metadata_locator = None
+        self._json_inventory_head_locator = None
 
     def _page_size(self, page_size: int | None) -> int:
         """Resolve one caller page without bypassing the configured bound."""
@@ -475,79 +488,249 @@ class _MetadataManifestRepository:
             return self.backend._metadata.get("entries", {}).get(key)
         return self.backend._entries.get(key)
 
-    def _inventory_state(self, *, candidate: dict[str, Any] | None = None) -> dict[str, Any]:
-        """Return the versioned append-only manifest inventory state.
+    def _json_inventory_event_locator(self, sequence: int) -> Path:
+        """Return one immutable JSON scheduling event without reading history."""
+        if type(sequence) is not int or sequence <= 0:
+            raise ValueError("manifest inventory sequence is invalid")
+        if self._json_lock_file_ops is None:
+            raise CacheBlobBackendError("JSON manifest inventory root is unavailable")
+        return resolve_managed_locator(
+            self._json_lock_file_ops.root,
+            f".{Path(self.backend.metadata_file).name}.manifest-inventory-v2-"
+            f"event-{sequence:020d}.json",
+            operation="manifest_inventory",
+            allow_missing_leaf=True,
+        )
 
-        The index is deliberately separate from canonical manifest authority.
-        It records only sequence, logical key, and a digest of bytes already
-        being published through the authority path.  A later page therefore
-        proves that an event was part of its high-water membership before it
-        reads current bytes; changed/deleted events are consumed as stale
-        positions rather than accidentally becoming new snapshot members.
-        """
-        if type(self.backend) is JsonBackend:
-            container = self.backend._metadata if candidate is None else candidate
-            state = container.get(_MANIFEST_INVENTORY_FIELD)
-            if state is None:
-                state = {"version": 1, "next_sequence": 1, "events": []}
-                container[_MANIFEST_INVENTORY_FIELD] = state
-            return self._validate_inventory_state(state)
-        state = getattr(self.backend, _MANIFEST_INVENTORY_FIELD, None)
-        if state is None:
-            state = {"version": 1, "next_sequence": 1, "events": []}
-            setattr(self.backend, _MANIFEST_INVENTORY_FIELD, state)
-        return self._validate_inventory_state(state)
+    def _inventory_event_max_bytes(self) -> int:
+        """Keep one event bounded independently from manifest record lifetime."""
+        return max(
+            _MANIFEST_INVENTORY_EVENT_MIN_BYTES,
+            self.lifecycle_limits.max_operation_field_bytes * 2 + 512,
+        )
 
     @staticmethod
-    def _validate_inventory_state(state: object) -> dict[str, Any]:
-        """Reject malformed local scheduling state before it drives paging."""
-        if not isinstance(state, dict) or set(state) != {"version", "next_sequence", "events"}:
+    def _empty_inventory_state() -> dict[str, Any]:
+        """Build the fixed-size v2 sequence head used by every local backend."""
+        return {
+            "version": _MANIFEST_INVENTORY_SCHEMA_VERSION,
+            "next_sequence": 1,
+            "compact_next_sequence": 1,
+        }
+
+    @staticmethod
+    def _validate_inventory_head(state: object) -> dict[str, int]:
+        """Validate the durable head without loading any event history."""
+        if not isinstance(state, dict) or set(state) != {
+            "version", "next_sequence", "compact_next_sequence"
+        }:
             raise CacheBlobBackendError(
                 "Canonical manifest inventory is invalid",
                 context={"operation": "manifest_inventory"},
             )
-        if state["version"] != 1 or type(state["next_sequence"]) is not int:
+        if (
+            state["version"] != _MANIFEST_INVENTORY_SCHEMA_VERSION
+            or type(state["next_sequence"]) is not int
+            or type(state["compact_next_sequence"]) is not int
+            or state["next_sequence"] <= 0
+            or not 1 <= state["compact_next_sequence"] <= state["next_sequence"]
+        ):
             raise CacheBlobBackendError(
                 "Canonical manifest inventory version is invalid",
                 context={"operation": "manifest_inventory"},
             )
-        events = state["events"]
-        if not isinstance(events, list) or state["next_sequence"] != len(events) + 1:
+        return state
+
+    def _inventory_state(self) -> dict[str, Any]:
+        """Load only a bounded v2 head and fail closed for pre-index evidence."""
+        if type(self.backend) is JsonBackend:
+            if self._json_lock_file_ops is None or self._json_inventory_head_locator is None:
+                raise CacheBlobBackendError("JSON manifest inventory root is unavailable")
+            try:
+                raw = self._json_lock_file_ops.read_bytes_bounded(
+                    self._json_inventory_head_locator,
+                    max_bytes=_MANIFEST_INVENTORY_HEAD_MAX_BYTES,
+                )
+            except FileNotFoundError:
+                if (
+                    _MANIFEST_INVENTORY_FIELD in self.backend._metadata
+                    or self.backend._metadata.get("entries")
+                ):
+                    raise CacheBlobMigrationRequiredError(
+                        "Canonical manifest inventory migration is required",
+                        context={"backend": type(self.backend).__name__},
+                    )
+                return self._empty_inventory_state()
+            try:
+                return self._validate_inventory_head(json_loads(raw))
+            except (TypeError, ValueError) as exc:
+                raise CacheBlobBackendError(
+                    "Canonical manifest inventory is invalid",
+                    context={"operation": "manifest_inventory"},
+                ) from exc
+        state = getattr(self.backend, "_cacheness_manifest_inventory_v2", None)
+        if state is None:
+            if self.backend._entries or getattr(self.backend, _MANIFEST_INVENTORY_FIELD, None):
+                raise CacheBlobMigrationRequiredError(
+                    "Canonical manifest inventory migration is required",
+                    context={"backend": type(self.backend).__name__},
+                )
+            state = {**self._empty_inventory_state(), "events": {}}
+            setattr(self.backend, "_cacheness_manifest_inventory_v2", state)
+        if not isinstance(state, dict) or set(state) != {
+            "version", "next_sequence", "compact_next_sequence", "events"
+        }:
             raise CacheBlobBackendError(
-                "Canonical manifest inventory is not contiguous",
+                "Canonical manifest inventory is invalid",
                 context={"operation": "manifest_inventory"},
             )
-        for sequence, event in enumerate(events, start=1):
-            if (
-                not isinstance(event, list)
-                or len(event) != 2
-                or not isinstance(event[0], str)
-                or not event[0]
-                or not isinstance(event[1], str)
-                or len(event[1]) != 64
-                or any(character not in "0123456789abcdef" for character in event[1])
-            ):
+        self._validate_inventory_head(
+            {name: state[name] for name in ("version", "next_sequence", "compact_next_sequence")}
+        )
+        if not isinstance(state["events"], dict):
+            raise CacheBlobBackendError(
+                "Canonical manifest inventory events are invalid",
+                context={"operation": "manifest_inventory"},
+            )
+        return state
+
+    def _write_inventory_head(self, state: dict[str, Any]) -> None:
+        """Persist only the fixed-size JSON head after an immutable event."""
+        if type(self.backend) is not JsonBackend:
+            return
+        if self._json_lock_file_ops is None or self._json_inventory_head_locator is None:
+            raise CacheBlobBackendError("JSON manifest inventory root is unavailable")
+        head = self._validate_inventory_head(state)
+        encoded = json_dumps(head, default=str).encode("utf-8")
+        if len(encoded) > _MANIFEST_INVENTORY_HEAD_MAX_BYTES:
+            raise AssertionError("manifest inventory head unexpectedly exceeds bound")
+        self._json_lock_file_ops.write_bytes_durable(self._json_inventory_head_locator, encoded)
+
+    @staticmethod
+    def _validate_inventory_event(event: object, sequence: int) -> tuple[str, str]:
+        """Validate a non-authoritative event before it drives a page position."""
+        if (
+            not isinstance(event, dict)
+            or set(event) != {"version", "key", "digest"}
+            or event["version"] != _MANIFEST_INVENTORY_SCHEMA_VERSION
+            or not isinstance(event["key"], str)
+            or not event["key"]
+            or len(event["key"].encode("utf-8")) > 8_192
+            or not isinstance(event["digest"], str)
+            or len(event["digest"]) != 64
+            or any(character not in "0123456789abcdef" for character in event["digest"])
+        ):
+            raise CacheBlobBackendError(
+                "Canonical manifest inventory event is invalid",
+                context={"operation": "manifest_inventory", "sequence": sequence},
+            )
+        return event["key"], event["digest"]
+
+    def _read_inventory_event(self, sequence: int) -> tuple[str, str] | None:
+        """Read one event directly; a compacted slot is a safe sparse gap."""
+        if type(self.backend) is JsonBackend:
+            if self._json_lock_file_ops is None:
+                raise CacheBlobBackendError("JSON manifest inventory root is unavailable")
+            try:
+                raw = self._json_lock_file_ops.read_bytes_bounded(
+                    self._json_inventory_event_locator(sequence),
+                    max_bytes=self._inventory_event_max_bytes(),
+                )
+            except FileNotFoundError:
+                return None
+            try:
+                return self._validate_inventory_event(json_loads(raw), sequence)
+            except (TypeError, ValueError) as exc:
                 raise CacheBlobBackendError(
                     "Canonical manifest inventory event is invalid",
                     context={"operation": "manifest_inventory", "sequence": sequence},
-                )
-        return state
+                ) from exc
+        event = self._inventory_state()["events"].get(sequence)
+        return None if event is None else self._validate_inventory_event(event, sequence)
 
-    @staticmethod
-    def _append_inventory_event(state: dict[str, Any], key: str, record: bytes) -> None:
-        """Append the exact publication event in the same local transaction."""
-        state["events"].append([key, hashlib.sha256(record).hexdigest()])
-        state["next_sequence"] += 1
+    def _append_inventory_event(self, key: str, record: bytes) -> None:
+        """Index publication before authority, without append/read/rewrite history."""
+        event = {
+            "version": _MANIFEST_INVENTORY_SCHEMA_VERSION,
+            "key": key,
+            "digest": hashlib.sha256(record).hexdigest(),
+        }
+        encoded = json_dumps(event, default=str).encode("utf-8")
+        if len(encoded) > self._inventory_event_max_bytes():
+            raise CacheBlobBackendError(
+                "Canonical manifest inventory event exceeds its field policy",
+                context={"operation": "manifest_inventory"},
+            )
+        self._validate_inventory_event(event, 1)
+        state = self._inventory_state()
+        if type(self.backend) is not JsonBackend:
+            sequence = state["next_sequence"]
+            state["events"][sequence] = event
+            state["next_sequence"] = sequence + 1
+            return
+        while True:
+            sequence = state["next_sequence"]
+            try:
+                self._json_lock_file_ops.create_bytes_durable_exclusive(  # type: ignore[union-attr]
+                    self._json_inventory_event_locator(sequence), encoded
+                )
+            except FileExistsError:
+                # A crash after event durability but before the bounded head
+                # acknowledgement leaves safe stale scheduling evidence.
+                if self._read_inventory_event(sequence) is None:
+                    raise CacheBlobBackendError(
+                        "Canonical manifest inventory event disappeared",
+                        context={"operation": "manifest_inventory", "sequence": sequence},
+                    )
+                state["next_sequence"] = sequence + 1
+                self._write_inventory_head(state)
+                continue
+            state["next_sequence"] = sequence + 1
+            self._write_inventory_head(state)
+            return
+
+    def _compact_inventory_window(self) -> None:
+        """Retire one bounded run of stale scheduling events after authority moves."""
+        state = self._inventory_state()
+        start = state["compact_next_sequence"]
+        stop = min(state["next_sequence"], start + _MANIFEST_INVENTORY_COMPACTION_WINDOW)
+        for sequence in range(start, stop):
+            event = self._read_inventory_event(sequence)
+            if event is None:
+                continue
+            key, digest = event
+            try:
+                current = self._raw_from_entry(self._current_entry(key))
+            except (TypeError, ValueError, CacheBlobMigrationRequiredError):
+                current = None
+            if current is None or hashlib.sha256(current).hexdigest() != digest:
+                if type(self.backend) is JsonBackend:
+                    try:
+                        self._json_lock_file_ops.delete_durable(  # type: ignore[union-attr]
+                            self._json_inventory_event_locator(sequence)
+                        )
+                    except FileNotFoundError:
+                        pass
+                else:
+                    state["events"].pop(sequence, None)
+        state["compact_next_sequence"] = stop if stop < state["next_sequence"] else 1
+        self._write_inventory_head(state)
 
     def _publish_projection(
         self, key: str, record: bytes, entry_data: Optional[Mapping[str, Any]]
     ) -> None:
         """Publish one reversible projection inside the established lock boundary."""
         projection = self._projection(key, record, entry_data)
+        try:
+            prior_raw = self._raw_from_entry(self._current_entry(key))
+        except (TypeError, ValueError, CacheBlobMigrationRequiredError):
+            prior_raw = None
+        # The scheduler event is durable before authority publication. A
+        # process loss therefore creates only a stale revalidated position;
+        # it can never publish authority that a high-water snapshot omitted.
+        self._append_inventory_event(key, record)
         if type(self.backend) is JsonBackend:
             candidate = deepcopy(self.backend._metadata)
-            inventory = self._inventory_state(candidate=candidate)
-            self._append_inventory_event(inventory, key, record)
             now = datetime.now(timezone.utc).isoformat()
             candidate.setdefault("entries", {})[key] = {
                 "description": projection.get("description", ""),
@@ -559,12 +742,12 @@ class _MetadataManifestRepository:
                 "metadata": projection["metadata"].copy(),
             }
             self._publish_json_document(candidate)
+            if prior_raw is not None:
+                self._compact_inventory_window()
             return
         self.backend.put_entry(key, projection)
-        # The in-memory backend shares this repository's re-entrant local
-        # boundary.  Its sequence index is process-local by definition, but
-        # follows the exact same event contract as durable JSON.
-        self._append_inventory_event(self._inventory_state(), key, record)
+        if prior_raw is not None:
+            self._compact_inventory_window()
 
     def _remove_projection(self, key: str) -> None:
         """Retire the raw and compatibility projections in one local boundary."""
@@ -572,8 +755,10 @@ class _MetadataManifestRepository:
             candidate = deepcopy(self.backend._metadata)
             candidate.get("entries", {}).pop(key, None)
             self._publish_json_document(candidate)
+            self._compact_inventory_window()
             return
         self.backend._entries.pop(key, None)
+        self._compact_inventory_window()
 
     def publish_if_expected(
         self,
@@ -672,17 +857,8 @@ class _MetadataManifestRepository:
                 else:
                     entries = self.backend._entries
                 inventory = self._inventory_state()
-                # An old backend may contain canonical rows written before
-                # this index existed.  Refusing to fabricate a lexical cursor
-                # makes the required migration/rebuild explicit rather than
-                # silently omitting legacy members from a claimed snapshot.
-                if not inventory["events"] and entries:
-                    raise CacheBlobMigrationRequiredError(
-                        "Canonical manifest inventory rebuild is required",
-                        context={"backend": type(self.backend).__name__},
-                    )
                 high_water = (
-                    len(inventory["events"])
+                    inventory["next_sequence"] - 1
                     if cursor is None or cursor.snapshot_high_water is None
                     else cursor.snapshot_high_water
                 )
@@ -702,9 +878,12 @@ class _MetadataManifestRepository:
                     and inspected < self.lifecycle_limits.max_inventory_items
                     and len(page_entries) < limit
                 ):
-                    event_key, event_digest = inventory["events"][position - 1]
                     inspected += 1
+                    event = self._read_inventory_event(position)
                     position += 1
+                    if event is None:
+                        continue
+                    event_key, event_digest = event
                     last_key = event_key
                     entry = entries.get(event_key)
                     try:
@@ -818,6 +997,18 @@ class SqliteManifestRepository:
                 )
                 connection.exec_driver_sql(
                     f"""
+                    CREATE TABLE IF NOT EXISTS {_SQLITE_MANIFEST_INVENTORY_STATE_TABLE} (
+                        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                        compact_next_sequence INTEGER NOT NULL
+                    )
+                    """
+                )
+                connection.exec_driver_sql(
+                    f"INSERT OR IGNORE INTO {_SQLITE_MANIFEST_INVENTORY_STATE_TABLE} "
+                    "(singleton, compact_next_sequence) VALUES (1, 1)"
+                )
+                connection.exec_driver_sql(
+                    f"""
                     CREATE TABLE IF NOT EXISTS {_SQLITE_MANIFEST_INVENTORY_TABLE} (
                         sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                         logical_key TEXT NOT NULL,
@@ -868,10 +1059,16 @@ class SqliteManifestRepository:
             raise TypeError("Canonical manifest records must be bytes")
         try:
             with self.backend._lock, self.backend.engine.begin() as connection:
+                prior = connection.exec_driver_sql(
+                    f"SELECT 1 FROM {_SQLITE_MANIFEST_TABLE} WHERE logical_key = ?",
+                    (key,),
+                ).first()
                 if entry_data is not None:
                     self._write_compatibility_projection(connection, key, entry_data)
                 self._write_raw_row(connection, key, record)
                 self._append_inventory_event(connection, key, record)
+                if prior is not None:
+                    self._compact_inventory_window(connection)
         except _BACKEND_OPERATION_ERRORS as exc:
             raise _backend_failure("put_raw", self.backend, exc) from exc
 
@@ -921,6 +1118,8 @@ class SqliteManifestRepository:
                     self._write_compatibility_projection(connection, key, entry_data)
                 self._write_raw_row(connection, key, record)
                 self._append_inventory_event(connection, key, record)
+                if current_raw is not None:
+                    self._compact_inventory_window(connection)
         except CacheBlobLifecycleConflictError:
             raise
         except _BACKEND_OPERATION_ERRORS as exc:
@@ -990,6 +1189,52 @@ class SqliteManifestRepository:
             (key, hashlib.sha256(record).hexdigest()),
         )
 
+    @staticmethod
+    def _compact_inventory_window(connection: Any) -> None:
+        """Drop only stale exact events while preserving sparse sequence cursors."""
+        state = connection.exec_driver_sql(
+            f"SELECT compact_next_sequence FROM {_SQLITE_MANIFEST_INVENTORY_STATE_TABLE} "
+            "WHERE singleton = 1"
+        ).first()
+        if state is None:
+            raise CacheBlobBackendError(
+                "SQLite manifest inventory compaction state is unavailable",
+                context={"operation": "manifest_inventory"},
+            )
+        high_water = int(
+            connection.exec_driver_sql(
+                f"SELECT COALESCE(MAX(sequence), 0) FROM {_SQLITE_MANIFEST_INVENTORY_TABLE}"
+            ).scalar_one()
+        )
+        if high_water == 0:
+            return
+        start = int(state[0])
+        if start > high_water:
+            start = 1
+        stop = min(high_water + 1, start + _MANIFEST_INVENTORY_COMPACTION_WINDOW)
+        rows = connection.exec_driver_sql(
+            f"SELECT inventory.sequence, inventory.logical_key, inventory.record_digest, "
+            "manifests.canonical_bytes "
+            f"FROM {_SQLITE_MANIFEST_INVENTORY_TABLE} AS inventory "
+            f"LEFT JOIN {_SQLITE_MANIFEST_TABLE} AS manifests "
+            "ON manifests.logical_key = inventory.logical_key "
+            "WHERE inventory.sequence >= ? AND inventory.sequence < ? "
+            "ORDER BY inventory.sequence",
+            (start, stop),
+        ).all()
+        for sequence, _key, digest, raw in rows:
+            if raw is None or hashlib.sha256(bytes(raw)).hexdigest() != str(digest):
+                connection.exec_driver_sql(
+                    f"DELETE FROM {_SQLITE_MANIFEST_INVENTORY_TABLE} WHERE sequence = ?",
+                    (int(sequence),),
+                )
+        next_sequence = stop if stop <= high_water else 1
+        connection.exec_driver_sql(
+            f"UPDATE {_SQLITE_MANIFEST_INVENTORY_STATE_TABLE} "
+            "SET compact_next_sequence = ? WHERE singleton = 1",
+            (next_sequence,),
+        )
+
     def remove(self, key: str) -> None:
         """Remove the raw manifest and compatible BlobStore metadata if present."""
         try:
@@ -998,6 +1243,7 @@ class SqliteManifestRepository:
                     f"DELETE FROM {_SQLITE_MANIFEST_TABLE} WHERE logical_key = ?",
                     (key,),
                 )
+                self._compact_inventory_window(connection)
             self.backend.remove_entry(key)
         except _BACKEND_OPERATION_ERRORS as exc:
             raise _backend_failure("remove", self.backend, exc) from exc
@@ -1024,6 +1270,7 @@ class SqliteManifestRepository:
                 connection.exec_driver_sql(
                     "DELETE FROM cache_entries WHERE cache_key = ?", (key,)
                 )
+                self._compact_inventory_window(connection)
         except CacheBlobLifecycleConflictError:
             raise
         except _BACKEND_OPERATION_ERRORS as exc:
@@ -1131,6 +1378,13 @@ class SqliteManifestRepository:
                     if len(entries_list) == resolved:
                         break
         entries = tuple(entries_list)
+        # Compaction leaves deliberate sparse gaps. If the bounded query found
+        # no later event rows, the high-water snapshot is complete even when
+        # its numeric sequence still extends beyond the caller's old cursor.
+        snapshot_exhausted = not rows or (
+            len(rows) < self.lifecycle_limits.max_inventory_items
+            and len(entries_list) < resolved
+        )
         return ManifestPage(
             entries=entries,
             next_cursor=(
@@ -1139,7 +1393,7 @@ class SqliteManifestRepository:
                     snapshot_high_water=int(high_water),
                     next_sequence=next_position,
                 )
-                if next_position <= int(high_water)
+                if next_position <= int(high_water) and not snapshot_exhausted
                 else None
             ),
             entry_next_cursors=tuple(entry_next_cursors),

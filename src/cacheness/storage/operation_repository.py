@@ -145,6 +145,14 @@ class PendingControlPage:
 
     entries: tuple[tuple[str, bytes | None], ...]
     next_cursor: PendingControlCursor | None
+    # Recovery may spend its action allowance on only a prefix of this page.
+    # Keep the source-sequence continuation for every yielded member so that a
+    # later call cannot rebuild a mutable lexical position and replay it.
+    entry_next_cursors: tuple[PendingControlCursor, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.entry_next_cursors and len(self.entry_next_cursors) != len(self.entries):
+            raise ValueError("pending entry cursors must align with page entries")
 
 
 class OperationRecordRepository(Protocol):
@@ -537,6 +545,7 @@ class FileOperationRecordRepository:
                 # is too large to prove empty, callers receive the same typed
                 # migration-required outcome instead of an unbounded scan.
                 max_inventory_names=self.lifecycle_limits.max_inventory_items,
+                max_scanned_names=self.lifecycle_limits.max_inventory_items,
                 operation="detect_legacy_lifecycle_inventory",
                 name_filter=name_filter,
             )
@@ -658,6 +667,7 @@ class FileOperationRecordRepository:
                     cursor=None,
                     max_names=self.lifecycle_limits.max_inventory_items,
                     max_inventory_names=self.lifecycle_limits.max_inventory_items,
+                    max_scanned_names=self.lifecycle_limits.max_inventory_items,
                     operation="bootstrap_pending_inventory",
                     name_filter=self._is_eligible_pending_name,
                 )
@@ -1782,7 +1792,7 @@ class FileOperationRecordRepository:
         if cursor is not None and not isinstance(cursor, PendingControlCursor):
             raise TypeError("pending control cursor is invalid")
         limit = self.lifecycle_limits.operation_page_size
-        entries, next_cursor, _entry_next_cursors = self._inventory_page(
+        entries, next_cursor, entry_next_cursors = self._inventory_page(
             "pending",
             cursor,
             page_size=limit,
@@ -1792,6 +1802,7 @@ class FileOperationRecordRepository:
         return PendingControlPage(
             entries=entries,
             next_cursor=next_cursor,
+            entry_next_cursors=entry_next_cursors,
         )
 
     def recover_pending_operation_records(self) -> tuple[str, ...]:
@@ -1806,24 +1817,24 @@ class FileOperationRecordRepository:
         page = self.list_pending_control_page(cursor)
         recovered: list[str] = []
         eligible_actions = 0
-        last_processed: str | None = None
-        for name, raw in page.entries:
+        last_processed_index: int | None = None
+        for entry_index, (name, raw) in enumerate(page.entries):
             if not (name.startswith(".") and name.endswith(".tmp")):
-                last_processed = name
+                last_processed_index = entry_index
                 continue
             pending_parts = name[1:-4].rsplit(".pending.", 1)
             if len(pending_parts) != 2:
-                last_processed = name
+                last_processed_index = entry_index
                 continue
             base, digest_and_token = pending_parts
             resolved_final = self._recoverable_pending_final(base)
             if resolved_final is None:
-                last_processed = name
+                last_processed_index = entry_index
                 continue
             final_locator, operation_id = resolved_final
             digest_parts = digest_and_token.rsplit(".", 1)
             if len(digest_parts) != 2:
-                last_processed = name
+                last_processed_index = entry_index
                 continue
             digest, token = digest_parts
             if (
@@ -1832,13 +1843,13 @@ class FileOperationRecordRepository:
                 or len(token) != 32
                 or any(character not in "0123456789abcdef" for character in token)
             ):
-                last_processed = name
+                last_processed_index = entry_index
                 continue
             if raw is None:
-                last_processed = name
+                last_processed_index = entry_index
                 continue
             if hashlib.sha256(raw).hexdigest() != digest:
-                last_processed = name
+                last_processed_index = entry_index
                 continue
             if eligible_actions >= self.lifecycle_limits.max_reconcile_actions:
                 break
@@ -1858,17 +1869,17 @@ class FileOperationRecordRepository:
             # Syntax-valid bytes with the wrong digest deliberately do not
             # consume this budget and remain untouched/reportable.
             eligible_actions += 1
-            last_processed = name
+            last_processed_index = entry_index
         # A pending candidate is scheduling evidence, never lifecycle
         # authority.  Persisting its opaque name lets later invocations move
         # past invalid or Windows-blocked prefixes without deleting them.
-        next_cursor = (
-            PendingControlCursor(last_processed)
-            if last_processed is not None
-            and (eligible_actions >= self.lifecycle_limits.max_reconcile_actions
-                 or last_processed != page.entries[-1][0])
-            else page.next_cursor
-        )
+        if (
+            last_processed_index is not None
+            and last_processed_index < len(page.entries) - 1
+        ):
+            next_cursor = page.entry_next_cursors[last_processed_index]
+        else:
+            next_cursor = page.next_cursor
         self._checkpoint_pending_recovery_cursor(next_cursor)
         return tuple(recovered)
 

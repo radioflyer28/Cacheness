@@ -894,6 +894,7 @@ class ManagedFileOps:
         cursor: str | None,
         max_names: int,
         max_inventory_names: int | None = None,
+        max_scanned_names: int | None = None,
         operation: str,
         name_filter: Callable[[str], bool] | None = None,
     ) -> tuple[tuple[str, ...], str | None]:
@@ -904,8 +905,11 @@ class ManagedFileOps:
         instead forms a *separately policy-bounded* inventory snapshot, then
         applies one lexical cursor to that snapshot.  ``max_names`` limits raw
         records the caller may read; ``max_inventory_names`` independently
-        limits directory entries inspected.  An over-limit namespace fails
-        closed rather than skipping evidence under a misleading page bound.
+        limits matching inventory entries.  ``max_scanned_names`` additionally
+        caps physical directory entries considered before filtering, which is
+        required for legacy bootstrap paths that cannot afford an unbounded
+        walk through unrelated names. An over-limit namespace fails closed
+        rather than skipping evidence under a misleading page bound.
         """
         if type(max_names) is not int or max_names <= 0:
             raise ValueError("directory page size must be a positive integer")
@@ -913,6 +917,10 @@ class ManagedFileOps:
             type(max_inventory_names) is not int or max_inventory_names <= 0
         ):
             raise ValueError("directory inventory size must be a positive integer")
+        if max_scanned_names is not None and (
+            type(max_scanned_names) is not int or max_scanned_names <= 0
+        ):
+            raise ValueError("directory scanned-name bound must be a positive integer")
         if cursor is not None and (
             not isinstance(cursor, str)
             or not cursor
@@ -926,11 +934,21 @@ class ManagedFileOps:
                 _unsafe_path(CacheReason.PATH_RACE)
             names: list[str] = []
             inspected = 0
+            scanned = 0
             with os.scandir(prepared) as entries:
                 for entry in entries:
                     name = entry.name
                     if name in {".", ".."}:
                         continue
+                    scanned += 1
+                    if max_scanned_names is not None and scanned > max_scanned_names:
+                        raise CacheBlobBackendError(
+                            "Managed directory scan exceeds its lifecycle bound",
+                            context={
+                                "operation": operation,
+                                "max_scanned_names": max_scanned_names,
+                            },
+                        )
                     # Family filtering happens before the accounting boundary:
                     # unrelated control files must never deny primary,
                     # pending, or sidecar scheduling.
