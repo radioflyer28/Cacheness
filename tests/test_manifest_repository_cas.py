@@ -1674,6 +1674,88 @@ def test_recovery_compacts_repeated_post_authority_failures_to_live_page_work(
             backend.close()
 
 
+def test_json_manifest_concurrent_compaction_preserves_old_cursor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Concurrent bounded recovery keeps authenticated old snapshots safe."""
+    metadata_path = tmp_path / "concurrent-manifest-maintenance.json"
+    limits = LifecycleLimits(manifest_page_size=1, max_inventory_items=1)
+    key = b"m" * 32
+    first_backend = JsonBackend(metadata_path)
+    first = JsonManifestRepository(
+        first_backend, lifecycle_limits=limits, inventory_key_provider=lambda: key
+    )
+    second_backend: JsonBackend | None = None
+    second: JsonManifestRepository | None = None
+    try:
+        first.put_raw("anchor", _record("anchor"))
+        first.put_raw("churn", _record("churn-0"))
+        old_page = first.list_page()
+        assert old_page.next_cursor is not None
+
+        real_compact = first._compact_inventory_window
+
+        def fail_after_authority() -> bool:
+            raise OSError("post-authority loss")
+
+        monkeypatch.setattr(first, "_compact_inventory_window", fail_after_authority)
+        for generation in (1, 2, 3):
+            observed = first.get_raw("churn")
+            assert observed is not None
+            with pytest.raises(CacheBlobBackendError):
+                first.publish_if_expected(
+                    "churn",
+                    ManifestExpectation.from_authenticated_record(
+                        f"generation-{generation}", observed
+                    ),
+                    _record(f"churn-{generation}"),
+                )
+        monkeypatch.setattr(first, "_compact_inventory_window", real_compact)
+
+        # A second repository has independent in-process locks, so this proves
+        # the file authority lock serializes two recoverers rather than merely
+        # exercising the single-instance reentrant lock.
+        second_backend = JsonBackend(metadata_path)
+        second = JsonManifestRepository(
+            second_backend, lifecycle_limits=limits, inventory_key_provider=lambda: key
+        )
+        gate = Barrier(2)
+        outcomes: list[bool] = []
+        failures: list[Exception] = []
+
+        def compact(repository: JsonManifestRepository) -> None:
+            try:
+                gate.wait(timeout=5)
+                outcomes.append(repository.compact_inventory_for_recovery())
+            except Exception as exc:  # pragma: no cover - asserted below.
+                failures.append(exc)
+
+        threads = [
+            Thread(target=compact, args=(first,)),
+            Thread(target=compact, args=(second,)),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=5)
+            assert not thread.is_alive()
+        assert not failures
+        assert len(outcomes) == 2
+
+        while not first.compact_inventory_for_recovery():
+            pass
+        # A continuation captured before the concurrent skip compaction still
+        # cannot revive the retired churn generation.
+        assert first.list_page(old_page.next_cursor).entries == ()
+    finally:
+        first.close()
+        first_backend.close()
+        if second is not None:
+            second.close()
+        if second_backend is not None:
+            second_backend.close()
+
+
 @pytest.mark.parametrize("backend_name", ("memory", "json"))
 def test_manifest_sparse_successor_marker_is_fail_closed(
     tmp_path: Path, backend_name: str
