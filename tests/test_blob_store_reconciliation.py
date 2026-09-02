@@ -43,7 +43,12 @@ from cacheness.storage.operation_record import (
     OperationTransition,
     store_identity,
 )
-from cacheness.storage.operation_repository import FileOperationRecordRepository
+from cacheness.storage.operation_repository import (
+    FileOperationRecordRepository,
+    OperationCursor,
+    PendingControlCursor,
+    ReconciliationCheckpointCursor,
+)
 from cacheness.storage import operation_repository as operation_repository_module
 from cacheness.storage import manifest_repository as manifest_repository_module
 from cacheness.storage.path_security import ManagedFileOps
@@ -1489,6 +1494,199 @@ def test_pending_inventory_compaction_skips_a_lifetime_stale_prefix(
         store.close()
 
 
+@pytest.mark.parametrize("max_inventory_items", (1, 2))
+@pytest.mark.parametrize("family", ("primary", "sidecar", "pending"))
+def test_current_v2_lone_family_head_never_uses_shared_legacy_scan(
+    tmp_path: Path, family: str, max_inventory_items: int
+) -> None:
+    """Older lazy v2 siblings remain empty despite unrelated operations names."""
+    root = tmp_path / f"lone-{family}-{max_inventory_items}"
+    limits = replace(
+        _small_lifecycle_limits(), max_inventory_items=max_inventory_items
+    )
+    config = CacheConfig(cache_dir=str(root), lifecycle_limits=limits)
+    store = BlobStore(root, backend="json", config=config)
+    operation_id = "a" * 32
+    raw = b"current-v2-scheduling-member"
+    repository = store.lifecycle.operation_repository
+    if family == "primary":
+        name = operation_id
+        current_locator = repository.locator_for(operation_id)
+    elif family == "sidecar":
+        # Sidecar inventory events carry the checkpoint id; the repository
+        # derives its durable ``reconcile-action-<id>.json`` locator from it.
+        name = operation_id
+        current_locator = repository.reconciliation_checkpoint_locator(operation_id)
+    else:
+        digest = hashlib.sha256(raw).hexdigest()
+        name = f".{operation_id}.json.pending.{digest}.{'b' * 32}.tmp"
+        current_locator = root / "operations" / name
+    try:
+        # Enter the fresh-store path once, then model a current-v2 store made
+        # by the lazy-head implementation that preceded the initialization
+        # marker.  The remaining validated head is sufficient provenance.
+        store._manifest_key(initialize_new_store=True)
+        repository._append_inventory_event(family, name, raw)
+        current_locator.write_bytes(raw)
+        repository.file_ops.delete_durable(repository._inventory_initialization_locator())
+        for sibling in ("primary", "sidecar", "pending"):
+            if sibling != family:
+                repository.file_ops.delete_durable(repository._inventory_head_locator(sibling))
+        operations = root / "operations"
+        for index in range(max_inventory_items + 1):
+            (operations / f"unrelated-{index:04d}").write_bytes(b"not lifecycle evidence")
+    finally:
+        store.close()
+
+    reopened = BlobStore(root, backend="json", config=config)
+    try:
+        # Startup recovery and public reconciliation both read all three
+        # families.  Neither may reinterpret unrelated names as a migration
+        # requirement merely because two current-v2 sibling heads are absent.
+        for inventory_family in ("primary", "sidecar", "pending"):
+            assert (
+                reopened.lifecycle.operation_repository._read_inventory(
+                    inventory_family
+                )["next_sequence"]
+                >= 1
+            )
+        report = reopened.reconcile(now=datetime(2026, 9, 2, tzinfo=timezone.utc))
+        assert report is not None
+    finally:
+        reopened.close()
+
+
+@pytest.mark.parametrize("interrupted_family", ("primary", "sidecar", "pending"))
+def test_crash_during_new_store_inventory_initialization_keeps_reopen_current_v2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interrupted_family: str
+) -> None:
+    """A crash between fresh-head writes cannot manufacture legacy migration debt."""
+    root = tmp_path / f"inventory-initialize-crash-{interrupted_family}"
+    store = BlobStore(root, backend="json")
+    repository = store.lifecycle.operation_repository
+    target = repository._inventory_head_locator(interrupted_family)
+    original_create = repository.file_ops.create_bytes_durable_exclusive
+
+    def interrupt_one_head(locator: Path, payload: bytes) -> None:
+        if locator == target:
+            raise OSError("injected inventory initialization interruption")
+        original_create(locator, payload)
+
+    monkeypatch.setattr(
+        repository.file_ops, "create_bytes_durable_exclusive", interrupt_one_head
+    )
+    try:
+        with pytest.raises(OSError, match="injected inventory initialization interruption"):
+            store._manifest_key(initialize_new_store=True)
+        assert repository._has_current_inventory_initialization()
+    finally:
+        store.close()
+
+    reopened = BlobStore(root, backend="json")
+    try:
+        for family in ("primary", "sidecar", "pending"):
+            assert reopened.lifecycle.operation_repository._read_inventory(family) == {
+                "version": 2,
+                "next_sequence": 1,
+                "compact_next_sequence": 1,
+                "first_live_sequence": 1,
+            }
+        assert reopened.reconcile(now=datetime(2026, 9, 2, tzinfo=timezone.utc)) is not None
+    finally:
+        reopened.close()
+
+
+@pytest.mark.parametrize("family", ("primary", "sidecar", "pending"))
+def test_inventory_floor_advances_after_wrap_and_sparse_pages_keep_valid_cursors(
+    tmp_path: Path, family: str
+) -> None:
+    """Retiring an old live floor cannot strand sparse v2 paging after wrap."""
+    root = tmp_path / f"floor-wrap-{family}"
+    limits = replace(
+        _small_lifecycle_limits(), max_inventory_items=1, operation_page_size=1
+    )
+    store = BlobStore(
+        root,
+        backend="json",
+        config=CacheConfig(cache_dir=str(root), lifecycle_limits=limits),
+    )
+    repository = store.lifecycle.operation_repository
+    raw = b"current-scheduling-member"
+    first_id = "a" * 32
+    later_id = "b" * 32
+    if family == "primary":
+        first_name, later_name = first_id, later_id
+        first_locator = repository.locator_for(first_id)
+        later_locator = repository.locator_for(later_id)
+    elif family == "sidecar":
+        first_name, later_name = first_id, later_id
+        first_locator = repository.reconciliation_checkpoint_locator(first_id)
+        later_locator = repository.reconciliation_checkpoint_locator(later_id)
+    else:
+        digest = hashlib.sha256(raw).hexdigest()
+        first_name = f".{first_id}.json.pending.{digest}.{'c' * 32}.tmp"
+        later_name = f".{later_id}.json.pending.{digest}.{'d' * 32}.tmp"
+        first_locator = root / "operations" / first_name
+        later_locator = root / "operations" / later_name
+    try:
+        store._manifest_key(initialize_new_store=True)
+        repository._append_inventory_event(family, first_name, raw)
+        first_locator.write_bytes(raw)
+        repository._append_inventory_event(family, "stale-member", raw)
+        repository._append_inventory_event(family, later_name, raw)
+        later_locator.write_bytes(raw)
+
+        # Compact the floor, advance past it, then retire it before compaction
+        # wraps.  The next wrapped window covers sequence one and must advance
+        # the floor even though its cursor no longer starts at that sequence.
+        repository._compact_inventory_after_retirement(family)
+        repository._compact_inventory_after_retirement(family)
+        first_locator.unlink()
+        repository._compact_inventory_after_retirement(family)
+        repository._compact_inventory_after_retirement(family)
+        state = repository._read_inventory(family)
+        assert state["first_live_sequence"] == 2
+
+        if family == "primary":
+            first_page = repository.list_page(None, page_size=1)
+            assert first_page.entries == ()
+            assert first_page.next_cursor == OperationCursor(
+                "0" * 32, snapshot_high_water=3, next_sequence=3
+            )
+            second_page = repository.list_page(first_page.next_cursor, page_size=1)
+        elif family == "sidecar":
+            first_page = repository.list_reconciliation_checkpoint_page(None, page_size=1)
+            assert first_page.entries == ()
+            assert first_page.next_cursor is not None
+            second_page = repository.list_reconciliation_checkpoint_page(
+                first_page.next_cursor, page_size=1
+            )
+        else:
+            first_page = repository.list_pending_control_page(None)
+            assert first_page.entries == ()
+            assert first_page.next_cursor is not None
+            second_page = repository.list_pending_control_page(first_page.next_cursor)
+        assert second_page.entries == ((later_name, raw),)
+
+        # An old authenticated high-water cursor remains valid after compaction
+        # and begins at the proved live floor instead of replaying lifetime gaps.
+        if family == "primary":
+            old_cursor = OperationCursor.before_first(3)
+            assert repository.list_page(old_cursor, page_size=1).next_cursor is not None
+        elif family == "sidecar":
+            old_cursor = ReconciliationCheckpointCursor.before_first(3)
+            assert (
+                repository.list_reconciliation_checkpoint_page(old_cursor, page_size=1)
+                .next_cursor
+                is not None
+            )
+        else:
+            old_cursor = PendingControlCursor("~", snapshot_high_water=3, next_sequence=1)
+            assert repository.list_pending_control_page(old_cursor).next_cursor is not None
+    finally:
+        store.close()
+
+
 def test_dry_run_reports_blocked_pending_control_residue(tmp_path: Path) -> None:
     """A digest-invalid pending candidate is visible without becoming authority."""
     root = tmp_path / "pending-dry-run"
@@ -1528,9 +1726,10 @@ def test_pending_only_reconciliation_page_emits_and_resumes_its_cursor(
         operations.mkdir(exist_ok=True)
         for index in range(3):
             operation_id = f"{index:032x}"
-            (operations / (
-                f".{operation_id}.json.pending.{'0' * 64}.{index:032x}.tmp"
-            )).write_bytes(b"invalid")
+            name = f".{operation_id}.json.pending.{'0' * 64}.{index:032x}.tmp"
+            repository = store.lifecycle.operation_repository
+            repository._append_inventory_event("pending", name, b"invalid")
+            (operations / name).write_bytes(b"invalid")
 
         first = store.reconcile(now=datetime(2026, 8, 31, tzinfo=timezone.utc))
         assert first.resume_token is not None

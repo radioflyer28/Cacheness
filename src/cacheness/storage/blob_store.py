@@ -997,6 +997,7 @@ class BlobStore:
     def _manifest_key(self, *, initialize_new_store: bool = False) -> bytes:
         """Return the strict persistent key without silently downgrading signing."""
         operation = "get_manifest_key"
+        initialize_inventory = False
         if initialize_new_store:
             # Repository availability is a storage boundary, not a key-provider
             # failure.  Preserve its typed cause instead of misreporting an
@@ -1016,6 +1017,14 @@ class BlobStore:
                     self._manifest_key_provider, "get_or_initialize_new_store", None
                 )
                 if callable(initializer):
+                    freshness_probe = getattr(
+                        self._manifest_key_provider,
+                        "key_was_absent_for_new_store_initialization",
+                        None,
+                    )
+                    initialize_inventory = bool(
+                        callable(freshness_probe) and freshness_probe()
+                    )
                     key = initializer()
                 else:
                     # An injected provider owns its trust-root provisioning.
@@ -1027,7 +1036,6 @@ class BlobStore:
                 raise ManifestKeyError(
                     "Canonical manifest key provider returned invalid key material"
                 )
-            return key
         except Exception as exc:
             raise CacheBlobManifestUnauthenticatedError(
                 "Canonical BlobStore signing key is unavailable",
@@ -1037,6 +1045,12 @@ class BlobStore:
                 },
                 reason=CacheReason.MANIFEST_SIGNING_KEY_INVALID,
             ) from exc
+        if initialize_inventory:
+            # The first lifecycle record is the only point at which this store
+            # has proved it is fresh.  Publish all scheduling-family heads now,
+            # before any operation evidence can become visible.
+            self.lifecycle.operation_repository.initialize_new_store()
+        return key
 
     def _delete_or_prove_absent(self, locator: Path) -> None:
         """Remove a contained payload only when deletion is conclusively known."""

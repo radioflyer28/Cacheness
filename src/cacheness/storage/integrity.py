@@ -205,6 +205,23 @@ class ManifestKeyProvider:
             return self._provided_key
         return self._read_existing_key(require_ready=True)
 
+    def key_was_absent_for_new_store_initialization(self) -> bool:
+        """Return whether a default provider has no key inode yet.
+
+        This intentionally distinguishes a safe ``ENOENT`` from a partial,
+        malformed, unreadable, or unsafe existing key.  The latter must still
+        flow through the strict initializer, but cannot authorize a caller to
+        mark old lifecycle evidence as a freshly indexed store.
+        """
+        if self._provided_key is not None:
+            return False
+        try:
+            return self._read_existing_key(
+                missing_ok=True, require_ready=False
+            ) is None
+        except ManifestKeyError:
+            return False
+
     def initialize_new_store(self) -> bytes:
         """Create or complete exactly one acknowledged local trust root.
 

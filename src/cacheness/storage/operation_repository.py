@@ -36,6 +36,8 @@ _INVENTORY_SCHEMA_VERSION = 2
 _INVENTORY_HEAD_MAX_BYTES = 4_096
 _INVENTORY_EVENT_MIN_BYTES = 32 * 1024
 _INVENTORY_COMPACTION_WINDOW = 64
+_INVENTORY_FAMILIES = ("primary", "sidecar", "pending")
+_INVENTORY_INITIALIZATION_BYTES = b"cacheness-operation-inventory-v2\n"
 
 
 @dataclass(frozen=True)
@@ -506,6 +508,21 @@ class FileOperationRecordRepository:
             allow_missing_leaf=True,
         )
 
+    def _inventory_initialization_locator(self) -> Path:
+        """Return the durable new-store marker for the v2 family heads.
+
+        The marker is intentionally separate from every family head.  A crash
+        after the fresh signing key is acknowledged but before all three heads
+        are durable is therefore distinguishable from a genuinely pre-index
+        store, without treating sibling evidence as a legacy migration signal.
+        """
+        return resolve_managed_locator(
+            self.file_ops.root,
+            Path("operations") / ".cacheness-inventory-v2" / "initialized",
+            operation="lifecycle_inventory",
+            allow_missing_leaf=True,
+        )
+
     def _inventory_event_locator(self, family: str, sequence: int) -> Path:
         """Return one immutable event in the family-local monotonic sequence."""
         if type(sequence) is not int or sequence <= 0:
@@ -604,35 +621,8 @@ class FileOperationRecordRepository:
         finally:
             self._pending_inventory_observer_depth -= 1
 
-    def _read_inventory(self, family: str) -> dict[str, int]:
-        """Read one bounded v2 sequence head, never the event history."""
-        try:
-            raw = self.file_ops.read_bytes_bounded(
-                self._inventory_head_locator(family),
-                max_bytes=_INVENTORY_HEAD_MAX_BYTES,
-            )
-        except FileNotFoundError:
-            # A v1 history cannot be safely reinterpreted as a v2 sparse
-            # sequence, and a raw legacy record must never look like no debt.
-            try:
-                legacy_size = self.file_ops.get_size(
-                    self._legacy_inventory_locator(family)
-                )
-            except FileNotFoundError:
-                legacy_size = -1
-            if legacy_size < 0:
-                if self._has_preindex_evidence(family):
-                    if family == "pending":
-                        return self._bootstrap_pending_inventory()
-                    raise CacheBlobMigrationRequiredError(
-                        "Lifecycle evidence predates its durable inventory",
-                        context={"family": family, "operation": "inventory_migration"},
-                    )
-                return self._empty_inventory_head()
-            raise CacheBlobMigrationRequiredError(
-                "Lifecycle inventory v1 requires an explicit migration",
-                context={"family": family, "operation": "inventory_migration"},
-            )
+    def _decode_inventory_head(self, family: str, raw: bytes) -> dict[str, int]:
+        """Validate one present head without inferring absence or migration."""
         try:
             state = json.loads(raw)
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
