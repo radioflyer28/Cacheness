@@ -1016,7 +1016,12 @@ class BlobStore:
             raise CacheBlobManifestUnauthenticatedError(
                 "Canonical BlobStore signing key is unavailable",
                 context={
-                    "operation": "initialize_inventory_provenance",
+                    # Inventory provenance is initialized as part of the
+                    # established fresh-store manifest-key boundary.  Keep
+                    # the public operation context stable for callers that
+                    # distinguish unavailable trust roots from migration
+                    # evidence.
+                    "operation": "initialize_manifest_key",
                     "provider": type(self._manifest_key_provider).__name__,
                 },
                 reason=CacheReason.MANIFEST_SIGNING_KEY_INVALID,
@@ -1024,7 +1029,7 @@ class BlobStore:
         if type(key) is not bytes or len(key) != 32:
             raise CacheBlobManifestUnauthenticatedError(
                 "Canonical BlobStore signing key is invalid",
-                context={"operation": "initialize_inventory_provenance"},
+                context={"operation": "initialize_manifest_key"},
                 reason=CacheReason.MANIFEST_SIGNING_KEY_INVALID,
             )
         return key
