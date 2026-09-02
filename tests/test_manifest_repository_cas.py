@@ -1404,7 +1404,7 @@ def test_json_manifest_inventory_is_external_bounded_and_reopens(tmp_path: Path)
 def test_recovery_compacts_repeated_post_authority_failures_to_live_page_work(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend_name: str
 ) -> None:
-    """Durable recovery rehomes live entries instead of retaining sparse history."""
+    """Durable recovery skips stale runs without changing live event order."""
     limits = LifecycleLimits(manifest_page_size=1, max_inventory_items=1)
     if backend_name == "memory":
         backend = InMemoryBackend()
@@ -1475,10 +1475,47 @@ def test_recovery_compacts_repeated_post_authority_failures_to_live_page_work(
         second = repository.list_page(first.next_cursor)
         assert [key for key, _raw in second.entries] == ["churn"]
         assert second.next_cursor is None
-        # The two-page live snapshot only inspected its two members; repeated
-        # failed cleanup does not leak into clear/reconciliation page count.
-        assert inspected[-2:] == [11, 12]
+        # The two-page live snapshot only inspected its two original members.
+        # The sparse-successor marker skips generations 2..9 without changing
+        # the stable identity/order of the remaining sequence 10 member.
+        assert inspected[-2:] == [1, 10]
     finally:
         repository.close()
         if not closed:
             backend.close()
+
+
+@pytest.mark.parametrize("backend_name", ("memory", "json"))
+def test_manifest_sparse_successor_marker_is_fail_closed(
+    tmp_path: Path, backend_name: str
+) -> None:
+    """Malformed scheduling accelerators cannot hide a current manifest record."""
+    limits = LifecycleLimits(manifest_page_size=1, max_inventory_items=1)
+    if backend_name == "memory":
+        backend = InMemoryBackend()
+        repository = InMemoryManifestRepository(backend, lifecycle_limits=limits)
+    else:
+        backend = JsonBackend(tmp_path / "malformed-sparse-successor.json")
+        repository = JsonManifestRepository(backend, lifecycle_limits=limits)
+    try:
+        repository.put_raw("current", _record("current"))
+        if backend_name == "memory":
+            state = repository._inventory_state()
+            state["skips"][1] = {
+                "version": 2,
+                "start_sequence": 1,
+                # A marker must move forward; a self-loop is not a benign
+                # missing accelerator and must never become a page omission.
+                "next_sequence": 1,
+            }
+        else:
+            repository._json_lock_file_ops.write_bytes_durable(  # type: ignore[union-attr]
+                repository._json_inventory_skip_locator(1), b"not-json"
+            )
+
+        with pytest.raises(CacheBlobBackendError, match="list_page failed"):
+            repository.list_page()
+        assert repository.get_raw("current") == _record("current")
+    finally:
+        repository.close()
+        backend.close()

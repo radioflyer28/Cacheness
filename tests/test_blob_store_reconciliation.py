@@ -1637,9 +1637,19 @@ def test_manifest_compaction_debt_recovers_after_post_authority_failures(
     try:
         repository = reopened.manifest_repository
         state = repository._inventory_state()
-        # Reopen uses the explicit mutating recovery boundary to retire all
-        # stale post-authority events in its fixed maintenance window.
-        assert state["first_live_sequence"] == state["next_sequence"] - 1
+        # Reopen consumes exactly one configured maintenance window.  The
+        # remaining exact target is durable, so later clear admission can
+        # finish recovery without allowing a normal read to mutate it.
+        assert state["first_live_sequence"] == 2
+        assert state["maintenance_target_sequence"] == state["next_sequence"] - 1
+
+        # Each recovery admission pays at most one configured event position.
+        # Finish the persisted continuation explicitly before clear captures
+        # its finite target; normal reads above did not perform this work.
+        maintenance_passes = 0
+        while not repository.compact_inventory_for_recovery():
+            maintenance_passes += 1
+            assert maintenance_passes < state["next_sequence"]
 
         pages = 0
         original_list_page = repository.list_page

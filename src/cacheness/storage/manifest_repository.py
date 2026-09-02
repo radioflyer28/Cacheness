@@ -506,6 +506,25 @@ class _MetadataManifestRepository:
             allow_missing_leaf=True,
         )
 
+    def _json_inventory_skip_locator(self, sequence: int) -> Path:
+        """Return one bounded sparse-successor marker for a retired run.
+
+        Markers are scheduling-only accelerators.  They never establish
+        membership: the target event is still authenticated by its immutable
+        digest and current authoritative projection before a page yields it.
+        """
+        if type(sequence) is not int or sequence <= 0:
+            raise ValueError("manifest inventory sparse-run sequence is invalid")
+        if self._json_lock_file_ops is None:
+            raise CacheBlobBackendError("JSON manifest inventory root is unavailable")
+        return resolve_managed_locator(
+            self._json_lock_file_ops.root,
+            f".{Path(self.backend.metadata_file).name}.manifest-inventory-v2-"
+            f"skip-{sequence:020d}.json",
+            operation="manifest_inventory",
+            allow_missing_leaf=True,
+        )
+
     def _inventory_event_max_bytes(self) -> int:
         """Keep one event bounded independently from manifest record lifetime."""
         return max(
@@ -529,6 +548,11 @@ class _MetadataManifestRepository:
             # from ``compact_next_sequence`` in bounded calls until it reaches
             # that target.  It is intentionally separate from normal reads.
             "maintenance_target_sequence": 0,
+            # The first sequence in an in-progress sparse run.  Its durable
+            # marker is extended only after every intervening event has been
+            # exact-revalidated stale.  Zero means there is no run currently
+            # being extended by maintenance.
+            "open_sparse_run_start": 0,
         }
 
     @staticmethod
@@ -548,6 +572,14 @@ class _MetadataManifestRepository:
                 "compact_next_sequence",
                 "first_live_sequence",
                 "maintenance_target_sequence",
+            },
+            {
+                "version",
+                "next_sequence",
+                "compact_next_sequence",
+                "first_live_sequence",
+                "maintenance_target_sequence",
+                "open_sparse_run_start",
             },
         ):
             raise CacheBlobBackendError(
@@ -575,6 +607,10 @@ class _MetadataManifestRepository:
             # existing high-water range as mutating recovery work rather than
             # allowing clear to scan a potentially stale history.
             state["maintenance_target_sequence"] = state["next_sequence"] - 1
+        if "open_sparse_run_start" not in state:
+            # Pre-marker heads keep their ordinary bounded scan behavior until
+            # a later maintenance call creates an authenticated sparse run.
+            state["open_sparse_run_start"] = 0
         if (
             type(state["first_live_sequence"]) is not int
             or not 1 <= state["first_live_sequence"] <= state["next_sequence"]
@@ -589,6 +625,14 @@ class _MetadataManifestRepository:
         ):
             raise CacheBlobBackendError(
                 "Canonical manifest inventory maintenance target is invalid",
+                context={"operation": "manifest_inventory"},
+            )
+        if (
+            type(state["open_sparse_run_start"]) is not int
+            or not 0 <= state["open_sparse_run_start"] < state["next_sequence"]
+        ):
+            raise CacheBlobBackendError(
+                "Canonical manifest inventory sparse-run continuation is invalid",
                 context={"operation": "manifest_inventory"},
             )
         return state
@@ -627,7 +671,7 @@ class _MetadataManifestRepository:
                     "Canonical manifest inventory migration is required",
                     context={"backend": type(self.backend).__name__},
                 )
-            state = {**self._empty_inventory_state(), "events": {}}
+            state = {**self._empty_inventory_state(), "events": {}, "skips": {}}
             setattr(self.backend, "_cacheness_manifest_inventory_v2", state)
         if not isinstance(state, dict) or set(state) not in (
             {"version", "next_sequence", "compact_next_sequence", "events"},
@@ -646,6 +690,25 @@ class _MetadataManifestRepository:
                 "maintenance_target_sequence",
                 "events",
             },
+            {
+                "version",
+                "next_sequence",
+                "compact_next_sequence",
+                "first_live_sequence",
+                "maintenance_target_sequence",
+                "open_sparse_run_start",
+                "events",
+            },
+            {
+                "version",
+                "next_sequence",
+                "compact_next_sequence",
+                "first_live_sequence",
+                "maintenance_target_sequence",
+                "open_sparse_run_start",
+                "events",
+                "skips",
+            },
         ):
             raise CacheBlobBackendError(
                 "Canonical manifest inventory is invalid",
@@ -660,15 +723,24 @@ class _MetadataManifestRepository:
                     "compact_next_sequence",
                     "first_live_sequence",
                     "maintenance_target_sequence",
+                    "open_sparse_run_start",
                 )
                 if name in state
             }
         )
         state["first_live_sequence"] = head["first_live_sequence"]
         state["maintenance_target_sequence"] = head["maintenance_target_sequence"]
+        state["open_sparse_run_start"] = head["open_sparse_run_start"]
         if not isinstance(state["events"], dict):
             raise CacheBlobBackendError(
                 "Canonical manifest inventory events are invalid",
+                context={"operation": "manifest_inventory"},
+            )
+        if "skips" not in state:
+            state["skips"] = {}
+        if not isinstance(state["skips"], dict):
+            raise CacheBlobBackendError(
+                "Canonical manifest inventory sparse runs are invalid",
                 context={"operation": "manifest_inventory"},
             )
         return state
@@ -726,6 +798,81 @@ class _MetadataManifestRepository:
                 ) from exc
         event = self._inventory_state()["events"].get(sequence)
         return None if event is None else self._validate_inventory_event(event, sequence)
+
+    @staticmethod
+    def _validate_inventory_skip(
+        marker: object, sequence: int, *, next_sequence: int
+    ) -> int:
+        """Validate a sparse-successor marker before it can skip positions."""
+        if (
+            not isinstance(marker, dict)
+            or set(marker) != {"version", "start_sequence", "next_sequence"}
+            or marker["version"] != _MANIFEST_INVENTORY_SCHEMA_VERSION
+            or marker["start_sequence"] != sequence
+            or type(marker["next_sequence"]) is not int
+            or not sequence < marker["next_sequence"] <= next_sequence
+        ):
+            raise CacheBlobBackendError(
+                "Canonical manifest inventory sparse-successor marker is invalid",
+                context={"operation": "manifest_inventory", "sequence": sequence},
+            )
+        return marker["next_sequence"]
+
+    def _read_inventory_skip(
+        self, sequence: int, state: dict[str, Any]
+    ) -> int | None:
+        """Read a non-authoritative sparse successor or fail closed if malformed."""
+        if type(self.backend) is JsonBackend:
+            if self._json_lock_file_ops is None:
+                raise CacheBlobBackendError("JSON manifest inventory root is unavailable")
+            try:
+                raw = self._json_lock_file_ops.read_bytes_bounded(
+                    self._json_inventory_skip_locator(sequence),
+                    max_bytes=_MANIFEST_INVENTORY_HEAD_MAX_BYTES,
+                )
+            except FileNotFoundError:
+                return None
+            try:
+                return self._validate_inventory_skip(
+                    json_loads(raw), sequence, next_sequence=state["next_sequence"]
+                )
+            except (TypeError, ValueError) as exc:
+                raise CacheBlobBackendError(
+                    "Canonical manifest inventory sparse-successor marker is invalid",
+                    context={"operation": "manifest_inventory", "sequence": sequence},
+                ) from exc
+        marker = state["skips"].get(sequence)
+        return (
+            None
+            if marker is None
+            else self._validate_inventory_skip(
+                marker, sequence, next_sequence=state["next_sequence"]
+            )
+        )
+
+    def _write_inventory_skip(
+        self, sequence: int, successor: int, state: dict[str, Any]
+    ) -> None:
+        """Durably extend one exact stale run before retiring its final event."""
+        marker = {
+            "version": _MANIFEST_INVENTORY_SCHEMA_VERSION,
+            "start_sequence": sequence,
+            "next_sequence": successor,
+        }
+        self._validate_inventory_skip(
+            marker, sequence, next_sequence=state["next_sequence"]
+        )
+        if type(self.backend) is not JsonBackend:
+            state["skips"][sequence] = marker
+            return
+        if self._json_lock_file_ops is None:
+            raise CacheBlobBackendError("JSON manifest inventory root is unavailable")
+        encoded = json_dumps(marker, default=str).encode("utf-8")
+        if len(encoded) > _MANIFEST_INVENTORY_HEAD_MAX_BYTES:
+            raise AssertionError("manifest inventory sparse-successor marker exceeds bound")
+        self._json_lock_file_ops.write_bytes_durable(
+            self._json_inventory_skip_locator(sequence), encoded
+        )
 
     def _append_inventory_event(self, key: str, record: bytes) -> int:
         """Index publication before authority, without append/read/rewrite history."""
@@ -798,67 +945,6 @@ class _MetadataManifestRepository:
             return None
         return current
 
-    def _move_inventory_projection_to_sequence(self, key: str, sequence: int) -> None:
-        """Make one current projection point at its newly appended live slot.
-
-        The event is written first.  If this authority update is interrupted,
-        the new event is not current because readers require the private
-        sequence match above; the old projection remains authoritative and a
-        later bounded pass retries it.  This avoids duplicate live members at
-        every crash seam while allowing compacted prefixes to contain no
-        permanent sparse slots.
-        """
-        if type(self.backend) is JsonBackend:
-            candidate = deepcopy(self.backend._metadata)
-            entry = candidate.get("entries", {}).get(key)
-            if not isinstance(entry, dict):
-                raise CacheBlobMigrationRequiredError(
-                    "Canonical manifest projection disappeared during maintenance",
-                    context={"key": key, "operation": "manifest_inventory"},
-                )
-            metadata = entry.get("metadata")
-            if not isinstance(metadata, Mapping):
-                raise CacheBlobMigrationRequiredError(
-                    "Canonical manifest projection metadata is invalid",
-                    context={"key": key, "operation": "manifest_inventory"},
-                )
-            updated_metadata = dict(metadata)
-            updated_metadata[_MANIFEST_INVENTORY_SEQUENCE_FIELD] = sequence
-            entry["metadata"] = updated_metadata
-            self._publish_json_document(candidate)
-            return
-        entry = self._current_entry(key)
-        if not isinstance(entry, dict):
-            raise CacheBlobMigrationRequiredError(
-                "Canonical manifest projection disappeared during maintenance",
-                context={"key": key, "operation": "manifest_inventory"},
-            )
-        metadata = entry.get("metadata")
-        if not isinstance(metadata, dict):
-            raise CacheBlobMigrationRequiredError(
-                "Canonical manifest projection metadata is invalid",
-                context={"key": key, "operation": "manifest_inventory"},
-            )
-        # Keep the exact canonical bytes untouched; this is only the private
-        # scheduler ownership field in the reversible compatibility projection.
-        metadata[_MANIFEST_INVENTORY_SEQUENCE_FIELD] = sequence
-
-    def _relocate_live_inventory_event(
-        self, key: str, record: bytes) -> None:
-        """Append one live member beyond a charged sparse prefix and rehome it."""
-        sequence = self._append_inventory_event(key, record)
-        try:
-            self._move_inventory_projection_to_sequence(key, sequence)
-        except (CacheError, OSError, TypeError, ValueError):
-            # The append is durable even if the projection update is not.  Fold
-            # it into the exact continuation before surfacing the fault so a
-            # later mutating recovery cannot leave an unclaimed sparse slot
-            # ahead of the eventually relocated member.
-            state = self._inventory_state()
-            self._mark_inventory_maintenance_debt(state, sequence=sequence)
-            self._write_inventory_head(state)
-            raise
-
     @staticmethod
     def _mark_inventory_maintenance_debt(
         state: dict[str, Any], *, sequence: int
@@ -868,8 +954,9 @@ class _MetadataManifestRepository:
         The charged position is either a replacement candidate or a removed
         predecessor.  Revalidation determines whether it is stale.  Starting
         at the live floor lets the continuation relocate any earlier live
-        positions and remove the whole charged prefix without leaving sparse
-        holes between otherwise-current entries.
+        positions and retire only the exact stale members.  The immutable
+        position of a live member is never changed: sparse-successor markers
+        let readers jump across retired runs without rewriting cursor order.
         """
         target = state["maintenance_target_sequence"]
         if target == 0:
@@ -882,7 +969,13 @@ class _MetadataManifestRepository:
         state["maintenance_target_sequence"] = max(target, sequence)
 
     def _compact_inventory_window(self) -> bool:
-        """Advance one durable bounded post-authority maintenance continuation."""
+        """Advance one durable bounded post-authority maintenance continuation.
+
+        Live events retain their original publication sequence.  Retiring a
+        stale run publishes a bounded sparse-successor marker *before* the
+        final event deletion, so a crash can at worst leave a stale event that
+        is hidden by a marker; it can never hide a current authority record.
+        """
         state = self._inventory_state()
         target = state["maintenance_target_sequence"]
         if target == 0:
@@ -904,9 +997,21 @@ class _MetadataManifestRepository:
             ),
         )
         floor_unresolved = False
+        first_remaining: int | None = None
+        open_sparse_run_start = state["open_sparse_run_start"]
         for sequence in range(start, stop):
             event = self._read_inventory_event(sequence)
             if event is None:
+                # A missing immutable event is itself a proven sparse slot.
+                # Record it in the same run as adjacent stale events.  This
+                # also upgrades historical markerless holes one bounded
+                # window at a time without changing their sequence identity.
+                if open_sparse_run_start == 0 or sequence < open_sparse_run_start:
+                    open_sparse_run_start = sequence
+                if sequence >= open_sparse_run_start:
+                    self._write_inventory_skip(
+                        open_sparse_run_start, sequence + 1, state
+                    )
                 continue
             key, digest = event
             try:
@@ -924,9 +1029,36 @@ class _MetadataManifestRepository:
                 # window instead of failing the unrelated write/remove.
                 if sequence >= state["first_live_sequence"]:
                     floor_unresolved = True
+                # A prior marker must continue to land on the malformed event
+                # rather than jumping past authority whose typed failure still
+                # has to be observable by a page reader.
+                if (
+                    open_sparse_run_start
+                    and sequence >= open_sparse_run_start
+                ):
+                    open_sparse_run_start = 0
                 continue
             if current is not None:
-                self._relocate_live_inventory_event(key, current)
+                if first_remaining is None:
+                    first_remaining = sequence
+                # Do not close an open run merely because this maintenance
+                # pass wrapped to an older live member.  Only its successor
+                # ends the run, which preserves a marker that begins later.
+                if (
+                    open_sparse_run_start
+                    and sequence >= open_sparse_run_start
+                ):
+                    open_sparse_run_start = 0
+                continue
+            if open_sparse_run_start == 0 or sequence < open_sparse_run_start:
+                open_sparse_run_start = sequence
+            # The marker becomes durable before the matching event is
+            # removed.  Since this lock serializes authority and the exact
+            # event comparison above proved it stale, a crash at either side
+            # can only retain or hide stale scheduling evidence.
+            self._write_inventory_skip(
+                open_sparse_run_start, sequence + 1, state
+            )
             if type(self.backend) is JsonBackend:
                 try:
                     self._json_lock_file_ops.delete_durable(  # type: ignore[union-attr]
@@ -941,17 +1073,16 @@ class _MetadataManifestRepository:
         # lifetime history after the floor's live record is retired.  This
         # branch uses only exact revalidation results from the inspected
         # window, and never lowers the durable monotonic floor.
-        # A relocation can append an event and persist a newer JSON head while
-        # this window is running.  Re-read that fixed-size head before writing
-        # the continuation fields so we never roll its next-sequence high water
-        # backwards on the final acknowledgement.
         updated_state = self._inventory_state()
         if (
             start <= updated_state["first_live_sequence"] < stop
             and not floor_unresolved
         ):
-            updated_state["first_live_sequence"] = stop
+            updated_state["first_live_sequence"] = (
+                first_remaining if first_remaining is not None else stop
+            )
         updated_state["compact_next_sequence"] = stop
+        updated_state["open_sparse_run_start"] = open_sparse_run_start
         # ``stop`` is exclusive.  Debt is complete only after this call has
         # exact-revalidated the target position itself; a floor that merely
         # reaches the target still leaves that target for the next bounded
@@ -1165,6 +1296,15 @@ class _MetadataManifestRepository:
                     and inspected < self.lifecycle_limits.max_inventory_items
                     and len(page_entries) < limit
                 ):
+                    successor = self._read_inventory_skip(position, inventory)
+                    if successor is not None:
+                        # Markers are scheduling-only and can never move an
+                        # old finite snapshot forward.  A successor beyond an
+                        # old high-water simply proves this cursor terminal;
+                        # the successor itself is still exact-revalidated on
+                        # a later current snapshot before yielding anything.
+                        position = min(successor, high_water + 1)
+                        continue
                     inspected += 1
                     event = self._read_inventory_event(position)
                     position += 1
