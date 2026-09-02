@@ -22,6 +22,7 @@ from cacheness.error_handling import (
 )
 
 from .coordination import interprocess_open_file_lock, lock_stripe_index
+from .integrity import sign_hmac_sha256, verify_hmac_sha256
 from .manifest import MAX_MANIFEST_BYTES
 from .operation_record import (
     MAX_CLEAR_TARGET_REFERENCE_CHUNKS,
@@ -37,7 +38,7 @@ _INVENTORY_HEAD_MAX_BYTES = 4_096
 _INVENTORY_EVENT_MIN_BYTES = 32 * 1024
 _INVENTORY_COMPACTION_WINDOW = 64
 _INVENTORY_FAMILIES = ("primary", "sidecar", "pending")
-_INVENTORY_INITIALIZATION_BYTES = b"cacheness-operation-inventory-v2\n"
+_INVENTORY_INITIALIZATION_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -267,13 +268,24 @@ class OperationRecordRepository(Protocol):
 class FileOperationRecordRepository:
     """Local operation evidence repository inside the managed store root."""
 
-    def __init__(self, file_ops: ManagedFileOps, *, lifecycle_limits: LifecycleLimits):
+    def __init__(
+        self,
+        file_ops: ManagedFileOps,
+        *,
+        lifecycle_limits: LifecycleLimits,
+        initialization_key_provider: Callable[[], bytes] | None = None,
+    ):
         self.file_ops = file_ops
         # Retain the one caller-owned policy object; no field copies are used.
         self.lifecycle_limits = lifecycle_limits
         self._lock_handle_guard = RLock()
         self._lock_handles: dict[str, tuple[Path, BinaryIO, tuple[int, int]]] = {}
         self._pending_inventory_observer_depth = 0
+        # This narrowly scoped provider is called only after the bounded
+        # all-family compatibility proof for a fresh store, or to verify an
+        # already-present initialization record.  It must not silently create
+        # a replacement trust root while reading an existing store.
+        self._initialization_key_provider = initialization_key_provider
         self.file_ops.pending_control_observer = self._record_pending_control
 
     def close(self) -> None:
@@ -523,12 +535,20 @@ class FileOperationRecordRepository:
         )
 
     def _inventory_initialization_locator(self) -> Path:
-        """Return the durable new-store marker for the v2 family heads.
+        """Return the signed all-family v3 initialization provenance record."""
+        return resolve_managed_locator(
+            self.file_ops.root,
+            Path("operations") / ".cacheness-inventory-v2" / "initialized-v3.json",
+            operation="lifecycle_inventory",
+            allow_missing_leaf=True,
+        )
 
-        The marker is intentionally separate from every family head.  A crash
-        after the fresh signing key is acknowledged but before all three heads
-        are durable is therefore distinguishable from a genuinely pre-index
-        store, without treating sibling evidence as a legacy migration signal.
+    def _legacy_inventory_initialization_locator(self) -> Path:
+        """Return the unsigned v2 marker solely so it can fail closed.
+
+        A v2 marker/head pair cannot prove it was published after one
+        all-family compatibility decision.  It is deliberately migration
+        evidence, not a compatibility shortcut for a missing sibling family.
         """
         return resolve_managed_locator(
             self.file_ops.root,
@@ -536,6 +556,33 @@ class FileOperationRecordRepository:
             operation="lifecycle_inventory",
             allow_missing_leaf=True,
         )
+
+    @staticmethod
+    def _initialization_signing_bytes() -> bytes:
+        """Return the stable HMAC preimage for all-family provenance."""
+        return json.dumps(
+            {
+                "families": list(_INVENTORY_FAMILIES),
+                "version": _INVENTORY_INITIALIZATION_SCHEMA_VERSION,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+    def _initialization_key(self) -> bytes:
+        """Read the caller-owned trust root needed to verify v3 provenance."""
+        if self._initialization_key_provider is None:
+            raise CacheBlobMigrationRequiredError(
+                "Lifecycle inventory initialization requires a signing-key provider",
+                context={"operation": "inventory_migration"},
+            )
+        key = self._initialization_key_provider()
+        if type(key) is not bytes or len(key) != 32:
+            raise CacheBlobBackendError(
+                "Lifecycle inventory initialization key is invalid",
+                context={"operation": "inventory"},
+            )
+        return key
 
     def _inventory_event_locator(self, family: str, sequence: int) -> Path:
         """Return one immutable event in the family-local monotonic sequence."""
@@ -723,11 +770,17 @@ class FileOperationRecordRepository:
         return self._decode_inventory_head(family, raw)
 
     def _has_current_inventory_initialization(self) -> bool:
-        """Return whether a fresh v2 store durably entered family-head setup."""
+        """Verify authenticated v3 provenance for one all-family decision.
+
+        The record is the sole proof that a missing family head belongs to a
+        store which was proven empty as a whole.  Older unsigned markers are
+        intentionally not upgraded in place: their publication order did not
+        serialize against every family evidence transition.
+        """
         try:
             raw = self.file_ops.read_bytes_bounded(
                 self._inventory_initialization_locator(),
-                max_bytes=len(_INVENTORY_INITIALIZATION_BYTES),
+                max_bytes=_INVENTORY_HEAD_MAX_BYTES,
             )
         except FileNotFoundError:
             return False
@@ -736,61 +789,95 @@ class FileOperationRecordRepository:
                 "Lifecycle inventory initialization marker exceeds its bound",
                 context={"operation": "inventory"},
             ) from exc
-        if raw != _INVENTORY_INITIALIZATION_BYTES:
+        try:
+            record = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise CacheBlobBackendError(
+                "Lifecycle inventory initialization marker is invalid",
+                context={"operation": "inventory"},
+            ) from exc
+        if (
+            not isinstance(record, dict)
+            or set(record) != {"families", "signature", "version"}
+            or record["version"] != _INVENTORY_INITIALIZATION_SCHEMA_VERSION
+            or record["families"] != list(_INVENTORY_FAMILIES)
+            or not isinstance(record["signature"], str)
+        ):
             raise CacheBlobBackendError(
                 "Lifecycle inventory initialization marker is invalid",
                 context={"operation": "inventory"},
             )
+        if not verify_hmac_sha256(
+            self._initialization_signing_bytes(),
+            record["signature"],
+            self._initialization_key(),
+        ):
+            raise CacheManifestIntegrityError(
+                "Lifecycle inventory initialization provenance is unauthenticated",
+                reason=CacheReason.MANIFEST_SIGNATURE_INVALID,
+            )
         return True
 
-    def _has_current_v2_sibling_head(self, family: str) -> bool:
-        """Recognize an older current-v2 store with lazily absent siblings.
+    def _has_legacy_initialization_marker(self) -> bool:
+        """Return whether the retired unsigned v2 marker is present."""
+        try:
+            self.file_ops.read_bytes_bounded(
+                self._legacy_inventory_initialization_locator(),
+                max_bytes=_INVENTORY_HEAD_MAX_BYTES,
+            )
+        except FileNotFoundError:
+            return False
+        return True
 
-        Earlier v2 releases wrote family heads lazily.  A validated sibling
-        head is durable evidence that this store is already indexed, so an
-        absent family cannot be proven "legacy" by scanning the shared
-        operations namespace.  The head remains non-authoritative scheduling
-        metadata; exact current bytes are still revalidated on every page.
-        """
-        for sibling in _INVENTORY_FAMILIES:
-            if sibling != family and self._read_present_inventory_head(sibling) is not None:
-                return True
-        return False
+    def _write_current_inventory_initialization(self) -> None:
+        """Publish signed v3 provenance before creating any empty heads."""
+        record = {
+            "families": list(_INVENTORY_FAMILIES),
+            "signature": sign_hmac_sha256(
+                self._initialization_signing_bytes(), self._initialization_key()
+            ),
+            "version": _INVENTORY_INITIALIZATION_SCHEMA_VERSION,
+        }
+        encoded = json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        try:
+            self.file_ops.create_bytes_durable_exclusive(
+                self._inventory_initialization_locator(), encoded
+            )
+        except FileExistsError:
+            if not self._has_current_inventory_initialization():
+                raise CacheBlobBackendError(
+                    "Lifecycle inventory initialization changed during creation",
+                    context={"operation": "inventory"},
+                )
 
     def initialize_new_store(self) -> None:
         """Durably establish all empty v2 family heads before first evidence.
 
-        This is called only after a fresh BlobStore signing key is safely
-        acknowledged.  The marker is written first so a crash at any later
-        head write remains a current-v2 initialization on reopen rather than a
-        false legacy migration requirement.  Existing heads are never
-        overwritten, preserving exact current stores and old-head recovery.
+        A signed v3 provenance record is written only after the compatibility
+        proof and before any empty head.  Every evidence append takes this
+        same store-level transition first, so no raw/v1 member can race the
+        proof or become hidden behind a sibling head.
         """
         with self._conditional_transition("inventory:initialize"):
-            marker = self._inventory_initialization_locator()
             initialized = self._has_current_inventory_initialization()
             present_heads = {
                 family: self._read_present_inventory_head(family)
                 for family in _INVENTORY_FAMILIES
             }
-            # A marker or any validated v2 head is durable provenance for an
-            # already-indexed store. It can safely finish a crash-interrupted
-            # initialization without rediscovering unrelated legacy-looking
-            # names. With neither, however, prove *all* legacy families absent
-            # before writing even the marker.
-            if not initialized and not any(present_heads.values()):
-                self._assert_fresh_inventory_namespace()
             if not initialized:
-                try:
-                    self.file_ops.create_bytes_durable_exclusive(
-                        marker, _INVENTORY_INITIALIZATION_BYTES
+                # There is no safe interpretation for old marker-only or
+                # lazy-head states.  They did not bind one all-family proof;
+                # retain them for the explicit migration workflow instead of
+                # inferring the missing family's emptiness from a sibling.
+                if self._has_legacy_initialization_marker() or any(
+                    present_heads.values()
+                ):
+                    raise CacheBlobMigrationRequiredError(
+                        "Lifecycle inventory initialization requires explicit migration",
+                        context={"operation": "inventory_migration"},
                     )
-                except FileExistsError:
-                    if not self._has_current_inventory_initialization():
-                        raise CacheBlobBackendError(
-                            "Lifecycle inventory initialization marker changed during creation",
-                            context={"operation": "inventory"},
-                        )
+                self._assert_fresh_inventory_namespace()
+                self._write_current_inventory_initialization()
             for family in _INVENTORY_FAMILIES:
                 if present_heads[family] is not None:
                     continue
@@ -814,11 +901,17 @@ class FileOperationRecordRepository:
         state = self._read_present_inventory_head(family)
         if state is not None:
             return state
-        if (
-            self._has_current_inventory_initialization()
-            or self._has_current_v2_sibling_head(family)
-        ):
+        if self._has_current_inventory_initialization():
             return self._empty_inventory_head()
+        if self._has_legacy_initialization_marker() or any(
+            self._read_present_inventory_head(sibling) is not None
+            for sibling in _INVENTORY_FAMILIES
+            if sibling != family
+        ):
+            raise CacheBlobMigrationRequiredError(
+                "Lifecycle inventory requires explicit migration before a missing family can be read",
+                context={"family": family, "operation": "inventory_migration"},
+            )
         # A v1 history cannot be safely reinterpreted as a v2 sparse sequence,
         # and a raw legacy record must never look like no debt.  Only a store
         # with neither the fresh marker nor another validated v2 head reaches
@@ -1042,44 +1135,50 @@ class FileOperationRecordRepository:
         """
         if not isinstance(raw, bytes) or not raw:
             raise TypeError("Lifecycle inventory events require non-empty bytes")
-        with self._conditional_transition(f"inventory:{family}"):
-            while True:
-                state = self._read_inventory(family)
-                sequence = state["next_sequence"]
-                encoded = json.dumps(
-                    {
-                        "version": _INVENTORY_SCHEMA_VERSION,
-                        "name": name,
-                        "digest": hashlib.sha256(raw).hexdigest(),
-                    },
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ).encode("utf-8")
-                if len(encoded) > self._inventory_event_max_bytes():
-                    raise CacheBlobBackendError(
-                        "Lifecycle inventory event exceeds its bounded field policy",
-                        context={"operation": "inventory", "family": family},
-                    )
-                try:
-                    self.file_ops.create_bytes_durable_exclusive(
-                        self._inventory_event_locator(family, sequence), encoded
-                    )
-                except FileExistsError:
-                    # A process loss can leave a durable event before its head
-                    # acknowledgement.  It is safe non-authoritative stale
-                    # scheduling membership; acknowledge the position and
-                    # allocate the next one without reading/re-writing history.
-                    if self._read_inventory_event(family, sequence) is None:
+        # The outer store-level lease is intentionally held across the
+        # proof/provenance/head transition as well as all future family
+        # publication.  Without it, a legacy raw member could appear between
+        # the all-family scan and marker publication and be hidden forever by
+        # an otherwise-valid sibling head.
+        with self._conditional_transition("inventory:initialize"):
+            with self._conditional_transition(f"inventory:{family}"):
+                while True:
+                    state = self._read_inventory(family)
+                    sequence = state["next_sequence"]
+                    encoded = json.dumps(
+                        {
+                            "version": _INVENTORY_SCHEMA_VERSION,
+                            "name": name,
+                            "digest": hashlib.sha256(raw).hexdigest(),
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                    if len(encoded) > self._inventory_event_max_bytes():
                         raise CacheBlobBackendError(
-                            "Lifecycle inventory event disappeared during recovery",
+                            "Lifecycle inventory event exceeds its bounded field policy",
                             context={"operation": "inventory", "family": family},
                         )
+                    try:
+                        self.file_ops.create_bytes_durable_exclusive(
+                            self._inventory_event_locator(family, sequence), encoded
+                        )
+                    except FileExistsError:
+                        # A process loss can leave a durable event before its head
+                        # acknowledgement.  It is safe non-authoritative stale
+                        # scheduling membership; acknowledge the position and
+                        # allocate the next one without reading/re-writing history.
+                        if self._read_inventory_event(family, sequence) is None:
+                            raise CacheBlobBackendError(
+                                "Lifecycle inventory event disappeared during recovery",
+                                context={"operation": "inventory", "family": family},
+                            )
+                        state["next_sequence"] = sequence + 1
+                        self._write_inventory_head(family, state)
+                        continue
                     state["next_sequence"] = sequence + 1
                     self._write_inventory_head(family, state)
-                    continue
-                state["next_sequence"] = sequence + 1
-                self._write_inventory_head(family, state)
-                return
+                    return
 
     def _compact_inventory_after_retirement(self, family: str) -> None:
         """Make bounded maintenance only after the owning action completed.

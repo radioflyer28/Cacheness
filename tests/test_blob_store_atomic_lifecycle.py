@@ -774,6 +774,9 @@ def test_clear_target_page_and_checkpoint_preserve_exact_progress_after_reopen(
     page_id = "b" * 32
     raw_first = b'{"first":"exact"}'
     raw_second = b'{"second":"exact"}'
+    # Direct control-fixture writes must establish the same authenticated
+    # all-family inventory provenance that a public lifecycle operation does.
+    store._manifest_key(initialize_new_store=True)
     page = ClearTargetPage(
         operation_id=operation_id,
         page_id=page_id,
@@ -789,6 +792,7 @@ def test_clear_target_page_and_checkpoint_preserve_exact_progress_after_reopen(
     repository = FileOperationRecordRepository(
         store.guarded_handler_io.file_ops,
         lifecycle_limits=store.lifecycle_limits,
+        initialization_key_provider=store._initialize_inventory_provenance_key,
     )
     try:
         raw_page = page.canonical_bytes()

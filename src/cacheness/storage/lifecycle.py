@@ -53,6 +53,7 @@ class LifecycleEngine:
         self.operation_repository = FileOperationRecordRepository(
             store.guarded_handler_io.file_ops,
             lifecycle_limits=lifecycle_limits,
+            initialization_key_provider=store._initialize_inventory_provenance_key,
         )
         self.test_hook: Callable[[str, LifecycleOperationRecord], None] | None = None
         self.fault_hook: Callable[[str, LifecycleOperationRecord], None] | None = None

@@ -48,7 +48,11 @@ def test_pending_recovery_filters_unrelated_names_before_its_action_bound(
     root.mkdir()
     limits = LifecycleLimits(max_reconcile_actions=1)
     file_ops = ManagedFileOps(root)
-    repository = FileOperationRecordRepository(file_ops, lifecycle_limits=limits)
+    repository = FileOperationRecordRepository(
+        file_ops,
+        lifecycle_limits=limits,
+        initialization_key_provider=lambda: b"k" * 32,
+    )
     repository.initialize_new_store()
     operation_id = "f" * 32
     raw = b'{"pending":"exact"}'
@@ -70,6 +74,47 @@ def test_pending_recovery_filters_unrelated_names_before_its_action_bound(
     finally:
         repository.close()
         file_ops.close()
+
+
+def test_markerless_sibling_head_cannot_hide_raw_absent_family_evidence(
+    tmp_path: Path,
+) -> None:
+    """A lazy v2 head is migration evidence, never absent-family provenance."""
+    root = tmp_path / "mixed-lazy-v2"
+    root.mkdir()
+    key = b"k" * 32
+    file_ops = ManagedFileOps(root)
+    repository = FileOperationRecordRepository(
+        file_ops,
+        lifecycle_limits=LifecycleLimits(max_inventory_items=1),
+        initialization_key_provider=lambda: key,
+    )
+    try:
+        repository.initialize_new_store()
+        # Model the old lazy-v2 crash shape: one valid sibling head survives,
+        # v3 all-family provenance and the target-family head do not, and raw
+        # evidence is present in that target family.
+        file_ops.delete_durable(repository._inventory_initialization_locator())
+        file_ops.delete_durable(repository._inventory_head_locator("sidecar"))
+        file_ops.write_bytes_durable(
+            repository.reconciliation_checkpoint_locator("a" * 32), b'{"raw":"legacy"}'
+        )
+    finally:
+        repository.close()
+        file_ops.close()
+
+    reopened_ops = ManagedFileOps(root)
+    reopened = FileOperationRecordRepository(
+        reopened_ops,
+        lifecycle_limits=LifecycleLimits(max_inventory_items=1),
+        initialization_key_provider=lambda: key,
+    )
+    try:
+        with pytest.raises(CacheBlobMigrationRequiredError):
+            reopened.list_reconciliation_checkpoint_page()
+    finally:
+        reopened.close()
+        reopened_ops.close()
 
 
 def test_directory_inventory_is_lexical_after_reverse_creation_and_has_a_distinct_bound(

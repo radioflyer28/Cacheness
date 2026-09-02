@@ -994,6 +994,41 @@ class BlobStore:
         """Map one public logical key to a backend-safe physical ID."""
         return encode_physical_name(key, namespace="blob-store")
 
+    def _initialize_inventory_provenance_key(self) -> bytes:
+        """Create/read the trust root only after inventory compatibility proof.
+
+        ``FileOperationRecordRepository`` holds the store-level initialization
+        lease while invoking this method.  It therefore cannot leave a fresh
+        key behind merely because a raw or v1 lifecycle family made the store
+        migration-required.  Existing v3 provenance calls this path only to
+        verify against the original, caller-owned key.
+        """
+        try:
+            initializer = getattr(
+                self._manifest_key_provider, "get_or_initialize_new_store", None
+            )
+            key = (
+                initializer()
+                if callable(initializer)
+                else self._manifest_key_provider.get_key()
+            )
+        except Exception as exc:
+            raise CacheBlobManifestUnauthenticatedError(
+                "Canonical BlobStore signing key is unavailable",
+                context={
+                    "operation": "initialize_inventory_provenance",
+                    "provider": type(self._manifest_key_provider).__name__,
+                },
+                reason=CacheReason.MANIFEST_SIGNING_KEY_INVALID,
+            ) from exc
+        if type(key) is not bytes or len(key) != 32:
+            raise CacheBlobManifestUnauthenticatedError(
+                "Canonical BlobStore signing key is invalid",
+                context={"operation": "initialize_inventory_provenance"},
+                reason=CacheReason.MANIFEST_SIGNING_KEY_INVALID,
+            )
+        return key
+
     def _manifest_key(self, *, initialize_new_store: bool = False) -> bytes:
         """Return the strict persistent key without silently downgrading signing."""
         operation = "get_manifest_key"
