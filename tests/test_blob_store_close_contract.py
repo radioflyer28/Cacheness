@@ -426,7 +426,9 @@ def test_windows_lock_path_keeps_canonical_blobstore_constructible(
     calls: list[tuple[str, bool | None]] = []
 
     class FakeWindowsLockApi:
-        def lock(self, _descriptor: int, *, exclusive: bool) -> object:
+        def lock(
+            self, _descriptor: int, *, exclusive: bool, nonblocking: bool = False
+        ) -> object:
             calls.append(("lock", exclusive))
             return object()
 
@@ -474,7 +476,9 @@ def test_default_blobstore_runs_the_native_windows_fallback_contract(
             assert authorities.setdefault(name, value) == value
 
     class FakeWindowsLockApi:
-        def lock(self, _descriptor: int, *, exclusive: bool) -> object:
+        def lock(
+            self, _descriptor: int, *, exclusive: bool, nonblocking: bool = False
+        ) -> object:
             return (exclusive, object())
 
         def unlock(self, _descriptor: int, _token: object) -> object:
@@ -555,7 +559,9 @@ def test_lock_release_failure_never_masks_the_lifecycle_body_and_closes_handle(
             self._handle.close()
 
     class FailingWindowsLockApi:
-        def lock(self, _descriptor: int, *, exclusive: bool) -> object:
+        def lock(
+            self, _descriptor: int, *, exclusive: bool, nonblocking: bool = False
+        ) -> object:
             assert exclusive
             return object()
 

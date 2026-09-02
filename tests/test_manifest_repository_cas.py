@@ -575,7 +575,9 @@ def test_json_cas_uses_the_win32_adapter_when_fcntl_is_unavailable(
     calls: list[str] = []
 
     class FakeWindowsLockApi:
-        def lock(self, _descriptor: int, *, exclusive: bool) -> object:
+        def lock(
+            self, _descriptor: int, *, exclusive: bool, nonblocking: bool = False
+        ) -> object:
             assert exclusive
             shared_lock.acquire()
             calls.append("lock")

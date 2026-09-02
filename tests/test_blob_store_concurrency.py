@@ -180,7 +180,9 @@ def test_uncertain_final_reader_unlock_poisoned_barrier_rejects_re_admission(
     barrier = StoreAdmissionBarrier.acquire(root)
 
     class FailingWindowsLockApi:
-        def lock(self, _descriptor: int, *, exclusive: bool) -> object:
+        def lock(
+            self, _descriptor: int, *, exclusive: bool, nonblocking: bool = False
+        ) -> object:
             assert exclusive is False
             return object()
 
