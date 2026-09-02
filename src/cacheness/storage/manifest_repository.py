@@ -802,7 +802,15 @@ class _MetadataManifestRepository:
         try:
             with self.backend._lock, self._json_compare_publish_lock():
                 if type(self.backend) is JsonBackend:
-                    self._refresh_json_for_conditional_operation()
+                    try:
+                        self._refresh_json_for_conditional_operation()
+                    except (CacheError, OSError, TypeError, ValueError):
+                        # A malformed, migration-required, or unreadable
+                        # authority document pins compaction debt.  Recovery
+                        # must not rewrite/index that unknown authority, and
+                        # normal public operations retain their established
+                        # typed refresh failure at their own admission point.
+                        return
                 self._compact_inventory_window()
         except _BACKEND_OPERATION_ERRORS as exc:
             raise _backend_failure("compact_inventory", self.backend, exc) from exc
