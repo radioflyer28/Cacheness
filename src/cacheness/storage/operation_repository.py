@@ -16,6 +16,7 @@ from cacheness.config import LifecycleLimits
 from cacheness.error_handling import (
     CacheBlobBackendError,
     CacheBlobLifecycleConflictError,
+    CacheBlobManifestUnauthenticatedError,
     CacheBlobMigrationRequiredError,
     CacheManifestIntegrityError,
     CacheReason,
@@ -274,6 +275,7 @@ class FileOperationRecordRepository:
         *,
         lifecycle_limits: LifecycleLimits,
         initialization_key_provider: Callable[[], bytes] | None = None,
+        initialization_key_initializer: Callable[[], bytes] | None = None,
     ):
         self.file_ops = file_ops
         # Retain the one caller-owned policy object; no field copies are used.
@@ -286,6 +288,15 @@ class FileOperationRecordRepository:
         # already-present initialization record.  It must not silently create
         # a replacement trust root while reading an existing store.
         self._initialization_key_provider = initialization_key_provider
+        # Direct repository fixtures can use one supplied stable key for both
+        # paths. BlobStore passes a strict reader plus an explicit first-store
+        # initializer so authenticating existing provenance can never create a
+        # replacement key.
+        self._initialization_key_initializer = (
+            initialization_key_provider
+            if initialization_key_initializer is None
+            else initialization_key_initializer
+        )
         self.file_ops.pending_control_observer = self._record_pending_control
 
     def close(self) -> None:
@@ -601,14 +612,19 @@ class FileOperationRecordRepository:
             separators=(",", ":"),
         ).encode("utf-8")
 
-    def _initialization_key(self) -> bytes:
-        """Read the caller-owned trust root needed to verify v3 provenance."""
-        if self._initialization_key_provider is None:
+    def _initialization_key(self, *, initialize_new_store: bool = False) -> bytes:
+        """Read or explicitly initialize the caller-owned provenance key."""
+        provider = (
+            self._initialization_key_initializer
+            if initialize_new_store
+            else self._initialization_key_provider
+        )
+        if provider is None:
             raise CacheBlobMigrationRequiredError(
                 "Lifecycle inventory initialization requires a signing-key provider",
                 context={"operation": "inventory_migration"},
             )
-        key = self._initialization_key_provider()
+        key = provider()
         if type(key) is not bytes or len(key) != 32:
             raise CacheBlobBackendError(
                 "Lifecycle inventory initialization key is invalid",
@@ -894,7 +910,8 @@ class FileOperationRecordRepository:
         record = {
             "families": list(_INVENTORY_FAMILIES),
             "signature": sign_hmac_sha256(
-                self._initialization_signing_bytes(), self._initialization_key()
+                self._initialization_signing_bytes(),
+                self._initialization_key(initialize_new_store=True),
             ),
             "version": _INVENTORY_INITIALIZATION_SCHEMA_VERSION,
         }
@@ -956,7 +973,7 @@ class FileOperationRecordRepository:
                             context={"operation": "inventory", "family": family},
                         )
 
-    def constructor_inventory_is_initialized(self) -> bool:
+    def constructor_inventory_is_initialized(self) -> bool | None:
         """Classify inventory without publishing provenance or maintenance state.
 
         Constructors must distinguish a current authenticated store from a
@@ -965,15 +982,25 @@ class FileOperationRecordRepository:
         legacy evidence raises the typed migration-required error through the
         ordinary bounded family reads.
         """
-        if self._has_current_inventory_initialization():
-            return True
+        try:
+            if self._has_current_inventory_initialization():
+                return True
+        except CacheBlobManifestUnauthenticatedError:
+            # A store with an unavailable trust root may still be opened for
+            # callers to observe the established read-time authentication
+            # error, but constructor recovery must not read or mutate any
+            # scheduler state without first verifying its v3 provenance.
+            return None
         for family in _INVENTORY_FAMILIES:
             self._read_inventory(family)
         # A concurrent first writer may have completed authenticated
         # initialization while the bounded legacy classification ran.  Recheck
         # so recovery takes the same clear-continuation lease as any current
         # store instead of inspecting its post-publication scheduling state.
-        return self._has_current_inventory_initialization()
+        try:
+            return self._has_current_inventory_initialization()
+        except CacheBlobManifestUnauthenticatedError:
+            return None
 
     def _read_inventory(self, family: str) -> dict[str, int]:
         """Read one bounded v2 sequence head, never the event history."""

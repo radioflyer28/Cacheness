@@ -53,7 +53,8 @@ class LifecycleEngine:
         self.operation_repository = FileOperationRecordRepository(
             store.guarded_handler_io.file_ops,
             lifecycle_limits=lifecycle_limits,
-            initialization_key_provider=store._initialize_inventory_provenance_key,
+            initialization_key_provider=store._manifest_key,
+            initialization_key_initializer=store._initialize_inventory_provenance_key,
         )
         self.test_hook: Callable[[str, LifecycleOperationRecord], None] | None = None
         self.fault_hook: Callable[[str, LifecycleOperationRecord], None] | None = None
@@ -66,6 +67,8 @@ class LifecycleEngine:
         # Raw/v1 evidence therefore still raises the typed migration outcome
         # before recovery reads absent families or advances any maintenance.
         initialized = self.operation_repository.constructor_inventory_is_initialized()
+        if initialized is None:
+            return
         if initialized:
             # Opening a second process must not inspect or advance operation
             # inventory while a live clear still owns its continuation.
