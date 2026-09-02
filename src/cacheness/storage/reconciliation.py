@@ -121,7 +121,11 @@ class _ApplyOutcome:
 
     @property
     def stale_or_unapplied(self) -> bool:
-        return not self.attempted and not self.completed
+        # An attempted exact CAS is a budget charge, not source progression.
+        # A conflicting action has not discharged the current source member;
+        # advancing its authenticated cursor would make a terminal-looking
+        # report hide still-present safe or unresolved debt.
+        return not self.completed
 
 
 @dataclass(frozen=True)
@@ -575,12 +579,17 @@ class _Reconciler:
                     # one apply budget, but the current bytes are still
                     # reportable as a conflict rather than being silently
                     # classified as completion.
+                    requires_retry, refreshed = self._reclassify_after_conflict(
+                        finding, observed_at
+                    )
+                    if refreshed is not None:
+                        dispositions.append(refreshed)
                     outcomes.append(
                         _ApplyOutcome(
                             finding,
                             self._finding_source(finding),
                             attempted=True,
-                            completed=False,
+                            completed=not requires_retry,
                             conflicted=True,
                         )
                     )
@@ -597,6 +606,33 @@ class _Reconciler:
                 if attempted:
                     remaining -= 1
         return tuple(dispositions), tuple(outcomes)
+
+    def _reclassify_after_conflict(
+        self, finding: ReconciliationFinding, observed_at: datetime
+    ) -> tuple[bool, ReconciliationFinding | None]:
+        """Re-read exact current bytes after a charged CAS conflict.
+
+        The old scan finding is not authority after a failed exact transition.
+        A disappeared source may progress; any still-present primary or sidecar
+        is classified from its current bytes and retained in the resume chain.
+        This deliberately favors a bounded truthful replay over skipping a
+        concurrent replacement that still carries recoverable debt.
+        """
+        assert finding.evidence_id is not None
+        repository = self.store.lifecycle.operation_repository
+        source = self._finding_source(finding)
+        if source == "sidecar":
+            raw = repository.get_reconciliation_checkpoint_raw(finding.evidence_id)
+            if raw is None:
+                return False, None
+            return True, self._classify_sidecar(
+                finding.evidence_id, raw, observed_at
+            )
+        raw = repository.get_raw(finding.evidence_id)
+        if raw is None:
+            return False, None
+        current = self._classify_operation(finding.evidence_id, raw, observed_at)
+        return True, self._block_primary_for_mismatched_sidecar(current, raw)
 
     @staticmethod
     def _finding_source(finding: ReconciliationFinding) -> str:
@@ -1055,7 +1091,9 @@ class _Reconciler:
         if retained is None:
             return computed
         index = identifiers.index(retained)
-        return current if index == 0 else OperationCursor(identifiers[index - 1])
+        if index == 0 or not page.entry_next_cursors:
+            return current
+        return page.entry_next_cursors[index - 1]
 
     def _retain_earliest_sidecar_source(
         self,
@@ -1072,11 +1110,9 @@ class _Reconciler:
         if retained is None:
             return computed
         index = identifiers.index(retained)
-        if index == 0:
+        if index == 0 or not page.entry_next_cursors:
             return current
-        return ReconciliationCheckpointCursor(
-            f"reconcile-action-{identifiers[index - 1]}.json"
-        )
+        return page.entry_next_cursors[index - 1]
 
     def _manifest_page(self, cursor: ManifestCursor | None) -> ManifestPage:
         return self.store.manifest_repository.list_page(
@@ -1109,12 +1145,13 @@ class _Reconciler:
     def _next_manifest_cursor(
         page: ManifestPage, current: ManifestCursor | None, consumed: int
     ) -> ManifestCursor | None:
+        if not page.entries:
+            return page.next_cursor
         if consumed == 0:
             return current
         if consumed < len(page.entries):
-            # The repository owns the opaque sequence position.  Replaying
-            # this bounded page is conservative but cannot advance across an
-            # uninspected member by reconstructing a lexical cursor here.
+            if page.entry_next_cursors:
+                return page.entry_next_cursors[consumed - 1]
             return current
         return page.next_cursor
 
@@ -1122,9 +1159,13 @@ class _Reconciler:
     def _next_operation_cursor(
         page: OperationPage, current: OperationCursor | None, consumed: int
     ) -> OperationCursor | None:
+        if not page.entries:
+            return page.next_cursor
         if consumed == 0:
             return current
         if consumed < len(page.entries):
+            if page.entry_next_cursors:
+                return page.entry_next_cursors[consumed - 1]
             return current
         return page.next_cursor
 
@@ -1134,9 +1175,13 @@ class _Reconciler:
         current: ReconciliationCheckpointCursor | None,
         consumed: int,
     ) -> ReconciliationCheckpointCursor | None:
+        if not page.entries:
+            return page.next_cursor
         if consumed == 0:
             return current
         if consumed < len(page.entries):
+            if page.entry_next_cursors:
+                return page.entry_next_cursors[consumed - 1]
             return current
         return page.next_cursor
 

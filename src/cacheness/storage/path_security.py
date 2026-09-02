@@ -813,6 +813,11 @@ class ManagedFileOps:
         self._lock = lock or threading.RLock()
         self.before_operation: Callable[[str, Path], None] | None = None
         self.after_control_durability_step: Callable[[str, Path], None] | None = None
+        # Lifecycle repositories may register a private scheduling observer for
+        # digest-bound control candidates.  It is invoked before the candidate
+        # can become persistent, so a crash leaves either an indexed stale slot
+        # or an indexable candidate; it is never authoritative by itself.
+        self.pending_control_observer: Callable[[Path, str, bytes], None] | None = None
         self._root_fd: int | None = None
         self._descriptor_mode = self._open_root_descriptor()
         self._lock_identities: dict[tuple[str, ...], tuple[int, int]] = {}
@@ -1257,6 +1262,8 @@ class ManagedFileOps:
             # bytes, so recovery can validate and promote an interrupted
             # pre-install candidate without relying on a loose filename glob.
             temporary_name = f".{name}.pending.{digest}.{uuid.uuid4().hex}.tmp"
+            if self.pending_control_observer is not None:
+                self.pending_control_observer(locator, temporary_name, data)
             temporary_fd: int | None = None
             try:
                 temporary_fd = os.open(
@@ -1641,6 +1648,8 @@ class ManagedFileOps:
                 self.root, locator, operation="exclusive_create", allow_missing_leaf=True
             )
             temporary = locator.parent / f".{locator.name}.pending.{hashlib.sha256(data).hexdigest()}.{uuid.uuid4().hex}.tmp"
+            if self.pending_control_observer is not None:
+                self.pending_control_observer(locator, temporary.name, data)
             try:
                 with open(temporary, "xb") as file_handle:
                     file_handle.write(data)

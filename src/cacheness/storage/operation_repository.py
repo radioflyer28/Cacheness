@@ -16,6 +16,7 @@ from cacheness.config import LifecycleLimits
 from cacheness.error_handling import (
     CacheBlobBackendError,
     CacheBlobLifecycleConflictError,
+    CacheBlobMigrationRequiredError,
     CacheManifestIntegrityError,
     CacheReason,
 )
@@ -31,6 +32,10 @@ from .path_security import ManagedFileOps, resolve_managed_locator, validate_blo
 
 _CONDITIONAL_LOCK_STRIPES = tuple(RLock() for _ in range(64))
 _OPERATION_LEASES = local()
+_INVENTORY_SCHEMA_VERSION = 2
+_INVENTORY_HEAD_MAX_BYTES = 4_096
+_INVENTORY_EVENT_MIN_BYTES = 32 * 1024
+_INVENTORY_COMPACTION_WINDOW = 64
 
 
 @dataclass(frozen=True)
@@ -56,6 +61,14 @@ class OperationPage:
 
     entries: tuple[tuple[str, bytes], ...]
     next_cursor: OperationCursor | None
+    # Exact source positions immediately after each returned entry.  A
+    # reconciler can consume only a prefix of a page without rebuilding a
+    # mutable lexical cursor or replaying that prefix on resume.
+    entry_next_cursors: tuple[OperationCursor, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.entry_next_cursors and len(self.entry_next_cursors) != len(self.entries):
+            raise ValueError("operation entry cursors must align with page entries")
 
 
 @dataclass(frozen=True)
@@ -92,6 +105,11 @@ class ReconciliationCheckpointPage:
 
     entries: tuple[tuple[str, bytes | None], ...]
     next_cursor: ReconciliationCheckpointCursor | None
+    entry_next_cursors: tuple[ReconciliationCheckpointCursor, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.entry_next_cursors and len(self.entry_next_cursors) != len(self.entries):
+            raise ValueError("sidecar entry cursors must align with page entries")
 
 
 @dataclass(frozen=True)
@@ -212,6 +230,8 @@ class FileOperationRecordRepository:
         self.lifecycle_limits = lifecycle_limits
         self._lock_handle_guard = RLock()
         self._lock_handles: dict[str, tuple[Path, BinaryIO, tuple[int, int]]] = {}
+        self._pending_inventory_observer_depth = 0
+        self.file_ops.pending_control_observer = self._record_pending_control
 
     def close(self) -> None:
         """Release retained bounded evidence-lock descriptors on store close."""
@@ -437,8 +457,8 @@ class FileOperationRecordRepository:
                 context={"operation": operation},
             ) from exc
 
-    def _inventory_locator(self, family: str) -> Path:
-        """Return one private append-only inventory for an evidence family."""
+    def _legacy_inventory_locator(self, family: str) -> Path:
+        """Return the retired whole-history inventory only for detection."""
         if family not in {"primary", "sidecar", "pending"}:
             raise ValueError("unknown lifecycle inventory family")
         return resolve_managed_locator(
@@ -448,15 +468,138 @@ class FileOperationRecordRepository:
             allow_missing_leaf=True,
         )
 
-    def _read_inventory(self, family: str) -> dict[str, object]:
-        """Read strict bounded scheduling state, never lifecycle authority."""
+    def _inventory_head_locator(self, family: str) -> Path:
+        """Return the bounded durable sequence head for one evidence family."""
+        if family not in {"primary", "sidecar", "pending"}:
+            raise ValueError("unknown lifecycle inventory family")
+        return resolve_managed_locator(
+            self.file_ops.root,
+            Path("operations") / ".cacheness-inventory-v2" / family / "head.json",
+            operation="lifecycle_inventory",
+            allow_missing_leaf=True,
+        )
+
+    def _inventory_event_locator(self, family: str, sequence: int) -> Path:
+        """Return one immutable event in the family-local monotonic sequence."""
+        if type(sequence) is not int or sequence <= 0:
+            raise ValueError("inventory sequence is invalid")
+        return resolve_managed_locator(
+            self.file_ops.root,
+            Path("operations")
+            / ".cacheness-inventory-v2"
+            / family
+            / f"event-{sequence:020d}.json",
+            operation="lifecycle_inventory",
+            allow_missing_leaf=True,
+        )
+
+    def _inventory_event_max_bytes(self) -> int:
+        """Bound one index event independently from one lifecycle record."""
+        return max(
+            _INVENTORY_EVENT_MIN_BYTES,
+            self.lifecycle_limits.max_operation_field_bytes * 2 + 512,
+        )
+
+    @staticmethod
+    def _empty_inventory_head() -> dict[str, int]:
+        return {
+            "version": _INVENTORY_SCHEMA_VERSION,
+            "next_sequence": 1,
+            "compact_next_sequence": 1,
+        }
+
+    def _has_preindex_evidence(self, family: str) -> bool:
+        """Fail closed if bounded legacy inspection finds known live evidence.
+
+        A missing v2 head is only an empty inventory when no direct primary or
+        sidecar evidence exists.  We deliberately do not rebuild a mutable
+        directory order: an upgrade must use an explicit migration rather than
+        silently omitting old recovery debt from a claimed high-water snapshot.
+        """
+        if family == "primary":
+            name_filter = self._is_hex_identifier
+        elif family == "sidecar":
+            name_filter = self._is_sidecar_filename
+        else:
+            name_filter = self._is_eligible_pending_name
+        operations_directory = resolve_managed_locator(
+            self.file_ops.root,
+            "operations",
+            operation="detect_legacy_lifecycle_inventory",
+            allow_missing_leaf=True,
+        )
+        try:
+            names, _next = self.file_ops.list_directory_names_bounded(
+                operations_directory,
+                cursor=None,
+                max_names=1,
+                # Legacy discovery is deliberately bounded.  If its namespace
+                # is too large to prove empty, callers receive the same typed
+                # migration-required outcome instead of an unbounded scan.
+                max_inventory_names=self.lifecycle_limits.max_inventory_items,
+                operation="detect_legacy_lifecycle_inventory",
+                name_filter=name_filter,
+            )
+        except CacheBlobBackendError as exc:
+            raise CacheBlobMigrationRequiredError(
+                "Lifecycle evidence inventory requires an explicit migration",
+                context={"family": family, "operation": "inventory_migration"},
+            ) from exc
+        return bool(names)
+
+    def _record_pending_control(self, locator: Path, name: str, raw: bytes) -> None:
+        """Index one future digest-bound pending control before it is created.
+
+        The observer is private to ``ManagedFileOps`` and ignores the index's
+        own control files.  Re-entrant event publication therefore cannot
+        recursively invent pending work, while every real lifecycle candidate
+        gets a monotonic pending-family membership slot before its first write.
+        """
+        if self._pending_inventory_observer_depth:
+            return
+        try:
+            relative = locator.relative_to(self.file_ops.root)
+        except ValueError:
+            return
+        if not relative.parts or relative.parts[0] != "operations":
+            return
+        if len(relative.parts) > 1 and relative.parts[1] == ".cacheness-inventory-v2":
+            return
+        self._pending_inventory_observer_depth += 1
+        try:
+            self._append_inventory_event("pending", name, raw)
+        finally:
+            self._pending_inventory_observer_depth -= 1
+
+    def _read_inventory(self, family: str) -> dict[str, int]:
+        """Read one bounded v2 sequence head, never the event history."""
         try:
             raw = self.file_ops.read_bytes_bounded(
-                self._inventory_locator(family),
-                max_bytes=self.lifecycle_limits.max_operation_record_bytes,
+                self._inventory_head_locator(family),
+                max_bytes=_INVENTORY_HEAD_MAX_BYTES,
             )
         except FileNotFoundError:
-            return {"version": 1, "events": []}
+            # A v1 history cannot be safely reinterpreted as a v2 sparse
+            # sequence, and a raw legacy record must never look like no debt.
+            try:
+                legacy_size = self.file_ops.get_size(
+                    self._legacy_inventory_locator(family)
+                )
+            except FileNotFoundError:
+                legacy_size = -1
+            if legacy_size < 0:
+                if self._has_preindex_evidence(family):
+                    if family == "pending":
+                        return self._bootstrap_pending_inventory()
+                    raise CacheBlobMigrationRequiredError(
+                        "Lifecycle evidence predates its durable inventory",
+                        context={"family": family, "operation": "inventory_migration"},
+                    )
+                return self._empty_inventory_head()
+            raise CacheBlobMigrationRequiredError(
+                "Lifecycle inventory v1 requires an explicit migration",
+                context={"family": family, "operation": "inventory_migration"},
+            )
         try:
             state = json.loads(raw)
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
@@ -464,32 +607,165 @@ class FileOperationRecordRepository:
                 "Lifecycle inventory is invalid",
                 context={"operation": "inventory", "family": family},
             ) from exc
-        if not isinstance(state, dict) or set(state) != {"version", "events"}:
+        if not isinstance(state, dict) or set(state) != {
+            "version", "next_sequence", "compact_next_sequence"
+        }:
             raise CacheBlobBackendError(
                 "Lifecycle inventory schema is invalid",
                 context={"operation": "inventory", "family": family},
             )
-        events = state["events"]
-        if state["version"] != 1 or not isinstance(events, list):
+        if (
+            state["version"] != _INVENTORY_SCHEMA_VERSION
+            or type(state["next_sequence"]) is not int
+            or type(state["compact_next_sequence"]) is not int
+            or state["next_sequence"] <= 0
+            or not 1 <= state["compact_next_sequence"] <= state["next_sequence"]
+        ):
             raise CacheBlobBackendError(
                 "Lifecycle inventory version is invalid",
                 context={"operation": "inventory", "family": family},
             )
-        for event in events:
-            if (
-                not isinstance(event, list)
-                or len(event) != 2
-                or not isinstance(event[0], str)
-                or not event[0]
-                or not isinstance(event[1], str)
-                or len(event[1]) != 64
-                or any(character not in "0123456789abcdef" for character in event[1])
-            ):
-                raise CacheBlobBackendError(
-                    "Lifecycle inventory event is invalid",
-                    context={"operation": "inventory", "family": family},
-                )
         return state
+
+    def _bootstrap_pending_inventory(self) -> dict[str, int]:
+        """Safely index one bounded legacy pending namespace exactly once.
+
+        Pending candidates are non-authoritative scheduling residue, but their
+        digest-bound names and exact bytes can be indexed without guessing
+        ownership.  A namespace larger than the explicit inspection budget is
+        intentionally migration-required rather than scanned piecemeal through
+        a mutable lexical cursor.
+        """
+        operations_directory = resolve_managed_locator(
+            self.file_ops.root,
+            "operations",
+            operation="bootstrap_pending_inventory",
+            allow_missing_leaf=True,
+        )
+        with self._conditional_transition("inventory:pending"):
+            try:
+                existing = self.file_ops.read_bytes_bounded(
+                    self._inventory_head_locator("pending"),
+                    max_bytes=_INVENTORY_HEAD_MAX_BYTES,
+                )
+            except FileNotFoundError:
+                existing = None
+            if existing is not None:
+                return self._read_inventory("pending")
+            try:
+                names, next_name = self.file_ops.list_directory_names_bounded(
+                    operations_directory,
+                    cursor=None,
+                    max_names=self.lifecycle_limits.max_inventory_items,
+                    max_inventory_names=self.lifecycle_limits.max_inventory_items,
+                    operation="bootstrap_pending_inventory",
+                    name_filter=self._is_eligible_pending_name,
+                )
+            except CacheBlobBackendError as exc:
+                raise CacheBlobMigrationRequiredError(
+                    "Legacy pending controls exceed the safe bootstrap bound",
+                    context={"family": "pending", "operation": "inventory_migration"},
+                ) from exc
+            if next_name is not None:
+                raise CacheBlobMigrationRequiredError(
+                    "Legacy pending controls require an explicit migration",
+                    context={"family": "pending", "operation": "inventory_migration"},
+                )
+            state = self._empty_inventory_head()
+            for name in names:
+                raw = self._get_pending_control_raw(name)
+                if raw is None:
+                    continue
+                sequence = state["next_sequence"]
+                encoded = json.dumps(
+                    {
+                        "version": _INVENTORY_SCHEMA_VERSION,
+                        "name": name,
+                        "digest": hashlib.sha256(raw).hexdigest(),
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                self.file_ops.create_bytes_durable_exclusive(
+                    self._inventory_event_locator("pending", sequence), encoded
+                )
+                state["next_sequence"] = sequence + 1
+            self._write_inventory_head("pending", state)
+            return state
+
+    def _write_inventory_head(self, family: str, state: dict[str, int]) -> None:
+        """Durably publish the small sequence head after one event transition."""
+        encoded = json.dumps(state, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        if len(encoded) > _INVENTORY_HEAD_MAX_BYTES:
+            raise AssertionError("lifecycle inventory head unexpectedly exceeds bound")
+        self.file_ops.write_bytes_durable(self._inventory_head_locator(family), encoded)
+
+    def _read_inventory_event(self, family: str, sequence: int) -> tuple[str, str] | None:
+        """Return one exact immutable scheduling event, or a compacted gap."""
+        try:
+            raw = self.file_ops.read_bytes_bounded(
+                self._inventory_event_locator(family, sequence),
+                max_bytes=self._inventory_event_max_bytes(),
+            )
+        except FileNotFoundError:
+            return None
+        try:
+            event = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise CacheBlobBackendError(
+                "Lifecycle inventory event is invalid",
+                context={"operation": "inventory", "family": family, "sequence": sequence},
+            ) from exc
+        if (
+            not isinstance(event, dict)
+            or set(event) != {"version", "name", "digest"}
+            or event["version"] != _INVENTORY_SCHEMA_VERSION
+            or not isinstance(event["name"], str)
+            or not event["name"]
+            or len(event["name"].encode("utf-8")) > self.lifecycle_limits.max_operation_field_bytes
+            or not isinstance(event["digest"], str)
+            or len(event["digest"]) != 64
+            or any(character not in "0123456789abcdef" for character in event["digest"])
+        ):
+            raise CacheBlobBackendError(
+                "Lifecycle inventory event is invalid",
+                context={"operation": "inventory", "family": family, "sequence": sequence},
+            )
+        return event["name"], event["digest"]
+
+    def _compact_inventory_window(self, family: str, state: dict[str, int]) -> None:
+        """Bounded safe compaction of events whose exact current bytes changed.
+
+        Removing a stale event leaves a sparse sequence gap.  Resume cursors
+        retain original sequence numbers, so old authenticated tokens simply
+        inspect the gap and move forward; no live snapshot member is skipped.
+        """
+        start = state["compact_next_sequence"]
+        stop = min(state["next_sequence"], start + _INVENTORY_COMPACTION_WINDOW)
+        reader: Callable[[str], bytes | None]
+        if family == "primary":
+            reader = self.get_raw
+        elif family == "sidecar":
+            reader = self.get_reconciliation_checkpoint_raw
+        else:
+            reader = self._get_pending_control_raw
+        for sequence in range(start, stop):
+            event = self._read_inventory_event(family, sequence)
+            if event is None:
+                continue
+            name, digest = event
+            try:
+                current = reader(name)
+            except (CacheBlobBackendError, CacheManifestIntegrityError):
+                current = None
+            if current is None or hashlib.sha256(current).hexdigest() != digest:
+                try:
+                    self.file_ops.delete_durable(self._inventory_event_locator(family, sequence))
+                except FileNotFoundError:
+                    pass
+        state["compact_next_sequence"] = (
+            stop if stop < state["next_sequence"] else 1
+        )
 
     def _append_inventory_event(self, family: str, name: str, raw: bytes) -> None:
         """Record membership before publishing the corresponding control file.
@@ -502,19 +778,57 @@ class FileOperationRecordRepository:
         if not isinstance(raw, bytes) or not raw:
             raise TypeError("Lifecycle inventory events require non-empty bytes")
         with self._conditional_transition(f"inventory:{family}"):
+            while True:
+                state = self._read_inventory(family)
+                sequence = state["next_sequence"]
+                encoded = json.dumps(
+                    {
+                        "version": _INVENTORY_SCHEMA_VERSION,
+                        "name": name,
+                        "digest": hashlib.sha256(raw).hexdigest(),
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                if len(encoded) > self._inventory_event_max_bytes():
+                    raise CacheBlobBackendError(
+                        "Lifecycle inventory event exceeds its bounded field policy",
+                        context={"operation": "inventory", "family": family},
+                    )
+                try:
+                    self.file_ops.create_bytes_durable_exclusive(
+                        self._inventory_event_locator(family, sequence), encoded
+                    )
+                except FileExistsError:
+                    # A process loss can leave a durable event before its head
+                    # acknowledgement.  It is safe non-authoritative stale
+                    # scheduling membership; acknowledge the position and
+                    # allocate the next one without reading/re-writing history.
+                    if self._read_inventory_event(family, sequence) is None:
+                        raise CacheBlobBackendError(
+                            "Lifecycle inventory event disappeared during recovery",
+                            context={"operation": "inventory", "family": family},
+                        )
+                    state["next_sequence"] = sequence + 1
+                    self._write_inventory_head(family, state)
+                    continue
+                state["next_sequence"] = sequence + 1
+                self._write_inventory_head(family, state)
+                return
+
+    def _compact_inventory_after_retirement(self, family: str) -> None:
+        """Make bounded maintenance only after the owning action completed.
+
+        Starting a reconciliation action must not delete unrelated scheduling
+        entries before its destructive payload transition.  Retiring an exact
+        primary/sidecar is a completed lifecycle boundary, so it is safe to
+        make one bounded compaction step there without changing normal reads
+        or pre-action fault ordering.
+        """
+        with self._conditional_transition(f"inventory:{family}"):
             state = self._read_inventory(family)
-            events = state["events"]
-            assert isinstance(events, list)
-            events.append([name, hashlib.sha256(raw).hexdigest()])
-            encoded = json.dumps(
-                state, sort_keys=True, separators=(",", ":")
-            ).encode("utf-8")
-            if len(encoded) > self.lifecycle_limits.max_operation_record_bytes:
-                raise CacheBlobBackendError(
-                    "Lifecycle inventory requires bounded compaction",
-                    context={"operation": "inventory", "family": family},
-                )
-            self.file_ops.write_bytes_durable(self._inventory_locator(family), encoded)
+            self._compact_inventory_window(family, state)
+            self._write_inventory_head(family, state)
 
     def _inventory_page(
         self,
@@ -524,13 +838,11 @@ class FileOperationRecordRepository:
         page_size: int,
         read_current: Callable[[str], bytes | None],
         cursor_type: type[OperationCursor] | type[ReconciliationCheckpointCursor] | type[PendingControlCursor],
-    ) -> tuple[tuple[tuple[str, bytes | None], ...], object | None]:
+    ) -> tuple[tuple[tuple[str, bytes | None], ...], object | None, tuple[object, ...]]:
         """Read at most one stable high-water page from one family index."""
         state = self._read_inventory(family)
-        events = state["events"]
-        assert isinstance(events, list)
         high_water = (
-            len(events)
+            state["next_sequence"] - 1
             if cursor is None or cursor.snapshot_high_water is None
             else cursor.snapshot_high_water
         )
@@ -539,16 +851,19 @@ class FileOperationRecordRepository:
         )
         inspected = 0
         entries: list[tuple[str, bytes | None]] = []
+        entry_next_cursors: list[object] = []
         last_name = cursor.operation_id if cursor is not None and hasattr(cursor, "operation_id") else (cursor.name if cursor is not None else "~")
         while (
             position <= high_water
             and inspected < self.lifecycle_limits.max_inventory_items
             and len(entries) < page_size
         ):
-            name, digest = events[position - 1]
-            assert isinstance(name, str) and isinstance(digest, str)
+            event = self._read_inventory_event(family, position)
             position += 1
             inspected += 1
+            if event is None:
+                continue
+            name, digest = event
             last_name = name
             try:
                 current = read_current(name)
@@ -556,6 +871,17 @@ class FileOperationRecordRepository:
                 current = None
             if current is not None and hashlib.sha256(current).hexdigest() == digest:
                 entries.append((name, current))
+                # ``position`` already includes all stale events inspected
+                # before and including this member.  Bind that exact source
+                # position to the yielded entry, rather than deriving a
+                # lexical name later in the reconciler.
+                entry_next_cursors.append(
+                    cursor_type(
+                        name,
+                        snapshot_high_water=high_water,
+                        next_sequence=position,
+                    )
+                )
         next_cursor = None
         if position <= high_water:
             next_cursor = cursor_type(
@@ -563,7 +889,7 @@ class FileOperationRecordRepository:
                 snapshot_high_water=high_water,
                 next_sequence=position,
             )
-        return tuple(entries), next_cursor
+        return tuple(entries), next_cursor, tuple(entry_next_cursors)
 
     def locator_for(self, operation_id: str) -> Path:
         """Derive a contained locator from an opaque operation identifier."""
@@ -667,6 +993,23 @@ class FileOperationRecordRepository:
             allow_missing_leaf=True,
         )
 
+    def _get_pending_control_raw(self, name: str) -> bytes | None:
+        """Read one indexed pending candidate without pathname discovery."""
+        if not self._is_eligible_pending_name(name):
+            return None
+        locator = resolve_managed_locator(
+            self.file_ops.root,
+            Path("operations") / name,
+            operation="read_pending_control",
+            allow_missing_leaf=True,
+        )
+        try:
+            return self.file_ops.read_bytes_bounded(
+                locator, max_bytes=self.lifecycle_limits.max_operation_record_bytes
+            )
+        except (FileNotFoundError, OSError, ValueError):
+            return None
+
     def _pending_recovery_cursor(self) -> PendingControlCursor | None:
         """Read bounded scheduler progress; malformed progress safely restarts."""
         try:
@@ -677,12 +1020,26 @@ class FileOperationRecordRepository:
         except (FileNotFoundError, OSError, ValueError):
             return None
         try:
-            name = raw.decode("ascii")
-        except UnicodeDecodeError:
-            return None
+            value = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            # v1 persisted only a lexical name. It remains scheduling-only and
+            # is conservatively readable, but new checkpoints retain the exact
+            # high-water sequence position.
+            try:
+                return PendingControlCursor(raw.decode("ascii"))
+            except (UnicodeDecodeError, ValueError):
+                return None
         try:
-            return PendingControlCursor(name)
-        except ValueError:
+            if not isinstance(value, dict) or set(value) != {
+                "version", "name", "snapshot_high_water", "next_sequence"
+            } or value["version"] != _INVENTORY_SCHEMA_VERSION:
+                return None
+            return PendingControlCursor(
+                value["name"],
+                snapshot_high_water=value["snapshot_high_water"],
+                next_sequence=value["next_sequence"],
+            )
+        except (TypeError, ValueError):
             return None
 
     def _checkpoint_pending_recovery_cursor(
@@ -696,7 +1053,17 @@ class FileOperationRecordRepository:
             except FileNotFoundError:
                 pass
             return
-        self.file_ops.write_bytes_durable(locator, cursor.name.encode("ascii"))
+        encoded = json.dumps(
+            {
+                "version": _INVENTORY_SCHEMA_VERSION,
+                "name": cursor.name,
+                "snapshot_high_water": cursor.snapshot_high_water,
+                "next_sequence": cursor.next_sequence,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        self.file_ops.write_bytes_durable(locator, encoded)
 
     def get_reconciliation_checkpoint_raw(self, operation_id: str) -> bytes | None:
         """Read opaque reconciliation progress without granting it authority."""
@@ -721,7 +1088,7 @@ class FileOperationRecordRepository:
         if cursor is not None and not isinstance(cursor, ReconciliationCheckpointCursor):
             raise TypeError("reconciliation checkpoint cursor is invalid")
         limit = self._page_size(page_size)
-        records, next_cursor = self._inventory_page(
+        records, next_cursor, entry_next_cursors = self._inventory_page(
             "sidecar",
             cursor,
             page_size=limit,
@@ -731,6 +1098,7 @@ class FileOperationRecordRepository:
         return ReconciliationCheckpointPage(
             entries=records,
             next_cursor=next_cursor,
+            entry_next_cursors=entry_next_cursors,
         )
 
     @staticmethod
@@ -831,6 +1199,7 @@ class FileOperationRecordRepository:
                 self.file_ops.delete_durable(
                     self.reconciliation_checkpoint_locator(operation_id)
                 )
+            self._compact_inventory_after_retirement("sidecar")
         except CacheBlobLifecycleConflictError:
             raise
         except OSError as exc:
@@ -1341,6 +1710,16 @@ class FileOperationRecordRepository:
         """Return whether ``value`` is the fixed opaque evidence identifier."""
         return len(value) == 32 and all(character in "0123456789abcdef" for character in value)
 
+    @classmethod
+    def _is_sidecar_filename(cls, name: str) -> bool:
+        """Return whether one name is a direct reconciliation sidecar."""
+        prefix = "reconcile-action-"
+        return (
+            name.startswith(prefix)
+            and name.endswith(".json")
+            and cls._is_hex_identifier(name.removeprefix(prefix)[:-5])
+        )
+
     def _recoverable_pending_final(self, name: str) -> tuple[Path, str | None] | None:
         """Resolve one strictly named lifecycle control final without guessing.
 
@@ -1394,43 +1773,25 @@ class FileOperationRecordRepository:
     def list_pending_control_page(
         self, cursor: PendingControlCursor | None
     ) -> PendingControlPage:
-        """Read at most one configured page of digest-bound pending controls."""
-        operations_directory = resolve_managed_locator(
-            self.file_ops.root,
-            "operations",
-            operation="list_pending_operation_records",
-            allow_missing_leaf=True,
-        )
+        """Read an indexed high-water page of pending controls.
+
+        This deliberately performs no directory enumeration: candidate names
+        were appended before their first durable write, and exact candidate
+        bytes are still revalidated before any recovery promotion.
+        """
+        if cursor is not None and not isinstance(cursor, PendingControlCursor):
+            raise TypeError("pending control cursor is invalid")
         limit = self.lifecycle_limits.operation_page_size
-        names, next_name = self.file_ops.list_directory_names_bounded(
-            operations_directory,
-            cursor=None if cursor is None else cursor.name,
-            max_names=limit,
-            # Sidecars have their own eligibility family and page bound.
-            max_inventory_names=None,
-            operation="recover_pending",
-            name_filter=self._is_eligible_pending_name,
+        entries, next_cursor, _entry_next_cursors = self._inventory_page(
+            "pending",
+            cursor,
+            page_size=limit,
+            read_current=self._get_pending_control_raw,
+            cursor_type=PendingControlCursor,
         )
-        page_names = tuple(name for name in names if self._is_eligible_pending_name(name))
-        entries: list[tuple[str, bytes | None]] = []
-        for name in page_names:
-            pending = resolve_managed_locator(
-                self.file_ops.root,
-                Path("operations") / name,
-                operation="recover_pending_operation_record",
-            )
-            try:
-                raw = self.file_ops.read_bytes_bounded(
-                    pending, max_bytes=self.lifecycle_limits.max_operation_record_bytes
-                )
-            except (FileNotFoundError, ValueError, OSError):
-                raw = None
-            entries.append((name, raw))
         return PendingControlPage(
-            entries=tuple(entries),
-            next_cursor=(
-                PendingControlCursor(next_name) if next_name is not None else None
-            ),
+            entries=entries,
+            next_cursor=next_cursor,
         )
 
     def recover_pending_operation_records(self) -> tuple[str, ...]:
@@ -1612,6 +1973,7 @@ class FileOperationRecordRepository:
                             "operation": "retire_if_exact",
                         },
                     )
+            self._compact_inventory_after_retirement("primary")
         except CacheBlobLifecycleConflictError:
             raise
         except OSError as exc:
@@ -1656,7 +2018,7 @@ class FileOperationRecordRepository:
         if cursor is not None and not isinstance(cursor, OperationCursor):
             raise TypeError("operation cursor must be an OperationCursor or None")
         limit = self._page_size(page_size)
-        records, next_cursor = self._inventory_page(
+        records, next_cursor, entry_next_cursors = self._inventory_page(
             "primary",
             cursor,
             page_size=limit,
@@ -1670,6 +2032,11 @@ class FileOperationRecordRepository:
                 if raw is not None
             ),
             next_cursor=next_cursor,
+            entry_next_cursors=tuple(
+                cursor
+                for (_operation_id, raw), cursor in zip(records, entry_next_cursors)
+                if raw is not None
+            ),
         )
 
     def iter_raw(self) -> Iterator[tuple[str, bytes]]:

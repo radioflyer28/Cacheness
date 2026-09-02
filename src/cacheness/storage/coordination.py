@@ -196,12 +196,16 @@ def interprocess_open_file_lock(
                         handle.fileno(), exclusive=exclusive, nonblocking=True
                     )
                 except TypeError as exc:
-                    # The adapter is private but earlier deterministic shims
-                    # implemented only the original blocking signature.
-                    # Native Windows always receives FAIL_IMMEDIATELY above.
-                    if "nonblocking" not in str(exc):
-                        raise
-                    token = api.lock(handle.fileno(), exclusive=exclusive)
+                    # A lifecycle admission retry must never silently turn
+                    # into a blocking Win32 call.  Test adapters and platform
+                    # integrations must provide FAIL_IMMEDIATELY-equivalent
+                    # semantics or be rejected before they can violate the
+                    # absolute deadline.
+                    raise CacheBlobBackendError(
+                        "BlobStore Windows lifecycle lock adapter does not support nonblocking acquisition",
+                        context={"operation": operation},
+                        reason=CacheReason.BLOB_BACKEND_CAPABILITY_UNSUPPORTED,
+                    ) from exc
             else:
                 token = api.lock(handle.fileno(), exclusive=exclusive)
 

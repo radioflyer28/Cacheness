@@ -533,11 +533,17 @@ class LifecycleEngine:
                     page_size=self.lifecycle_limits.manifest_page_size,
                 )
                 if not manifest_page.entries:
-                    if manifest_page.next_cursor is not None:
-                        raise CacheManifestIntegrityError(
-                            "Clear manifest page has an empty non-terminal cursor"
-                        )
-                    break
+                    # A high-water manifest inventory deliberately retains
+                    # membership independently of the current canonical row.
+                    # An inspected window can therefore contain only events
+                    # subsequently superseded or deleted.  That is a normal
+                    # empty *source* page, not corrupted clear authority. Do
+                    # not make a zero-target control page; advance the source
+                    # cursor and persist the first page that has a target.
+                    if manifest_page.next_cursor is None:
+                        break
+                    source_cursor = manifest_page.next_cursor
+                    continue
                 if len(manifest_page.entry_next_cursors) != len(manifest_page.entries):
                     raise CacheManifestIntegrityError(
                         "Clear manifest page lacks exact entry continuations"
@@ -551,7 +557,13 @@ class LifecycleEngine:
                         key, manifest.generation, raw_manifest
                     )
                     self._authenticated_clear_target(target)
-                    candidate_targets = tuple([*targets, target])
+                    # Inventory sequence is an immutable snapshot-membership
+                    # order, whereas target pages use an independent canonical
+                    # key order for stable per-page checkpoints.  Never infer
+                    # source progression from this presentation ordering.
+                    candidate_targets = tuple(
+                        sorted([*targets, target], key=lambda item: item.key)
+                    )
                     has_remaining = (
                         index + 1 < len(manifest_page.entries)
                         or manifest_page.next_cursor is not None
@@ -579,7 +591,9 @@ class LifecycleEngine:
                             raw_manifest=raw_manifest,
                             operation_id=record.operation_id,
                         )
-                        candidate_targets = tuple([*targets, target])
+                        candidate_targets = tuple(
+                            sorted([*targets, target], key=lambda item: item.key)
+                        )
                         candidate = self._new_clear_target_page(
                             operation_id=record.operation_id,
                             source_cursor=source_cursor,
@@ -608,7 +622,7 @@ class LifecycleEngine:
                         operation_id=record.operation_id,
                         source_cursor=source_cursor,
                         next_cursor=next_cursor,
-                        targets=tuple(targets),
+                        targets=tuple(sorted(targets, key=lambda item: item.key)),
                     )
                 )
                 raw_page = self._clear_page_raw(page)

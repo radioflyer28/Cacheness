@@ -58,11 +58,24 @@ class _KeyInitializationGuardRegistry:
             lock, references = cls._entries.get(identity, (RLock(), 0))
             cls._entries[identity] = (lock, references + 1)
         acquired = False
+        immediate_attempt = True
         try:
             while not acquired:
+                # The initial probe is intentionally immediate: callers may
+                # arrive precisely at their deadline and still discover an
+                # already-free local guard.  Every retry, however, must first
+                # observe the one shared absolute deadline.  Otherwise a
+                # holder releasing after expiry can be admitted on the next
+                # scheduler turn.
+                if not immediate_attempt and time.monotonic() >= deadline:
+                    raise CacheBlobLifecycleTimeoutError(
+                        "Canonical manifest key initialization timed out",
+                        context={"operation": "manifest_key_initialization"},
+                    )
                 acquired = lock.acquire(blocking=False)
                 if acquired:
                     break
+                immediate_attempt = False
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise CacheBlobLifecycleTimeoutError(
@@ -339,7 +352,17 @@ class ManifestKeyProvider:
                     time.monotonic()
                     + self._lifecycle_limits.key_initialization_timeout_seconds
                 )
+            immediate_attempt = True
             while True:
+                # The first lock operation is an immediate probe.  Once that
+                # loses, every subsequent acquisition must check the same
+                # deadline used by the in-process guard before touching the
+                # kernel lock again.
+                if not immediate_attempt and time.monotonic() >= deadline:
+                    raise CacheBlobLifecycleTimeoutError(
+                        "Canonical manifest key initialization timed out",
+                        context={"operation": "manifest_key_initialization"},
+                    )
                 try:
                     with interprocess_open_file_lock(
                         handle,
@@ -374,6 +397,7 @@ class ManifestKeyProvider:
                             max(0.0, deadline - time.monotonic()),
                         )
                     )
+                    immediate_attempt = False
         except ManifestKeyError:
             raise
         except OSError as exc:

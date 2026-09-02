@@ -299,14 +299,16 @@ def test_operation_repository_uses_configured_bounded_stable_pages(
             "a" * 32,
         ]
         assert first_page.next_cursor is not None
-        # One bounded private-index read plus one exact read per yielded
-        # operation; no namespace-wide directory scan is used.
-        assert len(calls) == limits.operation_page_size + 1
+        # One bounded sequence head, one immutable event per yielded member,
+        # and one exact control read per member; no history rewrite or
+        # namespace-wide directory scan is used.
+        assert len(calls) == 1 + (2 * limits.operation_page_size)
+        assert [cursor.next_sequence for cursor in first_page.entry_next_cursors] == [2, 3]
 
         second_page = repository.list_page(first_page.next_cursor)
         assert [operation_id for operation_id, _ in second_page.entries] == ["b" * 32]
         assert second_page.next_cursor is None
-        assert len(calls) == 5
+        assert len(calls) == 8
     finally:
         store.close()
 
@@ -1100,9 +1102,17 @@ def test_pending_recovery_pages_past_large_invalid_prefix_without_unbounded_read
             return original_read(locator, max_bytes=max_bytes)
 
         monkeypatch.setattr(repository.file_ops, "read_bytes_bounded", count_reads)
-        for _ in range(4):
+        for iteration in range(4):
+            before = len(calls)
             repository.recover_pending_operation_records()
-            assert len(calls) <= limits.operation_page_size * (_ + 1) + (_ + 1)
+            # The first legacy recovery performs one explicitly bounded
+            # bootstrap into the high-water sequence. Later calls inspect only
+            # the head, one immutable event window, and its exact candidates.
+            assert len(calls) - before <= (
+                limits.max_inventory_items + (2 * limits.operation_page_size) + 2
+                if iteration == 0
+                else 2 + (2 * limits.operation_page_size)
+            )
         assert repository.get_raw(valid_id) == raw
         assert (operations / ".pending-recovery.cursor").exists()
     finally:
