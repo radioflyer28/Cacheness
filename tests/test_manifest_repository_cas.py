@@ -193,7 +193,10 @@ def test_operation_inventory_scheduling_substitution_fails_closed(
             digest = hashlib.sha256(raw).hexdigest()
             name = f".{operation_id}.json.pending.{digest}.{'b' * 32}.tmp"
             locator = root / "operations" / name
-            read_page = lambda: repository.list_pending_control_page(None)
+
+            def read_page():
+                return repository.list_pending_control_page(None)
+
         repository._append_inventory_event(family, name, raw)
         file_ops.write_bytes_durable(locator, raw)
         head = json.loads(file_ops.read_bytes(repository._inventory_head_locator(family)))
