@@ -1175,6 +1175,12 @@ class FileOperationRecordRepository:
         """
         if not isinstance(raw, bytes) or not raw:
             raise TypeError("Lifecycle inventory events require non-empty bytes")
+        # Publish the signed all-family provenance and every empty head before
+        # accepting the first member of any one family.  Direct repository
+        # callers use this path too; without it a lone sidecar/pending event
+        # could create an unauthenticated lazy head that later readers must
+        # treat as migration evidence.
+        self.initialize_new_store()
         # The outer store-level lease is intentionally held across the
         # proof/provenance/head transition as well as all future family
         # publication.  Without it, a legacy raw member could appear between
@@ -1243,6 +1249,24 @@ class FileOperationRecordRepository:
         admission.  It inspects no more than one ``max_inventory_items``
         window per invocation, and reads remain entirely non-mutating.
         """
+        # Constructor recovery can run before any lifecycle mutation has
+        # established signed all-family provenance.  Maintenance must neither
+        # invoke the key provider nor classify a missing sibling head in that
+        # state: ordinary recovery retains responsibility for the later typed
+        # legacy-evidence decision.  A present marker is then authenticated by
+        # the normal head reads below.
+        try:
+            initialized_size = self.file_ops.get_size(
+                self._inventory_initialization_locator()
+            )
+        except OSError as exc:
+            raise CacheBlobBackendError(
+                "Lifecycle inventory initialization could not be inspected",
+                context={"operation": "inventory"},
+            ) from exc
+        if initialized_size < 0:
+            return True
+
         advanced = False
         for family in _INVENTORY_FAMILIES:
             with self._conditional_transition(f"inventory:{family}"):
