@@ -1091,7 +1091,22 @@ class _Reconciler:
         if retained is None:
             return computed
         index = identifiers.index(retained)
-        if index == 0 or not page.entry_next_cursors:
+        if index == 0:
+            # ``None`` is terminal in an authenticated resume token.  A
+            # conflict on the first item of a newly captured high-water page
+            # must instead retain an explicit position before sequence one.
+            if current is not None or not page.entry_next_cursors:
+                return current
+            first = page.entry_next_cursors[0]
+            if (
+                first.snapshot_high_water is None
+                or first.next_sequence is None
+            ):
+                # Legacy lexical pages have no safe pre-first representation;
+                # retain the caller's legacy cursor and conservatively replay.
+                return current
+            return OperationCursor.before_first(first.snapshot_high_water)
+        if not page.entry_next_cursors:
             return current
         return page.entry_next_cursors[index - 1]
 
@@ -1110,7 +1125,21 @@ class _Reconciler:
         if retained is None:
             return computed
         index = identifiers.index(retained)
-        if index == 0 or not page.entry_next_cursors:
+        if index == 0:
+            # See the primary equivalent above: a first-source conflict must
+            # never collapse to the terminal ``None`` token state.
+            if current is not None or not page.entry_next_cursors:
+                return current
+            first = page.entry_next_cursors[0]
+            if (
+                first.snapshot_high_water is None
+                or first.next_sequence is None
+            ):
+                return current
+            return ReconciliationCheckpointCursor.before_first(
+                first.snapshot_high_water
+            )
+        if not page.entry_next_cursors:
             return current
         return page.entry_next_cursors[index - 1]
 

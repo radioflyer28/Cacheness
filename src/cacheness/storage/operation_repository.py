@@ -54,6 +54,17 @@ class OperationCursor:
             if value is not None and (type(value) is not int or value < 0):
                 raise ValueError("operation cursor snapshot field is invalid")
 
+    @classmethod
+    def before_first(cls, high_water: int) -> "OperationCursor":
+        """Return the v2 position before sequence one of one fixed snapshot.
+
+        ``operation_id`` is a compatibility projection only once a cursor has
+        generation-bound sequence fields.  A reserved syntactically valid
+        value lets reconciliation retain the first source member without
+        overloading ``None``, which is the sole terminal representation.
+        """
+        return cls("0" * 32, snapshot_high_water=high_water, next_sequence=1)
+
 
 @dataclass(frozen=True)
 class OperationPage:
@@ -97,6 +108,14 @@ class ReconciliationCheckpointCursor:
         for value in (self.snapshot_high_water, self.next_sequence):
             if value is not None and (type(value) is not int or value < 0):
                 raise ValueError("reconciliation checkpoint cursor snapshot field is invalid")
+
+    @classmethod
+    def before_first(cls, high_water: int) -> "ReconciliationCheckpointCursor":
+        """Return the v2 position before sequence one of one fixed snapshot."""
+        # A sidecar cursor is an opaque scheduling name, never a direct path
+        # or evidence identifier.  ``~`` cannot collide with the canonical
+        # 32-hex operation IDs published by this repository.
+        return cls("~", snapshot_high_water=high_water, next_sequence=1)
 
 
 @dataclass(frozen=True)

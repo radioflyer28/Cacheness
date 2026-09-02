@@ -641,6 +641,69 @@ def test_reopen_retires_an_orphaned_completed_reconciliation_checkpoint(
         reopened.close()
 
 
+def test_first_sidecar_apply_conflict_keeps_a_generation_bound_resume_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sole conflicting sidecar is retryable, not a false terminal result."""
+    from cacheness.storage.reconciliation import _ActionCheckpoint
+
+    root = tmp_path / "first-sidecar-conflict-resume"
+    limits = LifecycleLimits(
+        operation_page_size=1,
+        max_reconcile_actions=1,
+        orphan_grace_seconds=0.01,
+        close_wait_seconds=0.02,
+    )
+    store = BlobStore(
+        config=CacheConfig(cache_dir=str(root), lifecycle_limits=limits), backend="json"
+    )
+    try:
+        repository = store.lifecycle.operation_repository
+        operation_id = "a" * 32
+        completed = _ActionCheckpoint.new(
+            operation_id,
+            "a" * 64,
+            ReconciliationAction.RETIRE_EVIDENCE,
+            "completed",
+            store._manifest_key(initialize_new_store=True),
+        )
+        raw = completed.canonical_bytes(lifecycle_limits=limits)
+        repository.create_reconciliation_checkpoint_exclusive(operation_id, raw)
+        original_retire = repository.retire_reconciliation_checkpoint_if_exact
+
+        def conflict_once(*_args: object, **_kwargs: object) -> None:
+            raise CacheBlobLifecycleConflictError("exact sidecar retirement raced")
+
+        monkeypatch.setattr(
+            repository, "retire_reconciliation_checkpoint_if_exact", conflict_once
+        )
+        first = store.reconcile(
+            apply=True, now=datetime(2026, 8, 31, tzinfo=timezone.utc)
+        )
+
+        assert first.resume_token is not None
+        _manifest, _operation, sidecar, _pending, _priority = (
+            store._reconciler._decode_resume_token(first.resume_token)
+        )
+        assert sidecar is not None
+        assert sidecar.snapshot_high_water == 1
+        assert sidecar.next_sequence == 1
+        assert repository.get_reconciliation_checkpoint_raw(operation_id) == raw
+
+        monkeypatch.setattr(
+            repository, "retire_reconciliation_checkpoint_if_exact", original_retire
+        )
+        second = store.reconcile(
+            apply=True,
+            resume_token=first.resume_token,
+            now=datetime(2026, 8, 31, tzinfo=timezone.utc),
+        )
+        assert second.resume_token is None
+        assert repository.get_reconciliation_checkpoint_raw(operation_id) is None
+    finally:
+        store.close()
+
+
 def test_reconcile_apply_resumes_bounded_actions_from_opaque_token(tmp_path: Path) -> None:
     """A second apply consumes only the remaining evidence after a cutoff."""
     root = tmp_path / "reconcile-resume"
