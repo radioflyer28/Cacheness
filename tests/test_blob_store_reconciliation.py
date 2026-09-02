@@ -20,6 +20,7 @@ from cacheness.metadata import InMemoryBackend
 from cacheness.error_handling import (
     CacheBlobBackendError,
     CacheBlobIntegrityError,
+    CacheBlobMigrationRequiredError,
     CacheStorageError,
     CacheBlobLifecycleConflictError,
     CacheManifestIntegrityError,
@@ -1748,6 +1749,112 @@ def test_inventory_floor_advances_after_wrap_and_sparse_pages_keep_valid_cursors
             assert repository.list_pending_control_page(old_cursor).next_cursor is not None
     finally:
         store.close()
+
+
+@pytest.mark.parametrize("max_inventory_items", (1, 2))
+@pytest.mark.parametrize("family", ("primary", "sidecar", "pending"))
+@pytest.mark.parametrize("injected_key", (False, True))
+def test_first_mutation_never_relabels_preindex_evidence_as_current_v2(
+    tmp_path: Path,
+    family: str,
+    injected_key: bool,
+    max_inventory_items: int,
+) -> None:
+    """Every legacy family blocks v2/key initialization until migrated."""
+    root = tmp_path / f"preindex-{family}-{injected_key}-{max_inventory_items}"
+    operations = root / "operations"
+    operations.mkdir(parents=True)
+    operation_id = "a" * 32
+    raw = b"legacy lifecycle evidence"
+    if family == "primary":
+        locator = operations / f"{operation_id}.json"
+    elif family == "sidecar":
+        locator = operations / f"reconcile-action-{operation_id}.json"
+    else:
+        digest = hashlib.sha256(raw).hexdigest()
+        locator = operations / (
+            f".{operation_id}.json.pending.{digest}.{'b' * 32}.tmp"
+        )
+    locator.write_bytes(raw)
+    # Unrelated files cannot make a genuine raw family record disappear from
+    # the bounded compatibility proof.
+    (operations / "unrelated.txt").write_text("not lifecycle evidence")
+    limits = replace(
+        _small_lifecycle_limits(), max_inventory_items=max_inventory_items
+    )
+    provider = (
+        ManifestKeyProvider(root / "injected-key.bin", key=b"k" * 32)
+        if injected_key
+        else None
+    )
+    config = CacheConfig(cache_dir=str(root), lifecycle_limits=limits)
+
+    if family == "primary":
+        # The direct repository boundary sees the raw primary filename rather
+        # than treating its `.json` suffix as an unrelated name.
+        file_ops = ManagedFileOps(root)
+        repository = FileOperationRecordRepository(file_ops, lifecycle_limits=limits)
+        try:
+            with pytest.raises(CacheBlobMigrationRequiredError):
+                repository.list_page(page_size=1)
+        finally:
+            file_ops.close()
+
+    # Constructor-time recovery must fail closed before a first mutation can
+    # publish key or v2 state. A sidecar can remain outside initial primary/
+    # pending recovery, so exercise its first-key path explicitly as well.
+    if family == "sidecar" and max_inventory_items == 2:
+        store = BlobStore(
+            root, backend="json", config=config, manifest_key_provider=provider
+        )
+        try:
+            with pytest.raises(CacheBlobMigrationRequiredError):
+                store.put({"first": True}, key="first-write")
+        finally:
+            store.close()
+        with pytest.raises(CacheBlobMigrationRequiredError):
+            BlobStore(
+                root, backend="json", config=config, manifest_key_provider=provider
+            )
+    else:
+        for _attempt in range(2):
+            with pytest.raises(CacheBlobMigrationRequiredError):
+                BlobStore(
+                    root, backend="json", config=config, manifest_key_provider=provider
+                )
+
+    inventory_root = operations / ".cacheness-inventory-v2"
+    assert not (inventory_root / "initialized").exists()
+    if inventory_root.exists():
+        assert not list(inventory_root.rglob("head.json"))
+    assert locator.read_bytes() == raw
+
+
+@pytest.mark.parametrize("injected_key", (False, True))
+def test_first_mutation_checks_sidecars_before_publishing_v2_provenance(
+    tmp_path: Path, injected_key: bool
+) -> None:
+    """A sidecar added after opening cannot be hidden by first-key setup."""
+    root = tmp_path / f"first-mutation-sidecar-{injected_key}"
+    provider = (
+        ManifestKeyProvider(root / "injected-key.bin", key=b"k" * 32)
+        if injected_key
+        else None
+    )
+    store = BlobStore(root, backend="json", manifest_key_provider=provider)
+    operation_id = "a" * 32
+    sidecar = root / "operations" / f"reconcile-action-{operation_id}.json"
+    sidecar.parent.mkdir(exist_ok=True)
+    sidecar.write_bytes(b"legacy sidecar")
+    try:
+        with pytest.raises(CacheBlobMigrationRequiredError) as raised:
+            store.put({"first": True}, key="first-write")
+        assert raised.value.context["family"] == "sidecar"
+    finally:
+        store.close()
+    inventory_root = root / "operations" / ".cacheness-inventory-v2"
+    assert not (inventory_root / "initialized").exists()
+    assert sidecar.read_bytes() == b"legacy sidecar"
 
 
 def test_dry_run_reports_blocked_pending_control_residue(tmp_path: Path) -> None:

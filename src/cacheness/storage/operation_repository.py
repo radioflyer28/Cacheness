@@ -566,7 +566,7 @@ class FileOperationRecordRepository:
         silently omitting old recovery debt from a claimed high-water snapshot.
         """
         if family == "primary":
-            name_filter = self._is_hex_identifier
+            name_filter = self._is_primary_filename
         elif family == "sidecar":
             name_filter = self._is_sidecar_filename
         else:
@@ -578,7 +578,7 @@ class FileOperationRecordRepository:
             allow_missing_leaf=True,
         )
         try:
-            names, _next = self.file_ops.list_directory_names_bounded(
+            names, next_name = self.file_ops.list_directory_names_bounded(
                 operations_directory,
                 cursor=None,
                 max_names=1,
@@ -595,7 +595,35 @@ class FileOperationRecordRepository:
                 "Lifecycle evidence inventory requires an explicit migration",
                 context={"family": family, "operation": "inventory_migration"},
             ) from exc
+        if next_name is not None:
+            # A compatibility proof may not turn a bounded prefix of an old
+            # namespace into a claim that the whole namespace is empty.
+            raise CacheBlobMigrationRequiredError(
+                "Lifecycle evidence inventory requires an explicit migration",
+                context={"family": family, "operation": "inventory_migration"},
+            )
         return bool(names)
+
+    def _assert_fresh_inventory_namespace(self) -> None:
+        """Prove every legacy family absent before publishing v2 provenance.
+
+        This check lives under the same inventory transition as the marker and
+        heads. A missing manifest key is deliberately irrelevant: it is not
+        evidence that a pre-index operations directory is fresh.
+        """
+        for family in _INVENTORY_FAMILIES:
+            try:
+                legacy_size = self.file_ops.get_size(self._legacy_inventory_locator(family))
+            except (OSError, ValueError) as exc:
+                raise CacheBlobMigrationRequiredError(
+                    "Lifecycle evidence inventory requires an explicit migration",
+                    context={"family": family, "operation": "inventory_migration"},
+                ) from exc
+            if legacy_size >= 0 or self._has_preindex_evidence(family):
+                raise CacheBlobMigrationRequiredError(
+                    "Lifecycle evidence predates its durable inventory",
+                    context={"family": family, "operation": "inventory_migration"},
+                )
 
     def _record_pending_control(self, locator: Path, name: str, raw: bytes) -> None:
         """Index one future digest-bound pending control before it is created.
@@ -726,7 +754,19 @@ class FileOperationRecordRepository:
         """
         with self._conditional_transition("inventory:initialize"):
             marker = self._inventory_initialization_locator()
-            if not self._has_current_inventory_initialization():
+            initialized = self._has_current_inventory_initialization()
+            present_heads = {
+                family: self._read_present_inventory_head(family)
+                for family in _INVENTORY_FAMILIES
+            }
+            # A marker or any validated v2 head is durable provenance for an
+            # already-indexed store. It can safely finish a crash-interrupted
+            # initialization without rediscovering unrelated legacy-looking
+            # names. With neither, however, prove *all* legacy families absent
+            # before writing even the marker.
+            if not initialized and not any(present_heads.values()):
+                self._assert_fresh_inventory_namespace()
+            if not initialized:
                 try:
                     self.file_ops.create_bytes_durable_exclusive(
                         marker, _INVENTORY_INITIALIZATION_BYTES
@@ -738,7 +778,7 @@ class FileOperationRecordRepository:
                             context={"operation": "inventory"},
                         )
             for family in _INVENTORY_FAMILIES:
-                if self._read_present_inventory_head(family) is not None:
+                if present_heads[family] is not None:
                     continue
                 state = self._empty_inventory_head()
                 encoded = json.dumps(
@@ -775,8 +815,6 @@ class FileOperationRecordRepository:
             legacy_size = -1
         if legacy_size < 0:
             if self._has_preindex_evidence(family):
-                if family == "pending":
-                    return self._bootstrap_pending_inventory()
                 raise CacheBlobMigrationRequiredError(
                     "Lifecycle evidence predates its durable inventory",
                     context={"family": family, "operation": "inventory_migration"},
@@ -1980,6 +2018,11 @@ class FileOperationRecordRepository:
     def _is_hex_identifier(value: str) -> bool:
         """Return whether ``value`` is the fixed opaque evidence identifier."""
         return len(value) == 32 and all(character in "0123456789abcdef" for character in value)
+
+    @classmethod
+    def _is_primary_filename(cls, name: str) -> bool:
+        """Return whether one name exactly matches :meth:`locator_for`."""
+        return name.endswith(".json") and cls._is_hex_identifier(name[:-5])
 
     @classmethod
     def _is_sidecar_filename(cls, name: str) -> bool:
