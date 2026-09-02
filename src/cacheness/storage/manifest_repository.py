@@ -44,6 +44,7 @@ _MANIFEST_INVENTORY_SCHEMA_VERSION = 2
 _MANIFEST_INVENTORY_HEAD_MAX_BYTES = 4_096
 _MANIFEST_INVENTORY_EVENT_MIN_BYTES = 32 * 1024
 _MANIFEST_INVENTORY_COMPACTION_WINDOW = 64
+_MANIFEST_INVENTORY_SEQUENCE_FIELD = "_cacheness_manifest_inventory_sequence_v2"
 _SQLITE_MANIFEST_TABLE = "cacheness_manifest_records_v1"
 _SQLITE_MANIFEST_INVENTORY_TABLE = "cacheness_manifest_inventory_v1"
 _SQLITE_MANIFEST_INVENTORY_STATE_TABLE = "cacheness_manifest_inventory_state_v2"
@@ -185,8 +186,8 @@ class ManifestRepository(Protocol):
     def list_keys(self) -> list[str]:
         """List logical keys that have canonical records."""
 
-    def compact_inventory_for_recovery(self) -> None:
-        """Perform one bounded, mutating inventory-maintenance pass."""
+    def compact_inventory_for_recovery(self) -> bool:
+        """Perform one bounded mutating pass and report snapshot readiness."""
 
     def list_page(
         self,
@@ -523,6 +524,11 @@ class _MetadataManifestRepository:
             # exact-revalidated as stale.  Keep it in the bounded head rather
             # than making every memory/JSON caller replay historical gaps.
             "first_live_sequence": 1,
+            # ``0`` means no post-authority stale-event debt is known.  A
+            # non-zero value is an exact high-water target; compaction resumes
+            # from ``compact_next_sequence`` in bounded calls until it reaches
+            # that target.  It is intentionally separate from normal reads.
+            "maintenance_target_sequence": 0,
         }
 
     @staticmethod
@@ -535,6 +541,13 @@ class _MetadataManifestRepository:
                 "next_sequence",
                 "compact_next_sequence",
                 "first_live_sequence",
+            },
+            {
+                "version",
+                "next_sequence",
+                "compact_next_sequence",
+                "first_live_sequence",
+                "maintenance_target_sequence",
             },
         ):
             raise CacheBlobBackendError(
@@ -557,12 +570,25 @@ class _MetadataManifestRepository:
             # lower sequence can be skipped until a later compaction proves
             # it stale and persists the new field.
             state["first_live_sequence"] = 1
+        if "maintenance_target_sequence" not in state:
+            # A v2 head predates a durable debt boundary.  Treat all of its
+            # existing high-water range as mutating recovery work rather than
+            # allowing clear to scan a potentially stale history.
+            state["maintenance_target_sequence"] = state["next_sequence"] - 1
         if (
             type(state["first_live_sequence"]) is not int
             or not 1 <= state["first_live_sequence"] <= state["next_sequence"]
         ):
             raise CacheBlobBackendError(
                 "Canonical manifest inventory live-sequence floor is invalid",
+                context={"operation": "manifest_inventory"},
+            )
+        if (
+            type(state["maintenance_target_sequence"]) is not int
+            or not 0 <= state["maintenance_target_sequence"] < state["next_sequence"]
+        ):
+            raise CacheBlobBackendError(
+                "Canonical manifest inventory maintenance target is invalid",
                 context={"operation": "manifest_inventory"},
             )
         return state
@@ -612,6 +638,14 @@ class _MetadataManifestRepository:
                 "first_live_sequence",
                 "events",
             },
+            {
+                "version",
+                "next_sequence",
+                "compact_next_sequence",
+                "first_live_sequence",
+                "maintenance_target_sequence",
+                "events",
+            },
         ):
             raise CacheBlobBackendError(
                 "Canonical manifest inventory is invalid",
@@ -625,11 +659,13 @@ class _MetadataManifestRepository:
                     "next_sequence",
                     "compact_next_sequence",
                     "first_live_sequence",
+                    "maintenance_target_sequence",
                 )
                 if name in state
             }
         )
         state["first_live_sequence"] = head["first_live_sequence"]
+        state["maintenance_target_sequence"] = head["maintenance_target_sequence"]
         if not isinstance(state["events"], dict):
             raise CacheBlobBackendError(
                 "Canonical manifest inventory events are invalid",
@@ -691,7 +727,7 @@ class _MetadataManifestRepository:
         event = self._inventory_state()["events"].get(sequence)
         return None if event is None else self._validate_inventory_event(event, sequence)
 
-    def _append_inventory_event(self, key: str, record: bytes) -> None:
+    def _append_inventory_event(self, key: str, record: bytes) -> int:
         """Index publication before authority, without append/read/rewrite history."""
         event = {
             "version": _MANIFEST_INVENTORY_SCHEMA_VERSION,
@@ -710,7 +746,7 @@ class _MetadataManifestRepository:
             sequence = state["next_sequence"]
             state["events"][sequence] = event
             state["next_sequence"] = sequence + 1
-            return
+            return sequence
         while True:
             sequence = state["next_sequence"]
             try:
@@ -730,21 +766,143 @@ class _MetadataManifestRepository:
                 continue
             state["next_sequence"] = sequence + 1
             self._write_inventory_head(state)
-            return
+            return sequence
 
-    def _compact_inventory_window(self) -> None:
-        """Retire one bounded run of stale scheduling events after authority moves."""
+    @staticmethod
+    def _inventory_sequence_from_entry(entry: object) -> int | None:
+        """Read a private exact scheduler sequence from one current projection."""
+        if not isinstance(entry, Mapping):
+            return None
+        metadata = entry.get("metadata")
+        if not isinstance(metadata, Mapping):
+            return None
+        sequence = metadata.get(_MANIFEST_INVENTORY_SEQUENCE_FIELD)
+        return sequence if type(sequence) is int and sequence > 0 else None
+
+    def _inventory_event_is_current(
+        self, entry: object, *, sequence: int, digest: str
+    ) -> bytes | None:
+        """Return current bytes only when this exact inventory slot still owns them.
+
+        Old projections did not contain the private sequence field.  They are
+        deliberately retained as a digest-only compatibility case until the
+        bounded maintenance sweep rewrites them.  Once a projection has a
+        sequence, digest equality alone is insufficient: replacing a value by
+        identical bytes must not make both scheduling positions live.
+        """
+        current = self._raw_from_entry(entry)
+        if current is None or hashlib.sha256(current).hexdigest() != digest:
+            return None
+        current_sequence = self._inventory_sequence_from_entry(entry)
+        if current_sequence is not None and current_sequence != sequence:
+            return None
+        return current
+
+    def _move_inventory_projection_to_sequence(self, key: str, sequence: int) -> None:
+        """Make one current projection point at its newly appended live slot.
+
+        The event is written first.  If this authority update is interrupted,
+        the new event is not current because readers require the private
+        sequence match above; the old projection remains authoritative and a
+        later bounded pass retries it.  This avoids duplicate live members at
+        every crash seam while allowing compacted prefixes to contain no
+        permanent sparse slots.
+        """
+        if type(self.backend) is JsonBackend:
+            candidate = deepcopy(self.backend._metadata)
+            entry = candidate.get("entries", {}).get(key)
+            if not isinstance(entry, dict):
+                raise CacheBlobMigrationRequiredError(
+                    "Canonical manifest projection disappeared during maintenance",
+                    context={"key": key, "operation": "manifest_inventory"},
+                )
+            metadata = entry.get("metadata")
+            if not isinstance(metadata, Mapping):
+                raise CacheBlobMigrationRequiredError(
+                    "Canonical manifest projection metadata is invalid",
+                    context={"key": key, "operation": "manifest_inventory"},
+                )
+            updated_metadata = dict(metadata)
+            updated_metadata[_MANIFEST_INVENTORY_SEQUENCE_FIELD] = sequence
+            entry["metadata"] = updated_metadata
+            self._publish_json_document(candidate)
+            return
+        entry = self._current_entry(key)
+        if not isinstance(entry, dict):
+            raise CacheBlobMigrationRequiredError(
+                "Canonical manifest projection disappeared during maintenance",
+                context={"key": key, "operation": "manifest_inventory"},
+            )
+        metadata = entry.get("metadata")
+        if not isinstance(metadata, dict):
+            raise CacheBlobMigrationRequiredError(
+                "Canonical manifest projection metadata is invalid",
+                context={"key": key, "operation": "manifest_inventory"},
+            )
+        # Keep the exact canonical bytes untouched; this is only the private
+        # scheduler ownership field in the reversible compatibility projection.
+        metadata[_MANIFEST_INVENTORY_SEQUENCE_FIELD] = sequence
+
+    def _relocate_live_inventory_event(
+        self, key: str, record: bytes) -> None:
+        """Append one live member beyond a charged sparse prefix and rehome it."""
+        sequence = self._append_inventory_event(key, record)
+        try:
+            self._move_inventory_projection_to_sequence(key, sequence)
+        except (CacheError, OSError, TypeError, ValueError):
+            # The append is durable even if the projection update is not.  Fold
+            # it into the exact continuation before surfacing the fault so a
+            # later mutating recovery cannot leave an unclaimed sparse slot
+            # ahead of the eventually relocated member.
+            state = self._inventory_state()
+            self._mark_inventory_maintenance_debt(state, sequence=sequence)
+            self._write_inventory_head(state)
+            raise
+
+    @staticmethod
+    def _mark_inventory_maintenance_debt(
+        state: dict[str, Any], *, sequence: int
+    ) -> None:
+        """Durably schedule exact stale-event revalidation after authority.
+
+        The charged position is either a replacement candidate or a removed
+        predecessor.  Revalidation determines whether it is stale.  Starting
+        at the live floor lets the continuation relocate any earlier live
+        positions and remove the whole charged prefix without leaving sparse
+        holes between otherwise-current entries.
+        """
+        target = state["maintenance_target_sequence"]
+        if target == 0:
+            state["compact_next_sequence"] = state["first_live_sequence"]
+            state["maintenance_target_sequence"] = sequence
+            return
+        state["compact_next_sequence"] = min(
+            state["compact_next_sequence"], sequence
+        )
+        state["maintenance_target_sequence"] = max(target, sequence)
+
+    def _compact_inventory_window(self) -> bool:
+        """Advance one durable bounded post-authority maintenance continuation."""
         state = self._inventory_state()
+        target = state["maintenance_target_sequence"]
+        if target == 0:
+            return True
         # ``first_live_sequence == next_sequence`` is a durable proof that
         # every event position is sparse.  Preserve that terminal floor rather
         # than wrapping maintenance back across a lifetime of gaps on reopen.
         if state["first_live_sequence"] == state["next_sequence"]:
             state["compact_next_sequence"] = state["next_sequence"]
+            state["maintenance_target_sequence"] = 0
             self._write_inventory_head(state)
-            return
-        start = state["compact_next_sequence"]
-        stop = min(state["next_sequence"], start + _MANIFEST_INVENTORY_COMPACTION_WINDOW)
-        first_remaining: int | None = None
+            return True
+        start = max(state["compact_next_sequence"], state["first_live_sequence"])
+        stop = min(
+            target + 1,
+            start + min(
+                _MANIFEST_INVENTORY_COMPACTION_WINDOW,
+                self.lifecycle_limits.max_inventory_items,
+            ),
+        )
         floor_unresolved = False
         for sequence in range(start, stop):
             event = self._read_inventory_event(sequence)
@@ -752,7 +910,9 @@ class _MetadataManifestRepository:
                 continue
             key, digest = event
             try:
-                current = self._raw_from_entry(self._current_entry(key))
+                current = self._inventory_event_is_current(
+                    self._current_entry(key), sequence=sequence, digest=digest
+                )
             except (TypeError, ValueError, CacheBlobMigrationRequiredError):
                 # A malformed or pre-migration projection is still live
                 # authority.  Its immutable scheduling event is the only
@@ -765,34 +925,44 @@ class _MetadataManifestRepository:
                 if sequence >= state["first_live_sequence"]:
                     floor_unresolved = True
                 continue
-            if current is None or hashlib.sha256(current).hexdigest() != digest:
-                if type(self.backend) is JsonBackend:
-                    try:
-                        self._json_lock_file_ops.delete_durable(  # type: ignore[union-attr]
-                            self._json_inventory_event_locator(sequence)
-                        )
-                    except FileNotFoundError:
-                        pass
-                else:
-                    state["events"].pop(sequence, None)
-            elif sequence >= state["first_live_sequence"] and first_remaining is None:
-                first_remaining = sequence
+            if current is not None:
+                self._relocate_live_inventory_event(key, current)
+            if type(self.backend) is JsonBackend:
+                try:
+                    self._json_lock_file_ops.delete_durable(  # type: ignore[union-attr]
+                        self._json_inventory_event_locator(sequence)
+                    )
+                except FileNotFoundError:
+                    pass
+            else:
+                state["events"].pop(sequence, None)
         # Compaction can wrap and encounter the existing floor in a later
         # window.  Advancing only when the window begins at that floor strands
         # lifetime history after the floor's live record is retired.  This
         # branch uses only exact revalidation results from the inspected
         # window, and never lowers the durable monotonic floor.
+        # A relocation can append an event and persist a newer JSON head while
+        # this window is running.  Re-read that fixed-size head before writing
+        # the continuation fields so we never roll its next-sequence high water
+        # backwards on the final acknowledgement.
+        updated_state = self._inventory_state()
         if (
-            start <= state["first_live_sequence"] < stop
+            start <= updated_state["first_live_sequence"] < stop
             and not floor_unresolved
         ):
-            state["first_live_sequence"] = (
-                first_remaining if first_remaining is not None else stop
-            )
-        state["compact_next_sequence"] = stop if stop < state["next_sequence"] else 1
-        self._write_inventory_head(state)
+            updated_state["first_live_sequence"] = stop
+        updated_state["compact_next_sequence"] = stop
+        # ``stop`` is exclusive.  Debt is complete only after this call has
+        # exact-revalidated the target position itself; a floor that merely
+        # reaches the target still leaves that target for the next bounded
+        # call when a prior window ended immediately before it.
+        complete = stop > target
+        if complete:
+            updated_state["maintenance_target_sequence"] = 0
+        self._write_inventory_head(updated_state)
+        return complete
 
-    def compact_inventory_for_recovery(self) -> None:
+    def compact_inventory_for_recovery(self) -> bool:
         """Consume bounded post-authority compaction debt under authority locks.
 
         Manifest pages remain read-only.  Lifecycle startup and clear-snapshot
@@ -810,8 +980,8 @@ class _MetadataManifestRepository:
                         # must not rewrite/index that unknown authority, and
                         # normal public operations retain their established
                         # typed refresh failure at their own admission point.
-                        return
-                self._compact_inventory_window()
+                        return False
+                return self._compact_inventory_window()
         except _BACKEND_OPERATION_ERRORS as exc:
             raise _backend_failure("compact_inventory", self.backend, exc) from exc
 
@@ -819,11 +989,26 @@ class _MetadataManifestRepository:
         self, key: str, record: bytes, entry_data: Optional[Mapping[str, Any]]
     ) -> None:
         """Publish one reversible projection inside the established lock boundary."""
+        previous_sequence = self._inventory_sequence_from_entry(self._current_entry(key))
         projection = self._projection(key, record, entry_data)
         # The scheduler event is durable before authority publication. A
         # process loss therefore creates only a stale revalidated position;
         # it can never publish authority that a high-water snapshot omitted.
-        self._append_inventory_event(key, record)
+        sequence = self._append_inventory_event(key, record)
+        projection["metadata"][_MANIFEST_INVENTORY_SEQUENCE_FIELD] = sequence
+        if previous_sequence is not None:
+            # Record the exact predecessor *before* authority moves.  A crash
+            # at either side of publication now has the same bounded
+            # continuation: revalidation retains the predecessor if the
+            # candidate did not become current, or retires it if it did.
+            state = self._inventory_state()
+            # Charge the candidate as well as its predecessor.  If a process
+            # dies before authority publication, that candidate is now an
+            # exact stale position the continuation will retire; if authority
+            # succeeds, the same sweep relocates the current candidate beyond
+            # the compacted prefix.
+            self._mark_inventory_maintenance_debt(state, sequence=sequence)
+            self._write_inventory_head(state)
         if type(self.backend) is JsonBackend:
             candidate = deepcopy(self.backend._metadata)
             now = datetime.now(timezone.utc).isoformat()
@@ -844,6 +1029,14 @@ class _MetadataManifestRepository:
 
     def _remove_projection(self, key: str) -> None:
         """Retire the raw and compatibility projections in one local boundary."""
+        previous_sequence = self._inventory_sequence_from_entry(self._current_entry(key))
+        if previous_sequence is not None:
+            # As above, schedule before the authority boundary so a crash
+            # cannot leave a removed projection's event permanently outside
+            # bounded maintenance.
+            state = self._inventory_state()
+            self._mark_inventory_maintenance_debt(state, sequence=previous_sequence)
+            self._write_inventory_head(state)
         if type(self.backend) is JsonBackend:
             candidate = deepcopy(self.backend._metadata)
             candidate.get("entries", {}).pop(key, None)
@@ -985,11 +1178,10 @@ class _MetadataManifestRepository:
                     # treating it as a miss would let reconciliation report a
                     # false-clean terminal inventory.  Let the typed failure
                     # cross the repository boundary and fail closed instead.
-                    current_raw = self._raw_from_entry(entry)
-                    if (
-                        current_raw is not None
-                        and hashlib.sha256(current_raw).hexdigest() == event_digest
-                    ):
+                    current_raw = self._inventory_event_is_current(
+                        entry, sequence=position - 1, digest=event_digest
+                    )
+                    if current_raw is not None:
                         page_entries.append((event_key, current_raw))
                         entry_next_cursors.append(
                             ManifestCursor(
@@ -1118,11 +1310,12 @@ class SqliteManifestRepository:
     def refresh_authoritative_view(self) -> None:
         """SQLite reads are transactional and require no cached view refresh."""
 
-    def compact_inventory_for_recovery(self) -> None:
+    def compact_inventory_for_recovery(self) -> bool:
         """Consume one bounded stale-inventory window in a SQLite transaction."""
         try:
             with self.backend._lock, self.backend.engine.begin() as connection:
                 self._compact_inventory_window(connection)
+                return True
         except _BACKEND_OPERATION_ERRORS as exc:
             raise _backend_failure("compact_inventory", self.backend, exc) from exc
 
@@ -1582,8 +1775,8 @@ class MetadataManifestRepository:
     def list_keys(self) -> list[str]:
         return self._repository.list_keys()
 
-    def compact_inventory_for_recovery(self) -> None:
-        self._repository.compact_inventory_for_recovery()
+    def compact_inventory_for_recovery(self) -> bool:
+        return self._repository.compact_inventory_for_recovery()
 
     def list_page(
         self,

@@ -522,12 +522,6 @@ class LifecycleEngine:
         self, record: LifecycleOperationRecord
     ) -> LifecycleOperationRecord:
         """Write every bounded authenticated page before releasing admission."""
-        # Clear owns an aggregate mutating admission boundary.  Consume one
-        # exact-revalidation compaction window before snapshotting so a prior
-        # process loss after manifest authority publication cannot turn stale
-        # history into a chain of empty clear pages.  Ordinary reads never
-        # invoke this maintenance path.
-        self.store.manifest_repository.compact_inventory_for_recovery()
         source_cursor: ManifestCursor | None = None
         while True:
             page_id = self._clear_page_id(record.operation_id, source_cursor)
@@ -1015,6 +1009,17 @@ class LifecycleEngine:
         # authenticated record available for a later opener to resume.
         with self.operation_repository.clear_operation_transition(record.operation_id):
             with self.store._admission_barrier.aggregate_admission():
+                # A clear snapshot must not turn bounded post-authority debt
+                # into a durable chain of empty target pages.  Recovery moves
+                # this exact continuation forward by one configured window per
+                # mutating call; reads remain strictly non-mutating.  Refuse
+                # admission until that continuation reaches a snapshot-safe
+                # boundary, then the page chain depends on live members only.
+                if not self.store.manifest_repository.compact_inventory_for_recovery():
+                    raise CacheBlobRecoverableCleanupError(
+                        "BlobStore clear is waiting for bounded manifest maintenance",
+                        context={"operation": "clear", "maintenance_pending": True},
+                    )
                 self.operation_repository.create_exclusive(
                     record, self._record_raw(record)
                 )

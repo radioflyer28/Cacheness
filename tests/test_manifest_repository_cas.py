@@ -1279,3 +1279,87 @@ def test_json_manifest_inventory_is_external_bounded_and_reopens(tmp_path: Path)
     finally:
         reopened.close()
         reopened_backend.close()
+
+
+@pytest.mark.parametrize("backend_name", ("memory", "json"))
+def test_recovery_compacts_repeated_post_authority_failures_to_live_page_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend_name: str
+) -> None:
+    """Durable recovery rehomes live entries instead of retaining sparse history."""
+    limits = LifecycleLimits(manifest_page_size=1, max_inventory_items=1)
+    if backend_name == "memory":
+        backend = InMemoryBackend()
+        repository = InMemoryManifestRepository(backend, lifecycle_limits=limits)
+        metadata_path: Path | None = None
+    else:
+        metadata_path = tmp_path / "post-authority-maintenance.json"
+        backend = JsonBackend(metadata_path)
+        repository = JsonManifestRepository(backend, lifecycle_limits=limits)
+    closed = False
+    try:
+        repository.put_raw("anchor", _record("anchor"))
+        repository.put_raw("churn", _record("churn-0"))
+        old_page = repository.list_page()
+        assert [key for key, _raw in old_page.entries] == ["anchor"]
+        assert old_page.next_cursor is not None
+
+        real_compact = repository._compact_inventory_window
+
+        def fail_after_authority() -> bool:
+            raise OSError("injected post-authority compaction loss")
+
+        monkeypatch.setattr(repository, "_compact_inventory_window", fail_after_authority)
+        for generation in range(1, 9):
+            observed = repository.get_raw("churn")
+            assert observed is not None
+            with pytest.raises(CacheBlobBackendError):
+                repository.publish_if_expected(
+                    "churn",
+                    ManifestExpectation.from_authenticated_record(
+                        f"generation-{generation}", observed
+                    ),
+                    _record(f"churn-{generation}"),
+                )
+        monkeypatch.setattr(repository, "_compact_inventory_window", real_compact)
+
+        # Reopen the file-backed authority before consuming debt so the test
+        # proves the exact cursor survives process loss, not just memory state.
+        if metadata_path is not None:
+            repository.close()
+            backend.close()
+            closed = True
+            backend = JsonBackend(metadata_path)
+            repository = JsonManifestRepository(backend, lifecycle_limits=limits)
+
+        inspected: list[int] = []
+        read_event = repository._read_inventory_event
+
+        def count_read(sequence: int):
+            inspected.append(sequence)
+            return read_event(sequence)
+
+        monkeypatch.setattr(repository, "_read_inventory_event", count_read)
+        passes = 0
+        while not repository.compact_inventory_for_recovery():
+            passes += 1
+            assert passes < 16
+        assert passes == 9
+        assert len(inspected) == 10
+
+        # A cursor from the pre-compaction high-water remains a clean terminal
+        # page.  It cannot resurrect a replaced record or force a new reader
+        # to replay the discarded sparse prefix.
+        assert repository.list_page(old_page.next_cursor).entries == ()
+        first = repository.list_page()
+        assert [key for key, _raw in first.entries] == ["anchor"]
+        assert first.next_cursor is not None
+        second = repository.list_page(first.next_cursor)
+        assert [key for key, _raw in second.entries] == ["churn"]
+        assert second.next_cursor is None
+        # The two-page live snapshot only inspected its two members; repeated
+        # failed cleanup does not leak into clear/reconciliation page count.
+        assert inspected[-2:] == [11, 12]
+    finally:
+        repository.close()
+        if not closed:
+            backend.close()
