@@ -104,6 +104,27 @@ class ReconciliationFinding:
 
 
 @dataclass(frozen=True)
+class _ApplyOutcome:
+    """Private revalidation result used to derive a truthful continuation.
+
+    A report finding describes a scan-time conclusion.  It cannot by itself
+    advance durable scheduling: exact evidence can change between scan and
+    apply.  Keeping this small outcome separate avoids treating a stale
+    finding as either a completed effect or a spent action budget slot.
+    """
+
+    finding: ReconciliationFinding
+    source: str
+    attempted: bool
+    completed: bool
+    conflicted: bool = False
+
+    @property
+    def stale_or_unapplied(self) -> bool:
+        return not self.attempted and not self.completed
+
+
+@dataclass(frozen=True)
 class ReconciliationReport:
     """Frozen report for one bounded reconciliation inspection or apply run."""
 
@@ -282,7 +303,7 @@ class _Reconciler:
     """Private coordinator for bounded, non-deserializing evidence analysis."""
 
     _TOKEN_DOMAIN = b"cacheness.reconciliation.cursor.v1\x00"
-    _TOKEN_VERSION = 2
+    _TOKEN_VERSION = 4
     _TOKEN_NONCE_BYTES = 12
     _TOKEN_TAG_BYTES = 16
 
@@ -433,13 +454,40 @@ class _Reconciler:
             # token is emitted instead of silently dropping their work.
             if next_priority is None and next_pending is not None:
                 next_priority = "sidecar"
+        apply_dispositions: tuple[ReconciliationFinding, ...] = ()
+        if apply:
+            apply_dispositions, outcomes = self._apply_findings(findings, observed_at)
+            findings.extend(apply_dispositions)
+            # Derive progression *after* exact revalidation.  A stale primary
+            # or sidecar is deliberately not an action attempt; returning the
+            # scan-time terminal cursor in that case would hide the current,
+            # independently actionable record from a caller that follows the
+            # authenticated continuation.
+            next_operation = self._retain_earliest_operation_source(
+                operation_page,
+                operation_cursor,
+                next_operation,
+                outcomes,
+            )
+            next_sidecar = self._retain_earliest_sidecar_source(
+                sidecar_page,
+                sidecar_cursor,
+                next_sidecar,
+                outcomes,
+            )
+            pending_operation = (
+                consumed_operation < len(operation_page.entries)
+                or next_operation is not None
+            )
+            pending_sidecar = (
+                consumed_sidecar < len(sidecar_page.entries)
+                or next_sidecar is not None
+            )
+            if next_priority is None and (pending_operation or pending_sidecar):
+                next_priority = "operation" if pending_operation else "sidecar"
         token = self._encode_resume_token(
             next_manifest, next_operation, next_sidecar, next_pending, next_priority
         )
-        if apply:
-            findings.extend(
-                self._apply_findings(findings, observed_at)
-            )
         return ReconciliationReport(
             findings=tuple(findings),
             resume_token=token,
@@ -452,7 +500,7 @@ class _Reconciler:
         self,
         findings: list[ReconciliationFinding],
         observed_at: datetime,
-    ) -> tuple[ReconciliationFinding, ...]:
+    ) -> tuple[tuple[ReconciliationFinding, ...], tuple[_ApplyOutcome, ...]]:
         """Apply one normalized, revalidated action stream under one snapshot gate.
 
         A dry-run finding is not itself a mutation budget charge.  The shared
@@ -462,6 +510,7 @@ class _Reconciler:
         second no-op primary action.
         """
         dispositions: list[ReconciliationFinding] = []
+        outcomes: list[_ApplyOutcome] = []
         # Reconciliation uses aggregate admission only while it reloads exact
         # authority and applies a bounded report. Ordinary operations retain
         # their per-key lifecycle/CAS concurrency contract.
@@ -469,7 +518,23 @@ class _Reconciler:
             remaining = self.lifecycle_limits.max_reconcile_actions
             for finding in findings:
                 if remaining <= 0:
-                    break
+                    # Keep every safe finding after the action budget as an
+                    # explicit unapplied outcome so cursor derivation cannot
+                    # turn a bounded apply into a fictional terminal run.
+                    if (
+                        finding.status is ReconciliationStatus.SAFE
+                        and finding.evidence_id is not None
+                        and finding.evidence_digest is not None
+                    ):
+                        outcomes.append(
+                            _ApplyOutcome(
+                                finding,
+                                self._finding_source(finding),
+                                attempted=False,
+                                completed=False,
+                            )
+                        )
+                    continue
                 if (
                     finding.status is not ReconciliationStatus.SAFE
                     or finding.evidence_id is None
@@ -506,10 +571,39 @@ class _Reconciler:
                             locator_fingerprint=finding.locator_fingerprint,
                         )
                     )
+                    # A repository CAS was reached, so it consumes exactly
+                    # one apply budget, but the current bytes are still
+                    # reportable as a conflict rather than being silently
+                    # classified as completion.
+                    outcomes.append(
+                        _ApplyOutcome(
+                            finding,
+                            self._finding_source(finding),
+                            attempted=True,
+                            completed=False,
+                            conflicted=True,
+                        )
+                    )
                     attempted = True
+                else:
+                    outcomes.append(
+                        _ApplyOutcome(
+                            finding,
+                            self._finding_source(finding),
+                            attempted=attempted,
+                            completed=attempted,
+                        )
+                    )
                 if attempted:
                     remaining -= 1
-        return tuple(dispositions)
+        return tuple(dispositions), tuple(outcomes)
+
+    @staticmethod
+    def _finding_source(finding: ReconciliationFinding) -> str:
+        """Classify the two evidence families that can own an apply action."""
+        if finding.reason == "completed_reconciliation_checkpoint_orphan":
+            return "sidecar"
+        return "operation"
 
     def _apply_finding(
         self,
@@ -927,6 +1021,63 @@ class _Reconciler:
         )
         return completed, raw
 
+    @staticmethod
+    def _first_unapplied_identifier(
+        outcomes: tuple[_ApplyOutcome, ...],
+        identifiers: tuple[str, ...],
+        *,
+        source: str,
+    ) -> str | None:
+        """Return the earliest scanned source item not advanced by apply."""
+        outcome_by_id = {
+            outcome.finding.evidence_id: outcome
+            for outcome in outcomes
+            if outcome.finding.evidence_id is not None and outcome.source == source
+        }
+        for identifier in identifiers:
+            outcome = outcome_by_id.get(identifier)
+            if outcome is not None and outcome.stale_or_unapplied:
+                return identifier
+        return None
+
+    def _retain_earliest_operation_source(
+        self,
+        page: OperationPage,
+        current: OperationCursor | None,
+        computed: OperationCursor | None,
+        outcomes: tuple[_ApplyOutcome, ...],
+    ) -> OperationCursor | None:
+        """Do not advance past stale primary evidence from an apply report."""
+        identifiers = tuple(identifier for identifier, _raw in page.entries)
+        retained = self._first_unapplied_identifier(
+            outcomes, identifiers, source="operation"
+        )
+        if retained is None:
+            return computed
+        index = identifiers.index(retained)
+        return current if index == 0 else OperationCursor(identifiers[index - 1])
+
+    def _retain_earliest_sidecar_source(
+        self,
+        page: ReconciliationCheckpointPage,
+        current: ReconciliationCheckpointCursor | None,
+        computed: ReconciliationCheckpointCursor | None,
+        outcomes: tuple[_ApplyOutcome, ...],
+    ) -> ReconciliationCheckpointCursor | None:
+        """Do not retire a sidecar cursor until its exact apply outcome exists."""
+        identifiers = tuple(identifier for identifier, _raw in page.entries)
+        retained = self._first_unapplied_identifier(
+            outcomes, identifiers, source="sidecar"
+        )
+        if retained is None:
+            return computed
+        index = identifiers.index(retained)
+        if index == 0:
+            return current
+        return ReconciliationCheckpointCursor(
+            f"reconcile-action-{identifiers[index - 1]}.json"
+        )
+
     def _manifest_page(self, cursor: ManifestCursor | None) -> ManifestPage:
         return self.store.manifest_repository.list_page(
             cursor,
@@ -961,7 +1112,10 @@ class _Reconciler:
         if consumed == 0:
             return current
         if consumed < len(page.entries):
-            return ManifestCursor(page.entries[consumed - 1][0])
+            # The repository owns the opaque sequence position.  Replaying
+            # this bounded page is conservative but cannot advance across an
+            # uninspected member by reconstructing a lexical cursor here.
+            return current
         return page.next_cursor
 
     @staticmethod
@@ -971,7 +1125,7 @@ class _Reconciler:
         if consumed == 0:
             return current
         if consumed < len(page.entries):
-            return OperationCursor(page.entries[consumed - 1][0])
+            return current
         return page.next_cursor
 
     @staticmethod
@@ -983,9 +1137,7 @@ class _Reconciler:
         if consumed == 0:
             return current
         if consumed < len(page.entries):
-            return ReconciliationCheckpointCursor(
-                f"reconcile-action-{page.entries[consumed - 1][0]}.json"
-            )
+            return current
         return page.next_cursor
 
     @staticmethod
@@ -1438,14 +1590,14 @@ class _Reconciler:
         key = self._token_key()
         payload = json.dumps(
             {
-                "manifest": None if manifest_cursor is None else manifest_cursor.key,
+                "manifest": self._encode_manifest_cursor(manifest_cursor),
                 "operation": (
-                    None if operation_cursor is None else operation_cursor.operation_id
+                    self._encode_sequence_cursor(operation_cursor, "operation_id")
                 ),
                 "sidecar": (
-                    None if sidecar_cursor is None else sidecar_cursor.operation_id
+                    self._encode_sequence_cursor(sidecar_cursor, "operation_id")
                 ),
-                "pending": None if pending_cursor is None else pending_cursor.name,
+                "pending": self._encode_sequence_cursor(pending_cursor, "name"),
                 "priority": priority,
             },
             sort_keys=True,
@@ -1515,14 +1667,109 @@ class _Reconciler:
             if priority not in valid_priorities:
                 raise ValueError("reconciliation resume token is malformed")
             return (
-                None if manifest is None else ManifestCursor(manifest),
-                None if operation is None else OperationCursor(operation),
-                None if sidecar is None else ReconciliationCheckpointCursor(sidecar),
-                None if pending is None else PendingControlCursor(pending),
+                self._decode_manifest_cursor(manifest, version=version),
+                self._decode_sequence_cursor(
+                    operation, OperationCursor, "operation_id", version=version
+                ),
+                self._decode_sequence_cursor(
+                    sidecar,
+                    ReconciliationCheckpointCursor,
+                    "operation_id",
+                    version=version,
+                ),
+                self._decode_sequence_cursor(
+                    pending, PendingControlCursor, "name", version=version
+                ),
                 priority,
             )
         except (InvalidTag, UnicodeError, ValueError, json.JSONDecodeError) as exc:
             raise ValueError("reconciliation resume token is invalid") from exc
+
+    @staticmethod
+    def _encode_manifest_cursor(cursor: ManifestCursor | None) -> dict[str, int | str] | None:
+        """Serialize the versioned generation-bound manifest cursor."""
+        if cursor is None:
+            return None
+        if cursor.snapshot_high_water is None or cursor.next_sequence is None:
+            return {"key": cursor.key, "restart": 1}
+        return {
+            "key": cursor.key,
+            "high_water": cursor.snapshot_high_water,
+            "next_sequence": cursor.next_sequence,
+        }
+
+    @staticmethod
+    def _decode_manifest_cursor(
+        value: object, *, version: int
+    ) -> ManifestCursor | None:
+        """Map v1/v2 lexical state into an explicit safe snapshot restart."""
+        if value is None:
+            return None
+        if version in {1, 2}:
+            if not isinstance(value, str):
+                raise ValueError("legacy manifest cursor is invalid")
+            # An authenticated lexical token cannot prove membership under a
+            # new high-water index.  Restarting this source from a current
+            # snapshot is intentionally conservative: it can repeat a report
+            # but never skips pre-cursor insertion.
+            return ManifestCursor(value)
+        if not isinstance(value, dict):
+            raise ValueError("manifest cursor is invalid")
+        if set(value) == {"key", "restart"} and value["restart"] == 1:
+            return ManifestCursor(value["key"])
+        if set(value) != {"key", "high_water", "next_sequence"}:
+            raise ValueError("manifest cursor is invalid")
+        return ManifestCursor(
+            value["key"],
+            snapshot_high_water=value["high_water"],
+            next_sequence=value["next_sequence"],
+        )
+
+    @staticmethod
+    def _encode_sequence_cursor(
+        cursor: OperationCursor | ReconciliationCheckpointCursor | PendingControlCursor | None,
+        field: str,
+    ) -> dict[str, int | str] | None:
+        """Serialize a high-water evidence cursor without exposing its order."""
+        if cursor is None:
+            return None
+        value = getattr(cursor, field)
+        if cursor.snapshot_high_water is None or cursor.next_sequence is None:
+            return {field: value, "restart": 1}
+        return {
+            field: value,
+            "high_water": cursor.snapshot_high_water,
+            "next_sequence": cursor.next_sequence,
+        }
+
+    @staticmethod
+    def _decode_sequence_cursor(
+        value: object,
+        cursor_type: type[OperationCursor]
+        | type[ReconciliationCheckpointCursor]
+        | type[PendingControlCursor],
+        field: str,
+        *,
+        version: int,
+    ) -> OperationCursor | ReconciliationCheckpointCursor | PendingControlCursor | None:
+        """Restart legacy lexical sources conservatively under their index."""
+        if value is None:
+            return None
+        if version in {1, 2, 3}:
+            if not isinstance(value, str):
+                raise ValueError("legacy reconciliation cursor is invalid")
+            return cursor_type(value)
+        if not isinstance(value, dict):
+            raise ValueError("reconciliation cursor is invalid")
+        if set(value) == {field, "restart"} and value["restart"] == 1:
+            return cursor_type(value[field])
+        if set(value) != {field, "high_water", "next_sequence"}:
+            raise ValueError("reconciliation cursor is invalid")
+        return cursor_type(
+            value[field],
+            snapshot_high_water=value["high_water"],
+            next_sequence=value["next_sequence"],
+        )
 
     def _token_key(self) -> bytes:
         """Derive the token-only AEAD key without reusing manifest signatures."""

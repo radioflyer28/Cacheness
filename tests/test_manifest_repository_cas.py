@@ -24,7 +24,6 @@ from cacheness.metadata import InMemoryBackend, JsonBackend, SqliteBackend
 from cacheness.storage.manifest_repository import (
     InMemoryManifestRepository,
     JsonManifestRepository,
-    ManifestCursor,
     ManifestExpectation,
     SqliteManifestRepository,
 )
@@ -1116,13 +1115,58 @@ def test_manifest_pages_are_stable_bounded_and_retain_the_supplied_limits(
 
         first = repository.list_page()
         assert repository.lifecycle_limits is limits
-        assert [key for key, _raw in first.entries] == ["alpha", "bravo"]
-        assert [raw for _key, raw in first.entries] == [records["alpha"], records["bravo"]]
-        assert first.next_cursor == ManifestCursor("bravo")
+        assert [key for key, _raw in first.entries] == ["delta", "alpha"]
+        assert [raw for _key, raw in first.entries] == [records["delta"], records["alpha"]]
+        assert first.next_cursor is not None
+        assert first.next_cursor.key == "alpha"
+        assert first.next_cursor.snapshot_high_water == 4
+        assert first.next_cursor.next_sequence == 3
 
         second = repository.list_page(first.next_cursor)
-        assert [key for key, _raw in second.entries] == ["charlie", "delta"]
+        assert [key for key, _raw in second.entries] == ["charlie", "bravo"]
         assert second.next_cursor is None
     finally:
         for backend in backends:
             backend.close()
+
+
+@pytest.mark.parametrize("backend_name", ("memory", "json", "sqlite"))
+def test_manifest_inventory_uses_a_high_water_snapshot_without_a_total_store_cap(
+    tmp_path: Path, backend_name: str
+) -> None:
+    """A late publication cannot move backwards into an active page chain."""
+    repository, _other, backends = _repository_pair(tmp_path, backend_name)
+    limits = LifecycleLimits(manifest_page_size=2, max_inventory_items=2)
+    repository = type(repository)(repository.backend, lifecycle_limits=limits)
+    try:
+        for key in ("a", "b", "c"):
+            repository.put_raw(key, _record(key))
+        first = repository.list_page()
+        assert [key for key, _raw in first.entries] == ["a", "b"]
+        assert first.next_cursor is not None
+
+        # This sorts before the former lexical cursor but was born after the
+        # snapshot high-water mark, so it belongs to a later chain.
+        repository.put_raw("aa", _record("aa"))
+        second = repository.list_page(first.next_cursor)
+        assert [key for key, _raw in second.entries] == ["c"]
+        assert second.next_cursor is None
+
+    finally:
+        for backend in backends:
+            backend.close()
+
+
+def test_memory_manifest_inventory_pages_a_store_above_the_former_hard_cap() -> None:
+    """4,097 current records remain eligible under a two-name page budget."""
+    backend = InMemoryBackend()
+    repository = InMemoryManifestRepository(
+        backend,
+        lifecycle_limits=LifecycleLimits(manifest_page_size=2, max_inventory_items=2),
+    )
+    for index in range(4_097):
+        key = f"large-{index:05d}"
+        repository.put_raw(key, _record(key))
+    page = repository.list_page()
+    assert len(page.entries) == 2
+    assert page.next_cursor is not None

@@ -39,7 +39,9 @@ except ImportError:  # pragma: no cover - SQLite support is optional at runtime.
 
 
 _RAW_MANIFEST_FIELD = "canonical_manifest_v1"
+_MANIFEST_INVENTORY_FIELD = "_cacheness_manifest_inventory_v1"
 _SQLITE_MANIFEST_TABLE = "cacheness_manifest_records_v1"
+_SQLITE_MANIFEST_INVENTORY_TABLE = "cacheness_manifest_inventory_v1"
 _BACKEND_OPERATION_ERRORS = (
     CacheError,
     OSError,
@@ -98,9 +100,17 @@ class ManifestExpectation:
 
 @dataclass(frozen=True)
 class ManifestCursor:
-    """Opaque stable position after a bounded manifest page."""
+    """Opaque generation-bound position after a bounded manifest page.
+
+    ``key`` remains the v1 compatibility projection.  New cursors additionally
+    bind a monotonic inventory high-water mark and the next sequence position,
+    so a writer that inserts or republishes a key after page one cannot be
+    pulled backwards through a lexical cursor.
+    """
 
     key: str
+    snapshot_high_water: int | None = None
+    next_sequence: int | None = None
 
     def __post_init__(self) -> None:
         """Keep cursors bounded without imposing a path grammar on logical keys."""
@@ -108,6 +118,12 @@ class ManifestCursor:
             raise ValueError("Manifest cursor key must be a non-empty string")
         if len(self.key.encode("utf-8")) > 8_192:
             raise ValueError("Manifest cursor key exceeds the byte limit")
+        if (self.snapshot_high_water is None) != (self.next_sequence is None):
+            raise ValueError("Manifest cursor snapshot fields must be paired")
+        for field_name in ("snapshot_high_water", "next_sequence"):
+            value = getattr(self, field_name)
+            if value is not None and (type(value) is not int or value < 0):
+                raise ValueError(f"Manifest cursor {field_name} is invalid")
 
 
 @dataclass(frozen=True)
@@ -355,13 +371,10 @@ class _MetadataManifestRepository:
         if not isinstance(record, bytes):
             raise TypeError("Canonical manifest records must be bytes")
         try:
-            if type(self.backend) is JsonBackend:
-                with self.backend._lock, self._json_compare_publish_lock():
+            with self.backend._lock, self._json_compare_publish_lock():
+                if type(self.backend) is JsonBackend:
                     self._refresh_json_for_conditional_operation()
-                    self._publish_projection(key, record, entry_data)
-                return
-            projection = self._projection(key, record, entry_data)
-            self.backend.put_entry(key, projection)
+                self._publish_projection(key, record, entry_data)
         except _BACKEND_OPERATION_ERRORS as exc:
             raise _backend_failure("put_raw", self.backend, exc) from exc
 
@@ -453,6 +466,70 @@ class _MetadataManifestRepository:
             return self.backend._metadata.get("entries", {}).get(key)
         return self.backend._entries.get(key)
 
+    def _inventory_state(self, *, candidate: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Return the versioned append-only manifest inventory state.
+
+        The index is deliberately separate from canonical manifest authority.
+        It records only sequence, logical key, and a digest of bytes already
+        being published through the authority path.  A later page therefore
+        proves that an event was part of its high-water membership before it
+        reads current bytes; changed/deleted events are consumed as stale
+        positions rather than accidentally becoming new snapshot members.
+        """
+        if type(self.backend) is JsonBackend:
+            container = self.backend._metadata if candidate is None else candidate
+            state = container.get(_MANIFEST_INVENTORY_FIELD)
+            if state is None:
+                state = {"version": 1, "next_sequence": 1, "events": []}
+                container[_MANIFEST_INVENTORY_FIELD] = state
+            return self._validate_inventory_state(state)
+        state = getattr(self.backend, _MANIFEST_INVENTORY_FIELD, None)
+        if state is None:
+            state = {"version": 1, "next_sequence": 1, "events": []}
+            setattr(self.backend, _MANIFEST_INVENTORY_FIELD, state)
+        return self._validate_inventory_state(state)
+
+    @staticmethod
+    def _validate_inventory_state(state: object) -> dict[str, Any]:
+        """Reject malformed local scheduling state before it drives paging."""
+        if not isinstance(state, dict) or set(state) != {"version", "next_sequence", "events"}:
+            raise CacheBlobBackendError(
+                "Canonical manifest inventory is invalid",
+                context={"operation": "manifest_inventory"},
+            )
+        if state["version"] != 1 or type(state["next_sequence"]) is not int:
+            raise CacheBlobBackendError(
+                "Canonical manifest inventory version is invalid",
+                context={"operation": "manifest_inventory"},
+            )
+        events = state["events"]
+        if not isinstance(events, list) or state["next_sequence"] != len(events) + 1:
+            raise CacheBlobBackendError(
+                "Canonical manifest inventory is not contiguous",
+                context={"operation": "manifest_inventory"},
+            )
+        for sequence, event in enumerate(events, start=1):
+            if (
+                not isinstance(event, list)
+                or len(event) != 2
+                or not isinstance(event[0], str)
+                or not event[0]
+                or not isinstance(event[1], str)
+                or len(event[1]) != 64
+                or any(character not in "0123456789abcdef" for character in event[1])
+            ):
+                raise CacheBlobBackendError(
+                    "Canonical manifest inventory event is invalid",
+                    context={"operation": "manifest_inventory", "sequence": sequence},
+                )
+        return state
+
+    @staticmethod
+    def _append_inventory_event(state: dict[str, Any], key: str, record: bytes) -> None:
+        """Append the exact publication event in the same local transaction."""
+        state["events"].append([key, hashlib.sha256(record).hexdigest()])
+        state["next_sequence"] += 1
+
     def _publish_projection(
         self, key: str, record: bytes, entry_data: Optional[Mapping[str, Any]]
     ) -> None:
@@ -460,6 +537,8 @@ class _MetadataManifestRepository:
         projection = self._projection(key, record, entry_data)
         if type(self.backend) is JsonBackend:
             candidate = deepcopy(self.backend._metadata)
+            inventory = self._inventory_state(candidate=candidate)
+            self._append_inventory_event(inventory, key, record)
             now = datetime.now(timezone.utc).isoformat()
             candidate.setdefault("entries", {})[key] = {
                 "description": projection.get("description", ""),
@@ -473,6 +552,10 @@ class _MetadataManifestRepository:
             self._publish_json_document(candidate)
             return
         self.backend.put_entry(key, projection)
+        # The in-memory backend shares this repository's re-entrant local
+        # boundary.  Its sequence index is process-local by definition, but
+        # follows the exact same event contract as durable JSON.
+        self._append_inventory_event(self._inventory_state(), key, record)
 
     def _remove_projection(self, key: str) -> None:
         """Retire the raw and compatibility projections in one local boundary."""
@@ -568,7 +651,7 @@ class _MetadataManifestRepository:
         *,
         page_size: int | None = None,
     ) -> ManifestPage:
-        """Read one lexical page while retaining at most ``limit + 1`` keys."""
+        """Read one generation-bound page without a namespace-size ceiling."""
         if cursor is not None and not isinstance(cursor, ManifestCursor):
             raise TypeError("manifest cursor must be a ManifestCursor or None")
         limit = self._page_size(page_size)
@@ -579,32 +662,64 @@ class _MetadataManifestRepository:
                     entries = self.backend._metadata.get("entries", {})
                 else:
                     entries = self.backend._entries
-                inventory_keys = [key for key in entries if isinstance(key, str)]
-                if len(inventory_keys) > self.lifecycle_limits.max_inventory_items:
-                    raise CacheBlobBackendError(
-                        "Canonical manifest inventory exceeds its lifecycle bound",
-                        context={
-                            "operation": "list_page",
-                            "max_inventory_items": self.lifecycle_limits.max_inventory_items,
-                        },
+                inventory = self._inventory_state()
+                # An old backend may contain canonical rows written before
+                # this index existed.  Refusing to fabricate a lexical cursor
+                # makes the required migration/rebuild explicit rather than
+                # silently omitting legacy members from a claimed snapshot.
+                if not inventory["events"] and entries:
+                    raise CacheBlobMigrationRequiredError(
+                        "Canonical manifest inventory rebuild is required",
+                        context={"backend": type(self.backend).__name__},
                     )
-                selected = [
-                    key
-                    for key in inventory_keys
-                    if cursor is None or key > cursor.key
-                ]
-                selected.sort()
-                selected = selected[: limit + 1]
-                has_more = len(selected) > limit
-                page_keys = selected[:limit]
-                page_entries = tuple(
-                    (key, self._raw_from_entry(entries[key])) for key in page_keys
+                high_water = (
+                    len(inventory["events"])
+                    if cursor is None or cursor.snapshot_high_water is None
+                    else cursor.snapshot_high_water
+                )
+                position = (
+                    1
+                    if cursor is None or cursor.next_sequence is None
+                    else cursor.next_sequence
+                )
+                inspected = 0
+                page_entries: list[tuple[str, bytes]] = []
+                last_key = cursor.key if cursor is not None else "~"
+                # ``max_inventory_items`` is now a per-call inspected-name
+                # budget.  It is never a total-store eligibility ceiling.
+                while (
+                    position <= high_water
+                    and inspected < self.lifecycle_limits.max_inventory_items
+                    and len(page_entries) < limit
+                ):
+                    event_key, event_digest = inventory["events"][position - 1]
+                    inspected += 1
+                    position += 1
+                    last_key = event_key
+                    entry = entries.get(event_key)
+                    try:
+                        current_raw = self._raw_from_entry(entry)
+                    except (TypeError, ValueError, CacheBlobMigrationRequiredError):
+                        current_raw = None
+                    if (
+                        current_raw is not None
+                        and hashlib.sha256(current_raw).hexdigest() == event_digest
+                    ):
+                        page_entries.append((event_key, current_raw))
+                next_cursor = (
+                    ManifestCursor(
+                        last_key,
+                        snapshot_high_water=high_water,
+                        next_sequence=position,
+                    )
+                    if position <= high_water
+                    else None
                 )
         except _BACKEND_OPERATION_ERRORS as exc:
             raise _backend_failure("list_page", self.backend, exc) from exc
         return ManifestPage(
-            entries=page_entries,
-            next_cursor=(ManifestCursor(page_keys[-1]) if has_more and page_keys else None),
+            entries=tuple(page_entries),
+            next_cursor=next_cursor,
         )
 
     def list_backend_entries(self) -> list[dict[str, Any]]:
@@ -683,6 +798,15 @@ class SqliteManifestRepository:
                     )
                     """
                 )
+                connection.exec_driver_sql(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS {_SQLITE_MANIFEST_INVENTORY_TABLE} (
+                        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                        logical_key TEXT NOT NULL,
+                        record_digest TEXT NOT NULL
+                    )
+                    """
+                )
         except _BACKEND_OPERATION_ERRORS as exc:
             raise _backend_failure("initialize", self.backend, exc) from exc
 
@@ -729,6 +853,7 @@ class SqliteManifestRepository:
                 if entry_data is not None:
                     self._write_compatibility_projection(connection, key, entry_data)
                 self._write_raw_row(connection, key, record)
+                self._append_inventory_event(connection, key, record)
         except _BACKEND_OPERATION_ERRORS as exc:
             raise _backend_failure("put_raw", self.backend, exc) from exc
 
@@ -777,6 +902,7 @@ class SqliteManifestRepository:
                 if entry_data is not None:
                     self._write_compatibility_projection(connection, key, entry_data)
                 self._write_raw_row(connection, key, record)
+                self._append_inventory_event(connection, key, record)
         except CacheBlobLifecycleConflictError:
             raise
         except _BACKEND_OPERATION_ERRORS as exc:
@@ -835,6 +961,15 @@ class SqliteManifestRepository:
                 canonical_bytes = excluded.canonical_bytes
             """,
             (key, record),
+        )
+
+    @staticmethod
+    def _append_inventory_event(connection: Any, key: str, record: bytes) -> None:
+        """Append publication membership in the same SQLite transaction."""
+        connection.exec_driver_sql(
+            f"INSERT INTO {_SQLITE_MANIFEST_INVENTORY_TABLE} "
+            "(logical_key, record_digest) VALUES (?, ?)",
+            (key, hashlib.sha256(record).hexdigest()),
         )
 
     def remove(self, key: str) -> None:
@@ -904,7 +1039,7 @@ class SqliteManifestRepository:
         *,
         page_size: int | None = None,
     ) -> ManifestPage:
-        """Fetch only one SQL-bounded lexical page of canonical bytes."""
+        """Fetch one high-water page using SQLite's indexed sequence table."""
         if cursor is not None and not isinstance(cursor, ManifestCursor):
             raise TypeError("manifest cursor must be a ManifestCursor or None")
         resolved = (
@@ -918,26 +1053,69 @@ class SqliteManifestRepository:
             raise ValueError("manifest page size exceeds configured lifecycle limit")
         try:
             with self.backend._lock, self.backend.engine.begin() as connection:
-                if cursor is None:
-                    rows = connection.exec_driver_sql(
-                        f"SELECT logical_key, canonical_bytes FROM {_SQLITE_MANIFEST_TABLE} "
-                        "ORDER BY logical_key LIMIT ?",
-                        (resolved + 1,),
-                    ).all()
-                else:
-                    rows = connection.exec_driver_sql(
-                        f"SELECT logical_key, canonical_bytes FROM {_SQLITE_MANIFEST_TABLE} "
-                        "WHERE logical_key > ? ORDER BY logical_key LIMIT ?",
-                        (cursor.key, resolved + 1),
-                    ).all()
+                high_water = (
+                    cursor.snapshot_high_water
+                    if cursor is not None and cursor.snapshot_high_water is not None
+                    else connection.exec_driver_sql(
+                        f"SELECT COALESCE(MAX(sequence), 0) "
+                        f"FROM {_SQLITE_MANIFEST_INVENTORY_TABLE}"
+                    ).scalar_one()
+                )
+                if high_water == 0:
+                    raw_exists = connection.exec_driver_sql(
+                        f"SELECT 1 FROM {_SQLITE_MANIFEST_TABLE} LIMIT 1"
+                    ).first()
+                    if raw_exists is not None:
+                        raise CacheBlobMigrationRequiredError(
+                            "SQLite canonical manifest inventory rebuild is required",
+                            context={"backend": type(self.backend).__name__},
+                        )
+                position = (
+                    cursor.next_sequence
+                    if cursor is not None and cursor.next_sequence is not None
+                    else 1
+                )
+                rows = connection.exec_driver_sql(
+                    f"SELECT inventory.sequence, inventory.logical_key, "
+                    "inventory.record_digest, manifests.canonical_bytes "
+                    f"FROM {_SQLITE_MANIFEST_INVENTORY_TABLE} AS inventory "
+                    f"LEFT JOIN {_SQLITE_MANIFEST_TABLE} AS manifests "
+                    "ON manifests.logical_key = inventory.logical_key "
+                    "WHERE inventory.sequence >= ? AND inventory.sequence <= ? "
+                    "ORDER BY inventory.sequence LIMIT ?",
+                    (
+                        position,
+                        high_water,
+                        self.lifecycle_limits.max_inventory_items,
+                    ),
+                ).all()
         except _BACKEND_OPERATION_ERRORS as exc:
             raise _backend_failure("list_page", self.backend, exc) from exc
-        has_more = len(rows) > resolved
-        page_rows = rows[:resolved]
-        entries = tuple((str(row[0]), bytes(row[1])) for row in page_rows)
+        entries_list: list[tuple[str, bytes]] = []
+        next_position = position
+        last_key = cursor.key if cursor is not None else "~"
+        for row in rows:
+            sequence, key, digest, raw = int(row[0]), str(row[1]), str(row[2]), row[3]
+            next_position = sequence + 1
+            last_key = key
+            if raw is not None:
+                canonical = bytes(raw)
+                if hashlib.sha256(canonical).hexdigest() == digest:
+                    entries_list.append((key, canonical))
+                    if len(entries_list) == resolved:
+                        break
+        entries = tuple(entries_list)
         return ManifestPage(
             entries=entries,
-            next_cursor=(ManifestCursor(entries[-1][0]) if has_more and entries else None),
+            next_cursor=(
+                ManifestCursor(
+                    last_key,
+                    snapshot_high_water=int(high_water),
+                    next_sequence=next_position,
+                )
+                if next_position <= int(high_water)
+                else None
+            ),
         )
 
     def list_backend_entries(self) -> list[dict[str, Any]]:

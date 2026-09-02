@@ -295,16 +295,18 @@ def test_operation_repository_uses_configured_bounded_stable_pages(
         first_page = repository.list_page()
 
         assert [operation_id for operation_id, _ in first_page.entries] == [
+            "c" * 32,
             "a" * 32,
-            "b" * 32,
         ]
         assert first_page.next_cursor is not None
-        assert len(calls) == limits.operation_page_size
+        # One bounded private-index read plus one exact read per yielded
+        # operation; no namespace-wide directory scan is used.
+        assert len(calls) == limits.operation_page_size + 1
 
         second_page = repository.list_page(first_page.next_cursor)
-        assert [operation_id for operation_id, _ in second_page.entries] == ["c" * 32]
+        assert [operation_id for operation_id, _ in second_page.entries] == ["b" * 32]
         assert second_page.next_cursor is None
-        assert len(calls) == 3
+        assert len(calls) == 5
     finally:
         store.close()
 
@@ -1181,9 +1183,7 @@ def test_invalid_checkpoint_does_not_starve_later_completed_orphan(
         key = store._manifest_key(initialize_new_store=True)
         bad_id = "0" * 32
         good_id = "f" * 32
-        repository.file_ops.write_bytes_durable(
-            repository.reconciliation_checkpoint_locator(bad_id), b"{"
-        )
+        repository.create_reconciliation_checkpoint_exclusive(bad_id, b"{")
         completed = _ActionCheckpoint.new(
             good_id,
             "a" * 64,
@@ -1192,9 +1192,7 @@ def test_invalid_checkpoint_does_not_starve_later_completed_orphan(
             key,
         )
         raw = completed.canonical_bytes(lifecycle_limits=store.lifecycle_limits)
-        repository.file_ops.write_bytes_durable(
-            repository.reconciliation_checkpoint_locator(good_id), raw
-        )
+        repository.create_reconciliation_checkpoint_exclusive(good_id, raw)
 
         report = store.reconcile(
             apply=True, now=datetime(2026, 8, 31, tzinfo=timezone.utc)
@@ -1339,9 +1337,8 @@ def test_dry_run_reports_malformed_matching_sidecar_without_deferring_startup(
             store.delete("tombstone-key")
         store._delete_or_prove_absent = original_cleanup  # type: ignore[method-assign]
         operation_id, _raw = next(iter(store.lifecycle.operation_repository.list_page().entries))
-        store.lifecycle.operation_repository.file_ops.write_bytes_durable(
-            store.lifecycle.operation_repository.reconciliation_checkpoint_locator(operation_id),
-            b"{",
+        store.lifecycle.operation_repository.create_reconciliation_checkpoint_exclusive(
+            operation_id, b"{"
         )
         report = store.reconcile(now=datetime(2026, 8, 31, tzinfo=timezone.utc))
         assert any(

@@ -43,14 +43,40 @@ class _KeyInitializationGuardRegistry:
 
     @classmethod
     @contextmanager
-    def acquire(cls, identity: str) -> Iterator[None]:
+    def acquire(cls, identity: str, *, deadline: float) -> Iterator[None]:
+        """Acquire one local admission guard before the shared deadline.
+
+        The kernel lock remains the cross-process authority, but the local
+        optimisation must not be allowed to mint a second timeout budget.  In
+        particular, a live same-process initializer has to be indistinguishable
+        from a live external initializer to a caller observing the configured
+        deadline.
+        """
+        if not isinstance(deadline, float):
+            raise TypeError("initialization deadline must be a monotonic float")
         with cls._guard:
             lock, references = cls._entries.get(identity, (RLock(), 0))
             cls._entries[identity] = (lock, references + 1)
+        acquired = False
         try:
-            with lock:
-                yield
+            while not acquired:
+                acquired = lock.acquire(blocking=False)
+                if acquired:
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise CacheBlobLifecycleTimeoutError(
+                        "Canonical manifest key initialization timed out",
+                        context={"operation": "manifest_key_initialization"},
+                    )
+                # A very short bounded yield keeps the registry from becoming
+                # the scheduling authority while preserving deterministic
+                # timeout behaviour in tests and production callers.
+                time.sleep(min(0.001, remaining))
+            yield
         finally:
+            if acquired:
+                lock.release()
             with cls._guard:
                 current = cls._entries.get(identity)
                 if current is None or current[0] is not lock:
@@ -181,7 +207,13 @@ class ManifestKeyProvider:
         # initialization lock serializes cross-process key observations.  In
         # particular, an EEXIST loser never reads a winner's partially written
         # key before it owns the same bounded authority.
-        with _KeyInitializationGuardRegistry.acquire(self._guard_identity()):
+        deadline = (
+            time.monotonic()
+            + self._lifecycle_limits.key_initialization_timeout_seconds
+        )
+        with _KeyInitializationGuardRegistry.acquire(
+            self._guard_identity(), deadline=deadline
+        ):
             try:
                 self.key_path.parent.mkdir(parents=True, exist_ok=True)
                 self._assert_safe_parent()
@@ -189,7 +221,7 @@ class ManifestKeyProvider:
                 raise ManifestKeyError(
                     "Unable to create canonical manifest key directory"
                 ) from exc
-            with self._initialization_lock():
+            with self._initialization_lock(deadline=deadline):
                 for _attempt in range(_MAX_KEY_INITIALIZATION_ATTEMPTS):
                     key: bytes
                     identity: tuple[int, int]
@@ -276,7 +308,7 @@ class ManifestKeyProvider:
         return os.path.abspath(os.fspath(self._initialization_lock_path))
 
     @contextmanager
-    def _initialization_lock(self) -> Iterator[None]:
+    def _initialization_lock(self, *, deadline: float | None = None) -> Iterator[None]:
         """Acquire the exact key-publication authority before inspecting a key.
 
         The lock is deliberately independent of the key inode: a process can
@@ -302,7 +334,11 @@ class ManifestKeyProvider:
                 interprocess_open_file_lock,
             )
 
-            deadline = time.monotonic() + self._lifecycle_limits.key_initialization_timeout_seconds
+            if deadline is None:
+                deadline = (
+                    time.monotonic()
+                    + self._lifecycle_limits.key_initialization_timeout_seconds
+                )
             while True:
                 try:
                     with interprocess_open_file_lock(

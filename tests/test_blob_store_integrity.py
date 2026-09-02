@@ -193,6 +193,81 @@ def test_concurrent_first_key_call_waits_for_acknowledged_ready_record(tmp_path:
     assert results == [provider.get_key(), provider.get_key()]
 
 
+def test_same_process_initializer_honors_the_single_absolute_deadline(
+    tmp_path: Path,
+) -> None:
+    """A local guard holder cannot mint a second initialization timeout budget."""
+    import cacheness.storage.integrity as integrity_module
+
+    entered = threading.Event()
+    release = threading.Event()
+    provider = ManifestKeyProvider(
+        tmp_path / "blob_manifest_hmac_key.bin",
+        durability_provider=type(
+            "BlockingDurability",
+            (),
+            {
+                "acknowledge_new_key": lambda _self, _path, _identity: (
+                    entered.set(), release.wait(timeout=5)
+                )[-1]
+            },
+        )(),
+        lifecycle_limits=LifecycleLimits(
+            key_initialization_timeout_seconds=0.05,
+            key_initialization_retry_seconds=0.002,
+        ),
+    )
+    winner = threading.Thread(target=provider.initialize_new_store)
+    winner.start()
+    assert entered.wait(timeout=5)
+    started = time.monotonic()
+    with pytest.raises(CacheBlobLifecycleTimeoutError):
+        provider.initialize_new_store()
+    assert time.monotonic() - started < 0.2
+    assert not provider.key_path.with_suffix(".ready").exists()
+    release.set()
+    winner.join(timeout=5)
+    assert not winner.is_alive()
+    assert integrity_module._KeyInitializationGuardRegistry._entries == {}
+
+
+def test_same_process_initializer_can_acquire_before_the_shared_deadline(
+    tmp_path: Path,
+) -> None:
+    """Releasing local admission before expiry permits the same winner bytes."""
+    import cacheness.storage.integrity as integrity_module
+
+    entered = threading.Event()
+    release = threading.Event()
+    results: list[bytes] = []
+
+    class BlockingDurability:
+        def acknowledge_new_key(self, _path: Path, _identity: tuple[int, int]) -> None:
+            entered.set()
+            assert release.wait(timeout=5)
+
+    provider = ManifestKeyProvider(
+        tmp_path / "blob_manifest_hmac_key.bin",
+        durability_provider=BlockingDurability(),
+        lifecycle_limits=LifecycleLimits(
+            key_initialization_timeout_seconds=1,
+            key_initialization_retry_seconds=0.002,
+        ),
+    )
+    winner = threading.Thread(target=lambda: results.append(provider.initialize_new_store()))
+    contender = threading.Thread(target=lambda: results.append(provider.initialize_new_store()))
+    winner.start()
+    assert entered.wait(timeout=5)
+    contender.start()
+    release.set()
+    winner.join(timeout=5)
+    contender.join(timeout=5)
+    assert not winner.is_alive()
+    assert not contender.is_alive()
+    assert results == [provider.get_key(), provider.get_key()]
+    assert integrity_module._KeyInitializationGuardRegistry._entries == {}
+
+
 @pytest.mark.skipif(os.name == "nt", reason="uses a POSIX child lock holder")
 def test_live_key_initializer_times_out_without_reading_its_winner_bytes(
     tmp_path: Path,

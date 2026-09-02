@@ -6,10 +6,11 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
+import json
 import os
 from pathlib import Path
 from threading import RLock, local
-from typing import BinaryIO, Protocol
+from typing import BinaryIO, Callable, Protocol
 
 from cacheness.config import LifecycleLimits
 from cacheness.error_handling import (
@@ -34,12 +35,19 @@ _OPERATION_LEASES = local()
 
 @dataclass(frozen=True)
 class OperationCursor:
-    """Opaque stable position after one operation-record page."""
+    """Opaque generation-bound position after one operation-record page."""
 
     operation_id: str
+    snapshot_high_water: int | None = None
+    next_sequence: int | None = None
 
     def __post_init__(self) -> None:
         validate_blob_id(self.operation_id)
+        if (self.snapshot_high_water is None) != (self.next_sequence is None):
+            raise ValueError("operation cursor snapshot fields must be paired")
+        for value in (self.snapshot_high_water, self.next_sequence):
+            if value is not None and (type(value) is not int or value < 0):
+                raise ValueError("operation cursor snapshot field is invalid")
 
 
 @dataclass(frozen=True)
@@ -55,6 +63,8 @@ class ReconciliationCheckpointCursor:
     """Opaque stable position after one reconciliation-sidecar page."""
 
     operation_id: str
+    snapshot_high_water: int | None = None
+    next_sequence: int | None = None
 
     def __post_init__(self) -> None:
         # This is an encrypted, opaque directory position rather than an
@@ -69,6 +79,11 @@ class ReconciliationCheckpointCursor:
             or "\x00" in self.operation_id
         ):
             raise ValueError("reconciliation checkpoint cursor is invalid")
+        if (self.snapshot_high_water is None) != (self.next_sequence is None):
+            raise ValueError("reconciliation checkpoint cursor snapshot fields must be paired")
+        for value in (self.snapshot_high_water, self.next_sequence):
+            if value is not None and (type(value) is not int or value < 0):
+                raise ValueError("reconciliation checkpoint cursor snapshot field is invalid")
 
 
 @dataclass(frozen=True)
@@ -84,6 +99,8 @@ class PendingControlCursor:
     """Opaque durable scheduling position for digest-bound pending controls."""
 
     name: str
+    snapshot_high_water: int | None = None
+    next_sequence: int | None = None
 
     def __post_init__(self) -> None:
         # Pending paging must advance across malformed prefixes too.  The
@@ -97,6 +114,11 @@ class PendingControlCursor:
             or "\x00" in self.name
         ):
             raise ValueError("pending control cursor is invalid")
+        if (self.snapshot_high_water is None) != (self.next_sequence is None):
+            raise ValueError("pending control cursor snapshot fields must be paired")
+        for value in (self.snapshot_high_water, self.next_sequence):
+            if value is not None and (type(value) is not int or value < 0):
+                raise ValueError("pending control cursor snapshot field is invalid")
 
 
 @dataclass(frozen=True)
@@ -415,6 +437,134 @@ class FileOperationRecordRepository:
                 context={"operation": operation},
             ) from exc
 
+    def _inventory_locator(self, family: str) -> Path:
+        """Return one private append-only inventory for an evidence family."""
+        if family not in {"primary", "sidecar", "pending"}:
+            raise ValueError("unknown lifecycle inventory family")
+        return resolve_managed_locator(
+            self.file_ops.root,
+            Path("operations") / ".cacheness-inventory-v1" / f"{family}.json",
+            operation="lifecycle_inventory",
+            allow_missing_leaf=True,
+        )
+
+    def _read_inventory(self, family: str) -> dict[str, object]:
+        """Read strict bounded scheduling state, never lifecycle authority."""
+        try:
+            raw = self.file_ops.read_bytes_bounded(
+                self._inventory_locator(family),
+                max_bytes=self.lifecycle_limits.max_operation_record_bytes,
+            )
+        except FileNotFoundError:
+            return {"version": 1, "events": []}
+        try:
+            state = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise CacheBlobBackendError(
+                "Lifecycle inventory is invalid",
+                context={"operation": "inventory", "family": family},
+            ) from exc
+        if not isinstance(state, dict) or set(state) != {"version", "events"}:
+            raise CacheBlobBackendError(
+                "Lifecycle inventory schema is invalid",
+                context={"operation": "inventory", "family": family},
+            )
+        events = state["events"]
+        if state["version"] != 1 or not isinstance(events, list):
+            raise CacheBlobBackendError(
+                "Lifecycle inventory version is invalid",
+                context={"operation": "inventory", "family": family},
+            )
+        for event in events:
+            if (
+                not isinstance(event, list)
+                or len(event) != 2
+                or not isinstance(event[0], str)
+                or not event[0]
+                or not isinstance(event[1], str)
+                or len(event[1]) != 64
+                or any(character not in "0123456789abcdef" for character in event[1])
+            ):
+                raise CacheBlobBackendError(
+                    "Lifecycle inventory event is invalid",
+                    context={"operation": "inventory", "family": family},
+                )
+        return state
+
+    def _append_inventory_event(self, family: str, name: str, raw: bytes) -> None:
+        """Record membership before publishing the corresponding control file.
+
+        A crash can leave a harmless index-only stale position, but can never
+        leave a published evidence record absent from a snapshot index.  The
+        index is not authority: every page re-reads and compares the recorded
+        digest before yielding bytes to lifecycle code.
+        """
+        if not isinstance(raw, bytes) or not raw:
+            raise TypeError("Lifecycle inventory events require non-empty bytes")
+        with self._conditional_transition(f"inventory:{family}"):
+            state = self._read_inventory(family)
+            events = state["events"]
+            assert isinstance(events, list)
+            events.append([name, hashlib.sha256(raw).hexdigest()])
+            encoded = json.dumps(
+                state, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+            if len(encoded) > self.lifecycle_limits.max_operation_record_bytes:
+                raise CacheBlobBackendError(
+                    "Lifecycle inventory requires bounded compaction",
+                    context={"operation": "inventory", "family": family},
+                )
+            self.file_ops.write_bytes_durable(self._inventory_locator(family), encoded)
+
+    def _inventory_page(
+        self,
+        family: str,
+        cursor: OperationCursor | ReconciliationCheckpointCursor | PendingControlCursor | None,
+        *,
+        page_size: int,
+        read_current: Callable[[str], bytes | None],
+        cursor_type: type[OperationCursor] | type[ReconciliationCheckpointCursor] | type[PendingControlCursor],
+    ) -> tuple[tuple[tuple[str, bytes | None], ...], object | None]:
+        """Read at most one stable high-water page from one family index."""
+        state = self._read_inventory(family)
+        events = state["events"]
+        assert isinstance(events, list)
+        high_water = (
+            len(events)
+            if cursor is None or cursor.snapshot_high_water is None
+            else cursor.snapshot_high_water
+        )
+        position = (
+            1 if cursor is None or cursor.next_sequence is None else cursor.next_sequence
+        )
+        inspected = 0
+        entries: list[tuple[str, bytes | None]] = []
+        last_name = cursor.operation_id if cursor is not None and hasattr(cursor, "operation_id") else (cursor.name if cursor is not None else "~")
+        while (
+            position <= high_water
+            and inspected < self.lifecycle_limits.max_inventory_items
+            and len(entries) < page_size
+        ):
+            name, digest = events[position - 1]
+            assert isinstance(name, str) and isinstance(digest, str)
+            position += 1
+            inspected += 1
+            last_name = name
+            try:
+                current = read_current(name)
+            except (CacheBlobBackendError, CacheManifestIntegrityError):
+                current = None
+            if current is not None and hashlib.sha256(current).hexdigest() == digest:
+                entries.append((name, current))
+        next_cursor = None
+        if position <= high_water:
+            next_cursor = cursor_type(
+                last_name,
+                snapshot_high_water=high_water,
+                next_sequence=position,
+            )
+        return tuple(entries), next_cursor
+
     def locator_for(self, operation_id: str) -> Path:
         """Derive a contained locator from an opaque operation identifier."""
         safe_operation_id = validate_blob_id(operation_id)
@@ -571,51 +721,16 @@ class FileOperationRecordRepository:
         if cursor is not None and not isinstance(cursor, ReconciliationCheckpointCursor):
             raise TypeError("reconciliation checkpoint cursor is invalid")
         limit = self._page_size(page_size)
-        operations_directory = resolve_managed_locator(
-            self.file_ops.root,
-            "operations",
-            operation="list_reconciliation_checkpoints",
-            allow_missing_leaf=True,
+        records, next_cursor = self._inventory_page(
+            "sidecar",
+            cursor,
+            page_size=limit,
+            read_current=self.get_reconciliation_checkpoint_raw,
+            cursor_type=ReconciliationCheckpointCursor,
         )
-        prefix = "reconcile-action-"
-        suffix = ".json"
-        names, next_name = self.file_ops.list_directory_names_bounded(
-            operations_directory,
-            cursor=(
-                None
-                if cursor is None
-                else self._checkpoint_cursor_name(cursor.operation_id)
-            ),
-            max_names=limit,
-            max_inventory_names=self.lifecycle_limits.max_inventory_items,
-            operation="list_reconciliation_checkpoints",
-            name_filter=lambda name: (
-                name.startswith(prefix)
-                and name.endswith(suffix)
-                and self._is_hex_identifier(name[len(prefix) : -len(suffix)])
-            ),
-        )
-        page_ids = tuple(
-            name[len(prefix) : -len(suffix)]
-            for name in names
-            if name.startswith(prefix)
-            and name.endswith(suffix)
-            and self._is_hex_identifier(name[len(prefix) : -len(suffix)])
-        )
-        records: list[tuple[str, bytes | None]] = []
-        for operation_id in page_ids:
-            try:
-                raw = self.get_reconciliation_checkpoint_raw(operation_id)
-            except (CacheManifestIntegrityError, CacheBlobBackendError):
-                raw = None
-            records.append((operation_id, raw))
         return ReconciliationCheckpointPage(
-            entries=tuple(records),
-            next_cursor=(
-                ReconciliationCheckpointCursor(next_name)
-                if next_name is not None
-                else None
-            ),
+            entries=records,
+            next_cursor=next_cursor,
         )
 
     @staticmethod
@@ -647,6 +762,7 @@ class FileOperationRecordRepository:
         if not isinstance(raw_record, bytes) or not raw_record:
             raise TypeError("Reconciliation checkpoints require non-empty bytes")
         try:
+            self._append_inventory_event("sidecar", operation_id, raw_record)
             return self.file_ops.create_bytes_durable_exclusive(
                 self.reconciliation_checkpoint_locator(operation_id), raw_record
             )
@@ -684,6 +800,7 @@ class FileOperationRecordRepository:
                             "operation": "checkpoint_reconcile",
                         },
                     )
+                self._append_inventory_event("sidecar", operation_id, raw_record)
                 self.file_ops.write_bytes_durable(
                     self.reconciliation_checkpoint_locator(operation_id), raw_record
                 )
@@ -1194,6 +1311,7 @@ class FileOperationRecordRepository:
     ) -> Path:
         """Create evidence exclusively and durably before payload publication."""
         try:
+            self._append_inventory_event("primary", record.operation_id, raw_record)
             return self.file_ops.create_bytes_durable_exclusive(
                 self.locator_for(record.operation_id), raw_record
             )
@@ -1288,7 +1406,8 @@ class FileOperationRecordRepository:
             operations_directory,
             cursor=None if cursor is None else cursor.name,
             max_names=limit,
-            max_inventory_names=self.lifecycle_limits.max_inventory_items,
+            # Sidecars have their own eligibility family and page bound.
+            max_inventory_names=None,
             operation="recover_pending",
             name_filter=self._is_eligible_pending_name,
         )
@@ -1445,6 +1564,9 @@ class FileOperationRecordRepository:
                 self._require_exact_current(
                     record, expected_raw, operation="checkpoint_if_exact"
                 )
+                self._append_inventory_event(
+                    "primary", record.operation_id, raw_record
+                )
                 self.file_ops.write_bytes_durable(
                     self.locator_for(record.operation_id), raw_record
                 )
@@ -1534,48 +1656,21 @@ class FileOperationRecordRepository:
         if cursor is not None and not isinstance(cursor, OperationCursor):
             raise TypeError("operation cursor must be an OperationCursor or None")
         limit = self._page_size(page_size)
-        operations_directory = resolve_managed_locator(
-            self.file_ops.root,
-            "operations",
-            operation="list_operation_records",
-            allow_missing_leaf=True,
+        records, next_cursor = self._inventory_page(
+            "primary",
+            cursor,
+            page_size=limit,
+            read_current=self.get_raw,
+            cursor_type=OperationCursor,
         )
-
-        try:
-            names, next_name = self.file_ops.list_directory_names_bounded(
-                operations_directory,
-                cursor=None if cursor is None else f"{cursor.operation_id}.json",
-                max_names=limit,
-                max_inventory_names=self.lifecycle_limits.max_inventory_items,
-                operation="list_page",
-                name_filter=lambda name: (
-                    name.endswith(".json")
-                    and self._is_hex_identifier(name.removesuffix(".json"))
-                ),
-            )
-        except FileNotFoundError:
-            return OperationPage(entries=(), next_cursor=None)
-        except OSError as exc:
-            raise CacheBlobBackendError(
-                "Lifecycle operation evidence directory could not be listed",
-                context={"operation": "list_page"},
-            ) from exc
-
-        page_ids = tuple(name.removesuffix(".json") for name in names)
-        entries: list[tuple[str, bytes]] = []
-        for operation_id in page_ids:
-            raw = self._read_bounded(
-                self.locator_for(operation_id), operation="list_page"
-            )
-            if raw is not None:
-                entries.append((operation_id, raw))
-
-        next_cursor = (
-            OperationCursor(next_name.removesuffix(".json"))
-            if next_name is not None
-            else None
+        return OperationPage(
+            entries=tuple(
+                (operation_id, raw)
+                for operation_id, raw in records
+                if raw is not None
+            ),
+            next_cursor=next_cursor,
         )
-        return OperationPage(entries=tuple(entries), next_cursor=next_cursor)
 
     def iter_raw(self) -> Iterator[tuple[str, bytes]]:
         """Compatibility iterator composed from bounded cursor pages."""

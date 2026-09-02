@@ -904,9 +904,9 @@ class ManagedFileOps:
         """
         if type(max_names) is not int or max_names <= 0:
             raise ValueError("directory page size must be a positive integer")
-        if max_inventory_names is None:
-            max_inventory_names = max_names
-        if type(max_inventory_names) is not int or max_inventory_names <= 0:
+        if max_inventory_names is not None and (
+            type(max_inventory_names) is not int or max_inventory_names <= 0
+        ):
             raise ValueError("directory inventory size must be a positive integer")
         if cursor is not None and (
             not isinstance(cursor, str)
@@ -926,8 +926,16 @@ class ManagedFileOps:
                     name = entry.name
                     if name in {".", ".."}:
                         continue
+                    # Family filtering happens before the accounting boundary:
+                    # unrelated control files must never deny primary,
+                    # pending, or sidecar scheduling.
+                    if name_filter is not None and not name_filter(name):
+                        continue
                     inspected += 1
-                    if inspected > max_inventory_names:
+                    if (
+                        max_inventory_names is not None
+                        and inspected > max_inventory_names
+                    ):
                         raise CacheBlobBackendError(
                             "Managed directory inventory exceeds its lifecycle bound",
                             context={
@@ -935,8 +943,6 @@ class ManagedFileOps:
                                 "max_inventory_names": max_inventory_names,
                             },
                         )
-                    if name_filter is not None and not name_filter(name):
-                        continue
                     if cursor is not None and name <= cursor:
                         continue
                     names.append(name)

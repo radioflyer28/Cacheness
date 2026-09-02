@@ -40,6 +40,7 @@ _LOCK_NAME = ".cacheness-clear-admission.lock"
 _JOURNAL_OWNER = "cacheness.clear_recovery"
 _JOURNAL_VERSION = 1
 _SNAPSHOT_FIELDS = {"entries", "cache_hits", "cache_misses"}
+_MANIFEST_INVENTORY_FIELD = "_cacheness_manifest_inventory_v1"
 _JOURNAL_FIELDS = {
     "version",
     "owner",
@@ -664,7 +665,12 @@ class ClearRecoveryCoordinator:
                 self._invalid_journal()
 
     def _validate_snapshot(self, snapshot: dict[str, Any]) -> None:
-        if set(snapshot) != _SNAPSHOT_FIELDS or not isinstance(snapshot["entries"], dict):
+        allowed_fields = _SNAPSHOT_FIELDS | {_MANIFEST_INVENTORY_FIELD}
+        if (
+            not _SNAPSHOT_FIELDS.issubset(snapshot)
+            or not set(snapshot).issubset(allowed_fields)
+            or not isinstance(snapshot["entries"], dict)
+        ):
             self._invalid_journal()
         if not all(isinstance(key, str) for key in snapshot["entries"]):
             self._invalid_journal()
@@ -673,6 +679,15 @@ class ClearRecoveryCoordinator:
         if any(
             type(snapshot[counter]) is not int or snapshot[counter] < 0
             for counter in ("cache_hits", "cache_misses")
+        ):
+            self._invalid_journal()
+        inventory = snapshot.get(_MANIFEST_INVENTORY_FIELD)
+        if inventory is not None and (
+            not isinstance(inventory, dict)
+            or set(inventory) != {"version", "next_sequence", "events"}
+            or inventory["version"] != 1
+            or type(inventory["next_sequence"]) is not int
+            or not isinstance(inventory["events"], list)
         ):
             self._invalid_journal()
 
