@@ -122,6 +122,46 @@ def test_markerless_sibling_head_cannot_hide_raw_absent_family_evidence(
         reopened_ops.close()
 
 
+def test_store_bound_inventory_provenance_rejects_cross_root_replay(
+    tmp_path: Path,
+) -> None:
+    """A shared manifest key cannot authenticate another store's empty families."""
+    key = b"k" * 32
+    source_root = tmp_path / "inventory-source"
+    target_root = tmp_path / "inventory-target"
+    source_root.mkdir()
+    target_root.mkdir()
+    source_ops = ManagedFileOps(source_root)
+    source = FileOperationRecordRepository(
+        source_ops,
+        lifecycle_limits=LifecycleLimits(max_inventory_items=1),
+        initialization_key_provider=lambda: key,
+    )
+    try:
+        source.initialize_new_store()
+        marker = source_ops.read_bytes(source._inventory_initialization_locator())
+    finally:
+        source.close()
+        source_ops.close()
+
+    target_ops = ManagedFileOps(target_root)
+    target = FileOperationRecordRepository(
+        target_ops,
+        lifecycle_limits=LifecycleLimits(max_inventory_items=1),
+        initialization_key_provider=lambda: key,
+    )
+    try:
+        target_ops.write_bytes_durable(target._inventory_initialization_locator(), marker)
+        target_ops.write_bytes_durable(
+            target.reconciliation_checkpoint_locator("a" * 32), b'{"legacy":true}'
+        )
+        with pytest.raises(CacheBlobBackendError, match="initialization marker is invalid"):
+            target.list_reconciliation_checkpoint_page()
+    finally:
+        target.close()
+        target_ops.close()
+
+
 @pytest.mark.parametrize("family", ("primary", "sidecar", "pending"))
 def test_operation_inventory_recovery_compacts_pinned_history_in_bounded_steps(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, family: str

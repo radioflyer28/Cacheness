@@ -39,7 +39,11 @@ _INVENTORY_SCHEMA_VERSION = 2
 _INVENTORY_HEAD_MAX_BYTES = 4_096
 _INVENTORY_EVENT_MIN_BYTES = 32 * 1024
 _INVENTORY_FAMILIES = ("primary", "sidecar", "pending")
-_INVENTORY_INITIALIZATION_SCHEMA_VERSION = 3
+# Version 3 authenticated only a constant domain and family list.  A valid
+# shared application key could therefore replay that marker into another
+# managed root and turn its missing families into false empty inventories.
+# Version 4 binds the proof to this exact store topology.
+_INVENTORY_INITIALIZATION_SCHEMA_VERSION = 4
 
 
 @dataclass(frozen=True)
@@ -578,10 +582,10 @@ class FileOperationRecordRepository:
         )
 
     def _inventory_initialization_locator(self) -> Path:
-        """Return the signed all-family v3 initialization provenance record."""
+        """Return the signed store-bound all-family initialization record."""
         return resolve_managed_locator(
             self.file_ops.root,
-            Path("operations") / ".cacheness-inventory-v2" / "initialized-v3.json",
+            Path("operations") / ".cacheness-inventory-v2" / "initialized-v4.json",
             operation="lifecycle_inventory",
             allow_missing_leaf=True,
         )
@@ -600,12 +604,32 @@ class FileOperationRecordRepository:
             allow_missing_leaf=True,
         )
 
-    @staticmethod
-    def _initialization_signing_bytes() -> bytes:
-        """Return the stable HMAC preimage for all-family provenance."""
+    def _replayable_inventory_initialization_locator(self) -> Path:
+        """Return the former v3 marker, retained only as migration evidence."""
+        return resolve_managed_locator(
+            self.file_ops.root,
+            Path("operations") / ".cacheness-inventory-v2" / "initialized-v3.json",
+            operation="lifecycle_inventory",
+            allow_missing_leaf=True,
+        )
+
+    def _inventory_store_provenance(self) -> dict[str, object]:
+        """Return the immutable topology identity that scopes scheduler proofs."""
+        device, inode = self.file_ops.root_identity
+        root = str(self.file_ops.root)
+        return {
+            "root_identity": [device, inode],
+            "store_id": hashlib.sha256(root.encode("utf-8")).hexdigest(),
+        }
+
+    def _initialization_signing_bytes(self) -> bytes:
+        """Return the store-bound HMAC preimage for all-family provenance."""
+        provenance = self._inventory_store_provenance()
         return json.dumps(
             {
                 "families": list(_INVENTORY_FAMILIES),
+                "root_identity": provenance["root_identity"],
+                "store_id": provenance["store_id"],
                 "version": _INVENTORY_INITIALIZATION_SCHEMA_VERSION,
             },
             sort_keys=True,
@@ -846,7 +870,7 @@ class FileOperationRecordRepository:
         return self._decode_inventory_head(family, raw)
 
     def _has_current_inventory_initialization(self) -> bool:
-        """Verify authenticated v3 provenance for one all-family decision.
+        """Verify authenticated store-bound provenance for one all-family decision.
 
         The record is the sole proof that a missing family head belongs to a
         store which was proven empty as a whole.  Older unsigned markers are
@@ -874,9 +898,13 @@ class FileOperationRecordRepository:
             ) from exc
         if (
             not isinstance(record, dict)
-            or set(record) != {"families", "signature", "version"}
+            or set(record)
+            != {"families", "root_identity", "signature", "store_id", "version"}
             or record["version"] != _INVENTORY_INITIALIZATION_SCHEMA_VERSION
             or record["families"] != list(_INVENTORY_FAMILIES)
+            or record["store_id"] != self._inventory_store_provenance()["store_id"]
+            or record["root_identity"]
+            != self._inventory_store_provenance()["root_identity"]
             or not isinstance(record["signature"], str)
         ):
             raise CacheBlobBackendError(
@@ -895,24 +923,32 @@ class FileOperationRecordRepository:
         return True
 
     def _has_legacy_initialization_marker(self) -> bool:
-        """Return whether the retired unsigned v2 marker is present."""
-        try:
-            self.file_ops.read_bytes_bounded(
-                self._legacy_inventory_initialization_locator(),
-                max_bytes=_INVENTORY_HEAD_MAX_BYTES,
-            )
-        except FileNotFoundError:
-            return False
-        return True
+        """Return whether a non-store-bound marker requires explicit migration."""
+        for locator in (
+            self._legacy_inventory_initialization_locator(),
+            self._replayable_inventory_initialization_locator(),
+        ):
+            try:
+                self.file_ops.read_bytes_bounded(
+                    locator,
+                    max_bytes=_INVENTORY_HEAD_MAX_BYTES,
+                )
+            except FileNotFoundError:
+                continue
+            return True
+        return False
 
     def _write_current_inventory_initialization(self) -> None:
-        """Publish signed v3 provenance before creating any empty heads."""
+        """Publish signed store-bound provenance before creating empty heads."""
+        provenance = self._inventory_store_provenance()
         record = {
             "families": list(_INVENTORY_FAMILIES),
+            "root_identity": provenance["root_identity"],
             "signature": sign_hmac_sha256(
                 self._initialization_signing_bytes(),
                 self._initialization_key(initialize_new_store=True),
             ),
+            "store_id": provenance["store_id"],
             "version": _INVENTORY_INITIALIZATION_SCHEMA_VERSION,
         }
         encoded = json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -930,7 +966,7 @@ class FileOperationRecordRepository:
     def initialize_new_store(self) -> None:
         """Durably establish all empty v2 family heads before first evidence.
 
-        A signed v3 provenance record is written only after the compatibility
+        A signed store-bound provenance record is written only after the compatibility
         proof and before any empty head.  Every evidence append takes this
         same store-level transition first, so no raw/v1 member can race the
         proof or become hidden behind a sibling head.
