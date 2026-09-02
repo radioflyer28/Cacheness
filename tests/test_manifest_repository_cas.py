@@ -1946,7 +1946,11 @@ def test_manifest_tail_ahead_crash_window_is_page_safe_and_append_resumable(
                 repository._json_inventory_event_locator(sequence),
                 manifest_repository_module.json_dumps(event, default=str).encode("utf-8"),
             )
-        repository._write_inventory_tail(state, sequence + 1)
+        repository._write_inventory_tail(
+            state,
+            sequence + 1,
+            terminal_event=(event["key"], event["digest"]),
+        )
 
         with pytest.raises(CacheBlobBackendError, match="list_page failed"):
             repository.list_page()
@@ -1956,6 +1960,45 @@ def test_manifest_tail_ahead_crash_window_is_page_safe_and_append_resumable(
         repository.put_raw("b", _record("b"))
         page = repository.list_page(page_size=4)
         assert [key for key, _raw in page.entries] == ["a", "b"]
+    finally:
+        repository.close()
+        backend.close()
+
+
+def test_json_manifest_tail_ahead_missing_terminal_fails_before_replacement(
+    tmp_path: Path,
+) -> None:
+    """A replayed head cannot reuse a tail-bound slot after its event is lost."""
+    metadata_path = tmp_path / "tail-ahead-missing-terminal.json"
+    backend = JsonBackend(metadata_path)
+    repository = JsonManifestRepository(backend)
+    try:
+        repository.put_raw("first", _record("first"))
+        assert repository._json_lock_file_ops is not None
+        assert repository._json_inventory_head_locator is not None
+        saved_head = repository._json_lock_file_ops.read_bytes_bounded(
+            repository._json_inventory_head_locator, max_bytes=4_096
+        )
+        repository.put_raw("lost", _record("lost"))
+        lost_sequence = repository._inventory_state()["next_sequence"] - 1
+        repository._json_lock_file_ops.write_bytes_durable(
+            repository._json_inventory_head_locator, saved_head
+        )
+        repository._json_lock_file_ops.delete_durable(
+            repository._json_inventory_event_locator(lost_sequence)
+        )
+    finally:
+        repository.close()
+        backend.close()
+
+    backend = JsonBackend(metadata_path)
+    repository = JsonManifestRepository(backend)
+    try:
+        with pytest.raises(CacheBlobBackendError, match="put_raw failed"):
+            repository.put_raw("replacement", _record("replacement"))
+        assert repository.get_raw("lost") == _record("lost")
+        assert repository.get_raw("replacement") is None
+        assert not repository._json_inventory_event_locator(lost_sequence).exists()
     finally:
         repository.close()
         backend.close()
@@ -2089,6 +2132,75 @@ def test_operation_append_tail_rejects_replayed_or_corrupt_control_member(
         assert file_ops.read_bytes_bounded(
             second_locator, max_bytes=1_048_576
         ) == second_raw
+    finally:
+        repository.close()
+        file_ops.close()
+
+
+@pytest.mark.parametrize("family", ("primary", "sidecar", "pending"))
+def test_operation_tail_ahead_missing_terminal_fails_before_slot_replacement(
+    tmp_path: Path, family: str
+) -> None:
+    """Every operation family preserves its tail-bound terminal slot on reopen."""
+    root = tmp_path / f"operation-tail-ahead-missing-{family}"
+    root.mkdir()
+    key = b"q" * 32
+    file_ops = ManagedFileOps(root)
+    repository = FileOperationRecordRepository(
+        file_ops,
+        lifecycle_limits=LifecycleLimits(),
+        initialization_key_provider=lambda: key,
+    )
+    first_id, lost_id, replacement_id = "a" * 32, "b" * 32, "c" * 32
+    first_raw, lost_raw, replacement_raw = b"first", b"lost", b"replacement"
+    if family == "primary":
+        first_name, lost_name, replacement_name = first_id, lost_id, replacement_id
+        first_locator = repository.locator_for(first_id)
+        lost_locator = repository.locator_for(lost_id)
+    elif family == "sidecar":
+        first_name, lost_name, replacement_name = first_id, lost_id, replacement_id
+        first_locator = repository.reconciliation_checkpoint_locator(first_id)
+        lost_locator = repository.reconciliation_checkpoint_locator(lost_id)
+    else:
+        def pending_name(operation_id: str, raw: bytes, token: str) -> str:
+            return (
+                f".{operation_id}.json.pending.{hashlib.sha256(raw).hexdigest()}."
+                f"{token * 32}.tmp"
+            )
+
+        first_name = pending_name(first_id, first_raw, "1")
+        lost_name = pending_name(lost_id, lost_raw, "2")
+        replacement_name = pending_name(replacement_id, replacement_raw, "3")
+        first_locator = root / "operations" / first_name
+        lost_locator = root / "operations" / lost_name
+    try:
+        repository._append_inventory_event(family, first_name, first_raw)
+        file_ops.write_bytes_durable(first_locator, first_raw)
+        saved_head = file_ops.read_bytes_bounded(
+            repository._inventory_head_locator(family), max_bytes=4_096
+        )
+        repository._append_inventory_event(family, lost_name, lost_raw)
+        file_ops.write_bytes_durable(lost_locator, lost_raw)
+        lost_sequence = repository._read_inventory(family)["next_sequence"] - 1
+        file_ops.write_bytes_durable(repository._inventory_head_locator(family), saved_head)
+        file_ops.delete_durable(repository._inventory_event_locator(family, lost_sequence))
+    finally:
+        repository.close()
+        file_ops.close()
+
+    file_ops = ManagedFileOps(root)
+    repository = FileOperationRecordRepository(
+        file_ops,
+        lifecycle_limits=LifecycleLimits(),
+        initialization_key_provider=lambda: key,
+    )
+    try:
+        with pytest.raises(CacheManifestIntegrityError, match="terminal event is missing"):
+            repository._append_inventory_event(
+                family, replacement_name, replacement_raw
+            )
+        assert file_ops.read_bytes_bounded(lost_locator, max_bytes=4_096) == lost_raw
+        assert not repository._inventory_event_locator(family, lost_sequence).exists()
     finally:
         repository.close()
         file_ops.close()

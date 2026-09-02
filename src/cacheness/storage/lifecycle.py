@@ -1388,12 +1388,10 @@ class LifecycleEngine:
                 self.lifecycle_limits.max_reconcile_actions,
             )
         )
-        cursor = None
         remaining_actions = self.lifecycle_limits.max_reconcile_actions
         remaining_inventory_work = self.lifecycle_limits.max_reconcile_actions
         while remaining_actions > 0 and remaining_inventory_work > 0:
-            page = self.operation_repository.list_page(
-                cursor,
+            page = self.operation_repository.recovery_primary_page(
                 page_size=min(
                     self.lifecycle_limits.operation_page_size,
                     remaining_actions,
@@ -1440,7 +1438,6 @@ class LifecycleEngine:
                 return
             if remaining_inventory_work == 0:
                 return
-            cursor = page.next_cursor
 
     def put(
         self,

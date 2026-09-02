@@ -49,7 +49,7 @@ _MANIFEST_INVENTORY_HEAD_MAX_BYTES = 4_096
 _MANIFEST_INVENTORY_EVENT_MIN_BYTES = 32 * 1024
 _MANIFEST_INVENTORY_COMPACTION_WINDOW = 64
 _MANIFEST_INVENTORY_SEQUENCE_FIELD = "_cacheness_manifest_inventory_sequence_v2"
-_MANIFEST_INVENTORY_TAIL_SCHEMA_VERSION = 1
+_MANIFEST_INVENTORY_TAIL_SCHEMA_VERSION = 2
 _SQLITE_MANIFEST_TABLE = "cacheness_manifest_records_v1"
 _SQLITE_MANIFEST_INVENTORY_TABLE = "cacheness_manifest_inventory_v1"
 _SQLITE_MANIFEST_INVENTORY_STATE_TABLE = "cacheness_manifest_inventory_state_v2"
@@ -859,8 +859,20 @@ class _MetadataManifestRepository:
         replayed earlier head cannot make a later immutable event invisible
         without also replacing this store-local authority object.
         """
+        if isinstance(tail, dict) and tail.get("version") == 1:
+            raise CacheBlobMigrationRequiredError(
+                "Canonical manifest inventory append-tail migration is required",
+                context={"operation": "manifest_inventory"},
+            )
         if not isinstance(tail, dict) or set(tail) != {
-            "version", "store_id", "epoch", "next_sequence", "signature"
+            "version",
+            "store_id",
+            "epoch",
+            "next_sequence",
+            "terminal_sequence",
+            "terminal_key",
+            "terminal_digest",
+            "signature",
         }:
             raise CacheBlobBackendError(
                 "Canonical manifest inventory tail is invalid",
@@ -872,6 +884,16 @@ class _MetadataManifestRepository:
             or tail["epoch"] != state["epoch"]
             or type(tail["next_sequence"]) is not int
             or tail["next_sequence"] <= 1
+            or tail["terminal_sequence"] != tail["next_sequence"] - 1
+            or not isinstance(tail["terminal_key"], str)
+            or not tail["terminal_key"]
+            or len(tail["terminal_key"].encode("utf-8")) > 8_192
+            or not isinstance(tail["terminal_digest"], str)
+            or len(tail["terminal_digest"]) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in tail["terminal_digest"]
+            )
             or not isinstance(tail["signature"], str)
         ):
             raise CacheBlobBackendError(
@@ -883,6 +905,18 @@ class _MetadataManifestRepository:
                 "Canonical manifest inventory tail is unauthenticated"
             )
         return tail
+
+    @staticmethod
+    def _tail_matches_inventory_event(
+        tail: Mapping[str, Any], event: tuple[str, str], sequence: int
+    ) -> bool:
+        """Return whether one append-tail binds this exact terminal event."""
+        key, digest = event
+        return (
+            tail["terminal_sequence"] == sequence
+            and tail["terminal_key"] == key
+            and tail["terminal_digest"] == digest
+        )
 
     def _read_inventory_tail(self, state: Mapping[str, Any]) -> dict[str, Any] | None:
         """Read the bounded signed append tail without probing event names."""
@@ -938,11 +972,58 @@ class _MetadataManifestRepository:
             "Canonical manifest inventory head does not match its append tail"
         )
 
-    def _write_inventory_tail(self, state: dict[str, Any], next_sequence: int) -> None:
+    def _acknowledge_unacknowledged_inventory_tail(
+        self, state: dict[str, Any]
+    ) -> None:
+        """Acknowledge only the immutable member already bound by a tail.
+
+        This is the sole durable crash window between an event/tail commit and
+        the bounded head acknowledgement.  It runs before append attempts so a
+        replayed head plus a missing terminal event cannot be replaced by a
+        different writer at the same sequence.
+        """
+        tail = self._read_inventory_tail(state)
+        if tail is None or tail["next_sequence"] == state["next_sequence"]:
+            return
+        if tail["next_sequence"] != state["next_sequence"] + 1:
+            raise CacheManifestIntegrityError(
+                "Canonical manifest inventory head does not match its append tail"
+            )
+        sequence = state["next_sequence"]
+        event = self._read_inventory_event(sequence, state=state)
+        if event is None:
+            raise CacheManifestIntegrityError(
+                "Canonical manifest inventory tail terminal event is missing",
+                context={"operation": "manifest_inventory", "sequence": sequence},
+            )
+        if not self._tail_matches_inventory_event(tail, event, sequence):
+            raise CacheManifestIntegrityError(
+                "Canonical manifest inventory tail terminal event is inconsistent",
+                context={"operation": "manifest_inventory", "sequence": sequence},
+            )
+        state["next_sequence"] = sequence + 1
+        self._write_inventory_head(state)
+
+    def _write_inventory_tail(
+        self,
+        state: dict[str, Any],
+        next_sequence: int,
+        *,
+        terminal_event: tuple[str, str],
+    ) -> None:
         """Durably advance the signed append tail after an immutable event."""
+        terminal_sequence = next_sequence - 1
+        if terminal_sequence <= 0:
+            raise ValueError("manifest inventory tail requires a terminal event")
         existing = self._read_inventory_tail(state)
         if existing is not None:
             if existing["next_sequence"] == next_sequence:
+                if not self._tail_matches_inventory_event(
+                    existing, terminal_event, terminal_sequence
+                ):
+                    raise CacheManifestIntegrityError(
+                        "Canonical manifest inventory tail terminal event changed"
+                    )
                 return
             if existing["next_sequence"] > next_sequence:
                 raise CacheManifestIntegrityError(
@@ -954,6 +1035,9 @@ class _MetadataManifestRepository:
                 "store_id": self._inventory_store_id(),
                 "epoch": state["epoch"],
                 "next_sequence": next_sequence,
+                "terminal_sequence": terminal_sequence,
+                "terminal_key": terminal_event[0],
+                "terminal_digest": terminal_event[1],
             },
             initialize_new_store=True,
         )
@@ -1005,7 +1089,9 @@ class _MetadataManifestRepository:
             )
         return event["key"], event["digest"]
 
-    def _read_inventory_event(self, sequence: int) -> tuple[str, str] | None:
+    def _read_inventory_event(
+        self, sequence: int, *, state: Mapping[str, Any] | None = None
+    ) -> tuple[str, str] | None:
         """Read one event directly; a compacted slot is a safe sparse gap."""
         if type(self.backend) is JsonBackend:
             if self._json_lock_file_ops is None:
@@ -1024,7 +1110,8 @@ class _MetadataManifestRepository:
                     "Canonical manifest inventory event is invalid",
                     context={"operation": "manifest_inventory", "sequence": sequence},
                 ) from exc
-        event = self._inventory_state()["events"].get(sequence)
+        inventory_state = self._inventory_state() if state is None else state
+        event = inventory_state["events"].get(sequence)
         return None if event is None else self._validate_inventory_event(event, sequence)
 
     def _validate_inventory_skip(
@@ -1179,6 +1266,7 @@ class _MetadataManifestRepository:
     def _append_inventory_event(self, key: str, record: bytes) -> int:
         """Index publication before authority, without append/read/rewrite history."""
         state = self._inventory_state(allow_unacknowledged_tail=True)
+        self._acknowledge_unacknowledged_inventory_tail(state)
         record_digest = hashlib.sha256(record).hexdigest()
         if type(self.backend) is not JsonBackend:
             sequence = state["next_sequence"]
@@ -1193,7 +1281,11 @@ class _MetadataManifestRepository:
             self._validate_inventory_event(event, sequence)
             state["events"][sequence] = event
             state["next_sequence"] = sequence + 1
-            self._write_inventory_tail(state, state["next_sequence"])
+            self._write_inventory_tail(
+                state,
+                state["next_sequence"],
+                terminal_event=(event["key"], event["digest"]),
+            )
             self._write_inventory_head(state)
             return sequence
         while True:
@@ -1227,13 +1319,19 @@ class _MetadataManifestRepository:
                         context={"operation": "manifest_inventory", "sequence": sequence},
                     )
                 state["next_sequence"] = sequence + 1
-                self._write_inventory_tail(state, state["next_sequence"])
+                self._write_inventory_tail(
+                    state, state["next_sequence"], terminal_event=existing
+                )
                 self._write_inventory_head(state)
                 if existing == (key, record_digest):
                     return sequence
                 continue
             state["next_sequence"] = sequence + 1
-            self._write_inventory_tail(state, state["next_sequence"])
+            self._write_inventory_tail(
+                state,
+                state["next_sequence"],
+                terminal_event=(event["key"], event["digest"]),
+            )
             self._write_inventory_head(state)
             return sequence
 

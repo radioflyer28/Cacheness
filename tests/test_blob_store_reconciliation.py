@@ -1738,7 +1738,118 @@ def test_successful_blob_lifecycle_retirement_converges_sparse_primary_history(
         # An already compacted terminal inventory pays only bounded head/tail
         # and current-page checks; it does not revisit the 64 retired
         # successful operations.
-        assert len(reads) <= 20
+        # The durable primary-recovery continuation adds a fixed signed-head
+        # acknowledgement to this terminal pass; it still never revisits the
+        # 64 retired operation events.
+        assert len(reads) <= 24
+    finally:
+        store.close()
+
+
+def test_reopen_recovery_persists_primary_progress_past_stale_predecessors(
+    tmp_path: Path,
+) -> None:
+    """One-item reopen passes reach live primary evidence after stale slots."""
+    root = tmp_path / "primary-recovery-continuation"
+    limits = replace(
+        _small_lifecycle_limits(),
+        operation_page_size=1,
+        max_inventory_items=1,
+        max_reconcile_actions=1,
+    )
+    config = CacheConfig(cache_dir=str(root), lifecycle_limits=limits)
+    store = BlobStore(root, backend="json", config=config)
+    try:
+        repository = store.lifecycle.operation_repository
+        key = store._manifest_key(initialize_new_store=True)
+        for operation_id in ("a" * 32, "b" * 32):
+            repository._append_inventory_event(
+                "primary", operation_id, b"stale-pre-cas-checkpoint"
+            )
+        live_id = "c" * 32
+        live = _reconciliation_record(store, root, key, live_id)
+        live_raw = live.canonical_bytes(lifecycle_limits=limits)
+        repository.create_exclusive(live, live_raw)
+    finally:
+        store.close()
+
+    first = BlobStore(root, backend="json", config=config)
+    try:
+        state = first.lifecycle.operation_repository._read_inventory("primary")
+        assert state["recovery_high_water"] == 3
+        assert state["recovery_next_sequence"] == 2
+        assert first.lifecycle.operation_repository.get_raw(live_id) == live_raw
+    finally:
+        first.close()
+
+    second = BlobStore(root, backend="json", config=config)
+    try:
+        state = second.lifecycle.operation_repository._read_inventory("primary")
+        assert state["recovery_high_water"] == 3
+        assert state["recovery_next_sequence"] == 3
+        assert second.lifecycle.operation_repository.get_raw(live_id) == live_raw
+    finally:
+        second.close()
+
+    third = BlobStore(root, backend="json", config=config)
+    try:
+        # The third bounded pass reaches the exact record and lifecycle
+        # recovery retires its no-longer-needed prepared evidence.
+        assert third.lifecycle.operation_repository.get_raw(live_id) is None
+    finally:
+        third.close()
+
+
+def test_primary_recovery_cursor_does_not_compact_an_inflight_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stale-prefix pass leaves a concurrent indexed record recoverable."""
+    root = tmp_path / "primary-recovery-inflight"
+    limits = replace(
+        _small_lifecycle_limits(), operation_page_size=1, max_inventory_items=1
+    )
+    store = BlobStore(
+        root, backend="json", config=CacheConfig(cache_dir=str(root), lifecycle_limits=limits)
+    )
+    repository = store.lifecycle.operation_repository
+    try:
+        key = store._manifest_key(initialize_new_store=True)
+        repository._append_inventory_event("primary", "a" * 32, b"stale-pre-cas")
+        live_id = "b" * 32
+        live = _reconciliation_record(store, root, key, live_id)
+        live_raw = live.canonical_bytes(lifecycle_limits=limits)
+        entered = Event()
+        release = Event()
+        original_create = repository.file_ops.create_bytes_durable_exclusive
+
+        def block_primary_record(locator: Path, payload: bytes) -> None:
+            if locator == repository.locator_for(live_id):
+                entered.set()
+                assert release.wait(timeout=5)
+            original_create(locator, payload)
+
+        monkeypatch.setattr(
+            repository.file_ops, "create_bytes_durable_exclusive", block_primary_record
+        )
+        writer = Thread(
+            target=repository.create_exclusive,
+            args=(live, live_raw),
+            daemon=True,
+        )
+        writer.start()
+        assert entered.wait(timeout=5)
+
+        first = repository.recovery_primary_page(page_size=1, max_inspections=1)
+        assert first.entries == ()
+        state = repository._read_inventory("primary")
+        assert state["recovery_high_water"] == 2
+        assert state["recovery_next_sequence"] == 2
+
+        release.set()
+        writer.join(timeout=5)
+        assert not writer.is_alive()
+        second = repository.recovery_primary_page(page_size=1, max_inspections=1)
+        assert second.entries == ((live_id, live_raw),)
     finally:
         store.close()
 
@@ -1891,7 +2002,7 @@ def test_crash_during_new_store_inventory_initialization_keeps_reopen_current_v2
         epochs: set[str] = set()
         for family in ("primary", "sidecar", "pending"):
             state = reopened.lifecycle.operation_repository._read_inventory(family)
-            assert state["version"] == 3
+            assert state["version"] == 4
             assert state["family"] == family
             assert state["next_sequence"] == 1
             assert state["compact_next_sequence"] == 1

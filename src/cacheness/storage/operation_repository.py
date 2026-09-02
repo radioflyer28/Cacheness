@@ -45,7 +45,7 @@ _CLEAR_OPERATION_LEASES = local()
 # and an event can redirect it.  Version 3 authenticates both under the same
 # store-bound root as all-family provenance.  Earlier v2 scheduler objects are
 # explicit migration evidence rather than safe sparse history.
-_INVENTORY_SCHEMA_VERSION = 3
+_INVENTORY_SCHEMA_VERSION = 4
 _INVENTORY_HEAD_MAX_BYTES = 4_096
 _INVENTORY_EVENT_MIN_BYTES = 32 * 1024
 _INVENTORY_FAMILIES = ("primary", "sidecar", "pending")
@@ -56,7 +56,7 @@ _INVENTORY_FAMILIES = ("primary", "sidecar", "pending")
 # scheduler epoch.  An older signed control object can therefore never be
 # substituted into a newly initialized family.
 _INVENTORY_INITIALIZATION_SCHEMA_VERSION = 5
-_INVENTORY_TAIL_SCHEMA_VERSION = 1
+_INVENTORY_TAIL_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -748,6 +748,14 @@ class FileOperationRecordRepository:
             # Recovery consumes it in caller-bounded windows before a later
             # aggregate clear can build an inventory snapshot.
             "maintenance_target_sequence": 0,
+            # Recovery consumes a primary inventory in caller-bounded
+            # windows.  This signed continuation keeps a stale speculative
+            # prefix from starving a later live record after reopen.  It is
+            # scheduling progress only: exact record revalidation remains the
+            # authority boundary and a future full pass revisits an event that
+            # was still being published when it was first observed absent.
+            "recovery_high_water": 0,
+            "recovery_next_sequence": 1,
         }
 
     def _has_preindex_evidence(self, family: str) -> bool:
@@ -875,6 +883,8 @@ class FileOperationRecordRepository:
             "compact_next_sequence",
             "first_live_sequence",
             "maintenance_target_sequence",
+            "recovery_high_water",
+            "recovery_next_sequence",
             "signature",
         }:
             raise CacheBlobBackendError(
@@ -912,6 +922,26 @@ class FileOperationRecordRepository:
         ):
             raise CacheBlobBackendError(
                 "Lifecycle inventory maintenance target is invalid",
+                context={"operation": "inventory", "family": family},
+            )
+        if (
+            type(state["recovery_high_water"]) is not int
+            or type(state["recovery_next_sequence"]) is not int
+            or not 0 <= state["recovery_high_water"] < state["next_sequence"]
+            or not 1 <= state["recovery_next_sequence"]
+            <= state["next_sequence"]
+            or (
+                state["recovery_high_water"] == 0
+                and state["recovery_next_sequence"] != 1
+            )
+            or (
+                state["recovery_high_water"] != 0
+                and state["recovery_next_sequence"]
+                > state["recovery_high_water"]
+            )
+        ):
+            raise CacheBlobBackendError(
+                "Lifecycle inventory recovery continuation is invalid",
                 context={"operation": "inventory", "family": family},
             )
         if not verify_hmac_sha256(
@@ -1217,6 +1247,7 @@ class FileOperationRecordRepository:
                     context={"family": "pending", "operation": "inventory_migration"},
                 )
             state = self._empty_inventory_head("pending")
+            terminal_event: tuple[str, str] | None = None
             for name in names:
                 raw = self._get_pending_control_raw(name)
                 if raw is None:
@@ -1238,8 +1269,15 @@ class FileOperationRecordRepository:
                     self._inventory_event_locator("pending", sequence), encoded
                 )
                 state["next_sequence"] = sequence + 1
+                terminal_event = (event["name"], event["digest"])
             if state["next_sequence"] > 1:
-                self._write_inventory_tail("pending", state, state["next_sequence"])
+                assert terminal_event is not None
+                self._write_inventory_tail(
+                    "pending",
+                    state,
+                    state["next_sequence"],
+                    terminal_event=terminal_event,
+                )
             self._write_inventory_head("pending", state)
             return state
 
@@ -1260,8 +1298,21 @@ class FileOperationRecordRepository:
         self, family: str, tail: object, state: dict[str, object]
     ) -> dict[str, object]:
         """Validate one independent signed append-tail high-water claim."""
+        if isinstance(tail, dict) and tail.get("version") == 1:
+            raise CacheBlobMigrationRequiredError(
+                "Lifecycle inventory append-tail migration is required",
+                context={"operation": "inventory_migration", "family": family},
+            )
         if not isinstance(tail, dict) or set(tail) != {
-            "version", "family", "store_id", "epoch", "next_sequence", "signature"
+            "version",
+            "family",
+            "store_id",
+            "epoch",
+            "next_sequence",
+            "terminal_sequence",
+            "terminal_name",
+            "terminal_digest",
+            "signature",
         }:
             raise CacheBlobBackendError(
                 "Lifecycle inventory tail is invalid",
@@ -1274,6 +1325,17 @@ class FileOperationRecordRepository:
             or tail["epoch"] != state["epoch"]
             or type(tail["next_sequence"]) is not int
             or tail["next_sequence"] <= 1
+            or tail["terminal_sequence"] != tail["next_sequence"] - 1
+            or not isinstance(tail["terminal_name"], str)
+            or not tail["terminal_name"]
+            or len(tail["terminal_name"].encode("utf-8"))
+            > self.lifecycle_limits.max_operation_field_bytes
+            or not isinstance(tail["terminal_digest"], str)
+            or len(tail["terminal_digest"]) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in tail["terminal_digest"]
+            )
             or not isinstance(tail["signature"], str)
         ):
             raise CacheBlobBackendError(
@@ -1290,6 +1352,18 @@ class FileOperationRecordRepository:
                 reason=CacheReason.MANIFEST_SIGNATURE_INVALID,
             )
         return tail
+
+    @staticmethod
+    def _tail_matches_inventory_event(
+        tail: dict[str, object], event: tuple[str, str], sequence: int
+    ) -> bool:
+        """Return whether one tail anchors exactly one immutable event."""
+        name, digest = event
+        return (
+            tail["terminal_sequence"] == sequence
+            and tail["terminal_name"] == name
+            and tail["terminal_digest"] == digest
+        )
 
     def _read_inventory_tail(
         self, family: str, state: dict[str, object]
@@ -1349,13 +1423,62 @@ class FileOperationRecordRepository:
             context={"operation": "inventory", "family": family},
         )
 
+    def _acknowledge_unacknowledged_inventory_tail(
+        self, family: str, state: dict[str, object]
+    ) -> None:
+        """Acknowledge only the terminal event bound by an ahead append tail.
+
+        The tail-ahead crash window is recovered before any exclusive create.
+        A replayed predecessor head plus a deleted terminal event therefore
+        fails closed instead of allowing the next caller to replace the
+        allocated sequence with a different primary, sidecar, or pending
+        member.
+        """
+        tail = self._read_inventory_tail(family, state)
+        if tail is None or tail["next_sequence"] == state["next_sequence"]:
+            return
+        if tail["next_sequence"] != state["next_sequence"] + 1:
+            raise CacheManifestIntegrityError(
+                "Lifecycle inventory head does not match its append tail",
+                context={"operation": "inventory", "family": family},
+            )
+        sequence = state["next_sequence"]
+        event = self._read_inventory_event(family, sequence)
+        if event is None:
+            raise CacheManifestIntegrityError(
+                "Lifecycle inventory tail terminal event is missing",
+                context={"operation": "inventory", "family": family, "sequence": sequence},
+            )
+        if not self._tail_matches_inventory_event(tail, event, sequence):
+            raise CacheManifestIntegrityError(
+                "Lifecycle inventory tail terminal event is inconsistent",
+                context={"operation": "inventory", "family": family, "sequence": sequence},
+            )
+        state["next_sequence"] = sequence + 1
+        self._write_inventory_head(family, state)
+
     def _write_inventory_tail(
-        self, family: str, state: dict[str, object], next_sequence: int
+        self,
+        family: str,
+        state: dict[str, object],
+        next_sequence: int,
+        *,
+        terminal_event: tuple[str, str],
     ) -> None:
         """Advance the independent signed tail only after its event exists."""
+        terminal_sequence = next_sequence - 1
+        if terminal_sequence <= 0:
+            raise ValueError("lifecycle inventory tail requires a terminal event")
         existing = self._read_inventory_tail(family, state)
         if existing is not None:
             if existing["next_sequence"] == next_sequence:
+                if not self._tail_matches_inventory_event(
+                    existing, terminal_event, terminal_sequence
+                ):
+                    raise CacheManifestIntegrityError(
+                        "Lifecycle inventory tail terminal event changed",
+                        context={"operation": "inventory", "family": family},
+                    )
                 return
             if existing["next_sequence"] > next_sequence:
                 raise CacheManifestIntegrityError(
@@ -1369,6 +1492,9 @@ class FileOperationRecordRepository:
                 "store_id": self._inventory_store_provenance()["store_id"],
                 "epoch": state["epoch"],
                 "next_sequence": next_sequence,
+                "terminal_sequence": terminal_sequence,
+                "terminal_name": terminal_event[0],
+                "terminal_digest": terminal_event[1],
             }
         )
         self._validate_inventory_tail(family, tail, state)
@@ -1573,6 +1699,7 @@ class FileOperationRecordRepository:
                     state = self._read_inventory(
                         family, allow_unacknowledged_tail=True
                     )
+                    self._acknowledge_unacknowledged_inventory_tail(family, state)
                     sequence = state["next_sequence"]
                     raw_digest = hashlib.sha256(raw).hexdigest()
                     event = self._sign_inventory_scheduling(
@@ -1609,12 +1736,20 @@ class FileOperationRecordRepository:
                             )
                         state["next_sequence"] = sequence + 1
                         self._write_inventory_tail(
-                            family, state, state["next_sequence"]
+                            family,
+                            state,
+                            state["next_sequence"],
+                            terminal_event=existing,
                         )
                         self._write_inventory_head(family, state)
                         continue
                     state["next_sequence"] = sequence + 1
-                    self._write_inventory_tail(family, state, state["next_sequence"])
+                    self._write_inventory_tail(
+                        family,
+                        state,
+                        state["next_sequence"],
+                        terminal_event=(event["name"], event["digest"]),
+                    )
                     self._write_inventory_head(family, state)
                     return
 
@@ -1781,6 +1916,82 @@ class FileOperationRecordRepository:
                 next_sequence=position,
             )
         return tuple(entries), next_cursor, tuple(entry_next_cursors), inspected
+
+    def recovery_primary_page(
+        self,
+        *,
+        page_size: int,
+        max_inspections: int,
+    ) -> OperationPage:
+        """Return and durably advance one bounded primary recovery window.
+
+        Normal public pages remain read-only.  Startup recovery is an explicit
+        mutating maintenance boundary, so it records the exact high-water and
+        continuation position it inspected.  A speculative event that races
+        its record write may look stale in one window, but is never compacted
+        here; after the fixed high-water pass resets, a later recovery pass
+        revalidates it again.  This prevents a stale prefix from starving a
+        later live operation without declaring an in-flight publication dead.
+        """
+        if type(page_size) is not int or page_size <= 0:
+            raise ValueError("primary recovery page size must be positive")
+        if (
+            type(max_inspections) is not int
+            or max_inspections <= 0
+            or max_inspections > self.lifecycle_limits.max_inventory_items
+        ):
+            raise ValueError("primary recovery inspection limit is invalid")
+        with self._conditional_transition("inventory:primary"):
+            state = self._read_inventory("primary")
+            if state["next_sequence"] == 1:
+                return OperationPage((), None, (), inspected_positions=0)
+            high_water = state["recovery_high_water"]
+            if high_water == 0:
+                high_water = state["next_sequence"] - 1
+                next_sequence = state["first_live_sequence"]
+            else:
+                next_sequence = max(
+                    state["recovery_next_sequence"], state["first_live_sequence"]
+                )
+            cursor = OperationCursor(
+                "0" * 32,
+                snapshot_high_water=high_water,
+                next_sequence=next_sequence,
+            )
+            records, next_cursor, entry_next_cursors, inspected_positions = (
+                self._inventory_page(
+                    "primary",
+                    cursor,
+                    page_size=page_size,
+                    max_inspections=max_inspections,
+                    read_current=self.get_raw,
+                    cursor_type=OperationCursor,
+                )
+            )
+            page = OperationPage(
+                entries=tuple(
+                    (operation_id, raw)
+                    for operation_id, raw in records
+                    if raw is not None
+                ),
+                next_cursor=next_cursor,
+                entry_next_cursors=tuple(
+                    item_cursor
+                    for (_operation_id, raw), item_cursor in zip(
+                        records, entry_next_cursors
+                    )
+                    if raw is not None
+                ),
+                inspected_positions=inspected_positions,
+            )
+            if next_cursor is None:
+                state["recovery_high_water"] = 0
+                state["recovery_next_sequence"] = 1
+            else:
+                state["recovery_high_water"] = high_water
+                state["recovery_next_sequence"] = next_cursor.next_sequence
+            self._write_inventory_head("primary", state)
+            return page
 
     def locator_for(self, operation_id: str) -> Path:
         """Derive a contained locator from an opaque operation identifier."""
