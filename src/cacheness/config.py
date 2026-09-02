@@ -362,9 +362,12 @@ class LifecycleLimits:
     max_operation_field_bytes: int = 8_192
     manifest_page_size: int = 256
     operation_page_size: int = 256
+    max_inventory_items: int = 4_096
     max_reconcile_actions: int = 10_000
     orphan_grace_seconds: float = 300.0
     close_wait_seconds: float = 30.0
+    key_initialization_timeout_seconds: float = 5.0
+    key_initialization_retry_seconds: float = 0.01
 
     def __post_init__(self) -> None:
         """Reject invalid operational bounds rather than silently normalizing them."""
@@ -373,6 +376,7 @@ class LifecycleLimits:
             "max_operation_field_bytes",
             "manifest_page_size",
             "operation_page_size",
+            "max_inventory_items",
             "max_reconcile_actions",
         )
         for field_name in integer_fields:
@@ -380,7 +384,12 @@ class LifecycleLimits:
             if type(value) is not int or value <= 0:
                 raise ValueError(f"{field_name} must be a positive integer")
 
-        for field_name in ("orphan_grace_seconds", "close_wait_seconds"):
+        for field_name in (
+            "orphan_grace_seconds",
+            "close_wait_seconds",
+            "key_initialization_timeout_seconds",
+            "key_initialization_retry_seconds",
+        ):
             value = getattr(self, field_name)
             if (
                 isinstance(value, bool)

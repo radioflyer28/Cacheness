@@ -75,6 +75,7 @@ class TestPublicExports:
             "blob_lock_release_failure",
             "blob_store_closed",
             "blob_close_timeout",
+            "blob_lifecycle_timeout",
         }
 
         assert {reason.value for reason in error_handling.CacheReason} == expected_reasons

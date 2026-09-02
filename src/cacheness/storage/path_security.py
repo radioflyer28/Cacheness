@@ -888,22 +888,26 @@ class ManagedFileOps:
         *,
         cursor: str | None,
         max_names: int,
+        max_inventory_names: int | None = None,
         operation: str,
         name_filter: Callable[[str], bool] | None = None,
     ) -> tuple[tuple[str, ...], str | None]:
-        """Return one bounded forward directory slice with an opaque cursor.
+        """Return a lexical page from one explicitly bounded directory snapshot.
 
-        Directory enumeration is deliberately streaming: callers receive no
-        sorted materialization and this method examines at most ``max_names``
-        names beyond the encrypted resume cursor.  The cursor is a directory
-        position, not lifecycle authority; callers must still validate every
-        returned name and exact record before acting on it.  Filesystem order
-        is stable for a live directory between mutations on supported local
-        stores.  A restart that encounters an insertion before a cursor wraps
-        through a fresh inventory rather than silently granting it authority.
+        A filesystem's ``scandir`` order is neither lexical nor restart-stable,
+        so it must never be combined with a lexical resume cursor.  This method
+        instead forms a *separately policy-bounded* inventory snapshot, then
+        applies one lexical cursor to that snapshot.  ``max_names`` limits raw
+        records the caller may read; ``max_inventory_names`` independently
+        limits directory entries inspected.  An over-limit namespace fails
+        closed rather than skipping evidence under a misleading page bound.
         """
         if type(max_names) is not int or max_names <= 0:
             raise ValueError("directory page size must be a positive integer")
+        if max_inventory_names is None:
+            max_inventory_names = max_names
+        if type(max_inventory_names) is not int or max_inventory_names <= 0:
+            raise ValueError("directory inventory size must be a positive integer")
         if cursor is not None and (
             not isinstance(cursor, str)
             or not cursor
@@ -916,29 +920,29 @@ class ManagedFileOps:
             if not stat.S_ISDIR(directory_stat.st_mode) or _is_link_or_reparse(directory_stat):
                 _unsafe_path(CacheReason.PATH_RACE)
             names: list[str] = []
-            exhausted = True
-            # scandir is lazy on supported local filesystem implementations.
-            # Never call listdir/nsmallest here: their full materialization
-            # makes a bounded page inspect an unbounded crash-residue set.
+            inspected = 0
             with os.scandir(prepared) as entries:
                 for entry in entries:
                     name = entry.name
                     if name in {".", ".."}:
                         continue
+                    inspected += 1
+                    if inspected > max_inventory_names:
+                        raise CacheBlobBackendError(
+                            "Managed directory inventory exceeds its lifecycle bound",
+                            context={
+                                "operation": operation,
+                                "max_inventory_names": max_inventory_names,
+                            },
+                        )
                     if name_filter is not None and not name_filter(name):
                         continue
                     if cursor is not None and name <= cursor:
                         continue
                     names.append(name)
-                    if len(names) >= max_names:
-                        exhausted = False
-                        break
-            # Sorting only this already-bounded slice gives deterministic
-            # source ordering without recreating nsmallest's whole-directory
-            # materialization.  The maximum inspected name is the stable
-            # forward cursor for the next lexical slice.
             names.sort()
-            return tuple(names), None if exhausted else (None if not names else names[-1])
+            page = tuple(names[:max_names])
+            return page, (page[-1] if len(names) > max_names and page else None)
         except FileNotFoundError:
             return (), None
         except CacheUnsafePathError:

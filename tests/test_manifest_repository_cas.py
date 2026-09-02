@@ -70,6 +70,40 @@ def test_pending_recovery_filters_unrelated_names_before_its_action_bound(
         file_ops.close()
 
 
+def test_directory_inventory_is_lexical_after_reverse_creation_and_has_a_distinct_bound(
+    tmp_path: Path,
+) -> None:
+    """A lexical cursor never combines a partial scandir order with its position."""
+    root = tmp_path / "stable-directory-inventory"
+    root.mkdir()
+    file_ops = ManagedFileOps(root)
+    directory = root / "operations"
+    directory.mkdir()
+    for name in ("z.json", "a.json", "b.json"):
+        (directory / name).write_bytes(name.encode("ascii"))
+    try:
+        first, cursor = file_ops.list_directory_names_bounded(
+            directory,
+            cursor=None,
+            max_names=2,
+            max_inventory_names=3,
+            operation="test_inventory",
+        )
+        second, terminal = file_ops.list_directory_names_bounded(
+            directory,
+            cursor=cursor,
+            max_names=2,
+            max_inventory_names=3,
+            operation="test_inventory",
+        )
+        assert first == ("a.json", "b.json")
+        assert cursor == "b.json"
+        assert second == ("z.json",)
+        assert terminal is None
+    finally:
+        file_ops.close()
+
+
 def _race_json_manifest_cas_process(
     metadata_path: str,
     record: bytes,

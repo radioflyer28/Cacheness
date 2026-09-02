@@ -27,10 +27,16 @@ from .path_security import ManagedFileOps, resolve_managed_locator
 _INTERPROCESS_LOCK_STRIPES = 64
 
 
+class InterprocessLockUnavailable(Exception):
+    """Internal signal for one nonblocking advisory-lock attempt that lost."""
+
+
 class _WindowsLockApi(Protocol):
     """Minimal Win32 byte-range lock surface kept injectable for tests."""
 
-    def lock(self, file_descriptor: int, *, exclusive: bool) -> object:
+    def lock(
+        self, file_descriptor: int, *, exclusive: bool, nonblocking: bool = False
+    ) -> object:
         """Acquire one blocking shared or exclusive whole-file lock."""
 
     def unlock(self, file_descriptor: int, token: object) -> object:
@@ -41,6 +47,8 @@ class _NativeWindowsLockApi:
     """Use ``LockFileEx`` so Windows retains shared admission semantics."""
 
     _LOCKFILE_EXCLUSIVE_LOCK = 0x00000002
+    _LOCKFILE_FAIL_IMMEDIATELY = 0x00000001
+    _ERROR_LOCK_VIOLATION = 33
     _MAX_DWORD = 0xFFFFFFFF
     _CAPABILITY_STATUSES = frozenset({1, 5, 50, 120, 1314})
 
@@ -85,9 +93,13 @@ class _NativeWindowsLockApi:
         )
         self._unlock_file_ex.restype = ctypes.c_int
 
-    def lock(self, file_descriptor: int, *, exclusive: bool) -> object:
+    def lock(
+        self, file_descriptor: int, *, exclusive: bool, nonblocking: bool = False
+    ) -> object:
         """Acquire a blocking whole-file lock without downgrading shared callers."""
         flags = self._LOCKFILE_EXCLUSIVE_LOCK if exclusive else 0
+        if nonblocking:
+            flags |= self._LOCKFILE_FAIL_IMMEDIATELY
         overlapped = self._Overlapped()
         handle = ctypes.c_void_p(self._get_osfhandle(file_descriptor))
         if not self._lock_file_ex(
@@ -98,7 +110,10 @@ class _NativeWindowsLockApi:
             self._MAX_DWORD,
             ctypes.byref(overlapped),
         ):
-            self._raise_native_error(ctypes.get_last_error(), "LockFileEx")
+            status = ctypes.get_last_error()
+            if nonblocking and status == self._ERROR_LOCK_VIOLATION:
+                raise InterprocessLockUnavailable from None
+            self._raise_native_error(status, "LockFileEx")
         return overlapped
 
     def unlock(self, file_descriptor: int, token: object) -> object:
@@ -159,6 +174,7 @@ def interprocess_open_file_lock(
     exclusive: bool,
     operation: str,
     close_handle: bool = False,
+    nonblocking: bool = False,
     on_release_failure: Callable[[CacheBlobLockReleaseError], None] | None = None,
 ) -> Iterator[None]:
     """Lock one already-open managed descriptor on every supported OS.
@@ -174,7 +190,20 @@ def interprocess_open_file_lock(
     try:
         if _platform_name() == "nt":
             api = _windows_lock_api()
-            token = api.lock(handle.fileno(), exclusive=exclusive)
+            if nonblocking:
+                try:
+                    token = api.lock(
+                        handle.fileno(), exclusive=exclusive, nonblocking=True
+                    )
+                except TypeError as exc:
+                    # The adapter is private but earlier deterministic shims
+                    # implemented only the original blocking signature.
+                    # Native Windows always receives FAIL_IMMEDIATELY above.
+                    if "nonblocking" not in str(exc):
+                        raise
+                    token = api.lock(handle.fileno(), exclusive=exclusive)
+            else:
+                token = api.lock(handle.fileno(), exclusive=exclusive)
 
             def unlock_windows_lock() -> object:
                 return api.unlock(handle.fileno(), token)
@@ -188,7 +217,15 @@ def interprocess_open_file_lock(
                     "BlobStore lifecycle locking requires POSIX flock or Win32 LockFileEx",
                     context={"operation": operation},
                 ) from exc
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+            flags = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+            if nonblocking:
+                flags |= fcntl.LOCK_NB
+            try:
+                fcntl.flock(handle.fileno(), flags)
+            except BlockingIOError as exc:
+                if nonblocking:
+                    raise InterprocessLockUnavailable from exc
+                raise
 
             def unlock_posix_lock() -> object:
                 return fcntl.flock(handle.fileno(), fcntl.LOCK_UN)

@@ -49,6 +49,7 @@ from typing import Any, Callable, Dict, List, Optional, Union
 from ..error_handling import (
     CacheBlobBackendError,
     CacheBlobLifecycleConflictError,
+    CacheBlobLifecycleTimeoutError,
     CacheBlobManifestMalformedError,
     CacheBlobManifestUnauthenticatedError,
     CacheBlobManifestUnsupportedVersionError,
@@ -313,7 +314,10 @@ class BlobStore:
             lifecycle_limits=self.lifecycle_limits,
         )
         self._manifest_key_provider = (
-            ManifestKeyProvider(self.cache_dir / "blob_manifest_hmac_key.bin")
+            ManifestKeyProvider(
+                self.cache_dir / "blob_manifest_hmac_key.bin",
+                lifecycle_limits=self.lifecycle_limits,
+            )
             if manifest_key_provider is None
             else manifest_key_provider
         )
@@ -895,6 +899,11 @@ class BlobStore:
             self._release_owned_resources()
             closed = True
         except CacheStorageError:
+            raise
+        except CacheBlobLifecycleTimeoutError:
+            # Bounded first-key admission is a lifecycle outcome, not an
+            # unauthenticated-signing-key outcome.  Callers can retry it
+            # without reading or retiring a live winner's key bytes.
             raise
         except Exception as exc:
             raise CacheBlobBackendError(

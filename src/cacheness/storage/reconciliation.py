@@ -438,9 +438,7 @@ class _Reconciler:
         )
         if apply:
             findings.extend(
-                self._apply_findings(
-                    findings, observed_at, sidecar_page.entries[:consumed_sidecar]
-                )
+                self._apply_findings(findings, observed_at)
             )
         return ReconciliationReport(
             findings=tuple(findings),
@@ -454,18 +452,21 @@ class _Reconciler:
         self,
         findings: list[ReconciliationFinding],
         observed_at: datetime,
-        sidecar_entries: tuple[tuple[str, bytes | None], ...],
     ) -> tuple[ReconciliationFinding, ...]:
-        """Revalidate and checkpoint every authorized action under one snapshot gate."""
+        """Apply one normalized, revalidated action stream under one snapshot gate.
+
+        A dry-run finding is not itself a mutation budget charge.  The shared
+        budget advances only when this pass reaches the one repository action
+        that can make progress for that finding.  In particular, a completed
+        orphan sidecar is a sidecar-retirement action, never a pre-pass plus a
+        second no-op primary action.
+        """
+        dispositions: list[ReconciliationFinding] = []
         # Reconciliation uses aggregate admission only while it reloads exact
         # authority and applies a bounded report. Ordinary operations retain
         # their per-key lifecycle/CAS concurrency contract.
         with self.store._admission_barrier.aggregate_admission():
             remaining = self.lifecycle_limits.max_reconcile_actions
-            _blocked_sidecars, sidecar_actions = self._retire_orphaned_completed_checkpoints(
-                sidecar_entries, remaining
-            )
-            remaining -= sidecar_actions
             for finding in findings:
                 if remaining <= 0:
                     break
@@ -476,43 +477,60 @@ class _Reconciler:
                 ):
                     continue
                 try:
-                    self._apply_finding(finding, observed_at)
+                    if finding.reason == "completed_reconciliation_checkpoint_orphan":
+                        attempted = self._retire_orphaned_completed_checkpoint(
+                            finding
+                        )
+                    else:
+                        attempted = self._apply_finding(finding, observed_at)
                 except (
                     CacheBlobReconciliationCheckpointError,
                     CacheBlobReconciliationConflictError,
+                    CacheBlobLifecycleConflictError,
                 ):
-                    # The matching sidecar was already reported as blocked.
-                    # It cannot turn into recovery authority or prevent a
-                    # later independently authenticated finding from running.
+                    # Exact primary/sidecar CAS races are local to this action.
+                    # Preserve current bytes, make the conflict visible, and
+                    # continue independently authenticated later work.
                     logger.warning(
-                        "BlobStore reconciliation action has a blocked checkpoint",
+                        "BlobStore reconciliation action conflicted",
                         extra={"operation_id": finding.evidence_id, "operation": "reconcile"},
                     )
-                remaining -= 1
-        # Every sidecar examined above already has a dry-run finding.  Do not
-        # duplicate it merely because this call also requested apply.
-        return ()
+                    dispositions.append(
+                        ReconciliationFinding(
+                            ReconciliationStatus.BLOCKED,
+                            ReconciliationAction.REPORT_ONLY,
+                            "reconciliation_action_conflict",
+                            evidence_id=finding.evidence_id,
+                            evidence_digest=finding.evidence_digest,
+                            key_fingerprint=finding.key_fingerprint,
+                            locator_fingerprint=finding.locator_fingerprint,
+                        )
+                    )
+                    attempted = True
+                if attempted:
+                    remaining -= 1
+        return tuple(dispositions)
 
     def _apply_finding(
         self,
         finding: ReconciliationFinding,
         observed_at: datetime,
-    ) -> None:
+    ) -> bool:
         """Perform one exact revalidated action, never using an old report as proof."""
         repository = self.store.lifecycle.operation_repository
         raw = repository.get_raw(finding.evidence_id)
         if raw is None or hashlib.sha256(raw).hexdigest() != finding.evidence_digest:
-            return
+            return False
         refreshed = self._classify_operation(finding.evidence_id, raw, observed_at)
         if (
             refreshed.status is not ReconciliationStatus.SAFE
             or refreshed.action is not finding.action
             or refreshed.evidence_digest != finding.evidence_digest
         ):
-            return
+            return False
         recovered = self.store.lifecycle._recoverable_record(finding.evidence_id, raw)
         if recovered is None:
-            return
+            return False
         record, candidate, _previous = recovered
         checkpoint, checkpoint_raw = self._prepare_action_checkpoint(
             record.operation_id,
@@ -523,7 +541,7 @@ class _Reconciler:
             self._finish_completed_checkpoint(
                 record, candidate, checkpoint, checkpoint_raw
             )
-            return
+            return True
         if finding.action is ReconciliationAction.DELETE_CANDIDATE:
             self._apply_candidate_delete(record, candidate, checkpoint, checkpoint_raw)
         elif finding.action is ReconciliationAction.RETIRE_EVIDENCE:
@@ -537,6 +555,45 @@ class _Reconciler:
             self._apply_complete_tombstone(
                 record, candidate, checkpoint, checkpoint_raw
             )
+        return True
+
+    def _retire_orphaned_completed_checkpoint(
+        self, finding: ReconciliationFinding
+    ) -> bool:
+        """Retire exactly one still-orphaned completed sidecar.
+
+        This is deliberately an action in the same stream as primary
+        reconciliation work.  It revalidates exact bytes and orphan status
+        immediately before the one destructive sidecar retirement, so a
+        concurrent primary creation or exact sidecar update cannot consume a
+        second budget slot or abort later actions.
+        """
+        assert finding.evidence_id is not None
+        assert finding.evidence_digest is not None
+        repository = self.store.lifecycle.operation_repository
+        raw = repository.get_reconciliation_checkpoint_raw(finding.evidence_id)
+        if raw is None or hashlib.sha256(raw).hexdigest() != finding.evidence_digest:
+            return False
+        checkpoint = _ActionCheckpoint.from_canonical_bytes(
+            raw,
+            self.store._manifest_key(),
+            lifecycle_limits=self.lifecycle_limits,
+        )
+        if (
+            checkpoint.operation_id != finding.evidence_id
+            or checkpoint.state != "completed"
+        ):
+            return False
+        if repository.get_raw(finding.evidence_id) is not None:
+            raise CacheBlobLifecycleConflictError(
+                "Reconciliation checkpoint is no longer orphaned",
+                context={
+                    "operation_id": finding.evidence_id,
+                    "operation": "retire_reconcile",
+                },
+            )
+        self._retire_completed_checkpoint(checkpoint, raw)
+        return True
 
     def _apply_candidate_delete(
         self,
@@ -633,62 +690,6 @@ class _Reconciler:
         self.store.lifecycle.operation_repository.retire_reconciliation_checkpoint_if_exact(
             checkpoint.operation_id, expected_raw=checkpoint_raw
         )
-
-    def _retire_orphaned_completed_checkpoints(
-        self,
-        entries: tuple[tuple[str, bytes | None], ...],
-        remaining_actions: int,
-    ) -> tuple[list[ReconciliationFinding], int]:
-        """Authenticate and remove completed sidecars orphaned after a crash."""
-        repository = self.store.lifecycle.operation_repository
-        retired = 0
-        blocked: list[ReconciliationFinding] = []
-        for operation_id, raw in entries:
-            if raw is None:
-                blocked.append(
-                    ReconciliationFinding(
-                        ReconciliationStatus.BLOCKED,
-                        ReconciliationAction.REPORT_ONLY,
-                        "reconciliation_checkpoint_untrusted",
-                        evidence_id=operation_id,
-                    )
-                )
-                continue
-            try:
-                key = self.store._manifest_key()
-                checkpoint = _ActionCheckpoint.from_canonical_bytes(
-                    raw, key, lifecycle_limits=self.lifecycle_limits
-                )
-            except (CacheBlobReconciliationCheckpointError, CacheStorageError):
-                # Invalid evidence is intentionally left untouched. It is a
-                # blocked operator finding, not authority and not a permanent
-                # consumer of every later completed-checkpoint work slot.
-                logger.warning(
-                    "BlobStore reconciliation checkpoint is blocked and was not retired",
-                    extra={"operation_id": operation_id, "operation": "reconcile"},
-                )
-                blocked.append(
-                    ReconciliationFinding(
-                        ReconciliationStatus.BLOCKED,
-                        ReconciliationAction.REPORT_ONLY,
-                        "reconciliation_checkpoint_untrusted",
-                        evidence_id=operation_id,
-                        evidence_digest=hashlib.sha256(raw).hexdigest(),
-                    )
-                )
-                continue
-            if checkpoint.operation_id != operation_id or checkpoint.state != "completed":
-                continue
-            # A completed sidecar with no primary evidence has already crossed
-            # the recoverable terminal boundary.  Do not infer or repeat the
-            # destructive action: authenticate then retire only this exact
-            # private checkpoint.
-            if repository.get_raw(operation_id) is None:
-                if retired >= remaining_actions:
-                    break
-                self._retire_completed_checkpoint(checkpoint, raw)
-                retired += 1
-        return blocked, retired
 
     def _advance_action_checkpoint(
         self,
@@ -982,7 +983,9 @@ class _Reconciler:
         if consumed == 0:
             return current
         if consumed < len(page.entries):
-            return ReconciliationCheckpointCursor(page.entries[consumed - 1][0])
+            return ReconciliationCheckpointCursor(
+                f"reconcile-action-{page.entries[consumed - 1][0]}.json"
+            )
         return page.next_cursor
 
     @staticmethod

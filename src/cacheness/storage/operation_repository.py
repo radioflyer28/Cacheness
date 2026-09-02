@@ -7,7 +7,6 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
 import os
-from heapq import nsmallest
 from pathlib import Path
 from threading import RLock, local
 from typing import BinaryIO, Protocol
@@ -18,7 +17,6 @@ from cacheness.error_handling import (
     CacheBlobLifecycleConflictError,
     CacheManifestIntegrityError,
     CacheReason,
-    CacheUnsafePathError,
 )
 
 from .coordination import interprocess_open_file_lock, lock_stripe_index
@@ -583,8 +581,13 @@ class FileOperationRecordRepository:
         suffix = ".json"
         names, next_name = self.file_ops.list_directory_names_bounded(
             operations_directory,
-            cursor=None if cursor is None else cursor.operation_id,
+            cursor=(
+                None
+                if cursor is None
+                else self._checkpoint_cursor_name(cursor.operation_id)
+            ),
             max_names=limit,
+            max_inventory_names=self.lifecycle_limits.max_inventory_items,
             operation="list_reconciliation_checkpoints",
             name_filter=lambda name: (
                 name.startswith(prefix)
@@ -614,6 +617,13 @@ class FileOperationRecordRepository:
                 else None
             ),
         )
+
+    @staticmethod
+    def _checkpoint_cursor_name(value: str) -> str:
+        """Map legacy bare IDs to the one full-filename cursor namespace."""
+        if FileOperationRecordRepository._is_hex_identifier(value):
+            return f"reconcile-action-{value}.json"
+        return value
 
     def list_reconciliation_checkpoint_raws(self) -> tuple[tuple[str, bytes], ...]:
         """Compatibility iterator composed from bounded sidecar pages."""
@@ -1278,6 +1288,7 @@ class FileOperationRecordRepository:
             operations_directory,
             cursor=None if cursor is None else cursor.name,
             max_names=limit,
+            max_inventory_names=self.lifecycle_limits.max_inventory_items,
             operation="recover_pending",
             name_filter=self._is_eligible_pending_name,
         )
@@ -1530,30 +1541,18 @@ class FileOperationRecordRepository:
             allow_missing_leaf=True,
         )
 
-        def operation_ids() -> Iterator[str]:
-            for path in operations_directory.iterdir():
-                name = path.name
-                if not name.endswith(".json"):
-                    continue
-                operation_id = name.removesuffix(".json")
-                if cursor is not None and operation_id <= cursor.operation_id:
-                    continue
-                if len(operation_id) != 32 or any(
-                    character not in "0123456789abcdef"
-                    for character in operation_id
-                ):
-                    # Page/checkpoint control evidence lives beside operation
-                    # records but must not consume bounded recovery admission.
-                    continue
-                try:
-                    validate_blob_id(operation_id)
-                except CacheUnsafePathError:
-                    # Hostile names are never evidence or deletion targets.
-                    continue
-                yield operation_id
-
         try:
-            selected = nsmallest(limit + 1, operation_ids())
+            names, next_name = self.file_ops.list_directory_names_bounded(
+                operations_directory,
+                cursor=None if cursor is None else f"{cursor.operation_id}.json",
+                max_names=limit,
+                max_inventory_names=self.lifecycle_limits.max_inventory_items,
+                operation="list_page",
+                name_filter=lambda name: (
+                    name.endswith(".json")
+                    and self._is_hex_identifier(name.removesuffix(".json"))
+                ),
+            )
         except FileNotFoundError:
             return OperationPage(entries=(), next_cursor=None)
         except OSError as exc:
@@ -1562,8 +1561,7 @@ class FileOperationRecordRepository:
                 context={"operation": "list_page"},
             ) from exc
 
-        has_more = len(selected) > limit
-        page_ids = selected[:limit]
+        page_ids = tuple(name.removesuffix(".json") for name in names)
         entries: list[tuple[str, bytes]] = []
         for operation_id in page_ids:
             raw = self._read_bounded(
@@ -1573,7 +1571,9 @@ class FileOperationRecordRepository:
                 entries.append((operation_id, raw))
 
         next_cursor = (
-            OperationCursor(page_ids[-1]) if has_more and page_ids else None
+            OperationCursor(next_name.removesuffix(".json"))
+            if next_name is not None
+            else None
         )
         return OperationPage(entries=tuple(entries), next_cursor=next_cursor)
 

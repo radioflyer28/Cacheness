@@ -59,6 +59,7 @@ class CacheReason(str, Enum):
     BLOB_RECONCILIATION_CHECKPOINT_INVALID = "blob_reconciliation_checkpoint_invalid"
     BLOB_STORE_CLOSED = "blob_store_closed"
     BLOB_CLOSE_TIMEOUT = "blob_close_timeout"
+    BLOB_LIFECYCLE_TIMEOUT = "blob_lifecycle_timeout"
     BLOB_LOCK_RELEASE_FAILURE = "blob_lock_release_failure"
 
 
@@ -329,6 +330,19 @@ class CacheBlobCloseTimeoutError(CacheStorageError):
         context: Optional[Dict[str, Any]] = None,
         *,
         reason: CacheReason = CacheReason.BLOB_CLOSE_TIMEOUT,
+    ):
+        super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheBlobLifecycleTimeoutError(CacheStorageError):
+    """Raised when a bounded lifecycle authority cannot be admitted in time."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.BLOB_LIFECYCLE_TIMEOUT,
     ):
         super().__init__(message, _context_with_reason(context, reason))
 

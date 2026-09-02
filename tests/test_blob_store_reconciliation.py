@@ -1209,6 +1209,53 @@ def test_invalid_checkpoint_does_not_starve_later_completed_orphan(
         store.close()
 
 
+def test_apply_charges_an_orphan_sidecar_once_before_later_primary_work(
+    tmp_path: Path,
+) -> None:
+    """One completed orphan plus one safe primary exhaust a two-action budget exactly."""
+    from cacheness.storage.reconciliation import _ActionCheckpoint
+
+    root = tmp_path / "orphan-sidecar-one-charge"
+    limits = LifecycleLimits(
+        manifest_page_size=2,
+        operation_page_size=2,
+        max_reconcile_actions=2,
+        orphan_grace_seconds=0.01,
+        close_wait_seconds=0.02,
+    )
+    store = BlobStore(
+        config=CacheConfig(cache_dir=str(root), lifecycle_limits=limits), backend="json"
+    )
+    try:
+        repository = store.lifecycle.operation_repository
+        key = store._manifest_key(initialize_new_store=True)
+        orphan_id = "a" * 32
+        primary_id = "f" * 32
+        completed = _ActionCheckpoint.new(
+            orphan_id,
+            "a" * 64,
+            ReconciliationAction.RETIRE_EVIDENCE,
+            "completed",
+            key,
+        )
+        repository.create_reconciliation_checkpoint_exclusive(
+            orphan_id,
+            completed.canonical_bytes(lifecycle_limits=limits),
+        )
+        record = _reconciliation_record(store, root, key, primary_id)
+        candidate = store.guarded_handler_io.root / record.candidate_locator
+        store.guarded_handler_io.file_ops.write_bytes_durable(candidate, b"candidate")
+        repository.create_exclusive(record, record.canonical_bytes(lifecycle_limits=limits))
+
+        store.reconcile(apply=True, now=datetime(2026, 8, 31, tzinfo=timezone.utc))
+
+        assert repository.get_reconciliation_checkpoint_raw(orphan_id) is None
+        assert repository.get_raw(primary_id) is None
+        assert not candidate.exists()
+    finally:
+        store.close()
+
+
 def test_signed_primary_mismatched_sidecar_blocks_only_its_primary(
     tmp_path: Path,
 ) -> None:

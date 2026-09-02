@@ -10,20 +10,55 @@ import stat
 from contextlib import contextmanager
 from pathlib import Path
 from threading import RLock
-from typing import BinaryIO, Iterator, Protocol, runtime_checkable
+import time
+from typing import BinaryIO, ClassVar, Iterator, Protocol, runtime_checkable
 
+from cacheness.config import LifecycleLimits
 from cacheness.error_handling import (
+    CacheBlobLifecycleTimeoutError,
     CacheBlobManifestUnauthenticatedError,
     CacheReason,
 )
 
 
 HMAC_SHA256_KEY_BYTES = 32
-_INITIALIZATION_GUARD = RLock()
 _KEY_READY_SUFFIX = ".ready"
 _KEY_INITIALIZATION_LOCK_SUFFIX = ".initializing.lock"
 _MAX_READY_RECORD_BYTES = 256
 _MAX_KEY_INITIALIZATION_ATTEMPTS = 4
+
+
+class _KeyInitializationGuardRegistry:
+    """Retain same-process guards only while one exact key is being initialized.
+
+    Kernel locking is still the cross-process correctness boundary.  This small
+    registry only avoids redundant same-process open/retry races and is keyed
+    by the managed key authority, not process-global first-use state.  Entries
+    retire at reference count zero, so many short-lived stores cannot grow an
+    unbounded lock map.
+    """
+
+    _guard = RLock()
+    _entries: ClassVar[dict[str, tuple[RLock, int]]] = {}
+
+    @classmethod
+    @contextmanager
+    def acquire(cls, identity: str) -> Iterator[None]:
+        with cls._guard:
+            lock, references = cls._entries.get(identity, (RLock(), 0))
+            cls._entries[identity] = (lock, references + 1)
+        try:
+            with lock:
+                yield
+        finally:
+            with cls._guard:
+                current = cls._entries.get(identity)
+                if current is None or current[0] is not lock:
+                    return
+                if current[1] <= 1:
+                    del cls._entries[identity]
+                else:
+                    cls._entries[identity] = (lock, current[1] - 1)
 
 
 class ManifestKeyError(CacheBlobManifestUnauthenticatedError, ValueError):
@@ -112,10 +147,16 @@ class ManifestKeyProvider:
         key: bytes | None = None,
         *,
         durability_provider: ManifestKeyDurabilityProvider | None = None,
+        lifecycle_limits: LifecycleLimits | None = None,
     ):
         self.key_path = Path(key_path)
         self._provided_key = key
         self._durability_provider = durability_provider
+        self._lifecycle_limits = (
+            LifecycleLimits() if lifecycle_limits is None else lifecycle_limits
+        )
+        if not isinstance(self._lifecycle_limits, LifecycleLimits):
+            raise TypeError("lifecycle_limits must be a LifecycleLimits instance")
         if key is not None:
             _validate_key(key)
 
@@ -136,11 +177,11 @@ class ManifestKeyProvider:
         """
         if self._provided_key is not None:
             return self._provided_key
-        # This guard serializes same-process first-use.  The separate stable
-        # initialization lock serializes *all* cross-process key observations.
-        # In particular, an EEXIST loser never reads a winner's partially
-        # written key before it has acquired the same authority.
-        with _INITIALIZATION_GUARD:
+        # This guard is scoped to one managed key.  The separate stable
+        # initialization lock serializes cross-process key observations.  In
+        # particular, an EEXIST loser never reads a winner's partially written
+        # key before it owns the same bounded authority.
+        with _KeyInitializationGuardRegistry.acquire(self._guard_identity()):
             try:
                 self.key_path.parent.mkdir(parents=True, exist_ok=True)
                 self._assert_safe_parent()
@@ -230,6 +271,10 @@ class ManifestKeyProvider:
             f"{self.key_path.name}{_KEY_INITIALIZATION_LOCK_SUFFIX}"
         )
 
+    def _guard_identity(self) -> str:
+        """Return a stable same-process authority identity without a global lock."""
+        return os.path.abspath(os.fspath(self._initialization_lock_path))
+
     @contextmanager
     def _initialization_lock(self) -> Iterator[None]:
         """Acquire the exact key-publication authority before inspecting a key.
@@ -252,26 +297,47 @@ class ManifestKeyProvider:
             self._assert_safe_key_metadata(metadata)
             handle = os.fdopen(descriptor, "r+b", closefd=True)
             descriptor = None
-            from .coordination import interprocess_open_file_lock
+            from .coordination import (
+                InterprocessLockUnavailable,
+                interprocess_open_file_lock,
+            )
 
-            with interprocess_open_file_lock(
-                handle,
-                exclusive=True,
-                operation="manifest_key_initialization",
-                close_handle=True,
-            ):
-                handle = None
-                self._assert_safe_parent()
-                current = os.lstat(self._initialization_lock_path)
-                self._assert_safe_key_metadata(current)
-                if (current.st_dev, current.st_ino) != (
-                    metadata.st_dev,
-                    metadata.st_ino,
-                ):
-                    raise ManifestKeyError(
-                        "Canonical manifest key initialization authority changed"
+            deadline = time.monotonic() + self._lifecycle_limits.key_initialization_timeout_seconds
+            while True:
+                try:
+                    with interprocess_open_file_lock(
+                        handle,
+                        exclusive=True,
+                        operation="manifest_key_initialization",
+                        nonblocking=True,
+                    ):
+                        self._assert_safe_parent()
+                        current = os.lstat(self._initialization_lock_path)
+                        self._assert_safe_key_metadata(current)
+                        if (current.st_dev, current.st_ino) != (
+                            metadata.st_dev,
+                            metadata.st_ino,
+                        ):
+                            raise ManifestKeyError(
+                                "Canonical manifest key initialization authority changed"
+                            )
+                        yield
+                        return
+                except InterprocessLockUnavailable:
+                    # No key or readiness bytes have been read under this
+                    # contender.  On expiry the finally block closes this
+                    # exact descriptor before exposing the stable timeout.
+                    if time.monotonic() >= deadline:
+                        raise CacheBlobLifecycleTimeoutError(
+                            "Canonical manifest key initialization timed out",
+                            context={"operation": "manifest_key_initialization"},
+                        ) from None
+                    time.sleep(
+                        min(
+                            self._lifecycle_limits.key_initialization_retry_seconds,
+                            max(0.0, deadline - time.monotonic()),
+                        )
                     )
-                yield
         except ManifestKeyError:
             raise
         except OSError as exc:

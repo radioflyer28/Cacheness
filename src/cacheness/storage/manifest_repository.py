@@ -14,7 +14,6 @@ from copy import deepcopy
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from heapq import nsmallest
 from pathlib import Path
 from threading import RLock
 from typing import Any, BinaryIO, Callable, Mapping, Optional, Protocol
@@ -580,15 +579,22 @@ class _MetadataManifestRepository:
                     entries = self.backend._metadata.get("entries", {})
                 else:
                     entries = self.backend._entries
-                selected = nsmallest(
-                    limit + 1,
-                    (
-                        key
-                        for key in entries
-                        if isinstance(key, str)
-                        and (cursor is None or key > cursor.key)
-                    ),
-                )
+                inventory_keys = [key for key in entries if isinstance(key, str)]
+                if len(inventory_keys) > self.lifecycle_limits.max_inventory_items:
+                    raise CacheBlobBackendError(
+                        "Canonical manifest inventory exceeds its lifecycle bound",
+                        context={
+                            "operation": "list_page",
+                            "max_inventory_items": self.lifecycle_limits.max_inventory_items,
+                        },
+                    )
+                selected = [
+                    key
+                    for key in inventory_keys
+                    if cursor is None or key > cursor.key
+                ]
+                selected.sort()
+                selected = selected[: limit + 1]
                 has_more = len(selected) > limit
                 page_keys = selected[:limit]
                 page_entries = tuple(

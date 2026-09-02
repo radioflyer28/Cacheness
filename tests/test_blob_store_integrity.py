@@ -8,6 +8,7 @@ import multiprocessing
 import os
 import inspect
 import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -15,6 +16,7 @@ import pytest
 
 from cacheness.error_handling import (
     CacheBlobLifecycleConflictError,
+    CacheBlobLifecycleTimeoutError,
     CacheBlobManifestMalformedError,
     CacheBlobManifestUnauthenticatedError,
     CacheBlobPayloadMissingError,
@@ -33,6 +35,7 @@ from cacheness.storage.integrity import (
     verify_hmac_sha256,
 )
 from cacheness.storage.manifest import BlobManifestV1
+from cacheness.config import LifecycleLimits
 
 
 _KEY = b"0123456789abcdef0123456789abcdef"
@@ -49,6 +52,25 @@ def _leave_crash_partial_key(path: str) -> None:
     finally:
         os.close(descriptor)
     os._exit(0)
+
+
+def _hold_initialization_lock(
+    lock_path: str,
+    entered: multiprocessing.synchronize.Event,
+    release: multiprocessing.synchronize.Event,
+) -> None:
+    """Hold a live POSIX initialization authority without touching key bytes."""
+    if os.name == "nt":  # pragma: no cover - native Windows has its own adapter gate.
+        os._exit(0)
+    import fcntl
+
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        entered.set()
+        release.wait(timeout=10)
+    finally:
+        os.close(descriptor)
 
 
 class _InjectedManifestKeyProvider:
@@ -168,6 +190,133 @@ def test_concurrent_first_key_call_waits_for_acknowledged_ready_record(tmp_path:
     winner.join(timeout=5)
     loser.join(timeout=5)
     assert results == [provider.get_key(), provider.get_key()]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="uses a POSIX child lock holder")
+def test_live_key_initializer_times_out_without_reading_its_winner_bytes(
+    tmp_path: Path,
+) -> None:
+    """A stalled external initializer ends at the policy deadline, not forever."""
+    key_path = tmp_path / "blob_manifest_hmac_key.bin"
+    lock_path = key_path.with_name(f"{key_path.name}.initializing.lock")
+    context = multiprocessing.get_context("spawn")
+    entered = context.Event()
+    release = context.Event()
+    child = context.Process(
+        target=_hold_initialization_lock,
+        args=(str(lock_path), entered, release),
+    )
+    child.start()
+    assert entered.wait(timeout=10)
+    provider = ManifestKeyProvider(
+        key_path,
+        lifecycle_limits=LifecycleLimits(
+            key_initialization_timeout_seconds=0.05,
+            key_initialization_retry_seconds=0.005,
+        ),
+    )
+    started = time.monotonic()
+    try:
+        with pytest.raises(CacheBlobLifecycleTimeoutError) as error:
+            provider.initialize_new_store()
+        assert time.monotonic() - started < 1
+        assert error.value.context["reason"] == CacheReason.BLOB_LIFECYCLE_TIMEOUT.value
+        assert not key_path.exists()
+    finally:
+        release.set()
+        child.join(timeout=10)
+        if child.is_alive():
+            child.terminate()
+            child.join(timeout=10)
+    assert child.exitcode == 0
+    assert provider.initialize_new_store() == provider.get_key()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="uses a POSIX child lock holder")
+def test_live_key_initializer_completes_when_the_holder_releases_before_deadline(
+    tmp_path: Path,
+) -> None:
+    """A retrying contender acquires the same exact authority before timeout."""
+    key_path = tmp_path / "blob_manifest_hmac_key.bin"
+    lock_path = key_path.with_name(f"{key_path.name}.initializing.lock")
+    context = multiprocessing.get_context("spawn")
+    entered = context.Event()
+    release = context.Event()
+    child = context.Process(
+        target=_hold_initialization_lock,
+        args=(str(lock_path), entered, release),
+    )
+    child.start()
+    assert entered.wait(timeout=10)
+    provider = ManifestKeyProvider(
+        key_path,
+        lifecycle_limits=LifecycleLimits(
+            key_initialization_timeout_seconds=1,
+            key_initialization_retry_seconds=0.005,
+        ),
+    )
+    outcome: list[bytes] = []
+    failure: list[BaseException] = []
+
+    def initialize() -> None:
+        try:
+            outcome.append(provider.initialize_new_store())
+        except BaseException as exc:  # pragma: no cover - parent assertion surfaces it.
+            failure.append(exc)
+
+    contender = threading.Thread(target=initialize)
+    contender.start()
+    time.sleep(0.02)
+    release.set()
+    contender.join(timeout=10)
+    child.join(timeout=10)
+    if child.is_alive():
+        child.terminate()
+        child.join(timeout=10)
+    assert not contender.is_alive()
+    assert child.exitcode == 0
+    assert failure == []
+    assert outcome == [provider.get_key()]
+
+
+def test_initialization_guards_are_store_scoped_and_retire_after_parallel_use(
+    tmp_path: Path,
+) -> None:
+    """Distinct keys reach acknowledgement concurrently and leave no guard residue."""
+    import cacheness.storage.integrity as integrity_module
+
+    barrier = threading.Barrier(2)
+    entered = 0
+    entered_guard = threading.Lock()
+
+    class CoordinatedDurability:
+        def acknowledge_new_key(self, _path: Path, _identity: tuple[int, int]) -> None:
+            nonlocal entered
+            with entered_guard:
+                entered += 1
+            barrier.wait(timeout=5)
+
+    first = ManifestKeyProvider(
+        tmp_path / "first" / "blob_manifest_hmac_key.bin",
+        durability_provider=CoordinatedDurability(),
+    )
+    second = ManifestKeyProvider(
+        tmp_path / "second" / "blob_manifest_hmac_key.bin",
+        durability_provider=CoordinatedDurability(),
+    )
+    results: list[bytes] = []
+    threads = [
+        threading.Thread(target=lambda provider=provider: results.append(provider.initialize_new_store()))
+        for provider in (first, second)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+    assert entered == 2
+    assert len(results) == 2
+    assert integrity_module._KeyInitializationGuardRegistry._entries == {}
 
 
 def test_unacknowledged_key_is_resumed_after_provider_failure(tmp_path: Path) -> None:
