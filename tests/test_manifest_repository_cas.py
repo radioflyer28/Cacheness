@@ -32,7 +32,12 @@ from cacheness.storage import coordination
 from cacheness.storage import path_security
 from cacheness.storage import manifest_repository as manifest_repository_module
 from cacheness.storage.path_security import ManagedFileOps, resolve_managed_locator
-from cacheness.storage.operation_repository import FileOperationRecordRepository
+from cacheness.storage.operation_repository import (
+    FileOperationRecordRepository,
+    OperationCursor,
+    PendingControlCursor,
+    ReconciliationCheckpointCursor,
+)
 
 
 def _record(label: str) -> bytes:
@@ -112,6 +117,120 @@ def test_markerless_sibling_head_cannot_hide_raw_absent_family_evidence(
     try:
         with pytest.raises(CacheBlobMigrationRequiredError):
             reopened.list_reconciliation_checkpoint_page()
+    finally:
+        reopened.close()
+        reopened_ops.close()
+
+
+@pytest.mark.parametrize("family", ("primary", "sidecar", "pending"))
+def test_operation_inventory_recovery_compacts_pinned_history_in_bounded_steps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, family: str
+) -> None:
+    """A long-lived record does not strand later live work behind stale slots."""
+    root = tmp_path / f"operation-maintenance-{family}"
+    root.mkdir()
+    limits = LifecycleLimits(operation_page_size=1, max_inventory_items=1)
+    key = b"k" * 32
+    file_ops = ManagedFileOps(root)
+    repository = FileOperationRecordRepository(
+        file_ops,
+        lifecycle_limits=limits,
+        initialization_key_provider=lambda: key,
+    )
+    pinned_id = "a" * 32
+    later_id = "b" * 32
+    pinned_raws = tuple(_record(f"{family}-pinned-{index}") for index in range(9))
+    later_raw = _record(f"{family}-later")
+
+    def pending_name(operation_id: str, raw: bytes) -> str:
+        return (
+            f".{operation_id}.json.pending.{hashlib.sha256(raw).hexdigest()}."
+            f"{'f' * 32}.tmp"
+        )
+
+    if family == "primary":
+        pinned_name, later_name = pinned_id, later_id
+        locate = repository.locator_for
+        list_page = repository.list_page
+        old_cursor = OperationCursor(
+            pinned_id, snapshot_high_water=10, next_sequence=9
+        )
+    elif family == "sidecar":
+        pinned_name, later_name = pinned_id, later_id
+        locate = repository.reconciliation_checkpoint_locator
+        list_page = repository.list_reconciliation_checkpoint_page
+        old_cursor = ReconciliationCheckpointCursor(
+            pinned_id, snapshot_high_water=10, next_sequence=9
+        )
+    else:
+        pinned_name = pending_name(pinned_id, pinned_raws[-1])
+        later_name = pending_name(later_id, later_raw)
+
+        def locate(name: str) -> Path:
+            return root / "operations" / name
+
+        list_page = repository.list_pending_control_page
+        old_cursor = PendingControlCursor(
+            pinned_name, snapshot_high_water=10, next_sequence=9
+        )
+
+    try:
+        repository.initialize_new_store()
+        for raw in pinned_raws:
+            repository._append_inventory_event(family, pinned_name, raw)
+            file_ops.write_bytes_durable(locate(pinned_name), raw)
+        repository._append_inventory_event(family, later_name, later_raw)
+        file_ops.write_bytes_durable(locate(later_name), later_raw)
+
+        # A terminal boundary schedules all charged slots but may only inspect
+        # one.  The remaining continuation is persisted across reopening.
+        assert not repository._compact_inventory_after_retirement(family)
+    finally:
+        repository.close()
+        file_ops.close()
+
+    reopened_ops = ManagedFileOps(root)
+    reopened = FileOperationRecordRepository(
+        reopened_ops,
+        lifecycle_limits=limits,
+        initialization_key_provider=lambda: key,
+    )
+    try:
+        if family == "primary":
+            list_page = reopened.list_page
+        elif family == "sidecar":
+            list_page = reopened.list_reconciliation_checkpoint_page
+        else:
+            list_page = reopened.list_pending_control_page
+        inspected: list[int] = []
+        read_event = reopened._read_inventory_event
+
+        def count_read(observed_family: str, sequence: int):
+            if observed_family == family:
+                inspected.append(sequence)
+            return read_event(observed_family, sequence)
+
+        monkeypatch.setattr(reopened, "_read_inventory_event", count_read)
+        passes = 0
+        while not reopened.compact_inventory_for_recovery():
+            passes += 1
+            assert passes < 16
+        assert passes == 8
+        assert inspected == list(range(2, 11))
+
+        # The exact preexisting high-water cursor still addresses the pinned
+        # record, while a fresh one-item page chain reaches the later live
+        # record without replaying the eight discarded primary/sidecar/pending
+        # slots.
+        old_page = list_page(old_cursor)
+        assert [name for name, _raw in old_page.entries] == [pinned_name]
+        first = list_page(None)
+        assert [name for name, _raw in first.entries] == [pinned_name]
+        assert first.next_cursor is not None
+        second = list_page(first.next_cursor)
+        assert [name for name, _raw in second.entries] == [later_name]
+        assert second.next_cursor is None
+        assert inspected[-3:] == [9, 9, 10]
     finally:
         reopened.close()
         reopened_ops.close()

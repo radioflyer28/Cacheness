@@ -1365,6 +1365,7 @@ class LifecycleEngine:
         # scheduling debt left after authority publication but before the
         # original operation reached its post-authority compaction step.
         self.store.manifest_repository.compact_inventory_for_recovery()
+        self.operation_repository.compact_inventory_for_recovery()
         self.operation_repository.recover_pending_operation_records(
             max_inspections=min(
                 self.lifecycle_limits.max_inventory_items,

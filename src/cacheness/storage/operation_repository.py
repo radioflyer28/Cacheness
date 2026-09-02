@@ -36,7 +36,6 @@ _OPERATION_LEASES = local()
 _INVENTORY_SCHEMA_VERSION = 2
 _INVENTORY_HEAD_MAX_BYTES = 4_096
 _INVENTORY_EVENT_MIN_BYTES = 32 * 1024
-_INVENTORY_COMPACTION_WINDOW = 64
 _INVENTORY_FAMILIES = ("primary", "sidecar", "pending")
 _INVENTORY_INITIALIZATION_SCHEMA_VERSION = 3
 
@@ -616,6 +615,11 @@ class FileOperationRecordRepository:
             # high-water cursor may safely skip them without changing its
             # snapshot membership.
             "first_live_sequence": 1,
+            # A non-zero target is an exact durable upper bound for stale
+            # scheduling work charged by a completed lifecycle boundary.
+            # Recovery consumes it in caller-bounded windows before a later
+            # aggregate clear can build an inventory snapshot.
+            "maintenance_target_sequence": 0,
         }
 
     def _has_preindex_evidence(self, family: str) -> bool:
@@ -728,6 +732,14 @@ class FileOperationRecordRepository:
                 "compact_next_sequence",
                 "first_live_sequence",
             }
+            or set(state)
+            == {
+                "version",
+                "next_sequence",
+                "compact_next_sequence",
+                "first_live_sequence",
+                "maintenance_target_sequence",
+            }
         ):
             raise CacheBlobBackendError(
                 "Lifecycle inventory schema is invalid",
@@ -748,12 +760,27 @@ class FileOperationRecordRepository:
             # Existing v2 heads remain valid.  Their history has not been
             # compacted through this floor yet, so start conservatively.
             state["first_live_sequence"] = 1
+        if "maintenance_target_sequence" not in state:
+            # Existing heads predate an exact debt boundary.  Treat their
+            # already-allocated range as recovery work rather than allowing a
+            # clear to re-scan a lifetime of stale slots as target pages.
+            state["maintenance_target_sequence"] = state["next_sequence"] - 1
         if (
             type(state["first_live_sequence"]) is not int
             or not 1 <= state["first_live_sequence"] <= state["next_sequence"]
         ):
             raise CacheBlobBackendError(
                 "Lifecycle inventory live-sequence floor is invalid",
+                context={"operation": "inventory", "family": family},
+            )
+        if (
+            type(state["maintenance_target_sequence"]) is not int
+            or not 0
+            <= state["maintenance_target_sequence"]
+            < state["next_sequence"]
+        ):
+            raise CacheBlobBackendError(
+                "Lifecycle inventory maintenance target is invalid",
                 context={"operation": "inventory", "family": family},
             )
         return state
@@ -1066,27 +1093,38 @@ class FileOperationRecordRepository:
             )
         return event["name"], event["digest"]
 
-    def _compact_inventory_window(self, family: str, state: dict[str, int]) -> None:
-        """Bounded safe compaction of events whose exact current bytes changed.
+    @staticmethod
+    def _schedule_inventory_maintenance(state: dict[str, int]) -> None:
+        """Charge all allocated positions through one completed lifecycle boundary."""
+        target = state["next_sequence"] - 1
+        if target == 0:
+            return
+        if state["maintenance_target_sequence"] == 0:
+            state["compact_next_sequence"] = state["first_live_sequence"]
+        state["maintenance_target_sequence"] = max(
+            state["maintenance_target_sequence"], target
+        )
+
+    def _compact_inventory_window(self, family: str, state: dict[str, int]) -> bool:
+        """Advance one exact caller-bounded compaction continuation.
 
         Removing a stale event leaves a sparse sequence gap.  Resume cursors
         retain original sequence numbers, so old authenticated tokens simply
         inspect the gap and move forward; no live snapshot member is skipped.
         """
-        # A durable empty-floor proof is terminal maintenance state.  Do not
-        # wrap its round-robin cursor back into a lifetime of already-proven
-        # sparse gaps merely because a later recovery pass was requested.
+        target = state["maintenance_target_sequence"]
+        if target == 0:
+            return True
+        # A durable empty-floor proof is terminal maintenance state.
         if state["first_live_sequence"] == state["next_sequence"]:
             state["compact_next_sequence"] = state["next_sequence"]
-            return
-        start = state["compact_next_sequence"]
-        # ``max_inventory_items`` limits an externally visible recovery page;
-        # it cannot throttle post-retirement maintenance below the number of
-        # immutable events a normal lifecycle can create.  A fixed bounded
-        # maintenance window amortizes more stale positions than one completed
-        # operation can append, including with deliberately tiny page limits.
-        window = _INVENTORY_COMPACTION_WINDOW
-        stop = min(state["next_sequence"], start + window)
+            state["maintenance_target_sequence"] = 0
+            return True
+        start = max(state["compact_next_sequence"], state["first_live_sequence"])
+        stop = min(
+            target + 1,
+            start + self.lifecycle_limits.max_inventory_items,
+        )
         reader: Callable[[str], bytes | None]
         if family == "primary":
             reader = self.get_raw
@@ -1121,9 +1159,11 @@ class FileOperationRecordRepository:
                 # A cursor may start at ``stop`` even when the next event has
                 # not been inspected yet; it cannot skip a live member.
                 state["first_live_sequence"] = stop
-        state["compact_next_sequence"] = (
-            stop if stop < state["next_sequence"] else 1
-        )
+        state["compact_next_sequence"] = stop
+        complete = stop > target
+        if complete:
+            state["maintenance_target_sequence"] = 0
+        return complete
 
     def _append_inventory_event(self, family: str, name: str, raw: bytes) -> None:
         """Record membership before publishing the corresponding control file.
@@ -1180,8 +1220,8 @@ class FileOperationRecordRepository:
                     self._write_inventory_head(family, state)
                     return
 
-    def _compact_inventory_after_retirement(self, family: str) -> None:
-        """Make bounded maintenance only after the owning action completed.
+    def _compact_inventory_after_retirement(self, family: str) -> bool:
+        """Charge and advance bounded maintenance after a completed action.
 
         Starting a reconciliation action must not delete unrelated scheduling
         entries before its destructive payload transition.  Retiring an exact
@@ -1191,17 +1231,35 @@ class FileOperationRecordRepository:
         """
         with self._conditional_transition(f"inventory:{family}"):
             state = self._read_inventory(family)
-            self._compact_inventory_window(family, state)
-            # The ordinary round-robin cursor guarantees global progress, but
-            # a completed action can append its final checkpoint immediately
-            # after that cursor passed.  Revisit the durable live floor once:
-            # this second fixed window directly drains the retiring action's
-            # tail instead of making successful traffic leave sparse history
-            # for future recovery calls.
-            if state["first_live_sequence"] < state["next_sequence"]:
-                state["compact_next_sequence"] = state["first_live_sequence"]
-                self._compact_inventory_window(family, state)
+            self._schedule_inventory_maintenance(state)
+            complete = self._compact_inventory_window(family, state)
             self._write_inventory_head(family, state)
+            return complete
+
+    def compact_inventory_for_recovery(self) -> bool:
+        """Advance one persisted family continuation and report clear readiness.
+
+        This path is called only by lifecycle recovery or aggregate clear
+        admission.  It inspects no more than one ``max_inventory_items``
+        window per invocation, and reads remain entirely non-mutating.
+        """
+        advanced = False
+        for family in _INVENTORY_FAMILIES:
+            with self._conditional_transition(f"inventory:{family}"):
+                state = self._read_inventory(family)
+                if state["maintenance_target_sequence"] == 0:
+                    continue
+                if advanced:
+                    # Head reads are bounded; event inspection is not.  Leave
+                    # the next family for a later recovery call rather than
+                    # multiplying the caller's hard work limit by family.
+                    return False
+                complete = self._compact_inventory_window(family, state)
+                self._write_inventory_head(family, state)
+                advanced = True
+                if not complete:
+                    return False
+        return True
 
     def _inventory_page(
         self,
