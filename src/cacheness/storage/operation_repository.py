@@ -407,6 +407,19 @@ class FileOperationRecordRepository:
         """
         del operation_id
         lock_identity = "clear-resume"
+        lease_key = self._operation_lease_key(lock_identity)
+        leases = self._held_operation_leases()
+        if leases.get(lease_key, 0):
+            # Constructor recovery can hold the store-wide clear continuation
+            # lease while it authenticates inventory state, then re-enter this
+            # boundary to resume the discovered clear record.  Reacquiring a
+            # second descriptor lock would deadlock that same recovery thread.
+            leases[lease_key] += 1
+            try:
+                yield
+            finally:
+                leases[lease_key] -= 1
+            return
         with self._conditional_lock_for(lock_identity):
             locator, handle, expected_identity = self._retained_lock(
                 lock_identity, self._clear_resume_lock_locator()
@@ -416,7 +429,11 @@ class FileOperationRecordRepository:
                 handle, exclusive=True, operation="clear_resume"
             ):
                 self.file_ops.assert_retained_lock_identity(locator, expected_identity)
-                yield
+                leases[lease_key] = 1
+                try:
+                    yield
+                finally:
+                    leases.pop(lease_key, None)
 
     @contextmanager
     def _conditional_transition(

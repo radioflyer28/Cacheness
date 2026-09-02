@@ -59,10 +59,14 @@ class LifecycleEngine:
         self.fault_hook: Callable[[str, LifecycleOperationRecord], None] | None = None
         if self.store._legacy_identity is not None:
             return
-        # Opening a second process must not interpret and advance a clear
-        # record while its creator still owns the snapshot boundary.
-        with self.store._admission_barrier.aggregate_admission():
-            self.recover(_snapshot_admitted=True)
+        # Opening a second process must not inspect or advance operation
+        # inventory while a live clear still owns its continuation.  Aggregate
+        # admission protects the finite snapshot; the clear-resume lease also
+        # covers post-snapshot inventory retirement, preventing a constructor
+        # from racing a durable head replacement with strict path validation.
+        with self.operation_repository.clear_operation_transition("constructor"):
+            with self.store._admission_barrier.aggregate_admission():
+                self.recover(_snapshot_admitted=True)
 
     def _emit(self, step: str, record: LifecycleOperationRecord) -> None:
         if self.test_hook is not None:
