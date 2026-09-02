@@ -49,6 +49,7 @@ from cacheness.storage.operation_repository import (
     PendingControlCursor,
     ReconciliationCheckpointCursor,
 )
+from cacheness.storage.manifest_repository import ManifestCursor
 from cacheness.storage import operation_repository as operation_repository_module
 from cacheness.storage import manifest_repository as manifest_repository_module
 from cacheness.storage.path_security import ManagedFileOps
@@ -406,6 +407,68 @@ def test_manifest_compaction_retains_malformed_live_authority_events(
             assert reopened.manifest_repository._read_inventory_event(1) is not None
     finally:
         reopened.close()
+
+
+@pytest.mark.parametrize("backend_name", ("memory", "json"))
+def test_manifest_live_floor_bounds_clear_after_lifetime_overwrite_prefix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend_name: str
+) -> None:
+    """Memory and JSON clear skip compacted lifetime prefixes after reopen."""
+    root = tmp_path / f"manifest-live-floor-{backend_name}"
+    limits = replace(
+        _small_lifecycle_limits(), manifest_page_size=1, max_inventory_items=1
+    )
+    config = CacheConfig(cache_dir=str(root), lifecycle_limits=limits)
+    backend = InMemoryBackend() if backend_name == "memory" else "json"
+    store = BlobStore(root, backend=backend, config=config)
+    try:
+        for generation in range(20):
+            store.put({"generation": generation}, key="history")
+        store.put({"generation": "later"}, key="later")
+        state = store.manifest_repository._inventory_state()
+        high_water = state["next_sequence"] - 1
+        assert state["first_live_sequence"] == high_water - 1
+        assert store.get("history") == {"generation": 19}
+        assert store.get("later") == {"generation": "later"}
+
+        if backend_name == "json":
+            store.close()
+            store = BlobStore(root, backend="json", config=config)
+            state = store.manifest_repository._inventory_state()
+            assert state["first_live_sequence"] == high_water - 1
+
+        # An old high-water cursor remains valid while beginning at the
+        # durable live floor, rather than inspecting twenty retired slots.
+        old_cursor = ManifestCursor(
+            "~", snapshot_high_water=high_water, next_sequence=1
+        )
+        first_page = store.manifest_repository.list_page(old_cursor, page_size=1)
+        assert first_page.entries[0][0] == "history"
+        assert first_page.next_cursor is not None
+        # Publishing after an already-issued high-water cursor cannot pull a
+        # new member into that finite snapshot.
+        store.put({"generation": "appended"}, key="appended")
+        second_page = store.manifest_repository.list_page(
+            first_page.next_cursor, page_size=1
+        )
+        assert second_page.entries[0][0] == "later"
+        assert second_page.next_cursor is None
+
+        calls = 0
+        original_list_page = store.manifest_repository.list_page
+
+        def count_list_pages(*args: object, **kwargs: object):
+            nonlocal calls
+            calls += 1
+            return original_list_page(*args, **kwargs)
+
+        monkeypatch.setattr(store.manifest_repository, "list_page", count_list_pages)
+        assert store.clear() == 3
+        # Three live members with one-item pages need three source pages; leave
+        # room for a bounded continuation/revalidation call, never history.
+        assert calls <= 5
+    finally:
+        store.close()
 
 
 @pytest.mark.parametrize("family", ("primary", "sidecar", "pending"))

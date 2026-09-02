@@ -516,14 +516,24 @@ class _MetadataManifestRepository:
             "version": _MANIFEST_INVENTORY_SCHEMA_VERSION,
             "next_sequence": 1,
             "compact_next_sequence": 1,
+            # Sequence positions strictly below this floor have been
+            # exact-revalidated as stale.  Keep it in the bounded head rather
+            # than making every memory/JSON caller replay historical gaps.
+            "first_live_sequence": 1,
         }
 
     @staticmethod
     def _validate_inventory_head(state: object) -> dict[str, int]:
         """Validate the durable head without loading any event history."""
-        if not isinstance(state, dict) or set(state) != {
-            "version", "next_sequence", "compact_next_sequence"
-        }:
+        if not isinstance(state, dict) or set(state) not in (
+            {"version", "next_sequence", "compact_next_sequence"},
+            {
+                "version",
+                "next_sequence",
+                "compact_next_sequence",
+                "first_live_sequence",
+            },
+        ):
             raise CacheBlobBackendError(
                 "Canonical manifest inventory is invalid",
                 context={"operation": "manifest_inventory"},
@@ -537,6 +547,19 @@ class _MetadataManifestRepository:
         ):
             raise CacheBlobBackendError(
                 "Canonical manifest inventory version is invalid",
+                context={"operation": "manifest_inventory"},
+            )
+        if "first_live_sequence" not in state:
+            # Heads written before durable live floors are conservative: no
+            # lower sequence can be skipped until a later compaction proves
+            # it stale and persists the new field.
+            state["first_live_sequence"] = 1
+        if (
+            type(state["first_live_sequence"]) is not int
+            or not 1 <= state["first_live_sequence"] <= state["next_sequence"]
+        ):
+            raise CacheBlobBackendError(
+                "Canonical manifest inventory live-sequence floor is invalid",
                 context={"operation": "manifest_inventory"},
             )
         return state
@@ -577,16 +600,33 @@ class _MetadataManifestRepository:
                 )
             state = {**self._empty_inventory_state(), "events": {}}
             setattr(self.backend, "_cacheness_manifest_inventory_v2", state)
-        if not isinstance(state, dict) or set(state) != {
-            "version", "next_sequence", "compact_next_sequence", "events"
-        }:
+        if not isinstance(state, dict) or set(state) not in (
+            {"version", "next_sequence", "compact_next_sequence", "events"},
+            {
+                "version",
+                "next_sequence",
+                "compact_next_sequence",
+                "first_live_sequence",
+                "events",
+            },
+        ):
             raise CacheBlobBackendError(
                 "Canonical manifest inventory is invalid",
                 context={"operation": "manifest_inventory"},
             )
-        self._validate_inventory_head(
-            {name: state[name] for name in ("version", "next_sequence", "compact_next_sequence")}
+        head = self._validate_inventory_head(
+            {
+                name: state[name]
+                for name in (
+                    "version",
+                    "next_sequence",
+                    "compact_next_sequence",
+                    "first_live_sequence",
+                )
+                if name in state
+            }
         )
+        state["first_live_sequence"] = head["first_live_sequence"]
         if not isinstance(state["events"], dict):
             raise CacheBlobBackendError(
                 "Canonical manifest inventory events are invalid",
@@ -694,6 +734,8 @@ class _MetadataManifestRepository:
         state = self._inventory_state()
         start = state["compact_next_sequence"]
         stop = min(state["next_sequence"], start + _MANIFEST_INVENTORY_COMPACTION_WINDOW)
+        first_remaining: int | None = None
+        floor_unresolved = False
         for sequence in range(start, stop):
             event = self._read_inventory_event(sequence)
             if event is None:
@@ -710,6 +752,8 @@ class _MetadataManifestRepository:
                 # Compaction is post-publication best-effort maintenance, so
                 # preserve the event and keep progressing through this bounded
                 # window instead of failing the unrelated write/remove.
+                if sequence >= state["first_live_sequence"]:
+                    floor_unresolved = True
                 continue
             if current is None or hashlib.sha256(current).hexdigest() != digest:
                 if type(self.backend) is JsonBackend:
@@ -721,6 +765,20 @@ class _MetadataManifestRepository:
                         pass
                 else:
                     state["events"].pop(sequence, None)
+            elif sequence >= state["first_live_sequence"] and first_remaining is None:
+                first_remaining = sequence
+        # Compaction can wrap and encounter the existing floor in a later
+        # window.  Advancing only when the window begins at that floor strands
+        # lifetime history after the floor's live record is retired.  This
+        # branch uses only exact revalidation results from the inspected
+        # window, and never lowers the durable monotonic floor.
+        if (
+            start <= state["first_live_sequence"] < stop
+            and not floor_unresolved
+        ):
+            state["first_live_sequence"] = (
+                first_remaining if first_remaining is not None else stop
+            )
         state["compact_next_sequence"] = stop if stop < state["next_sequence"] else 1
         self._write_inventory_head(state)
 
@@ -870,11 +928,12 @@ class _MetadataManifestRepository:
                     if cursor is None or cursor.snapshot_high_water is None
                     else cursor.snapshot_high_water
                 )
-                position = (
+                requested_position = (
                     1
                     if cursor is None or cursor.next_sequence is None
                     else cursor.next_sequence
                 )
+                position = max(requested_position, inventory["first_live_sequence"])
                 inspected = 0
                 page_entries: list[tuple[str, bytes]] = []
                 entry_next_cursors: list[ManifestCursor] = []
