@@ -1961,38 +1961,46 @@ def test_manifest_tail_ahead_crash_window_is_page_safe_and_append_resumable(
         backend.close()
 
 
-@pytest.mark.parametrize("unrelated", (False, True))
+@pytest.mark.parametrize(
+    ("collision_keys", "expected_offset"),
+    (
+        (("b",), 0),
+        (("other",), 1),
+        (("other", "b"), 1),
+        (("other", "other-two"), 2),
+    ),
+)
 def test_json_manifest_collision_rebuilds_sequence_bound_event_bytes(
-    tmp_path: Path, unrelated: bool
+    tmp_path: Path, collision_keys: tuple[str, ...], expected_offset: int
 ) -> None:
-    """An unacknowledged event never gets re-published at a new sequence."""
-    backend = JsonBackend(tmp_path / f"collision-{unrelated}.json")
+    """Every collision retry writes bytes signed for its own sequence."""
+    backend = JsonBackend(tmp_path / f"collision-{len(collision_keys)}.json")
     repository = JsonManifestRepository(backend)
     try:
         repository.put_raw("a", _record("a"))
         state = repository._inventory_state()
         sequence = state["next_sequence"]
-        existing_key = "other" if unrelated else "b"
-        existing_record = _record("other") if unrelated else _record("b")
-        event = repository._sign_inventory_value(
-            {
-                "version": manifest_repository_module._MANIFEST_INVENTORY_SCHEMA_VERSION,
-                "store_id": repository._inventory_store_id(),
-                "epoch": state["epoch"],
-                "sequence": sequence,
-                "key": existing_key,
-                "digest": hashlib.sha256(existing_record).hexdigest(),
-            },
-            initialize_new_store=True,
-        )
-        encoded = manifest_repository_module.json_dumps(event, default=str).encode("utf-8")
         assert repository._json_lock_file_ops is not None
-        repository._json_lock_file_ops.create_bytes_durable_exclusive(
-            repository._json_inventory_event_locator(sequence), encoded
-        )
+        for offset, existing_key in enumerate(collision_keys):
+            event_sequence = sequence + offset
+            event = repository._sign_inventory_value(
+                {
+                    "version": manifest_repository_module._MANIFEST_INVENTORY_SCHEMA_VERSION,
+                    "store_id": repository._inventory_store_id(),
+                    "epoch": state["epoch"],
+                    "sequence": event_sequence,
+                    "key": existing_key,
+                    "digest": hashlib.sha256(_record(existing_key)).hexdigest(),
+                },
+                initialize_new_store=True,
+            )
+            repository._json_lock_file_ops.create_bytes_durable_exclusive(
+                repository._json_inventory_event_locator(event_sequence),
+                manifest_repository_module.json_dumps(event, default=str).encode("utf-8"),
+            )
 
         repository.put_raw("b", _record("b"))
-        expected_sequence = sequence + 1 if unrelated else sequence
+        expected_sequence = sequence + expected_offset
         event_raw = repository._json_lock_file_ops.read_bytes_bounded(
             repository._json_inventory_event_locator(expected_sequence),
             max_bytes=repository._inventory_event_max_bytes(),
