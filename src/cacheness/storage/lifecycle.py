@@ -37,6 +37,13 @@ from .operation_repository import FileOperationRecordRepository
 from .path_security import resolve_managed_locator, validate_blob_id
 
 
+# This is signed as part of the canonical tombstone manifest's handler
+# metadata.  It is deliberately an implementation-reserved key rather than a
+# second, unsigned filename convention: a tombstone must name the exact
+# delete operation that owns its eventual reclamation.
+_TOMBSTONE_OPERATION_ID_FIELD = "_cacheness_tombstone_operation_id"
+
+
 class LifecycleEngine:
     """Coordinate the only direct BlobStore write authority transition.
 
@@ -1326,47 +1333,37 @@ class LifecycleEngine:
         self,
         key: str,
         generation: str,
+        manifest: BlobManifestV1,
     ) -> tuple[LifecycleOperationRecord, Path] | None:
-        """Find one authenticated delete record for an observed tombstone."""
-        cursor = None
-        remaining_actions = self.lifecycle_limits.max_reconcile_actions
-        remaining_inventory_work = self.lifecycle_limits.max_reconcile_actions
-        while remaining_actions > 0 and remaining_inventory_work > 0:
-            page = self.operation_repository.list_page(
-                cursor,
-                page_size=min(
-                    self.lifecycle_limits.operation_page_size,
-                    remaining_actions,
-                ),
-                max_inspections=min(
-                    self.lifecycle_limits.max_inventory_items,
-                    remaining_inventory_work,
-                ),
-            )
-            # Sparse or stale inventory positions still required an exact
-            # index/event read.  Charge them separately from authenticated
-            # lifecycle actions so a high-water history cannot make one
-            # recovery call perform unbounded empty-page traversal.
-            remaining_inventory_work -= page.inspected_positions
-            for operation_id, raw in page.entries:
-                recovered = self._recoverable_record(operation_id, raw)
-                remaining_actions -= 1
-                if recovered is None:
-                    continue
-                record, candidate_locator, _previous_locator = recovered
-                if (
-                    record.transition is OperationTransition.TOMBSTONE
-                    and record.key == key
-                    and record.generation == generation
-                ):
-                    return record, candidate_locator
-                if remaining_actions == 0:
-                    return None
-            if page.next_cursor is None:
-                return None
-            if remaining_inventory_work == 0:
-                return None
-            cursor = page.next_cursor
+        """Resolve the tombstone's signed delete-operation reference exactly.
+
+        A tombstone is public lifecycle authority.  Looking up its owning
+        evidence by repeatedly scanning an unrelated global inventory made
+        deletion convergence depend on older live operations.  The signed
+        manifest instead carries the opaque operation ID, and the referenced
+        record remains independently authenticated and bound to this key and
+        tombstone generation before it can reclaim anything.
+        """
+        operation_id = manifest.handler_metadata.get(_TOMBSTONE_OPERATION_ID_FIELD)
+        if not isinstance(operation_id, str):
+            return None
+        try:
+            validate_blob_id(operation_id)
+        except ValueError:
+            return None
+        raw = self.operation_repository.get_raw(operation_id)
+        if raw is None:
+            return None
+        recovered = self._recoverable_record(operation_id, raw)
+        if recovered is None:
+            return None
+        record, candidate_locator, _previous_locator = recovered
+        if (
+            record.transition is OperationTransition.TOMBSTONE
+            and record.key == key
+            and record.generation == generation
+        ):
+            return record, candidate_locator
         return None
 
     def recover(self, *, _snapshot_admitted: bool = False) -> None:
@@ -1679,7 +1676,9 @@ class LifecycleEngine:
                 )
 
         if manifest.state == "tombstoned":
-            existing_record = self._find_tombstone_record(key, manifest.generation)
+            existing_record = self._find_tombstone_record(
+                key, manifest.generation, manifest
+            )
             if existing_record is None:
                 raise CacheBlobLifecycleConflictError(
                     "BlobStore tombstone has no matching authenticated operation",
@@ -1723,10 +1722,13 @@ class LifecycleEngine:
         self.operation_repository.create_exclusive(record, self._record_raw(record))
         self._emit("evidence_created", record)
 
+        tombstone_handler_metadata = dict(manifest.handler_metadata)
+        tombstone_handler_metadata[_TOMBSTONE_OPERATION_ID_FIELD] = operation_id
         tombstone = replace(
             manifest,
             generation=tombstone_generation,
             state="tombstoned",
+            handler_metadata=tombstone_handler_metadata,
             signature="",
         )
         signed_tombstone = tombstone.with_signature(

@@ -603,6 +603,55 @@ def test_repeated_delete_resumes_the_same_signed_tombstone(
         store.close()
 
 
+def test_repeated_delete_uses_the_signed_tombstone_operation_reference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unrelated inventory history cannot block a tombstone's own cleanup."""
+    store = BlobStore(
+        tmp_path / "direct-tombstone-reference",
+        backend="json",
+        config=CacheConfig(
+            lifecycle_limits=LifecycleLimits(
+                operation_page_size=1,
+                max_inventory_items=1,
+                max_reconcile_actions=1,
+            )
+        ),
+    )
+    try:
+        key = store.put({"state": "present"}, key="repeat-key")
+
+        def interrupt_reclamation(seam: str, _record: Any) -> None:
+            if seam == "payload_cleanup":
+                raise RuntimeError("pause tombstone cleanup")
+
+        store.lifecycle.fault_hook = interrupt_reclamation
+        with pytest.raises(CacheBlobRecoverableCleanupError):
+            store.delete(key)
+
+        raw_tombstone = store.manifest_repository.get_raw(key)
+        assert raw_tombstone is not None
+        tombstone = BlobManifestV1.from_canonical_bytes(raw_tombstone)
+        operation_id = tombstone.handler_metadata[
+            "_cacheness_tombstone_operation_id"
+        ]
+        assert isinstance(operation_id, str)
+
+        def inventory_must_not_be_scanned(*_args: Any, **_kwargs: Any) -> None:
+            raise AssertionError("tombstone recovery scanned unrelated inventory")
+
+        monkeypatch.setattr(
+            store.lifecycle.operation_repository,
+            "list_page",
+            inventory_must_not_be_scanned,
+        )
+        store.lifecycle.fault_hook = None
+        assert store.delete(key) is True
+        assert store.get(key) is None
+    finally:
+        store.close()
+
+
 def test_stale_delete_conflict_preserves_newer_committed_generation(
     tmp_path: Path,
 ) -> None:
