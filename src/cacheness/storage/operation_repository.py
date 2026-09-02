@@ -78,10 +78,16 @@ class OperationPage:
     # reconciler can consume only a prefix of a page without rebuilding a
     # mutable lexical cursor or replaying that prefix on resume.
     entry_next_cursors: tuple[OperationCursor, ...] = ()
+    # Inventory members are work even when compacted or stale and therefore
+    # yield no public evidence record.  Recovery uses this count to bound a
+    # sparse historical scan independently of its action allowance.
+    inspected_positions: int = 0
 
     def __post_init__(self) -> None:
         if self.entry_next_cursors and len(self.entry_next_cursors) != len(self.entries):
             raise ValueError("operation entry cursors must align with page entries")
+        if type(self.inspected_positions) is not int or self.inspected_positions < 0:
+            raise ValueError("operation inspected positions must be non-negative")
 
 
 @dataclass(frozen=True)
@@ -127,10 +133,13 @@ class ReconciliationCheckpointPage:
     entries: tuple[tuple[str, bytes | None], ...]
     next_cursor: ReconciliationCheckpointCursor | None
     entry_next_cursors: tuple[ReconciliationCheckpointCursor, ...] = ()
+    inspected_positions: int = 0
 
     def __post_init__(self) -> None:
         if self.entry_next_cursors and len(self.entry_next_cursors) != len(self.entries):
             raise ValueError("sidecar entry cursors must align with page entries")
+        if type(self.inspected_positions) is not int or self.inspected_positions < 0:
+            raise ValueError("sidecar inspected positions must be non-negative")
 
 
 @dataclass(frozen=True)
@@ -170,10 +179,13 @@ class PendingControlPage:
     # Keep the source-sequence continuation for every yielded member so that a
     # later call cannot rebuild a mutable lexical position and replay it.
     entry_next_cursors: tuple[PendingControlCursor, ...] = ()
+    inspected_positions: int = 0
 
     def __post_init__(self) -> None:
         if self.entry_next_cursors and len(self.entry_next_cursors) != len(self.entries):
             raise ValueError("pending entry cursors must align with page entries")
+        if type(self.inspected_positions) is not int or self.inspected_positions < 0:
+            raise ValueError("pending inspected positions must be non-negative")
 
 
 class OperationRecordRepository(Protocol):
@@ -208,6 +220,7 @@ class OperationRecordRepository(Protocol):
         cursor: OperationCursor | None = None,
         *,
         page_size: int | None = None,
+        max_inspections: int | None = None,
     ) -> OperationPage:
         """Return a stable, bounded inventory page without interpreting evidence."""
 
@@ -216,6 +229,7 @@ class OperationRecordRepository(Protocol):
         cursor: ReconciliationCheckpointCursor | None = None,
         *,
         page_size: int | None = None,
+        max_inspections: int | None = None,
     ) -> ReconciliationCheckpointPage:
         """Return bounded private-sidecar bytes without assigning authority."""
 
@@ -966,10 +980,19 @@ class FileOperationRecordRepository:
         retain original sequence numbers, so old authenticated tokens simply
         inspect the gap and move forward; no live snapshot member is skipped.
         """
+        # A durable empty-floor proof is terminal maintenance state.  Do not
+        # wrap its round-robin cursor back into a lifetime of already-proven
+        # sparse gaps merely because a later recovery pass was requested.
+        if state["first_live_sequence"] == state["next_sequence"]:
+            state["compact_next_sequence"] = state["next_sequence"]
+            return
         start = state["compact_next_sequence"]
-        window = min(
-            _INVENTORY_COMPACTION_WINDOW, self.lifecycle_limits.max_inventory_items
-        )
+        # ``max_inventory_items`` limits an externally visible recovery page;
+        # it cannot throttle post-retirement maintenance below the number of
+        # immutable events a normal lifecycle can create.  A fixed bounded
+        # maintenance window amortizes more stale positions than one completed
+        # operation can append, including with deliberately tiny page limits.
+        window = _INVENTORY_COMPACTION_WINDOW
         stop = min(state["next_sequence"], start + window)
         reader: Callable[[str], bytes | None]
         if family == "primary":
@@ -1070,6 +1093,15 @@ class FileOperationRecordRepository:
         with self._conditional_transition(f"inventory:{family}"):
             state = self._read_inventory(family)
             self._compact_inventory_window(family, state)
+            # The ordinary round-robin cursor guarantees global progress, but
+            # a completed action can append its final checkpoint immediately
+            # after that cursor passed.  Revisit the durable live floor once:
+            # this second fixed window directly drains the retiring action's
+            # tail instead of making successful traffic leave sparse history
+            # for future recovery calls.
+            if state["first_live_sequence"] < state["next_sequence"]:
+                state["compact_next_sequence"] = state["first_live_sequence"]
+                self._compact_inventory_window(family, state)
             self._write_inventory_head(family, state)
 
     def _inventory_page(
@@ -1078,9 +1110,12 @@ class FileOperationRecordRepository:
         cursor: OperationCursor | ReconciliationCheckpointCursor | PendingControlCursor | None,
         *,
         page_size: int,
+        max_inspections: int | None = None,
         read_current: Callable[[str], bytes | None],
         cursor_type: type[OperationCursor] | type[ReconciliationCheckpointCursor] | type[PendingControlCursor],
-    ) -> tuple[tuple[tuple[str, bytes | None], ...], object | None, tuple[object, ...]]:
+    ) -> tuple[
+        tuple[tuple[str, bytes | None], ...], object | None, tuple[object, ...], int
+    ]:
         """Read at most one stable high-water page from one family index."""
         state = self._read_inventory(family)
         high_water = (
@@ -1095,6 +1130,17 @@ class FileOperationRecordRepository:
         # an authenticated cursor's next position.  It only records a proven
         # lower bound, which prevents a fresh recovery from paying lifetime
         # cost for empty scheduling history.
+        inspection_limit = (
+            self.lifecycle_limits.max_inventory_items
+            if max_inspections is None
+            else max_inspections
+        )
+        if (
+            type(inspection_limit) is not int
+            or inspection_limit <= 0
+            or inspection_limit > self.lifecycle_limits.max_inventory_items
+        ):
+            raise ValueError("inventory inspection limit exceeds configured lifecycle limit")
         position = max(requested_position, state["first_live_sequence"])
         inspected = 0
         entries: list[tuple[str, bytes | None]] = []
@@ -1114,7 +1160,7 @@ class FileOperationRecordRepository:
             last_name = "~"
         while (
             position <= high_water
-            and inspected < self.lifecycle_limits.max_inventory_items
+            and inspected < inspection_limit
             and len(entries) < page_size
         ):
             event = self._read_inventory_event(family, position)
@@ -1149,7 +1195,7 @@ class FileOperationRecordRepository:
                 snapshot_high_water=high_water,
                 next_sequence=position,
             )
-        return tuple(entries), next_cursor, tuple(entry_next_cursors)
+        return tuple(entries), next_cursor, tuple(entry_next_cursors), inspected
 
     def locator_for(self, operation_id: str) -> Path:
         """Derive a contained locator from an opaque operation identifier."""
@@ -1386,6 +1432,7 @@ class FileOperationRecordRepository:
         cursor: ReconciliationCheckpointCursor | None = None,
         *,
         page_size: int | None = None,
+        max_inspections: int | None = None,
     ) -> ReconciliationCheckpointPage:
         """Return one stable bounded page of reconciliation sidecar bytes.
 
@@ -1397,10 +1444,11 @@ class FileOperationRecordRepository:
         if cursor is not None and not isinstance(cursor, ReconciliationCheckpointCursor):
             raise TypeError("reconciliation checkpoint cursor is invalid")
         limit = self._page_size(page_size)
-        records, next_cursor, entry_next_cursors = self._inventory_page(
+        records, next_cursor, entry_next_cursors, inspected_positions = self._inventory_page(
             "sidecar",
             cursor,
             page_size=limit,
+            max_inspections=max_inspections,
             read_current=self.get_reconciliation_checkpoint_raw,
             cursor_type=ReconciliationCheckpointCursor,
         )
@@ -1408,6 +1456,7 @@ class FileOperationRecordRepository:
             entries=records,
             next_cursor=next_cursor,
             entry_next_cursors=entry_next_cursors,
+            inspected_positions=inspected_positions,
         )
 
     @staticmethod
@@ -1509,6 +1558,12 @@ class FileOperationRecordRepository:
                     self.reconciliation_checkpoint_locator(operation_id)
                 )
             self._compact_inventory_after_retirement("sidecar")
+            # The durable write protocol records its private pending control
+            # before every rename.  At this completed sidecar boundary those
+            # candidates are no longer live authority, so amortize their
+            # exact revalidation here as well instead of deferring ordinary
+            # successful traffic to a later recovery call.
+            self._compact_inventory_after_retirement("pending")
         except CacheBlobLifecycleConflictError:
             raise
         except OSError as exc:
@@ -2085,7 +2140,10 @@ class FileOperationRecordRepository:
         return None
 
     def list_pending_control_page(
-        self, cursor: PendingControlCursor | None
+        self,
+        cursor: PendingControlCursor | None,
+        *,
+        max_inspections: int | None = None,
     ) -> PendingControlPage:
         """Read an indexed high-water page of pending controls.
 
@@ -2096,10 +2154,11 @@ class FileOperationRecordRepository:
         if cursor is not None and not isinstance(cursor, PendingControlCursor):
             raise TypeError("pending control cursor is invalid")
         limit = self.lifecycle_limits.operation_page_size
-        entries, next_cursor, entry_next_cursors = self._inventory_page(
+        entries, next_cursor, entry_next_cursors, inspected_positions = self._inventory_page(
             "pending",
             cursor,
             page_size=limit,
+            max_inspections=max_inspections,
             read_current=self._get_pending_control_raw,
             cursor_type=PendingControlCursor,
         )
@@ -2107,9 +2166,12 @@ class FileOperationRecordRepository:
             entries=entries,
             next_cursor=next_cursor,
             entry_next_cursors=entry_next_cursors,
+            inspected_positions=inspected_positions,
         )
 
-    def recover_pending_operation_records(self) -> tuple[str, ...]:
+    def recover_pending_operation_records(
+        self, *, max_inspections: int | None = None
+    ) -> tuple[str, ...]:
         """Promote digest-bound interrupted lifecycle control candidates.
 
         A candidate name binds one exact final control name and SHA-256 of its
@@ -2119,7 +2181,7 @@ class FileOperationRecordRepository:
         """
         cursor = self._pending_recovery_cursor()
         pending_history_exists = self._read_inventory("pending")["next_sequence"] > 1
-        page = self.list_pending_control_page(cursor)
+        page = self.list_pending_control_page(cursor, max_inspections=max_inspections)
         recovered: list[str] = []
         eligible_actions = 0
         last_processed_index: int | None = None
@@ -2299,6 +2361,10 @@ class FileOperationRecordRepository:
                         },
                     )
             self._compact_inventory_after_retirement("primary")
+            # Primary lifecycle retirement is the normal completion boundary
+            # for create/replace/delete.  Drain its durable pending-control
+            # residue here; reads remain strictly non-mutating.
+            self._compact_inventory_after_retirement("pending")
         except CacheBlobLifecycleConflictError:
             raise
         except OSError as exc:
@@ -2334,6 +2400,7 @@ class FileOperationRecordRepository:
         cursor: OperationCursor | None = None,
         *,
         page_size: int | None = None,
+        max_inspections: int | None = None,
     ) -> OperationPage:
         """Return one bounded page using only ``page_size + 1`` ID slots.
 
@@ -2343,10 +2410,11 @@ class FileOperationRecordRepository:
         if cursor is not None and not isinstance(cursor, OperationCursor):
             raise TypeError("operation cursor must be an OperationCursor or None")
         limit = self._page_size(page_size)
-        records, next_cursor, entry_next_cursors = self._inventory_page(
+        records, next_cursor, entry_next_cursors, inspected_positions = self._inventory_page(
             "primary",
             cursor,
             page_size=limit,
+            max_inspections=max_inspections,
             read_current=self.get_raw,
             cursor_type=OperationCursor,
         )
@@ -2362,6 +2430,7 @@ class FileOperationRecordRepository:
                 for (_operation_id, raw), cursor in zip(records, entry_next_cursors)
                 if raw is not None
             ),
+            inspected_positions=inspected_positions,
         )
 
     def iter_raw(self) -> Iterator[tuple[str, bytes]]:

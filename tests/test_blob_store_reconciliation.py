@@ -1424,15 +1424,19 @@ def test_digest_invalid_pending_control_does_not_consume_recovery_action_budget(
     )
     try:
         repository = store.lifecycle.operation_repository
+        repository.initialize_new_store()
         operations = root / "operations"
         operations.mkdir(exist_ok=True)
         invalid_id = "0" * 32
         valid_id = "f" * 32
         invalid = operations / f".{invalid_id}.json.pending.{'0' * 64}.{'a' * 32}.tmp"
-        invalid.write_bytes(b"digest-mismatch")
+        invalid_raw = b"digest-mismatch"
+        repository._append_inventory_event("pending", invalid.name, invalid_raw)
+        invalid.write_bytes(invalid_raw)
         valid_raw = b"valid-control"
         valid_digest = hashlib.sha256(valid_raw).hexdigest()
         valid = operations / f".{valid_id}.json.pending.{valid_digest}.{'b' * 32}.tmp"
+        repository._append_inventory_event("pending", valid.name, valid_raw)
         valid.write_bytes(valid_raw)
 
         assert repository.recover_pending_operation_records() == (valid_id,)
@@ -1453,17 +1457,20 @@ def test_pending_recovery_pages_past_large_invalid_prefix_without_unbounded_read
     )
     try:
         repository = store.lifecycle.operation_repository
+        repository.initialize_new_store()
         operations = root / "operations"
         operations.mkdir(exist_ok=True)
         for index in range(6):
             operation_id = f"{index:032x}"
-            (operations / f".{operation_id}.json.pending.{'0' * 64}.{index:032x}.tmp").write_bytes(
-                b"bad-digest"
-            )
+            pending = operations / f".{operation_id}.json.pending.{'0' * 64}.{index:032x}.tmp"
+            repository._append_inventory_event("pending", pending.name, b"bad-digest")
+            pending.write_bytes(b"bad-digest")
         valid_id = "f" * 32
         raw = b"valid-control"
         digest = hashlib.sha256(raw).hexdigest()
-        (operations / f".{valid_id}.json.pending.{digest}.{'f' * 32}.tmp").write_bytes(raw)
+        pending = operations / f".{valid_id}.json.pending.{digest}.{'f' * 32}.tmp"
+        repository._append_inventory_event("pending", pending.name, raw)
+        pending.write_bytes(raw)
 
         calls: list[Path] = []
         original_read = repository.file_ops.read_bytes_bounded
@@ -1476,19 +1483,11 @@ def test_pending_recovery_pages_past_large_invalid_prefix_without_unbounded_read
         for iteration in range(4):
             before = len(calls)
             repository.recover_pending_operation_records()
-            # The first legacy recovery performs one explicitly bounded
-            # bootstrap into the high-water sequence. Later calls inspect only
-            # the head, one immutable event window, and its exact candidates.
+            # Every pass starts from durable v2 inventory and inspects only its
+            # configured current page plus a bounded stale-event maintenance
+            # window; it never rebuilds a legacy directory ordering.
             assert len(calls) - before <= (
-                limits.max_inventory_items
-                + (2 * limits.operation_page_size)
-                + 2
-                if iteration == 0
-                # Each later pass reads a bounded current recovery page plus
-                # one bounded stale-event compaction window.
-                else 4
-                + (2 * limits.operation_page_size)
-                + (2 * limits.max_inventory_items)
+                4 + (2 * limits.operation_page_size) + 64
             )
         assert repository.get_raw(valid_id) == raw
         # The exact high-water sequence is terminal after the valid candidate;
@@ -1547,15 +1546,117 @@ def test_pending_inventory_compaction_skips_a_lifetime_stale_prefix(
         monkeypatch.setattr(repository.file_ops, "read_bytes_bounded", count_reads)
         assert repository.recover_pending_operation_records() == (operation_id,)
 
-        # Head/event/candidate reads are bounded by the configured current
-        # window, independent of the forty retired historical candidates.
-        assert len(calls) <= 8 + (2 * limits.max_inventory_items)
+        # Recovery itself consumes only the current page. Its post-retirement
+        # maintenance then pays one fixed 64-position compaction window, which
+        # is independent of the small externally visible page limit and keeps
+        # successful control traffic from accumulating stale history.
+        assert len(calls) <= 8 + 64
         assert repository.get_raw(operation_id) == raw_record
         compacted = repository._read_inventory("pending")
         assert compacted["first_live_sequence"] == compacted["next_sequence"] == 42
         assert not repository._inventory_event_locator("pending", 41).exists()
     finally:
         store.close()
+
+
+@pytest.mark.parametrize("max_inventory_items", (1, 2))
+def test_successful_blob_lifecycle_retirement_never_leaves_sparse_primary_history(
+    tmp_path: Path,
+    max_inventory_items: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Normal create/replace/delete traffic compacts faster than it appends."""
+    root = tmp_path / f"success-history-{max_inventory_items}"
+    limits = replace(
+        _small_lifecycle_limits(), max_inventory_items=max_inventory_items
+    )
+    store = BlobStore(
+        config=CacheConfig(cache_dir=str(root), lifecycle_limits=limits), backend="json"
+    )
+    try:
+        for index in range(32):
+            assert store.put({"index": index}, key="stable") == "stable"
+            assert store.delete("stable")
+
+        repository = store.lifecycle.operation_repository
+        state = repository._read_inventory("primary")
+        assert state["first_live_sequence"] == state["next_sequence"]
+        assert repository.list_page(page_size=1).entries == ()
+        assert repository.list_page(page_size=1).next_cursor is None
+
+        reads: list[Path] = []
+        original_read = repository.file_ops.read_bytes_bounded
+
+        def count_reads(locator: Path, *, max_bytes: int) -> bytes:
+            reads.append(locator)
+            return original_read(locator, max_bytes=max_bytes)
+
+        monkeypatch.setattr(repository.file_ops, "read_bytes_bounded", count_reads)
+        store.lifecycle.recover()
+
+        # An already compacted terminal inventory pays only head/current-page
+        # checks; it does not revisit the 64 retired successful operations.
+        assert len(reads) <= 8
+    finally:
+        store.close()
+
+
+def test_manifest_compaction_debt_recovers_after_post_authority_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reopen and clear consume manifest debt without making reads mutate it."""
+    root = tmp_path / "manifest-maintenance-debt"
+    limits = replace(_small_lifecycle_limits(), max_inventory_items=1)
+    config = CacheConfig(cache_dir=str(root), lifecycle_limits=limits)
+    store = BlobStore(root, backend="json", config=config)
+    try:
+        assert store.put({"generation": 0}, key="debt") == "debt"
+        repository = store.manifest_repository
+        original_compact = repository._compact_inventory_window
+        failures_remaining = 3
+
+        def fail_after_authority() -> None:
+            nonlocal failures_remaining
+            if failures_remaining:
+                failures_remaining -= 1
+                raise OSError("post-authority compaction interruption")
+            original_compact()
+
+        monkeypatch.setattr(repository, "_compact_inventory_window", fail_after_authority)
+        for generation in range(1, 4):
+            with pytest.raises(CacheBlobBackendError):
+                store.put({"generation": generation}, key="debt")
+
+        inventory_before_read = repository._inventory_state().copy()
+        assert store.get("debt") == {"generation": 3}
+        assert repository._inventory_state() == inventory_before_read
+    finally:
+        store.close()
+
+    reopened = BlobStore(root, backend="json", config=config)
+    try:
+        repository = reopened.manifest_repository
+        state = repository._inventory_state()
+        # Reopen uses the explicit mutating recovery boundary to retire all
+        # stale post-authority events in its fixed maintenance window.
+        assert state["first_live_sequence"] == state["next_sequence"] - 1
+
+        pages = 0
+        original_list_page = repository.list_page
+
+        def count_pages(*args: object, **kwargs: object):
+            nonlocal pages
+            pages += 1
+            return original_list_page(*args, **kwargs)
+
+        monkeypatch.setattr(repository, "list_page", count_pages)
+        assert reopened.clear() == 1
+        # Clear has one snapshot page plus at most a terminal bridge/check;
+        # its work is now constant in the one live manifest rather than the
+        # stale generations injected before reopen.
+        assert pages <= 2
+    finally:
+        reopened.close()
 
 
 @pytest.mark.parametrize("max_inventory_items", (1, 2))
@@ -1709,44 +1810,35 @@ def test_inventory_floor_advances_after_wrap_and_sparse_pages_keep_valid_cursors
         repository._compact_inventory_after_retirement(family)
         repository._compact_inventory_after_retirement(family)
         state = repository._read_inventory(family)
-        assert state["first_live_sequence"] == 2
+        assert state["first_live_sequence"] == 3
 
         if family == "primary":
             first_page = repository.list_page(None, page_size=1)
-            assert first_page.entries == ()
-            assert first_page.next_cursor == OperationCursor(
-                "0" * 32, snapshot_high_water=3, next_sequence=3
-            )
-            second_page = repository.list_page(first_page.next_cursor, page_size=1)
+            assert first_page.entries == ((later_name, raw),)
+            second_page = first_page
         elif family == "sidecar":
             first_page = repository.list_reconciliation_checkpoint_page(None, page_size=1)
-            assert first_page.entries == ()
-            assert first_page.next_cursor is not None
-            second_page = repository.list_reconciliation_checkpoint_page(
-                first_page.next_cursor, page_size=1
-            )
+            second_page = first_page
         else:
             first_page = repository.list_pending_control_page(None)
-            assert first_page.entries == ()
-            assert first_page.next_cursor is not None
-            second_page = repository.list_pending_control_page(first_page.next_cursor)
+            second_page = first_page
         assert second_page.entries == ((later_name, raw),)
 
         # An old authenticated high-water cursor remains valid after compaction
         # and begins at the proved live floor instead of replaying lifetime gaps.
         if family == "primary":
             old_cursor = OperationCursor.before_first(3)
-            assert repository.list_page(old_cursor, page_size=1).next_cursor is not None
+            assert repository.list_page(old_cursor, page_size=1).entries == ((later_name, raw),)
         elif family == "sidecar":
             old_cursor = ReconciliationCheckpointCursor.before_first(3)
             assert (
                 repository.list_reconciliation_checkpoint_page(old_cursor, page_size=1)
-                .next_cursor
-                is not None
+                .entries
+                == ((later_name, raw),)
             )
         else:
             old_cursor = PendingControlCursor("~", snapshot_high_water=3, next_sequence=1)
-            assert repository.list_pending_control_page(old_cursor).next_cursor is not None
+            assert repository.list_pending_control_page(old_cursor).entries == ((later_name, raw),)
     finally:
         store.close()
 
@@ -1862,13 +1954,17 @@ def test_dry_run_reports_blocked_pending_control_residue(tmp_path: Path) -> None
     root = tmp_path / "pending-dry-run"
     store = BlobStore(root, backend="json")
     try:
+        repository = store.lifecycle.operation_repository
+        repository.initialize_new_store()
         operations = root / "operations"
         operations.mkdir(exist_ok=True)
         operation_id = "a" * 32
         pending = operations / (
             f".{operation_id}.json.pending.{'0' * 64}.{'b' * 32}.tmp"
         )
-        pending.write_bytes(b"wrong-digest")
+        pending_raw = b"wrong-digest"
+        repository._append_inventory_event("pending", pending.name, pending_raw)
+        pending.write_bytes(pending_raw)
 
         report = store.reconcile(now=datetime(2026, 8, 31, tzinfo=timezone.utc))
 

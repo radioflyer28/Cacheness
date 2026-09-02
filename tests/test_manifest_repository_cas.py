@@ -49,16 +49,18 @@ def test_pending_recovery_filters_unrelated_names_before_its_action_bound(
     limits = LifecycleLimits(max_reconcile_actions=1)
     file_ops = ManagedFileOps(root)
     repository = FileOperationRecordRepository(file_ops, lifecycle_limits=limits)
+    repository.initialize_new_store()
     operation_id = "f" * 32
     raw = b'{"pending":"exact"}'
     digest = hashlib.sha256(raw).hexdigest()
     operations = root / "operations"
-    operations.mkdir()
+    operations.mkdir(exist_ok=True)
     # These sort before the valid pending name but are not eligible controls.
     (operations / ".000-malformed.tmp").write_bytes(b"noise")
     (operations / ".111.json.pending.not-a-digest.tmp").write_bytes(b"noise")
     (operations / "clear-target-page-not-an-operation.json").write_bytes(b"noise")
     pending = operations / f".{operation_id}.json.pending.{digest}.{'a' * 32}.tmp"
+    repository._append_inventory_event("pending", pending.name, raw)
     pending.write_bytes(raw)
     try:
         assert repository.recover_pending_operation_records() == (operation_id,)

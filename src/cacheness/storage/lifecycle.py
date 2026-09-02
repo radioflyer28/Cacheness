@@ -521,6 +521,12 @@ class LifecycleEngine:
         self, record: LifecycleOperationRecord
     ) -> LifecycleOperationRecord:
         """Write every bounded authenticated page before releasing admission."""
+        # Clear owns an aggregate mutating admission boundary.  Consume one
+        # exact-revalidation compaction window before snapshotting so a prior
+        # process loss after manifest authority publication cannot turn stale
+        # history into a chain of empty clear pages.  Ordinary reads never
+        # invoke this maintenance path.
+        self.store.manifest_repository.compact_inventory_for_recovery()
         source_cursor: ManifestCursor | None = None
         while True:
             page_id = self._clear_page_id(record.operation_id, source_cursor)
@@ -1299,14 +1305,24 @@ class LifecycleEngine:
         """Find one authenticated delete record for an observed tombstone."""
         cursor = None
         remaining_actions = self.lifecycle_limits.max_reconcile_actions
-        while remaining_actions > 0:
+        remaining_inventory_work = self.lifecycle_limits.max_reconcile_actions
+        while remaining_actions > 0 and remaining_inventory_work > 0:
             page = self.operation_repository.list_page(
                 cursor,
                 page_size=min(
                     self.lifecycle_limits.operation_page_size,
                     remaining_actions,
                 ),
+                max_inspections=min(
+                    self.lifecycle_limits.max_inventory_items,
+                    remaining_inventory_work,
+                ),
             )
+            # Sparse or stale inventory positions still required an exact
+            # index/event read.  Charge them separately from authenticated
+            # lifecycle actions so a high-water history cannot make one
+            # recovery call perform unbounded empty-page traversal.
+            remaining_inventory_work -= page.inspected_positions
             for operation_id, raw in page.entries:
                 recovered = self._recoverable_record(operation_id, raw)
                 remaining_actions -= 1
@@ -1323,6 +1339,8 @@ class LifecycleEngine:
                     return None
             if page.next_cursor is None:
                 return None
+            if remaining_inventory_work == 0:
+                return None
             cursor = page.next_cursor
         return None
 
@@ -1333,17 +1351,36 @@ class LifecycleEngine:
         unauthenticated, from another store, or locator-invalid remains
         untouched rather than becoming authority or a deletion target.
         """
-        self.operation_repository.recover_pending_operation_records()
+        # Pending and primary indices use separate bounded recovery passes.
+        # Supplying the same work limit prevents a sparse pending page from
+        # bypassing the caller-owned lifecycle budget before primary recovery.
+        # Constructor/recovery is explicitly mutating lifecycle maintenance,
+        # unlike the public read path.  This bounded pass converges manifest
+        # scheduling debt left after authority publication but before the
+        # original operation reached its post-authority compaction step.
+        self.store.manifest_repository.compact_inventory_for_recovery()
+        self.operation_repository.recover_pending_operation_records(
+            max_inspections=min(
+                self.lifecycle_limits.max_inventory_items,
+                self.lifecycle_limits.max_reconcile_actions,
+            )
+        )
         cursor = None
         remaining_actions = self.lifecycle_limits.max_reconcile_actions
-        while remaining_actions > 0:
+        remaining_inventory_work = self.lifecycle_limits.max_reconcile_actions
+        while remaining_actions > 0 and remaining_inventory_work > 0:
             page = self.operation_repository.list_page(
                 cursor,
                 page_size=min(
                     self.lifecycle_limits.operation_page_size,
                     remaining_actions,
                 ),
+                max_inspections=min(
+                    self.lifecycle_limits.max_inventory_items,
+                    remaining_inventory_work,
+                ),
             )
+            remaining_inventory_work -= page.inspected_positions
             for operation_id, raw in page.entries:
                 recovered = self._recoverable_record(operation_id, raw)
                 if recovered is None:
@@ -1377,6 +1414,8 @@ class LifecycleEngine:
                 if remaining_actions == 0:
                     return
             if page.next_cursor is None:
+                return
+            if remaining_inventory_work == 0:
                 return
             cursor = page.next_cursor
 

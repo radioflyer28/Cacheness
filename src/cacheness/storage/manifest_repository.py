@@ -185,6 +185,9 @@ class ManifestRepository(Protocol):
     def list_keys(self) -> list[str]:
         """List logical keys that have canonical records."""
 
+    def compact_inventory_for_recovery(self) -> None:
+        """Perform one bounded, mutating inventory-maintenance pass."""
+
     def list_page(
         self,
         cursor: ManifestCursor | None = None,
@@ -732,6 +735,13 @@ class _MetadataManifestRepository:
     def _compact_inventory_window(self) -> None:
         """Retire one bounded run of stale scheduling events after authority moves."""
         state = self._inventory_state()
+        # ``first_live_sequence == next_sequence`` is a durable proof that
+        # every event position is sparse.  Preserve that terminal floor rather
+        # than wrapping maintenance back across a lifetime of gaps on reopen.
+        if state["first_live_sequence"] == state["next_sequence"]:
+            state["compact_next_sequence"] = state["next_sequence"]
+            self._write_inventory_head(state)
+            return
         start = state["compact_next_sequence"]
         stop = min(state["next_sequence"], start + _MANIFEST_INVENTORY_COMPACTION_WINDOW)
         first_remaining: int | None = None
@@ -782,15 +792,26 @@ class _MetadataManifestRepository:
         state["compact_next_sequence"] = stop if stop < state["next_sequence"] else 1
         self._write_inventory_head(state)
 
+    def compact_inventory_for_recovery(self) -> None:
+        """Consume bounded post-authority compaction debt under authority locks.
+
+        Manifest pages remain read-only.  Lifecycle startup and clear-snapshot
+        admission are the explicit mutating opportunities that converge a
+        process loss after authority publication but before compaction.
+        """
+        try:
+            with self.backend._lock, self._json_compare_publish_lock():
+                if type(self.backend) is JsonBackend:
+                    self._refresh_json_for_conditional_operation()
+                self._compact_inventory_window()
+        except _BACKEND_OPERATION_ERRORS as exc:
+            raise _backend_failure("compact_inventory", self.backend, exc) from exc
+
     def _publish_projection(
         self, key: str, record: bytes, entry_data: Optional[Mapping[str, Any]]
     ) -> None:
         """Publish one reversible projection inside the established lock boundary."""
         projection = self._projection(key, record, entry_data)
-        try:
-            prior_raw = self._raw_from_entry(self._current_entry(key))
-        except (TypeError, ValueError, CacheBlobMigrationRequiredError):
-            prior_raw = None
         # The scheduler event is durable before authority publication. A
         # process loss therefore creates only a stale revalidated position;
         # it can never publish authority that a high-water snapshot omitted.
@@ -808,12 +829,10 @@ class _MetadataManifestRepository:
                 "metadata": projection["metadata"].copy(),
             }
             self._publish_json_document(candidate)
-            if prior_raw is not None:
-                self._compact_inventory_window()
+            self._compact_inventory_window()
             return
         self.backend.put_entry(key, projection)
-        if prior_raw is not None:
-            self._compact_inventory_window()
+        self._compact_inventory_window()
 
     def _remove_projection(self, key: str) -> None:
         """Retire the raw and compatibility projections in one local boundary."""
@@ -1091,6 +1110,14 @@ class SqliteManifestRepository:
     def refresh_authoritative_view(self) -> None:
         """SQLite reads are transactional and require no cached view refresh."""
 
+    def compact_inventory_for_recovery(self) -> None:
+        """Consume one bounded stale-inventory window in a SQLite transaction."""
+        try:
+            with self.backend._lock, self.backend.engine.begin() as connection:
+                self._compact_inventory_window(connection)
+        except _BACKEND_OPERATION_ERRORS as exc:
+            raise _backend_failure("compact_inventory", self.backend, exc) from exc
+
     def get_raw(self, key: str) -> Optional[bytes]:
         """Load one BLOB without decoding or authenticating it."""
         try:
@@ -1128,16 +1155,11 @@ class SqliteManifestRepository:
             raise TypeError("Canonical manifest records must be bytes")
         try:
             with self.backend._lock, self.backend.engine.begin() as connection:
-                prior = connection.exec_driver_sql(
-                    f"SELECT 1 FROM {_SQLITE_MANIFEST_TABLE} WHERE logical_key = ?",
-                    (key,),
-                ).first()
                 if entry_data is not None:
                     self._write_compatibility_projection(connection, key, entry_data)
                 self._write_raw_row(connection, key, record)
                 self._append_inventory_event(connection, key, record)
-                if prior is not None:
-                    self._compact_inventory_window(connection)
+                self._compact_inventory_window(connection)
         except _BACKEND_OPERATION_ERRORS as exc:
             raise _backend_failure("put_raw", self.backend, exc) from exc
 
@@ -1187,8 +1209,7 @@ class SqliteManifestRepository:
                     self._write_compatibility_projection(connection, key, entry_data)
                 self._write_raw_row(connection, key, record)
                 self._append_inventory_event(connection, key, record)
-                if current_raw is not None:
-                    self._compact_inventory_window(connection)
+                self._compact_inventory_window(connection)
         except CacheBlobLifecycleConflictError:
             raise
         except _BACKEND_OPERATION_ERRORS as exc:
@@ -1552,6 +1573,9 @@ class MetadataManifestRepository:
 
     def list_keys(self) -> list[str]:
         return self._repository.list_keys()
+
+    def compact_inventory_for_recovery(self) -> None:
+        self._repository.compact_inventory_for_recovery()
 
     def list_page(
         self,
