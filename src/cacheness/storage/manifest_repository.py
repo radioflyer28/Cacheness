@@ -49,6 +49,7 @@ _MANIFEST_INVENTORY_HEAD_MAX_BYTES = 4_096
 _MANIFEST_INVENTORY_EVENT_MIN_BYTES = 32 * 1024
 _MANIFEST_INVENTORY_COMPACTION_WINDOW = 64
 _MANIFEST_INVENTORY_SEQUENCE_FIELD = "_cacheness_manifest_inventory_sequence_v2"
+_MANIFEST_INVENTORY_TAIL_SCHEMA_VERSION = 1
 _SQLITE_MANIFEST_TABLE = "cacheness_manifest_records_v1"
 _SQLITE_MANIFEST_INVENTORY_TABLE = "cacheness_manifest_inventory_v1"
 _SQLITE_MANIFEST_INVENTORY_STATE_TABLE = "cacheness_manifest_inventory_state_v2"
@@ -240,6 +241,7 @@ class _MetadataManifestRepository:
         self._json_lock_identity: tuple[int, int] | None = None
         self._json_metadata_locator: Path | None = None
         self._json_inventory_head_locator: Path | None = None
+        self._json_inventory_tail_locator: Path | None = None
         self._json_lock_guard = RLock()
         self._inventory_key_provider = inventory_key_provider
         self._fallback_inventory_key_provider: ManifestKeyProvider | None = None
@@ -275,6 +277,12 @@ class _MetadataManifestRepository:
                 self._json_inventory_head_locator = resolve_managed_locator(
                     self._json_lock_file_ops.root,
                     f".{Path(backend.metadata_file).name}.manifest-inventory-v2-head.json",
+                    operation="manifest_inventory",
+                    allow_missing_leaf=True,
+                )
+                self._json_inventory_tail_locator = resolve_managed_locator(
+                    self._json_lock_file_ops.root,
+                    f".{Path(backend.metadata_file).name}.manifest-inventory-v2-tail.json",
                     operation="manifest_inventory",
                     allow_missing_leaf=True,
                 )
@@ -386,6 +394,7 @@ class _MetadataManifestRepository:
             self._json_lock_file_ops = None
         self._json_metadata_locator = None
         self._json_inventory_head_locator = None
+        self._json_inventory_tail_locator = None
 
     def _page_size(self, page_size: int | None) -> int:
         """Resolve one caller page without bypassing the configured bound."""
@@ -613,6 +622,12 @@ class _MetadataManifestRepository:
             allow_missing_leaf=True,
         )
 
+    def _json_inventory_tail_locator_for_state(self) -> Path:
+        """Return the one signed append-tail anchor for this inventory."""
+        if self._json_inventory_tail_locator is None:
+            raise CacheBlobBackendError("JSON manifest inventory root is unavailable")
+        return self._json_inventory_tail_locator
+
     def _inventory_event_max_bytes(self) -> int:
         """Keep one event bounded independently from manifest record lifetime."""
         return max(
@@ -724,7 +739,9 @@ class _MetadataManifestRepository:
             )
         return state
 
-    def _inventory_state(self) -> dict[str, Any]:
+    def _inventory_state(
+        self, *, allow_unacknowledged_tail: bool = False
+    ) -> dict[str, Any]:
         """Load only a bounded v2 head and fail closed for pre-index evidence."""
         if type(self.backend) is JsonBackend:
             if self._json_lock_file_ops is None or self._json_inventory_head_locator is None:
@@ -749,6 +766,9 @@ class _MetadataManifestRepository:
             try:
                 state = self._validate_inventory_head(json_loads(raw))
                 self._active_inventory_epoch = state["epoch"]
+                self._verify_inventory_tail(
+                    state, allow_unacknowledged=allow_unacknowledged_tail
+                )
                 return state
             except (TypeError, ValueError) as exc:
                 raise CacheBlobBackendError(
@@ -766,13 +786,19 @@ class _MetadataManifestRepository:
             # The first scheduler append publishes this fresh head together
             # with an event, after BlobStore has performed its explicit
             # manifest-key initialization boundary.
-            state = {**self._empty_inventory_state(), "events": {}, "skips": {}}
+            state = {
+                **self._empty_inventory_state(),
+                "events": {},
+                "skips": {},
+                "tail": None,
+            }
             self._active_inventory_epoch = state["epoch"]
             return state
         if not isinstance(state, dict) or set(state) != {
             *self._inventory_head_field_names(),
             "events",
             "skips",
+            "tail",
         }:
             raise CacheBlobBackendError(
                 "Canonical manifest inventory is invalid",
@@ -795,6 +821,9 @@ class _MetadataManifestRepository:
                 "Canonical manifest inventory sparse runs are invalid",
                 context={"operation": "manifest_inventory"},
             )
+        self._verify_inventory_tail(
+            state, allow_unacknowledged=allow_unacknowledged_tail
+        )
         return state
 
     def _write_inventory_head(self, state: dict[str, Any]) -> None:
@@ -818,6 +847,128 @@ class _MetadataManifestRepository:
         if len(encoded) > _MANIFEST_INVENTORY_HEAD_MAX_BYTES:
             raise AssertionError("manifest inventory head unexpectedly exceeds bound")
         self._json_lock_file_ops.write_bytes_durable(self._json_inventory_head_locator, encoded)
+
+    def _validate_inventory_tail(
+        self, tail: object, state: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Validate the monotonic append anchor independently from a head.
+
+        The head carries paging and maintenance cursors and can therefore be
+        rewritten after an append.  The tail is a separate signed control
+        object whose only mutable claim is the next allocated sequence.  A
+        replayed earlier head cannot make a later immutable event invisible
+        without also replacing this store-local authority object.
+        """
+        if not isinstance(tail, dict) or set(tail) != {
+            "version", "store_id", "epoch", "next_sequence", "signature"
+        }:
+            raise CacheBlobBackendError(
+                "Canonical manifest inventory tail is invalid",
+                context={"operation": "manifest_inventory"},
+            )
+        if (
+            tail["version"] != _MANIFEST_INVENTORY_TAIL_SCHEMA_VERSION
+            or tail["store_id"] != self._inventory_store_id()
+            or tail["epoch"] != state["epoch"]
+            or type(tail["next_sequence"]) is not int
+            or tail["next_sequence"] <= 1
+            or not isinstance(tail["signature"], str)
+        ):
+            raise CacheBlobBackendError(
+                "Canonical manifest inventory tail is invalid",
+                context={"operation": "manifest_inventory"},
+            )
+        if not self._verify_inventory_value(tail):
+            raise CacheManifestIntegrityError(
+                "Canonical manifest inventory tail is unauthenticated"
+            )
+        return tail
+
+    def _read_inventory_tail(self, state: Mapping[str, Any]) -> dict[str, Any] | None:
+        """Read the bounded signed append tail without probing event names."""
+        if type(self.backend) is not JsonBackend:
+            tail = state.get("tail")
+            return None if tail is None else self._validate_inventory_tail(tail, state)
+        if self._json_lock_file_ops is None:
+            raise CacheBlobBackendError("JSON manifest inventory root is unavailable")
+        try:
+            raw = self._json_lock_file_ops.read_bytes_bounded(
+                self._json_inventory_tail_locator_for_state(),
+                max_bytes=_MANIFEST_INVENTORY_HEAD_MAX_BYTES,
+            )
+        except FileNotFoundError:
+            return None
+        try:
+            return self._validate_inventory_tail(json_loads(raw), state)
+        except (TypeError, ValueError) as exc:
+            raise CacheBlobBackendError(
+                "Canonical manifest inventory tail is invalid",
+                context={"operation": "manifest_inventory"},
+            ) from exc
+
+    def _verify_inventory_tail(
+        self, state: Mapping[str, Any], *, allow_unacknowledged: bool = False
+    ) -> dict[str, Any] | None:
+        """Reject a head that is not exactly anchored to the append tail."""
+        tail = self._read_inventory_tail(state)
+        if state["next_sequence"] == 1:
+            if tail is not None:
+                raise CacheBlobBackendError(
+                    "Canonical manifest inventory tail is ahead of an empty head",
+                    context={"operation": "manifest_inventory"},
+                )
+            return None
+        if tail is None:
+            raise CacheBlobMigrationRequiredError(
+                "Canonical manifest inventory requires append-tail migration",
+                context={"operation": "manifest_inventory"},
+            )
+        if tail["next_sequence"] == state["next_sequence"]:
+            return tail
+        # This is the narrow durable crash window after the immutable event
+        # and tail commit but before head acknowledgement.  Only an append
+        # transition may resume it; normal pages and recovery readers fail
+        # closed rather than silently choosing one control object.
+        if (
+            allow_unacknowledged
+            and tail["next_sequence"] == state["next_sequence"] + 1
+        ):
+            return tail
+        raise CacheManifestIntegrityError(
+            "Canonical manifest inventory head does not match its append tail"
+        )
+
+    def _write_inventory_tail(self, state: dict[str, Any], next_sequence: int) -> None:
+        """Durably advance the signed append tail after an immutable event."""
+        existing = self._read_inventory_tail(state)
+        if existing is not None:
+            if existing["next_sequence"] == next_sequence:
+                return
+            if existing["next_sequence"] > next_sequence:
+                raise CacheManifestIntegrityError(
+                    "Canonical manifest inventory tail cannot move backwards"
+                )
+        tail = self._sign_inventory_value(
+            {
+                "version": _MANIFEST_INVENTORY_TAIL_SCHEMA_VERSION,
+                "store_id": self._inventory_store_id(),
+                "epoch": state["epoch"],
+                "next_sequence": next_sequence,
+            },
+            initialize_new_store=True,
+        )
+        self._validate_inventory_tail(tail, state)
+        if type(self.backend) is not JsonBackend:
+            state["tail"] = tail
+            return
+        if self._json_lock_file_ops is None:
+            raise CacheBlobBackendError("JSON manifest inventory root is unavailable")
+        encoded = json_dumps(tail, default=str).encode("utf-8")
+        if len(encoded) > _MANIFEST_INVENTORY_HEAD_MAX_BYTES:
+            raise AssertionError("manifest inventory tail unexpectedly exceeds bound")
+        self._json_lock_file_ops.write_bytes_durable(
+            self._json_inventory_tail_locator_for_state(), encoded
+        )
 
     def _validate_inventory_event(self, event: object, sequence: int) -> tuple[str, str]:
         """Validate a non-authoritative event before it drives a page position."""
@@ -1027,30 +1178,41 @@ class _MetadataManifestRepository:
 
     def _append_inventory_event(self, key: str, record: bytes) -> int:
         """Index publication before authority, without append/read/rewrite history."""
-        state = self._inventory_state()
-        sequence = state["next_sequence"]
-        event = self._sign_inventory_value({
-            "version": _MANIFEST_INVENTORY_SCHEMA_VERSION,
-            "store_id": self._inventory_store_id(),
-            "epoch": state["epoch"],
-            "sequence": sequence,
-            "key": key,
-            "digest": hashlib.sha256(record).hexdigest(),
-        }, initialize_new_store=True)
-        encoded = json_dumps(event, default=str).encode("utf-8")
-        if len(encoded) > self._inventory_event_max_bytes():
-            raise CacheBlobBackendError(
-                "Canonical manifest inventory event exceeds its field policy",
-                context={"operation": "manifest_inventory"},
-            )
-        self._validate_inventory_event(event, sequence)
+        state = self._inventory_state(allow_unacknowledged_tail=True)
+        record_digest = hashlib.sha256(record).hexdigest()
         if type(self.backend) is not JsonBackend:
+            sequence = state["next_sequence"]
+            event = self._sign_inventory_value({
+                "version": _MANIFEST_INVENTORY_SCHEMA_VERSION,
+                "store_id": self._inventory_store_id(),
+                "epoch": state["epoch"],
+                "sequence": sequence,
+                "key": key,
+                "digest": record_digest,
+            }, initialize_new_store=True)
+            self._validate_inventory_event(event, sequence)
             state["events"][sequence] = event
             state["next_sequence"] = sequence + 1
+            self._write_inventory_tail(state, state["next_sequence"])
             self._write_inventory_head(state)
             return sequence
         while True:
             sequence = state["next_sequence"]
+            event = self._sign_inventory_value({
+                "version": _MANIFEST_INVENTORY_SCHEMA_VERSION,
+                "store_id": self._inventory_store_id(),
+                "epoch": state["epoch"],
+                "sequence": sequence,
+                "key": key,
+                "digest": record_digest,
+            }, initialize_new_store=True)
+            encoded = json_dumps(event, default=str).encode("utf-8")
+            if len(encoded) > self._inventory_event_max_bytes():
+                raise CacheBlobBackendError(
+                    "Canonical manifest inventory event exceeds its field policy",
+                    context={"operation": "manifest_inventory"},
+                )
+            self._validate_inventory_event(event, sequence)
             try:
                 self._json_lock_file_ops.create_bytes_durable_exclusive(  # type: ignore[union-attr]
                     self._json_inventory_event_locator(sequence), encoded
@@ -1058,15 +1220,20 @@ class _MetadataManifestRepository:
             except FileExistsError:
                 # A crash after event durability but before the bounded head
                 # acknowledgement leaves safe stale scheduling evidence.
-                if self._read_inventory_event(sequence) is None:
+                existing = self._read_inventory_event(sequence)
+                if existing is None:
                     raise CacheBlobBackendError(
                         "Canonical manifest inventory event disappeared",
                         context={"operation": "manifest_inventory", "sequence": sequence},
                     )
                 state["next_sequence"] = sequence + 1
+                self._write_inventory_tail(state, state["next_sequence"])
                 self._write_inventory_head(state)
+                if existing == (key, record_digest):
+                    return sequence
                 continue
             state["next_sequence"] = sequence + 1
+            self._write_inventory_tail(state, state["next_sequence"])
             self._write_inventory_head(state)
             return sequence
 
@@ -1155,19 +1322,30 @@ class _MetadataManifestRepository:
         first_remaining: int | None = None
         open_sparse_run_start = state["open_sparse_run_start"]
         for sequence in range(start, stop):
+            successor = self._read_inventory_skip(sequence, state)
+            if successor is not None:
+                # A sparse successor is an authenticated proof for this exact
+                # retired position.  It is written before the event unlink, so
+                # recovery may advance across it without mistaking ordinary
+                # control-data loss for compacted history.  Readers make the
+                # same direct, bounded lookup before asking for an event.
+                if (
+                    open_sparse_run_start
+                    and sequence >= open_sparse_run_start
+                ):
+                    open_sparse_run_start = 0
+                continue
             event = self._read_inventory_event(sequence)
             if event is None:
-                # A missing immutable event is itself a proven sparse slot.
-                # Record it in the same run as adjacent stale events.  This
-                # also upgrades historical markerless holes one bounded
-                # window at a time without changing their sequence identity.
-                if open_sparse_run_start == 0 or sequence < open_sparse_run_start:
-                    open_sparse_run_start = sequence
-                if sequence >= open_sparse_run_start:
-                    self._write_inventory_skip(
-                        open_sparse_run_start, sequence + 1, state, event=None
-                    )
-                continue
+                # A deleted event is not an authenticated sparse gap.  Normal
+                # compaction writes a signed successor marker before retiring
+                # an immutable event, and page readers consume that marker
+                # before asking for the event.  Manufacturing a new marker
+                # here would turn control-data loss into false-clean recovery.
+                raise CacheManifestIntegrityError(
+                    "Canonical manifest inventory event is missing",
+                    context={"operation": "manifest_inventory", "sequence": sequence},
+                )
             key, digest = event
             try:
                 current = self._inventory_event_is_current(
@@ -1464,7 +1642,13 @@ class _MetadataManifestRepository:
                     event = self._read_inventory_event(position)
                     position += 1
                     if event is None:
-                        continue
+                        raise CacheManifestIntegrityError(
+                            "Canonical manifest inventory event is missing",
+                            context={
+                                "operation": "manifest_inventory",
+                                "sequence": position - 1,
+                            },
+                        )
                     event_key, event_digest = event
                     last_key = event_key
                     entry = entries.get(event_key)

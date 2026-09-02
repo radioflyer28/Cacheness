@@ -315,16 +315,16 @@ def test_operation_repository_uses_configured_bounded_stable_pages(
         ]
         assert first_page.next_cursor is not None
         # One authenticated initialization epoch, one bounded sequence head,
-        # one immutable event per yielded member, and one exact control read
-        # per member; no history rewrite or namespace-wide directory scan is
-        # used.
-        assert len(calls) == 2 + (2 * limits.operation_page_size)
+        # one independent signed append-tail anchor, one immutable event per
+        # yielded member, and one exact control read per member; no history
+        # rewrite or namespace-wide directory scan is used.
+        assert len(calls) == 3 + (2 * limits.operation_page_size)
         assert [cursor.next_sequence for cursor in first_page.entry_next_cursors] == [2, 3]
 
         second_page = repository.list_page(first_page.next_cursor)
         assert [operation_id for operation_id, _ in second_page.entries] == ["b" * 32]
         assert second_page.next_cursor is None
-        assert len(calls) == 10
+        assert len(calls) == 12
     finally:
         store.close()
 
@@ -1563,7 +1563,10 @@ def test_pending_inventory_compaction_skips_a_lifetime_stale_prefix(
         assert repository.get_raw(operation_id) == raw_record
         compacted = repository._read_inventory("pending")
         assert compacted["first_live_sequence"] == compacted["next_sequence"] == 42
-        assert not repository._inventory_event_locator("pending", 41).exists()
+        # Operation inventory retains immutable stale events until a later
+        # authenticated gap-proof format exists; the signed live floor avoids
+        # replaying them without creating an unproven missing slot.
+        assert repository._inventory_event_locator("pending", 41).exists()
     finally:
         store.close()
 
@@ -1608,9 +1611,10 @@ def test_successful_blob_lifecycle_retirement_converges_sparse_primary_history(
         monkeypatch.setattr(repository.file_ops, "read_bytes_bounded", count_reads)
         store.lifecycle.recover()
 
-        # An already compacted terminal inventory pays only head/current-page
-        # checks; it does not revisit the 64 retired successful operations.
-        assert len(reads) <= 12
+        # An already compacted terminal inventory pays only bounded head/tail
+        # and current-page checks; it does not revisit the 64 retired
+        # successful operations.
+        assert len(reads) <= 20
     finally:
         store.close()
 

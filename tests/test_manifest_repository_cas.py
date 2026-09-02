@@ -9,6 +9,7 @@ import hashlib
 import json
 import multiprocessing
 import os
+from copy import deepcopy
 from pathlib import Path
 from threading import Barrier, RLock, Thread
 
@@ -1793,3 +1794,346 @@ def test_manifest_sparse_successor_marker_is_fail_closed(
     finally:
         repository.close()
         backend.close()
+
+
+@pytest.mark.parametrize("backend_name", ("memory", "json"))
+@pytest.mark.parametrize("replayed_control", ("head", "tail", "corrupt_tail"))
+def test_manifest_append_tail_rejects_replayed_or_corrupt_control_member(
+    tmp_path: Path, backend_name: str, replayed_control: str
+) -> None:
+    """A head/tail mismatch or corruption cannot hide immutable events."""
+    metadata_path = tmp_path / "tail-control-replay.json"
+    if backend_name == "memory":
+        backend = InMemoryBackend()
+        repository = InMemoryManifestRepository(backend)
+        head_path: Path | None = None
+        tail_path: Path | None = None
+        saved_head: bytes | None = None
+    else:
+        backend = JsonBackend(metadata_path)
+        repository = JsonManifestRepository(backend)
+        head_path = repository._json_inventory_head_locator
+        tail_path = repository._json_inventory_tail_locator_for_state()
+        assert head_path is not None
+        saved_head = None
+    try:
+        repository.put_raw("a", _record("a"))
+        if backend_name == "memory":
+            state = repository._inventory_state()
+            saved_state = {
+                name: state[name]
+                for name in repository._inventory_head_field_names()
+            }
+            saved_tail = deepcopy(state["tail"])
+        else:
+            assert repository._json_lock_file_ops is not None
+            saved_head = repository._json_lock_file_ops.read_bytes_bounded(
+                head_path, max_bytes=4_096
+            )
+            saved_tail = repository._json_lock_file_ops.read_bytes_bounded(
+                tail_path, max_bytes=4_096
+            )
+        repository.put_raw("b", _record("b"))
+        repository.put_raw("c", _record("c"))
+
+        if backend_name == "memory":
+            if replayed_control == "head":
+                for name, value in saved_state.items():
+                    state[name] = value
+            elif replayed_control == "tail":
+                state["tail"] = saved_tail
+            else:
+                state["tail"] = {}
+        else:
+            assert repository._json_lock_file_ops is not None
+            if replayed_control == "head":
+                assert saved_head is not None
+                repository._json_lock_file_ops.write_bytes_durable(head_path, saved_head)
+            elif replayed_control == "tail":
+                repository._json_lock_file_ops.write_bytes_durable(tail_path, saved_tail)
+            else:
+                repository._json_lock_file_ops.write_bytes_durable(tail_path, b"{}")
+            # The durable control state must keep the same rejection on reopen,
+            # not merely through cached state in the original repository.
+            repository.close()
+            backend.close()
+            backend = JsonBackend(metadata_path)
+            repository = JsonManifestRepository(backend)
+
+        with pytest.raises(CacheBlobBackendError, match="list_page failed"):
+            repository.list_page()
+        # The canonical backend authority remains intact; only the scheduling
+        # control plane is rejected as incomplete.
+        assert repository.get_raw("c") == _record("c")
+    finally:
+        repository.close()
+        backend.close()
+
+
+@pytest.mark.parametrize("backend_name", ("memory", "json"))
+@pytest.mark.parametrize("sequence", (1, 2, 3))
+def test_manifest_missing_allocated_event_fails_closed_for_every_position(
+    tmp_path: Path, backend_name: str, sequence: int
+) -> None:
+    """First, middle, and last allocated events need a direct skip proof."""
+    if backend_name == "memory":
+        backend = InMemoryBackend()
+        repository = InMemoryManifestRepository(backend)
+    else:
+        backend = JsonBackend(tmp_path / "missing-event.json")
+        repository = JsonManifestRepository(backend)
+    try:
+        for key in ("first", "middle", "last"):
+            repository.put_raw(key, _record(key))
+        first_page = repository.list_page(page_size=1)
+        assert first_page.next_cursor is not None
+        if backend_name == "memory":
+            repository._inventory_state()["events"].pop(sequence)
+        else:
+            assert repository._json_lock_file_ops is not None
+            repository._json_lock_file_ops.delete_durable(
+                repository._json_inventory_event_locator(sequence)
+            )
+            metadata_path = backend.metadata_file
+            repository.close()
+            backend.close()
+            backend = JsonBackend(metadata_path)
+            repository = JsonManifestRepository(backend)
+
+        with pytest.raises(CacheBlobBackendError, match="list_page failed"):
+            if sequence == 1:
+                repository.list_page(page_size=4)
+            else:
+                repository.list_page(first_page.next_cursor)
+        assert repository.get_raw("last") == _record("last")
+    finally:
+        repository.close()
+        backend.close()
+
+
+@pytest.mark.parametrize("backend_name", ("memory", "json"))
+def test_manifest_tail_ahead_crash_window_is_page_safe_and_append_resumable(
+    tmp_path: Path, backend_name: str
+) -> None:
+    """Only a writer resumes an event/tail commit lacking its head acknowledgement."""
+    if backend_name == "memory":
+        backend = InMemoryBackend()
+        repository = InMemoryManifestRepository(backend)
+    else:
+        backend = JsonBackend(tmp_path / "tail-ahead.json")
+        repository = JsonManifestRepository(backend)
+    try:
+        repository.put_raw("a", _record("a"))
+        state = repository._inventory_state()
+        sequence = state["next_sequence"]
+        event = repository._sign_inventory_value(
+            {
+                "version": manifest_repository_module._MANIFEST_INVENTORY_SCHEMA_VERSION,
+                "store_id": repository._inventory_store_id(),
+                "epoch": state["epoch"],
+                "sequence": sequence,
+                "key": "b",
+                "digest": hashlib.sha256(_record("b")).hexdigest(),
+            },
+            initialize_new_store=True,
+        )
+        repository._validate_inventory_event(event, sequence)
+        if backend_name == "memory":
+            state["events"][sequence] = event
+        else:
+            assert repository._json_lock_file_ops is not None
+            repository._json_lock_file_ops.create_bytes_durable_exclusive(
+                repository._json_inventory_event_locator(sequence),
+                manifest_repository_module.json_dumps(event, default=str).encode("utf-8"),
+            )
+        repository._write_inventory_tail(state, sequence + 1)
+
+        with pytest.raises(CacheBlobBackendError, match="list_page failed"):
+            repository.list_page()
+
+        # The exact matching publication may acknowledge the sole durable
+        # crash window.  Reads and reconciliation never make this mutation.
+        repository.put_raw("b", _record("b"))
+        page = repository.list_page(page_size=4)
+        assert [key for key, _raw in page.entries] == ["a", "b"]
+    finally:
+        repository.close()
+        backend.close()
+
+
+@pytest.mark.parametrize("unrelated", (False, True))
+def test_json_manifest_collision_rebuilds_sequence_bound_event_bytes(
+    tmp_path: Path, unrelated: bool
+) -> None:
+    """An unacknowledged event never gets re-published at a new sequence."""
+    backend = JsonBackend(tmp_path / f"collision-{unrelated}.json")
+    repository = JsonManifestRepository(backend)
+    try:
+        repository.put_raw("a", _record("a"))
+        state = repository._inventory_state()
+        sequence = state["next_sequence"]
+        existing_key = "other" if unrelated else "b"
+        existing_record = _record("other") if unrelated else _record("b")
+        event = repository._sign_inventory_value(
+            {
+                "version": manifest_repository_module._MANIFEST_INVENTORY_SCHEMA_VERSION,
+                "store_id": repository._inventory_store_id(),
+                "epoch": state["epoch"],
+                "sequence": sequence,
+                "key": existing_key,
+                "digest": hashlib.sha256(existing_record).hexdigest(),
+            },
+            initialize_new_store=True,
+        )
+        encoded = manifest_repository_module.json_dumps(event, default=str).encode("utf-8")
+        assert repository._json_lock_file_ops is not None
+        repository._json_lock_file_ops.create_bytes_durable_exclusive(
+            repository._json_inventory_event_locator(sequence), encoded
+        )
+
+        repository.put_raw("b", _record("b"))
+        expected_sequence = sequence + 1 if unrelated else sequence
+        event_raw = repository._json_lock_file_ops.read_bytes_bounded(
+            repository._json_inventory_event_locator(expected_sequence),
+            max_bytes=repository._inventory_event_max_bytes(),
+        )
+        persisted = json.loads(event_raw)
+        assert persisted["sequence"] == expected_sequence
+        assert persisted["key"] == "b"
+        assert repository.get_raw("b") == _record("b")
+        page = repository.list_page(page_size=4)
+        assert [key for key, _raw in page.entries] == ["a", "b"]
+    finally:
+        repository.close()
+        backend.close()
+
+
+@pytest.mark.parametrize("family", ("primary", "sidecar", "pending"))
+@pytest.mark.parametrize("replayed_control", ("head", "tail", "corrupt_tail"))
+def test_operation_append_tail_rejects_replayed_or_corrupt_control_member(
+    tmp_path: Path, family: str, replayed_control: str
+) -> None:
+    """Each family rejects a stale or corrupt high-water control member."""
+    root = tmp_path / f"operation-tail-{family}"
+    root.mkdir()
+    file_ops = ManagedFileOps(root)
+    repository = FileOperationRecordRepository(
+        file_ops,
+        lifecycle_limits=LifecycleLimits(),
+        initialization_key_provider=lambda: b"t" * 32,
+    )
+    first_id = "a" * 32
+    second_id = "b" * 32
+    first_raw = b"first-indexed-control"
+    second_raw = b"second-indexed-control"
+    if family == "primary":
+        first_name, second_name = first_id, second_id
+        first_locator = repository.locator_for(first_id)
+        second_locator = repository.locator_for(second_id)
+        read_page = repository.list_page
+    elif family == "sidecar":
+        first_name, second_name = first_id, second_id
+        first_locator = repository.reconciliation_checkpoint_locator(first_id)
+        second_locator = repository.reconciliation_checkpoint_locator(second_id)
+        read_page = repository.list_reconciliation_checkpoint_page
+    else:
+        first_name = (
+            f".{first_id}.json.pending.{hashlib.sha256(first_raw).hexdigest()}."
+            f"{'1' * 32}.tmp"
+        )
+        second_name = (
+            f".{second_id}.json.pending.{hashlib.sha256(second_raw).hexdigest()}."
+            f"{'2' * 32}.tmp"
+        )
+        first_locator = root / "operations" / first_name
+        second_locator = root / "operations" / second_name
+
+        def read_page():
+            return repository.list_pending_control_page(None)
+    try:
+        repository._append_inventory_event(family, first_name, first_raw)
+        file_ops.write_bytes_durable(first_locator, first_raw)
+        saved_head = file_ops.read_bytes_bounded(
+            repository._inventory_head_locator(family), max_bytes=4_096
+        )
+        saved_tail = file_ops.read_bytes_bounded(
+            repository._inventory_tail_locator(family), max_bytes=4_096
+        )
+        repository._append_inventory_event(family, second_name, second_raw)
+        file_ops.write_bytes_durable(second_locator, second_raw)
+        if replayed_control == "head":
+            file_ops.write_bytes_durable(
+                repository._inventory_head_locator(family), saved_head
+            )
+        elif replayed_control == "tail":
+            file_ops.write_bytes_durable(
+                repository._inventory_tail_locator(family), saved_tail
+            )
+        else:
+            file_ops.write_bytes_durable(
+                repository._inventory_tail_locator(family), b"{}"
+            )
+
+        with pytest.raises(
+            (CacheBlobBackendError, CacheManifestIntegrityError)
+        ):
+            read_page()
+        assert file_ops.read_bytes_bounded(
+            second_locator, max_bytes=1_048_576
+        ) == second_raw
+    finally:
+        repository.close()
+        file_ops.close()
+
+
+@pytest.mark.parametrize("family", ("primary", "sidecar", "pending"))
+@pytest.mark.parametrize("sequence", (1, 2, 3))
+def test_operation_missing_allocated_event_fails_closed_for_every_position(
+    tmp_path: Path, family: str, sequence: int
+) -> None:
+    """No family treats a missing first, middle, or last member as stale."""
+    root = tmp_path / f"operation-missing-{family}"
+    root.mkdir()
+    file_ops = ManagedFileOps(root)
+    repository = FileOperationRecordRepository(
+        file_ops,
+        lifecycle_limits=LifecycleLimits(),
+        initialization_key_provider=lambda: b"m" * 32,
+    )
+    if family == "primary":
+        read_page = repository.list_page
+    elif family == "sidecar":
+        read_page = repository.list_reconciliation_checkpoint_page
+    else:
+        def read_page():
+            return repository.list_pending_control_page(None)
+
+    try:
+        stored_records: list[tuple[Path, bytes]] = []
+        for index, character in enumerate(("a", "b", "c"), start=1):
+            operation_id = character * 32
+            raw = f"current-indexed-control-{index}".encode("ascii")
+            if family == "primary":
+                name = operation_id
+                locator = repository.locator_for(operation_id)
+            elif family == "sidecar":
+                name = operation_id
+                locator = repository.reconciliation_checkpoint_locator(operation_id)
+            else:
+                name = (
+                    f".{operation_id}.json.pending.{hashlib.sha256(raw).hexdigest()}."
+                    f"{character * 32}.tmp"
+                )
+                locator = root / "operations" / name
+            repository._append_inventory_event(family, name, raw)
+            file_ops.write_bytes_durable(locator, raw)
+            stored_records.append((locator, raw))
+        file_ops.delete_durable(repository._inventory_event_locator(family, sequence))
+
+        with pytest.raises(CacheManifestIntegrityError, match="event is missing"):
+            read_page()
+        for locator, raw in stored_records:
+            assert file_ops.read_bytes_bounded(locator, max_bytes=1_048_576) == raw
+    finally:
+        repository.close()
+        file_ops.close()

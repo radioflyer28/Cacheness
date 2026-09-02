@@ -51,6 +51,7 @@ _INVENTORY_FAMILIES = ("primary", "sidecar", "pending")
 # scheduler epoch.  An older signed control object can therefore never be
 # substituted into a newly initialized family.
 _INVENTORY_INITIALIZATION_SCHEMA_VERSION = 5
+_INVENTORY_TAIL_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -589,6 +590,17 @@ class FileOperationRecordRepository:
             allow_missing_leaf=True,
         )
 
+    def _inventory_tail_locator(self, family: str) -> Path:
+        """Return the signed monotonic append tail for one family."""
+        if family not in _INVENTORY_FAMILIES:
+            raise ValueError("unknown lifecycle inventory family")
+        return resolve_managed_locator(
+            self.file_ops.root,
+            Path("operations") / ".cacheness-inventory-v2" / family / "tail.json",
+            operation="lifecycle_inventory",
+            allow_missing_leaf=True,
+        )
+
     def _inventory_initialization_locator(self) -> Path:
         """Return the signed store-bound all-family initialization record."""
         return resolve_managed_locator(
@@ -1102,10 +1114,15 @@ class FileOperationRecordRepository:
         except CacheBlobManifestUnauthenticatedError:
             return None
 
-    def _read_inventory(self, family: str) -> dict[str, int]:
+    def _read_inventory(
+        self, family: str, *, allow_unacknowledged_tail: bool = False
+    ) -> dict[str, int]:
         """Read one bounded v2 sequence head, never the event history."""
         state = self._read_present_inventory_head(family)
         if state is not None:
+            self._verify_inventory_tail(
+                family, state, allow_unacknowledged=allow_unacknowledged_tail
+            )
             return state
         if self._has_current_inventory_initialization():
             return self._empty_inventory_head(family)
@@ -1205,6 +1222,8 @@ class FileOperationRecordRepository:
                     self._inventory_event_locator("pending", sequence), encoded
                 )
                 state["next_sequence"] = sequence + 1
+            if state["next_sequence"] > 1:
+                self._write_inventory_tail("pending", state, state["next_sequence"])
             self._write_inventory_head("pending", state)
             return state
 
@@ -1221,8 +1240,129 @@ class FileOperationRecordRepository:
             raise AssertionError("lifecycle inventory head unexpectedly exceeds bound")
         self.file_ops.write_bytes_durable(self._inventory_head_locator(family), encoded)
 
+    def _validate_inventory_tail(
+        self, family: str, tail: object, state: dict[str, object]
+    ) -> dict[str, object]:
+        """Validate one independent signed append-tail high-water claim."""
+        if not isinstance(tail, dict) or set(tail) != {
+            "version", "family", "store_id", "epoch", "next_sequence", "signature"
+        }:
+            raise CacheBlobBackendError(
+                "Lifecycle inventory tail is invalid",
+                context={"operation": "inventory", "family": family},
+            )
+        if (
+            tail["version"] != _INVENTORY_TAIL_SCHEMA_VERSION
+            or tail["family"] != family
+            or tail["store_id"] != self._inventory_store_provenance()["store_id"]
+            or tail["epoch"] != state["epoch"]
+            or type(tail["next_sequence"]) is not int
+            or tail["next_sequence"] <= 1
+            or not isinstance(tail["signature"], str)
+        ):
+            raise CacheBlobBackendError(
+                "Lifecycle inventory tail is invalid",
+                context={"operation": "inventory", "family": family},
+            )
+        if not verify_hmac_sha256(
+            self._inventory_scheduling_bytes(tail),
+            tail["signature"],
+            self._initialization_key(),
+        ):
+            raise CacheManifestIntegrityError(
+                "Lifecycle inventory tail is unauthenticated",
+                reason=CacheReason.MANIFEST_SIGNATURE_INVALID,
+            )
+        return tail
+
+    def _read_inventory_tail(
+        self, family: str, state: dict[str, object]
+    ) -> dict[str, object] | None:
+        """Read the fixed locator that anchors the immutable event sequence."""
+        try:
+            raw = self.file_ops.read_bytes_bounded(
+                self._inventory_tail_locator(family),
+                max_bytes=_INVENTORY_HEAD_MAX_BYTES,
+            )
+        except FileNotFoundError:
+            return None
+        except ValueError as exc:
+            raise CacheManifestIntegrityError(
+                "Lifecycle inventory tail exceeds the configured byte limit",
+                context={"operation": "inventory", "family": family},
+                reason=CacheReason.MANIFEST_BOUNDS,
+            ) from exc
+        try:
+            return self._validate_inventory_tail(family, json.loads(raw), state)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise CacheBlobBackendError(
+                "Lifecycle inventory tail is invalid",
+                context={"operation": "inventory", "family": family},
+            ) from exc
+
+    def _verify_inventory_tail(
+        self,
+        family: str,
+        state: dict[str, object],
+        *,
+        allow_unacknowledged: bool = False,
+    ) -> dict[str, object] | None:
+        """Require every non-empty head to match the independent append tail."""
+        tail = self._read_inventory_tail(family, state)
+        if state["next_sequence"] == 1:
+            if tail is not None:
+                raise CacheBlobBackendError(
+                    "Lifecycle inventory tail is ahead of an empty head",
+                    context={"operation": "inventory", "family": family},
+                )
+            return None
+        if tail is None:
+            raise CacheBlobMigrationRequiredError(
+                "Lifecycle inventory requires append-tail migration",
+                context={"operation": "inventory_migration", "family": family},
+            )
+        if tail["next_sequence"] == state["next_sequence"]:
+            return tail
+        if (
+            allow_unacknowledged
+            and tail["next_sequence"] == state["next_sequence"] + 1
+        ):
+            return tail
+        raise CacheManifestIntegrityError(
+            "Lifecycle inventory head does not match its append tail",
+            context={"operation": "inventory", "family": family},
+        )
+
+    def _write_inventory_tail(
+        self, family: str, state: dict[str, object], next_sequence: int
+    ) -> None:
+        """Advance the independent signed tail only after its event exists."""
+        existing = self._read_inventory_tail(family, state)
+        if existing is not None:
+            if existing["next_sequence"] == next_sequence:
+                return
+            if existing["next_sequence"] > next_sequence:
+                raise CacheManifestIntegrityError(
+                    "Lifecycle inventory tail cannot move backwards",
+                    context={"operation": "inventory", "family": family},
+                )
+        tail = self._sign_inventory_scheduling(
+            {
+                "version": _INVENTORY_TAIL_SCHEMA_VERSION,
+                "family": family,
+                "store_id": self._inventory_store_provenance()["store_id"],
+                "epoch": state["epoch"],
+                "next_sequence": next_sequence,
+            }
+        )
+        self._validate_inventory_tail(family, tail, state)
+        encoded = json.dumps(tail, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        if len(encoded) > _INVENTORY_HEAD_MAX_BYTES:
+            raise AssertionError("lifecycle inventory tail unexpectedly exceeds bound")
+        self.file_ops.write_bytes_durable(self._inventory_tail_locator(family), encoded)
+
     def _read_inventory_event(self, family: str, sequence: int) -> tuple[str, str] | None:
-        """Return one exact immutable scheduling event, or a compacted gap."""
+        """Return one exact immutable scheduling event when its file exists."""
         try:
             raw = self.file_ops.read_bytes_bounded(
                 self._inventory_event_locator(family, sequence),
@@ -1246,9 +1386,9 @@ class FileOperationRecordRepository:
                 reason=CacheReason.MANIFEST_BOUNDS,
             ) from exc
         except OSError as exc:
-            # Only FileNotFoundError is an intentional compacted sparse gap.
             # Other filesystem failures are observable storage faults, not
-            # evidence that the immutable scheduling member is absent.
+            # evidence that the immutable scheduling member is absent.  A
+            # caller decides whether an absent allocated position is valid.
             raise CacheBlobBackendError(
                 "Lifecycle inventory event could not be read",
                 context={
@@ -1319,9 +1459,10 @@ class FileOperationRecordRepository:
     def _compact_inventory_window(self, family: str, state: dict[str, int]) -> bool:
         """Advance one exact caller-bounded compaction continuation.
 
-        Removing a stale event leaves a sparse sequence gap.  Resume cursors
-        retain original sequence numbers, so old authenticated tokens simply
-        inspect the gap and move forward; no live snapshot member is skipped.
+        Operation inventory deliberately retains stale immutable events rather
+        than representing them as missing positions.  The signed live floor
+        advances only after exact revalidation, so old cursors retain their
+        sequence identities without treating control-data loss as a gap.
         """
         target = state["maintenance_target_sequence"]
         if target == 0:
@@ -1347,7 +1488,18 @@ class FileOperationRecordRepository:
         for sequence in range(start, stop):
             event = self._read_inventory_event(family, sequence)
             if event is None:
-                continue
+                # Operation inventories never retire immutable event files.
+                # A missing allocated position therefore has no authenticated
+                # compacted-gap proof and must pin recovery rather than make
+                # outstanding evidence look terminal.
+                raise CacheManifestIntegrityError(
+                    "Lifecycle inventory event is missing",
+                    context={
+                        "operation": "inventory",
+                        "family": family,
+                        "sequence": sequence,
+                    },
+                )
             name, digest = event
             current = reader(name)
             if current is None or hashlib.sha256(current).hexdigest() != digest:
@@ -1402,8 +1554,11 @@ class FileOperationRecordRepository:
         with self._conditional_transition("inventory:initialize"):
             with self._conditional_transition(f"inventory:{family}"):
                 while True:
-                    state = self._read_inventory(family)
+                    state = self._read_inventory(
+                        family, allow_unacknowledged_tail=True
+                    )
                     sequence = state["next_sequence"]
+                    raw_digest = hashlib.sha256(raw).hexdigest()
                     event = self._sign_inventory_scheduling(
                         {
                             "version": _INVENTORY_SCHEMA_VERSION,
@@ -1412,7 +1567,7 @@ class FileOperationRecordRepository:
                             "epoch": state["epoch"],
                             "sequence": sequence,
                             "name": name,
-                            "digest": hashlib.sha256(raw).hexdigest(),
+                            "digest": raw_digest,
                         }
                     )
                     encoded = json.dumps(event, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -1430,15 +1585,20 @@ class FileOperationRecordRepository:
                         # acknowledgement.  It is safe non-authoritative stale
                         # scheduling membership; acknowledge the position and
                         # allocate the next one without reading/re-writing history.
-                        if self._read_inventory_event(family, sequence) is None:
+                        existing = self._read_inventory_event(family, sequence)
+                        if existing is None:
                             raise CacheBlobBackendError(
                                 "Lifecycle inventory event disappeared during recovery",
                                 context={"operation": "inventory", "family": family},
                             )
                         state["next_sequence"] = sequence + 1
+                        self._write_inventory_tail(
+                            family, state, state["next_sequence"]
+                        )
                         self._write_inventory_head(family, state)
                         continue
                     state["next_sequence"] = sequence + 1
+                    self._write_inventory_tail(family, state, state["next_sequence"])
                     self._write_inventory_head(family, state)
                     return
 
@@ -1569,7 +1729,14 @@ class FileOperationRecordRepository:
             position += 1
             inspected += 1
             if event is None:
-                continue
+                raise CacheManifestIntegrityError(
+                    "Lifecycle inventory event is missing",
+                    context={
+                        "operation": "inventory",
+                        "family": family,
+                        "sequence": position - 1,
+                    },
+                )
             name, digest = event
             last_name = name
             # A missing record or digest mismatch makes this immutable
@@ -1747,7 +1914,7 @@ class FileOperationRecordRepository:
             return
         sequence = source_cursor.next_sequence - 1
         with self._conditional_transition("inventory:pending"):
-            state = self._read_inventory("pending")
+            self._read_inventory("pending")
             event = self._read_inventory_event("pending", sequence)
             if event is None or event[0] != name:
                 return
@@ -1755,17 +1922,13 @@ class FileOperationRecordRepository:
             current = self._get_pending_control_raw(event_name)
             if current is not None and hashlib.sha256(current).hexdigest() == digest:
                 return
-            try:
-                self.file_ops.delete_durable(
-                    self._inventory_event_locator("pending", sequence)
-                )
-            except FileNotFoundError:
-                return
-            if state["first_live_sequence"] == sequence:
-                # Only the verified sequence is skipped; the following event
-                # remains subject to ordinary exact revalidation on its page.
-                state["first_live_sequence"] = sequence + 1
-            self._write_inventory_head("pending", state)
+            # Keep the immutable scheduling event.  Unlike manifest inventory
+            # compaction, operation inventory has no per-position signed skip
+            # record; deleting it would create an unproven hole if a later
+            # head still names the slot or a crash interrupts the floor update.
+            # The caller's bounded maintenance pass revalidates this stale
+            # event and advances the signed floor only across its exact prefix.
+            return
 
     def _pending_recovery_cursor(self) -> PendingControlCursor | None:
         """Read bounded scheduler progress; malformed progress safely restarts."""
