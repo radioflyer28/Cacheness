@@ -1128,6 +1128,41 @@ def test_released_v1_reconciliation_token_vector_remains_resumable(tmp_path: Pat
         store.close()
 
 
+@pytest.mark.parametrize("family", ("primary", "pending"))
+def test_reconcile_fails_closed_for_a_typed_indexed_control_read_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, family: str
+) -> None:
+    """A current indexed primary or pending read fault is not an absent member."""
+    root = tmp_path / f"{family}-read-failure"
+    store = BlobStore(root, backend="json")
+    try:
+        repository = store.lifecycle.operation_repository
+        raw = b"current-control"
+        if family == "primary":
+            name = "a" * 32
+            locator = repository.locator_for(name)
+            reader_name = "get_raw"
+        else:
+            digest = hashlib.sha256(raw).hexdigest()
+            name = f".{'a' * 32}.json.pending.{digest}.{'b' * 32}.tmp"
+            locator = root / "operations" / name
+            reader_name = "_get_pending_control_raw"
+        repository._append_inventory_event(family, name, raw)
+        repository.file_ops.write_bytes_durable(locator, raw)
+        original_read = getattr(repository, reader_name)
+
+        def fail_exact_read(candidate: str) -> bytes | None:
+            if candidate == name:
+                raise CacheBlobBackendError(f"injected {family} read failure")
+            return original_read(candidate)
+
+        monkeypatch.setattr(repository, reader_name, fail_exact_read)
+        with pytest.raises(CacheBlobBackendError, match=f"injected {family} read failure"):
+            store.reconcile(now=datetime(2026, 8, 31, tzinfo=timezone.utc))
+    finally:
+        store.close()
+
+
 def test_reconciliation_public_types_and_reason_coded_errors_are_narrow() -> None:
     """Storage exports report values and exact reconciliation error boundaries."""
     from cacheness.storage import (
@@ -1228,14 +1263,80 @@ def test_pending_recovery_pages_past_large_invalid_prefix_without_unbounded_read
             # bootstrap into the high-water sequence. Later calls inspect only
             # the head, one immutable event window, and its exact candidates.
             assert len(calls) - before <= (
-                limits.max_inventory_items + (2 * limits.operation_page_size) + 2
+                limits.max_inventory_items
+                + (2 * limits.operation_page_size)
+                + 2
                 if iteration == 0
-                else 2 + (2 * limits.operation_page_size)
+                # Each later pass reads a bounded current recovery page plus
+                # one bounded stale-event compaction window.
+                else 4
+                + (2 * limits.operation_page_size)
+                + (2 * limits.max_inventory_items)
             )
         assert repository.get_raw(valid_id) == raw
         # The exact high-water sequence is terminal after the valid candidate;
         # retaining a lexical cursor here would replay the finished snapshot.
         assert not (operations / ".pending-recovery.cursor").exists()
+    finally:
+        store.close()
+
+
+def test_pending_inventory_compaction_skips_a_lifetime_stale_prefix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Recovery reads bounded current work after stale scheduling events retire."""
+    root = tmp_path / "pending-compaction"
+    limits = replace(_small_lifecycle_limits(), max_inventory_items=2)
+    store = BlobStore(
+        config=CacheConfig(cache_dir=str(root), lifecycle_limits=limits), backend="json"
+    )
+    try:
+        repository = store.lifecycle.operation_repository
+        # Simulate many completed control publications whose candidate names
+        # no longer exist.  The compactor must establish a durable sparse
+        # floor rather than re-reading this history on every future reopen.
+        for index in range(40):
+            repository._append_inventory_event(
+                "pending",
+                f".{index:032x}.json.pending.{'0' * 64}.{index:032x}.tmp",
+                b"stale-control",
+            )
+        for _ in range(20):
+            repository._compact_inventory_after_retirement("pending")
+
+        compacted = repository._read_inventory("pending")
+        assert compacted["first_live_sequence"] == compacted["next_sequence"] == 41
+
+        key = b"0123456789abcdef0123456789abcdef"
+        operation_id = "f" * 32
+        record = _reconciliation_record(store, root, key, operation_id)
+        raw_record = record.canonical_bytes()
+        digest = hashlib.sha256(raw_record).hexdigest()
+        pending_name = (
+            f".{operation_id}.json.pending.{digest}.{'a' * 32}.tmp"
+        )
+        repository._append_inventory_event("pending", pending_name, raw_record)
+        repository.file_ops.write_bytes_durable(
+            root / "operations" / pending_name, raw_record
+        )
+
+        calls: list[Path] = []
+        original_read = repository.file_ops.read_bytes_bounded
+
+        def count_reads(locator: Path, *, max_bytes: int) -> bytes:
+            calls.append(locator)
+            return original_read(locator, max_bytes=max_bytes)
+
+        monkeypatch.setattr(repository.file_ops, "read_bytes_bounded", count_reads)
+        assert repository.recover_pending_operation_records() == (operation_id,)
+
+        # Head/event/candidate reads are bounded by the configured current
+        # window, independent of the forty retired historical candidates.
+        assert len(calls) <= 8 + (2 * limits.max_inventory_items)
+        assert repository.get_raw(operation_id) == raw_record
+        compacted = repository._read_inventory("pending")
+        assert compacted["first_live_sequence"] == compacted["next_sequence"] == 42
+        assert not repository._inventory_event_locator("pending", 41).exists()
     finally:
         store.close()
 

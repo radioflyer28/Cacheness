@@ -533,6 +533,11 @@ class FileOperationRecordRepository:
             "version": _INVENTORY_SCHEMA_VERSION,
             "next_sequence": 1,
             "compact_next_sequence": 1,
+            # The lowest sequence that can still name live evidence. Sparse
+            # gaps below this floor were exact-revalidated as stale, so every
+            # high-water cursor may safely skip them without changing its
+            # snapshot membership.
+            "first_live_sequence": 1,
         }
 
     def _has_preindex_evidence(self, family: str) -> bool:
@@ -635,9 +640,16 @@ class FileOperationRecordRepository:
                 "Lifecycle inventory is invalid",
                 context={"operation": "inventory", "family": family},
             ) from exc
-        if not isinstance(state, dict) or set(state) != {
-            "version", "next_sequence", "compact_next_sequence"
-        }:
+        if not isinstance(state, dict) or not (
+            set(state) == {"version", "next_sequence", "compact_next_sequence"}
+            or set(state)
+            == {
+                "version",
+                "next_sequence",
+                "compact_next_sequence",
+                "first_live_sequence",
+            }
+        ):
             raise CacheBlobBackendError(
                 "Lifecycle inventory schema is invalid",
                 context={"operation": "inventory", "family": family},
@@ -651,6 +663,18 @@ class FileOperationRecordRepository:
         ):
             raise CacheBlobBackendError(
                 "Lifecycle inventory version is invalid",
+                context={"operation": "inventory", "family": family},
+            )
+        if "first_live_sequence" not in state:
+            # Existing v2 heads remain valid.  Their history has not been
+            # compacted through this floor yet, so start conservatively.
+            state["first_live_sequence"] = 1
+        if (
+            type(state["first_live_sequence"]) is not int
+            or not 1 <= state["first_live_sequence"] <= state["next_sequence"]
+        ):
+            raise CacheBlobBackendError(
+                "Lifecycle inventory live-sequence floor is invalid",
                 context={"operation": "inventory", "family": family},
             )
         return state
@@ -770,7 +794,10 @@ class FileOperationRecordRepository:
         inspect the gap and move forward; no live snapshot member is skipped.
         """
         start = state["compact_next_sequence"]
-        stop = min(state["next_sequence"], start + _INVENTORY_COMPACTION_WINDOW)
+        window = min(
+            _INVENTORY_COMPACTION_WINDOW, self.lifecycle_limits.max_inventory_items
+        )
+        stop = min(state["next_sequence"], start + window)
         reader: Callable[[str], bytes | None]
         if family == "primary":
             reader = self.get_raw
@@ -778,20 +805,28 @@ class FileOperationRecordRepository:
             reader = self.get_reconciliation_checkpoint_raw
         else:
             reader = self._get_pending_control_raw
+        first_remaining: int | None = None
         for sequence in range(start, stop):
             event = self._read_inventory_event(family, sequence)
             if event is None:
                 continue
             name, digest = event
-            try:
-                current = reader(name)
-            except (CacheBlobBackendError, CacheManifestIntegrityError):
-                current = None
+            current = reader(name)
             if current is None or hashlib.sha256(current).hexdigest() != digest:
                 try:
                     self.file_ops.delete_durable(self._inventory_event_locator(family, sequence))
                 except FileNotFoundError:
                     pass
+            elif first_remaining is None:
+                first_remaining = sequence
+        if state["first_live_sequence"] == start:
+            if first_remaining is not None:
+                state["first_live_sequence"] = first_remaining
+            else:
+                # All positions through ``stop - 1`` are durable sparse gaps.
+                # A cursor may start at ``stop`` even when the next event has
+                # not been inspected yet; it cannot skip a live member.
+                state["first_live_sequence"] = stop
         state["compact_next_sequence"] = (
             stop if stop < state["next_sequence"] else 1
         )
@@ -875,9 +910,14 @@ class FileOperationRecordRepository:
             if cursor is None or cursor.snapshot_high_water is None
             else cursor.snapshot_high_water
         )
-        position = (
+        requested_position = (
             1 if cursor is None or cursor.next_sequence is None else cursor.next_sequence
         )
+        # Compacting a stale event never changes the immutable high-water or
+        # an authenticated cursor's next position.  It only records a proven
+        # lower bound, which prevents a fresh recovery from paying lifetime
+        # cost for empty scheduling history.
+        position = max(requested_position, state["first_live_sequence"])
         inspected = 0
         entries: list[tuple[str, bytes | None]] = []
         entry_next_cursors: list[object] = []
@@ -1037,8 +1077,57 @@ class FileOperationRecordRepository:
             return self.file_ops.read_bytes_bounded(
                 locator, max_bytes=self.lifecycle_limits.max_operation_record_bytes
             )
-        except (FileNotFoundError, OSError, ValueError):
+        except FileNotFoundError:
             return None
+        except ValueError as exc:
+            raise CacheManifestIntegrityError(
+                "Pending lifecycle control exceeds the configured byte limit",
+                reason=CacheReason.MANIFEST_BOUNDS,
+            ) from exc
+        except OSError as exc:
+            raise CacheBlobBackendError(
+                "Pending lifecycle control could not be read",
+                context={"operation": "read_pending_control"},
+            ) from exc
+
+    def _compact_consumed_pending_event(
+        self, name: str, source_cursor: PendingControlCursor | None
+    ) -> None:
+        """Retire one exactly indexed consumed pending candidate when stale.
+
+        ``source_cursor`` is the page's authenticated post-entry position, so
+        its preceding sequence is the only event this method can touch.  The
+        inventory lock serializes that compare/delete with concurrent appends;
+        sparse sequence numbers remain stable for every existing cursor.
+        """
+        if (
+            source_cursor is None
+            or source_cursor.snapshot_high_water is None
+            or source_cursor.next_sequence is None
+            or source_cursor.next_sequence <= 1
+        ):
+            return
+        sequence = source_cursor.next_sequence - 1
+        with self._conditional_transition("inventory:pending"):
+            state = self._read_inventory("pending")
+            event = self._read_inventory_event("pending", sequence)
+            if event is None or event[0] != name:
+                return
+            event_name, digest = event
+            current = self._get_pending_control_raw(event_name)
+            if current is not None and hashlib.sha256(current).hexdigest() == digest:
+                return
+            try:
+                self.file_ops.delete_durable(
+                    self._inventory_event_locator("pending", sequence)
+                )
+            except FileNotFoundError:
+                return
+            if state["first_live_sequence"] == sequence:
+                # Only the verified sequence is skipped; the following event
+                # remains subject to ordinary exact revalidation on its page.
+                state["first_live_sequence"] = sequence + 1
+            self._write_inventory_head("pending", state)
 
     def _pending_recovery_cursor(self) -> PendingControlCursor | None:
         """Read bounded scheduler progress; malformed progress safely restarts."""
@@ -1834,6 +1923,7 @@ class FileOperationRecordRepository:
         is ever used as ownership evidence.
         """
         cursor = self._pending_recovery_cursor()
+        pending_history_exists = self._read_inventory("pending")["next_sequence"] > 1
         page = self.list_pending_control_page(cursor)
         recovered: list[str] = []
         eligible_actions = 0
@@ -1884,6 +1974,10 @@ class FileOperationRecordRepository:
                 ) from exc
             if promoted and operation_id is not None:
                 recovered.append(operation_id)
+            if entry_index < len(page.entry_next_cursors):
+                self._compact_consumed_pending_event(
+                    name, page.entry_next_cursors[entry_index]
+                )
             # A digest-valid candidate is real bounded recovery work even if
             # a concurrent winner already installed the same final record.
             # Syntax-valid bytes with the wrong digest deliberately do not
@@ -1901,6 +1995,11 @@ class FileOperationRecordRepository:
         else:
             next_cursor = page.next_cursor
         self._checkpoint_pending_recovery_cursor(next_cursor)
+        if pending_history_exists:
+            # A crash after a normal control rename can leave only a stale
+            # pending event.  Make bounded maintenance during recovery even
+            # when that event did not yield an actionable candidate page.
+            self._compact_inventory_after_retirement("pending")
         return tuple(recovered)
 
     def _is_eligible_pending_name(self, name: str) -> bool:
