@@ -759,8 +759,17 @@ class ClearTargetPage:
             self.next_next_sequence,
             "next",
         )
-        if not isinstance(self.targets, tuple) or not self.targets:
-            raise CacheManifestIntegrityError("Clear target page must contain targets")
+        if not isinstance(self.targets, tuple):
+            raise CacheManifestIntegrityError("Clear target page targets are invalid")
+        # A v2 page may be an authenticated zero-target bridge.  High-water
+        # manifest inventories can have windows containing only superseded or
+        # deleted events; retaining those windows in the durable chain is what
+        # keeps the later page reachable after an interruption.  The empty
+        # page grants no delete authority and uses the normal signed
+        # checkpoint solely to prove traversal completion.  v1 did not carry
+        # generation-bound cursors, so preserve its non-empty contract.
+        if not self.targets and self.schema_version == CLEAR_TARGET_LEGACY_SCHEMA_VERSION:
+            raise CacheManifestIntegrityError("Legacy clear target page must contain targets")
         if len(self.targets) > 4_096 or any(not isinstance(target, ClearTarget) for target in self.targets):
             raise CacheManifestIntegrityError("Clear target page targets are invalid")
         keys = [target.key for target in self.targets]
@@ -993,8 +1002,8 @@ class ClearTargetCheckpoint:
 
     def complete_page(self, target_count: int) -> "ClearTargetCheckpoint":
         """Mark a page complete only after every bounded target is checkpointed."""
-        if type(target_count) is not int or target_count <= 0:
-            raise ValueError("clear target count must be a positive integer")
+        if type(target_count) is not int or target_count < 0:
+            raise ValueError("clear target count must be a non-negative integer")
         if self.completed_target_indices != tuple(range(target_count)):
             raise CacheManifestIntegrityError("Clear target page completion skipped targets")
         return replace(self, page_complete=True, signature="")

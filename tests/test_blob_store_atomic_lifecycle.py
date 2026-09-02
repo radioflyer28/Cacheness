@@ -18,6 +18,7 @@ from cacheness.error_handling import (
     CacheBlobRecoverableCleanupError,
     CacheUnsafePathError,
 )
+from cacheness.metadata import InMemoryBackend
 from cacheness.storage import BlobStore
 from cacheness.storage.manifest import BlobManifestV1
 from cacheness.storage.manifest_repository import ManifestCursor, ManifestPage
@@ -1103,6 +1104,36 @@ def test_clear_empty_store_initializes_authenticated_control_evidence(
     try:
         assert store.clear() == 0
         assert store.list() == []
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("backend_name", ("memory", "json", "sqlite"))
+def test_clear_traverses_durable_empty_inventory_bridges(
+    tmp_path: Path, backend_name: str
+) -> None:
+    """Clear reaches current targets after stale-only high-water windows.
+
+    The first page deliberately contains only superseded manifest events.  A
+    zero-target signed page must bridge it to the later current targets rather
+    than letting continuation from ``None`` mistake the absent first target
+    page for a terminal clear.
+    """
+    root = tmp_path / f"clear-empty-bridge-{backend_name}"
+    limits = LifecycleLimits(manifest_page_size=2, max_inventory_items=2)
+    config = CacheConfig(cache_dir=str(root), lifecycle_limits=limits)
+    backend = InMemoryBackend() if backend_name == "memory" else backend_name
+    store = BlobStore(root, backend=backend, config=config)
+    try:
+        store.put({"generation": 1}, key="k")
+        store.put({"generation": 2}, key="k")
+        store.put({"generation": 3}, key="k")
+        store.put({"generation": "x"}, key="x")
+
+        assert store.clear() == 2
+        assert store.get("k") is None
+        assert store.get("x") is None
+        assert not list((root / "operations").glob("clear-target-*.json"))
     finally:
         store.close()
 

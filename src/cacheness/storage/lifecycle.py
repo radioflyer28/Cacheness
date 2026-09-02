@@ -533,16 +533,48 @@ class LifecycleEngine:
                     page_size=self.lifecycle_limits.manifest_page_size,
                 )
                 if not manifest_page.entries:
-                    # A high-water manifest inventory deliberately retains
-                    # membership independently of the current canonical row.
-                    # An inspected window can therefore contain only events
-                    # subsequently superseded or deleted.  That is a normal
-                    # empty *source* page, not corrupted clear authority. Do
-                    # not make a zero-target control page; advance the source
-                    # cursor and persist the first page that has a target.
-                    if manifest_page.next_cursor is None:
+                    # A high-water inventory can legitimately yield a window
+                    # containing only stale events.  Persist an authenticated
+                    # zero-target bridge *including the terminal window* so
+                    # every ``next_cursor`` in the clear chain names a page
+                    # that a reopened process can traverse from ``None``.
+                    # The bridge has no destructive target authority; its
+                    # regular signed checkpoint proves only that traversal was
+                    # completed before control evidence is retired.
+                    page = self._signed_clear_target_page(
+                        self._new_clear_target_page(
+                            operation_id=record.operation_id,
+                            source_cursor=source_cursor,
+                            next_cursor=manifest_page.next_cursor,
+                            targets=(),
+                        )
+                    )
+                    raw_page = self._clear_page_raw(page)
+                    try:
+                        self.operation_repository.create_clear_target_page_exclusive(
+                            record.operation_id, page_id, raw_page
+                        )
+                    except CacheBlobLifecycleConflictError:
+                        raw_page = self.operation_repository.get_clear_target_page_raw(
+                            record.operation_id, page_id
+                        )
+                        if raw_page is None:
+                            raise
+                    self._fault("clear_target_page_persisted", record)
+                    page = self._authenticated_clear_target_page(
+                        raw_page,
+                        operation_id=record.operation_id,
+                        page_id=page_id,
+                        source_cursor=source_cursor,
+                    )
+                    self._load_or_create_clear_checkpoint(page)
+                    if page.next_cursor is None:
                         break
-                    source_cursor = manifest_page.next_cursor
+                    source_cursor = self._clear_page_cursor(
+                        page.next_cursor,
+                        page.next_snapshot_high_water,
+                        page.next_next_sequence,
+                    )
                     continue
                 if len(manifest_page.entry_next_cursors) != len(manifest_page.entries):
                     raise CacheManifestIntegrityError(
