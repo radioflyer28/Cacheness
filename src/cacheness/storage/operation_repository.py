@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import os
+import secrets
 from pathlib import Path
 from threading import RLock, local
 from typing import BinaryIO, Callable, Protocol
@@ -35,15 +36,21 @@ from .path_security import ManagedFileOps, resolve_managed_locator, validate_blo
 _CONDITIONAL_LOCK_STRIPES = tuple(RLock() for _ in range(64))
 _OPERATION_LEASES = local()
 _CLEAR_OPERATION_LEASES = local()
-_INVENTORY_SCHEMA_VERSION = 2
+# Scheduling metadata is control authority: a head can truncate a snapshot
+# and an event can redirect it.  Version 3 authenticates both under the same
+# store-bound root as all-family provenance.  Earlier v2 scheduler objects are
+# explicit migration evidence rather than safe sparse history.
+_INVENTORY_SCHEMA_VERSION = 3
 _INVENTORY_HEAD_MAX_BYTES = 4_096
 _INVENTORY_EVENT_MIN_BYTES = 32 * 1024
 _INVENTORY_FAMILIES = ("primary", "sidecar", "pending")
 # Version 3 authenticated only a constant domain and family list.  A valid
 # shared application key could therefore replay that marker into another
 # managed root and turn its missing families into false empty inventories.
-# Version 4 binds the proof to this exact store topology.
-_INVENTORY_INITIALIZATION_SCHEMA_VERSION = 4
+# Version 5 binds the proof to this exact store topology and one fresh
+# scheduler epoch.  An older signed control object can therefore never be
+# substituted into a newly initialized family.
+_INVENTORY_INITIALIZATION_SCHEMA_VERSION = 5
 
 
 @dataclass(frozen=True)
@@ -585,7 +592,7 @@ class FileOperationRecordRepository:
         """Return the signed store-bound all-family initialization record."""
         return resolve_managed_locator(
             self.file_ops.root,
-            Path("operations") / ".cacheness-inventory-v2" / "initialized-v4.json",
+            Path("operations") / ".cacheness-inventory-v2" / "initialized-v5.json",
             operation="lifecycle_inventory",
             allow_missing_leaf=True,
         )
@@ -613,6 +620,15 @@ class FileOperationRecordRepository:
             allow_missing_leaf=True,
         )
 
+    def _store_bound_v4_initialization_locator(self) -> Path:
+        """Retain v4 provenance as explicit migration evidence after epoching."""
+        return resolve_managed_locator(
+            self.file_ops.root,
+            Path("operations") / ".cacheness-inventory-v2" / "initialized-v4.json",
+            operation="lifecycle_inventory",
+            allow_missing_leaf=True,
+        )
+
     def _inventory_store_provenance(self) -> dict[str, object]:
         """Return the immutable topology identity that scopes scheduler proofs."""
         device, inode = self.file_ops.root_identity
@@ -622,11 +638,12 @@ class FileOperationRecordRepository:
             "store_id": hashlib.sha256(root.encode("utf-8")).hexdigest(),
         }
 
-    def _initialization_signing_bytes(self) -> bytes:
+    def _initialization_signing_bytes(self, epoch: str) -> bytes:
         """Return the store-bound HMAC preimage for all-family provenance."""
         provenance = self._inventory_store_provenance()
         return json.dumps(
             {
+                "epoch": epoch,
                 "families": list(_INVENTORY_FAMILIES),
                 "root_identity": provenance["root_identity"],
                 "store_id": provenance["store_id"],
@@ -677,10 +694,19 @@ class FileOperationRecordRepository:
             self.lifecycle_limits.max_operation_field_bytes * 2 + 512,
         )
 
-    @staticmethod
-    def _empty_inventory_head() -> dict[str, int]:
+    def _empty_inventory_head(self, family: str) -> dict[str, object]:
+        """Return unsigned scheduler state before its durable HMAC envelope."""
+        if family not in _INVENTORY_FAMILIES:
+            raise ValueError("unknown lifecycle inventory family")
+        initialization = self._read_current_inventory_initialization()
         return {
             "version": _INVENTORY_SCHEMA_VERSION,
+            "family": family,
+            "store_id": self._inventory_store_provenance()["store_id"],
+            # Fresh constructor classification is deliberately non-mutating.
+            # It may inspect an empty family before initialization publishes a
+            # trust root; that transient head is never signed or persisted.
+            "epoch": "" if initialization is None else initialization["epoch"],
             "next_sequence": 1,
             "compact_next_sequence": 1,
             # The lowest sequence that can still name live evidence. Sparse
@@ -787,6 +813,21 @@ class FileOperationRecordRepository:
         finally:
             self._pending_inventory_observer_depth -= 1
 
+    def _inventory_scheduling_bytes(self, value: dict[str, object]) -> bytes:
+        """Encode the signed scheduler projection with a fixed domain."""
+        unsigned = dict(value)
+        unsigned.pop("signature", None)
+        return b"cacheness.lifecycle-inventory.v4\x00" + json.dumps(
+            unsigned, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+
+    def _sign_inventory_scheduling(self, value: dict[str, object]) -> dict[str, object]:
+        signed = dict(value)
+        signed["signature"] = sign_hmac_sha256(
+            self._inventory_scheduling_bytes(signed), self._initialization_key()
+        )
+        return signed
+
     def _decode_inventory_head(self, family: str, raw: bytes) -> dict[str, int]:
         """Validate one present head without inferring absence or migration."""
         try:
@@ -796,30 +837,27 @@ class FileOperationRecordRepository:
                 "Lifecycle inventory is invalid",
                 context={"operation": "inventory", "family": family},
             ) from exc
-        if not isinstance(state, dict) or not (
-            set(state) == {"version", "next_sequence", "compact_next_sequence"}
-            or set(state)
-            == {
-                "version",
-                "next_sequence",
-                "compact_next_sequence",
-                "first_live_sequence",
-            }
-            or set(state)
-            == {
-                "version",
-                "next_sequence",
-                "compact_next_sequence",
-                "first_live_sequence",
-                "maintenance_target_sequence",
-            }
-        ):
+        if not isinstance(state, dict) or set(state) != {
+            "version",
+            "family",
+            "store_id",
+            "epoch",
+            "next_sequence",
+            "compact_next_sequence",
+            "first_live_sequence",
+            "maintenance_target_sequence",
+            "signature",
+        }:
             raise CacheBlobBackendError(
                 "Lifecycle inventory schema is invalid",
                 context={"operation": "inventory", "family": family},
             )
         if (
             state["version"] != _INVENTORY_SCHEMA_VERSION
+            or state["family"] != family
+            or state["store_id"] != self._inventory_store_provenance()["store_id"]
+            or state["epoch"] != self._inventory_epoch()
+            or not isinstance(state["signature"], str)
             or type(state["next_sequence"]) is not int
             or type(state["compact_next_sequence"]) is not int
             or state["next_sequence"] <= 0
@@ -829,15 +867,6 @@ class FileOperationRecordRepository:
                 "Lifecycle inventory version is invalid",
                 context={"operation": "inventory", "family": family},
             )
-        if "first_live_sequence" not in state:
-            # Existing v2 heads remain valid.  Their history has not been
-            # compacted through this floor yet, so start conservatively.
-            state["first_live_sequence"] = 1
-        if "maintenance_target_sequence" not in state:
-            # Existing heads predate an exact debt boundary.  Treat their
-            # already-allocated range as recovery work rather than allowing a
-            # clear to re-scan a lifetime of stale slots as target pages.
-            state["maintenance_target_sequence"] = state["next_sequence"] - 1
         if (
             type(state["first_live_sequence"]) is not int
             or not 1 <= state["first_live_sequence"] <= state["next_sequence"]
@@ -856,6 +885,15 @@ class FileOperationRecordRepository:
                 "Lifecycle inventory maintenance target is invalid",
                 context={"operation": "inventory", "family": family},
             )
+        if not verify_hmac_sha256(
+            self._inventory_scheduling_bytes(state),
+            state["signature"],
+            self._initialization_key(),
+        ):
+            raise CacheManifestIntegrityError(
+                "Lifecycle inventory head is unauthenticated",
+                reason=CacheReason.MANIFEST_SIGNATURE_INVALID,
+            )
         return state
 
     def _read_present_inventory_head(self, family: str) -> dict[str, int] | None:
@@ -869,7 +907,7 @@ class FileOperationRecordRepository:
             return None
         return self._decode_inventory_head(family, raw)
 
-    def _has_current_inventory_initialization(self) -> bool:
+    def _read_current_inventory_initialization(self) -> dict[str, object] | None:
         """Verify authenticated store-bound provenance for one all-family decision.
 
         The record is the sole proof that a missing family head belongs to a
@@ -883,7 +921,7 @@ class FileOperationRecordRepository:
                 max_bytes=_INVENTORY_HEAD_MAX_BYTES,
             )
         except FileNotFoundError:
-            return False
+            return None
         except ValueError as exc:
             raise CacheBlobBackendError(
                 "Lifecycle inventory initialization marker exceeds its bound",
@@ -899,8 +937,11 @@ class FileOperationRecordRepository:
         if (
             not isinstance(record, dict)
             or set(record)
-            != {"families", "root_identity", "signature", "store_id", "version"}
+            != {"epoch", "families", "root_identity", "signature", "store_id", "version"}
             or record["version"] != _INVENTORY_INITIALIZATION_SCHEMA_VERSION
+            or not isinstance(record["epoch"], str)
+            or len(record["epoch"]) != 32
+            or any(character not in "0123456789abcdef" for character in record["epoch"])
             or record["families"] != list(_INVENTORY_FAMILIES)
             or record["store_id"] != self._inventory_store_provenance()["store_id"]
             or record["root_identity"]
@@ -912,7 +953,7 @@ class FileOperationRecordRepository:
                 context={"operation": "inventory"},
             )
         if not verify_hmac_sha256(
-            self._initialization_signing_bytes(),
+            self._initialization_signing_bytes(record["epoch"]),
             record["signature"],
             self._initialization_key(),
         ):
@@ -920,13 +961,28 @@ class FileOperationRecordRepository:
                 "Lifecycle inventory initialization provenance is unauthenticated",
                 reason=CacheReason.MANIFEST_SIGNATURE_INVALID,
             )
-        return True
+        return record
+
+    def _has_current_inventory_initialization(self) -> bool:
+        """Return whether the one current signed all-family epoch exists."""
+        return self._read_current_inventory_initialization() is not None
+
+    def _inventory_epoch(self) -> str:
+        """Return the active signed scheduler epoch for family control records."""
+        record = self._read_current_inventory_initialization()
+        if record is None:
+            raise CacheBlobMigrationRequiredError(
+                "Lifecycle inventory initialization is required before scheduling",
+                context={"operation": "inventory_migration"},
+            )
+        return record["epoch"]  # type: ignore[return-value]
 
     def _has_legacy_initialization_marker(self) -> bool:
         """Return whether a non-store-bound marker requires explicit migration."""
         for locator in (
             self._legacy_inventory_initialization_locator(),
             self._replayable_inventory_initialization_locator(),
+            self._store_bound_v4_initialization_locator(),
         ):
             try:
                 self.file_ops.read_bytes_bounded(
@@ -941,11 +997,13 @@ class FileOperationRecordRepository:
     def _write_current_inventory_initialization(self) -> None:
         """Publish signed store-bound provenance before creating empty heads."""
         provenance = self._inventory_store_provenance()
+        epoch = secrets.token_hex(16)
         record = {
+            "epoch": epoch,
             "families": list(_INVENTORY_FAMILIES),
             "root_identity": provenance["root_identity"],
             "signature": sign_hmac_sha256(
-                self._initialization_signing_bytes(),
+                self._initialization_signing_bytes(epoch),
                 self._initialization_key(initialize_new_store=True),
             ),
             "store_id": provenance["store_id"],
@@ -994,9 +1052,11 @@ class FileOperationRecordRepository:
             for family in _INVENTORY_FAMILIES:
                 if present_heads[family] is not None:
                     continue
-                state = self._empty_inventory_head()
+                state = self._empty_inventory_head(family)
                 encoded = json.dumps(
-                    state, sort_keys=True, separators=(",", ":")
+                    self._sign_inventory_scheduling(state),
+                    sort_keys=True,
+                    separators=(",", ":"),
                 ).encode("utf-8")
                 try:
                     self.file_ops.create_bytes_durable_exclusive(
@@ -1044,7 +1104,7 @@ class FileOperationRecordRepository:
         if state is not None:
             return state
         if self._has_current_inventory_initialization():
-            return self._empty_inventory_head()
+            return self._empty_inventory_head(family)
         if self._has_legacy_initialization_marker() or any(
             self._read_present_inventory_head(sibling) is not None
             for sibling in _INVENTORY_FAMILIES
@@ -1068,7 +1128,7 @@ class FileOperationRecordRepository:
                     "Lifecycle evidence predates its durable inventory",
                     context={"family": family, "operation": "inventory_migration"},
                 )
-            return self._empty_inventory_head()
+            return self._empty_inventory_head(family)
         raise CacheBlobMigrationRequiredError(
             "Lifecycle inventory v1 requires an explicit migration",
             context={"family": family, "operation": "inventory_migration"},
@@ -1119,21 +1179,24 @@ class FileOperationRecordRepository:
                     "Legacy pending controls require an explicit migration",
                     context={"family": "pending", "operation": "inventory_migration"},
                 )
-            state = self._empty_inventory_head()
+            state = self._empty_inventory_head("pending")
             for name in names:
                 raw = self._get_pending_control_raw(name)
                 if raw is None:
                     continue
                 sequence = state["next_sequence"]
-                encoded = json.dumps(
+                event = self._sign_inventory_scheduling(
                     {
                         "version": _INVENTORY_SCHEMA_VERSION,
+                        "family": "pending",
+                        "store_id": self._inventory_store_provenance()["store_id"],
+                        "epoch": state["epoch"],
+                        "sequence": sequence,
                         "name": name,
                         "digest": hashlib.sha256(raw).hexdigest(),
-                    },
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ).encode("utf-8")
+                    }
+                )
+                encoded = json.dumps(event, sort_keys=True, separators=(",", ":")).encode("utf-8")
                 self.file_ops.create_bytes_durable_exclusive(
                     self._inventory_event_locator("pending", sequence), encoded
                 )
@@ -1141,9 +1204,15 @@ class FileOperationRecordRepository:
             self._write_inventory_head("pending", state)
             return state
 
-    def _write_inventory_head(self, family: str, state: dict[str, int]) -> None:
+    def _write_inventory_head(self, family: str, state: dict[str, object]) -> None:
         """Durably publish the small sequence head after one event transition."""
-        encoded = json.dumps(state, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        state["family"] = family
+        state["store_id"] = self._inventory_store_provenance()["store_id"]
+        state["epoch"] = self._inventory_epoch()
+        signed = self._sign_inventory_scheduling(state)
+        state.clear()
+        state.update(signed)
+        encoded = json.dumps(signed, sort_keys=True, separators=(",", ":")).encode("utf-8")
         if len(encoded) > _INVENTORY_HEAD_MAX_BYTES:
             raise AssertionError("lifecycle inventory head unexpectedly exceeds bound")
         self.file_ops.write_bytes_durable(self._inventory_head_locator(family), encoded)
@@ -1193,8 +1262,22 @@ class FileOperationRecordRepository:
             ) from exc
         if (
             not isinstance(event, dict)
-            or set(event) != {"version", "name", "digest"}
+            or set(event)
+            != {
+                "version",
+                "family",
+                "store_id",
+                "epoch",
+                "sequence",
+                "name",
+                "digest",
+                "signature",
+            }
             or event["version"] != _INVENTORY_SCHEMA_VERSION
+            or event["family"] != family
+            or event["store_id"] != self._inventory_store_provenance()["store_id"]
+            or event["epoch"] != self._inventory_epoch()
+            or event["sequence"] != sequence
             or not isinstance(event["name"], str)
             or not event["name"]
             or len(event["name"].encode("utf-8")) > self.lifecycle_limits.max_operation_field_bytes
@@ -1205,6 +1288,15 @@ class FileOperationRecordRepository:
             raise CacheBlobBackendError(
                 "Lifecycle inventory event is invalid",
                 context={"operation": "inventory", "family": family, "sequence": sequence},
+            )
+        if not verify_hmac_sha256(
+            self._inventory_scheduling_bytes(event),
+            event["signature"],
+            self._initialization_key(),
+        ):
+            raise CacheManifestIntegrityError(
+                "Lifecycle inventory event is unauthenticated",
+                reason=CacheReason.MANIFEST_SIGNATURE_INVALID,
             )
         return event["name"], event["digest"]
 
@@ -1255,10 +1347,12 @@ class FileOperationRecordRepository:
             name, digest = event
             current = reader(name)
             if current is None or hashlib.sha256(current).hexdigest() != digest:
-                try:
-                    self.file_ops.delete_durable(self._inventory_event_locator(family, sequence))
-                except FileNotFoundError:
-                    pass
+                # Keep stale event evidence immutable.  The authenticated
+                # head may advance only across a contiguous exact-revalidated
+                # prefix; deleting later slots would make a missing file look
+                # like a safe sparse gap without a separately authenticated
+                # run proof.
+                pass
             elif first_remaining is None:
                 first_remaining = sequence
         # The compacting cursor can wrap before a previously established live
@@ -1306,15 +1400,18 @@ class FileOperationRecordRepository:
                 while True:
                     state = self._read_inventory(family)
                     sequence = state["next_sequence"]
-                    encoded = json.dumps(
+                    event = self._sign_inventory_scheduling(
                         {
                             "version": _INVENTORY_SCHEMA_VERSION,
+                            "family": family,
+                            "store_id": self._inventory_store_provenance()["store_id"],
+                            "epoch": state["epoch"],
+                            "sequence": sequence,
                             "name": name,
                             "digest": hashlib.sha256(raw).hexdigest(),
-                        },
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ).encode("utf-8")
+                        }
+                    )
+                    encoded = json.dumps(event, sort_keys=True, separators=(",", ":")).encode("utf-8")
                     if len(encoded) > self._inventory_event_max_bytes():
                         raise CacheBlobBackendError(
                             "Lifecycle inventory event exceeds its bounded field policy",

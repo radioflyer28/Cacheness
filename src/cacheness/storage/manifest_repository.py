@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
+import secrets
 from copy import deepcopy
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -22,7 +23,9 @@ from cacheness.config import LifecycleLimits
 from cacheness.error_handling import (
     CacheBlobBackendError,
     CacheBlobLifecycleConflictError,
+    CacheBlobManifestUnauthenticatedError,
     CacheBlobMigrationRequiredError,
+    CacheManifestIntegrityError,
     CacheError,
 )
 from cacheness.metadata import InMemoryBackend, JsonBackend, SqliteBackend
@@ -30,6 +33,7 @@ from cacheness.json_utils import dumps as json_dumps
 from cacheness.json_utils import loads as json_loads
 
 from .coordination import interprocess_open_file_lock
+from .integrity import ManifestKeyProvider, sign_hmac_sha256, verify_hmac_sha256
 from .path_security import ManagedFileOps, resolve_managed_locator
 
 try:
@@ -40,7 +44,7 @@ except ImportError:  # pragma: no cover - SQLite support is optional at runtime.
 
 _RAW_MANIFEST_FIELD = "canonical_manifest_v1"
 _MANIFEST_INVENTORY_FIELD = "_cacheness_manifest_inventory_v1"
-_MANIFEST_INVENTORY_SCHEMA_VERSION = 2
+_MANIFEST_INVENTORY_SCHEMA_VERSION = 3
 _MANIFEST_INVENTORY_HEAD_MAX_BYTES = 4_096
 _MANIFEST_INVENTORY_EVENT_MIN_BYTES = 32 * 1024
 _MANIFEST_INVENTORY_COMPACTION_WINDOW = 64
@@ -223,6 +227,7 @@ class _MetadataManifestRepository:
         *,
         lifecycle_limits: LifecycleLimits | None = None,
         file_ops: ManagedFileOps | None = None,
+        inventory_key_provider: Callable[[], bytes] | None = None,
     ):
         self.backend = backend
         self.lifecycle_limits = (
@@ -236,6 +241,9 @@ class _MetadataManifestRepository:
         self._json_metadata_locator: Path | None = None
         self._json_inventory_head_locator: Path | None = None
         self._json_lock_guard = RLock()
+        self._inventory_key_provider = inventory_key_provider
+        self._fallback_inventory_key_provider: ManifestKeyProvider | None = None
+        self._active_inventory_epoch: str | None = None
         # Deterministic race seams used only by containment regressions.  They
         # deliberately run while the retained descriptor remains authoritative.
         self.after_json_lock_validation: Callable[[], None] | None = None
@@ -286,6 +294,86 @@ class _MetadataManifestRepository:
             except BaseException:
                 self.close()
                 raise
+
+        if self._inventory_key_provider is None and type(backend) is InMemoryBackend:
+            # In-memory backends never persist control records beyond this
+            # backend object. Retain a random key on that object so separately
+            # constructed repositories share one trust root without inventing
+            # a deterministic/public fallback key.
+            key = getattr(backend, "_cacheness_manifest_inventory_key_v3", None)
+            if type(key) is not bytes or len(key) != 32:
+                key = os.urandom(32)
+                setattr(backend, "_cacheness_manifest_inventory_key_v3", key)
+            self._inventory_key_provider = lambda: key
+
+    def _inventory_store_id(self) -> str:
+        """Return a stable managed-root identity for scheduler signatures."""
+        if self._json_lock_file_ops is not None:
+            root = self._json_lock_file_ops.root
+            device, inode = self._json_lock_file_ops.root_identity
+            material = f"{root}:{device}:{inode}"
+        else:
+            material = f"memory:{id(self.backend)}"
+        return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+    def _inventory_key(self, *, initialize_new_store: bool = False) -> bytes:
+        """Read the scheduler trust root without accepting a public fallback."""
+        provider = self._inventory_key_provider
+        if provider is not None:
+            key = provider()
+        else:
+            if self._json_lock_file_ops is None:
+                raise CacheBlobMigrationRequiredError(
+                    "Manifest inventory requires a signing-key provider",
+                    context={"operation": "manifest_inventory"},
+                )
+            if self._fallback_inventory_key_provider is None:
+                self._fallback_inventory_key_provider = ManifestKeyProvider(
+                    self._json_lock_file_ops.root
+                    / f".{Path(self.backend.metadata_file).name}.manifest-inventory-key.bin",
+                    lifecycle_limits=self.lifecycle_limits,
+                )
+            try:
+                key = (
+                    self._fallback_inventory_key_provider.get_or_initialize_new_store()
+                    if initialize_new_store
+                    else self._fallback_inventory_key_provider.get_key()
+                )
+            except CacheBlobManifestUnauthenticatedError as exc:
+                raise CacheBlobMigrationRequiredError(
+                    "Manifest inventory requires an explicit migration before key initialization",
+                    context={"operation": "manifest_inventory"},
+                ) from exc
+        if type(key) is not bytes or len(key) != 32:
+            raise CacheBlobManifestUnauthenticatedError(
+                "Manifest inventory signing key is invalid"
+            )
+        return key
+
+    @staticmethod
+    def _inventory_signing_bytes(value: Mapping[str, Any]) -> bytes:
+        """Return the canonical domain-separated scheduler HMAC preimage."""
+        unsigned = dict(value)
+        unsigned.pop("signature", None)
+        return b"cacheness.manifest-inventory.v4\x00" + json_dumps(
+            unsigned, default=str
+        ).encode("utf-8")
+
+    def _sign_inventory_value(
+        self, value: Mapping[str, Any], *, initialize_new_store: bool = False
+    ) -> dict[str, Any]:
+        signed = dict(value)
+        signed["signature"] = sign_hmac_sha256(
+            self._inventory_signing_bytes(signed),
+            self._inventory_key(initialize_new_store=initialize_new_store),
+        )
+        return signed
+
+    def _verify_inventory_value(self, value: Mapping[str, Any]) -> bool:
+        signature = value.get("signature")
+        return isinstance(signature, str) and verify_hmac_sha256(
+            self._inventory_signing_bytes(value), signature, self._inventory_key()
+        )
 
     def close(self) -> None:
         """Release only a lock root that this direct repository constructed."""
@@ -532,11 +620,14 @@ class _MetadataManifestRepository:
             self.lifecycle_limits.max_operation_field_bytes * 2 + 512,
         )
 
-    @staticmethod
-    def _empty_inventory_state() -> dict[str, Any]:
+    def _empty_inventory_state(self) -> dict[str, Any]:
         """Build the fixed-size v2 sequence head used by every local backend."""
         return {
             "version": _MANIFEST_INVENTORY_SCHEMA_VERSION,
+            "store_id": self._inventory_store_id(),
+            # A fresh random epoch distinguishes control objects produced by
+            # separate initialization eras under the same persistent key.
+            "epoch": secrets.token_hex(16),
             "next_sequence": 1,
             "compact_next_sequence": 1,
             # Sequence positions strictly below this floor have been
@@ -556,38 +647,44 @@ class _MetadataManifestRepository:
         }
 
     @staticmethod
-    def _validate_inventory_head(state: object) -> dict[str, int]:
+    def _inventory_head_field_names() -> tuple[str, ...]:
+        """Return the fixed signed scheduler-head schema in one place."""
+        return (
+            "version",
+            "store_id",
+            "epoch",
+            "next_sequence",
+            "compact_next_sequence",
+            "first_live_sequence",
+            "maintenance_target_sequence",
+            "open_sparse_run_start",
+            "signature",
+        )
+
+    def _validate_inventory_head(self, state: object) -> dict[str, Any]:
         """Validate the durable head without loading any event history."""
-        if not isinstance(state, dict) or set(state) not in (
-            {"version", "next_sequence", "compact_next_sequence"},
-            {
-                "version",
-                "next_sequence",
-                "compact_next_sequence",
-                "first_live_sequence",
-            },
-            {
-                "version",
-                "next_sequence",
-                "compact_next_sequence",
-                "first_live_sequence",
-                "maintenance_target_sequence",
-            },
-            {
-                "version",
-                "next_sequence",
-                "compact_next_sequence",
-                "first_live_sequence",
-                "maintenance_target_sequence",
-                "open_sparse_run_start",
-            },
-        ):
+        if not isinstance(state, dict) or set(state) != {
+            "version",
+            "store_id",
+            "epoch",
+            "next_sequence",
+            "compact_next_sequence",
+            "first_live_sequence",
+            "maintenance_target_sequence",
+            "open_sparse_run_start",
+            "signature",
+        }:
             raise CacheBlobBackendError(
                 "Canonical manifest inventory is invalid",
                 context={"operation": "manifest_inventory"},
             )
         if (
             state["version"] != _MANIFEST_INVENTORY_SCHEMA_VERSION
+            or state["store_id"] != self._inventory_store_id()
+            or not isinstance(state["epoch"], str)
+            or len(state["epoch"]) != 32
+            or any(character not in "0123456789abcdef" for character in state["epoch"])
+            or not isinstance(state["signature"], str)
             or type(state["next_sequence"]) is not int
             or type(state["compact_next_sequence"]) is not int
             or state["next_sequence"] <= 0
@@ -597,20 +694,6 @@ class _MetadataManifestRepository:
                 "Canonical manifest inventory version is invalid",
                 context={"operation": "manifest_inventory"},
             )
-        if "first_live_sequence" not in state:
-            # Heads written before durable live floors are conservative: no
-            # lower sequence can be skipped until a later compaction proves
-            # it stale and persists the new field.
-            state["first_live_sequence"] = 1
-        if "maintenance_target_sequence" not in state:
-            # A v2 head predates a durable debt boundary.  Treat all of its
-            # existing high-water range as mutating recovery work rather than
-            # allowing clear to scan a potentially stale history.
-            state["maintenance_target_sequence"] = state["next_sequence"] - 1
-        if "open_sparse_run_start" not in state:
-            # Pre-marker heads keep their ordinary bounded scan behavior until
-            # a later maintenance call creates an authenticated sparse run.
-            state["open_sparse_run_start"] = 0
         if (
             type(state["first_live_sequence"]) is not int
             or not 1 <= state["first_live_sequence"] <= state["next_sequence"]
@@ -635,6 +718,10 @@ class _MetadataManifestRepository:
                 "Canonical manifest inventory sparse-run continuation is invalid",
                 context={"operation": "manifest_inventory"},
             )
+        if not self._verify_inventory_value(state):
+            raise CacheManifestIntegrityError(
+                "Canonical manifest inventory head is unauthenticated"
+            )
         return state
 
     def _inventory_state(self) -> dict[str, Any]:
@@ -656,9 +743,13 @@ class _MetadataManifestRepository:
                         "Canonical manifest inventory migration is required",
                         context={"backend": type(self.backend).__name__},
                     )
-                return self._empty_inventory_state()
+                state = self._empty_inventory_state()
+                self._active_inventory_epoch = state["epoch"]
+                return state
             try:
-                return self._validate_inventory_head(json_loads(raw))
+                state = self._validate_inventory_head(json_loads(raw))
+                self._active_inventory_epoch = state["epoch"]
+                return state
             except (TypeError, ValueError) as exc:
                 raise CacheBlobBackendError(
                     "Canonical manifest inventory is invalid",
@@ -671,66 +762,27 @@ class _MetadataManifestRepository:
                     "Canonical manifest inventory migration is required",
                     context={"backend": type(self.backend).__name__},
                 )
+            # Constructor recovery is read-only for a never-used backend.
+            # The first scheduler append publishes this fresh head together
+            # with an event, after BlobStore has performed its explicit
+            # manifest-key initialization boundary.
             state = {**self._empty_inventory_state(), "events": {}, "skips": {}}
-            setattr(self.backend, "_cacheness_manifest_inventory_v2", state)
-        if not isinstance(state, dict) or set(state) not in (
-            {"version", "next_sequence", "compact_next_sequence", "events"},
-            {
-                "version",
-                "next_sequence",
-                "compact_next_sequence",
-                "first_live_sequence",
-                "events",
-            },
-            {
-                "version",
-                "next_sequence",
-                "compact_next_sequence",
-                "first_live_sequence",
-                "maintenance_target_sequence",
-                "events",
-            },
-            {
-                "version",
-                "next_sequence",
-                "compact_next_sequence",
-                "first_live_sequence",
-                "maintenance_target_sequence",
-                "open_sparse_run_start",
-                "events",
-            },
-            {
-                "version",
-                "next_sequence",
-                "compact_next_sequence",
-                "first_live_sequence",
-                "maintenance_target_sequence",
-                "open_sparse_run_start",
-                "events",
-                "skips",
-            },
-        ):
+            self._active_inventory_epoch = state["epoch"]
+            return state
+        if not isinstance(state, dict) or set(state) != {
+            *self._inventory_head_field_names(),
+            "events",
+            "skips",
+        }:
             raise CacheBlobBackendError(
                 "Canonical manifest inventory is invalid",
                 context={"operation": "manifest_inventory"},
             )
         head = self._validate_inventory_head(
-            {
-                name: state[name]
-                for name in (
-                    "version",
-                    "next_sequence",
-                    "compact_next_sequence",
-                    "first_live_sequence",
-                    "maintenance_target_sequence",
-                    "open_sparse_run_start",
-                )
-                if name in state
-            }
+            {name: state[name] for name in self._inventory_head_field_names()}
         )
-        state["first_live_sequence"] = head["first_live_sequence"]
-        state["maintenance_target_sequence"] = head["maintenance_target_sequence"]
-        state["open_sparse_run_start"] = head["open_sparse_run_start"]
+        state.update(head)
+        self._active_inventory_epoch = head["epoch"]
         if not isinstance(state["events"], dict):
             raise CacheBlobBackendError(
                 "Canonical manifest inventory events are invalid",
@@ -747,23 +799,44 @@ class _MetadataManifestRepository:
 
     def _write_inventory_head(self, state: dict[str, Any]) -> None:
         """Persist only the fixed-size JSON head after an immutable event."""
+        state["store_id"] = self._inventory_store_id()
+        unsigned_head = {
+            name: state[name]
+            for name in self._inventory_head_field_names()
+            if name != "signature"
+        }
+        signed = self._sign_inventory_value(unsigned_head, initialize_new_store=True)
+        state.update(signed)
+        self._active_inventory_epoch = signed["epoch"]
+        head = self._validate_inventory_head(signed)
         if type(self.backend) is not JsonBackend:
+            setattr(self.backend, "_cacheness_manifest_inventory_v2", state)
             return
         if self._json_lock_file_ops is None or self._json_inventory_head_locator is None:
             raise CacheBlobBackendError("JSON manifest inventory root is unavailable")
-        head = self._validate_inventory_head(state)
         encoded = json_dumps(head, default=str).encode("utf-8")
         if len(encoded) > _MANIFEST_INVENTORY_HEAD_MAX_BYTES:
             raise AssertionError("manifest inventory head unexpectedly exceeds bound")
         self._json_lock_file_ops.write_bytes_durable(self._json_inventory_head_locator, encoded)
 
-    @staticmethod
-    def _validate_inventory_event(event: object, sequence: int) -> tuple[str, str]:
+    def _validate_inventory_event(self, event: object, sequence: int) -> tuple[str, str]:
         """Validate a non-authoritative event before it drives a page position."""
         if (
             not isinstance(event, dict)
-            or set(event) != {"version", "key", "digest"}
+            or set(event)
+            != {
+                "version",
+                "store_id",
+                "epoch",
+                "sequence",
+                "key",
+                "digest",
+                "signature",
+            }
             or event["version"] != _MANIFEST_INVENTORY_SCHEMA_VERSION
+            or event["store_id"] != self._inventory_store_id()
+            or event["epoch"] != self._active_inventory_epoch
+            or event["sequence"] != sequence
             or not isinstance(event["key"], str)
             or not event["key"]
             or len(event["key"].encode("utf-8")) > 8_192
@@ -774,6 +847,10 @@ class _MetadataManifestRepository:
             raise CacheBlobBackendError(
                 "Canonical manifest inventory event is invalid",
                 context={"operation": "manifest_inventory", "sequence": sequence},
+            )
+        if not self._verify_inventory_value(event):
+            raise CacheManifestIntegrityError(
+                "Canonical manifest inventory event is unauthenticated"
             )
         return event["key"], event["digest"]
 
@@ -799,29 +876,46 @@ class _MetadataManifestRepository:
         event = self._inventory_state()["events"].get(sequence)
         return None if event is None else self._validate_inventory_event(event, sequence)
 
-    @staticmethod
     def _validate_inventory_skip(
-        marker: object, sequence: int, *, next_sequence: int
-    ) -> int:
+        self, marker: object, sequence: int, *, next_sequence: int
+    ) -> dict[str, Any]:
         """Validate a sparse-successor marker before it can skip positions."""
         if (
             not isinstance(marker, dict)
-            or set(marker) != {"version", "start_sequence", "next_sequence"}
+            or set(marker)
+            != {
+                "version",
+                "store_id",
+                "epoch",
+                "start_sequence",
+                "next_sequence",
+                "run_digest",
+                "signature",
+            }
             or marker["version"] != _MANIFEST_INVENTORY_SCHEMA_VERSION
+            or marker["store_id"] != self._inventory_store_id()
+            or marker["epoch"] != self._active_inventory_epoch
             or marker["start_sequence"] != sequence
             or type(marker["next_sequence"]) is not int
             or not sequence < marker["next_sequence"] <= next_sequence
+            or not isinstance(marker["run_digest"], str)
+            or len(marker["run_digest"]) != 64
+            or any(character not in "0123456789abcdef" for character in marker["run_digest"])
         ):
             raise CacheBlobBackendError(
                 "Canonical manifest inventory sparse-successor marker is invalid",
                 context={"operation": "manifest_inventory", "sequence": sequence},
             )
-        return marker["next_sequence"]
+        if not self._verify_inventory_value(marker):
+            raise CacheManifestIntegrityError(
+                "Canonical manifest inventory sparse-successor marker is unauthenticated"
+            )
+        return marker
 
-    def _read_inventory_skip(
+    def _read_inventory_skip_record(
         self, sequence: int, state: dict[str, Any]
-    ) -> int | None:
-        """Read a non-authoritative sparse successor or fail closed if malformed."""
+    ) -> dict[str, Any] | None:
+        """Read one authenticated sparse-run proof without interpreting it."""
         if type(self.backend) is JsonBackend:
             if self._json_lock_file_ops is None:
                 raise CacheBlobBackendError("JSON manifest inventory root is unavailable")
@@ -850,15 +944,72 @@ class _MetadataManifestRepository:
             )
         )
 
+    def _read_inventory_skip(
+        self, sequence: int, state: dict[str, Any]
+    ) -> int | None:
+        """Read a non-authoritative sparse successor or fail closed if malformed."""
+        marker = self._read_inventory_skip_record(sequence, state)
+        return None if marker is None else marker["next_sequence"]
+
+    @staticmethod
+    def _inventory_skip_run_digest(
+        *,
+        start_sequence: int,
+        successor: int,
+        previous_digest: str | None,
+        event: tuple[str, str] | None,
+    ) -> str:
+        """Extend a bounded authenticated proof of exact skipped evidence.
+
+        Each marker commits to the previous authenticated run digest and the
+        exact event (or proved-absent slot) just revalidated by compaction.
+        The control record therefore remains fixed-size even if a stale run
+        spans many bounded maintenance calls, while changing its range or any
+        constituent event requires a new store-key HMAC.
+        """
+        proof = {
+            "event": None if event is None else {"key": event[0], "digest": event[1]},
+            "previous_digest": previous_digest,
+            "start_sequence": start_sequence,
+            "successor": successor,
+        }
+        return hashlib.sha256(
+            b"cacheness.manifest-inventory.skip-run.v3\x00"
+            + json_dumps(proof, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+
     def _write_inventory_skip(
-        self, sequence: int, successor: int, state: dict[str, Any]
+        self,
+        sequence: int,
+        successor: int,
+        state: dict[str, Any],
+        *,
+        event: tuple[str, str] | None,
     ) -> None:
         """Durably extend one exact stale run before retiring its final event."""
-        marker = {
+        existing = self._read_inventory_skip_record(sequence, state)
+        if existing is not None and existing["next_sequence"] >= successor:
+            return
+        if existing is not None and existing["next_sequence"] != successor - 1:
+            raise CacheBlobBackendError(
+                "Canonical manifest inventory sparse-successor continuation is invalid",
+                context={"operation": "manifest_inventory", "sequence": sequence},
+            )
+        marker = self._sign_inventory_value({
             "version": _MANIFEST_INVENTORY_SCHEMA_VERSION,
+            "store_id": self._inventory_store_id(),
+            "epoch": state["epoch"],
             "start_sequence": sequence,
             "next_sequence": successor,
-        }
+            "run_digest": self._inventory_skip_run_digest(
+                start_sequence=sequence,
+                successor=successor,
+                previous_digest=(
+                    None if existing is None else existing["run_digest"]
+                ),
+                event=event,
+            ),
+        }, initialize_new_store=True)
         self._validate_inventory_skip(
             marker, sequence, next_sequence=state["next_sequence"]
         )
@@ -876,23 +1027,27 @@ class _MetadataManifestRepository:
 
     def _append_inventory_event(self, key: str, record: bytes) -> int:
         """Index publication before authority, without append/read/rewrite history."""
-        event = {
+        state = self._inventory_state()
+        sequence = state["next_sequence"]
+        event = self._sign_inventory_value({
             "version": _MANIFEST_INVENTORY_SCHEMA_VERSION,
+            "store_id": self._inventory_store_id(),
+            "epoch": state["epoch"],
+            "sequence": sequence,
             "key": key,
             "digest": hashlib.sha256(record).hexdigest(),
-        }
+        }, initialize_new_store=True)
         encoded = json_dumps(event, default=str).encode("utf-8")
         if len(encoded) > self._inventory_event_max_bytes():
             raise CacheBlobBackendError(
                 "Canonical manifest inventory event exceeds its field policy",
                 context={"operation": "manifest_inventory"},
             )
-        self._validate_inventory_event(event, 1)
-        state = self._inventory_state()
+        self._validate_inventory_event(event, sequence)
         if type(self.backend) is not JsonBackend:
-            sequence = state["next_sequence"]
             state["events"][sequence] = event
             state["next_sequence"] = sequence + 1
+            self._write_inventory_head(state)
             return sequence
         while True:
             sequence = state["next_sequence"]
@@ -1010,7 +1165,7 @@ class _MetadataManifestRepository:
                     open_sparse_run_start = sequence
                 if sequence >= open_sparse_run_start:
                     self._write_inventory_skip(
-                        open_sparse_run_start, sequence + 1, state
+                        open_sparse_run_start, sequence + 1, state, event=None
                     )
                 continue
             key, digest = event
@@ -1057,7 +1212,7 @@ class _MetadataManifestRepository:
             # event comparison above proved it stale, a crash at either side
             # can only retain or hide stale scheduling evidence.
             self._write_inventory_skip(
-                open_sparse_run_start, sequence + 1, state
+                open_sparse_run_start, sequence + 1, state, event=event
             )
             if type(self.backend) is JsonBackend:
                 try:
@@ -1373,8 +1528,14 @@ class InMemoryManifestRepository(_MetadataManifestRepository):
         *,
         lifecycle_limits: LifecycleLimits | None = None,
         file_ops: ManagedFileOps | None = None,
+        inventory_key_provider: Callable[[], bytes] | None = None,
     ):
-        super().__init__(backend, lifecycle_limits=lifecycle_limits, file_ops=file_ops)
+        super().__init__(
+            backend,
+            lifecycle_limits=lifecycle_limits,
+            file_ops=file_ops,
+            inventory_key_provider=inventory_key_provider,
+        )
 
 
 class JsonManifestRepository(_MetadataManifestRepository):
@@ -1386,8 +1547,14 @@ class JsonManifestRepository(_MetadataManifestRepository):
         *,
         lifecycle_limits: LifecycleLimits | None = None,
         file_ops: ManagedFileOps | None = None,
+        inventory_key_provider: Callable[[], bytes] | None = None,
     ):
-        super().__init__(backend, lifecycle_limits=lifecycle_limits, file_ops=file_ops)
+        super().__init__(
+            backend,
+            lifecycle_limits=lifecycle_limits,
+            file_ops=file_ops,
+            inventory_key_provider=inventory_key_provider,
+        )
 
 
 class SqliteManifestRepository:
@@ -1843,15 +2010,22 @@ def create_manifest_repository(
     *,
     lifecycle_limits: LifecycleLimits | None = None,
     file_ops: ManagedFileOps | None = None,
+    inventory_key_provider: Callable[[], bytes] | None = None,
 ) -> ManifestRepository:
     """Select the exact local adapter that can preserve canonical record bytes."""
     if type(backend) is InMemoryBackend:
         return InMemoryManifestRepository(
-            backend, lifecycle_limits=lifecycle_limits, file_ops=file_ops
+            backend,
+            lifecycle_limits=lifecycle_limits,
+            file_ops=file_ops,
+            inventory_key_provider=inventory_key_provider,
         )
     if type(backend) is JsonBackend:
         return JsonManifestRepository(
-            backend, lifecycle_limits=lifecycle_limits, file_ops=file_ops
+            backend,
+            lifecycle_limits=lifecycle_limits,
+            file_ops=file_ops,
+            inventory_key_provider=inventory_key_provider,
         )
     if type(backend) is SqliteBackend:
         return SqliteManifestRepository(backend, lifecycle_limits=lifecycle_limits)
@@ -1874,9 +2048,13 @@ class MetadataManifestRepository:
         *,
         lifecycle_limits: LifecycleLimits | None = None,
         file_ops: ManagedFileOps | None = None,
+        inventory_key_provider: Callable[[], bytes] | None = None,
     ):
         self._repository = create_manifest_repository(
-            backend, lifecycle_limits=lifecycle_limits, file_ops=file_ops
+            backend,
+            lifecycle_limits=lifecycle_limits,
+            file_ops=file_ops,
+            inventory_key_provider=inventory_key_provider,
         )
 
     def get_raw(self, key: str) -> Optional[bytes]:

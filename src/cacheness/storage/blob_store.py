@@ -309,10 +309,6 @@ class BlobStore:
         
         # Initialize handler registry
         self.handlers = HandlerRegistry()
-        self.manifest_repository = create_manifest_repository(
-            self.backend,
-            lifecycle_limits=self.lifecycle_limits,
-        )
         self._manifest_key_provider = (
             ManifestKeyProvider(
                 self.cache_dir / "blob_manifest_hmac_key.bin",
@@ -320,6 +316,15 @@ class BlobStore:
             )
             if manifest_key_provider is None
             else manifest_key_provider
+        )
+        self.manifest_repository = create_manifest_repository(
+            self.backend,
+            lifecycle_limits=self.lifecycle_limits,
+            file_ops=self.guarded_handler_io.file_ops,
+            # The scheduler is control authority: it must be signed by the
+            # same persistent store trust root as the canonical manifests,
+            # rather than by a public or independently replaceable key.
+            inventory_key_provider=self._manifest_key,
         )
         self.lifecycle = LifecycleEngine(self, lifecycle_limits=self.lifecycle_limits)
         self._reconciler = _Reconciler(self, lifecycle_limits=self.lifecycle_limits)

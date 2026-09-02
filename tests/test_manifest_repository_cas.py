@@ -6,10 +6,11 @@ import builtins
 import ctypes
 import errno
 import hashlib
+import json
 import multiprocessing
 import os
 from pathlib import Path
-from threading import Barrier, Lock, Thread
+from threading import Barrier, RLock, Thread
 
 import pytest
 
@@ -18,6 +19,7 @@ from cacheness.error_handling import (
     CacheBlobBackendError,
     CacheBlobLifecycleConflictError,
     CacheBlobMigrationRequiredError,
+    CacheManifestIntegrityError,
     CacheReason,
     CacheUnsafePathError,
 )
@@ -160,6 +162,148 @@ def test_store_bound_inventory_provenance_rejects_cross_root_replay(
     finally:
         target.close()
         target_ops.close()
+
+
+@pytest.mark.parametrize("family", ("primary", "sidecar", "pending"))
+def test_operation_inventory_scheduling_substitution_fails_closed(
+    tmp_path: Path, family: str
+) -> None:
+    """A valid-shaped unsigned scheduler record cannot suppress evidence."""
+    root = tmp_path / f"signed-scheduler-{family}"
+    root.mkdir()
+    file_ops = ManagedFileOps(root)
+    repository = FileOperationRecordRepository(
+        file_ops,
+        lifecycle_limits=LifecycleLimits(max_inventory_items=1),
+        initialization_key_provider=lambda: b"k" * 32,
+    )
+    try:
+        repository.initialize_new_store()
+        raw = b'{"control":"current"}'
+        operation_id = "a" * 32
+        if family == "primary":
+            name = operation_id
+            locator = repository.locator_for(operation_id)
+            read_page = repository.list_page
+        elif family == "sidecar":
+            name = f"reconcile-action-{operation_id}.json"
+            locator = repository.reconciliation_checkpoint_locator(operation_id)
+            read_page = repository.list_reconciliation_checkpoint_page
+        else:
+            digest = hashlib.sha256(raw).hexdigest()
+            name = f".{operation_id}.json.pending.{digest}.{'b' * 32}.tmp"
+            locator = root / "operations" / name
+            read_page = lambda: repository.list_pending_control_page(None)
+        repository._append_inventory_event(family, name, raw)
+        file_ops.write_bytes_durable(locator, raw)
+        head = json.loads(file_ops.read_bytes(repository._inventory_head_locator(family)))
+        head["first_live_sequence"] = head["next_sequence"]
+        file_ops.write_bytes_durable(
+            repository._inventory_head_locator(family),
+            json.dumps(head, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+        )
+        with pytest.raises(CacheManifestIntegrityError):
+            read_page()
+    finally:
+        repository.close()
+        file_ops.close()
+
+
+@pytest.mark.parametrize("backend_name", ("memory", "json"))
+def test_manifest_scheduler_skip_proof_rejects_tampering_after_reopen(
+    tmp_path: Path, backend_name: str
+) -> None:
+    """An old cursor cannot accept a substituted signed-run proof."""
+    key = b"m" * 32
+    limits = LifecycleLimits(manifest_page_size=1, max_inventory_items=1)
+    if backend_name == "memory":
+        backend = InMemoryBackend()
+        repository = InMemoryManifestRepository(
+            backend, lifecycle_limits=limits, inventory_key_provider=lambda: key
+        )
+    else:
+        backend = JsonBackend(tmp_path / "manifest-scheduler.json")
+        repository = JsonManifestRepository(
+            backend, lifecycle_limits=limits, inventory_key_provider=lambda: key
+        )
+    try:
+        repository.put_raw("anchor", _record("anchor"))
+        repository.put_raw("churn", _record("churn-0"))
+        old_page = repository.list_page()
+        assert old_page.next_cursor is not None
+
+        # Two replacements advance bounded maintenance past the stable anchor
+        # and emit an authenticated sparse proof for the stale churn member.
+        for generation in (1, 2):
+            observed = repository.get_raw("churn")
+            assert observed is not None
+            repository.publish_if_expected(
+                "churn",
+                ManifestExpectation.from_authenticated_record(
+                    f"generation-{generation}", observed
+                ),
+                _record(f"churn-{generation}"),
+            )
+
+        if backend_name == "json":
+            repository.close()
+            backend.close()
+            backend = JsonBackend(tmp_path / "manifest-scheduler.json")
+            repository = JsonManifestRepository(
+                backend, lifecycle_limits=limits, inventory_key_provider=lambda: key
+            )
+        else:
+            repository = InMemoryManifestRepository(
+                backend, lifecycle_limits=limits, inventory_key_provider=lambda: key
+            )
+
+        # A cursor captured before the stale run remains a safe terminal view
+        # after the reopened scheduler consumes that run.
+        assert repository.list_page(old_page.next_cursor).entries == ()
+        if backend_name == "json":
+            marker_path = repository._json_inventory_skip_locator(2)  # type: ignore[union-attr]
+            marker = json.loads(marker_path.read_bytes())
+            marker["run_digest"] = "0" * 64
+            marker_path.write_text(json.dumps(marker, sort_keys=True, separators=(",", ":")))
+        else:
+            repository._inventory_state()["skips"][2]["run_digest"] = "0" * 64
+
+        with pytest.raises(CacheBlobBackendError, match="list_page failed"):
+            repository.list_page(old_page.next_cursor)
+    finally:
+        repository.close()
+        backend.close()
+
+
+def test_manifest_scheduler_replay_from_another_root_fails_closed(tmp_path: Path) -> None:
+    """A valid signed manifest head is scoped to one managed store identity."""
+    key = b"m" * 32
+    source_path = tmp_path / "manifest-source" / "metadata.json"
+    source_path.parent.mkdir()
+    source_backend = JsonBackend(source_path)
+    source = JsonManifestRepository(
+        source_backend, inventory_key_provider=lambda: key
+    )
+    try:
+        source.put_raw("source", _record("source"))
+        head = source._json_inventory_head_locator.read_bytes()  # type: ignore[union-attr]
+    finally:
+        source.close()
+        source_backend.close()
+
+    target_path = tmp_path / "manifest-target" / "metadata.json"
+    target_path.parent.mkdir()
+    target_backend = JsonBackend(target_path)
+    target = JsonManifestRepository(
+        target_backend, inventory_key_provider=lambda: key
+    )
+    try:
+        target._json_inventory_head_locator.write_bytes(head)  # type: ignore[union-attr]
+        with pytest.raises(CacheBlobBackendError, match="list_page failed"):
+            target.list_page()
+    finally:
+        target.close()
+        target_backend.close()
 
 
 @pytest.mark.parametrize("family", ("primary", "sidecar", "pending"))
@@ -777,7 +921,12 @@ def test_json_cas_uses_the_win32_adapter_when_fcntl_is_unavailable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The simulated one-user/session Windows path never imports POSIX locking."""
-    shared_lock = Lock()
+    # Scheduler-key initialization now correctly takes a second distinct
+    # cross-process lock while the metadata lock is held.  Model the Windows
+    # kernel primitive faithfully: separate lock handles remain reentrant for
+    # their owning thread rather than deadlocking this deliberately simplified
+    # fake on every nested descriptor.
+    shared_lock = RLock()
     calls: list[str] = []
 
     class FakeWindowsLockApi:
