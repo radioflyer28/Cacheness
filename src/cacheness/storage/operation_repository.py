@@ -294,6 +294,7 @@ class FileOperationRecordRepository:
         self._lock_handle_guard = RLock()
         self._lock_handles: dict[str, tuple[Path, BinaryIO, tuple[int, int]]] = {}
         self._pending_inventory_observer_depth = 0
+        self._active_inventory_epoch: str | None = None
         # This narrowly scoped provider is called only after the bounded
         # all-family compatibility proof for a fresh store, or to verify an
         # already-present initialization record.  It must not silently create
@@ -961,6 +962,7 @@ class FileOperationRecordRepository:
                 "Lifecycle inventory initialization provenance is unauthenticated",
                 reason=CacheReason.MANIFEST_SIGNATURE_INVALID,
             )
+        self._active_inventory_epoch = record["epoch"]
         return record
 
     def _has_current_inventory_initialization(self) -> bool:
@@ -969,10 +971,12 @@ class FileOperationRecordRepository:
 
     def _inventory_epoch(self) -> str:
         """Return the active signed scheduler epoch for family control records."""
+        if self._active_inventory_epoch is not None:
+            return self._active_inventory_epoch
         record = self._read_current_inventory_initialization()
         if record is None:
             raise CacheBlobMigrationRequiredError(
-                "Lifecycle inventory initialization is required before scheduling",
+                "Lifecycle inventory initialization requires explicit migration before scheduling",
                 context={"operation": "inventory_migration"},
             )
         return record["epoch"]  # type: ignore[return-value]
@@ -1467,6 +1471,7 @@ class FileOperationRecordRepository:
         # state: ordinary recovery retains responsibility for the later typed
         # legacy-evidence decision.  A present marker is then authenticated by
         # the normal head reads below.
+        self._active_inventory_epoch = None
         try:
             initialized_size = self.file_ops.get_size(
                 self._inventory_initialization_locator()
@@ -1510,6 +1515,10 @@ class FileOperationRecordRepository:
         tuple[tuple[str, bytes | None], ...], object | None, tuple[object, ...], int
     ]:
         """Read at most one stable high-water page from one family index."""
+        # Authenticate the immutable initialization record once per bounded
+        # reader call; each subsequent head/event proof must share that exact
+        # epoch without turning page work into a per-member marker scan.
+        self._active_inventory_epoch = None
         state = self._read_inventory(family)
         high_water = (
             state["next_sequence"] - 1

@@ -314,16 +314,17 @@ def test_operation_repository_uses_configured_bounded_stable_pages(
             "a" * 32,
         ]
         assert first_page.next_cursor is not None
-        # One bounded sequence head, one immutable event per yielded member,
-        # and one exact control read per member; no history rewrite or
-        # namespace-wide directory scan is used.
-        assert len(calls) == 1 + (2 * limits.operation_page_size)
+        # One authenticated initialization epoch, one bounded sequence head,
+        # one immutable event per yielded member, and one exact control read
+        # per member; no history rewrite or namespace-wide directory scan is
+        # used.
+        assert len(calls) == 2 + (2 * limits.operation_page_size)
         assert [cursor.next_sequence for cursor in first_page.entry_next_cursors] == [2, 3]
 
         second_page = repository.list_page(first_page.next_cursor)
         assert [operation_id for operation_id, _ in second_page.entries] == ["b" * 32]
         assert second_page.next_cursor is None
-        assert len(calls) == 8
+        assert len(calls) == 10
     finally:
         store.close()
 
@@ -1609,7 +1610,7 @@ def test_successful_blob_lifecycle_retirement_converges_sparse_primary_history(
 
         # An already compacted terminal inventory pays only head/current-page
         # checks; it does not revisit the 64 retired successful operations.
-        assert len(reads) <= 8
+        assert len(reads) <= 12
     finally:
         store.close()
 
@@ -1759,14 +1760,19 @@ def test_crash_during_new_store_inventory_initialization_keeps_reopen_current_v2
 
     reopened = BlobStore(root, backend="json")
     try:
+        epochs: set[str] = set()
         for family in ("primary", "sidecar", "pending"):
-            assert reopened.lifecycle.operation_repository._read_inventory(family) == {
-                "version": 2,
-                "next_sequence": 1,
-                "compact_next_sequence": 1,
-                "first_live_sequence": 1,
-                "maintenance_target_sequence": 0,
-            }
+            state = reopened.lifecycle.operation_repository._read_inventory(family)
+            assert state["version"] == 3
+            assert state["family"] == family
+            assert state["next_sequence"] == 1
+            assert state["compact_next_sequence"] == 1
+            assert state["first_live_sequence"] == 1
+            assert state["maintenance_target_sequence"] == 0
+            assert isinstance(state["epoch"], str)
+            assert len(state["epoch"]) == 32
+            epochs.add(state["epoch"])
+        assert len(epochs) == 1
         assert reopened.reconcile(now=datetime(2026, 9, 2, tzinfo=timezone.utc)) is not None
     finally:
         reopened.close()
