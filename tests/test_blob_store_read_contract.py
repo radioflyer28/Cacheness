@@ -16,6 +16,7 @@ from cacheness.error_handling import (
     CacheBlobManifestUnauthenticatedError,
     CacheBlobManifestUnsupportedVersionError,
     CacheBlobPayloadTamperedError,
+    CacheManifestIntegrityError,
     CacheStorageError,
     CacheUnsafePathError,
 )
@@ -894,7 +895,12 @@ def test_delete_and_clear_preflight_authenticated_manifests_before_mutation(
         second = store.put("second clear", key="clear-second")
         _replace_signed_manifest(store, second, state="prepared")
 
-        with pytest.raises(CacheBlobLifecycleConflictError):
+        # A generation-bound inventory preserves its publication order. The
+        # deliberately unauthenticated first record can therefore fail the
+        # clear preflight before the deliberately non-committed later record.
+        with pytest.raises(
+            (CacheBlobLifecycleConflictError, CacheManifestIntegrityError)
+        ):
             store.clear()
         assert store.manifest_repository.get_raw(first) is not None
         assert store.manifest_repository.get_raw(second) is not None
