@@ -702,7 +702,15 @@ class _MetadataManifestRepository:
             try:
                 current = self._raw_from_entry(self._current_entry(key))
             except (TypeError, ValueError, CacheBlobMigrationRequiredError):
-                current = None
+                # A malformed or pre-migration projection is still live
+                # authority.  Its immutable scheduling event is the only
+                # bounded route by which a later inventory page can expose the
+                # typed failure; treating this as absence would let unrelated
+                # maintenance manufacture a false terminal reconciliation.
+                # Compaction is post-publication best-effort maintenance, so
+                # preserve the event and keep progressing through this bounded
+                # window instead of failing the unrelated write/remove.
+                continue
             if current is None or hashlib.sha256(current).hexdigest() != digest:
                 if type(self.backend) is JsonBackend:
                     try:

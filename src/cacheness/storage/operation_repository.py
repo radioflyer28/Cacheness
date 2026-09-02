@@ -762,6 +762,33 @@ class FileOperationRecordRepository:
             )
         except FileNotFoundError:
             return None
+        except ValueError as exc:
+            # A bounded event cannot be silently treated as a sparse gap:
+            # that would make remaining lifecycle debt look terminal.  Use
+            # the same stable bounds reason as other control-evidence reads,
+            # while retaining enough inventory provenance for callers to
+            # remediate the exact family/sequence.
+            raise CacheManifestIntegrityError(
+                "Lifecycle inventory event exceeds the configured byte limit",
+                context={
+                    "operation": "read_inventory_event",
+                    "family": family,
+                    "sequence": sequence,
+                },
+                reason=CacheReason.MANIFEST_BOUNDS,
+            ) from exc
+        except OSError as exc:
+            # Only FileNotFoundError is an intentional compacted sparse gap.
+            # Other filesystem failures are observable storage faults, not
+            # evidence that the immutable scheduling member is absent.
+            raise CacheBlobBackendError(
+                "Lifecycle inventory event could not be read",
+                context={
+                    "operation": "read_inventory_event",
+                    "family": family,
+                    "sequence": sequence,
+                },
+            ) from exc
         try:
             event = json.loads(raw)
         except (TypeError, ValueError, json.JSONDecodeError) as exc:

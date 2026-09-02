@@ -23,6 +23,7 @@ from cacheness.error_handling import (
     CacheStorageError,
     CacheBlobLifecycleConflictError,
     CacheManifestIntegrityError,
+    CacheReason,
 )
 from cacheness.storage import BlobStore
 from cacheness.storage.reconciliation import ReconciliationAction, ReconciliationStatus
@@ -44,6 +45,7 @@ from cacheness.storage.operation_record import (
 )
 from cacheness.storage.operation_repository import FileOperationRecordRepository
 from cacheness.storage import operation_repository as operation_repository_module
+from cacheness.storage import manifest_repository as manifest_repository_module
 from cacheness.storage.path_security import ManagedFileOps
 from cacheness.storage import reconciliation as reconciliation_module
 
@@ -327,6 +329,152 @@ def test_reconcile_fails_closed_for_a_malformed_current_manifest_projection(
 
         with pytest.raises(CacheBlobBackendError, match="list_page failed"):
             store.reconcile(now=datetime(2026, 8, 31, tzinfo=timezone.utc))
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("backend_name", ("memory", "json"))
+@pytest.mark.parametrize("maintenance", ("overwrite", "remove"))
+def test_manifest_compaction_retains_malformed_live_authority_events(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend_name: str,
+    maintenance: str,
+) -> None:
+    """Unrelated bounded maintenance cannot hide malformed live authority."""
+    root = tmp_path / f"manifest-compaction-{backend_name}-{maintenance}"
+    limits = _small_lifecycle_limits()
+    backend = InMemoryBackend() if backend_name == "memory" else "json"
+    store = BlobStore(
+        config=CacheConfig(cache_dir=str(root), lifecycle_limits=limits),
+        backend=backend,
+    )
+    monkeypatch.setattr(
+        manifest_repository_module, "_MANIFEST_INVENTORY_COMPACTION_WINDOW", 1
+    )
+    try:
+        store.put({"value": "broken"}, key="broken")
+        store.put({"value": "other"}, key="other")
+        # Preserve a later valid event in the same bounded inventory before
+        # corrupting authority; normal admission must not be needed after a
+        # fail-closed corruption is discovered.
+        store.put({"value": "later-valid"}, key="later")
+        if backend_name == "memory":
+            store.backend._entries["broken"]["metadata"][  # type: ignore[union-attr]
+                "canonical_manifest_v1"
+            ] = "not-base64"
+        else:
+            store.backend._metadata["entries"]["broken"]["metadata"][  # type: ignore[union-attr]
+                "canonical_manifest_v1"
+            ] = "not-base64"
+            store.backend._save_to_disk()  # type: ignore[union-attr]
+
+        # The first one-event maintenance window reaches only ``broken``.
+        # It must not reject this unrelated published operation and must not
+        # erase the scheduling route that a later reconciliation will inspect.
+        if maintenance == "overwrite":
+            store.put({"value": "other-updated"}, key="other")
+        else:
+            assert store.delete("other")
+        assert store.manifest_repository._read_inventory_event(1) is not None
+
+        # More bounded windows may inspect later valid events, but none may
+        # convert the malformed first authority into a clean terminal report.
+        for _ in range(3):
+            with pytest.raises(CacheBlobBackendError, match="list_page failed"):
+                store.reconcile(now=datetime(2026, 8, 31, tzinfo=timezone.utc))
+            assert store.manifest_repository._read_inventory_event(1) is not None
+    finally:
+        store.close()
+
+    if backend_name != "json":
+        return
+    reopened = BlobStore(
+        config=CacheConfig(cache_dir=str(root), lifecycle_limits=limits), backend="json"
+    )
+    try:
+        # JSON inventory state and the retained immutable event survive reopen.
+        assert reopened.manifest_repository._read_inventory_event(1) is not None
+        for _ in range(2):
+            with pytest.raises(CacheBlobBackendError, match="list_page failed"):
+                reopened.reconcile(now=datetime(2026, 8, 31, tzinfo=timezone.utc))
+            assert reopened.manifest_repository._read_inventory_event(1) is not None
+    finally:
+        reopened.close()
+
+
+@pytest.mark.parametrize("family", ("primary", "sidecar", "pending"))
+@pytest.mark.parametrize(
+    ("failure", "error_type", "reason"),
+    (
+        ("permission", CacheBlobBackendError, CacheReason.BLOB_BACKEND_FAILURE.value),
+        ("bounds", CacheManifestIntegrityError, CacheReason.MANIFEST_BOUNDS.value),
+    ),
+)
+def test_inventory_event_read_failures_are_typed_and_preserve_membership(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    family: str,
+    failure: str,
+    error_type: type[Exception],
+    reason: str,
+) -> None:
+    """Only missing indexed events are sparse gaps; I/O/bounds faults remain debt."""
+    root = tmp_path / f"inventory-event-{family}-{failure}"
+    store = BlobStore(root, backend="json")
+    try:
+        repository = store.lifecycle.operation_repository
+        raw = b"indexed-control"
+        operation_id = "a" * 32
+        if family == "primary":
+            name = operation_id
+            locator = repository.locator_for(operation_id)
+            read_page = repository.list_page
+        elif family == "sidecar":
+            name = f"reconcile-action-{operation_id}.json"
+            locator = repository.reconciliation_checkpoint_locator(operation_id)
+            read_page = repository.list_reconciliation_checkpoint_page
+        else:
+            digest = hashlib.sha256(raw).hexdigest()
+            name = f".{operation_id}.json.pending.{digest}.{'b' * 32}.tmp"
+            locator = root / "operations" / name
+
+            def read_pending_page() -> object:
+                return repository.list_pending_control_page(None)
+
+            read_page = read_pending_page
+        repository._append_inventory_event(family, name, raw)
+        repository.file_ops.write_bytes_durable(locator, raw)
+        event_locator = repository._inventory_event_locator(family, 1)
+        original_read = repository.file_ops.read_bytes_bounded
+        injected: OSError | ValueError
+        if failure == "permission":
+            injected = PermissionError(f"injected {family} inventory denial")
+        else:
+            injected = ValueError(f"injected {family} inventory bounds")
+
+        def fail_exact_event(candidate: Path, *, max_bytes: int) -> bytes:
+            if candidate == event_locator:
+                raise injected
+            return original_read(candidate, max_bytes=max_bytes)
+
+        monkeypatch.setattr(repository.file_ops, "read_bytes_bounded", fail_exact_event)
+
+        # Repository paging and its bounded stale-event compaction have the
+        # same typed public boundary and cannot delete unread membership.
+        for invoke in (
+            read_page,
+            lambda: repository._compact_inventory_after_retirement(family),
+            lambda: store.reconcile(now=datetime(2026, 8, 31, tzinfo=timezone.utc)),
+        ):
+            with pytest.raises(error_type) as raised:
+                invoke()
+            assert raised.value.context["operation"] == "read_inventory_event"
+            assert raised.value.context["family"] == family
+            assert raised.value.context["sequence"] == 1
+            assert raised.value.context["reason"] == reason
+            assert raised.value.__cause__ is injected
+            assert event_locator.is_file()
     finally:
         store.close()
 
