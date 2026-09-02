@@ -59,14 +59,26 @@ class LifecycleEngine:
         self.fault_hook: Callable[[str, LifecycleOperationRecord], None] | None = None
         if self.store._legacy_identity is not None:
             return
-        # Opening a second process must not inspect or advance operation
-        # inventory while a live clear still owns its continuation.  Aggregate
-        # admission protects the finite snapshot; the clear-resume lease also
-        # covers post-snapshot inventory retirement, preventing a constructor
-        # from racing a durable head replacement with strict path validation.
-        with self.operation_repository.clear_operation_transition("constructor"):
-            with self.store._admission_barrier.aggregate_admission():
-                self.recover(_snapshot_admitted=True)
+        # Classify all families before creating maintenance locks.  In
+        # particular, a fresh store remains markerless until its first
+        # mutation; writing a clear-resume lock first would turn that internal
+        # file into unrelated pre-index evidence at tiny legacy scan bounds.
+        # Raw/v1 evidence therefore still raises the typed migration outcome
+        # before recovery reads absent families or advances any maintenance.
+        initialized = self.operation_repository.constructor_inventory_is_initialized()
+        if initialized:
+            # Opening a second process must not inspect or advance operation
+            # inventory while a live clear still owns its continuation.
+            # Aggregate admission protects the finite snapshot; the
+            # clear-resume lease also covers post-snapshot inventory retirement,
+            # preventing a constructor from racing a durable head replacement
+            # with strict path validation.
+            with self.operation_repository.clear_operation_transition("constructor"):
+                with self.store._admission_barrier.aggregate_admission():
+                    self.recover(_snapshot_admitted=True)
+            return
+        with self.store._admission_barrier.aggregate_admission():
+            self.recover(_snapshot_admitted=True)
 
     def _emit(self, step: str, record: LifecycleOperationRecord) -> None:
         if self.test_hook is not None:

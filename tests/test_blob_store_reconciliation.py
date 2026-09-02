@@ -1904,28 +1904,15 @@ def test_first_mutation_never_relabels_preindex_evidence_as_current_v2(
         finally:
             file_ops.close()
 
-    # Constructor-time recovery must fail closed before a first mutation can
-    # publish key or v2 state. A sidecar can remain outside initial primary/
-    # pending recovery, so exercise its first-key path explicitly as well.
-    if family == "sidecar" and max_inventory_items == 2:
-        store = BlobStore(
-            root, backend="json", config=config, manifest_key_provider=provider
-        )
-        try:
-            with pytest.raises(CacheBlobMigrationRequiredError):
-                store.put({"first": True}, key="first-write")
-        finally:
-            store.close()
+    # Constructor-time classification covers every family before it creates
+    # maintenance locks or reads absent-family scheduling state.  Therefore a
+    # raw sidecar is now rejected at the same typed boundary as raw primary
+    # and pending evidence, before either provenance or v2 heads can exist.
+    for _attempt in range(2):
         with pytest.raises(CacheBlobMigrationRequiredError):
             BlobStore(
                 root, backend="json", config=config, manifest_key_provider=provider
             )
-    else:
-        for _attempt in range(2):
-            with pytest.raises(CacheBlobMigrationRequiredError):
-                BlobStore(
-                    root, backend="json", config=config, manifest_key_provider=provider
-                )
 
     inventory_root = operations / ".cacheness-inventory-v2"
     assert not (inventory_root / "initialized").exists()

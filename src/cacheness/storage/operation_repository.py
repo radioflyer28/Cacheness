@@ -956,6 +956,25 @@ class FileOperationRecordRepository:
                             context={"operation": "inventory", "family": family},
                         )
 
+    def constructor_inventory_is_initialized(self) -> bool:
+        """Classify inventory without publishing provenance or maintenance state.
+
+        Constructors must distinguish a current authenticated store from a
+        raw/v1 namespace before creating their own scheduler locks.  A fresh
+        store deliberately stays markerless until its first mutation, whereas
+        legacy evidence raises the typed migration-required error through the
+        ordinary bounded family reads.
+        """
+        if self._has_current_inventory_initialization():
+            return True
+        for family in _INVENTORY_FAMILIES:
+            self._read_inventory(family)
+        # A concurrent first writer may have completed authenticated
+        # initialization while the bounded legacy classification ran.  Recheck
+        # so recovery takes the same clear-continuation lease as any current
+        # store instead of inspecting its post-publication scheduling state.
+        return self._has_current_inventory_initialization()
+
     def _read_inventory(self, family: str) -> dict[str, int]:
         """Read one bounded v2 sequence head, never the event history."""
         state = self._read_present_inventory_head(family)
