@@ -57,6 +57,19 @@ _INVENTORY_FAMILIES = ("primary", "sidecar", "pending")
 # substituted into a newly initialized family.
 _INVENTORY_INITIALIZATION_SCHEMA_VERSION = 5
 _INVENTORY_TAIL_SCHEMA_VERSION = 2
+# Receipt v1 is the nonblocking scheduler publication protocol.  A normal
+# append creates immutable event, tail, then head receipts for one sequence;
+# none of those writes need a mutable family lease.  The old fixed head/tail
+# files remain an authenticated compatibility/maintenance checkpoint only.
+_INVENTORY_RECEIPT_SCHEMA_VERSION = 1
+_INVENTORY_MAX_SEQUENCE = (1 << 63) - 1
+# At most 63 exponential probes plus 62 binary probes find a signed 63-bit
+# high water.  Keep this explicit rather than accidentally charging an
+# unbounded directory scan to an ordinary append/read.
+_INVENTORY_RECEIPT_PROBE_MAX = 125
+_INVENTORY_RECEIPT_DISCOVERY_MAX_BYTES = (
+    _INVENTORY_RECEIPT_PROBE_MAX * _INVENTORY_HEAD_MAX_BYTES
+)
 
 
 @dataclass(frozen=True)
@@ -716,6 +729,52 @@ class FileOperationRecordRepository:
             allow_missing_leaf=True,
         )
 
+    def _inventory_tail_receipt_locator(self, family: str, sequence: int) -> Path:
+        """Return one immutable event-to-tail publication receipt."""
+        if family not in _INVENTORY_FAMILIES:
+            raise ValueError("unknown lifecycle inventory family")
+        if type(sequence) is not int or not 1 <= sequence <= _INVENTORY_MAX_SEQUENCE:
+            raise ValueError("inventory sequence is invalid")
+        return resolve_managed_locator(
+            self.file_ops.root,
+            Path("operations")
+            / ".cacheness-inventory-v2"
+            / family
+            / f"tail-{sequence:020d}.json",
+            operation="lifecycle_inventory",
+            allow_missing_leaf=True,
+        )
+
+    def _inventory_head_receipt_locator(self, family: str, sequence: int) -> Path:
+        """Return one immutable tail-to-head publication receipt."""
+        if family not in _INVENTORY_FAMILIES:
+            raise ValueError("unknown lifecycle inventory family")
+        if type(sequence) is not int or not 1 <= sequence <= _INVENTORY_MAX_SEQUENCE:
+            raise ValueError("inventory sequence is invalid")
+        return resolve_managed_locator(
+            self.file_ops.root,
+            Path("operations")
+            / ".cacheness-inventory-v2"
+            / family
+            / f"head-{sequence:020d}.json",
+            operation="lifecycle_inventory",
+            allow_missing_leaf=True,
+        )
+
+    def _inventory_receipt_anchor_locator(self, family: str) -> Path:
+        """Return the bounded authenticated receipt-compaction anchor."""
+        if family not in _INVENTORY_FAMILIES:
+            raise ValueError("unknown lifecycle inventory family")
+        return resolve_managed_locator(
+            self.file_ops.root,
+            Path("operations")
+            / ".cacheness-inventory-v2"
+            / family
+            / "receipt-anchor.json",
+            operation="lifecycle_inventory",
+            allow_missing_leaf=True,
+        )
+
     def _inventory_event_max_bytes(self) -> int:
         """Bound one index event independently from one lifecycle record."""
         return max(
@@ -1091,8 +1150,16 @@ class FileOperationRecordRepository:
         same store-level transition first, so no raw/v1 member can race the
         proof or become hidden behind a sibling head.
         """
+        # Ordinary appends take no store-wide scheduler lease.  The only
+        # global transition is the one-time fresh-namespace proof; a current
+        # authenticated epoch is a stable writer-version fence and lets each
+        # family publish independently thereafter.
+        if self._has_current_inventory_initialization():
+            return
         with self._conditional_transition("inventory:initialize"):
             initialized = self._has_current_inventory_initialization()
+            if initialized:
+                return
             present_heads = {
                 family: self._read_present_inventory_head(family)
                 for family in _INVENTORY_FAMILIES
@@ -1166,12 +1233,24 @@ class FileOperationRecordRepository:
         """Read one bounded v2 sequence head, never the event history."""
         state = self._read_present_inventory_head(family)
         if state is not None:
+            if self._uses_receipt_inventory(family, state):
+                # Receipt heads are immutable, sequence-specific CAS results.
+                # The fixed head is retained for legacy compatibility and
+                # maintenance fields, but cannot safely be the authority once
+                # writers may finish out of order with a stalled old mirror.
+                # Bounded exponential/binary probing finds the contiguous
+                # receipt high water without a directory inventory.
+                state["next_sequence"] = self._receipt_next_sequence(family)
+                return state
             self._verify_inventory_tail(
                 family, state, allow_unacknowledged=allow_unacknowledged_tail
             )
             return state
         if self._has_current_inventory_initialization():
-            return self._empty_inventory_head(family)
+            state = self._empty_inventory_head(family)
+            if self._uses_receipt_inventory(family, state):
+                state["next_sequence"] = self._receipt_next_sequence(family)
+            return state
         if self._has_legacy_initialization_marker() or any(
             self._read_present_inventory_head(sibling) is not None
             for sibling in _INVENTORY_FAMILIES
@@ -1412,6 +1491,7 @@ class FileOperationRecordRepository:
                 context={"operation": "inventory_migration", "family": family},
             )
         if tail["next_sequence"] == state["next_sequence"]:
+            self._verify_acknowledged_inventory_terminal(family, tail)
             return tail
         if (
             allow_unacknowledged
@@ -1422,6 +1502,34 @@ class FileOperationRecordRepository:
             "Lifecycle inventory head does not match its append tail",
             context={"operation": "inventory", "family": family},
         )
+
+    def _verify_acknowledged_inventory_terminal(
+        self, family: str, tail: dict[str, object]
+    ) -> None:
+        """Require an accepted head to retain the tail's exact event member.
+
+        Operation inventories intentionally never retire immutable events.  A
+        missing terminal is therefore evidence loss, never a compacted sparse
+        gap, and the signed tail must agree with the still-readable event on
+        every normal head read as well as append resumption.
+        """
+        sequence = tail["terminal_sequence"]
+        if type(sequence) is not int:
+            raise CacheBlobBackendError(
+                "Lifecycle inventory tail is invalid",
+                context={"operation": "inventory", "family": family},
+            )
+        event = self._read_inventory_event(family, sequence)
+        if event is None:
+            raise CacheManifestIntegrityError(
+                "Lifecycle inventory tail terminal event is missing",
+                context={"operation": "inventory", "family": family, "sequence": sequence},
+            )
+        if not self._tail_matches_inventory_event(tail, event, sequence):
+            raise CacheManifestIntegrityError(
+                "Lifecycle inventory tail terminal event is inconsistent",
+                context={"operation": "inventory", "family": family, "sequence": sequence},
+            )
 
     def _acknowledge_unacknowledged_inventory_tail(
         self, family: str, state: dict[str, object]
@@ -1503,8 +1611,10 @@ class FileOperationRecordRepository:
             raise AssertionError("lifecycle inventory tail unexpectedly exceeds bound")
         self.file_ops.write_bytes_durable(self._inventory_tail_locator(family), encoded)
 
-    def _read_inventory_event(self, family: str, sequence: int) -> tuple[str, str] | None:
-        """Return one exact immutable scheduling event when its file exists."""
+    def _read_inventory_event_with_raw(
+        self, family: str, sequence: int
+    ) -> tuple[tuple[str, str], bytes] | None:
+        """Return one validated immutable event and its exact signed bytes."""
         try:
             raw = self.file_ops.read_bytes_bounded(
                 self._inventory_event_locator(family, sequence),
@@ -1584,7 +1694,537 @@ class FileOperationRecordRepository:
                 "Lifecycle inventory event is unauthenticated",
                 reason=CacheReason.MANIFEST_SIGNATURE_INVALID,
             )
-        return event["name"], event["digest"]
+        return (event["name"], event["digest"]), raw
+
+    def _read_inventory_event(self, family: str, sequence: int) -> tuple[str, str] | None:
+        """Return one exact immutable scheduling event when its file exists."""
+        payload = self._read_inventory_event_with_raw(family, sequence)
+        return None if payload is None else payload[0]
+
+    def _decode_inventory_receipt(
+        self, family: str, sequence: int, stage: str, raw: bytes
+    ) -> dict[str, object]:
+        """Validate one bounded immutable scheduler publication receipt."""
+        try:
+            receipt = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise CacheBlobBackendError(
+                "Lifecycle inventory publication receipt is invalid",
+                context={"operation": "inventory", "family": family, "sequence": sequence},
+            ) from exc
+        fields = {
+            "version",
+            "stage",
+            "family",
+            "store_id",
+            "epoch",
+            "sequence",
+            "name",
+            "digest",
+            "event_digest",
+            "signature",
+        }
+        if stage == "head":
+            fields.add("tail_digest")
+        if (
+            not isinstance(receipt, dict)
+            or set(receipt) != fields
+            or receipt["version"] != _INVENTORY_RECEIPT_SCHEMA_VERSION
+            or receipt["stage"] != stage
+            or receipt["family"] != family
+            or receipt["store_id"] != self._inventory_store_provenance()["store_id"]
+            or receipt["epoch"] != self._inventory_epoch()
+            or receipt["sequence"] != sequence
+            or not isinstance(receipt["name"], str)
+            or not receipt["name"]
+            or len(receipt["name"].encode("utf-8"))
+            > self.lifecycle_limits.max_operation_field_bytes
+            or not isinstance(receipt["digest"], str)
+            or len(receipt["digest"]) != 64
+            or any(character not in "0123456789abcdef" for character in receipt["digest"])
+            or not isinstance(receipt["event_digest"], str)
+            or len(receipt["event_digest"]) != 64
+            or any(
+                character not in "0123456789abcdef" for character in receipt["event_digest"]
+            )
+            or (
+                stage == "head"
+                and (
+                    not isinstance(receipt["tail_digest"], str)
+                    or len(receipt["tail_digest"]) != 64
+                    or any(
+                        character not in "0123456789abcdef"
+                        for character in receipt["tail_digest"]
+                    )
+                )
+            )
+            or not isinstance(receipt["signature"], str)
+        ):
+            raise CacheBlobBackendError(
+                "Lifecycle inventory publication receipt is invalid",
+                context={"operation": "inventory", "family": family, "sequence": sequence},
+            )
+        if not verify_hmac_sha256(
+            self._inventory_scheduling_bytes(receipt),
+            receipt["signature"],
+            self._initialization_key(),
+        ):
+            raise CacheManifestIntegrityError(
+                "Lifecycle inventory publication receipt is unauthenticated",
+                reason=CacheReason.MANIFEST_SIGNATURE_INVALID,
+            )
+        return receipt
+
+    def _read_inventory_receipt(
+        self, family: str, sequence: int, stage: str
+    ) -> tuple[dict[str, object], bytes] | None:
+        """Read one exact immutable publication receipt without directory scans."""
+        locator = (
+            self._inventory_tail_receipt_locator(family, sequence)
+            if stage == "tail"
+            else self._inventory_head_receipt_locator(family, sequence)
+        )
+        try:
+            raw = self.file_ops.read_bytes_bounded(locator, max_bytes=_INVENTORY_HEAD_MAX_BYTES)
+        except FileNotFoundError:
+            return None
+        except ValueError as exc:
+            raise CacheManifestIntegrityError(
+                "Lifecycle inventory publication receipt exceeds the configured byte limit",
+                context={"operation": "inventory", "family": family, "sequence": sequence},
+                reason=CacheReason.MANIFEST_BOUNDS,
+            ) from exc
+        receipt = self._decode_inventory_receipt(family, sequence, stage, raw)
+        return receipt, raw
+
+    def _read_inventory_tail_receipt(
+        self, family: str, sequence: int
+    ) -> tuple[dict[str, object], bytes] | None:
+        """Require one tail receipt to bind the exact immutable event bytes."""
+        payload = self._read_inventory_receipt(family, sequence, "tail")
+        if payload is None:
+            return None
+        receipt, raw = payload
+        event_payload = self._read_inventory_event_with_raw(family, sequence)
+        if event_payload is None:
+            raise CacheManifestIntegrityError(
+                "Lifecycle inventory tail terminal event is missing",
+                context={"operation": "inventory", "family": family, "sequence": sequence},
+            )
+        event, event_raw = event_payload
+        if (
+            (receipt["name"], receipt["digest"]) != event
+            or receipt["event_digest"] != hashlib.sha256(event_raw).hexdigest()
+        ):
+            raise CacheManifestIntegrityError(
+                "Lifecycle inventory tail terminal event is inconsistent",
+                context={"operation": "inventory", "family": family, "sequence": sequence},
+            )
+        return receipt, raw
+
+    def _read_inventory_head_receipt(
+        self, family: str, sequence: int
+    ) -> tuple[dict[str, object], bytes] | None:
+        """Require one accepted head receipt to bind its exact tail receipt."""
+        payload = self._read_inventory_receipt(family, sequence, "head")
+        if payload is None:
+            return None
+        receipt, raw = payload
+        tail_payload = self._read_inventory_tail_receipt(family, sequence)
+        if tail_payload is None:
+            raise CacheManifestIntegrityError(
+                "Lifecycle inventory head terminal tail is missing",
+                context={"operation": "inventory", "family": family, "sequence": sequence},
+            )
+        tail, tail_raw = tail_payload
+        if (
+            receipt["tail_digest"] != hashlib.sha256(tail_raw).hexdigest()
+            or receipt["name"] != tail["name"]
+            or receipt["digest"] != tail["digest"]
+            or receipt["event_digest"] != tail["event_digest"]
+        ):
+            raise CacheManifestIntegrityError(
+                "Lifecycle inventory head terminal tail is inconsistent",
+                context={"operation": "inventory", "family": family, "sequence": sequence},
+            )
+        return receipt, raw
+
+    def _read_inventory_receipt_anchor(
+        self, family: str
+    ) -> dict[str, object] | None:
+        """Read the fixed proof left after bounded receipt retirement."""
+        try:
+            raw = self.file_ops.read_bytes_bounded(
+                self._inventory_receipt_anchor_locator(family),
+                max_bytes=_INVENTORY_HEAD_MAX_BYTES,
+            )
+        except FileNotFoundError:
+            return None
+        except ValueError as exc:
+            raise CacheManifestIntegrityError(
+                "Lifecycle inventory receipt anchor exceeds the configured byte limit",
+                context={"operation": "inventory", "family": family},
+                reason=CacheReason.MANIFEST_BOUNDS,
+            ) from exc
+        try:
+            anchor = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise CacheBlobBackendError(
+                "Lifecycle inventory receipt anchor is invalid",
+                context={"operation": "inventory", "family": family},
+            ) from exc
+        if (
+            not isinstance(anchor, dict)
+            or set(anchor)
+            != {
+                "version",
+                "family",
+                "store_id",
+                "epoch",
+                "sequence",
+                "name",
+                "digest",
+                "event_digest",
+                "head_digest",
+                "retire_next_sequence",
+                "signature",
+            }
+            or anchor["version"] != _INVENTORY_RECEIPT_SCHEMA_VERSION
+            or anchor["family"] != family
+            or anchor["store_id"] != self._inventory_store_provenance()["store_id"]
+            or anchor["epoch"] != self._inventory_epoch()
+            or type(anchor["sequence"]) is not int
+            or not 1 <= anchor["sequence"] <= _INVENTORY_MAX_SEQUENCE
+            or not isinstance(anchor["name"], str)
+            or not anchor["name"]
+            or not isinstance(anchor["digest"], str)
+            or not isinstance(anchor["event_digest"], str)
+            or not isinstance(anchor["head_digest"], str)
+            or type(anchor["retire_next_sequence"]) is not int
+            or not 1 <= anchor["retire_next_sequence"] <= anchor["sequence"] + 1
+            or any(
+                len(anchor[field]) != 64
+                or any(character not in "0123456789abcdef" for character in anchor[field])
+                for field in ("digest", "event_digest", "head_digest")
+            )
+            or not isinstance(anchor["signature"], str)
+        ):
+            raise CacheBlobBackendError(
+                "Lifecycle inventory receipt anchor is invalid",
+                context={"operation": "inventory", "family": family},
+            )
+        if not verify_hmac_sha256(
+            self._inventory_scheduling_bytes(anchor),
+            anchor["signature"],
+            self._initialization_key(),
+        ):
+            raise CacheManifestIntegrityError(
+                "Lifecycle inventory receipt anchor is unauthenticated",
+                reason=CacheReason.MANIFEST_SIGNATURE_INVALID,
+            )
+        event_payload = self._read_inventory_event_with_raw(family, anchor["sequence"])
+        if event_payload is None:
+            raise CacheManifestIntegrityError(
+                "Lifecycle inventory receipt anchor terminal event is missing",
+                context={
+                    "operation": "inventory",
+                    "family": family,
+                    "sequence": anchor["sequence"],
+                },
+            )
+        event, event_raw = event_payload
+        if (
+            event != (anchor["name"], anchor["digest"])
+            or hashlib.sha256(event_raw).hexdigest() != anchor["event_digest"]
+        ):
+            raise CacheManifestIntegrityError(
+                "Lifecycle inventory receipt anchor terminal event is inconsistent",
+                context={
+                    "operation": "inventory",
+                    "family": family,
+                    "sequence": anchor["sequence"],
+                },
+            )
+        return anchor
+
+    def _uses_receipt_inventory(self, family: str, state: dict[str, int]) -> bool:
+        """Identify the fenced nonblocking scheduler protocol for one family."""
+        if self._read_inventory_receipt_anchor(family) is not None:
+            return True
+        first = self._read_inventory_head_receipt(family, 1)
+        if first is not None:
+            return True
+        # The v5 all-family initializer creates an authenticated empty legacy
+        # head.  That exact empty state is the one-time writer-version fence
+        # for receipt v1; any nonempty v4 head remains on the compatibility
+        # path until an explicit migration, rather than silently guessing a
+        # base sequence for existing history.
+        return state["next_sequence"] == 1 and self._read_inventory_tail(family, state) is None
+
+    def _receipt_next_sequence(self, family: str) -> int:
+        """Find contiguous receipt high water within a fixed control budget.
+
+        This is intentionally not charged to ``max_inventory_items``: it
+        never enumerates an inventory member and has an absolute bound of
+        ``_INVENTORY_RECEIPT_PROBE_MAX`` fixed-size control records
+        (``_INVENTORY_RECEIPT_DISCOVERY_MAX_BYTES``).  Caller-configured
+        member/page and receipt-retirement work remains charged separately to
+        ``max_inventory_items``.
+        """
+        anchor = self._read_inventory_receipt_anchor(family)
+        base = 0 if anchor is None else anchor["sequence"]
+        if type(base) is not int:  # Narrow the heterogeneous signed mapping.
+            raise AssertionError("validated receipt anchor sequence is not an integer")
+        first_sequence = base + 1
+        if first_sequence > _INVENTORY_MAX_SEQUENCE:
+            return first_sequence
+        probes = 0
+
+        def read_head(sequence: int) -> tuple[dict[str, object], bytes] | None:
+            nonlocal probes
+            probes += 1
+            if probes > _INVENTORY_RECEIPT_PROBE_MAX:
+                raise CacheBlobBackendError(
+                    "Lifecycle inventory receipt discovery exceeded its fixed probe budget",
+                    context={
+                        "operation": "inventory",
+                        "family": family,
+                        "max_control_records": _INVENTORY_RECEIPT_PROBE_MAX,
+                        "max_control_bytes": _INVENTORY_RECEIPT_DISCOVERY_MAX_BYTES,
+                    },
+                )
+            return self._read_inventory_head_receipt(family, sequence)
+
+        first = read_head(first_sequence)
+        if first is None:
+            return first_sequence
+        low = first_sequence
+        offset = 2
+        high = base + offset
+        while high <= _INVENTORY_MAX_SEQUENCE:
+            if read_head(high) is None:
+                break
+            low = high
+            offset *= 2
+            high = base + offset
+        if high > _INVENTORY_MAX_SEQUENCE:
+            high = _INVENTORY_MAX_SEQUENCE + 1
+        left, right = low + 1, high - 1
+        while left <= right:
+            middle = (left + right) // 2
+            if read_head(middle) is None:
+                right = middle - 1
+            else:
+                low = middle
+                left = middle + 1
+        return low + 1
+
+    def _create_inventory_receipt_exclusive(
+        self, locator: Path, encoded: bytes, *, family: str, sequence: int, stage: str
+    ) -> None:
+        """Create one immutable publication step or prove an exact prior winner."""
+        try:
+            self.file_ops.create_bytes_durable_exclusive(locator, encoded)
+            return
+        except FileExistsError:
+            pass
+        existing = self.file_ops.read_bytes_bounded(locator, max_bytes=_INVENTORY_HEAD_MAX_BYTES)
+        if existing != encoded:
+            # Decode the winner before reporting collision so malformed or
+            # unauthenticated control bytes cannot masquerade as a benign
+            # concurrent publication.
+            self._decode_inventory_receipt(family, sequence, stage, existing)
+            raise CacheManifestIntegrityError(
+                "Lifecycle inventory publication receipt changed during creation",
+                context={"operation": "inventory", "family": family, "sequence": sequence},
+            )
+
+    def _publish_inventory_receipts(
+        self, family: str, sequence: int, event: tuple[str, str], event_raw: bytes
+    ) -> None:
+        """Publish immutable event→tail→head receipts without a scheduler lease."""
+        if not 1 <= sequence <= _INVENTORY_MAX_SEQUENCE:
+            raise CacheBlobBackendError(
+                "Lifecycle inventory sequence exceeds its bounded range",
+                context={"operation": "inventory", "family": family},
+            )
+        event_digest = hashlib.sha256(event_raw).hexdigest()
+        tail = self._sign_inventory_scheduling(
+            {
+                "version": _INVENTORY_RECEIPT_SCHEMA_VERSION,
+                "stage": "tail",
+                "family": family,
+                "store_id": self._inventory_store_provenance()["store_id"],
+                "epoch": self._inventory_epoch(),
+                "sequence": sequence,
+                "name": event[0],
+                "digest": event[1],
+                "event_digest": event_digest,
+            }
+        )
+        tail_encoded = json.dumps(tail, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        self._create_inventory_receipt_exclusive(
+            self._inventory_tail_receipt_locator(family, sequence),
+            tail_encoded,
+            family=family,
+            sequence=sequence,
+            stage="tail",
+        )
+        head = self._sign_inventory_scheduling(
+            {
+                "version": _INVENTORY_RECEIPT_SCHEMA_VERSION,
+                "stage": "head",
+                "family": family,
+                "store_id": self._inventory_store_provenance()["store_id"],
+                "epoch": self._inventory_epoch(),
+                "sequence": sequence,
+                "name": event[0],
+                "digest": event[1],
+                "event_digest": event_digest,
+                "tail_digest": hashlib.sha256(tail_encoded).hexdigest(),
+            }
+        )
+        head_encoded = json.dumps(head, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        self._create_inventory_receipt_exclusive(
+            self._inventory_head_receipt_locator(family, sequence),
+            head_encoded,
+            family=family,
+            sequence=sequence,
+            stage="head",
+        )
+
+    def _write_inventory_receipt_anchor(
+        self,
+        family: str,
+        sequence: int,
+        head: dict[str, object],
+        head_raw: bytes,
+        *,
+        retire_next_sequence: int,
+    ) -> None:
+        """Advance one authenticated receipt-retirement anchor monotonically."""
+        anchor = self._sign_inventory_scheduling(
+            {
+                "version": _INVENTORY_RECEIPT_SCHEMA_VERSION,
+                "family": family,
+                "store_id": self._inventory_store_provenance()["store_id"],
+                "epoch": self._inventory_epoch(),
+                "sequence": sequence,
+                "name": head["name"],
+                "digest": head["digest"],
+                "event_digest": head["event_digest"],
+                "head_digest": hashlib.sha256(head_raw).hexdigest(),
+                "retire_next_sequence": retire_next_sequence,
+            }
+        )
+        encoded = json.dumps(anchor, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        if len(encoded) > _INVENTORY_HEAD_MAX_BYTES:
+            raise AssertionError("lifecycle inventory receipt anchor unexpectedly exceeds bound")
+        existing = self._read_inventory_receipt_anchor(family)
+        if existing is not None:
+            if existing["sequence"] > sequence:
+                return
+            if existing["sequence"] == sequence and (
+                existing["retire_next_sequence"] > retire_next_sequence
+            ):
+                return
+        self.file_ops.write_bytes_durable(self._inventory_receipt_anchor_locator(family), encoded)
+
+    def _compact_inventory_receipts(self, family: str, state: dict[str, int]) -> bool:
+        """Bound receipt namespace work without charging it to ordinary reads.
+
+        The signed anchor is written before deleting the covered immutable
+        receipts.  Its independent retirement cursor is advanced only after
+        each bounded delete window, so a crash leaves replayable cleanup debt
+        rather than an unbounded accumulation or an unauthenticated gap.
+        """
+        anchor = self._read_inventory_receipt_anchor(family)
+        if anchor is not None and anchor["retire_next_sequence"] <= anchor["sequence"]:
+            start = anchor["retire_next_sequence"]
+            stop = min(
+                anchor["sequence"],
+                start + self.lifecycle_limits.max_inventory_items - 1,
+            )
+            if type(start) is not int or type(stop) is not int:
+                raise AssertionError("validated receipt retirement cursor is not an integer")
+            for sequence in range(start, stop + 1):
+                self.file_ops.delete_durable(self._inventory_tail_receipt_locator(family, sequence))
+                self.file_ops.delete_durable(self._inventory_head_receipt_locator(family, sequence))
+            head_payload = self._read_inventory_head_receipt(family, anchor["sequence"])
+            if head_payload is None:
+                # The terminal receipt may already have been retired.  Reuse
+                # the authenticated anchor bytes by advancing only its cleanup
+                # cursor; the terminal event has already been verified by
+                # _read_inventory_receipt_anchor above.
+                updated = dict(anchor)
+                updated["retire_next_sequence"] = stop + 1
+                updated.pop("signature", None)
+                updated = self._sign_inventory_scheduling(updated)
+                encoded = json.dumps(updated, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                self.file_ops.write_bytes_durable(
+                    self._inventory_receipt_anchor_locator(family), encoded
+                )
+            else:
+                head, head_raw = head_payload
+                self._write_inventory_receipt_anchor(
+                    family,
+                    anchor["sequence"],
+                    head,
+                    head_raw,
+                    retire_next_sequence=stop + 1,
+                )
+            return stop == anchor["sequence"]
+
+        anchored_sequence = 0 if anchor is None else anchor["sequence"]
+        if type(anchored_sequence) is not int:
+            raise AssertionError("validated receipt anchor sequence is not an integer")
+        high_water = state["next_sequence"] - 1
+        if anchored_sequence >= high_water:
+            return True
+        start = anchored_sequence + 1
+        stop = min(
+            high_water,
+            start + self.lifecycle_limits.max_inventory_items - 1,
+        )
+        terminal: tuple[dict[str, object], bytes] | None = None
+        for sequence in range(start, stop + 1):
+            terminal = self._read_inventory_head_receipt(family, sequence)
+            if terminal is None:
+                raise CacheManifestIntegrityError(
+                    "Lifecycle inventory receipt sequence has a gap",
+                    context={"operation": "inventory", "family": family, "sequence": sequence},
+                )
+        assert terminal is not None
+        head, head_raw = terminal
+        # Publish exact terminal witness before any receipt unlink.  Cleanup
+        # starts on a later bounded call so this order also survives a crash.
+        self._write_inventory_receipt_anchor(
+            family,
+            stop,
+            head,
+            head_raw,
+            retire_next_sequence=start,
+        )
+        # Normal maintenance completes the just-anchored bounded delete window
+        # immediately.  If it crashes after the anchor write, the branch above
+        # resumes from the durable retirement cursor; if it does not, receipt
+        # retirement and event compaction both make one charged unit of
+        # progress per completed lifecycle boundary rather than doubling the
+        # number of recovery passes.
+        anchored = self._read_inventory_receipt_anchor(family)
+        assert anchored is not None
+        for sequence in range(start, stop + 1):
+            self.file_ops.delete_durable(self._inventory_tail_receipt_locator(family, sequence))
+            self.file_ops.delete_durable(self._inventory_head_receipt_locator(family, sequence))
+        updated = dict(anchored)
+        updated["retire_next_sequence"] = stop + 1
+        updated.pop("signature", None)
+        updated = self._sign_inventory_scheduling(updated)
+        self.file_ops.write_bytes_durable(
+            self._inventory_receipt_anchor_locator(family),
+            json.dumps(updated, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+        )
+        return stop == high_water
 
     @staticmethod
     def _schedule_inventory_maintenance(state: dict[str, int]) -> None:
@@ -1688,70 +2328,175 @@ class FileOperationRecordRepository:
         # could create an unauthenticated lazy head that later readers must
         # treat as migration evidence.
         self.initialize_new_store()
-        # The outer store-level lease is intentionally held across the
-        # proof/provenance/head transition as well as all future family
-        # publication.  Without it, a legacy raw member could appear between
-        # the all-family scan and marker publication and be hidden forever by
-        # an otherwise-valid sibling head.
-        with self._conditional_transition("inventory:initialize"):
-            with self._conditional_transition(f"inventory:{family}"):
-                while True:
-                    state = self._read_inventory(
-                        family, allow_unacknowledged_tail=True
+        raw_digest = hashlib.sha256(raw).hexdigest()
+        initial_state = self._read_inventory(family, allow_unacknowledged_tail=True)
+        if self._uses_receipt_inventory(family, initial_state):
+            self._append_receipt_inventory_event(family, name, raw, raw_digest)
+            return
+        while True:
+            # Exclusive event creation is the sequence-allocation CAS.  It is
+            # intentionally outside the mutable family-head transition: an
+            # unrelated key may publish its own durable event while this call
+            # is stalled in a filesystem create/fsync.
+            state = self._read_inventory(family, allow_unacknowledged_tail=True)
+            sequence = state["next_sequence"]
+            tail = self._read_inventory_tail(family, state)
+            if tail is not None and tail["next_sequence"] == sequence + 1:
+                # Never reserve the tail-bound crash slot with a new member.
+                # This narrow acknowledgement is family-local and validates
+                # the old immutable event before any create for this caller.
+                self._acknowledge_inventory_event(
+                    family,
+                    sequence,
+                    terminal_event=(
+                        tail["terminal_name"], tail["terminal_digest"]
+                    ),
+                )
+                continue
+            event = self._sign_inventory_scheduling(
+                {
+                    "version": _INVENTORY_SCHEMA_VERSION,
+                    "family": family,
+                    "store_id": self._inventory_store_provenance()["store_id"],
+                    "epoch": state["epoch"],
+                    "sequence": sequence,
+                    "name": name,
+                    "digest": raw_digest,
+                }
+            )
+            encoded = json.dumps(event, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            if len(encoded) > self._inventory_event_max_bytes():
+                raise CacheBlobBackendError(
+                    "Lifecycle inventory event exceeds its bounded field policy",
+                    context={"operation": "inventory", "family": family},
+                )
+            expected_event = (event["name"], event["digest"])
+            try:
+                self.file_ops.create_bytes_durable_exclusive(
+                    self._inventory_event_locator(family, sequence), encoded
+                )
+            except FileExistsError:
+                existing = self._read_inventory_event(family, sequence)
+                if existing is None:
+                    raise CacheBlobBackendError(
+                        "Lifecycle inventory event disappeared during recovery",
+                        context={"operation": "inventory", "family": family},
                     )
-                    self._acknowledge_unacknowledged_inventory_tail(family, state)
-                    sequence = state["next_sequence"]
-                    raw_digest = hashlib.sha256(raw).hexdigest()
-                    event = self._sign_inventory_scheduling(
-                        {
-                            "version": _INVENTORY_SCHEMA_VERSION,
+                self._acknowledge_inventory_event(
+                    family, sequence, terminal_event=existing
+                )
+                if existing != expected_event:
+                    # The winner owns this immutable slot.  It is now safely
+                    # acknowledged, so retry from its successor without ever
+                    # rewriting the collision bytes.
+                    continue
+            self._acknowledge_inventory_event(
+                family, sequence, terminal_event=expected_event
+            )
+            return
+
+    def _append_receipt_inventory_event(
+        self, family: str, name: str, raw: bytes, raw_digest: str
+    ) -> None:
+        """Append with immutable sequence receipts and no scheduler lease.
+
+        Event creation is the allocation CAS.  A process that loses it helps
+        the immutable winner through tail and head publication before retrying
+        at the successor, so a writer paused at any durability boundary cannot
+        strand or serialize an unrelated key.
+        """
+        while True:
+            state = self._read_inventory(family)
+            sequence = state["next_sequence"]
+            event = self._sign_inventory_scheduling(
+                {
+                    "version": _INVENTORY_SCHEMA_VERSION,
+                    "family": family,
+                    "store_id": self._inventory_store_provenance()["store_id"],
+                    "epoch": state["epoch"],
+                    "sequence": sequence,
+                    "name": name,
+                    "digest": raw_digest,
+                }
+            )
+            encoded = json.dumps(event, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            if len(encoded) > self._inventory_event_max_bytes():
+                raise CacheBlobBackendError(
+                    "Lifecycle inventory event exceeds its bounded field policy",
+                    context={"operation": "inventory", "family": family},
+                )
+            expected = (event["name"], event["digest"])
+            event_raw = encoded
+            try:
+                self.file_ops.create_bytes_durable_exclusive(
+                    self._inventory_event_locator(family, sequence), encoded
+                )
+            except FileExistsError:
+                existing_payload = self._read_inventory_event_with_raw(family, sequence)
+                if existing_payload is None:
+                    raise CacheBlobBackendError(
+                        "Lifecycle inventory event disappeared during recovery",
+                        context={"operation": "inventory", "family": family},
+                    )
+                actual, event_raw = existing_payload
+                self._publish_inventory_receipts(family, sequence, actual, event_raw)
+                if actual != expected:
+                    continue
+            else:
+                self._publish_inventory_receipts(family, sequence, expected, event_raw)
+            return
+
+    def _acknowledge_inventory_event(
+        self, family: str, sequence: int, *, terminal_event: tuple[str, str]
+    ) -> None:
+        """Advance one family head only after its exact event is durable.
+
+        The family-local transition is a short mutable-control critical
+        section, not an allocation lock.  An event create is already an exact
+        backend CAS, so holding this lock only across tail/head durability
+        preserves ordered acknowledgement without globally blocking distinct
+        keys that are still allocating their own immutable slot.
+        """
+        with self._conditional_transition(f"inventory:{family}"):
+            state = self._read_inventory(family, allow_unacknowledged_tail=True)
+            self._acknowledge_unacknowledged_inventory_tail(family, state)
+            current_sequence = state["next_sequence"]
+            if current_sequence > sequence:
+                actual = self._read_inventory_event(family, sequence)
+                if actual != terminal_event:
+                    raise CacheManifestIntegrityError(
+                        "Lifecycle inventory event changed during acknowledgement",
+                        context={
+                            "operation": "inventory",
                             "family": family,
-                            "store_id": self._inventory_store_provenance()["store_id"],
-                            "epoch": state["epoch"],
                             "sequence": sequence,
-                            "name": name,
-                            "digest": raw_digest,
-                        }
+                        },
                     )
-                    encoded = json.dumps(event, sort_keys=True, separators=(",", ":")).encode("utf-8")
-                    if len(encoded) > self._inventory_event_max_bytes():
-                        raise CacheBlobBackendError(
-                            "Lifecycle inventory event exceeds its bounded field policy",
-                            context={"operation": "inventory", "family": family},
-                        )
-                    try:
-                        self.file_ops.create_bytes_durable_exclusive(
-                            self._inventory_event_locator(family, sequence), encoded
-                        )
-                    except FileExistsError:
-                        # A process loss can leave a durable event before its head
-                        # acknowledgement.  It is safe non-authoritative stale
-                        # scheduling membership; acknowledge the position and
-                        # allocate the next one without reading/re-writing history.
-                        existing = self._read_inventory_event(family, sequence)
-                        if existing is None:
-                            raise CacheBlobBackendError(
-                                "Lifecycle inventory event disappeared during recovery",
-                                context={"operation": "inventory", "family": family},
-                            )
-                        state["next_sequence"] = sequence + 1
-                        self._write_inventory_tail(
-                            family,
-                            state,
-                            state["next_sequence"],
-                            terminal_event=existing,
-                        )
-                        self._write_inventory_head(family, state)
-                        continue
-                    state["next_sequence"] = sequence + 1
-                    self._write_inventory_tail(
-                        family,
-                        state,
-                        state["next_sequence"],
-                        terminal_event=(event["name"], event["digest"]),
-                    )
-                    self._write_inventory_head(family, state)
-                    return
+                return
+            if current_sequence != sequence:
+                raise CacheManifestIntegrityError(
+                    "Lifecycle inventory sequence advanced past an unacknowledged gap",
+                    context={
+                        "operation": "inventory",
+                        "family": family,
+                        "sequence": sequence,
+                    },
+                )
+            actual = self._read_inventory_event(family, sequence)
+            if actual != terminal_event:
+                raise CacheManifestIntegrityError(
+                    "Lifecycle inventory event changed during acknowledgement",
+                    context={
+                        "operation": "inventory",
+                        "family": family,
+                        "sequence": sequence,
+                    },
+                )
+            state["next_sequence"] = sequence + 1
+            self._write_inventory_tail(
+                family, state, state["next_sequence"], terminal_event=terminal_event
+            )
+            self._write_inventory_head(family, state)
 
     def _compact_inventory_after_retirement(self, family: str) -> bool:
         """Charge and advance bounded maintenance after a completed action.
@@ -1764,10 +2509,13 @@ class FileOperationRecordRepository:
         """
         with self._conditional_transition(f"inventory:{family}"):
             state = self._read_inventory(family)
+            receipts_complete = True
+            if self._uses_receipt_inventory(family, state):
+                receipts_complete = self._compact_inventory_receipts(family, state)
             self._schedule_inventory_maintenance(state)
             complete = self._compact_inventory_window(family, state)
             self._write_inventory_head(family, state)
-            return complete
+            return receipts_complete and complete
 
     def compact_inventory_for_recovery(self) -> bool:
         """Advance one persisted family continuation and report clear readiness.
@@ -1799,7 +2547,12 @@ class FileOperationRecordRepository:
         for family in _INVENTORY_FAMILIES:
             with self._conditional_transition(f"inventory:{family}"):
                 state = self._read_inventory(family)
+                receipts_complete = True
+                if self._uses_receipt_inventory(family, state):
+                    receipts_complete = self._compact_inventory_receipts(family, state)
                 if state["maintenance_target_sequence"] == 0:
+                    if not receipts_complete:
+                        return False
                     continue
                 if advanced:
                     # Head reads are bounded; event inspection is not.  Leave
@@ -1809,7 +2562,7 @@ class FileOperationRecordRepository:
                 complete = self._compact_inventory_window(family, state)
                 self._write_inventory_head(family, state)
                 advanced = True
-                if not complete:
+                if not complete or not receipts_complete:
                     return False
         return True
 

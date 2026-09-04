@@ -50,6 +50,7 @@ _MANIFEST_INVENTORY_EVENT_MIN_BYTES = 32 * 1024
 _MANIFEST_INVENTORY_COMPACTION_WINDOW = 64
 _MANIFEST_INVENTORY_SEQUENCE_FIELD = "_cacheness_manifest_inventory_sequence_v2"
 _MANIFEST_INVENTORY_TAIL_SCHEMA_VERSION = 2
+_MANIFEST_INVENTORY_TAIL_WITNESS_SCHEMA_VERSION = 1
 _SQLITE_MANIFEST_TABLE = "cacheness_manifest_records_v1"
 _SQLITE_MANIFEST_INVENTORY_TABLE = "cacheness_manifest_inventory_v1"
 _SQLITE_MANIFEST_INVENTORY_STATE_TABLE = "cacheness_manifest_inventory_state_v2"
@@ -242,6 +243,7 @@ class _MetadataManifestRepository:
         self._json_metadata_locator: Path | None = None
         self._json_inventory_head_locator: Path | None = None
         self._json_inventory_tail_locator: Path | None = None
+        self._json_inventory_tail_witness_locator: Path | None = None
         self._json_lock_guard = RLock()
         self._inventory_key_provider = inventory_key_provider
         self._fallback_inventory_key_provider: ManifestKeyProvider | None = None
@@ -283,6 +285,12 @@ class _MetadataManifestRepository:
                 self._json_inventory_tail_locator = resolve_managed_locator(
                     self._json_lock_file_ops.root,
                     f".{Path(backend.metadata_file).name}.manifest-inventory-v2-tail.json",
+                    operation="manifest_inventory",
+                    allow_missing_leaf=True,
+                )
+                self._json_inventory_tail_witness_locator = resolve_managed_locator(
+                    self._json_lock_file_ops.root,
+                    f".{Path(backend.metadata_file).name}.manifest-inventory-v2-tail-witness.json",
                     operation="manifest_inventory",
                     allow_missing_leaf=True,
                 )
@@ -395,6 +403,7 @@ class _MetadataManifestRepository:
         self._json_metadata_locator = None
         self._json_inventory_head_locator = None
         self._json_inventory_tail_locator = None
+        self._json_inventory_tail_witness_locator = None
 
     def _page_size(self, page_size: int | None) -> int:
         """Resolve one caller page without bypassing the configured bound."""
@@ -628,6 +637,12 @@ class _MetadataManifestRepository:
             raise CacheBlobBackendError("JSON manifest inventory root is unavailable")
         return self._json_inventory_tail_locator
 
+    def _json_inventory_tail_witness_locator_for_state(self) -> Path:
+        """Return the bounded proof that a compacted tail member was exact."""
+        if self._json_inventory_tail_witness_locator is None:
+            raise CacheBlobBackendError("JSON manifest inventory root is unavailable")
+        return self._json_inventory_tail_witness_locator
+
     def _inventory_event_max_bytes(self) -> int:
         """Keep one event bounded independently from manifest record lifetime."""
         return max(
@@ -659,6 +674,11 @@ class _MetadataManifestRepository:
             # exact-revalidated stale.  Zero means there is no run currently
             # being extended by maintenance.
             "open_sparse_run_start": 0,
+            # The current tail event normally remains immutable.  If bounded
+            # maintenance retires that exact stale event, this separate signed
+            # witness proves the marker and terminal tuple before a reader may
+            # accept the now-absent tail member.
+            "tail_witness": None,
         }
 
     @staticmethod
@@ -794,12 +814,15 @@ class _MetadataManifestRepository:
             }
             self._active_inventory_epoch = state["epoch"]
             return state
-        if not isinstance(state, dict) or set(state) != {
-            *self._inventory_head_field_names(),
-            "events",
-            "skips",
-            "tail",
-        }:
+        if not isinstance(state, dict):
+            raise CacheBlobBackendError(
+                "Canonical manifest inventory is invalid",
+                context={"operation": "manifest_inventory"},
+            )
+        expected_fields = {
+            *self._inventory_head_field_names(), "events", "skips", "tail"
+        }
+        if set(state) not in (expected_fields, {*expected_fields, "tail_witness"}):
             raise CacheBlobBackendError(
                 "Canonical manifest inventory is invalid",
                 context={"operation": "manifest_inventory"},
@@ -816,6 +839,8 @@ class _MetadataManifestRepository:
             )
         if "skips" not in state:
             state["skips"] = {}
+        if "tail_witness" not in state:
+            state["tail_witness"] = None
         if not isinstance(state["skips"], dict):
             raise CacheBlobBackendError(
                 "Canonical manifest inventory sparse runs are invalid",
@@ -940,6 +965,151 @@ class _MetadataManifestRepository:
                 context={"operation": "manifest_inventory"},
             ) from exc
 
+    def _validate_inventory_tail_witness(
+        self,
+        witness: object,
+        tail: Mapping[str, Any],
+        state: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Validate one exact proof for a deliberately retired tail member."""
+        if not isinstance(witness, dict) or set(witness) != {
+            "version",
+            "store_id",
+            "epoch",
+            "terminal_sequence",
+            "terminal_key",
+            "terminal_digest",
+            "marker_sequence",
+            "marker_next_sequence",
+            "marker_run_digest",
+            "signature",
+        }:
+            raise CacheBlobBackendError(
+                "Canonical manifest inventory tail witness is invalid",
+                context={"operation": "manifest_inventory"},
+            )
+        if (
+            witness["version"] != _MANIFEST_INVENTORY_TAIL_WITNESS_SCHEMA_VERSION
+            or witness["store_id"] != self._inventory_store_id()
+            or witness["epoch"] != state["epoch"]
+            or witness["terminal_sequence"] != tail["terminal_sequence"]
+            or witness["terminal_key"] != tail["terminal_key"]
+            or witness["terminal_digest"] != tail["terminal_digest"]
+            or type(witness["marker_sequence"]) is not int
+            or type(witness["marker_next_sequence"]) is not int
+            or not 1 <= witness["marker_sequence"] <= witness["terminal_sequence"]
+            or not witness["terminal_sequence"] < witness["marker_next_sequence"]
+            or witness["marker_next_sequence"] > state["next_sequence"]
+            or not isinstance(witness["marker_run_digest"], str)
+            or len(witness["marker_run_digest"]) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in witness["marker_run_digest"]
+            )
+            or not isinstance(witness["signature"], str)
+        ):
+            raise CacheBlobBackendError(
+                "Canonical manifest inventory tail witness is invalid",
+                context={"operation": "manifest_inventory"},
+            )
+        if not self._verify_inventory_value(witness):
+            raise CacheManifestIntegrityError(
+                "Canonical manifest inventory tail witness is unauthenticated"
+            )
+        return witness
+
+    def _read_inventory_tail_witness(
+        self, tail: Mapping[str, Any], state: Mapping[str, Any]
+    ) -> dict[str, Any] | None:
+        """Read the fixed-size proof required after a tail event is compacted."""
+        if type(self.backend) is not JsonBackend:
+            witness = state.get("tail_witness")
+            return (
+                None
+                if witness is None
+                else self._validate_inventory_tail_witness(witness, tail, state)
+            )
+        if self._json_lock_file_ops is None:
+            raise CacheBlobBackendError("JSON manifest inventory root is unavailable")
+        try:
+            raw = self._json_lock_file_ops.read_bytes_bounded(
+                self._json_inventory_tail_witness_locator_for_state(),
+                max_bytes=_MANIFEST_INVENTORY_HEAD_MAX_BYTES,
+            )
+        except FileNotFoundError:
+            return None
+        try:
+            return self._validate_inventory_tail_witness(json_loads(raw), tail, state)
+        except (TypeError, ValueError) as exc:
+            raise CacheBlobBackendError(
+                "Canonical manifest inventory tail witness is invalid",
+                context={"operation": "manifest_inventory"},
+            ) from exc
+
+    def _write_inventory_tail_witness(
+        self,
+        state: dict[str, Any],
+        tail: Mapping[str, Any],
+        marker: Mapping[str, Any],
+    ) -> None:
+        """Publish exact terminal-retirement proof before unlinking its event."""
+        witness = self._sign_inventory_value(
+            {
+                "version": _MANIFEST_INVENTORY_TAIL_WITNESS_SCHEMA_VERSION,
+                "store_id": self._inventory_store_id(),
+                "epoch": state["epoch"],
+                "terminal_sequence": tail["terminal_sequence"],
+                "terminal_key": tail["terminal_key"],
+                "terminal_digest": tail["terminal_digest"],
+                "marker_sequence": marker["start_sequence"],
+                "marker_next_sequence": marker["next_sequence"],
+                "marker_run_digest": marker["run_digest"],
+            },
+            initialize_new_store=True,
+        )
+        self._validate_inventory_tail_witness(witness, tail, state)
+        if type(self.backend) is not JsonBackend:
+            state["tail_witness"] = witness
+            return
+        if self._json_lock_file_ops is None:
+            raise CacheBlobBackendError("JSON manifest inventory root is unavailable")
+        encoded = json_dumps(witness, default=str).encode("utf-8")
+        if len(encoded) > _MANIFEST_INVENTORY_HEAD_MAX_BYTES:
+            raise AssertionError("manifest inventory tail witness unexpectedly exceeds bound")
+        self._json_lock_file_ops.write_bytes_durable(
+            self._json_inventory_tail_witness_locator_for_state(), encoded
+        )
+
+    def _verify_acknowledged_inventory_terminal(
+        self, tail: Mapping[str, Any], state: dict[str, Any]
+    ) -> None:
+        """Require every accepted high water to retain its exact terminal proof."""
+        sequence = tail["terminal_sequence"]
+        event = self._read_inventory_event(sequence, state=state)
+        if event is not None:
+            if self._tail_matches_inventory_event(tail, event, sequence):
+                return
+            raise CacheManifestIntegrityError(
+                "Canonical manifest inventory tail terminal event is inconsistent",
+                context={"operation": "manifest_inventory", "sequence": sequence},
+            )
+        witness = self._read_inventory_tail_witness(tail, state)
+        if witness is None:
+            raise CacheManifestIntegrityError(
+                "Canonical manifest inventory tail terminal event is missing",
+                context={"operation": "manifest_inventory", "sequence": sequence},
+            )
+        marker = self._read_inventory_skip_record(witness["marker_sequence"], state)
+        if (
+            marker is None
+            or marker["next_sequence"] != witness["marker_next_sequence"]
+            or marker["run_digest"] != witness["marker_run_digest"]
+        ):
+            raise CacheManifestIntegrityError(
+                "Canonical manifest inventory tail witness marker is inconsistent",
+                context={"operation": "manifest_inventory", "sequence": sequence},
+            )
+
     def _verify_inventory_tail(
         self, state: Mapping[str, Any], *, allow_unacknowledged: bool = False
     ) -> dict[str, Any] | None:
@@ -958,6 +1128,7 @@ class _MetadataManifestRepository:
                 context={"operation": "manifest_inventory"},
             )
         if tail["next_sequence"] == state["next_sequence"]:
+            self._verify_acknowledged_inventory_terminal(tail, state)
             return tail
         # This is the narrow durable crash window after the immutable event
         # and tail commit but before head acknowledgement.  Only an append
@@ -1223,11 +1394,11 @@ class _MetadataManifestRepository:
         state: dict[str, Any],
         *,
         event: tuple[str, str] | None,
-    ) -> None:
+    ) -> dict[str, Any]:
         """Durably extend one exact stale run before retiring its final event."""
         existing = self._read_inventory_skip_record(sequence, state)
         if existing is not None and existing["next_sequence"] >= successor:
-            return
+            return existing
         if existing is not None and existing["next_sequence"] != successor - 1:
             raise CacheBlobBackendError(
                 "Canonical manifest inventory sparse-successor continuation is invalid",
@@ -1253,7 +1424,7 @@ class _MetadataManifestRepository:
         )
         if type(self.backend) is not JsonBackend:
             state["skips"][sequence] = marker
-            return
+            return marker
         if self._json_lock_file_ops is None:
             raise CacheBlobBackendError("JSON manifest inventory root is unavailable")
         encoded = json_dumps(marker, default=str).encode("utf-8")
@@ -1262,6 +1433,7 @@ class _MetadataManifestRepository:
         self._json_lock_file_ops.write_bytes_durable(
             self._json_inventory_skip_locator(sequence), encoded
         )
+        return marker
 
     def _append_inventory_event(self, key: str, record: bytes) -> int:
         """Index publication before authority, without append/read/rewrite history."""
@@ -1487,9 +1659,17 @@ class _MetadataManifestRepository:
             # removed.  Since this lock serializes authority and the exact
             # event comparison above proved it stale, a crash at either side
             # can only retain or hide stale scheduling evidence.
-            self._write_inventory_skip(
+            marker = self._write_inventory_skip(
                 open_sparse_run_start, sequence + 1, state, event=event
             )
+            tail = self._read_inventory_tail(state)
+            if (
+                tail is not None
+                and marker["start_sequence"]
+                <= tail["terminal_sequence"]
+                < marker["next_sequence"]
+            ):
+                self._write_inventory_tail_witness(state, tail, marker)
             if type(self.backend) is JsonBackend:
                 try:
                     self._json_lock_file_ops.delete_durable(  # type: ignore[union-attr]

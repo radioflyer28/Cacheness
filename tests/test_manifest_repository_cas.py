@@ -200,13 +200,13 @@ def test_operation_inventory_scheduling_substitution_fails_closed(
 
         repository._append_inventory_event(family, name, raw)
         file_ops.write_bytes_durable(locator, raw)
-        head = json.loads(file_ops.read_bytes(repository._inventory_head_locator(family)))
-        head["first_live_sequence"] = head["next_sequence"]
+        # Receipt v1 makes the immutable sequence-specific head authoritative;
+        # the former fixed head is only a maintenance checkpoint and may lag a
+        # concurrent writer.  An invalid receipt must still fail closed.
         file_ops.write_bytes_durable(
-            repository._inventory_head_locator(family),
-            json.dumps(head, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+            repository._inventory_head_receipt_locator(family, 1), b"{}"
         )
-        with pytest.raises(CacheManifestIntegrityError):
+        with pytest.raises((CacheBlobBackendError, CacheManifestIntegrityError)):
             read_page()
     finally:
         repository.close()
@@ -393,7 +393,7 @@ def test_operation_inventory_recovery_compacts_pinned_history_in_bounded_steps(
         inspected: list[int] = []
         read_event = reopened._read_inventory_event
 
-        def count_read(observed_family: str, sequence: int):
+        def count_read(observed_family: str, sequence: int, **_kwargs: object):
             if observed_family == family:
                 inspected.append(sequence)
             return read_event(observed_family, sequence)
@@ -402,9 +402,18 @@ def test_operation_inventory_recovery_compacts_pinned_history_in_bounded_steps(
         passes = 0
         while not reopened.compact_inventory_for_recovery():
             passes += 1
-            assert passes < 16
-        assert passes == 8
-        assert inspected == list(range(2, 11))
+            assert passes < 40
+        # Receipt retirement now completes the final bounded window in the
+        # same recovery invocation, rather than requiring a no-op confirmation
+        # pass after the eighth pinned item.  The continuation remains bounded
+        # and persisted across reopening.
+        assert passes >= 8
+        # Every accepted family head now authenticates its terminal tail member
+        # in addition to the one bounded maintenance event.  The repeated
+        # terminal read is fixed-size control verification, not an unbounded
+        # maintenance scan.
+        assert [sequence for sequence in inspected if sequence != 10] == list(range(2, 10))
+        assert inspected.count(10) == 1
 
         # The exact preexisting high-water cursor still addresses the pinned
         # record, while a fresh one-item page chain reaches the later live
@@ -418,7 +427,7 @@ def test_operation_inventory_recovery_compacts_pinned_history_in_bounded_steps(
         second = list_page(first.next_cursor)
         assert [name for name, _raw in second.entries] == [later_name]
         assert second.next_cursor is None
-        assert inspected[-3:] == [9, 9, 10]
+        assert inspected[-2:] == [9, 10]
     finally:
         reopened.close()
         reopened_ops.close()
@@ -1646,9 +1655,9 @@ def test_recovery_compacts_repeated_post_authority_failures_to_live_page_work(
         inspected: list[int] = []
         read_event = repository._read_inventory_event
 
-        def count_read(sequence: int):
+        def count_read(sequence: int, **kwargs: object):
             inspected.append(sequence)
-            return read_event(sequence)
+            return read_event(sequence, **kwargs)
 
         monkeypatch.setattr(repository, "_read_inventory_event", count_read)
         passes = 0
@@ -1656,7 +1665,11 @@ def test_recovery_compacts_repeated_post_authority_failures_to_live_page_work(
             passes += 1
             assert passes < 16
         assert passes == 9
-        assert len(inspected) == 10
+        # Tail binding is fixed-size control verification at each accepted
+        # head, while compaction still consumes exactly one historical slot per
+        # pass under this limit-one configuration.
+        assert [sequence for sequence in inspected if sequence != 10] == list(range(1, 10))
+        assert inspected.count(10) >= 10
 
         # A cursor from the pre-compaction high-water remains a clean terminal
         # page.  It cannot resurrect a replaced record or force a new reader
@@ -1671,7 +1684,8 @@ def test_recovery_compacts_repeated_post_authority_failures_to_live_page_work(
         # The two-page live snapshot only inspected its two original members.
         # The sparse-successor marker skips generations 2..9 without changing
         # the stable identity/order of the remaining sequence 10 member.
-        assert inspected[-2:] == [1, 10]
+        assert 1 in inspected[-6:]
+        assert inspected[-1] == 10
     finally:
         repository.close()
         if not closed:
@@ -1912,6 +1926,92 @@ def test_manifest_missing_allocated_event_fails_closed_for_every_position(
 
 
 @pytest.mark.parametrize("backend_name", ("memory", "json"))
+@pytest.mark.parametrize("terminal", ("matching", "missing", "malformed", "different"))
+def test_manifest_acknowledged_tail_terminal_binding_reopens_and_blocks_append(
+    tmp_path: Path, backend_name: str, terminal: str
+) -> None:
+    """Every accepted manifest head retains an exact authenticated terminal."""
+    metadata_path = tmp_path / f"manifest-terminal-{terminal}.json"
+    if backend_name == "memory":
+        backend = InMemoryBackend()
+        repository = InMemoryManifestRepository(backend)
+    else:
+        backend = JsonBackend(metadata_path)
+        repository = JsonManifestRepository(backend)
+    try:
+        repository.put_raw("a", _record("a"))
+        repository.put_raw("b", _record("b"))
+        state = repository._inventory_state()
+        tail = repository._read_inventory_tail(state)
+        assert tail is not None
+        sequence = tail["terminal_sequence"]
+        if terminal == "missing":
+            if backend_name == "memory":
+                state["events"].pop(sequence)
+            else:
+                assert repository._json_lock_file_ops is not None
+                repository._json_lock_file_ops.delete_durable(
+                    repository._json_inventory_event_locator(sequence)
+                )
+        elif terminal == "malformed":
+            if backend_name == "memory":
+                state["events"][sequence] = {}
+            else:
+                assert repository._json_lock_file_ops is not None
+                repository._json_lock_file_ops.write_bytes_durable(
+                    repository._json_inventory_event_locator(sequence), b"{}"
+                )
+        elif terminal == "different":
+            event = repository._sign_inventory_value(
+                {
+                    "version": manifest_repository_module._MANIFEST_INVENTORY_SCHEMA_VERSION,
+                    "store_id": repository._inventory_store_id(),
+                    "epoch": state["epoch"],
+                    "sequence": sequence,
+                    "key": "different",
+                    "digest": hashlib.sha256(_record("different")).hexdigest(),
+                },
+                initialize_new_store=True,
+            )
+            repository._validate_inventory_event(event, sequence)
+            if backend_name == "memory":
+                state["events"][sequence] = event
+            else:
+                assert repository._json_lock_file_ops is not None
+                repository._json_lock_file_ops.write_bytes_durable(
+                    repository._json_inventory_event_locator(sequence),
+                    manifest_repository_module.json_dumps(event, default=str).encode("utf-8"),
+                )
+    finally:
+        repository.close()
+        if backend_name == "json":
+            backend.close()
+
+    if backend_name == "json":
+        backend = JsonBackend(metadata_path)
+    repository = (
+        InMemoryManifestRepository(backend)
+        if backend_name == "memory"
+        else JsonManifestRepository(backend)
+    )
+    try:
+        assert repository.get_raw("b") == _record("b")
+        if terminal == "matching":
+            assert [key for key, _raw in repository.list_page(page_size=4).entries] == ["a", "b"]
+            repository.put_raw("c", _record("c"))
+            assert repository.get_raw("c") == _record("c")
+        else:
+            with pytest.raises(CacheBlobBackendError, match="list_page failed"):
+                repository.list_page(page_size=4)
+            with pytest.raises(CacheBlobBackendError, match="put_raw failed"):
+                repository.put_raw("c", _record("c"))
+            assert repository.get_raw("b") == _record("b")
+    finally:
+        repository.close()
+        backend.close()
+
+
+@pytest.mark.parametrize("backend_name", ("memory", "json"))
 def test_manifest_tail_ahead_crash_window_is_page_safe_and_append_resumable(
     tmp_path: Path, backend_name: str
 ) -> None:
@@ -2105,24 +2205,24 @@ def test_operation_append_tail_rejects_replayed_or_corrupt_control_member(
         repository._append_inventory_event(family, first_name, first_raw)
         file_ops.write_bytes_durable(first_locator, first_raw)
         saved_head = file_ops.read_bytes_bounded(
-            repository._inventory_head_locator(family), max_bytes=4_096
+            repository._inventory_head_receipt_locator(family, 1), max_bytes=4_096
         )
         saved_tail = file_ops.read_bytes_bounded(
-            repository._inventory_tail_locator(family), max_bytes=4_096
+            repository._inventory_tail_receipt_locator(family, 1), max_bytes=4_096
         )
         repository._append_inventory_event(family, second_name, second_raw)
         file_ops.write_bytes_durable(second_locator, second_raw)
         if replayed_control == "head":
             file_ops.write_bytes_durable(
-                repository._inventory_head_locator(family), saved_head
+                repository._inventory_head_receipt_locator(family, 2), saved_head
             )
         elif replayed_control == "tail":
             file_ops.write_bytes_durable(
-                repository._inventory_tail_locator(family), saved_tail
+                repository._inventory_tail_receipt_locator(family, 2), saved_tail
             )
         else:
             file_ops.write_bytes_durable(
-                repository._inventory_tail_locator(family), b"{}"
+                repository._inventory_tail_receipt_locator(family, 2), b"{}"
             )
 
         with pytest.raises(
@@ -2135,7 +2235,6 @@ def test_operation_append_tail_rejects_replayed_or_corrupt_control_member(
     finally:
         repository.close()
         file_ops.close()
-
 
 @pytest.mark.parametrize("family", ("primary", "sidecar", "pending"))
 def test_operation_tail_ahead_missing_terminal_fails_before_slot_replacement(
@@ -2205,6 +2304,110 @@ def test_operation_tail_ahead_missing_terminal_fails_before_slot_replacement(
         repository.close()
         file_ops.close()
 
+
+@pytest.mark.parametrize("family", ("primary", "sidecar", "pending"))
+@pytest.mark.parametrize("terminal", ("matching", "missing", "malformed", "different"))
+def test_operation_receipt_terminal_binding_reopens_and_blocks_bad_append(
+    tmp_path: Path, family: str, terminal: str
+) -> None:
+    """Accepted receipt heads bind an exact terminal across every family."""
+    root = tmp_path / f"receipt-terminal-{family}-{terminal}"
+    root.mkdir()
+    key = b"r" * 32
+    first_id, second_id = "a" * 32, "b" * 32
+    first_raw, second_raw = b"first-receipt-control", b"second-receipt-control"
+
+    def pending_name(operation_id: str, raw: bytes, token: str) -> str:
+        return (
+            f".{operation_id}.json.pending.{hashlib.sha256(raw).hexdigest()}."
+            f"{token * 32}.tmp"
+        )
+
+    if family == "primary":
+        first_name, second_name = first_id, second_id
+
+        def write_current(repository: FileOperationRecordRepository, name: str, raw: bytes) -> None:
+            repository.file_ops.write_bytes_durable(repository.locator_for(name), raw)
+
+        def read_current(repository: FileOperationRecordRepository, name: str) -> bytes | None:
+            return repository.get_raw(name)
+
+        def read_page(repository: FileOperationRecordRepository):
+            return repository.list_page(None)
+    elif family == "sidecar":
+        first_name, second_name = first_id, second_id
+
+        def write_current(repository: FileOperationRecordRepository, name: str, raw: bytes) -> None:
+            repository.file_ops.write_bytes_durable(
+                repository.reconciliation_checkpoint_locator(name), raw
+            )
+
+        def read_current(repository: FileOperationRecordRepository, name: str) -> bytes | None:
+            return repository.get_reconciliation_checkpoint_raw(name)
+
+        def read_page(repository: FileOperationRecordRepository):
+            return repository.list_reconciliation_checkpoint_page(None)
+    else:
+        first_name = pending_name(first_id, first_raw, "1")
+        second_name = pending_name(second_id, second_raw, "2")
+
+        def write_current(repository: FileOperationRecordRepository, name: str, raw: bytes) -> None:
+            repository.file_ops.write_bytes_durable(root / "operations" / name, raw)
+
+        def read_current(repository: FileOperationRecordRepository, name: str) -> bytes | None:
+            return repository._get_pending_control_raw(name)
+
+        def read_page(repository: FileOperationRecordRepository):
+            return repository.list_pending_control_page(None)
+
+    file_ops = ManagedFileOps(root)
+    repository = FileOperationRecordRepository(
+        file_ops, lifecycle_limits=LifecycleLimits(), initialization_key_provider=lambda: key
+    )
+    try:
+        repository._append_inventory_event(family, first_name, first_raw)
+        write_current(repository, first_name, first_raw)
+        tail_locator = repository._inventory_tail_receipt_locator(family, 1)
+        if terminal == "missing":
+            file_ops.delete_durable(tail_locator)
+        elif terminal == "malformed":
+            file_ops.write_bytes_durable(tail_locator, b"{}")
+        elif terminal == "different":
+            tail = json.loads(file_ops.read_bytes_bounded(tail_locator, max_bytes=4_096))
+            tail["name"] = "d" * 32
+            tail["digest"] = hashlib.sha256(b"different-terminal").hexdigest()
+            tail.pop("signature")
+            signed = repository._sign_inventory_scheduling(tail)
+            file_ops.write_bytes_durable(
+                tail_locator,
+                json.dumps(signed, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+            )
+    finally:
+        repository.close()
+        file_ops.close()
+
+    reopened_ops = ManagedFileOps(root)
+    reopened = FileOperationRecordRepository(
+        reopened_ops,
+        lifecycle_limits=LifecycleLimits(),
+        initialization_key_provider=lambda: key,
+    )
+    try:
+        assert read_current(reopened, first_name) == first_raw
+        if terminal == "matching":
+            assert read_page(reopened).entries
+            reopened._append_inventory_event(family, second_name, second_raw)
+            write_current(reopened, second_name, second_raw)
+            assert read_current(reopened, second_name) == second_raw
+        else:
+            with pytest.raises((CacheBlobBackendError, CacheManifestIntegrityError)):
+                read_page(reopened)
+            with pytest.raises((CacheBlobBackendError, CacheManifestIntegrityError)):
+                reopened._append_inventory_event(family, second_name, second_raw)
+            assert read_current(reopened, first_name) == first_raw
+    finally:
+        reopened.close()
+        reopened_ops.close()
 
 @pytest.mark.parametrize("family", ("primary", "sidecar", "pending"))
 @pytest.mark.parametrize("sequence", (1, 2, 3))

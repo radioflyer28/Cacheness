@@ -37,6 +37,26 @@ def _put_from_independent_process(
         store.close()
 
 
+def _put_from_ready_independent_process(
+    root: str,
+    ready: multiprocessing.synchronize.Event,
+    run: multiprocessing.synchronize.Event,
+    completed: multiprocessing.synchronize.Event,
+    errors: multiprocessing.queues.Queue,
+) -> None:
+    """Open independently before a scheduler race, then perform one public put."""
+    store = BlobStore(root, backend="json")
+    try:
+        ready.set()
+        assert run.wait(timeout=15)
+        store.put("child", key="child-key")
+        completed.set()
+    except BaseException as exc:  # pragma: no cover - surfaced in parent.
+        errors.put(repr(exc))
+    finally:
+        store.close()
+
+
 def _join(thread: threading.Thread) -> None:
     """Join one deterministic test worker without hiding a deadlock."""
     thread.join(timeout=5)
@@ -438,6 +458,154 @@ def test_clear_snapshot_does_not_delete_a_post_snapshot_key(tmp_path):
         assert store.get("after-key") == "after"
     finally:
         store.close()
+
+
+@pytest.mark.parametrize("stage", ("event", "tail", "head"))
+def test_distinct_key_put_helps_a_paused_scheduler_receipt_and_reopens(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str
+) -> None:
+    """No scheduler durability boundary may serialize unrelated BlobStore puts.
+
+    The second public put must finish while the first is paused before its
+    immutable event/tail/head receipt create.  It therefore proves both the
+    reverse help path and that no family/store lease remains held across the
+    stalled fsync-equivalent boundary.
+    """
+    root = tmp_path / f"receipt-{stage}"
+    store = BlobStore(root, backend="json")
+    repository = store.lifecycle.operation_repository
+    entered = threading.Event()
+    release = threading.Event()
+    second_done = threading.Event()
+    errors: list[BaseException] = []
+    original_create = repository.file_ops.create_bytes_durable_exclusive
+
+    def pause_one_receipt(locator: Path, payload: bytes) -> Path:
+        if (
+            locator.parent.name == "primary"
+            and locator.name.startswith(f"{stage}-")
+            and not entered.is_set()
+        ):
+            entered.set()
+            assert release.wait(timeout=5)
+        return original_create(locator, payload)
+
+    monkeypatch.setattr(
+        repository.file_ops, "create_bytes_durable_exclusive", pause_one_receipt
+    )
+
+    def put(key: str, value: str, done: threading.Event | None = None) -> None:
+        try:
+            store.put(value, key=key)
+            if done is not None:
+                done.set()
+        except BaseException as exc:  # pragma: no cover - asserted by caller.
+            errors.append(exc)
+
+    first = threading.Thread(target=put, args=("key-a", "value-a"))
+    second = threading.Thread(
+        target=put, args=("key-b", "value-b", second_done)
+    )
+    try:
+        first.start()
+        assert entered.wait(timeout=5)
+        second.start()
+        assert second_done.wait(timeout=5)
+        release.set()
+        _join(first)
+        _join(second)
+        assert errors == []
+        assert store.get("key-a") == "value-a"
+        assert store.get("key-b") == "value-b"
+    finally:
+        release.set()
+        _join(first)
+        _join(second)
+        store.close()
+
+    reopened = BlobStore(root, backend="json")
+    try:
+        assert reopened.get("key-a") == "value-a"
+        assert reopened.get("key-b") == "value-b"
+    finally:
+        reopened.close()
+
+
+@pytest.mark.parametrize("stage", ("event", "tail", "head"))
+def test_independent_process_put_completes_during_paused_scheduler_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str
+) -> None:
+    """The receipt chain orders cross-process writers without a shared lease."""
+    root = tmp_path / f"receipt-process-{stage}"
+    store = BlobStore(root, backend="json")
+    # A child constructor may legitimately take aggregate recovery admission.
+    # Open it before the parent starts its ordinary write so this probe isolates
+    # scheduler publication rather than constructor-admission timing.
+    store.put("seed", key="seed-key")
+    repository = store.lifecycle.operation_repository
+    entered = threading.Event()
+    release = threading.Event()
+    errors: list[BaseException] = []
+    original_create = repository.file_ops.create_bytes_durable_exclusive
+
+    def pause_one_receipt(locator: Path, payload: bytes) -> Path:
+        if (
+            locator.parent.name == "primary"
+            and locator.name.startswith(f"{stage}-")
+            and not entered.is_set()
+        ):
+            entered.set()
+            assert release.wait(timeout=30)
+        return original_create(locator, payload)
+
+    monkeypatch.setattr(
+        repository.file_ops, "create_bytes_durable_exclusive", pause_one_receipt
+    )
+
+    def first_put() -> None:
+        try:
+            store.put("parent", key="parent-key")
+        except BaseException as exc:  # pragma: no cover - asserted by parent.
+            errors.append(exc)
+
+    context = multiprocessing.get_context("spawn")
+    ready = context.Event()
+    run = context.Event()
+    completed = context.Event()
+    child_errors = context.Queue()
+    first = threading.Thread(target=first_put)
+    child = context.Process(
+        target=_put_from_ready_independent_process,
+        args=(str(root), ready, run, completed, child_errors),
+    )
+    try:
+        child.start()
+        assert ready.wait(timeout=15)
+        first.start()
+        assert entered.wait(timeout=15)
+        run.set()
+        assert completed.wait(timeout=15)
+        child.join(timeout=15)
+        assert child.exitcode == 0
+        assert child_errors.empty()
+        release.set()
+        run.set()
+        _join(first)
+        assert errors == []
+    finally:
+        release.set()
+        _join(first)
+        if child.is_alive():
+            child.terminate()
+        child.join(timeout=15)
+        store.close()
+
+    reopened = BlobStore(root, backend="json")
+    try:
+        assert reopened.get("parent-key") == "parent"
+        assert reopened.get("child-key") == "child"
+    finally:
+        reopened.close()
 
 
 def test_live_clear_transition_lease_preserves_creator_return_count(tmp_path: Path) -> None:

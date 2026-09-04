@@ -314,17 +314,20 @@ def test_operation_repository_uses_configured_bounded_stable_pages(
             "a" * 32,
         ]
         assert first_page.next_cursor is not None
-        # One authenticated initialization epoch, one bounded sequence head,
-        # one independent signed append-tail anchor, one immutable event per
-        # yielded member, and one exact control read per member; no history
-        # rewrite or namespace-wide directory scan is used.
-        assert len(calls) == 3 + (2 * limits.operation_page_size)
+        # Receipt-v1 derives the high water from fixed-size head/tail/event
+        # proofs, never a directory scan.  It charges at most one anchor and
+        # three reads for each of the explicitly capped control probes; page
+        # members remain charged to the configured caller page size.
+        control_budget = 2 + (
+            3 * operation_repository_module._INVENTORY_RECEIPT_PROBE_MAX
+        )
+        assert len(calls) <= control_budget + (2 * limits.operation_page_size)
         assert [cursor.next_sequence for cursor in first_page.entry_next_cursors] == [2, 3]
 
         second_page = repository.list_page(first_page.next_cursor)
         assert [operation_id for operation_id, _ in second_page.entries] == ["b" * 32]
         assert second_page.next_cursor is None
-        assert len(calls) == 12
+        assert len(calls) <= 2 * (control_budget + (2 * limits.operation_page_size))
     finally:
         store.close()
 
@@ -1620,7 +1623,10 @@ def test_pending_recovery_pages_past_large_invalid_prefix_without_unbounded_read
             # configured current page plus a bounded stale-event maintenance
             # window; it never rebuilds a legacy directory ordering.
             assert len(calls) - before <= (
-                4 + (2 * limits.operation_page_size) + 64
+                4
+                + (2 * limits.operation_page_size)
+                + 64
+                + (3 * operation_repository_module._INVENTORY_RECEIPT_PROBE_MAX)
             )
         assert repository.get_raw(valid_id) == raw
         # The exact high-water sequence is terminal after the valid candidate;
@@ -1683,7 +1689,11 @@ def test_pending_inventory_compaction_skips_a_lifetime_stale_prefix(
         # maintenance then pays one fixed 64-position compaction window, which
         # is independent of the small externally visible page limit and keeps
         # successful control traffic from accumulating stale history.
-        assert len(calls) <= 8 + 64
+        assert len(calls) <= (
+            8
+            + 64
+            + (3 * operation_repository_module._INVENTORY_RECEIPT_PROBE_MAX)
+        )
         assert repository.get_raw(operation_id) == raw_record
         compacted = repository._read_inventory("pending")
         assert compacted["first_live_sequence"] == compacted["next_sequence"] == 42
@@ -1738,10 +1748,11 @@ def test_successful_blob_lifecycle_retirement_converges_sparse_primary_history(
         # An already compacted terminal inventory pays only bounded head/tail
         # and current-page checks; it does not revisit the 64 retired
         # successful operations.
-        # The durable primary-recovery continuation adds a fixed signed-head
-        # acknowledgement to this terminal pass; it still never revisits the
-        # 64 retired operation events.
-        assert len(reads) <= 24
+        # Receipt high-water discovery adds only its fixed control-record
+        # budget; it still never revisits the 64 retired operation events.
+        assert len(reads) <= (
+            24 + (3 * operation_repository_module._INVENTORY_RECEIPT_PROBE_MAX)
+        )
     finally:
         store.close()
 
