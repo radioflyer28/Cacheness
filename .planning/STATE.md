@@ -3,12 +3,12 @@ gsd_state_version: 1.0
 milestone: v1.0
 current_phase: 03
 current_phase_name: Atomic Lifecycle and Recovery Engine
-status: verifying
-stopped_at: Resumed Phase 03 review-fix iteration 14
-last_updated: "2026-09-02T00:52:15.950Z"
-last_activity: 2026-09-01
-last_activity_desc: Resumed Phase 03 deep-review convergence loop
-state_head: 2ec6df4
+status: paused
+stopped_at: Architectural replan decision after non-converging Phase 03 race-fix cycle
+last_updated: "2026-09-04T18:59:08Z"
+last_activity: 2026-09-04
+last_activity_desc: Paused iteration-28 fixer after evidence that the file-native lifecycle protocol is not converging
+state_head: f19cc94
 progress:
   total_phases: 8
   completed_phases: 2
@@ -30,8 +30,8 @@ See: .planning/PROJECT.md (updated 2026-08-29)
 
 Phase: 03 (Atomic Lifecycle and Recovery Engine) — VERIFYING
 Plan: 10 of 10
-Status: Review convergence in progress — iteration 14 has 3 Critical findings
-Last activity: 2026-09-01 — Resumed Phase 03 review-fix iteration 14
+Status: Paused for architectural replan — repeated race fixes keep adding protocol states and exposing new races
+Last activity: 2026-09-04 — Interrupted iteration-28 fixer at a safe uncommitted checkpoint and audited the 28-cycle finding pattern
 
 Progress: [██░░░░░░░░] 2 of 8 phases complete
 
@@ -180,6 +180,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-09-02T00:52:15.950Z
-Stopped at: Session resumed, proceeding to Phase 03 review-fix iteration 14
+Last session: 2026-09-04T18:59:08Z
+Stopped at: Awaiting user decision on replacing the file-native receipt/inventory protocol with a smaller transactional authority design
 Resume file: .planning/phases/03-atomic-lifecycle-and-recovery-engine/.continue-here.md

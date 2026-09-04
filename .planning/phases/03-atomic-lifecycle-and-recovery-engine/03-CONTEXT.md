@@ -1,7 +1,7 @@
 # Phase 3: Atomic Lifecycle and Recovery Engine - Context
 
-**Gathered:** 2026-08-30
-**Status:** Ready for planning
+**Gathered:** 2026-08-30; architecture replanned 2026-09-04
+**Status:** Ready for transactional-authority replanning
 
 <domain>
 ## Phase Boundary
@@ -58,11 +58,23 @@ does not yet implement the complete PostgreSQL/S3 backend matrix, rewire
 - **D-21:** The OS principal that owns a local store is inside the trusted deployment boundary for lifecycle-control availability. Cacheness validates control-object type, containment, identity, and authenticated contents and fails closed when observable substitution occurs, but it does not promise continued operation or immutable per-key authority if that same principal deliberately deletes or rebinds every lifecycle authority object while the store is live. Ordinary Cacheness processes never perform such rebinding. — **Reversibility:** costly — Defending against a hostile store owner would require an external coordinator, privileged mandatory controls, or store-wide serialization and therefore changes the architecture or deployment model.
 - **D-22:** In this milestone, Windows local-store coordination is supported only among processes running as one OS user in one interactive or service session. Cross-user, cross-service, and cross-session access to the same local store is unsupported and must fail or be prevented by deployment ACLs; supporting it later requires an explicit global authority namespace, ACL/security-descriptor contract, and native Windows validation. Advertised Windows compatibility otherwise remains in force. — **Reversibility:** reversible — A later milestone may broaden the topology after implementing and validating that authority contract.
 
+### Transactional Authority Replan
+
+- **D-23:** The file-native lifecycle scheduler built from operation receipts, inventory events, heads, anchors, cursors, pending-control records, and staged control files is rejected. The replacement removes that protocol rather than wrapping or incrementally repairing it. D-05 through D-20 remain behavioral requirements only where they do not prescribe that discarded mechanism. — **Reversibility:** costly — Reintroducing file-native transactional coordination would require new proof that it is smaller and more reliable than the transactional authority.
+- **D-24:** `BlobStore` depends on one deep lifecycle-authority module whose interface exposes complete entry-state transactions, not individual receipt/checkpoint/storage primitives. The authority atomically owns canonical manifest state, mutation intent, cleanup debt, clear membership/progress, and reconciliation checkpoints. Callers never coordinate those records themselves.
+- **D-25:** Payload generations remain immutable native handler output outside the authority transaction. A durable authority intent is committed before the first persistent payload side effect; a later authority transaction conditionally promotes the verified generation and records any cleanup debt. Recovery queries indexed intent/debt rows and never discovers protocol state by scanning filenames.
+- **D-26:** The local persistent reference adapter uses Python's standard-library SQLite engine as the transactional authority, with explicit durability configuration and schema/version migration. JSON remains a supported metadata projection and compatibility representation, but it is not an independent cross-process transaction authority. Configuration that requests durable multi-process guarantees without a capable authority fails with a typed unsupported-capability outcome rather than silently downgrading.
+- **D-27:** The in-memory authority adapter provides deterministic same-process behavior for tests and ephemeral stores. PostgreSQL and S3-capable authority adapters use their native transaction or conditional-write facilities through the same lifecycle-authority interface in Phases 4 and 5; Phase 3 must not recreate the discarded filesystem scheduler inside those adapters.
+- **D-28:** Distinct-key serialization, payload verification, and cleanup proceed concurrently. A backend may serialize only the short authority commit itself (SQLite has one writer), and no authority transaction or global/store/family lease may span handler serialization, payload upload/fsync, payload verification, or reclamation.
+- **D-29:** Clear stores its exact target generations and progress as transactional authority rows. Reconciliation pages indexed authority rows using stable database cursors and explicit work/byte/action limits; it does not maintain a second file inventory or infer provenance.
+- **D-30:** The implementation must delete or retire the abandoned file-native scheduler modules and tests rather than carry both lifecycle engines. Replacement tests exercise behavior through the lifecycle-authority interface and `BlobStore`; low-level receipt/inventory tests are historical evidence, not the new test surface.
+- **D-31:** Windows local persistence uses the same SQLite transactional authority and the D-22 one-user/session trust scope. No custom Win32/POSIX lock-file authority, inode/handle identity registry, extended-attribute reservation, or platform-specific receipt protocol is part of the replacement.
+
 ### the agent's Discretion
 
-- Exact class/module names for lifecycle operations, journals, reconciliation reports, and coordination registries.
+- Exact class/module names for the lifecycle authority, transaction records, and reconciliation reports.
 - Whether local per-key coordination uses lock striping or dynamically retained locks, provided unrelated keys remain concurrent and retention is bounded.
-- Exact bounded retry/backoff values and operation-record encoding, provided failure outcomes remain deterministic and testable.
+- Exact bounded database busy retry/backoff values and authority-row encoding, provided failure outcomes remain deterministic and testable.
 - Whether safe quarantine is implemented as a contained rename, backend namespace move, or immutable report-only disposition for a backend that cannot move atomically.
 
 </decisions>

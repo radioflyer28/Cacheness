@@ -1,6 +1,7 @@
 ---
 phase: 03-atomic-lifecycle-and-recovery-engine
 plan: "06"
+status: superseded
 subsystem: storage-lifecycle
 tags: [blobstore, clear, legacy-compatibility, lifecycle, recovery]
 requires:

@@ -1,6 +1,7 @@
 ---
 phase: 03-atomic-lifecycle-and-recovery-engine
 plan: "03"
+status: superseded
 subsystem: storage-lifecycle
 tags: [blobstore, lifecycle, operation-evidence, hmac, paging, recovery]
 requires:

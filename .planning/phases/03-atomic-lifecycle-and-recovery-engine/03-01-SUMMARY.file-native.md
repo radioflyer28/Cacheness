@@ -1,6 +1,7 @@
 ---
 phase: 03-atomic-lifecycle-and-recovery-engine
 plan: "01"
+status: superseded
 subsystem: storage-lifecycle
 tags: [blobstore, immutable-generations, cas, recovery, hmac, json]
 requires:

@@ -1,6 +1,7 @@
 ---
 phase: 03-atomic-lifecycle-and-recovery-engine
 plan: 07
+status: superseded
 subsystem: storage
 tags: [reconciliation, lifecycle, recovery, integrity]
 requires: [03-01, 03-02, 03-03, 03-05, 03-06]

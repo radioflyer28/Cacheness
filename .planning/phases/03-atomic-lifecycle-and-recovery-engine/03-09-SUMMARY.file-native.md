@@ -1,6 +1,7 @@
 ---
 phase: 03-atomic-lifecycle-and-recovery-engine
 plan: "09"
+status: superseded
 subsystem: storage-lifecycle
 tags: [blobstore, close, admission, ownership, concurrency, lifecycle]
 requires:

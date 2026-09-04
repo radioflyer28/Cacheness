@@ -1,6 +1,7 @@
 ---
 phase: 03-atomic-lifecycle-and-recovery-engine
 plan: "02"
+status: superseded
 subsystem: storage-lifecycle
 tags: [blobstore, manifest, cas, json, sqlite, concurrency]
 requires:

@@ -1,6 +1,7 @@
 ---
 phase: 03-atomic-lifecycle-and-recovery-engine
 plan: "05"
+status: superseded
 subsystem: storage-lifecycle
 tags: [blobstore, clear, manifest-pages, cas, tombstones, coordination]
 requires:

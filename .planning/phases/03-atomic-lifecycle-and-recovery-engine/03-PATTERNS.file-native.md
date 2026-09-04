@@ -1,5 +1,7 @@
 # Phase 3: Atomic Lifecycle and Recovery Engine - Pattern Map
 
+> Superseded by the transactional-authority replan authorized 2026-09-04.
+
 **Mapped:** 2026-08-30  
 **Files analyzed:** 22 proposed new/modified files  
 **Analogs found:** 22 / 22 (role-match or stronger)

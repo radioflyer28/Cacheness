@@ -1,14 +1,15 @@
 # Phase 3: Atomic Lifecycle and Recovery Engine - Research
 
-**Researched:** 2026-08-30
-**Domain:** backend-neutral atomic object lifecycle, crash recovery, reconciliation, and same-key concurrency
-**Confidence:** HIGH for in-repository architecture and locked behavior; MEDIUM for external standards mapping
+**Researched:** 2026-09-04
+**Domain:** Transactional storage lifecycle authority, crash recovery, and concurrency
+**Confidence:** HIGH for the in-repository replacement boundary; MEDIUM for the SQLite design because official documentation was read but the configured research provider fell back from Context7 to web search
 
 <user_constraints>
 ## User Constraints (from CONTEXT.md)
 
-<!-- DATA_Q7M4Z2KP_START -->
 ### Locked Decisions
+
+DATA_76D97E72_START
 
 ### Immutable Generations and Publication
 
@@ -45,20 +46,46 @@
 - **D-19:** Same-key write/write races have one conditional-publication winner; losers receive a typed conflict and clean or report only their own candidate residue. Write/delete races obey the same expected-generation rule. Reads return a complete committed generation or a typed lifecycle/conflict outcome, never mixed bytes and metadata.
 - **D-20:** Operations on distinct keys proceed independently except for an explicit store-wide clear/reconciliation admission barrier. Lock acquisition order for multi-key work is deterministic to avoid deadlocks.
 
+### Local Authority Trust and Windows Scope
+
+- **D-21:** The OS principal that owns a local store is inside the trusted deployment boundary for lifecycle-control availability. Cacheness validates control-object type, containment, identity, and authenticated contents and fails closed when observable substitution occurs, but it does not promise continued operation or immutable per-key authority if that same principal deliberately deletes or rebinds every lifecycle authority object while the store is live. Ordinary Cacheness processes never perform such rebinding. — **Reversibility:** costly — Defending against a hostile store owner would require an external coordinator, privileged mandatory controls, or store-wide serialization and therefore changes the architecture or deployment model.
+- **D-22:** In this milestone, Windows local-store coordination is supported only among processes running as one OS user in one interactive or service session. Cross-user, cross-service, and cross-session access to the same local store is unsupported and must fail or be prevented by deployment ACLs; supporting it later requires an explicit global authority namespace, ACL/security-descriptor contract, and native Windows validation. Advertised Windows compatibility otherwise remains in force. — **Reversibility:** reversible — A later milestone may broaden the topology after implementing and validating that authority contract.
+
+### Transactional Authority Replan
+
+- **D-23:** The file-native lifecycle scheduler built from operation receipts, inventory events, heads, anchors, cursors, pending-control records, and staged control files is rejected. The replacement removes that protocol rather than wrapping or incrementally repairing it. D-05 through D-20 remain behavioral requirements only where they do not prescribe that discarded mechanism. — **Reversibility:** costly — Reintroducing file-native transactional coordination would require new proof that it is smaller and more reliable than the transactional authority.
+- **D-24:** `BlobStore` depends on one deep lifecycle-authority module whose interface exposes complete entry-state transactions, not individual receipt/checkpoint/storage primitives. The authority atomically owns canonical manifest state, mutation intent, cleanup debt, clear membership/progress, and reconciliation checkpoints. Callers never coordinate those records themselves.
+- **D-25:** Payload generations remain immutable native handler output outside the authority transaction. A durable authority intent is committed before the first persistent payload side effect; a later authority transaction conditionally promotes the verified generation and records any cleanup debt. Recovery queries indexed intent/debt rows and never discovers protocol state by scanning filenames.
+- **D-26:** The local persistent reference adapter uses Python's standard-library SQLite engine as the transactional authority, with explicit durability configuration and schema/version migration. JSON remains a supported metadata projection and compatibility representation, but it is not an independent cross-process transaction authority. Configuration that requests durable multi-process guarantees without a capable authority fails with a typed unsupported-capability outcome rather than silently downgrading.
+- **D-27:** The in-memory authority adapter provides deterministic same-process behavior for tests and ephemeral stores. PostgreSQL and S3-capable authority adapters use their native transaction or conditional-write facilities through the same lifecycle-authority interface in Phases 4 and 5; Phase 3 must not recreate the discarded filesystem scheduler inside those adapters.
+- **D-28:** Distinct-key serialization, payload verification, and cleanup proceed concurrently. A backend may serialize only the short authority commit itself (SQLite has one writer), and no authority transaction or global/store/family lease may span handler serialization, payload upload/fsync, payload verification, or reclamation.
+- **D-29:** Clear stores its exact target generations and progress as transactional authority rows. Reconciliation pages indexed authority rows using stable database cursors and explicit work/byte/action limits; it does not maintain a second file inventory or infer provenance.
+- **D-30:** The implementation must delete or retire the abandoned file-native scheduler modules and tests rather than carry both lifecycle engines. Replacement tests exercise behavior through the lifecycle-authority interface and `BlobStore`; low-level receipt/inventory tests are historical evidence, not the new test surface.
+- **D-31:** Windows local persistence uses the same SQLite transactional authority and the D-22 one-user/session trust scope. No custom Win32/POSIX lock-file authority, inode/handle identity registry, extended-attribute reservation, or platform-specific receipt protocol is part of the replacement.
+
+DATA_76D97E72_END
+
 ### the agent's Discretion
 
-- Exact class/module names for lifecycle operations, journals, reconciliation reports, and coordination registries.
+DATA_412BC23C_START
+
+- Exact class/module names for the lifecycle authority, transaction records, and reconciliation reports.
 - Whether local per-key coordination uses lock striping or dynamically retained locks, provided unrelated keys remain concurrent and retention is bounded.
-- Exact bounded retry/backoff values and operation-record encoding, provided failure outcomes remain deterministic and testable.
+- Exact bounded database busy retry/backoff values and authority-row encoding, provided failure outcomes remain deterministic and testable.
 - Whether safe quarantine is implemented as a contained rename, backend namespace move, or immutable report-only disposition for a backend that cannot move atomically.
 
+DATA_412BC23C_END
+
 ### Deferred Ideas (OUT OF SCOPE)
+
+DATA_78D12C18_START
 
 - Concrete capability declarations and full metadata-backend conditional publication across JSON, memory, SQLite, and PostgreSQL — Phase 4.
 - Full filesystem, memory, and S3 payload lifecycle implementation and matrix verification — Phase 5.
 - `UnifiedCache` delegation, TTL/eviction/invalidation policy, and miss/statistics translation — Phase 6.
 - Stored-format inventory and copy-verify-switch migration execution — Phase 7; Phase 3 reconciliation handles lifecycle inconsistency, not format migration.
-<!-- DATA_Q7M4Z2KP_END -->
+
+DATA_78D12C18_END
 </user_constraints>
 
 <phase_requirements>
@@ -66,465 +93,645 @@
 
 | ID | Description | Research Support |
 |----|-------------|------------------|
-| STOR-03 | A write exposes either the previous complete generation or the new complete generation, never partial payload or metadata state. | Split private serialization from persistent candidate publication; use immutable generation locators and one expected-generation manifest CAS as the authority point. [VERIFIED: `.planning/REQUIREMENTS.md:8-12`; `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-CONTEXT.md:18-31`] |
-| STOR-04 | A failed write preserves the last valid generation and leaves any residue detectable and recoverable. | Persist bounded authenticated operation evidence before candidate publication, classify failures by whether manifest CAS succeeded, and retain cleanup debt until idempotent reclamation finishes. [VERIFIED: `.planning/REQUIREMENTS.md:10`; `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-CONTEXT.md:33-41`] |
-| STOR-05 | Overwrite, delete, clear, and close operations are idempotent and clean up both payload and metadata state. | Route mutations through one lifecycle engine; delete uses a CAS tombstone, clear uses a bounded generation snapshot, and close uses instance admission plus ownership-aware resource release. [VERIFIED: `.planning/REQUIREMENTS.md:11`; `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-CONTEXT.md:43-50`] |
-| STOR-06 | Operators can run dry-run and resumable reconciliation that detects inconsistent state and safely repairs, quarantines, or reports it. | Reconcile only authenticated manifests, validated operation records, and contained owned locators; revalidate immediately before apply and checkpoint every completed action. [VERIFIED: `.planning/REQUIREMENTS.md:12`; `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-CONTEXT.md:52-61`] |
-| STOR-07 | Same-key races have deterministic outcomes through per-key coordination and backend generation checks without globally serializing distinct keys. | Use dynamically retained per-key locks for local ordering, a short store-wide barrier only for clear/reconciliation admission, and backend CAS for the actual winner. [VERIFIED: `.planning/REQUIREMENTS.md:13`; `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-CONTEXT.md:63-72`] |
+| STOR-03 | A write exposes either the previous complete generation or the new complete generation, never partial payload or metadata state. | The prepare/publish/verify/promote sequence makes one SQLite transaction the only visibility switch while payloads remain immutable. |
+| STOR-04 | A failed write preserves the last valid generation and leaves any residue detectable and recoverable. | A committed mutation-intent row identifies the exact candidate locator before publication; cleanup debt makes post-promotion residue queryable. |
+| STOR-05 | Overwrite, delete, clear, and close operations are idempotent and clean up both payload and metadata state. | Tombstone promotion, exact-generation clear targets, idempotent debt retirement, and ownership-aware close are modeled as authority transitions. |
+| STOR-06 | Operators can run dry-run and resumable reconciliation that detects inconsistent state and safely repairs, quarantines, or reports it. | Indexed mutation/debt/clear tables, captured high-water marks, keyset cursors, and transactional checkpoints replace filename discovery. |
+| STOR-07 | Same-key races have deterministic outcomes through per-key coordination and backend generation checks without globally serializing distinct keys. | Expected-generation plus expected-manifest-digest CAS selects one winner; only short SQLite writer transactions serialize and payload work overlaps. |
 </phase_requirements>
 
 ## Summary
 
-Phase 3 should introduce one lifecycle engine beneath direct `BlobStore` mutations, not add transaction logic independently to `put`, `delete`, and `clear`. The engine's invariant is simple: immutable payload bytes are prepared first, then one signed canonical manifest is conditionally published; that successful CAS is the only authority transition. Everything before CAS is rollback/reconciliation work for an uncommitted candidate, and everything after CAS is forward-only cleanup debt for a committed winner. This is the only design that composes filesystem payloads with separately persisted metadata without pretending they share a distributed transaction. [VERIFIED: `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-CONTEXT.md:18-41`; `.planning/ROADMAP.md:104-119`]
+Phase 3 should replace the rejected filesystem scheduler with one deep `LifecycleAuthority` module. The module owns the only transactional source of truth for committed manifests, prepared mutations, cleanup debt, clear targets/progress, and reconciliation checkpoints. `BlobStore` asks it to perform complete state transitions; neither `BlobStore` nor the lifecycle orchestrator manipulates receipt fragments, inventory heads, anchors, staged control files, or raw authority tables. This boundary directly implements D-23 through D-31 and keeps payload formats native. [VERIFIED: `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-CONTEXT.md:80-99`]
 
-The most important implementation consequence is that `GuardedHandlerIO.put()` must be split. It currently serializes in a private stage and publishes into managed storage in one method, while the locked contract requires serialization failure to leave no record and requires durable operation evidence before the first managed-store side effect. The planned seam must therefore be: private handler serialization → durable operation record → exclusive immutable generation publication → candidate verification → manifest CAS → old-generation/tombstone reclamation → operation-record retirement. Native handlers still own NPZ, Parquet, pickle, dill, and Blosc2 payload bytes; no lifecycle header or wrapper belongs in the payload. [VERIFIED: `src/cacheness/storage/guarded_handler_io.py:301-334`; `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-CONTEXT.md:33-41,109-111`; `.planning/phases/02-canonical-storage-and-integrity-contract/02-VERIFICATION.md:35-38`]
+The persistent local reference adapter should use Python's standard-library `sqlite3` with explicit transactions, rollback-journal `DELETE` mode, `synchronous=EXTRA`, a bounded busy deadline, and local-filesystem-only topology. SQLite permits multiple readers but only one simultaneous writer; `BEGIN IMMEDIATE` starts a write transaction immediately and can report `SQLITE_BUSY`. [CITED: https://www.sqlite.org/lang_transaction.html] The short writer transaction is acceptable commit serialization under D-28: it contains only comparisons and row changes, never handler serialization, payload publication/fsync, verification, deletion, projection export, or callbacks.
 
-The existing Phase 1 clear coordinator is a pattern library, not the finished engine. Its strongest reusable ideas are durable prepared/committed evidence, strict bounded parsing, topology binding, deterministic admission, and pre/post-authority recovery. Its limitations are equally important: it is clear-only, snapshots whole backend state, uses one global admission lock for normal mutations, recognizes candidate ownership partly by filename grammar, and cannot produce a dry-run/resumable operator report. Absorb those ideas into the new operation/reconciliation model, then leave full S3/PostgreSQL and backend capability truthfulness to Phases 4-5. [VERIFIED: `src/cacheness/storage/clear_recovery.py:1-6,34-70,198-225,336-470,564-642`; `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-CONTEXT.md:93-111,119-124`]
+The essential simplification is that recovery no longer asks “which files imply unfinished protocol state?” It asks indexed authority tables for exact unfinished operations and debts. The authority records a durable intent before the first managed payload publication, then payload I/O proceeds outside any authority transaction, and a later conditional transaction promotes the verified generation and records old-generation cleanup debt atomically. JSON metadata becomes a rebuildable projection rather than a second cross-process authority.
 
-**Primary recommendation:** Build a small explicit lifecycle state machine around immutable generation locators, authenticated bounded operation records, and exact expected-generation CAS; make dry-run reconciliation and deterministic fault/race tests first-class consumers of that state machine. [VERIFIED: `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-CONTEXT.md:18-72`]
+**Primary recommendation:** Implement a small transactional state machine behind `LifecycleAuthority`; ship `SqliteLifecycleAuthority` and `InMemoryLifecycleAuthority`; delete the file-native scheduling protocol rather than adapting it.
 
 ## Architectural Responsibility Map
 
 | Capability | Primary Tier | Secondary Tier | Rationale |
-|------------|-------------|----------------|-----------|
-| Lifecycle orchestration for write/overwrite/delete/clear/close | API / Backend (`BlobStore`) | Database / Storage | `BlobStore` owns payload-plus-metadata lifecycle; storage adapters perform only atomic primitives. [VERIFIED: `AGENTS.md:13-21`; `src/cacheness/storage/blob_store.py:178-206`] |
-| Conditional authority publication | Database / Storage (manifest repository) | API / Backend | Backend-local CAS is the cross-instance correctness boundary; the engine supplies an authenticated expectation and signed replacement. [VERIFIED: `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-CONTEXT.md:21,66`] |
-| Native payload serialization and snapshots | Database / Storage (`GuardedHandlerIO` + handlers) | API / Backend | Handlers own formats; guarded I/O owns containment, private staging, exclusive generation publication, and one-snapshot reads. [VERIFIED: `src/cacheness/storage/guarded_handler_io.py:1-7,301-367`; `.planning/phases/02-canonical-storage-and-integrity-contract/02-VERIFICATION.md:35-38`] |
-| Operation evidence and recovery decisions | API / Backend (lifecycle/reconciliation engine) | Database / Storage (operation repository) | The engine interprets authenticated manifests and operation progress; repositories persist exact bounded records without guessing intent. [VERIFIED: `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-CONTEXT.md:33-41,52-61`] |
-| In-process same-key ordering | API / Backend (coordination registry) | — | Local locks order work within an instance but cannot replace backend CAS across processes. [VERIFIED: `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-CONTEXT.md:63-72`] |
-| Store-wide clear/reconciliation admission | API / Backend | Database / Storage | A bounded snapshot/barrier protects aggregate setup while per-entry expected generations prevent deletion of later writes. [VERIFIED: `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-CONTEXT.md:45,72`] |
-| Cache policy, TTL, eviction, statistics | API / Backend (`UnifiedCache`) | — | Explicitly deferred to Phase 6; Phase 3 must not duplicate or rewire policy. [VERIFIED: `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-CONTEXT.md:119-123`] |
-| SQL pull-through cache | API / Backend (`SqlCache`) | Database / Storage | It remains a separate subsystem and is outside this lifecycle. [VERIFIED: `.planning/PROJECT.md:40-44`; `AGENTS.md:13-21`] |
-
-## Project Constraints (from AGENTS.md)
-
-- Preserve supported public APIs; stored data may change only through an explicit documented migration or rebuild path. [VERIFIED: `AGENTS.md:13-21`]
-- Keep ownership layered: `BlobStore` owns storage lifecycle, `UnifiedCache` owns cache policy, and `SqlCache` remains separate. [VERIFIED: `AGENTS.md:13-21`]
-- Design the lifecycle contract so filesystem, memory, S3, JSON, SQLite, and PostgreSQL can eventually implement it, while this phase does not claim the deferred backend matrix. [VERIFIED: `AGENTS.md:13-21`; `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-CONTEXT.md:119-124`]
-- Treat application payloads as trusted, but treat manifests, operation records, locators, and control metadata as untrusted; enforce safe parsing, containment, and fail-closed integrity. [VERIFIED: `AGENTS.md:13-21`; `docs/SECURITY.md:7-29`]
-- Give payload/metadata operations atomic commit, rollback, or deterministic reconciliation semantics, and prevent same-key corruption without globally serializing unrelated keys. [VERIFIED: `AGENTS.md:13-21`]
-- Correctness precedes performance during migration; final performance budgets come from checked-in benchmarks, not estimates in this phase. [VERIFIED: `AGENTS.md:13-21`]
-- Maintain Python `>=3.11`; the checked development environment is Python 3.13, and supported versions must be verified rather than inferred from that one interpreter. The manifest says verbatim: `requires-python = ">=3.11"`. [VERIFIED: `pyproject.toml:1-13`; `AGENTS.md:29-41`]
-- Use `snake_case.py`, `snake_case` callables, PascalCase classes/exceptions, focused abstract/protocol interfaces, four-space indentation, module/public docstrings, and Google-style `Args`/`Returns`/`Raises` where appropriate. [VERIFIED: `AGENTS.md:99-153`]
-- Keep public re-exports in package `__init__.py`; use package-relative imports internally; guard optional dependencies explicitly. [VERIFIED: `AGENTS.md:99-165,188-199`]
-- Raise domain-specific errors, preserve original causes with `raise ... from exc`, catch narrow operational failures, and make partial-success/recovery policy explicit. [VERIFIED: `AGENTS.md:166-176`]
-- Use structured contextual logging at appropriate levels; tests that assert logs use `caplog`. [VERIFIED: `AGENTS.md:178-185`]
-- Run targeted Ruff over changed source/tests and do not add to the repository's pre-existing lint baseline. [VERIFIED: `AGENTS.md:127-153`]
-- Use pytest test names `test_<subject>.py`, specific `pytest.raises`, temporary local filesystem/SQLite fixtures, and explicit optional/integration markers. [VERIFIED: `AGENTS.md:99-105,166-176`; `pyproject.toml:82-111`]
-- Do not edit protected `.planning/codebase/*.md` files or `.planning/milestone.lock`; preserve unrelated dirty-worktree changes. [VERIFIED: orchestrator assignment; `git status --short` showed pre-existing `.planning/codebase/*.md` modifications during this research]
+|------------|--------------|----------------|-----------|
+| Canonical entry visibility and expected-generation CAS | Database / Storage authority | API / Backend orchestration | Visibility changes only through an atomic authority transaction. |
+| Native payload serialization, publication, verification, reclamation | Database / Storage payload tier | Handler strategies | Payload work is deliberately outside authority transactions. |
+| Mutation intent and cleanup debt | Database / Storage authority | API / Backend orchestration | Recovery evidence must commit atomically with lifecycle state. |
+| Clear target membership and progress | Database / Storage authority | API / Backend orchestration | A transaction captures exact generations; workers execute bounded target rows. |
+| Reconciliation reporting/checkpointing | API / Backend orchestration | Database / Storage authority | The orchestrator renders reports; the authority supplies stable pages and checkpoints. |
+| JSON metadata compatibility | Projection/export boundary | Database / Storage authority | JSON mirrors committed state but never arbitrates concurrent publication. |
+| In-process admission and per-key ordering | API / Backend process | Database / Storage authority | Local coordination is an optimization; authority CAS remains correctness boundary. |
 
 ## Standard Stack
 
 ### Core
 
-| Library / Module | Version | Purpose | Why Standard |
-|------------------|---------|---------|--------------|
-| Python standard library (`dataclasses`, `enum`, `threading`, `contextlib`, `hashlib`, `hmac`, `uuid`, `pathlib`) | Python `>=3.11`; uv environment 3.13.3 | Immutable records, typed states, per-key coordination, deterministic contexts, cryptographic provenance, opaque IDs | Already the project runtime and sufficient for the lifecycle engine; no new runtime dependency is needed. [VERIFIED: `pyproject.toml:1-13`; environment probe 2026-08-30] |
-| Existing `BlobManifestV1` + integrity helpers | manifest schema 1 / payload contract 1 | Sole signed committed authority and payload digest/size verification | Phase 2 verified exact canonical bytes, complete signed fields, and committed-only reads. [VERIFIED: `src/cacheness/storage/manifest.py:238-395`; `.planning/phases/02-canonical-storage-and-integrity-contract/02-VERIFICATION.md:27-64`] |
-| Existing `ManifestRepository` adapters, extended with CAS | current local JSON, memory, SQLite reference adapters | Exact raw records plus atomic expected-generation publication | The current protocol has only `get_raw`, unconditional `put_raw`, `remove`, and listing; CAS is the missing authority primitive. Verbatim methods: `get_raw`, `put_raw`, `remove`, `list_keys`, `list_backend_entries`. [VERIFIED: `src/cacheness/storage/manifest_repository.py:38-60`] |
-| Existing `GuardedHandlerIO` / `ManagedFileOps`, split at the stage-publication seam | current repository implementation | Private native serialization, contained exclusive generation publication, private snapshots, durable operation files | It already prevents handler-controlled paths from reaching managed storage and provides durable/exclusive control-file primitives. [VERIFIED: `src/cacheness/storage/guarded_handler_io.py:1-7,95-121,301-367`; `src/cacheness/storage/path_security.py:615-672`] |
-| pytest | 8.4.1 in uv environment | Fault injection, crash/reopen, and deterministic race contracts | Existing project framework and test conventions. The dependency group says verbatim: `"pytest>=8.4.1"`. [VERIFIED: `pyproject.toml:68-73`; environment probe 2026-08-30] |
+| Library/runtime | Version | Purpose | Why standard here |
+|-----------------|---------|---------|-------------------|
+| Python `sqlite3` | Python 3.11+ standard library; runtime-linked SQLite | Local persistent lifecycle authority | Locked by D-26; no new package or dependency-resolution risk. |
+| SQLite rollback journal | Runtime SQLite | Atomic local authority transactions | Works on the supported stdlib runtimes without depending on a sufficiently patched WAL implementation. |
+| Existing canonical manifest/signing code | Repository implementation | Authenticated committed entry state | Phase 2 already defines committed-only visibility and native payload integrity. |
+| Existing `GuardedHandlerIO` payload primitives | Repository implementation | Stage, immutable publish, verify, reclaim | Keeps native handler bytes outside the authority database. |
+| `threading` synchronization | Python standard library | In-memory adapter and bounded local key coordination | Same-process ordering only; never the cross-process correctness boundary. |
 
 ### Supporting
 
-| Library / Module | Version | Purpose | When to Use |
-|------------------|---------|---------|-------------|
-| `ClearRecoveryCoordinator` patterns | journal version 1 | Reuse prepared/committed failure classification, strict bounds, topology binding, durable evidence, and reopen convergence | Mine patterns and tests; replace clear-only ownership rather than nesting a second journal beneath the new engine. Its current constants are verbatim: `MAX_JOURNAL_BYTES = 64 * 1024 * 1024`, `MAX_JOURNAL_ENTRIES = 100_000`, `MAX_JOURNAL_FIELD_BYTES = 8192`. [VERIFIED: `src/cacheness/storage/clear_recovery.py:1-6,34-70`] |
-| `threading.Lock`, `Condition`, `Event`, `Barrier` | Python standard library | Per-key exclusion, in-flight close coordination, and deterministic interleaving tests | Use `Lock`/`Condition` in production state; use `Event`/`Barrier` in tests with timeouts. Lock waiter order is unspecified, so correctness must not depend on fairness. [CITED: https://docs.python.org/3/library/threading.html] |
-| Existing typed BlobStore error hierarchy | current public contract | Conflict, backend, integrity, version, migration, and recoverable-cleanup outcomes | Extend stable lower-snake-case reasons rather than returning booleans for ambiguity or generic `CacheStorageError`. Current exact reasons include `"blob_lifecycle_conflict"`, `"blob_backend_failure"`, and `"blob_migration_required"`. [VERIFIED: `src/cacheness/error_handling.py:19-54,155-299`] |
+| Library/runtime | Version | Purpose | When to use |
+|-----------------|---------|---------|-------------|
+| Python `multiprocessing` / subprocesses | Python 3.11+ | Crash and cross-process CAS tests | Spawn fresh processes with independently opened authorities. |
+| pytest | Repository-locked test framework | Contract, fault-injection, race, and crash tests | All authority adapters and `BlobStore` lifecycle behavior. |
 
-### Alternatives Considered
+No external package installation is required, so the package-legitimacy gate does not apply. The project declares Python `>=3.11`, and the repository pins Python `3.13`. [VERIFIED: `pyproject.toml:9`; quote: `requires-python = ">=3.11"`; VERIFIED: `.python-version:1`; quote: `3.13`]
 
-| Instead of | Could Use | Tradeoff |
-|------------|-----------|----------|
-| Dynamically retained per-key lock entries | Fixed lock striping | Striping is fixed-memory but serializes unrelated colliding keys, weakening D-20. Refcounted per-key entries preserve distinct-key concurrency and retire at zero users. [VERIFIED: `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-CONTEXT.md:63-72`] |
-| Immutable generations + manifest CAS | In-place payload replacement or rollback of the winning manifest | In-place mutation breaks complete-generation reads; rolling the manifest back after authority can revoke a valid concurrent winner. Both contradict locked D-01/D-04. [VERIFIED: `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-CONTEXT.md:18-31`] |
-| Project-owned operation records | Inferring orphans from filename patterns | The workspace currently contains many legitimate payloads whose names include `-candidate-`; filename matching cannot prove ownership or lifecycle status. D-06 explicitly forbids it. [VERIFIED: read-only workspace inventory, 76 such files on 2026-08-30; `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-CONTEXT.md:35`] |
-| Standard-library synchronization | New lock/journal package | No external package supplies backend CAS or cross-resource recovery; adding one would not remove the need for the project-owned state machine. [VERIFIED: current repository contracts and locked D-18; `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-CONTEXT.md:66`] |
+### Journal-mode decision
 
-**Installation:** None. This phase should add no external package and therefore needs no package-legitimacy audit. [VERIFIED: the recommended stack above is stdlib plus existing locked dependencies]
+Use `PRAGMA journal_mode=DELETE` with `PRAGMA synchronous=EXTRA` for the Phase 3 local authority. Do **not** make WAL the default.
 
-## Runtime State Inventory
+- SQLite WAL improves reader/writer overlap but still permits only one writer at a time and requires every process to be on the same host; it does not work over a network filesystem. [CITED: https://www.sqlite.org/wal.html]
+- SQLite now documents a rare WAL-reset corruption bug affecting versions `3.7.0` through `3.51.2` under concurrent writes/checkpoints, fixed in `3.51.3` with specified backports. [CITED: https://www.sqlite.org/wal.html]
+- The currently checked system and project Python interpreters link SQLite versions `3.43.1` and `3.47.1`, respectively. [VERIFIED: runtime probe performed 2026-09-04; commands: `python3 -c 'import sqlite3; print(sqlite3.sqlite_version)'` and `.venv/bin/python -c 'import sqlite3; print(sqlite3.sqlite_version)'`; quoted results: `3.43.1`, `3.47.1`]
+- In rollback-journal mode, `synchronous=EXTRA` adds a directory sync after unlinking the rollback journal, strengthening the durability of the most recent commit beyond `FULL` on relevant filesystems. [CITED: https://www.sqlite.org/pragma.html#pragma_synchronous]
 
-| Category | Items Found | Action Required |
-|----------|-------------|-----------------|
-| Stored data | Two ignored SQLite databases and a repository `cache/` directory exist. The cache database contains 29 `cache_entries`, has no `cacheness_manifest_records_v1` table, and the directory contains 76 files with `-candidate-` in their names. [VERIFIED: read-only filesystem and SQLite `mode=ro&immutable=1` inventory, 2026-08-30] | Treat all as pre-canonical/compatibility evidence outside Phase 3. Do not migrate, rename, deserialize, or delete it. Phase 7 owns stored-format inventory/migration; Phase 6 owns `UnifiedCache` delegation. [VERIFIED: `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-CONTEXT.md:121-124`] |
-| Live service config | No live service configuration is required by the Phase 3 local reference path. PostgreSQL/S3 integration exists in source but full service capability plumbing is deferred. [VERIFIED: `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-CONTEXT.md:119-124`; `AGENTS.md:91-95`] | No API/UI patch. Do not claim remote CAS or reconciliation support in this phase. |
-| OS-registered state | None: this is an in-process Python library with no web server, worker, container, or hosting manifest. [VERIFIED: `AGENTS.md:91-95`] | None. |
-| Secrets/env vars | No `.env` file or live HMAC key was found in the audited repository root. Canonical `BlobStore` constructs its key provider at verbatim path `self.cache_dir / "blob_manifest_hmac_key.bin"`; PostgreSQL test configuration uses `CACHENESS_TEST_POSTGRES_URL`. [VERIFIED: `src/cacheness/storage/blob_store.py:282-287`; `tests/test_postgresql_backend.py:56`; read-only filesystem inventory 2026-08-30] | Do not rename or rotate keys. New operation evidence should authenticate with a domain-separated projection under the existing canonical store key boundary; never log key bytes. [VERIFIED: `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-CONTEXT.md:35,58-61`] |
-| Build artifacts / installed packages | `.venv` exists; no repository-local `*.egg-info` directory was found. [VERIFIED: read-only filesystem inventory, 2026-08-30] | Source/test changes require no artifact migration. Run tests through `uv run`; packaging remains Phase 8. [VERIFIED: `.planning/REQUIREMENTS.md:66-73`] |
+WAL can be reconsidered only as an explicit later capability after the runtime SQLite version is proven to contain the fix and the checkpoint/crash matrix is added. That is not needed to satisfy D-28 because the long-running payload work, rather than the short row commit, is the concurrency-sensitive portion.
 
-**Runtime-state conclusion:** Updating every source file would still leave the observed compatibility databases and 76 candidate-named payloads unchanged. That is correct: Phase 3 reconciliation must report provenance-free evidence untouched, not absorb it as lifecycle residue. [VERIFIED: `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-CONTEXT.md:57-61,123-124`; runtime inventory above]
+### Required SQLite connection policy
+
+Each authority method should open or borrow a connection owned by the current process and thread, set and verify connection pragmas, execute one bounded operation, and close/return the connection. The simplest Phase 3 reference is a method-scoped connection with `check_same_thread=True` and `isolation_level=None`, followed by explicit SQL `BEGIN IMMEDIATE` for state-changing transactions.
+
+Recommended connection contract:
+
+| Concern | Required behavior |
+|---------|-------------------|
+| Transaction control | Set `isolation_level=None`; issue explicit `BEGIN IMMEDIATE`, `COMMIT`, and `ROLLBACK`. Python documents that `None` leaves the underlying SQLite library in autocommit mode, so code controls transactions explicitly. [CITED: https://docs.python.org/3.11/library/sqlite3.html#transaction-control] |
+| Writer acquisition | Acquire the writer at transaction start with `BEGIN IMMEDIATE`, so contention is reported before application reads data it intends to update. SQLite documents that it may fail with `SQLITE_BUSY`. [CITED: https://www.sqlite.org/lang_transaction.html] |
+| Busy/deadline | Carry one absolute authority deadline into connection `timeout`/`PRAGMA busy_timeout`; cap any retry at remaining time and translate final `BUSY`/`LOCKED` to a typed lifecycle timeout. Python's default connection timeout is five seconds, but Phase 3 should make the bounded policy explicit. [CITED: https://docs.python.org/3.11/library/sqlite3.html#sqlite3.connect] |
+| Durability | Require returned `journal_mode` to be `delete` and returned `synchronous` to be the requested strong setting; fail typed if the database cannot honor them. |
+| Integrity | Set `foreign_keys=ON` outside a transaction, `trusted_schema=OFF`, and run `PRAGMA integrity_check` plus `PRAGMA foreign_key_check` in validation/reopen diagnostics. SQLite recommends explicitly setting foreign-key enforcement and encourages disabling trusted schema. [CITED: https://www.sqlite.org/pragma.html#pragma_foreign_keys] [CITED: https://www.sqlite.org/pragma.html#pragma_trusted_schema] |
+| Schema identity | Assign an application-specific `application_id` and maintain ordered schema migrations with `user_version`. Both are application-controlled header fields. Configure/verify journal mode before migration, then use one bounded `BEGIN EXCLUSIVE` migration transaction so another process cannot observe a partial schema. [CITED: https://www.sqlite.org/pragma.html#pragma_application_id] [CITED: https://www.sqlite.org/pragma.html#pragma_user_version] [CITED: https://www.sqlite.org/lang_transaction.html] |
+| Close | Explicitly close every connection; Python's connection context manager commits or rolls back but does not close the connection. [CITED: https://docs.python.org/3.11/library/sqlite3.html#how-to-use-the-connection-context-manager] |
+| Fork | Capture creating PID and reject use after fork; the child must construct/open a new authority. SQLite warns not to carry a connection across `fork()` or close the inherited connection from the child. [CITED: https://www.sqlite.org/howtocorrupt.html#_carrying_an_open_database_connection_across_a_fork_] |
+| Filesystem | Support only a local filesystem for this adapter. SQLite documents unreliable locking/synchronization risks over network filesystems. [CITED: https://www.sqlite.org/useovernet.html] |
+
+Do not claim portable automatic detection of every network or userspace filesystem. Require configuration/topology capability validation and fail closed when a durable multi-process local authority cannot be established. [ASSUMED]
 
 ## Architecture Patterns
 
 ### System Architecture Diagram
 
 ```text
-Direct BlobStore call
-        |
-        v
-Instance admission (reject after close begins)
-        |
-        +------ clear/reconcile ------> bounded store-wide admission barrier
-        |
-        v
-Per-key coordinator (local ordering only)
-        |
-        v
-Private native handler stage --serialization failure--> no durable evidence
-        |
-        v
-Authenticated/versioned operation record (durable, bounded)
-        |
-        v
-Exclusive immutable generation publication --> verify digest/size
-        |
-        v
-Manifest repository CAS(expected generation / absence)
-        |                         |
-        | conflict                | success = AUTHORITY POINT
-        v                         v
-clean/report own candidate     committed/tombstoned manifest
-                                  |
-                                  v
-                         idempotent old-payload reclamation
-                                  |
-                                  v
-                         checkpoint + retire operation record
+BlobStore put/delete/clear/reconcile
+                |
+                v
+       LifecycleEngine orchestration
+                |
+                +-------- private handler staging (no managed-store side effect)
+                |
+                v
+       LifecycleAuthority deep module
+       +-------------------------------+
+       | committed canonical entries   |
+       | mutation intent                |
+       | cleanup debt                   |
+       | clear targets/progress         |
+       | reconciliation checkpoints    |
+       +-------------------------------+
+          |                    |
+          | short transaction  | stable indexed pages
+          v                    v
+  SQLite local adapter     In-memory adapter
+          |
+          | committed intent / later promotion
+          v
+ GuardedHandlerIO / native payload backend
+          |
+          +--> immutable generation publish
+          +--> exact digest/size verification
+          +--> idempotent old-payload cleanup
 
-Read path:
-committed signed manifest -> private immutable snapshot -> reread generation
-      | same                                      | changed/missing
-      v                                           v
-digest/size -> native handler             one bounded reacquisition retry
+Committed authority revision
+          |
+          v
+ JSON projection exporter (derived compatibility snapshot; never CAS authority)
+
+Later phases only:
+  PostgreSQL authority adapter     S3-native conditional authority adapter
 ```
-
-This flow keeps the signed manifest as the only normal-read authority; operation records never become an alternate value source. [VERIFIED: `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-CONTEXT.md:22-23,36-40,53-61`]
 
 ### Recommended Project Structure
 
 ```text
 src/cacheness/storage/
-├── blob_store.py                 # compatible direct facade; delegates lifecycle
-├── lifecycle.py                  # mutation state machine and authority classification [ASSUMED]
-├── operation_record.py           # bounded authenticated operation model/codec [ASSUMED]
-├── operation_repository.py       # durable record CRUD/checkpoint seam [ASSUMED]
-├── reconciliation.py             # dry-run/apply reports and bounded resume [ASSUMED]
-├── coordination.py               # per-key registry + instance/store admission [ASSUMED]
-├── manifest_repository.py        # exact raw persistence + conditional publication
-├── guarded_handler_io.py         # split native stage from exclusive generation publish
-├── manifest.py                   # existing signed authority model
-└── clear_recovery.py             # compatibility shim or absorbed predecessor, not nested engine
-
-tests/
-├── test_manifest_repository_cas.py
-├── test_blob_store_atomic_lifecycle.py
-├── test_blob_store_reconciliation.py
-├── test_blob_store_concurrency.py
-└── test_blob_store_close_contract.py
+├── lifecycle_authority.py          # deep interface, domain records, complete transitions
+├── sqlite_lifecycle_authority.py   # local persistent reference adapter
+├── memory_lifecycle_authority.py   # deterministic ephemeral adapter
+├── lifecycle.py                    # thin payload-I/O orchestration
+├── reconciliation.py               # report rendering and bounded orchestration
+├── guarded_handler_io.py           # retained native immutable payload operations
+├── manifest.py                     # retained Phase 2 canonical manifest
+├── coordination.py                 # only bounded in-process key/instance coordination
+└── path_security.py                # only containment and durable payload primitives
 ```
 
-Names marked `[ASSUMED]` are recommendations only; CONTEXT delegates exact module/type names. The responsibility split is the prescriptive part. [VERIFIED: `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-CONTEXT.md:74-80`]
+Names are recommendations under the agent's discretion, not existing public API. [ASSUMED]
 
-### Pattern 1: Split Private Serialization from Persistent Publication
+### Pattern 1: One deep lifecycle-authority seam
 
-**What:** Refactor guarded handler output into a context-owned staged artifact. Handler serialization completes in the private temporary directory first. Only after it succeeds does the lifecycle engine allocate the generation/operation identifiers, persist durable evidence, and publish the staged stream exclusively at its immutable generation locator. [VERIFIED: locked D-01/D-05/D-08 in `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-CONTEXT.md:18-21,33-41`; current combined seam at `src/cacheness/storage/guarded_handler_io.py:301-334`]
+The authority interface should expose complete state transitions, not raw table CRUD, locks, receipts, or checkpoint fragments. A concrete adapter must make each method atomic according to its contract.
 
-**Why:** The current method performs handler serialization at line 312 and managed publication at lines 320-325 inside one call. There is no legal point for D-05 evidence between those steps. [VERIFIED: `src/cacheness/storage/guarded_handler_io.py:301-334`]
+Proposed interface responsibilities:
 
-**Planning requirements:**
+| Method family | Complete responsibility |
+|---------------|-------------------------|
+| `read_entry(key)` | Return the one committed/tombstoned canonical entry snapshot and its authority revision. |
+| `prepare_mutation(spec)` | In one transaction validate expectations and persist bounded authenticated intent, exact candidate/prior locators, and operation identity before managed payload publication. |
+| `record_candidate_verified(op_id, proof)` | Persist exact digest/size verification without changing normal-read visibility. |
+| `promote_mutation(op_id, manifest)` | Revalidate expected generation and exact prior manifest digest; atomically replace entry state, mark operation promoted, create cleanup debt, mark projections dirty, and advance authority revision. |
+| `abort_mutation(op_id, residue)` | Atomically retain or create exact candidate cleanup debt; never erase the prior committed entry. |
+| `snapshot_clear()` | In one transaction create a clear run and exact target rows from the committed entry snapshot. |
+| `page_clear_targets(clear_id, after_id, limits)` | Keyset-page immutable target rows under explicit work/action/byte limits. |
+| `record_cleanup_result(...)` | Revalidate bindings and atomically retire debt or record bounded failure information. |
+| `start/page/checkpoint_reconciliation(...)` | Capture high-water bounds, return stable indexed work, and checkpoint applied actions. |
+| `close()` | Release adapter-owned resources idempotently without deleting stored state. |
 
-1. The staged-artifact context must retain its validated file descriptor identity until publication, preserving the existing path-race defense. [VERIFIED: `src/cacheness/storage/guarded_handler_io.py:52-86,134-211,215-300`]
-2. The generation identifier must be allocated before the managed locator, and the locator provenance must bind the logical-key physical ID, operation ID, and generation rather than using an unrelated candidate UUID. The current code creates `candidate_id = f"{storage_id}-candidate-{uuid.uuid4().hex}"` and separately creates `generation=uuid.uuid4().hex`. [VERIFIED: `src/cacheness/storage/blob_store.py:379-385,417-422`]
-3. Publication must be create-exclusive, streamed, contained, and durably acknowledged; the existing general stream writer atomically replaces a locator, while only the bytes helper is create-exclusive. Add the missing exclusive stream primitive instead of buffering payloads into memory. [VERIFIED: `src/cacheness/storage/path_security.py:553-586,615-665`]
-4. Candidate verification must hash/size the managed candidate before manifest construction and must not deserialize it. [VERIFIED: `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-CONTEXT.md:18,58-61`; existing digest seam `src/cacheness/storage/blob_store.py:393-432`]
+Equivalent method grouping is acceptable, but callers must not be able to compose a partially atomic authority transition themselves.
 
-### Pattern 2: Exact Expectation CAS at the Manifest Repository
+### Pattern 2: Normalized authority state
 
-**What:** Extend `ManifestRepository` with one conditional publication primitive that receives the logical key, an authenticated expectation, the signed replacement record, and compatibility projection. The expectation represents absence for create or the exact authenticated committed generation for overwrite/delete. [VERIFIED: locked D-02/D-18 in `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-CONTEXT.md:21,66`]
+Use normalized bounded rows. Exact schema names and encodings are discretionary, but the following ownership must remain inside one database and one transaction boundary:
 
-**Recommended strengthening:** Carry both `expected_generation` and a digest/revision of the exact canonical record observed by the engine. Generation enforces the public lifecycle contract; exact-record comparison prevents an authenticated same-generation metadata update from being silently lost. This extra token is an implementation recommendation, not a new public stored field. [ASSUMED]
+| Logical table | Required contents | Required indexes/invariants |
+|---------------|-------------------|-----------------------------|
+| Authority metadata | Store identity, application/schema version, monotonically increasing authority revision | Singleton row; unknown newer version fails closed. |
+| Key state / entries | Logical key, monotonically advancing per-key state version, lifecycle state, generation, exact canonical manifest bytes when committed/tombstoned, manifest digest, revision, timestamps | Primary key on logical key; decoded indexed fields must agree with authenticated manifest. A compact absent lineage marker prevents create/delete/create ABA after tombstone retirement. |
+| Mutations | Monotonic work ID, unique operation ID, key, operation kind, expected generation/digest, candidate generation/locator, prior locator, bounded phase/proof/error fields | Unique operation ID; indexes on phase/work ID and key; check constraints on kinds/phases. |
+| Cleanup debt | Monotonic debt ID, operation/key/generation/locator/role, state, bounded attempts/error | Index on state plus debt ID; unique logical debt identity where possible. |
+| Clear runs | Clear ID, state, snapshot revision, progress counters | Index on active state. |
+| Clear targets | Monotonic target ID, clear ID, key, expected generation and manifest digest, state/error | Unique clear/key; index on clear/state/target ID. |
+| Reconciliation runs | Run ID, mode, immutable high-water IDs, cursor IDs, action counts/state | Resume by run ID; cursors never point into filename order. |
+| Projection state | Projection name, exported authority revision, dirty bit, bounded last error | Dirty is set in the same transaction as entry change. |
 
-**Repository rule:** The repository must not independently trust/decode an unauthenticated manifest merely to discover a generation. The engine authenticates the current record first; the adapter atomically compares the supplied opaque expectation with current storage and writes the replacement. [VERIFIED: Phase 2 read ordering at `src/cacheness/storage/blob_store.py:1006-1076`; raw repository boundary at `src/cacheness/storage/manifest_repository.py:38-60`]
+The proposed row/table names and state labels are [ASSUMED]; the ownership and atomicity are locked by D-24 and D-29. Store canonical bytes once rather than maintaining independently editable manifest columns; indexed columns are corroborating query fields, not a second canonical record. Preserve a monotonic per-key state token even after a tombstone stops being externally visible. Otherwise an operation prepared against an ancient absence could promote after an intervening create/delete cycle (the ABA problem). The compact lineage row is bounded to one row per key rather than one row per historical operation.
 
-**Local reference adapters:**
+### Pattern 3: Put/overwrite state machine
 
-- In-memory: compare and replace under the backend object's lock. [VERIFIED: current adapter is process-local at `src/cacheness/storage/manifest_repository.py:166-170`]
-- SQLite: perform compatibility projection and canonical BLOB conditional update in one transaction; current `put_raw` already writes both in one transaction but unconditionally upserts the BLOB. [VERIFIED: `src/cacheness/storage/manifest_repository.py:236-307`]
-- JSON: hold only a short document-publication lock across refresh → compare → durable replace, not across serialization or payload work. Cross-process truthfulness requires an OS-backed compare/publication boundary; otherwise construction fails typed rather than downgrading. [VERIFIED: locked D-18; current JSON adapter's unconditional backend call at `src/cacheness/storage/manifest_repository.py:106-125`]
+```text
+PRIVATE_STAGE
+  handler serializes in an OS-private temporary area
+  failure => no authority row, no managed payload
+        |
+        v
+PREPARED (short authority transaction)
+  validate expected per-key state token/generation/digest
+  commit exact op ID and candidate locator bound to op ID + generation
+        |
+        v
+CANDIDATE_PUBLISHED (outside authority transaction)
+  create immutable generation exclusively and durably
+        |
+        v
+CANDIDATE_VERIFIED (payload verification outside transaction;
+                    proof recorded in short transaction)
+        |
+        v
+PROMOTED (short authority transaction)
+  exact expected-generation + prior-manifest-digest CAS
+  replace committed manifest
+  create prior-payload cleanup debt
+  mark JSON projection dirty
+        |
+        v
+CLEANUP (outside authority transaction)
+  revalidate debt binding, idempotently remove prior payload
+        |
+        v
+RETIRED (short authority transaction)
+  retire cleanup debt and terminal operation evidence
+```
 
-Full capability declarations and PostgreSQL implementation remain Phase 4. Full S3 payload semantics remain Phase 5. [VERIFIED: `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-CONTEXT.md:119-124`]
+The existing handler staging path uses an OS temporary directory and deliberately avoids managed-store effects before publication. [VERIFIED: `src/cacheness/storage/guarded_handler_io.py:149-170`; quote: `tempfile.TemporaryDirectory(prefix="cacheness-handler-")`] Therefore D-08 and D-25 are compatible: private serialization may precede intent, but the first **managed persistent payload publication** must occur only after the PREPARED transaction commits. The existing immutable publication primitive uses exclusive creation and durability operations. [VERIFIED: `src/cacheness/storage/path_security.py:1984-2046`; quote: `create_stream_durable_exclusive`]
 
-### Pattern 3: One Operation Record, Pre/Post-Authority Recovery
+The promotion CAS must compare the expected per-key state token, generation, and digest of exact canonical prior bytes. Generation alone is insufficient if malformed/substituted authority content reuses a generation identifier, and bare “absence” is insufficient across create/delete/create ABA. Candidate locators must be bound to the operation ID and proposed generation and installed with exclusive creation; a collision is never overwritten.
 
-**What:** Use one bounded versioned record per mutation. It contains no payload bytes and binds operation ID, logical key, operation kind, expected generation/absence, candidate/tombstone generation, old/new locators, intended transition, progress checkpoint, and topology/store provenance. Authenticate its canonical projection or enforce equally strict owner/version/topology/locator validation. [VERIFIED: locked D-05/D-06 at `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-CONTEXT.md:33-36`]
+### Pattern 4: Failure classification and convergence
 
-**Recovery decision table:**
+| Failure/crash point | Authoritative entry | Indexed evidence | Deterministic recovery |
+|---------------------|---------------------|------------------|------------------------|
+| During private serialization | Previous/absent | None | Return serialization failure; OS temporary cleanup is outside store lifecycle. |
+| After PREPARED, before candidate creation | Previous/absent | Prepared mutation | Confirm candidate absent; retire/abort operation. |
+| During immutable candidate creation | Previous/absent | Prepared mutation with exact locator | Remove or quarantine the exact partial candidate after provenance/containment checks. |
+| After candidate publication, before verification | Previous/absent | Prepared mutation and candidate | Verify then resume, or convert to candidate cleanup debt. |
+| After verification, before promotion | Previous/absent | Verified mutation and candidate | Retry exact CAS or clean only that candidate on conflict. |
+| During promotion commit | Old or new complete | SQLite journal plus mutation row | Reopen and inspect entry/operation; classify committed versus rolled back, never guess from exception text. |
+| After promotion, before old cleanup | New complete | Cleanup-debt row created atomically with promotion | Delete the exact old locator after revalidation. |
+| After physical cleanup, before debt retirement | New complete | Cleanup debt whose locator is already missing | Missing is successful idempotent cleanup; retire debt. |
 
-| Observed authority | Candidate / old payload | Safe conclusion | Required action |
-|--------------------|-------------------------|-----------------|-----------------|
-| Expected old generation (or absence) still authoritative | Candidate present and operation provenance valid | CAS never committed | Delete/quarantine only this operation's candidate, then retire evidence; failure remains typed cleanup debt. [VERIFIED: D-04/D-07/D-11] |
-| New generation authoritative and matches operation record | Old payload or tombstone remains | CAS committed | Never roll manifest back; reclaim proven superseded bytes, checkpoint, retire evidence. [VERIFIED: D-04/D-07/D-11] |
-| Different generation authoritative | Any residue | Another operation won | Do not delete anything unless the residue is exclusively proven to belong to the losing operation and is not the current locator; report conflict. [VERIFIED: D-02/D-11/D-19] |
-| Manifest/evidence malformed, unauthenticated, future-version, or provenance-free | Any | Ownership/authority cannot be proven | Report untouched; quarantine only through a separately safe backend-native move. [VERIFIED: D-15/D-16] |
+An uncertain commit outcome must be resolved by reopening the authority and reading the operation/entry state. Do not retry promotion blindly.
 
-The current `_cleanup_uncommitted_candidate` and `_cleanup_prior_payload` perform immediate deletion with no durable operation identity. When cleanup itself fails, they raise a generic storage error but leave no machine-readable resumption record. Replace these helpers with lifecycle-engine checkpoint/reclamation calls. [VERIFIED: `src/cacheness/storage/blob_store.py:911-956`]
+### Pattern 5: Same-key CAS and distinct-key concurrency
 
-### Pattern 4: Tombstone-First Delete
+SQLite permits only one simultaneous write transaction. [CITED: https://www.sqlite.org/lang_transaction.html] That constraint does not violate D-28. A short `BEGIN IMMEDIATE` transaction that performs indexed reads, comparisons, and row writes is the explicitly allowed **authority commit serialization**. The implementation violates D-28 if it holds that transaction—or any global/store/family lease—while running any of these:
 
-**What:** Authenticate the committed manifest, persist delete evidence, then CAS a signed `tombstoned` manifest against the expected generation. The tombstone retains enough signed payload identity to prove which old locator may be reclaimed. Only after payload reclamation succeeds does the engine conditionally remove the tombstone and retire operation evidence. [VERIFIED: locked D-09/D-11; existing exact state string `"tombstoned"` at `src/cacheness/storage/manifest.py:304-310`]
+- handler serialization or private staging;
+- candidate publication, upload, or filesystem synchronization;
+- digest/size verification;
+- payload deletion or quarantine;
+- JSON projection generation/publication;
+- user callbacks, log handlers, or retry sleep.
 
-The current delete order is the inverse: it deletes the payload first and then removes the manifest. A failure between lines 614 and 615 leaves committed metadata naming a missing payload. [VERIFIED: `src/cacheness/storage/blob_store.py:594-618`]
+Same-key ordering has two layers:
 
-Repeated delete behavior must distinguish three cases without destructive guessing: true absence is a compatible successful no-op; the same validated tombstone resumes cleanup; a newer committed generation conflicts. Preserve the legacy boolean adapter's documented meaning where possible while treating “already absent” as lifecycle success rather than an error. The exact already-absent return boolean needs a compatibility decision before planning locks the public assertion. [VERIFIED: locked D-09; current return contract `True if deleted, False if not found` at `src/cacheness/storage/blob_store.py:594-611`]
+1. A bounded dynamically retained per-key lock may order threads in one process and reduce wasted candidates. The existing `KeyCoordinatorRegistry` is a separable local mechanism, whereas cross-process correctness comes from authority CAS. [VERIFIED: `src/cacheness/storage/coordination.py:639-778`; quote: `class KeyCoordinatorRegistry`]
+2. Every process commits through expected-generation plus expected-prior-manifest-digest CAS. Two operations prepared from the same prior state can serialize and verify concurrently, but exactly one promotion transaction wins; the loser atomically records cleanup debt for only its own candidate and returns a typed conflict.
 
-### Pattern 5: Bounded Generation-Snapshot Clear
+Do not hold the local key lock while blocked on SQLite writer acquisition if doing so can prevent another operation that owns the state needed for progress. Establish one documented acquisition order and test it.
 
-**What:** Replace whole-backend snapshot/restore with an authenticated, bounded list of `(key, expected generation)` targets and a durable per-entry checkpoint. Establish the snapshot under the explicit store-wide admission barrier, then delete each target through the same tombstone/CAS lifecycle. A key created after the snapshot is absent from the target set; a key overwritten after snapshot conflicts on expected generation and is not deleted. [VERIFIED: locked D-10/D-20; `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-CONTEXT.md:45,72`]
+**Measurable D-28 proof:** deterministic test hooks pause operation A for key A during payload publication, verification, and cleanup. Operation B for key B must reach committed success before A is released. Instrumentation must show `max_concurrent_payload_work >= 2`, `max_concurrent_authority_write_transactions == 1`, and `open_authority_write_transactions == 0` at every payload-I/O pause point. A wall-clock speedup alone is not proof.
 
-The Phase 1 clear journal is valuable for fault classification but not the target data model: it stores a complete `metadata_snapshot` and requires snapshot keys to equal mapping keys. Its limits are 100,000 entries and 64 MiB, but it is still all-at-once and cannot resume/report individual operator actions. [VERIFIED: `src/cacheness/storage/clear_recovery.py:34-52,448-470,564-642`]
+### Pattern 6: Delete and cleanup debt
 
-Use stable page ordering/cursors and fixed maximum page/report/record sizes. Do not select numeric defaults in planning from intuition; derive tombstone retention, orphan grace, page size, and checkpoint frequency from fault/crash tests and measured local call counts. [VERIFIED: `.planning/STATE.md:143-147`; `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-CONTEXT.md:76-80`]
+Delete uses the same state machine rather than a special scheduler:
 
-### Pattern 6: Read Acquisition with One Generation Retry
+1. Read and authenticate the current committed manifest.
+2. Prepare an exact-generation delete intent.
+3. In one short transaction, revalidate the generation/digest, publish the signed tombstone as the canonical entry, mark the operation promoted, create payload cleanup debt, mark projections dirty, and advance revision.
+4. Outside the transaction, re-read/revalidate the debt's exact key, generation, and locator binding, then delete idempotently.
+5. In a short transaction, retire debt and convert the tombstone to a compact absent lineage marker only if it is still the same tombstone. Do not erase the per-key state token.
 
-**What:** Read and authenticate committed manifest M1, attempt one private immutable snapshot, then re-read/authenticate the manifest before deserialization. If snapshot acquisition fails and the generation changed, or if M2 differs from M1, discard the snapshot and retry acquisition once. If the same generation still names missing/tampered bytes, preserve the existing typed integrity failure. Once a complete private snapshot is acquired and the generation recheck passes, later cleanup cannot create mixed bytes because the handler reads only the private snapshot. [VERIFIED: locked D-03/D-19; existing snapshot contract `src/cacheness/storage/guarded_handler_io.py:336-367`; existing integrity order `src/cacheness/storage/blob_store.py:473-522`]
+A repeated delete of an externally absent key preserves compatible success/false behavior. A repeated delete that finds its own tombstone resumes cleanup. A delete that finds a newer generation conflicts and never removes the newer payload. If two workers claim the same cleanup debt, duplicate physical delete is safe only after each revalidates that the locator is not current/live; a missing locator counts as success.
 
-Do not retry malformed manifests, invalid signatures, unsupported versions, backend failures, or same-generation integrity failures. Retry is only for observed generation movement during acquisition. [VERIFIED: locked D-03 and Phase 2 typed failure boundary `.planning/phases/02-canonical-storage-and-integrity-contract/02-VERIFICATION.md:39-64`]
+### Pattern 7: Transactional clear snapshot
 
-### Pattern 7: Refcounted Per-Key Coordination and Instance Close Admission
+Clear must not use a file inventory or hold a global barrier across the entire deletion pass.
 
-**What:** Use a small registry guard protecting a dictionary of key → `{lock, users}`. Increment `users` while holding the guard before waiting on the key lock; on release, decrement under the guard and remove only the same entry when zero. This keeps memory proportional to active/waiting keys and avoids lock striping collisions. [ASSUMED] Behavior is required by D-17/D-20; this implementation detail is not locked.
+Recommended sequence:
 
-Production correctness must not rely on lock fairness: Python documents that selection among blocked `Lock.acquire()` waiters is undefined. Multi-key work sorts one stable key representation before acquisition. [CITED: https://docs.python.org/3/library/threading.html] [VERIFIED: deterministic ordering required by `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-CONTEXT.md:72`]
+1. One short authority transaction creates the clear run and executes an indexed `INSERT ... SELECT` equivalent that records every currently committed key with its exact generation and manifest digest.
+2. Commit. Keys created or promoted after that snapshot are not members of the clear.
+3. Workers keyset-page target rows and invoke the same exact-generation delete transition for each target.
+4. A target whose generation/digest changed is marked conflict/skipped; it is never deleted speculatively.
+5. Each successful target and the aggregate counters are checkpointed transactionally. Completion is set only when no bounded target state remains.
 
-Instance admission should reject new operations once close begins, count in-flight operations with a condition, wait deterministically for those already admitted, flush/reconcile only owned durable state, close `GuardedHandlerIO`, and close the backend only when `_owns_backend` is true. The current `close()` unconditionally closes both guarded I/O and the backend and has no idempotence/admission state. [VERIFIED: `src/cacheness/storage/blob_store.py:217-232,266-280,860-870`; locked D-12]
+This may briefly serialize the snapshot transaction with other authority writers, but it does not need the discarded `StoreAdmissionBarrier` or an external key inventory. A large store may make one `INSERT ... SELECT` transaction expensive; the acceptance benchmark must measure snapshot duration and writer wait. If it exceeds the explicit budget, the follow-up design must use a revisioned snapshot strategy that remains exact—never a weak filename scan. [ASSUMED]
 
-### Pattern 8: Dry-Run-First Reconciliation
+### Pattern 8: Stable bounded reconciliation
 
-**What:** Separate analysis from mutation. A dry run consumes bounded manifest pages, bounded operation-record pages, and only backend-provided owned-locator inventory. It emits stable machine records plus a human summary. Apply consumes those records but re-authenticates/revalidates the current manifest, operation record, generation, and locator immediately before each action; stale findings become conflicts, not stale deletes. [VERIFIED: locked D-13 through D-16]
+Reconciliation works only from indexed authority rows and exact locators already recorded there:
 
-**Required finding data (verbatim from D-13):** `authoritative generation`, `operation provenance`, `residue type`, `proposed action`, `reason`, and whether the action is `safe`, `blocked`, or `requires confirmation`. [VERIFIED: `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-CONTEXT.md:52-55`]
+- At run start, capture immutable high-water IDs for mutations and cleanup debt in a short transaction. Persist them with the run for apply mode.
+- Page with monotonic keyset predicates such as “work ID greater than cursor and less than or equal to high-water,” ordered by the indexed ID. Do not use mutable-state offset pagination.
+- Enforce independent limits for inspected rows, proposed/applied actions, and payload bytes. Stop before a limit is exceeded and return a stable resume handle.
+- Dry-run produces findings without creating destructive action checkpoints. Apply mode persists completed action/checkpoint state in the authority transaction that records the action outcome.
+- Before every destructive action, reload the exact row and current entry and revalidate operation provenance, generation, manifest digest, containment, and locator non-ownership by a live generation.
+- Work created after the captured high-water belongs to the next run. A row already retired when resumed counts as completed; it must not cause cursor rewind or livelock.
+- Never deserialize a payload to establish lifecycle ownership and never enumerate filenames to discover operation state.
 
-Phase 3 must not implement a universal payload scan by walking arbitrary filenames. It may reconcile authenticated manifests and its own operation namespace on current local reference storage. If an adapter cannot enumerate backend-owned locators safely and boundedly, orphan inventory is reported as unsupported/blocked until the Phase 4/5 capability work. [VERIFIED: D-06/D-15/D-18 and deferred Phase 4/5 scope]
+Suggested report fields follow D-13: stable finding ID, authority/run revision, operation ID, key, expected/authoritative generation, exact residue role/locator, proposed action, reason code, disposition (`safe`, `blocked`, or `confirmation_required`), and applied/checkpoint state. Exact reason values are public-contract decisions and must be characterized before renaming; proposed values are [ASSUMED].
+
+### Pattern 9: JSON as a projection, not an authority
+
+All direct `BlobStore` reads, writes, metadata reads, listing, clear, and recovery must use the lifecycle authority. JSON remains a supported compatibility representation, but it cannot independently decide cross-process publication.
+
+Projection algorithm:
+
+1. The promoting transaction sets the JSON projection row dirty and advances the authority revision.
+2. An exporter creates a mode-restricted process-private temporary SQLite destination and uses SQLite's online backup API to capture a consistent authority snapshot without copying live database files directly. It closes the live source connection and reads revision `R` from the snapshot. [CITED: https://docs.python.org/3.11/library/sqlite3.html#sqlite3.Connection.backup]
+3. It keyset-pages committed rows from the private snapshot, streams and atomically replaces the JSON projection, and removes the private snapshot. Rendering therefore holds no transaction on the live authority and does not require all manifests in memory.
+4. A short authority transaction marks the projection clean only if the current authority revision still equals `R`. If not, it remains dirty so a newer export will rebuild it.
+
+This final revision check is essential: without it, an older exporter could overwrite a newer JSON snapshot and falsely mark it current. Projection write failure does not roll back an already committed lifecycle mutation; it leaves a dirty/error marker and a rebuild action. A missing/corrupt projection is rebuilt from authority. A missing/corrupt authority is **not** reconstructed automatically from JSON because doing so would promote a derived representation into an unproven transaction source. The private backup is projection staging, not lifecycle evidence; it must use restrictive permissions and contain no payload bytes.
+
+Do not incrementally patch JSON as part of the authority transaction, and do not resurrect cross-process JSON lock/CAS files. If a public API returns JSON-shaped metadata, preserve its shape through an adapter over authority rows and characterization tests.
+
+### Pattern 10: In-memory adapter semantics
+
+`InMemoryLifecycleAuthority` should implement the exact same complete-transition contract with a private lock around each authority method and immutable/copy-on-read records. It should provide:
+
+- same-process deterministic CAS and revision behavior;
+- identical operation/debt/clear/reconciliation states and typed outcomes;
+- atomic state changes visible to threads in that Python process;
+- no durable crash-recovery or cross-process claim;
+- explicit capability rejection when durable or multiprocess guarantees are requested;
+- idempotent `close()` that marks the instance closed but does not imply persistence.
+
+Separate in-memory authority instances do not implicitly share state; callers that want multiple `BlobStore` instances to coordinate in memory must inject the same authority instance. [ASSUMED] `BlobStore.close()` closes only an authority it owns; a caller-injected authority remains caller-owned, consistent with D-12. Tests must run the common interface contract against both adapters. Adapter-specific tests may verify SQLite durability/reopen and memory ephemerality, but the lifecycle state-machine tests should not branch on storage internals.
+
+### Pattern 11: Future authority adapters without pre-implementation
+
+Phase 3 defines semantic capabilities, not concrete Phase 4/5 backend plumbing:
+
+| Future adapter | Required semantic mapping | Deferred work |
+|----------------|---------------------------|---------------|
+| PostgreSQL | Transactions and row-level/unique-constraint CAS implement complete authority methods; indexed sequence IDs page work. | Connection/config registry, real-service matrix, isolation/deadlock tuning, migrations, and operational tests belong to Phases 4/5. |
+| S3-native | Conditional object operations must implement equivalent complete-state publication, or a capable metadata authority must be paired with S3 payloads. | ETag/versioning semantics, listing consistency claims, multipart cleanup, compatible-service scope, and real AWS tests belong to Phases 4/5. |
+
+The interface must describe invariants and outcomes (`prepared`, `promoted`, conflict, cleanup debt, clear snapshot, stable page), not SQLite concepts such as SQL text, row IDs as public identities, busy pragmas, or filesystem paths. Conversely, Phase 3 must not add receipt files inside a future adapter to simulate transactions.
 
 ### Anti-Patterns to Avoid
 
-- **One global mutex around every operation:** It violates distinct-key concurrency and can hide missing backend CAS in tests. Use per-key ordering plus a short explicit aggregate barrier. [VERIFIED: D-17/D-18/D-20]
-- **Deleting the old payload before CAS or deleting the new manifest after cleanup failure:** Either loses the last valid generation or revokes the winner. [VERIFIED: D-04/D-07]
-- **Treating a candidate filename as ownership proof:** Current authoritative/compatibility payloads already contain `-candidate-`; loose matching is unsafe. [VERIFIED: D-06; runtime inventory]
-- **Catching `BaseException` and performing speculative destructive cleanup:** `BaseException` models process-loss boundaries in existing crash tests. Persist evidence before the boundary and let reopen reconciliation decide. [VERIFIED: `src/cacheness/storage/clear_recovery.py:346-404`; `tests/test_clear_recovery.py:27-31,234-326`]
-- **Deserializing during reconciliation:** Pickle/dill may execute code and are trusted only at the normal authenticated read boundary. Lifecycle ownership comes from signed metadata, not payload interpretation. [VERIFIED: D-16; `docs/SECURITY.md:12-23`]
-- **Restoring an old backend snapshot after uncertain publication:** Once CAS may have succeeded, rollback can erase a valid winner. Unknown authority must poison/block until evidence can decide. [VERIFIED: D-04; analogous clear classification `src/cacheness/storage/clear_recovery.py:362-404,428-446`]
-- **Full-store list materialization or N+1 discovery without bounds:** STOR-06 and QUAL-07 require bounded/resumable work; page and call-count assertions belong in validation. [VERIFIED: `.planning/REQUIREMENTS.md:12,73`]
-- **Adding a Cacheness payload wrapper/header:** Native handlers remain the payload-format owners. Lifecycle data belongs only in manifests/operation records. [VERIFIED: `.planning/phases/02-canonical-storage-and-integrity-contract/02-VERIFICATION.md:35-38,147-151`]
+- **Dual authorities:** Keeping canonical JSON and SQLite independently writable recreates split-brain metadata.
+- **CRUD-shaped authority interface:** Exposing `put_receipt`, `append_inventory`, or raw table methods lets callers rebuild partial transactions.
+- **Transaction across payload I/O:** This serializes unrelated keys, increases busy failures, and makes external I/O part of a database lock lifetime.
+- **Filename-driven recovery:** A directory scan cannot prove operation ownership, stable bounded progress, or whether an unindexed temporary is safe to delete.
+- **Mutable offset pagination:** Updates/deletes between pages cause skip/replay; use high-water plus keyset cursors.
+- **Blind retry after commit error:** The commit may already have succeeded; reopen and classify by operation/entry state.
+- **WAL by assumption:** The bundled SQLite version and topology are runtime properties; current checked runtimes fall in the documented WAL-reset affected range.
+- **Inherited post-fork authority:** Connections and locks belong to their creating process.
+- **Tests that name receipt files:** These ossify the rejected mechanism rather than verify lifecycle behavior.
 
 ## Don't Hand-Roll
 
-| Problem | Don't Build | Use Instead | Why |
+| Problem | Don't build | Use instead | Why |
 |---------|-------------|-------------|-----|
-| Payload serialization/container format | Lifecycle envelope around NPZ/Parquet/pickle/dill/Blosc2 | Existing handler + guarded private stage | A new wrapper creates another stored format and migration obligation. [VERIFIED: Phase 2 prohibition] |
-| Cryptographic signing/hash comparison | New MAC/hash scheme | Existing HMAC-SHA256 key provider, canonical signing bytes, SHA-256/size helpers with domain-separated operation-record projection | Phase 2 already verified key provenance and fail-closed integrity. [VERIFIED: `.planning/phases/02-canonical-storage-and-integrity-contract/02-VERIFICATION.md:47-64`] |
-| Path validation or direct `Path.unlink` recovery | Filename sanitization and loose root checks | `ManagedFileOps` + `resolve_managed_locator` + exclusive/durable contained primitives | Existing code guards symlink/race/root-replacement boundaries. [VERIFIED: `src/cacheness/storage/path_security.py:220-314,421-476,615-672`] |
-| Distributed lock pretending to span payload and metadata stores | Python mutex/file lock as the correctness boundary | Immutable payload generation + backend manifest CAS + reconciliation | Local locks do not coordinate processes/hosts or two resource managers. [VERIFIED: D-18] |
-| Retry framework | Generic retry of entire mutation | Explicit bounded retry only on idempotent steps and the single permitted read reacquisition | Retrying serialization/CAS/cleanup indiscriminately can duplicate residue or revoke a winner. [VERIFIED: D-03/D-11/D-19] |
-| Reconciliation ownership inference | Glob/extension/payload sniffing | Authenticated manifests + validated operation records + backend-owned inventory | Filename/payload content does not prove library ownership. [VERIFIED: D-06/D-15/D-16] |
+| Cross-process atomic commit | Receipt/head/anchor/pending files and custom lock authority | SQLite transactions | SQLite already provides journaled atomic transactions and crash rollback. [CITED: https://sqlite.org/atomiccommit.html] |
+| Database journaling | Custom replay log or manipulation of SQLite journal sidecars | SQLite's rollback journal | Touching/copying live journal files can corrupt or misclassify database state. [CITED: https://www.sqlite.org/howtocorrupt.html] |
+| Compare-and-swap | File identity/inode/handle registries | Conditional row update inside one authority transaction | CAS belongs with the canonical entry and operation/debt changes. |
+| Stable work enumeration | File inventories, anchors, cursors, receipts | Indexed rows, monotonic IDs, captured high-water, keyset pagination | Database indexes give stable bounded traversal without a second history protocol. |
+| Migration transaction | Ad hoc file-copy switching of a live DB | Ordered schema migration transaction plus supported backup/quiesce procedure | The authority schema must never appear partially migrated. |
+| Payload framing | Cacheness wrapper/header around handler output | Native NumPy/Blosc2/Parquet/pickle/dill formats plus separate manifest | Locked project intent keeps handlers responsible for payload format. |
 
-**Key insight:** the hard problem is not atomic file replacement; it is preserving a provable authority decision across two independent resources. The signed manifest CAS plus durable operation evidence is the transaction protocol. [VERIFIED: D-04 through D-07]
+**Key insight:** SQLite is not being used as a cache of the filesystem protocol; it replaces that protocol as the single local transactional authority. Payloads remain outside the database, so this is not turning payload storage into a filesystem database.
+
+## Runtime State Inventory
+
+This is a replacement/refactor phase, so repository edits alone are insufficient. The canonical question is: after file-native code is deleted, what runtime state still contains or depends on that protocol?
+
+| Category | Items found | Action required |
+|----------|-------------|-----------------|
+| Stored data | Existing stores may contain canonical Phase 2 manifests/metadata plus internal file-native operation, inventory, anchor, receipt, pending-control, clear, and reconciliation artifacts. Exact released prevalence is not established in this research. [ASSUMED] | Do not silently import or delete. Detect exact known legacy control roots/sentinels and return a typed migration/rebuild-required outcome. Phase 7 owns non-mutating inventory and copy-verify-switch. For explicitly disposable development stores, document a rebuild path. |
+| Live service config | No external service configuration is required by the local SQLite adapter. PostgreSQL/S3 service state remains deferred. | None for Phase 3; planner must avoid introducing external configuration. |
+| OS-registered state | No systemd, launchd, Task Scheduler, or service registration is part of the current Python library architecture. [VERIFIED: `AGENTS.md:90-95`; quote: `the library has no web server, worker runtime, container definition, or hosting manifest`] | None. Local database and payload roots remain process-opened resources. |
+| Secrets/env vars | Existing manifest-signing key/config remains security-critical. No repository environment-variable parser exists. [VERIFIED: `AGENTS.md:80-85`; quote: `no environment-variable parser is implemented in src/cacheness/`] | Reuse the existing signer/key path; do not invent an authority secret namespace. Schema rows containing recovery evidence must either authenticate bounded provenance or be strictly derived/corroborated from signed manifests. |
+| Build artifacts / installed packages | Installed wheels may retain the abandoned modules after source deletion until reinstalled; `__pycache__` may retain bytecode but is not an authority. [ASSUMED] | Rebuild/reinstall the package for validation. Do not scan or execute stale artifacts as recovery state. |
+
+### Authority schema migration versus stored-format migration
+
+Keep two migration classes separate:
+
+- **Authority database schema migration (Phase 3):** configure/verify journal mode, validate `application_id` and `user_version`, reject a wrong application ID or unknown newer version, apply ordered migrations in one bounded `BEGIN EXCLUSIVE` transaction, reopen, and run integrity/foreign-key checks. Concurrent initializers obey the same absolute busy deadline and then re-read the winning schema. Never expose a partially migrated schema. Exact application ID and schema version are implementation constants and remain [ASSUMED] until defined in source.
+- **Existing cache/store adoption (Phase 7):** inventory canonical manifests and legacy control state without mutation, produce a machine/human plan, then copy-verify-switch or explicit rebuild. Do not infer a correct SQLite authority state by scanning arbitrary filenames during normal Phase 3 recovery.
+
+Do not copy a live database file as a backup. Quiesce/close it or use a supported SQLite backup mechanism, and never manually copy the database without any live rollback journal or WAL sidecars. [CITED: https://www.sqlite.org/howtocorrupt.html]
+
+## Project Constraints (from AGENTS.md)
+
+- Preserve supported public APIs; stored-data migration/rebuild requires an explicit documented path.
+- `BlobStore` owns storage lifecycle; `UnifiedCache` later consumes it as cache-policy layer; `SqlCache` remains separate.
+- The eventual unified lifecycle covers filesystem, memory, S3, JSON, SQLite, and PostgreSQL backends, while this phase implements only the local SQLite and in-memory authority adapters.
+- Treat application payloads as trusted while enforcing safe parsing, path containment, and fail-closed integrity boundaries.
+- Payload and metadata operations require atomic commit, rollback, or deterministic reconciliation.
+- Same-key operations must not corrupt payloads or create payload/metadata disagreement.
+- Correctness precedes performance; acceptance still needs checked-in measured budgets.
+- Maintain Python 3.11+ and verify supported versions rather than testing only Python 3.13.
+- Use domain exceptions, preserve causes with `raise ... from e`, and avoid broad exceptions that turn corruption/backend failure into a cache miss.
+- Keep new functions focused and do not grow the already-large orchestration modules.
+- Keep optional dependency/runtime checks aligned with packaging extras; no new external dependency is required here.
+- Run targeted pytest and Ruff checks without treating the repository-wide existing Ruff baseline as a clean invariant.
+
+These constraints are extracted from the supplied `AGENTS.md` project/stack/conventions sections. [VERIFIED: `AGENTS.md:13-22`, `AGENTS.md:119-175`; quoted directives include `Preserve supported public APIs`, `BlobStore owns storage lifecycle`, `Correctness comes first during migration`, and `Maintain Python 3.11+ support`]
+
+## Deletion and Replacement Map
+
+The current scheduler is distributed across eight large modules; deletion should be driven by responsibility, not by mechanically preserving all module names.
+
+| Current mechanism | Evidence on current main | Replacement action |
+|-------------------|--------------------------|--------------------|
+| `operation_repository.py` / `FileOperationRecordRepository` | The file is 4,014 lines and defines `class FileOperationRecordRepository`. [VERIFIED: `src/cacheness/storage/operation_repository.py:299-4014`] | Delete the file-native repository: receipts, inventory events/heads/tails, anchors, compaction, pending controls, clear target pages, and file reconciliation cursors. Replace with normalized rows behind `LifecycleAuthority`; do not retain a compatibility wrapper around this repository. |
+| `operation_record.py` | The file is 1,323 lines. [VERIFIED: `src/cacheness/storage/operation_record.py:1-1323`] | Delete bespoke signed receipt/page/checkpoint schemas. Reintroduce only small private domain dataclasses/enums needed by the authority contract, with bounded safe row decoders. |
+| `coordination.py` | Contains `StoreAdmissionBarrier`, `KeyCoordinatorRegistry`, and `InstanceAdmission`. [VERIFIED: `src/cacheness/storage/coordination.py:354-837`; quote: `class StoreAdmissionBarrier`, `class KeyCoordinatorRegistry`, `class InstanceAdmission`] | Delete interprocess file locks and `StoreAdmissionBarrier`. Retain/extract bounded in-process `KeyCoordinatorRegistry` and `InstanceAdmission` behavior for per-key ordering and close ownership. |
+| `clear_recovery.py` | Contains `ClearRecoveryCoordinator` and `LegacyClearEvidenceAdapter`. [VERIFIED: `src/cacheness/storage/clear_recovery.py:88-913`; quote: `class ClearRecoveryCoordinator`, `class LegacyClearEvidenceAdapter`] | Delete bounded JSON journals and lock/admission orchestration. Preserve a read-only legacy detector only if release/migration evidence proves it is required; otherwise report exact legacy sentinel presence as migration-required. |
+| Scheduler portions of `path_security.py` | The module also contains retained payload primitives `create_stream_durable_exclusive` and `delete_durable`. [VERIFIED: `src/cacheness/storage/path_security.py:1984-2048`; quote: `def create_stream_durable_exclusive`, `def delete_durable`] | Delete platform lock-file/inode/handle/xattr reservation, pending-control promotion, and scheduler control staging. Retain containment, safe open/read, immutable exclusive payload publication, fsync, and durable deletion. |
+| Scheduler portions of `manifest_repository.py` | Current lifecycle separates manifest repository from file operation repository. [VERIFIED: `src/cacheness/storage/lifecycle.py:36-65`; quote: `FileOperationRecordRepository`] | Move canonical committed manifest ownership into the authority transaction. Keep only compatibility projection/import adapters required by public behavior; do not run JSON/SQLite manifest inventory alongside authority rows. |
+| `reconciliation.py` | Current file is 1,854 lines. [VERIFIED: `src/cacheness/storage/reconciliation.py:1-1854`] | Replace scheduler/sidecar/pending-control multiplexer with a thin report/orchestration layer over authority pages. |
+| `lifecycle.py` | `LifecycleEngine` currently constructs `FileOperationRecordRepository`. [VERIFIED: `src/cacheness/storage/lifecycle.py:47-65`; quote: `class LifecycleEngine`, `self.operation_repository = FileOperationRecordRepository`] | Rewrite as a thin state-machine coordinator that calls complete authority operations around payload I/O. No raw SQL or scheduler file manipulation. |
+| `blob_store.py` composition | Imports `StoreAdmissionBarrier` and acquires it for the root. [VERIFIED: `src/cacheness/storage/blob_store.py:63-90`, `src/cacheness/storage/blob_store.py:280-292`; quote: `StoreAdmissionBarrier.acquire`] | Inject/select a lifecycle authority; remove store-root barrier composition; preserve instance admission, local key coordination, handler I/O, and caller-owned resource rules. |
+
+### Test retirement map
+
+Delete or rewrite tests whose subject is receipt/inventory/anchor/pending-control/lock-file structure. Current examples include direct imports of `FileOperationRecordRepository`, private `_append_inventory_event`, `StoreAdmissionBarrier`, and scheduler receipt pause hooks. [VERIFIED: `tests/test_manifest_repository_cas.py:38-75`, `tests/test_blob_store_concurrency.py:19-20`, `tests/test_blob_store_concurrency.py:464-562`, `tests/test_blob_store_close_contract.py:25-27`]
+
+Preserve behavior cases while changing their fixture seam:
+
+| Historical test concern | New test surface |
+|-------------------------|------------------|
+| Old-or-new put visibility | `BlobStore` plus common authority contract and payload fault injection. |
+| Same-key writer/delete races | Expected-generation CAS results through public lifecycle operations. |
+| Distinct-key progress | Deterministic payload-stage hooks and authority transaction counters. |
+| Clear snapshot excludes later writes | Transactional clear target membership through `BlobStore.clear`. |
+| Close drains/blocks instance work | Instance admission and authority resource ownership, not repository lock handles. |
+| Recovery boundedness/resume | Authority high-water/keyset pages and stable reports, not receipt filenames. |
+| Windows behavior | Same SQLite adapter and same-process/session scope; no Win32 fallback protocol expectations. |
 
 ## Common Pitfalls
 
-### Pitfall 1: Journaling Too Early or Too Late
+### Pitfall 1: Recreating the scheduler inside SQLite
 
-**What goes wrong:** Journaling before handler serialization leaves durable records for operations that never produced a candidate; journaling after managed candidate publication leaves unowned residue on process loss. [VERIFIED: locked D-05/D-08]
+**What goes wrong:** Tables mirror event heads, receipt chains, anchors, and pending files instead of representing domain state.
 
-**Why it happens:** The current `GuardedHandlerIO.put()` combines serialization and publication, so there is no intermediate hook. [VERIFIED: `src/cacheness/storage/guarded_handler_io.py:301-334`]
+**Why it happens:** A mechanical port preserves implementation artifacts rather than invariants.
 
-**How to avoid:** Split the API and place durable operation-record creation after private serialization succeeds but before the exclusive managed publish begins. [VERIFIED: D-05/D-08]
+**How to avoid:** Design complete authority methods and normalized current/work/debt rows first. There is no event-replay requirement.
 
-**Warning signs:** An injected serialization fault creates an operation record, or a `BaseException` during candidate publication leaves a file with no validated operation record.
+**Warning signs:** `append_*`, `head`, `tail`, `receipt`, `pending_control`, or file-identity concepts appear in the authority API.
 
-### Pitfall 2: CAS That Is Only “Check Then Put”
+### Pitfall 2: Holding a writer transaction across payload I/O
 
-**What goes wrong:** Two instances both read generation G, both pass a non-atomic check, and the later unconditional `put_raw` silently clobbers the first winner. [VERIFIED: current repository `put_raw` is unconditional at `src/cacheness/storage/manifest_repository.py:44-51,106-125,236-252`]
+**What goes wrong:** A slow serializer, fsync, upload, verification, or delete blocks all authority writers and defeats distinct-key concurrency.
 
-**Why it happens:** A local per-key lock makes single-instance tests pass but does not coordinate other processes/instances. [VERIFIED: D-18]
+**How to avoid:** Commit intent, close transaction, perform payload work, then reopen for short verification/promotion/debt transitions.
 
-**How to avoid:** Make compare and publication one backend-local atomic primitive and test with independent store/repository instances. [VERIFIED: D-02/D-18/D-19]
+**Warning signs:** Any payload backend/handler call appears syntactically inside a transaction context.
 
-**Warning signs:** Repository code invokes `get_raw()` and then `put_raw()` as separate unlocked/transactionally separate calls; race tests use only one `BlobStore` object.
+### Pitfall 3: Ambiguous transaction outcome
 
-### Pitfall 3: Cleanup Revokes or Damages the Winner
+**What goes wrong:** A commit raises after state may have become durable, and blind retry creates conflict or duplicate cleanup.
 
-**What goes wrong:** A losing writer deletes a locator now named by the winning manifest, or a post-commit error handler restores the old manifest. [VERIFIED: D-02/D-04/D-11/D-19]
+**How to avoid:** Every operation has a unique ID; reopen and classify the operation plus canonical entry.
 
-**Why it happens:** Cleanup is keyed only by logical key/filename rather than operation ID, generation, and exact locator provenance. [VERIFIED: D-06]
+**Warning signs:** Retry catches `OperationalError` around `commit()` without a state read.
 
-**How to avoid:** Re-read/authenticate authority immediately before destructive cleanup; require both operation ownership and a generation mismatch from the current locator. Treat changed ownership as conflict. [VERIFIED: D-11/D-15]
+### Pitfall 4: Projection false-clean race
 
-**Warning signs:** Cleanup accepts just `key`; a conflict handler calls repository `remove(key)`; tests assert only the returned exception and not winner readability/residue ownership.
+**What goes wrong:** Exporter A captures revision 5, exporter B writes revision 6, then A overwrites JSON and marks it clean.
 
-### Pitfall 4: Tombstone Removal Is Not Conditional
+**How to avoid:** Mark clean only by compare-and-set on the captured authority revision; otherwise remain dirty.
 
-**What goes wrong:** Delete publishes a tombstone, another writer creates a new generation, then delete's final `remove(key)` removes that new generation. [VERIFIED: D-09/D-19]
+**Warning signs:** Projection success updates no expected revision.
 
-**Why it happens:** The current repository exposes unconditional `remove`. [VERIFIED: `src/cacheness/storage/manifest_repository.py:53-54,127-132,309-319`]
+### Pitfall 5: Unsafe cleanup from stale evidence
 
-**How to avoid:** Tombstone retirement is itself conditional on the exact tombstone generation/revision. A new generation produces conflict and survives. [VERIFIED: D-09/D-11]
+**What goes wrong:** Reconciliation deletes a locator now referenced by a newer committed generation.
 
-**Warning signs:** Delete finalization calls unconditional manifest removal; no write-after-tombstone forced interleaving test exists.
+**How to avoid:** Revalidate exact debt/op/key/generation/manifest digest and current locator non-ownership immediately before deletion.
 
-### Pitfall 5: Read Retry Hides Corruption
+**Warning signs:** Cleanup accepts only a pathname or checks only that a file exists.
 
-**What goes wrong:** A same-generation missing/tampered payload is retried and eventually translated into a miss, weakening Phase 2's typed integrity contract. [VERIFIED: Phase 2 observable truths 6-10 in `.planning/phases/02-canonical-storage-and-integrity-contract/02-VERIFICATION.md:39-64`]
+### Pitfall 6: Unstable reconciliation pagination
 
-**Why it happens:** Retry is keyed to any `FileNotFoundError` rather than a proven generation change. [VERIFIED: D-03]
+**What goes wrong:** Mutable filters plus offset skip/repeat rows; newly inserted work prevents convergence.
 
-**How to avoid:** Re-read the manifest; retry once only if authenticated generation changed. Otherwise re-raise the original typed integrity/backend failure. [VERIFIED: D-03]
+**How to avoid:** Capture high-water IDs and keyset-page immutable monotonic IDs; persist apply checkpoints.
 
-**Warning signs:** A loop count greater than two acquisition attempts; retry catches malformed/auth/signature/version errors; tests do not assert exact snapshot/manifest-read counts.
+**Warning signs:** `OFFSET`, lexical filename cursors, or a moving “all pending” scan.
 
-### Pitfall 6: Reconciliation Is “Dry Run” in Name Only
+### Pitfall 7: Treating timeout as correctness
 
-**What goes wrong:** Analysis updates access counters, creates a signing key, quarantines a file, cleans a temp, or invokes a handler. [VERIFIED: D-13/D-16 and Phase 2 non-mutating read truth]
+**What goes wrong:** Different machines produce nondeterministic races and false test confidence.
 
-**Why it happens:** Reuse of high-level read APIs carries side effects or deserialization. [VERIFIED: Phase 2 explicitly separated exact raw records and guarded reads; `.planning/phases/02-canonical-storage-and-integrity-contract/02-VERIFICATION.md:65-68`]
+**How to avoid:** Inject barriers/events at transaction and payload boundaries; timeout only guards a hung test.
 
-**How to avoid:** Dry run consumes raw repository/evidence inventory through dedicated non-mutating readers, authenticates records, and hashes only when needed; mutation callbacks are absent/spied to fail. [VERIFIED: D-13/D-16]
+### Pitfall 8: Assuming local topology from a path
 
-**Warning signs:** Dry-run tests merely inspect final report without comparing full pre/post bytes, mtimes, key material, and backend call logs.
+**What goes wrong:** SQLite authority is placed on NFS/SMB/FUSE with locking/durability semantics the adapter does not support.
 
-### Pitfall 7: Close Transfers Ownership
+**How to avoid:** State local-only capability explicitly and fail closed for declared remote topology; document that automatic detection is incomplete. [CITED: https://www.sqlite.org/useovernet.html]
 
-**What goes wrong:** A `BlobStore` closes a caller-injected backend, accepts operations after root descriptor closure, double-closes a descriptor, or clears data. [VERIFIED: D-12; current unconditional close `src/cacheness/storage/blob_store.py:860-870`]
+## Instrumentation and Operational Evidence
 
-**Why it happens:** Close is treated as two direct `.close()` calls instead of an operation-admission state transition. [VERIFIED: current implementation]
+Instrumentation should describe lifecycle semantics, not SQLite internals alone.
 
-**How to avoid:** Track owned resources, reject new operations before draining, wait on in-flight count, make resource release exactly-once, and never invoke `clear()`. Existing constructor-failure tests already distinguish owned and injected backends. [VERIFIED: `tests/test_blob_store_read_contract.py:90-288`]
+| Signal | Required dimensions | Purpose |
+|--------|---------------------|---------|
+| Mutation transition count | operation kind, from/to phase, result/reason; never raw key/payload | Detect stuck prepared/verified/promoted operations. |
+| Authority transaction duration | adapter, method family, success/busy/rollback | Prove commits remain short and diagnose writer contention. |
+| Authority busy/deadline count | method family, elapsed bucket | Separate expected bounded contention from systemic stalls. |
+| Payload stage/publish/verify/cleanup duration | operation kind, backend family, result | Confirm payload work dominates outside authority transactions and overlaps across keys. |
+| Cleanup debt age/count | residue role, state, retry bucket | Detect convergence failures before storage leaks grow. |
+| Reconciliation progress | mode, scanned/actions/bytes, cursor/high-water age, disposition | Show bounded progress and resumability. |
+| Clear progress | target count, completed/conflict/blocked, age | Identify exact incomplete clear runs. |
+| Projection lag | projection name, authority revision minus exported revision, dirty age | Surface JSON compatibility lag without treating it as authority failure. |
 
-**Warning signs:** `close()` lacks a guard/state; direct APIs do not share an admission context; injected-backend close spy fires.
+For validation builds, add injectable observers around transaction begin/end and payload-stage begin/end. Production metrics may expose aggregate counters, but tests need deterministic event hooks. Never include arbitrary logical keys, locators, manifest bytes, exception reprs with credentials, or payload-derived metadata in logs by default.
 
-### Pitfall 8: Aggregate Work Is Unbounded
+Recommended initial budgets are [ASSUMED] until measured on checked-in benchmarks: authority write transactions should be millisecond-scale and exclude all payload I/O; every reconciliation call must obey configured action/row/byte limits; busy waits must never exceed the caller's absolute deadline. The planner should create a benchmark-baseline task rather than lock unmeasured numeric latency promises.
 
-**What goes wrong:** Clear/reconcile materializes every manifest/operation/payload or restarts from zero after an interruption. [VERIFIED: STOR-06/QUAL-07]
+## Security Domain
 
-**Why it happens:** Existing `list_keys()` returns a full list, and the clear journal snapshots the full backend. [VERIFIED: `src/cacheness/storage/manifest_repository.py:56-60,134-156,321-341`; `src/cacheness/storage/clear_recovery.py:448-470`]
+Security enforcement is enabled in `.planning/config.json`; Phase 3 therefore requires explicit input, file, integrity, and logging controls. [VERIFIED: `.planning/config.json:20-49`; quote: `"security_enforcement": true`, `"security_asvs_level": 1`]
 
-**How to avoid:** Introduce stable bounded page/cursor interfaces and per-action checkpoints. Keep compatibility list APIs as adapters over bounded internals only where safe. [VERIFIED: D-10/D-14]
+### Applicable ASVS Categories
 
-**Warning signs:** `list(...)` around all keys/records in reconciliation; no max-page/report bound; crash resume repeats already completed deletes; call count scales worse than a documented constant per item.
+| ASVS category | Applies | Standard control |
+|---------------|---------|------------------|
+| V2 Authentication | No user authentication surface | Store signing/authenticity keys remain configuration credentials, not user authentication. |
+| V3 Session Management | No web session surface | Process/connection ownership and post-fork rejection are lifecycle controls, not sessions. |
+| V4 Access Control | Yes at local resource boundary | Contained private store root, owner/session deployment scope, fail-closed topology and resource-type checks. |
+| V5 Validation, Sanitization and Encoding | Yes | Bound SQL parameters, strict bounded row decoders, enum/version/length validation, canonical manifest verification before trusting locators. |
+| V6 Stored Cryptography | Yes | Reuse established HMAC/canonical manifest signing; never invent custom cryptography. |
+| V7 Error Handling and Logging | Yes | Typed conflict/integrity/backend/timeout outcomes, cause preservation, bounded sanitized logs. |
+| V8 Data Protection | Yes | Never log payload or secrets; database and journals live under protected contained root. |
+| V10 Malicious Code | Trusted application payload boundary | Reconciliation never deserializes payload to infer lifecycle ownership. |
+| V12 Files and Resources | Yes | Existing path containment, exclusive immutable generation creation, no symlink escape, exact-locator delete. |
+| V14 Configuration | Yes | Verify pragmas/capabilities, reject unsupported durable multiprocess configurations, version schema. |
+
+### Known threat and failure patterns
+
+| Pattern | STRIDE / reliability class | Required mitigation |
+|---------|----------------------------|---------------------|
+| SQL injection via key/error/report fields | Tampering | Parameter binding only; never interpolate identifiers or values from metadata. |
+| Oversized/malformed authority rows | Denial of service / tampering | Column/check constraints plus bounded decode before allocation; unknown versions fail closed. |
+| Manifest/row disagreement | Tampering | Authenticate canonical manifest first; corroborate indexed generation/state/locator/digest columns exactly. |
+| Locator traversal/symlink substitution | Tampering/elevation | Retain Phase 1 contained file operations and exact ownership revalidation immediately before deletion. |
+| Deleting a newly reused locator | Integrity/destruction | Immutable generation-specific locators and current-entry non-ownership check; no loose glob cleanup. |
+| Database replacement or wrong store | Spoofing/tampering | Contained regular-file checks, store identity, SQLite `application_id`, schema version, and deployment ACL assumptions. |
+| SQLite sidecar manipulation | Tampering/corruption | Never open, scan, move, or delete SQLite journal files as Cacheness protocol artifacts. |
+| Network-filesystem lock failure | Tampering/corruption | Local-filesystem-only capability; fail typed for unsupported declared topology. [CITED: https://www.sqlite.org/useovernet.html] |
+| WAL-reset bug in affected SQLite | Corruption | Phase 3 default rollback `DELETE`, not WAL. [CITED: https://www.sqlite.org/wal.html] |
+| Post-fork inherited connection/lock | Corruption/deadlock | PID ownership check; child constructs a fresh store/authority. [CITED: https://www.sqlite.org/howtocorrupt.html#_carrying_an_open_database_connection_across_a_fork_] |
+| Cleanup/reconciliation payload deserialization | Code execution | Decide ownership only from authenticated authority/manifest evidence; trusted payload is read only by normal handler path. |
+| Sensitive errors in operation rows | Information disclosure | Store bounded reason codes and sanitized text; no credentials, signed URLs, or arbitrary exception repr. |
+
+### Connection and database resource hardening
+
+- Place the authority database in the already-contained private store root; validate parent and target resource type before opening.
+- Treat database, rollback journal, and temporary SQLite-created files as one SQLite-owned resource family. Cacheness never directly reconciles its sidecars.
+- Configure pragmas on every new connection and verify values returned by pragmas where SQLite can silently choose another mode.
+- Set `trusted_schema=OFF` and do not register application-defined SQL functions/collations needed by schema objects.
+- Bound key, locator, manifest, digest, error, and report fields before database write and after database read.
+- Never dynamically construct table/column names from untrusted metadata. Ordered migrations use constants embedded in code.
+- On integrity-check failure, stop lifecycle mutation and preserve the entire authority family for diagnosis; do not rebuild automatically from JSON.
 
 ## Code Examples
 
-The following are planning skeletons, not locked public names. Exact type/module names are delegated. [ASSUMED] Behavior and ordering are locked by CONTEXT. [VERIFIED: `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-CONTEXT.md:18-72`]
+The following are proposed patterns, not existing source. Names, enum values, table names, application ID, and version constants are [ASSUMED] until the planner defines them and implementation tests lock them.
 
-### Conditional Publication Contract
-
-```python
-from dataclasses import dataclass
-from typing import Mapping, Protocol
-
-
-@dataclass(frozen=True)
-class ManifestExpectation:  # suggested internal name
-    generation: str | None       # None means the caller authenticated absence
-    record_digest: str | None    # strengthens against same-generation lost update
-
-
-class ManifestRepository(Protocol):
-    def publish_if_expected(
-        self,
-        key: str,
-        expected: ManifestExpectation,
-        record: bytes,
-        *,
-        entry_data: Mapping[str, object],
-    ) -> None:
-        """Publish atomically or raise the typed lifecycle conflict."""
-```
-
-This keeps raw storage opaque: the lifecycle engine authenticates the expected manifest; the repository performs one atomic compare/publication and never treats a failed compare as permission to overwrite. [VERIFIED: D-02/D-18; raw repository boundary `src/cacheness/storage/manifest_repository.py:38-60`]
-
-### Write Authority Skeleton
+### Explicit short write transaction
 
 ```python
-# Pseudocode: names are discretionary; order is mandatory.
-with instance_admission.operation(), key_coordinator.hold(key):
-    with guarded_io.stage(handler, value, config) as staged:
-        current = load_authenticated_committed_or_absent(key)
-        operation = operation_records.create_before_persistent_payload(
-            key=key,
-            expected_generation=None if current is None else current.generation,
-            candidate_generation=new_generation(),
-            candidate_locator=derive_owned_locator(key),
-        )
-        candidate = guarded_io.publish_exclusive(staged, operation.candidate_locator)
-        verify_digest_and_size(candidate)
-        manifests.publish_if_expected(key, operation.expectation, signed_manifest(candidate))
-        operation_records.checkpoint_authority_published(operation)
-        reclaim_superseded_payload_if_still_owned(current, operation)
-        operation_records.retire(operation)
-```
-
-The private stage precedes durable evidence; every managed persistent side effect follows it. Manifest publication is the single authority point. [VERIFIED: D-01/D-04/D-05/D-08]
-
-### Read Reacquisition Skeleton
-
-```python
-for acquisition_attempt in range(2):  # one initial attempt, one permitted retry
-    first = load_authenticated_committed(key)
+# Proposed pattern. API names/constants are [ASSUMED].
+def _write_transaction(self, deadline, body):
+    connection = self._open_connection(deadline)
     try:
-        snapshot = guarded_io.acquire_snapshot(first.locator)
-    except FileNotFoundError:
-        second = load_authenticated_committed(key)
-        if second.generation != first.generation and acquisition_attempt == 0:
-            continue
-        raise_typed_missing_for_same_generation()
-
-    second = load_authenticated_committed(key)
-    if second.generation != first.generation:
-        snapshot.close()
-        if acquisition_attempt == 0:
-            continue
-        raise_typed_lifecycle_conflict()
-    return verify_then_deserialize(snapshot, first)
+        connection.execute("BEGIN IMMEDIATE")
+        result = body(connection)  # indexed reads/comparisons/row writes only
+        connection.execute("COMMIT")
+        return result
+    except BaseException:
+        if connection.in_transaction:
+            connection.execute("ROLLBACK")
+        raise
+    finally:
+        connection.close()
 ```
 
-The numeric bound `range(2)` directly implements locked D-03's “one bounded retry”; it is not a general retry policy. [VERIFIED: `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-CONTEXT.md:22`]
+Python documents `isolation_level=None` for explicit transaction control. [CITED: https://docs.python.org/3.11/library/sqlite3.html#transaction-control] Payload I/O must never be passed as `body`.
 
-### Deterministic Race Test Pattern
+### Conditional promotion as one authority operation
 
 ```python
-entered = threading.Event()
-release = threading.Event()
-
-def pause_before_cas(*_args: object) -> None:
-    entered.set()
-    assert release.wait(timeout=5)
-
-# Start the first operation, wait until the exact seam is reached, run the
-# contender, then release. Never use sleep() as the ordering oracle.
+# Proposed interface shape; names/outcomes are [ASSUMED].
+promotion = authority.promote_mutation(
+    operation_id=prepared.operation_id,
+    expected_generation=prepared.expected_generation,
+    expected_manifest_digest=prepared.expected_manifest_digest,
+    verified_manifest=new_manifest,
+)
+if promotion.conflict:
+    raise CacheConflictError(promotion.reason)
 ```
 
-Python `Event` is a flag-based signal and `Barrier` coordinates a fixed number of threads; both accept bounded waits suitable for deterministic tests. [CITED: https://docs.python.org/3/library/threading.html]
+The implementation transaction must load the prepared operation, compare the exact current entry, replace the canonical manifest, create prior-payload cleanup debt, advance authority revision, and mark the projection dirty before commit.
+
+### Stable reconciliation page
+
+```sql
+-- Proposed SQLite adapter query; table/column/state names are [ASSUMED].
+SELECT debt_id, operation_id, key, generation, locator, role
+FROM cleanup_debt
+WHERE state = ? AND debt_id > ? AND debt_id <= ?
+ORDER BY debt_id
+LIMIT ?
+```
+
+The resume cursor is the last processed monotonic ID, and the run's high-water is immutable. An index beginning with `(state, debt_id)` supports the filter, subject to query-plan verification.
 
 ## State of the Art
 
-| Old Approach in Repository | Required Current Approach | Change Boundary | Impact |
-|----------------------------|---------------------------|-----------------|--------|
-| Candidate UUID locator unrelated to signed generation, unconditional manifest `put_raw`, immediate best-effort cleanup | Generation-specific immutable locator, durable operation record, expected-generation CAS, explicit cleanup debt | Phase 3 | Establishes old-or-new completeness and deterministic conflicts. [VERIFIED: current `src/cacheness/storage/blob_store.py:364-466`; locked D-01-D-08] |
-| Delete payload then remove metadata | CAS signed tombstone, reclaim payload, conditional tombstone retirement | Phase 3 | Prevents committed manifests naming deleted payloads and prevents late delete from removing a new write. [VERIFIED: current `src/cacheness/storage/blob_store.py:594-618`; locked D-09] |
-| Clear-only whole-store snapshot journal with prepared/committed recovery | Bounded authenticated generation snapshot using the common per-entry lifecycle plus resumable checkpoints/reports | Phase 3 | Makes clear safe with later writes and gives operators dry-run/resume. [VERIFIED: current `src/cacheness/storage/clear_recovery.py:336-470`; locked D-10,D-13-D-16] |
-| Global clear admission serializes ordinary lifecycle mutations | Refcounted per-key coordination; store-wide barrier only for aggregate operations | Phase 3 | Unrelated keys proceed independently. [VERIFIED: current `src/cacheness/storage/clear_recovery.py:198-215`; locked D-17-D-20] |
-| Unconditional close of guarded I/O and backend | Instance admission/drain plus ownership-aware exactly-once release | Phase 3 | Injected backends remain caller-owned and repeated close converges. [VERIFIED: current `src/cacheness/storage/blob_store.py:860-870`; locked D-12] |
+| Superseded approach | Recommended approach | Reason for change | Impact |
+|---------------------|----------------------|-------------------|--------|
+| File-native receipts, event inventories, heads/tails, anchors, pending controls, staged control files | One transactional lifecycle authority | D-23 rejects the scheduler after repeated non-convergence. | Delete protocol and internal tests; retain behavior contracts. |
+| Cross-process lock/file identity authority | SQLite transaction and row CAS | Platform-specific identity and crash gaps multiplied state transitions. | Same local adapter on Windows/macOS/Linux under declared trust topology. |
+| Filename scans/cursors for recovery | Indexed rows with high-water/keyset cursor | Stable bounded progress must not infer ownership. | Reconciliation becomes query/report orchestration. |
+| JSON conditional publication as local process authority | SQLite canonical authority plus JSON projection | Independent JSON CAS cannot atomically combine entry, intent, debt, clear, and checkpoint state. | Projection failures become rebuildable lag, not split-brain lifecycle state. |
+| Whole-clear admission protocol plus file target inventory | One transactional target snapshot and per-target exact CAS | Exact membership/progress belong in the authority. | New keys after snapshot survive without a long global lease. |
 
-**Deprecated/outdated within the Phase 3 path:**
+The final archived iteration reported that crash residue from `.cas.tmp` and `.pending.*.tmp` control staging could be unindexed while reconciliation reported clean, demonstrating that additional file protocol layers were not converging on D-25/D-29. [VERIFIED: `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-REVIEW.file-native-final.md:64-84`, `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-REVIEW.file-native-final.md:106-150`; quote: `reconciliation can consequently report a clean store while leaving managed control residue behind`]
 
-- Direct calls to manifest `put_raw`/`remove` from multi-step mutations are insufficient; use conditional authority operations. [VERIFIED: D-02/D-09]
-- `_cleanup_uncommitted_candidate` and `_cleanup_prior_payload` cannot be the recovery system because they retain no resumable provenance. [VERIFIED: `src/cacheness/storage/blob_store.py:931-956`; D-05-D-08]
-- Filename grammar such as `_CANDIDATE_PREFIX` cannot establish ownership for generalized reconciliation. [VERIFIED: `src/cacheness/storage/clear_recovery.py:62-65,678-708`; D-06]
-- Whole-backend metadata snapshot restoration must not be used after an uncertain authority transition. [VERIFIED: `src/cacheness/storage/clear_recovery.py:362-404`; D-04]
+## Environment Availability
+
+| Dependency | Required by | Available | Version | Fallback |
+|------------|-------------|-----------|---------|----------|
+| CPython system | SQLite design/runtime probe | Yes | Python 3.12.1; SQLite 3.43.1; `sqlite3.threadsafety == 3` [VERIFIED: runtime probe 2026-09-04; quoted result: `Python 3.12.1`, `3.43.1 3`] | Project venv for tests. |
+| Project virtualenv | Phase tests | Yes | Python 3.13.3; SQLite 3.47.1 [VERIFIED: runtime probe 2026-09-04; quoted result: `Python 3.13.3`, `3.47.1 3`] | Supported-version CI in Phase 8; Phase 3 should add local matrix where available. |
+| pytest | Validation | Yes | 8.4.1 in project venv [VERIFIED: runtime probe 2026-09-04; quoted result: `pytest 8.4.1`] | None required. |
+| `uv` | Repository workflow | Installed, but sandbox cache access was denied in this research session [VERIFIED: command probe 2026-09-04; quoted error: `Failed to initialize cache`] | Repository lock/tooling present | Direct `.venv/bin/python` and `.venv/bin/pytest` for local probes; normal project execution may use approved `uv run`. |
+| Local writable filesystem | SQLite authority and filesystem payloads | Yes for repository/test temp roots | Platform-provided | In-memory authority for ephemeral same-process tests only. |
+| PostgreSQL/S3 | Future adapters | Not required in Phase 3 | Deferred | None; do not pre-implement. |
+
+Both inspected runtime SQLite versions fall in the official WAL advisory's affected range, reinforcing rollback-journal mode for Phase 3. [CITED: https://www.sqlite.org/wal.html]
+
+**Missing dependencies with no fallback:** None for Phase 3.
+
+**Missing dependencies with fallback:** `uv` cache access in the sandbox; the existing project venv remains usable for read-only version probes and targeted tests.
 
 ## Validation Architecture
 
@@ -532,221 +739,175 @@ Python `Event` is a flag-based signal and `Barrier` coordinates a fixed number o
 
 | Property | Value |
 |----------|-------|
-| Framework | pytest 8.4.1 [VERIFIED: `pyproject.toml:68-73`; uv environment probe 2026-08-30] |
-| Config file | `pyproject.toml` [VERIFIED: `pyproject.toml:82-111`] |
-| Discovery | `tests/test_*.py`, `Test*`, `test_*`; strict markers enabled. [VERIFIED: `pyproject.toml:82-99`] |
-| Quick run command | `uv run pytest -q -o log_cli=false tests/test_manifest_repository_cas.py tests/test_blob_store_atomic_lifecycle.py -x` [ASSUMED] New filenames are proposed. |
-| Full phase command | `uv run pytest -q -o log_cli=false tests/test_manifest_repository_cas.py tests/test_blob_store_atomic_lifecycle.py tests/test_blob_store_reconciliation.py tests/test_blob_store_concurrency.py tests/test_blob_store_close_contract.py tests/test_blob_manifest.py tests/test_blob_manifest_backends.py tests/test_blob_store_read_contract.py tests/test_blob_store_integrity.py tests/test_clear_recovery.py tests/test_filesystem_containment.py -x` [ASSUMED] New filenames are proposed; existing filenames are verified. |
-| Full suite command | `uv run pytest -q -o log_cli=false` [VERIFIED: repository pytest configuration and prior verification command] |
-| Targeted lint | `uv run ruff check <phase-created-or-modified-python-files>` [VERIFIED: `AGENTS.md:127-153`] |
-
-Focused environment proof during research ran seven parametrized cases covering prepared reopen rollback, committed reopen roll-forward, clear admission, SQLite atomic raw publication, and the canonical tracer; all passed. [VERIFIED: `uv run pytest` probe, 2026-08-30]
+| Framework | pytest 8.4.1 |
+| Config file | `pyproject.toml` (`[tool.pytest.ini_options]`) [VERIFIED: `pyproject.toml:83`] |
+| Quick run command | `.venv/bin/pytest -q tests/test_lifecycle_authority_contract.py tests/test_sqlite_lifecycle_authority.py -x` |
+| Full phase command | `.venv/bin/pytest -q tests/test_lifecycle_authority_contract.py tests/test_sqlite_lifecycle_authority.py tests/test_blob_store_atomic_lifecycle.py tests/test_blob_store_reconciliation.py tests/test_blob_store_concurrency.py tests/test_blob_store_close_contract.py -o log_cli=false` |
+| Repository gate | `uv run pytest -q -o log_cli=false` plus `uv run ruff check src tests` under normal approved project tooling |
 
 ### Phase Requirements → Test Map
 
-| Req ID | Behavior | Test Type | Automated Command | File Exists? |
-|--------|----------|-----------|-------------------|-------------|
-| STOR-03 | Every injected write boundary exposes old complete or new complete generation; read acquisition never mixes manifest/payload | unit + integration + crash/reopen | `uv run pytest -q -o log_cli=false tests/test_blob_store_atomic_lifecycle.py -k 'write or read_acquisition' -x` | ❌ Wave 0 [ASSUMED] filename |
-| STOR-04 | Pre-authority failure preserves old authority and leaves recoverable owned residue; post-authority failure preserves new authority and cleanup debt | fault matrix + reopen | `uv run pytest -q -o log_cli=false tests/test_blob_store_atomic_lifecycle.py -k 'failure or recovery or reopen' -x` | ❌ Wave 0 [ASSUMED] filename |
-| STOR-05 | Overwrite/delete/clear/close converge on repetition; tombstone and operation retirement are conditional and ownership-aware | contract + integration | `uv run pytest -q -o log_cli=false tests/test_blob_store_atomic_lifecycle.py tests/test_blob_store_close_contract.py -k 'idempotent or delete or clear or close' -x` | ❌ Wave 0 [ASSUMED] filenames |
-| STOR-06 | Dry run is byte-for-byte non-mutating; apply is bounded/checkpointed/resumable; ambiguous evidence is untouched or safely quarantined | unit + adversarial + crash/reopen | `uv run pytest -q -o log_cli=false tests/test_blob_store_reconciliation.py -x` | ❌ Wave 0 [ASSUMED] filename |
-| STOR-07 | Forced write/write, write/delete, and read/write same-key races have deterministic winners; distinct keys overlap; registry retires entries | deterministic threads + independent instances + stress | `uv run pytest -q -o log_cli=false tests/test_blob_store_concurrency.py -x` | ❌ Wave 0 [ASSUMED] filename |
+| Req ID | Behavior | Test type | Automated command | File exists? |
+|--------|----------|-----------|-------------------|--------------|
+| STOR-03 | Every fault point shows old or new complete generation only | Interface contract + subprocess crash integration | `.venv/bin/pytest -q tests/test_lifecycle_authority_contract.py tests/test_blob_store_atomic_lifecycle.py -x` | Contract file ❌ Wave 0; BlobStore file exists but requires rewrite |
+| STOR-04 | Prepared/candidate/verified/promoted residue is exact and recoverable | Fault injection + reopen/crash | `.venv/bin/pytest -q tests/test_sqlite_lifecycle_authority.py tests/test_blob_store_reconciliation.py -x` | SQLite file ❌ Wave 0; reconciliation file exists but requires rewrite |
+| STOR-05 | Overwrite/delete/clear/close resume idempotently | Interface + BlobStore behavior | `.venv/bin/pytest -q tests/test_blob_store_atomic_lifecycle.py tests/test_blob_store_close_contract.py -x` | Existing files require scheduler-decoupled rewrite |
+| STOR-06 | Dry-run stable, apply resumable, bounded, destructive action revalidated | Interface + report integration | `.venv/bin/pytest -q tests/test_blob_store_reconciliation.py -x` | Exists but requires replacement internals |
+| STOR-07 | Same-key one winner; distinct-key payload work overlaps; no transaction spans I/O | Deterministic thread/process concurrency | `.venv/bin/pytest -q tests/test_blob_store_concurrency.py -x` | Exists but receipt/barrier tests require replacement |
 
-### Required Fault-Injection Matrix
+### Common authority-adapter contract
 
-Each boundary must be tested with ordinary `Exception` and process-loss-style `BaseException` where meaningful. `BaseException` tests must reopen a fresh store rather than relying on the interrupted live object's cleanup. This matches the established `_SimulatedClearInterruption` pattern. [VERIFIED: `tests/test_clear_recovery.py:27-31,234-326`; `src/cacheness/storage/clear_recovery.py:346-404`]
+Run the same parametrized contract against memory and SQLite:
 
-| Operation | Inject Immediately Before / During | Required Observable Result |
-|-----------|------------------------------------|----------------------------|
-| write/overwrite | handler serialization | No operation record, no managed candidate, old/absence unchanged. [VERIFIED: D-08] |
-| write/overwrite | operation-record exclusive create | No managed candidate, old/absence unchanged, typed backend/recoverable failure. [VERIFIED: D-05/D-08] |
-| write/overwrite | candidate stream creation/write/fsync/directory acknowledgement | Old/absence remains authority; partial/complete candidate is tied to detectable operation evidence; reopen dry run reports it. [VERIFIED: D-05-D-08] |
-| write/overwrite | candidate digest/size verification | Old remains authority; candidate never published in a manifest; evidence remains recoverable. [VERIFIED: D-01/D-07] |
-| write/overwrite | CAS compare failure | One winner remains readable; loser gets typed conflict and may clean/report only its own candidate. [VERIFIED: D-02/D-19] |
-| write/overwrite | CAS post-write acknowledgement ambiguity | Reopen authenticates actual manifest; if new generation is authority, only roll forward; never speculative rollback. [VERIFIED: D-04/D-07] |
-| write/overwrite | authority checkpoint update | New manifest remains authority; prepared-looking record is classified by manifest match and resumed forward. [VERIFIED: D-04/D-14] |
-| write/overwrite | old payload reclamation / operation retirement | New remains readable; cleanup debt is typed and second recovery converges. [VERIFIED: D-07/D-11/D-14] |
-| delete | tombstone CAS | Old remains until tombstone wins; compare conflict cannot delete a newer write. [VERIFIED: D-09/D-19] |
-| delete | payload reclamation | Signed tombstone remains and repeated delete/reconcile resumes. [VERIFIED: D-09/D-11] |
-| delete | conditional tombstone retirement | Absence or newer generation survives; late finalizer cannot remove newer record. [VERIFIED: D-09/D-11] |
-| clear | bounded snapshot page/checkpoint, each per-key CAS/reclaim, interruption between pages | Completed entries remain completed; later keys/new generations are not accidentally deleted; resume continues from stable checkpoint. [VERIFIED: D-10/D-14] |
-| close | transition to rejecting new work, waiting for in-flight, record flush, owned resource close | New calls fail typed; admitted call completes deterministically; repeated close is no-op/same outcome; injected backend remains open. [VERIFIED: D-12] |
+- absent/create CAS, overwrite CAS, delete/tombstone CAS, and conflict outcomes;
+- prepared intent does not affect normal read;
+- promotion atomically changes entry, mutation, cleanup debt, projection dirty state, and revision;
+- rollback leaves all participating tables unchanged;
+- operation IDs and calls are idempotent after uncertain outcomes;
+- clear snapshot captures exact target generations and excludes later commits;
+- high-water/keyset pages neither skip nor repeat eligible starting rows;
+- apply checkpoints resume after interruption;
+- malformed/oversized/unknown-version state fails typed and unchanged;
+- close is idempotent and caller-owned resources are not closed.
 
-### Required Race Matrix
+### Deterministic crash matrix
 
-Use `threading.Event`/`Barrier` hooks at exact lifecycle seams with timeouts; do not use `sleep()` as the interleaving oracle. Python documents that lock waiter choice is undefined, so assertions target the CAS/state invariant, not which thread happens to win. [CITED: https://docs.python.org/3/library/threading.html]
+Use spawned subprocesses that open their own authority/store, signal a parent at a named hook, and are terminated at these boundaries:
 
-| Race | Forced Interleaving | Assertion |
-|------|---------------------|-----------|
-| write vs write, absent | both read absence; both candidates verified; release CAS together | Exactly one committed generation; one typed conflict; winner readable; loser cleanup touches only loser locator. [VERIFIED: D-19] |
-| write vs write, overwrite | both read generation G; first wins G→N1; second attempts G→N2 | N1 remains authority; loser cannot reclaim G until it proves ownership rules and cannot delete N1. [VERIFIED: D-02/D-11/D-19] |
-| write vs delete | both read G; alternate which CAS wins | Winner determines committed new generation or tombstone; loser conflicts; no missing payload under committed manifest. [VERIFIED: D-19] |
-| read vs overwrite | reader reads G, writer commits N and starts G reclamation | Reader returns complete G snapshot or retries once and returns N/typed conflict; never mixed. [VERIFIED: D-03/D-19] |
-| read vs delete | reader reads G, delete tombstones/reclaims | Reader returns complete G snapshot or one bounded lifecycle outcome; handler never sees partial bytes. [VERIFIED: D-03/D-19] |
-| distinct-key operations | block key A at pre-CAS, complete key B | B completes before A releases; proves no global ordinary-operation mutex. [VERIFIED: D-20] |
-| clear vs post-snapshot create/overwrite | establish clear snapshot, then admit later write where protocol permits | New key absent from snapshot survives; changed generation conflicts rather than being deleted. [VERIFIED: D-10] |
-| close vs in-flight operation | pause admitted op, begin close, attempt second op | close waits/cancels deterministically; second op rejected; no resource use after close. [VERIFIED: D-12] |
+1. before intent commit;
+2. after intent commit and before payload creation;
+3. during candidate creation;
+4. after candidate fsync and before verification;
+5. after verification and before promotion;
+6. inside promotion before commit;
+7. immediately after promotion commit;
+8. during old-payload cleanup;
+9. after physical cleanup and before debt retirement;
+10. during clear target processing and reconciliation checkpointing.
 
-### Reconciliation Validation
+After each crash: reopen, run `PRAGMA integrity_check` and `PRAGMA foreign_key_check`, inspect normal read, run dry-run twice for stable report equality, apply with an injected interruption, resume, and assert convergence plus no deletion of the only valid generation.
 
-Dry-run tests must compare complete pre/post observable state: exact manifest bytes, operation-record bytes, payload bytes or hashes, mtimes where stable, signing-key bytes, directory membership, backend counters, and mutation-call spies. The report must be deterministic for the same snapshot and serializable to the documented machine format. [VERIFIED: D-13/D-16; established zero-mutation audit `.planning/phases/02-canonical-storage-and-integrity-contract/02-VERIFICATION.md:65-68`]
+### Deterministic concurrency tests
 
-Apply/resume tests must interrupt after every action checkpoint, reopen, re-run, and assert convergence without repeated destructive calls. Mutate authority between dry run and apply and assert that revalidation converts the finding to blocked/conflict. Include malformed, oversized, duplicate, unknown-version, wrong-store, wrong-key, locator-escape, symlink, and provenance-free evidence. [VERIFIED: D-14-D-16; bounded clear adversarial precedent `tests/test_clear_recovery.py:944-1106,1538-2008`]
+- Two same-key writes prepared from the same generation: release both promotion barriers; exactly one commits and one receives typed conflict; loser cleans only its candidate.
+- ABA regression: prepare an absent-key create, execute an intervening create/delete to an absent lineage state, then prove the stale prepared operation cannot promote against the later absence.
+- Write versus delete from the same generation: exactly one tombstone/new-generation promotion wins.
+- Reader paused after manifest snapshot while writer promotes: reader returns one complete snapshot or the one bounded retry outcome, never mixed state.
+- Distinct keys: pause A at each payload boundary; B must finish before A release. Assert `max_concurrent_payload_work >= 2`, `max_concurrent_authority_write_transactions == 1`, and no authority transaction open at pause.
+- SQLite busy deadline: hold a writer transaction from a test-only connection; operation times out within bounded tolerance and returns the typed authority timeout with preserved cause.
+- Cross-process: use `multiprocessing` spawn, not a fork-inherited store. Each worker constructs its own authority.
+- Clear race: snapshot exact targets, then overwrite/create; clear never deletes post-snapshot generation/key.
+
+Avoid timing-only races and sleeps as the synchronization mechanism. Events/barriers and fault hooks decide ordering; timeouts only fail hung tests.
+
+### SQLite adapter-specific tests
+
+- Create/reopen schema; verify application ID, user version, `journal_mode=delete`, `synchronous=extra`, foreign keys on, trusted schema off.
+- Reject unknown newer schema and wrong-store/application identity without mutation.
+- Roll back a multi-table promotion fault at each statement; assert no partial entry/debt/revision/projection state.
+- Confirm database recovery after process termination during write transaction.
+- Reject post-fork inherited authority by PID; fresh child authority succeeds where topology is supported.
+- Verify `close()` releases owned connections and is idempotent.
+- Exercise Windows/macOS/Linux in CI on supported Python versions; no platform-specific receipt/lock behavior is expected.
 
 ### Sampling Rate
 
-- **Per task commit:** Run the smallest new test module for the touched seam plus its nearest Phase 2/clear regression file. [VERIFIED: existing test organization]
-- **Per wave merge:** Run the full phase command above. [ASSUMED] New filenames are proposed.
-- **Before phase verification:** Run full phase command, full suite, targeted Ruff, and the independent compatibility corpus validator `uv run python tests/fixtures/compat/validate_corpus.py --expected-through sqlite-columns-v0314`. [VERIFIED: Phase 2 verification command `.planning/phases/02-canonical-storage-and-integrity-contract/02-VERIFICATION.md:95-101`]
-- **Phase gate:** Full suite green relative to the checked baseline; every fault/race/reopen test active with no unconditional skip. [VERIFIED: project delivery constraints]
+- **Per task commit:** common authority contract plus the directly changed behavior file.
+- **Per wave merge:** full phase command.
+- **Phase gate:** full repository suite, targeted supported-Python/platform matrix, Ruff delta clean, and crash/concurrency suite green before `$gsd-verify-work`.
 
 ### Wave 0 Gaps
 
-- [ ] `tests/test_manifest_repository_cas.py` — exact create-if-absent, replace-if-generation, conditional tombstone retirement, independent-instance conflict, SQLite rollback, JSON cross-instance refresh/locking. [ASSUMED] Filename is proposed.
-- [ ] `tests/test_blob_store_atomic_lifecycle.py` — complete write/delete/clear fault matrix and reopen recovery. [ASSUMED] Filename is proposed.
-- [ ] `tests/test_blob_store_reconciliation.py` — dry-run immutability, stable reports, bounded pages, apply revalidation, checkpoints, quarantine/report policy. [ASSUMED] Filename is proposed.
-- [ ] `tests/test_blob_store_concurrency.py` — forced same-key and distinct-key race matrix, one-retry read acquisition, registry retirement. [ASSUMED] Filename is proposed.
-- [ ] `tests/test_blob_store_close_contract.py` — operation admission/drain, exactly-once owned closes, injected backend retention, no data clear. [ASSUMED] Filename is proposed.
-- [ ] Shared fault hooks/fixtures at lifecycle boundaries; prefer explicit test-only callbacks over monkeypatching implementation-private line order after the design stabilizes. [ASSUMED]
-- [ ] Add test-only bounded inventory/call counters so QUAL-07 behavior is asserted rather than inferred. [VERIFIED: `.planning/REQUIREMENTS.md:73`]
-
-## Security Domain
-
-Security enforcement is enabled at ASVS level 1 in `.planning/config.json`. [VERIFIED: `.planning/config.json` `workflow.security_enforcement=true`, `security_asvs_level=1`]
-
-OWASP ASVS 5.0.0 is the latest stable release identified by the official project; its chapter numbering differs from ASVS 4.x, so references below use version-qualified functional categories. [CITED: https://github.com/OWASP/ASVS]
-
-### Applicable ASVS 5.0 Categories
-
-| ASVS Category | Applies | Standard Control for Phase 3 |
-|---------------|---------|------------------------------|
-| V1 Encoding and Sanitization | yes | Canonical bounded structured encoding; decode once; reject duplicate/unknown/oversized fields before use. Existing manifest codec is the model. [CITED: https://github.com/OWASP/ASVS/blob/master/5.0/docs_en/OWASP_Application_Security_Verification_Standard_5.0.0_en.json] [VERIFIED: `src/cacheness/storage/manifest.py:80-228`] |
-| V2 Validation and Business Logic | yes | Validate state transition, expected generation, checkpoint monotonicity, operation/store ownership, and destructive-action preconditions; reject invalid evidence rather than normalize it. [CITED: https://github.com/OWASP/ASVS/blob/master/5.0/docs_en/OWASP_Application_Security_Verification_Standard_5.0.0_en.flat.json] |
-| V5 File Handling | yes | Internally derive generation locators; contain and no-follow every open/write/delete/quarantine; enforce size/count limits before parsing or copying. [CITED: https://github.com/OWASP/ASVS/blob/master/5.0/docs_en/OWASP_Application_Security_Verification_Standard_5.0.0_en.flat.json] [VERIFIED: `src/cacheness/storage/path_security.py:220-314`] |
-| V11 Cryptography | yes | Reuse HMAC-SHA256/SHA-256 through the verified key provider; domain-separate operation evidence; fail closed on missing/invalid key or signature. [CITED: https://github.com/OWASP/ASVS/blob/master/5.0/en/0x20-V11-Cryptography.md] [VERIFIED: Phase 2 verification truths 8-10] |
-| V15 Secure Coding and Architecture | yes | Bound memory/record/page/key-lock retention, expose unsupported topology instead of false guarantees, and keep authority/recovery responsibilities separated. [CITED: https://github.com/OWASP/ASVS/blob/master/5.0/docs_en/OWASP_Application_Security_Verification_Standard_5.0.0_en.json] |
-| V16 Security Logging and Error Handling | yes | Stable typed reasons, operation/generation context without payload/key material leakage, and fail-closed ambiguous publication. [CITED: https://github.com/OWASP/ASVS/blob/master/5.0/en/0x25-V16-Security-Logging-and-Error-Handling.md] |
-| Authentication / Session Management / Web Access Control | no | `BlobStore` is an in-process library and this phase adds no user/session/web authorization boundary. Do not invent one. [VERIFIED: `AGENTS.md:42-45,91-95`] |
-
-### Known Threat Patterns
-
-| Pattern | STRIDE | Standard Mitigation |
-|---------|--------|---------------------|
-| Forged operation record claims ownership of an unrelated locator | Spoofing / Tampering | Authenticate or strictly validate owner/version/store topology; derive contained locators; require manifest/generation corroboration before mutation. [VERIFIED: D-06/D-15] |
-| Losing writer deletes winning generation | Tampering / Denial of Service | Exact expected-generation CAS, operation-specific locators, and revalidation immediately before cleanup. [VERIFIED: D-02/D-11/D-19] |
-| Malformed/oversized journal or reconciliation inventory exhausts memory | Denial of Service | Enforce encoded-byte, item, nesting, field, page, and total-run bounds before allocation/deserialization; stable resumable cursors. [VERIFIED: D-05/D-10/D-14; existing bounds `src/cacheness/storage/clear_recovery.py:34-36`] |
-| Reconciliation invokes pickle/dill to identify residue | Elevation of Privilege | Never deserialize for ownership/lifecycle decisions; payloads are opaque and trusted only after normal authenticated read checks. [VERIFIED: D-16; `docs/SECURITY.md:12-23`] |
-| Dry-run mutates/quarantines evidence | Tampering / Repudiation | Dedicated non-mutating analysis path; exact pre/post byte/call audit; explicit apply mode and checkpoints. [VERIFIED: D-13/D-14] |
-| Cleanup/report logs payload bytes, signing material, or unsafe raw paths | Information Disclosure | Record identifiers, generations, bounded reason codes, and redacted/relative locators only; never payload contents or key bytes. [VERIFIED: D-05; ASVS V16 guidance] |
-| Unknown future schema is interpreted as current lifecycle evidence | Tampering | Exact version dispatch; unsupported-version report untouched; no guessed repair. [VERIFIED: D-15/D-16; Phase 2 MIGR-07] |
-| Symlink/root replacement redirects deletion/quarantine | Tampering / Elevation of Privilege | Reuse `ManagedFileOps` descriptor/no-follow/root-identity checks for every destructive and quarantine operation. [VERIFIED: `src/cacheness/storage/path_security.py:220-314,421-476`] |
-| Unbounded per-key lock registry from attacker-chosen keys | Denial of Service | Refcount entries for active/waiting users and retire at zero; assert registry size returns to baseline after high-cardinality tests. [VERIFIED: D-17] |
-
-### Security-Specific Prohibitions
-
-- Do not use operation evidence as an alternate read authority. [VERIFIED: D-03]
-- Do not parse handler payloads or filename suffixes to infer ownership. [VERIFIED: D-06/D-16]
-- Do not quarantine when the backend cannot perform a contained/backend-owned safe move; report untouched. [VERIFIED: D-15]
-- Do not log secret material, payload contents, or unbounded attacker-controlled metadata. [VERIFIED: D-05; ASVS V16]
-- Do not weaken Phase 2 authentication/locator/digest ordering to make recovery easier. [VERIFIED: Phase 2 verification truths 5-10]
+- [ ] `tests/test_lifecycle_authority_contract.py` — parametrized semantic contract for memory and SQLite.
+- [ ] `tests/test_sqlite_lifecycle_authority.py` — pragmas, schema, migration, busy, recovery, close/fork.
+- [ ] Shared deterministic authority/payload fault hooks and spawned-process helpers in `tests/conftest.py` or a focused private helper.
+- [ ] Replace scheduler-internal cases in `tests/test_manifest_repository_cas.py`, `tests/test_blob_store_atomic_lifecycle.py`, `tests/test_blob_store_reconciliation.py`, `tests/test_blob_store_concurrency.py`, `tests/test_clear_recovery.py`, and `tests/test_blob_store_close_contract.py` with interface/behavior assertions.
+- [ ] Add benchmark probes for authority transaction duration, clear snapshot duration, busy wait, and distinct-key payload overlap; establish budgets from measured baselines.
 
 ## Assumptions Log
 
-| # | Claim | Section | Risk if Wrong |
+| # | Claim | Section | Risk if wrong |
 |---|-------|---------|---------------|
-| A1 | Suggested module/type names (`lifecycle.py`, `operation_record.py`, `operation_repository.py`, `reconciliation.py`, `coordination.py`, `ManifestExpectation`) are implementation placeholders. | Recommended Project Structure; Code Examples | Low: CONTEXT explicitly delegates names; planner may rename without changing responsibilities. |
-| A2 | An exact canonical-record digest/revision should accompany expected generation internally to prevent same-generation metadata lost updates. | Pattern 2 | Medium: if metadata updates are changed to allocate a new generation, the extra digest may be redundant; if omitted while same-generation patches remain, lost updates are possible. |
-| A3 | A dynamically retained refcounted per-key registry is preferable to striping. | Pattern 7 | Low/medium: behavior is locked, implementation is discretionary; a carefully designed stripe scheme might be accepted but can serialize distinct keys. |
-| A4 | New test filenames and their exact CLI selectors will follow the five-file Wave 0 layout shown. | Validation Architecture | Low: planner may consolidate files; requirement-to-test coverage and commands must be updated together. |
-| A5 | Shared lifecycle fault hooks will be exposed as explicit test-only callbacks/fixtures after seam design stabilizes. | Wave 0 Gaps | Low: monkeypatch seams can work, but stable hooks make race/fault tests less coupled to line order. |
-| A6 | `delete()` preserves `False` for true absence while treating that result as an idempotent non-error. | Open Questions — RESOLVED | Resolved by Plan 03-04 and D-09 compatibility coverage. |
-| A7 | `LifecycleLimits` makes tombstone/grace/page/close policy explicit, finite, validated, and test-derived. | Open Questions — RESOLVED | Resolved by Plans 03-03 and 03-09 with deterministic boundary tests. |
+| A1 | Portable automatic network/userspace-filesystem detection is incomplete; explicit topology/capability declaration is needed. | SQLite connection policy | Unsupported topology might be accepted or a valid local topology rejected. |
+| A2 | Proposed module, method, table, column, state, report-reason, application-ID, and schema-version names are not public locked values yet. | Architecture / code examples | Prematurely locking names could break compatibility or force needless migrations. |
+| A3 | One-transaction `INSERT ... SELECT` clear snapshot will meet the measured store-size/writer-wait budget. | Transactional clear | Large clears could hold the sole SQLite writer too long; benchmark before locking budget. |
+| A4 | Existing deployed stores may contain file-native iteration artifacts; their released prevalence is not established. | Runtime inventory / migration | Removing recognition without an explicit compatibility decision could strand a real user store. |
+| A5 | Installed wheels/bytecode can retain removed Python modules until reinstall, but they are not lifecycle authority. | Runtime inventory | Test environment could accidentally import stale code and mask source deletion. |
+| A6 | Initial numeric transaction-duration and busy-wait budgets must be derived from checked-in benchmarks. | Instrumentation | Arbitrary targets could be either meaningless or prohibitively strict. |
+| A7 | Separate in-memory authority instances do not share state; multi-store coordination requires injection of the same instance. | In-memory adapter | A hidden global registry would change ownership, isolation, and close semantics. |
 
-No retention/grace/page-size/retry-delay numeric default is assumed here. CONTEXT delegates bounded values, and STATE explicitly says tombstone retention and orphan grace must be derived from fault/crash testing. [VERIFIED: `.planning/STATE.md:143-147`; `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-CONTEXT.md:76-80`]
+The planner should turn A3, A4, and public compatibility around report/error values into explicit Wave 0 characterization or benchmark tasks. Other assumed names remain implementation discretion and should be locked by the first authority-contract tests.
 
-## Open Questions — RESOLVED
+## Open Questions
 
-1. **[RESOLVED] What should `delete()` return when the key is already absent?**
-   - What we know: D-09 calls repeated delete “successful”; the current public docstring says `True if deleted, False if not found`. [VERIFIED: CONTEXT D-09; `src/cacheness/storage/blob_store.py:594-611`]
-   - Resolution: Preserve `False` for true absence as the compatible boolean meaning “nothing removed in this call,” while treating it as an idempotent non-error. Plan 03-04 locks this behavior and tests absent, resumed-tombstone, deleted, and conflict outcomes separately. [RESOLVED: Plan 03-04; D-09]
-   - Recommendation adopted: Preserve `False` for true absence as the legacy boolean meaning “nothing removed in this call,” while documenting/testing that it is an idempotent non-error. Use a richer internal result for absent/resumed/deleted/conflict. [RESOLVED]
+1. **Was any file-native Phase 3 scheduler format released or used outside disposable development worktrees?**
+   - What we know: current main contains the scheduler modules, and the final iteration-28 review identifies unrecoverable unindexed control residue. [VERIFIED: `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-REVIEW.file-native-final.md:64-84`]
+   - What's unclear: whether user stores exist whose only recovery evidence is that internal protocol.
+   - Recommendation: inventory package release history and supported stored formats in Wave 0. If never released, document dev-store rebuild and delete it. If released, add only an exact read-only detector that returns migration-required; do not resume the protocol.
 
-2. **[RESOLVED] How much conditional-publication implementation belongs in Phase 3 versus Phase 4?**
-   - What we know: Phase 3 requires backend CAS as its correctness boundary, while Phase 4 owns full JSON/memory/SQLite/PostgreSQL parity and capability declarations. [VERIFIED: D-18; deferred scope]
-   - Resolution: Phase 3 implements and independently tests truthful exact-record CAS for the exact local repositories admitted by Phase 2—JSON, memory, and SQLite. Registered/custom/PostgreSQL capability composition remains Phase 4 scope. [RESOLVED: Plans 03-01 and 03-02; D-02/D-18]
-   - Recommendation: Implement truthful CAS for the exact local repositories already admitted by Phase 2 (JSON, memory, SQLite) and define the backend-neutral protocol now; defer registered/custom/PostgreSQL capability composition to Phase 4. Otherwise Phase 3 cannot validate independent-instance races on real direct `BlobStore` paths. [VERIFIED: current admitted set `src/cacheness/storage/manifest_repository.py:351-366`; deferred Phase 4]
+2. **What exact public result/error/reconciliation fields are already compatibility-locked?**
+   - What we know: STOR-08 and earlier phases protect typed outcomes, and D-13 requires stable machine/human reconciliation reports.
+   - What's unclear: which scheduler-era reason strings were public versus internal.
+   - Recommendation: characterize public calls and serialization shapes before naming new authority enum/reason values; map deprecated values at the boundary rather than leaking SQLite errors.
 
-3. **[RESOLVED] What payload inventory can Phase 3 reconciliation truthfully claim?**
-   - What we know: D-06 forbids filename inference; full payload-backend listing/capability parity is Phase 5. [VERIFIED: D-06; deferred scope]
-   - Resolution: Phase 3 reconciles stable manifest pages plus authenticated operation-record pages. A payload inventory that cannot prove ownership is represented as a blocked/unsupported finding and remains untouched; Phase 3 never scans compatibility payload names or claims Phase 5 inventory capability. [RESOLVED: Plans 03-05 and 03-07; D-13-D-16]
-   - Recommendation: Reconcile manifests plus authenticated operation records in Phase 3 and add a narrow bounded local owned-locator inventory only if ownership can be proven without filename guessing. Otherwise emit a blocked/unsupported inventory finding and let Phase 5 fill the payload contract. Never scan the repository's existing 76 candidate-named compatibility payloads as Phase 3 residue. [VERIFIED: D-13-D-16; runtime inventory]
+3. **What clear-snapshot writer-hold budget is acceptable at expected maximum local store size?**
+   - What we know: exact clear membership must be transactional, and SQLite has one writer. [CITED: https://www.sqlite.org/lang_transaction.html]
+   - What's unclear: target cardinality and acceptable p95/p99 writer wait.
+   - Recommendation: implement the single-transaction snapshot first, benchmark realistic cardinalities, and set a checked-in threshold. Do not add a chunked weak snapshot preemptively.
 
-4. **[RESOLVED] What are the default tombstone retention, orphan grace, reconciliation page size, and close wait policy?**
-   - What we know: Values must be bounded/deterministic; STATE requires retention/grace to come from fault/crash testing. [VERIFIED: discretion; `.planning/STATE.md:143-147`]
-   - Resolution: `LifecycleLimits` makes every limit finite, explicit, validated, and caller-configurable where operational policy is required. Defaults are selected and documented from deterministic page/call-count, frozen-clock, fault, and close-deadline tests; retention is semantic (until exact terminal cleanup), not an age-only evidence purge. [RESOLVED: Plan 03-03 and Plan 03-09]
-   - Recommendation adopted: Make limits injectable in tests, choose documented project defaults from deterministic fault/call-count/deadline evidence, and expose policy through the frozen `LifecycleLimits` boundary. [RESOLVED]
-
-5. **[RESOLVED] What might this research have missed?**
-   - Resolution: Plans require independent-instance CAS tests, exact-record expectations for same-generation metadata patches, and one lifecycle/recovery engine with the Phase 1 clear coordinator retained only as an exact legacy-evidence adapter. These requirements close the three residual risks below. [RESOLVED: Plans 03-02, 03-04, 03-05, and 03-06; D-02/D-04/D-18]
-   - The largest residual risk is a backend-local CAS implementation that is atomic inside one Python object but not across independent instances/processes. The plan checker should require independent-instance tests and refuse topology claims that cannot pass them. [VERIFIED: D-18]
-   - A second risk is treating metadata-only same-generation updates as irrelevant to CAS. Plan 03-02 adopts exact-record expectations for same-generation metadata patches. [RESOLVED]
-   - A third risk is retaining the Phase 1 clear coordinator alongside the new engine so two journals can both claim one operation. The plan should choose one authority/recovery engine and provide only a compatibility adapter for old clear evidence. [VERIFIED: current clear-only coordinator plus Phase 3 ownership boundary]
-
-## Environment Availability
-
-| Dependency | Required By | Available | Version | Fallback |
-|------------|-------------|-----------|---------|----------|
-| CPython | library/runtime tests | ✓ | system `python3` 3.12.1; uv environment 3.13.3 | Verify 3.11+ matrix later in Phase 8; Phase 3 tests run in uv environment. [VERIFIED: environment probe; `pyproject.toml:9`] |
-| uv | dependency/test runner | ✓ | 0.12.6 | Direct `.venv/bin/python -m pytest` only for diagnosis; checked commands should use uv. [VERIFIED: environment probe; `AGENTS.md:35-41`] |
-| pytest | validation | ✓ | 8.4.1 | None needed. [VERIFIED: environment probe; `pyproject.toml:68-73`] |
-| Ruff | changed-file lint | ✓ through uv lock/environment | locked 0.12.9 per project instructions | Run only targeted changed files during phase; repository baseline is not clean. [VERIFIED: `AGENTS.md:46-51,127-153`] |
-| POSIX advisory locking | current JSON/local cross-process admission reference | ✓ on this macOS host | stdlib `fcntl.flock` | A topology without the required primitive must fail typed; do not downgrade to a process-only lock. [VERIFIED: `src/cacheness/storage/clear_recovery.py:74-83,149-195`; D-18] |
-| SQLite | local CAS reference adapter | ✓ through SQLAlchemy/uv environment | SQLAlchemy 2.0.43 locked; SQLite runtime supplied by Python | In-memory repository for unit tests, but not a substitute for SQLite transaction tests. [VERIFIED: `AGENTS.md:44-65`] |
-| PostgreSQL service | deferred backend CAS/matrix | not required for Phase 3 | — | Phase 4/5 real-service coverage. [VERIFIED: deferred scope] |
-| AWS S3 | deferred payload lifecycle/matrix | not required for Phase 3 | — | Phase 5 real AWS behavior. [VERIFIED: deferred scope] |
-
-**Missing dependencies with no fallback:** None for Phase 3's local reference implementation. [VERIFIED: environment probe and phase boundary]
-
-**Missing dependencies with fallback/deferred owner:** PostgreSQL and AWS S3 are intentionally deferred, not Phase 3 blockers. [VERIFIED: `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-CONTEXT.md:119-124`]
+4. **Where should the authority database live relative to existing metadata paths?**
+   - What we know: it must be under a contained local root and must not be confused with JSON projection or payload files.
+   - What's unclear: the compatibility-safe filename/config mapping.
+   - Recommendation: select one reserved contained locator during planning, characterize collisions with released paths, and fail typed if an incompatible object occupies it. The proposed filename is intentionally not specified here.
 
 ## Sources
 
-### Primary (HIGH confidence)
+### Primary repository evidence (HIGH confidence)
 
-- `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-CONTEXT.md` — locked authority, evidence, reconciliation, coordination, and scope decisions.
-- `.planning/REQUIREMENTS.md` and `.planning/ROADMAP.md` — STOR-03 through STOR-07 and observable success criteria.
-- `.planning/phases/02-canonical-storage-and-integrity-contract/02-VERIFICATION.md` — verified canonical authority/read ordering, native payload ownership, and typed error boundary.
-- `src/cacheness/storage/blob_store.py` — current direct lifecycle, failure cleanup, delete/clear/close, and read seams.
-- `src/cacheness/storage/manifest.py` — exact canonical fields and verbatim lifecycle-state values `"prepared"`, `"committed"`, `"replacing"`, `"tombstoned"`, `"conflicted"`. [VERIFIED: `src/cacheness/storage/manifest.py:238-310`]
-- `src/cacheness/storage/manifest_repository.py` — current exact raw adapter protocol and local persistence transactions.
-- `src/cacheness/storage/guarded_handler_io.py` and `src/cacheness/storage/path_security.py` — validated stage identity, one private snapshot, atomic/durable/exclusive contained I/O.
-- `src/cacheness/storage/clear_recovery.py` and `tests/test_clear_recovery.py` — prepared/committed recovery precedent, strict bounds, fault/crash/admission tests.
-- `src/cacheness/error_handling.py` and `src/cacheness/storage/read_contract.py` — public typed reasons/categories.
-- `AGENTS.md`, `pyproject.toml`, `.planning/config.json`, `docs/SECURITY.md` — project constraints, runtime/test configuration, security enforcement, trusted-payload boundary.
-- Read-only runtime inventory and focused pytest probe performed 2026-08-30.
+- `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-CONTEXT.md` — locked D-01 through D-31, discretion, and deferrals.
+- `.planning/REQUIREMENTS.md` — STOR-03 through STOR-07 exact requirement text.
+- `.planning/phases/02-canonical-storage-and-integrity-contract/02-CONTEXT.md` — canonical manifest and committed-only read contract.
+- `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-RESEARCH.file-native.md` — superseded architecture/history only.
+- `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-REVIEW.file-native-final.md` and iteration archives — non-convergence/failure evidence.
+- `src/cacheness/storage/lifecycle.py`, `operation_repository.py`, `operation_record.py`, `coordination.py`, `clear_recovery.py`, `path_security.py`, `manifest_repository.py`, `reconciliation.py`, and `blob_store.py` — current main integration and deletion seams.
+- Targeted test files named in the deletion/validation sections — behavior worth preserving and scheduler coupling to remove.
 
-### Secondary (MEDIUM confidence)
+### Official documentation (MEDIUM confidence in this research)
 
-- [Python `threading` documentation](https://docs.python.org/3/library/threading.html) — lock semantics/fairness, conditions, events, barriers, and bounded waits.
-- [OWASP ASVS official project](https://github.com/OWASP/ASVS) — latest stable 5.0.0 and version-qualified references.
-- [OWASP ASVS 5.0 machine-readable requirements](https://github.com/OWASP/ASVS/blob/master/5.0/docs_en/OWASP_Application_Security_Verification_Standard_5.0.0_en.flat.json) — current chapter/category mapping.
-- [OWASP ASVS 5.0 Cryptography](https://github.com/OWASP/ASVS/blob/master/5.0/en/0x20-V11-Cryptography.md) — fail-secure cryptographic controls.
-- [OWASP ASVS 5.0 Logging and Error Handling](https://github.com/OWASP/ASVS/blob/master/5.0/en/0x25-V16-Security-Logging-and-Error-Handling.md) — fail-closed error handling and safe logging.
+- [SQLite Transaction](https://www.sqlite.org/lang_transaction.html) — explicit transactions, one writer, `BEGIN IMMEDIATE`, busy behavior.
+- [SQLite Write-Ahead Logging](https://www.sqlite.org/wal.html) — concurrency, same-host requirement, persistent mode, current WAL-reset bug advisory.
+- [SQLite PRAGMA Statements](https://www.sqlite.org/pragma.html) — synchronous modes, busy timeout, foreign keys, trusted schema, integrity checks, application ID, user version.
+- [SQLite Atomic Commit](https://sqlite.org/atomiccommit.html) — rollback-journal atomicity model and filesystem assumptions.
+- [SQLite How To Corrupt](https://www.sqlite.org/howtocorrupt.html) — journal-family handling, network filesystems, and post-fork connections.
+- [SQLite Over a Network](https://www.sqlite.org/useovernet.html) — local/server-process topology guidance and network locking/sync risks.
+- [Python 3.11 `sqlite3`](https://docs.python.org/3.11/library/sqlite3.html) — connection timeout/thread behavior, explicit transaction control, connection context-manager and close behavior.
 
-### Tertiary (LOW confidence)
-
-- None used as factual authority. Assumptions are isolated in the Assumptions Log.
+Context7 was selected by the research seam but was unavailable in this environment, so official documentation was read through web-search fallback. The seam classified `websearch` LOW; the document uses `[CITED]` rather than `[VERIFIED]` for those external facts and keeps design choices clearly identified as recommendations.
 
 ## Metadata
 
 **Confidence breakdown:**
 
-- Standard stack: HIGH — no new dependency; versions and contracts were read from `pyproject.toml`, uv environment, and current source.
-- Architecture: HIGH — derived from locked decisions, current source-of-truth seams, and passing Phase 2 verification.
-- Lifecycle failure/recovery pattern: HIGH — authority rules are locked and analogous clear fault/reopen behavior is already extensively tested.
-- Reconciliation API names/report encoding: MEDIUM — behavior/fields are locked; exact internal names and codec remain delegated.
-- Cross-process JSON/SQLite CAS details: MEDIUM — the contract is locked and current storage primitives are known, but Phase 3 must prove exact adapter implementations with independent-instance tests.
-- Security mapping: MEDIUM — mapped to official ASVS 5.0 sources via the research seam; ASVS is web-application-oriented while Cacheness is an in-process library.
+- Standard stack: HIGH for “stdlib SQLite, no new dependency” because D-26 locks it; MEDIUM for exact durability configuration because it is derived from official SQLite documentation and current runtime probes.
+- Architecture: HIGH because it follows locked D-23 through D-31 and the current-main integration/deletion audit.
+- Failure model: HIGH for the old scheduler's failure evidence; MEDIUM for the proposed normalized state machine until implementation fault tests pass.
+- Concurrency: HIGH for the contract and proof shape; MEDIUM for performance until benchmarked across supported platforms.
+- Migration: MEDIUM because deployed file-native-format prevalence is unresolved and Phase 7 owns execution.
+- Security: HIGH for retained Phase 1/2 boundaries; MEDIUM for SQLite resource hardening until platform matrix validation.
 
-**Research date:** 2026-08-30
-**Valid until:** 2026-09-29 (30 days; codebase architecture is stable enough for planning, but re-check after any Phase 3 precursor changes)
+**Research date:** 2026-09-04
+**Valid until:** 2026-10-04 for stable SQLite transaction fundamentals; recheck the WAL advisory and bundled runtime versions immediately before considering WAL.
+
+## RESEARCH COMPLETE
+
+Recommended plan decomposition:
+
+1. **Wave 0 — contract and compatibility characterization:** lock public outcomes/report shapes, determine whether scheduler formats were released, create common authority test fixtures, deterministic fault hooks, and benchmark probes.
+2. **Authority core — deep interface plus in-memory reference:** define bounded domain records and complete state transitions; prove CAS, atomic mutation/debt/clear/checkpoint ownership against the common contract.
+3. **SQLite authority — durable local reference:** implement schema identity/migrations, rollback `DELETE` + `synchronous=EXTRA`, explicit short `BEGIN IMMEDIATE` transactions, bounded busy deadlines, integrity checks, local-only capability, and close/fork ownership.
+4. **Lifecycle orchestration — native payload state machine:** rewire put/overwrite/delete around durable intent, immutable publish, verification, conditional promotion, cleanup debt, and retirement without a transaction across payload I/O.
+5. **Clear, reconciliation, and JSON projection:** implement transactional clear targets, indexed high-water/keyset recovery, resumable apply checkpoints, stable reports, and revision-checked JSON rebuild/export.
+6. **Delete the abandoned scheduler:** remove `operation_repository.py`, scheduler record/journal/lock/inventory mechanisms, platform receipt authority, and internal tests; retain only containment, immutable payload I/O, bounded local key/instance coordination, and any proven read-only migration detector.
+7. **Cross-platform acceptance:** run deterministic crash/race tests on supported Python versions and Windows/macOS/Linux, prove D-28 overlap counters, establish transaction/clear/busy budgets, and gate on full regression plus lint delta.
+
+This decomposition satisfies STOR-03 through STOR-07 without recreating a filesystem database: SQLite stores only small transactional lifecycle authority rows, while payloads remain immutable native handler outputs in their payload backend.

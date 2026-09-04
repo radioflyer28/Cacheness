@@ -1,6 +1,7 @@
 ---
 phase: 03-atomic-lifecycle-and-recovery-engine
 plan: "04"
+status: superseded
 subsystem: storage-lifecycle
 tags: [blobstore, immutable-generations, cas, tombstone, recovery]
 requires:

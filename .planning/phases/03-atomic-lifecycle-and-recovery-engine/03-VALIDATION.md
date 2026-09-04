@@ -1,15 +1,15 @@
 ---
 phase: 03
 slug: atomic-lifecycle-and-recovery-engine
-status: complete
-nyquist_compliant: true
-wave_0_complete: true
-created: 2026-08-30
+status: draft
+nyquist_compliant: false
+wave_0_complete: false
+created: 2026-09-04
 ---
 
 # Phase 03 — Validation Strategy
 
-> Per-phase validation contract for feedback sampling during execution.
+> Replacement validation contract for the transactional lifecycle-authority replan.
 
 ---
 
@@ -19,84 +19,77 @@ created: 2026-08-30
 |----------|-------|
 | **Framework** | pytest 8.4.1 |
 | **Config file** | `pyproject.toml` |
-| **Quick run command** | `uv run pytest -q -o log_cli=false tests/test_manifest_repository_cas.py tests/test_blob_store_atomic_lifecycle.py -x` |
-| **Full phase command** | `uv run pytest -q -o log_cli=false tests/test_manifest_repository_cas.py tests/test_blob_store_atomic_lifecycle.py tests/test_blob_store_reconciliation.py tests/test_blob_store_concurrency.py tests/test_blob_store_close_contract.py tests/test_blob_manifest.py tests/test_blob_manifest_backends.py tests/test_blob_store_read_contract.py tests/test_blob_store_integrity.py tests/test_clear_recovery.py tests/test_filesystem_containment.py -x` |
-| **Full suite command** | `uv run pytest -q -o log_cli=false` |
-| **Estimated runtime** | Focused files under 30 seconds; full phase gate under 60 seconds on the reference environment |
+| **Quick run command** | `.venv/bin/pytest -q tests/test_lifecycle_authority_contract.py tests/test_sqlite_lifecycle_authority.py -x` |
+| **Full phase command** | `.venv/bin/pytest -q tests/test_lifecycle_authority_contract.py tests/test_sqlite_lifecycle_authority.py tests/test_blob_store_atomic_lifecycle.py tests/test_blob_store_reconciliation.py tests/test_blob_store_concurrency.py tests/test_blob_store_close_contract.py -o log_cli=false` |
+| **Repository gate** | `uv run pytest -q -o log_cli=false` |
+| **Estimated runtime** | Establish from Wave 0; focused feedback target under 30 seconds |
 
 ---
 
 ## Sampling Rate
 
-- **After every task commit:** Run the smallest new test module for the touched lifecycle seam plus its nearest Phase 2 or clear-recovery regression file.
+- **After every task commit:** Run the common authority contract plus the directly changed behavior file.
 - **After every plan wave:** Run the full Phase 3 command.
-- **Before phase verification:** Run the full phase command, full pytest suite, targeted Ruff, and `uv run python tests/fixtures/compat/validate_corpus.py --expected-through sqlite-columns-v0314`.
-- **Max feedback latency:** 30 seconds for a focused task gate; split slower targets.
+- **Before `$gsd-verify-work`:** Run the full Phase 3 command, full repository suite, compatibility corpus, supported Python 3.11/3.13 checks, and changed-path Ruff.
+- **Max feedback latency:** 30 seconds for focused tests; split longer crash/platform matrices into explicit gate jobs.
 
 ---
 
-## Per-Task Verification Map
-
-Task/plan identifiers are finalized by the planner; this requirement-to-target contract is fixed.
+## Requirement Verification Map
 
 | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |-------------|------------|-----------------|-----------|-------------------|-------------|--------|
-| STOR-03 | Lifecycle authority/CAS | Every injected write boundary exposes the old complete or new complete generation; reads never mix manifest and payload | fault + crash/reopen | `uv run pytest -q -o log_cli=false tests/test_blob_store_atomic_lifecycle.py -k 'write or read_acquisition' -x` | ✅ W0 | ✅ green |
-| STOR-04 | Evidence/provenance | Pre-authority failure preserves old authority and detectable owned residue; post-authority failure preserves new authority and cleanup debt | fault matrix + reopen | `uv run pytest -q -o log_cli=false tests/test_blob_store_atomic_lifecycle.py -k 'failure or recovery or reopen' -x` | ✅ W0 | ✅ green |
-| STOR-05 | Destructive convergence | Overwrite/delete/clear/close are idempotent, generation-conditional, and ownership-aware | contract + integration | `uv run pytest -q -o log_cli=false tests/test_blob_store_atomic_lifecycle.py tests/test_blob_store_close_contract.py -k 'idempotent or delete or clear or close' -x` | ✅ W0 | ✅ green |
-| STOR-06 | Reconciliation safety | Dry-run is byte-for-byte non-mutating; apply is bounded, checkpointed, resumable, and evidence-gated | adversarial + reopen | `uv run pytest -q -o log_cli=false tests/test_blob_store_reconciliation.py -x` | ✅ W0 | ✅ green |
-| STOR-07 | Race determinism | Same-key races have one deterministic CAS winner; distinct keys overlap; local coordination entries retire | deterministic concurrency | `uv run pytest -q -o log_cli=false tests/test_blob_store_concurrency.py -x` | ✅ W0 | ✅ green |
+| STOR-03 | T-03-01 partial visibility | Every fault boundary exposes the old or new complete generation; promotion is one authority transaction | contract + subprocess crash | `.venv/bin/pytest -q tests/test_lifecycle_authority_contract.py tests/test_blob_store_atomic_lifecycle.py -x` | Contract file ❌ W0; BlobStore file requires rewrite | ⬜ pending |
+| STOR-04 | T-03-02 unindexed residue | Durable intent precedes persistent payload side effects; exact indexed work/debt survives reopen | fault + recovery | `.venv/bin/pytest -q tests/test_sqlite_lifecycle_authority.py tests/test_blob_store_reconciliation.py -x` | SQLite file ❌ W0; reconciliation requires rewrite | ⬜ pending |
+| STOR-05 | T-03-03 stale cleanup | Overwrite/delete/clear/close are idempotent and never reclaim a current generation | interface + integration | `.venv/bin/pytest -q tests/test_blob_store_atomic_lifecycle.py tests/test_blob_store_close_contract.py -x` | Existing files require scheduler-decoupled rewrite | ⬜ pending |
+| STOR-06 | T-03-04 unsafe repair | Dry-run is non-mutating; apply is indexed, bounded, exact, resumable, and revalidated | adversarial + reopen | `.venv/bin/pytest -q tests/test_blob_store_reconciliation.py -x` | Existing file requires replacement internals | ⬜ pending |
+| STOR-07 | T-03-05 race/ABA | Same-key CAS has one winner; ABA is rejected; distinct-key payload work overlaps outside transactions | deterministic concurrency | `.venv/bin/pytest -q tests/test_blob_store_concurrency.py -x` | Existing file requires receipt/barrier test replacement | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
-## Required Fault and Race Dimensions
+## Required State and Failure Dimensions
 
-- Inject before/after serialization, operation-record persistence, candidate publication, candidate verification, CAS comparison/write/acknowledgement, authority checkpointing, old-payload reclamation, and operation retirement.
-- Exercise ordinary exceptions and process-loss-style `BaseException`; reopen a fresh store after simulated process loss.
-- Force write/write, write/delete, read/write, read/delete, clear/post-snapshot write, and close/in-flight interleavings with `Event`/`Barrier` hooks and timeouts, never `sleep()` as the oracle.
-- Assert exact manifest/payload/operation bytes and mtimes where stable, no cross-generation reclamation, and one bounded read retry only.
-- Prove a blocked key A does not prevent an unrelated key B from completing.
+- Common contract runs against `InMemoryLifecycleAuthority` and `SqliteLifecycleAuthority` for absent/create, overwrite, tombstone/delete, operation idempotency, rollback, cleanup debt, clear targets, reconciliation checkpoints, malformed rows, unknown versions, and close ownership.
+- Subprocess crash matrix interrupts before/after intent commit, candidate creation/fsync, verification, promotion transaction commit, cleanup, debt retirement, clear progress, and reconciliation checkpointing.
+- Every crash reopen runs SQLite integrity and foreign-key checks, performs two equal dry-runs, resumes an interrupted apply, and proves the only valid generation survives.
+- Same-key write/write and write/delete release promotion barriers together and assert exactly one expected-lineage winner.
+- ABA test prepares against absence, performs create/delete, then proves the stale prepared create cannot promote against the later absent lineage.
+- Distinct-key test pauses key A at every payload boundary and proves key B completes; counters assert payload overlap and no authority transaction is open at the pause.
+- SQLite busy tests hold an independent writer and prove the absolute deadline, typed timeout, rollback, and preserved cause.
+- Clear captures exact key/generation targets transactionally; later creates and overwrites are not deleted.
+- Reconciliation uses captured high-water IDs and monotonic keyset cursors with independent row/action/byte limits; no filename inventory or offset pagination is accepted.
 
 ---
 
 ## Wave 0 Requirements
 
-- [x] `tests/test_manifest_repository_cas.py` — exact create-if-absent, replace-if-record/generation, conditional tombstone retirement, independent-instance conflict, and local adapter atomicity.
-- [x] `tests/test_blob_store_atomic_lifecycle.py` — write/overwrite/delete/clear authority and complete fault/reopen matrix.
-- [x] `tests/test_blob_store_reconciliation.py` — dry-run immutability, deterministic reports, bounded pages, apply revalidation, checkpoints, safe quarantine/report policy.
-- [x] `tests/test_blob_store_concurrency.py` — forced same-key/distinct-key races, one-retry acquisition, and coordination-registry retirement.
-- [x] `tests/test_blob_store_close_contract.py` — admission/drain, idempotent close, owned-resource cleanup, injected-backend retention, and no stored-data clear.
-- [x] Shared explicit lifecycle fault hooks/fixtures and bounded inventory/call counters.
+- [ ] `tests/test_lifecycle_authority_contract.py` — common semantic contract for memory and SQLite adapters.
+- [ ] `tests/test_sqlite_lifecycle_authority.py` — schema identity/migration, `journal_mode=DELETE`, `synchronous=EXTRA`, pragmas, busy deadline, rollback, crash recovery, local topology, close, and fork ownership.
+- [ ] Shared deterministic authority/payload fault hooks and spawned-process helpers.
+- [ ] Characterization tests for public error reasons, reconciliation report shape, JSON metadata projection shape, and released scheduler-format prevalence.
+- [ ] Benchmark probes for authority transaction duration, clear snapshot duration, busy wait, and distinct-key payload overlap; budgets are set from measured baselines.
+- [ ] Retire or rewrite scheduler-internal tests in `test_manifest_repository_cas.py`, `test_clear_recovery.py`, and adjacent Phase 3 files so the test surface is the lifecycle-authority interface and `BlobStore` behavior.
 
 ---
 
 ## Manual-Only Verifications
 
-All Phase 3 behaviors must have automated local reference coverage. Backends whose
-topology cannot yet provide the required CAS or quarantine primitives return typed
-unsupported-capability outcomes; their full service matrices remain Phases 4 and 5.
+No lifecycle behavior is accepted as manual-only. Native Windows/macOS/Linux and supported-Python execution is an automated platform gate; until Phase 8 installs that CI matrix, Phase 3 records unavailable native-host evidence explicitly and does not substitute a platform fake for final platform proof.
 
 ---
 
 ## Validation Sign-Off
 
-- [ ] All tasks have an automated verify command or explicit Wave 0 dependency.
+- [ ] Every planned task has an automated verify command or explicit Wave 0 dependency.
 - [ ] Sampling continuity: no three consecutive tasks lack an automated check.
-- [ ] Wave 0 covers every missing test reference.
+- [ ] Wave 0 covers every missing test reference and compatibility question.
 - [ ] No watch-mode flags or timing-only race assertions are used.
-- [ ] Focused feedback latency remains under 30 seconds.
-- [ ] Fault, crash/reopen, and race matrices run without unconditional skips.
-- [ ] Full suite, compatibility corpus, and targeted Ruff pass.
-- [ ] `nyquist_compliant: true` and `wave_0_complete: true` are set only after evidence is complete.
+- [ ] Focused feedback latency is measured and remains under 30 seconds.
+- [ ] Common contract passes unchanged against both current authority adapters.
+- [ ] Full deterministic crash, rollback, ABA, clear, reconciliation, and concurrency matrices pass.
+- [ ] No authority transaction spans handler or payload backend I/O.
+- [ ] No file-native receipt, inventory, head, tail, anchor, cursor, pending-control, or authority-lock protocol remains reachable.
+- [ ] Full repository suite, compatibility corpus, supported-Python checks, and changed-path Ruff pass.
+- [ ] `nyquist_compliant: true` and `wave_0_complete: true` are set only after implementation evidence is complete.
 
-**Execution evidence (2026-08-31):**
-
-| Gate | Command | Result | Evidence |
-|------|---------|--------|----------|
-| Full Phase 3 suite | `uv run pytest -q -o log_cli=false tests/test_manifest_repository_cas.py tests/test_blob_store_atomic_lifecycle.py tests/test_blob_store_reconciliation.py tests/test_blob_store_concurrency.py tests/test_blob_store_close_contract.py tests/test_blob_manifest.py tests/test_blob_manifest_backends.py tests/test_blob_store_read_contract.py tests/test_blob_store_integrity.py tests/test_clear_recovery.py tests/test_filesystem_containment.py -x` | ✅ exit 0 | All phase modules passed; one expected Windows-only junction skip. |
-| Compatibility corpus | `uv run python tests/fixtures/compat/validate_corpus.py --expected-through sqlite-columns-v0314` | ✅ exit 0 | Validated through `sqlite-columns-v0314`. |
-| Full repository suite | `uv run pytest -q -o log_cli=false` | ✅ exit 0 | One existing collection warning; 27 expected platform/optional-dependency skips. |
-| Targeted Ruff | `uv run ruff check src/cacheness/config.py src/cacheness/__init__.py src/cacheness/storage/path_security.py src/cacheness/storage/guarded_handler_io.py src/cacheness/storage/manifest_repository.py src/cacheness/storage/operation_record.py src/cacheness/storage/operation_repository.py src/cacheness/storage/lifecycle.py src/cacheness/storage/reconciliation.py src/cacheness/storage/coordination.py src/cacheness/storage/blob_store.py src/cacheness/storage/clear_recovery.py src/cacheness/storage/__init__.py src/cacheness/error_handling.py tests/test_config_validation.py tests/test_manifest_repository_cas.py tests/test_blob_store_atomic_lifecycle.py tests/test_blob_store_reconciliation.py tests/test_blob_store_concurrency.py tests/test_blob_store_close_contract.py` | ❌ exit 1 | 23 pre-existing F401/F841 findings in `src/cacheness/__init__.py`, `src/cacheness/config.py`, and `tests/test_config_validation.py`; none are in 03-10 changes. |
-| 03-10 changed-path lint | `uv run ruff check tests/test_blob_store_integrity.py tests/test_clear_recovery.py tests/test_filesystem_containment.py tests/test_public_api_contract.py` | ✅ exit 0 | All changed test paths pass. `git diff --name-only a5fe465..HEAD -- src/cacheness/__init__.py src/cacheness/config.py tests/test_config_validation.py` returned no paths, confirming the 23 target findings predate 03-10. |
-
-**Approval:** complete with one scoped baseline exception documented in `deferred-items.md`. Phase 3 requirements, Wave 0, compatibility corpus, full pytest suite, and changed-path lint are green. The unrelated 23-finding targeted Ruff baseline remains honestly red and nonblocking.
+**Approval:** pending replacement-plan execution and verification

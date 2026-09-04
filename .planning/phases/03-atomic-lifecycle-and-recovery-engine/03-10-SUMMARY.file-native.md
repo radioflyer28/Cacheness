@@ -1,6 +1,7 @@
 ---
 phase: 03-atomic-lifecycle-and-recovery-engine
 plan: 10
+status: superseded
 subsystem: testing
 tags: [blobstore, lifecycle, integrity, reconciliation, concurrency, pytest]
 requires:
