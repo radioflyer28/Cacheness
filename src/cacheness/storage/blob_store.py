@@ -55,6 +55,7 @@ from ..error_handling import (
     CacheBlobManifestUnsupportedVersionError,
     CacheBlobPayloadMissingError,
     CacheBlobPayloadTamperedError,
+    CacheManifestIntegrityError,
     CacheBlobPayloadUnsupportedVersionError,
     CacheManifestUnsupportedVersionError,
     CacheReason,
@@ -86,6 +87,8 @@ from .manifest_repository import (
 )
 from .legacy_manifest import LegacyManifestIdentity, recognize_legacy_fixture_tree
 from .lifecycle import LifecycleEngine
+from .lifecycle import AuthorityLifecycleEngine
+from .lifecycle_authority import EntryExpectation, LifecycleAuthority
 from .path_security import encode_physical_name, resolve_managed_locator
 from .reconciliation import _Reconciler, ReconciliationReport
 from ..metadata import InMemoryBackend, MetadataBackend as CoreMetadataBackend
@@ -133,6 +136,8 @@ def _ordinary_admitted(method: Callable) -> Callable:
         # exact evidence tree an operator is being asked to migrate.
         self._require_canonical_store()
         with self._instance_admission.operation():
+            if self._authority_mode:
+                return method(self, *args, **kwargs)
             with self._admission_barrier.ordinary_admission():
                 self._refresh_metadata_view_for_lifecycle()
                 return method(self, *args, **kwargs)
@@ -196,6 +201,7 @@ class BlobStore:
         *,
         config: CacheConfig | None = None,
         manifest_key_provider: ManifestSigningKeyProvider | None = None,
+        lifecycle_authority: LifecycleAuthority | None = None,
     ):
         """
         Initialize a BlobStore.
@@ -214,6 +220,8 @@ class BlobStore:
             else cache_dir
         )
         self.cache_dir = Path(configured_path)
+        self._authority_mode = lifecycle_authority is not None
+        self.lifecycle_authority = lifecycle_authority
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.guarded_handler_io = GuardedHandlerIO(self.cache_dir)
         self._owns_backend = False
@@ -231,6 +239,7 @@ class BlobStore:
             content_addressable,
             config,
             manifest_key_provider,
+            lifecycle_authority,
             )
         except BaseException:
             # Cancellation must not retain a partially initialized owner and
@@ -248,6 +257,7 @@ class BlobStore:
         content_addressable: bool,
         config: CacheConfig | None,
         manifest_key_provider: ManifestSigningKeyProvider | None,
+        lifecycle_authority: LifecycleAuthority | None,
     ) -> None:
         """Finish initialization after the managed-root descriptor is acquired."""
         self._legacy_identity: LegacyManifestIdentity | None = None
@@ -279,6 +289,28 @@ class BlobStore:
         )
         self.lifecycle_limits = self.config.lifecycle_limits
         self._instance_admission = InstanceAdmission(self.lifecycle_limits)
+        if lifecycle_authority is not None:
+            self._admission_barrier = None
+            self._key_coordinator = KeyCoordinatorRegistry()
+            self.backend = InMemoryBackend()
+            self._owns_backend = True
+            self.handlers = HandlerRegistry()
+            self._manifest_key_provider = (
+                ManifestKeyProvider(
+                    self.cache_dir / "blob_manifest_hmac_key.bin",
+                    lifecycle_limits=self.lifecycle_limits,
+                )
+                if manifest_key_provider is None
+                else manifest_key_provider
+            )
+            self.manifest_repository = None
+            self.lifecycle = None
+            self._reconciler = None
+            self._clear_recovery = None
+            self._legacy_clear_evidence = None
+            self._authority_lifecycle = AuthorityLifecycleEngine(self, lifecycle_authority)
+            return
+        self._authority_lifecycle = None
         # Exact legacy fixtures are read-only migration evidence. They reject
         # every public operation before admission, so creating a lifecycle lock
         # for them would itself mutate the fixture merely by opening it.
@@ -432,7 +464,11 @@ class BlobStore:
             blob_key = self._generate_unique_key()
 
         with self._key_coordinator.hold(self._storage_id_for_key(blob_key)):
-            stored_key = self.lifecycle.put(data, key=blob_key, metadata=metadata)
+            stored_key = (
+                self._authority_lifecycle.put(data, key=blob_key, metadata=metadata)
+                if self._authority_lifecycle is not None
+                else self.lifecycle.put(data, key=blob_key, metadata=metadata)
+            )
         logger.debug(f"Stored blob {stored_key} through the lifecycle engine")
         return stored_key
     
@@ -448,6 +484,8 @@ class BlobStore:
             The stored data, or None if not found
         """
         self._require_canonical_store()
+        if self._authority_lifecycle is not None:
+            return self._authority_get(key)
         with self._key_coordinator.hold(self._storage_id_for_key(key)):
             for attempt in range(2):
                 authenticated = self._load_authenticated_manifest(
@@ -517,6 +555,12 @@ class BlobStore:
             Metadata dictionary, or None if not found
         """
         self._require_canonical_store()
+        if self._authority_lifecycle is not None:
+            entry = self.lifecycle_authority.read_entry(key)
+            if entry is None:
+                return None
+            manifest = self._authenticated_authority_manifest(entry.manifest)
+            return self._manifest_entry_data(manifest)
         with self._key_coordinator.hold(self._storage_id_for_key(key)):
             authenticated = self._load_authenticated_manifest(
                 key,
@@ -541,6 +585,8 @@ class BlobStore:
             True if successful, False if blob not found
         """
         self._require_canonical_store()
+        if self._authority_lifecycle is not None:
+            return self.lifecycle_authority.read_entry(key) is not None
         with self._key_coordinator.hold(self._storage_id_for_key(key)):
             if not isinstance(metadata, dict):
                 raise CacheBlobManifestMalformedError(
@@ -925,6 +971,16 @@ class BlobStore:
         descriptors.  Flush and close them before the shared managed-root
         descriptor is released.
         """
+        if self._authority_mode:
+            self.lifecycle_authority.close()
+            if not self._released_resources["guarded_handler_io"]:
+                self.guarded_handler_io.close()
+                self._released_resources["guarded_handler_io"] = True
+            if self._owns_backend and not self._released_resources["backend"]:
+                self.backend.close()
+                self._released_resources["backend"] = True
+            self._released_resources["admission_barrier"] = True
+            return
         operation_repository = self.lifecycle.operation_repository
         flush = getattr(operation_repository, "flush", None)
         if callable(flush):
@@ -961,7 +1017,63 @@ class BlobStore:
         return False
     
     # Private helper methods
-    
+
+    @staticmethod
+    def _authority_absent_expectation() -> EntryExpectation:
+        """Return the explicit absence token used by authority preparation."""
+        return EntryExpectation.absent()
+
+    def _authority_manifest_key(self) -> bytes:
+        """Initialize the persistent key only after authority intent commits."""
+        try:
+            initializer = getattr(
+                self._manifest_key_provider, "get_or_initialize_new_store", None
+            )
+            key = initializer() if callable(initializer) else self._manifest_key_provider.get_key()
+        except Exception as exc:
+            raise CacheBlobManifestUnauthenticatedError(
+                "Canonical BlobStore signing key is unavailable",
+                context={"operation": "authority_manifest_key"},
+                reason=CacheReason.MANIFEST_SIGNING_KEY_INVALID,
+            ) from exc
+        if type(key) is not bytes or len(key) != 32:
+            raise CacheBlobManifestUnauthenticatedError(
+                "Canonical BlobStore signing key is invalid",
+                context={"operation": "authority_manifest_key"},
+                reason=CacheReason.MANIFEST_SIGNING_KEY_INVALID,
+            )
+        return key
+
+    def _authenticated_authority_manifest(self, raw: bytes) -> BlobManifestV1:
+        """Authenticate authority-owned canonical bytes before trusting locators."""
+        try:
+            manifest = BlobManifestV1.from_canonical_bytes(raw)
+        except CacheManifestIntegrityError as exc:
+            raise CacheBlobManifestMalformedError("Authority manifest is malformed") from exc
+        if manifest.state != "committed" or not verify_hmac_sha256(
+            manifest.signing_bytes(), manifest.signature, self._authority_manifest_key()
+        ):
+            raise CacheBlobManifestUnauthenticatedError(
+                "Authority manifest cannot be authenticated"
+            )
+        return manifest
+
+    def _authority_get(self, key: str) -> Optional[Any]:
+        """Read one committed authority entry through the Phase 2 snapshot order."""
+        entry = self.lifecycle_authority.read_entry(key)
+        if entry is None:
+            return None
+        manifest = self._authenticated_authority_manifest(entry.manifest)
+        handler = self.handlers.get_handler_by_type(manifest.handler_type)
+        metadata = self._handler_metadata(manifest)
+        with self.guarded_handler_io.open_snapshot(manifest.locator, metadata) as snapshot:
+            digest, byte_size = sha256_and_size(snapshot.path)
+            if digest != manifest.digest or byte_size != manifest.byte_size:
+                raise CacheBlobPayloadTamperedError(
+                    "Canonical BlobStore payload integrity check failed"
+                )
+            return handler.get(snapshot.path, snapshot.metadata)
+
     def _compute_content_hash(self, data: Any) -> str:
         """Compute a content-based hash for the data."""
         import pickle

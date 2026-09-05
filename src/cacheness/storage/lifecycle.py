@@ -19,7 +19,7 @@ from cacheness.error_handling import (
     CacheUnsafePathError,
 )
 
-from .integrity import sign_hmac_sha256, verify_hmac_sha256
+from .integrity import sha256_and_size, sign_hmac_sha256, verify_hmac_sha256
 from .manifest import MAX_MANIFEST_BYTES, BlobManifestV1
 from .manifest_repository import ManifestCursor, ManifestExpectation
 from .operation_record import (
@@ -35,6 +35,11 @@ from .operation_record import (
 )
 from .operation_repository import FileOperationRecordRepository
 from .path_security import resolve_managed_locator, validate_blob_id
+from .lifecycle_authority import (
+    LifecycleAuthority,
+    MutationSpec,
+    VerificationProof,
+)
 
 
 # This is signed as part of the canonical tombstone manifest's handler
@@ -1781,4 +1786,64 @@ class LifecycleEngine:
         return True
 
 
-__all__ = ["LifecycleEngine"]
+class AuthorityLifecycleEngine:
+    """Orchestrate native payload I/O around one LifecycleAuthority transition.
+
+    This deliberately small tracer is used by explicitly authority-composed
+    stores while the remaining public lifecycle operations are moved in later
+    plans.  It never opens an authority transaction around handler I/O.
+    """
+
+    def __init__(self, store: Any, authority: LifecycleAuthority):
+        self.store = store
+        self.authority = authority
+
+    def put(self, data: Any, *, key: str, metadata: dict[str, Any] | None) -> str:
+        handler = self.store.handlers.get_handler(data)
+        with self.store.guarded_handler_io.stage(handler, data, self.store.config) as staged:
+            generation = uuid.uuid4().hex
+            locator = Path("generations") / f"{generation}{staged.suffix}"
+            prepared = self.authority.prepare_mutation(
+                MutationSpec.create(
+                    operation_id=uuid.uuid4().hex,
+                    key=key,
+                    generation=generation,
+                    candidate_locator=locator.as_posix(),
+                    expected=(
+                        existing.expectation
+                        if (existing := self.authority.read_entry(key)) is not None
+                        else self.store._authority_absent_expectation()
+                    ),
+                )
+            )
+            published = self.store.guarded_handler_io.publish_generation(staged, locator)
+            digest, byte_size = sha256_and_size(published["actual_path"])
+            handler_metadata = dict(published.get("metadata", {}))
+            manifest = BlobManifestV1(
+                schema_version=1,
+                key=key,
+                generation=generation,
+                state="committed",
+                locator=locator.as_posix(),
+                handler_type=handler.data_type,
+                payload_format=str(published.get("storage_format", "native")),
+                payload_format_version=1,
+                digest_algorithm="sha256",
+                digest=digest,
+                byte_size=byte_size,
+                created_at=datetime.now(timezone.utc).isoformat(),
+                handler_metadata=handler_metadata,
+                user_metadata=dict(metadata or {}),
+            )
+            signed_manifest = manifest.with_signature(
+                sign_hmac_sha256(manifest.signing_bytes(), self.store._authority_manifest_key())
+            )
+            self.authority.record_verification(
+                prepared,
+                VerificationProof(digest=digest, byte_size=byte_size, manifest=signed_manifest.canonical_bytes()),
+            )
+            self.authority.promote_mutation(prepared)
+        return key
+
+
+__all__ = ["AuthorityLifecycleEngine", "LifecycleEngine"]
