@@ -449,13 +449,13 @@ class _AuthorityReconciler:
                     for candidate in current
                 ):
                     return True
-                self.store._authority_lifecycle._settle_debts((debt,))
+                self.store.lifecycle._settle_debts((debt,))
                 return True
             prepared = work.mutation
             assert prepared is not None
             if prepared not in self.authority.pending_mutations():
                 return True
-            self.store._authority_lifecycle._abort(prepared, candidate_persisted=True)
+            self.store.lifecycle._abort(prepared, candidate_persisted=True)
             return True
         except (CacheBlobLifecycleConflictError, CacheStorageError):
             return False

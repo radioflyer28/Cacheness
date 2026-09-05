@@ -4,19 +4,14 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import multiprocessing
-import os
 import threading
 from pathlib import Path
 
 import pytest
 
-from cacheness.error_handling import (
-    CacheBlobLifecycleConflictError,
-    CacheBlobLockReleaseError,
-)
-from cacheness.storage import coordination
+from cacheness.error_handling import CacheBlobLifecycleConflictError
 from cacheness.storage.blob_store import BlobStore
-from cacheness.storage.coordination import KeyCoordinatorRegistry, StoreAdmissionBarrier
+from cacheness.storage.coordination import KeyCoordinatorRegistry
 
 
 def _put_from_independent_process(
@@ -61,172 +56,6 @@ def _join(thread: threading.Thread) -> None:
     """Join one deterministic test worker without hiding a deadlock."""
     thread.join(timeout=5)
     assert not thread.is_alive(), "worker did not finish within the bounded wait"
-
-
-def _try_external_exclusive_admission(lock_path: str, outcomes: multiprocessing.queues.Queue) -> None:
-    """Report whether a fresh process can take the barrier's exclusive lock."""
-    import fcntl
-
-    descriptor = os.open(lock_path, os.O_RDONLY)
-    try:
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            outcomes.put(False)
-        else:
-            outcomes.put(True)
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
-    finally:
-        os.close(descriptor)
-
-
-@pytest.mark.skipif(os.name != "posix", reason="POSIX advisory-lock contract")
-def test_two_local_readers_hold_shared_admission_until_the_last_exit(tmp_path: Path) -> None:
-    """One reader exit must not unlock the shared OS admission for another."""
-    root = tmp_path / "aggregate-shared-admission"
-    root.mkdir()
-    barrier = StoreAdmissionBarrier.acquire(root)
-    outcomes = multiprocessing.get_context("spawn").Queue()
-
-    def can_take_exclusive() -> bool:
-        process = multiprocessing.get_context("spawn").Process(
-            target=_try_external_exclusive_admission,
-            args=(str(barrier._lock_locator), outcomes),
-        )
-        process.start()
-        process.join(timeout=10)
-        assert process.exitcode == 0
-        return outcomes.get(timeout=5)
-
-    try:
-        with barrier.ordinary_admission():
-            with barrier.ordinary_admission():
-                assert can_take_exclusive() is False
-            # The inner reader has exited, but the outer reader still owns the
-            # same aggregate OS shared lock.
-            assert can_take_exclusive() is False
-        assert can_take_exclusive() is True
-    finally:
-        barrier.release()
-
-
-@pytest.mark.skipif(os.name != "posix", reason="POSIX advisory-lock contract")
-def test_replacement_reader_waits_for_final_unlock_without_losing_shared_lock(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The closing-to-opening handoff never exposes an active reader to clear.
-
-    Pause the last reader immediately before its retained descriptor unlocks,
-    begin a replacement reader, then resume the unlock.  The replacement must
-    wait for that closing state and acquire a new shared lock only afterwards;
-    an external exclusive contender remains blocked while it is active.
-    """
-    root = tmp_path / "ordinary-closing-handoff"
-    root.mkdir()
-    barrier = StoreAdmissionBarrier.acquire(root)
-    final_unlock_entered = threading.Event()
-    allow_final_unlock = threading.Event()
-    replacement_entered = threading.Event()
-    release_replacement = threading.Event()
-    errors: list[BaseException] = []
-    original_admission = barrier._advisory_admission
-
-    @contextmanager
-    def pause_final_unlock(*, exclusive: bool):
-        with original_admission(exclusive=exclusive):
-            try:
-                yield
-            finally:
-                if not exclusive:
-                    final_unlock_entered.set()
-                    assert allow_final_unlock.wait(timeout=5)
-
-    monkeypatch.setattr(barrier, "_advisory_admission", pause_final_unlock)
-    outcomes = multiprocessing.get_context("spawn").Queue()
-
-    def can_take_exclusive() -> bool:
-        contender = multiprocessing.get_context("spawn").Process(
-            target=_try_external_exclusive_admission,
-            args=(str(barrier._lock_locator), outcomes),
-        )
-        contender.start()
-        contender.join(timeout=10)
-        assert contender.exitcode == 0
-        return outcomes.get(timeout=5)
-
-    def first_reader() -> None:
-        try:
-            with barrier.ordinary_admission():
-                pass
-        except BaseException as exc:  # pragma: no cover - asserted by parent.
-            errors.append(exc)
-
-    def replacement_reader() -> None:
-        try:
-            with barrier.ordinary_admission():
-                replacement_entered.set()
-                assert release_replacement.wait(timeout=5)
-        except BaseException as exc:  # pragma: no cover - asserted by parent.
-            errors.append(exc)
-
-    first = threading.Thread(target=first_reader)
-    replacement = threading.Thread(target=replacement_reader)
-    try:
-        first.start()
-        assert final_unlock_entered.wait(timeout=5)
-        replacement.start()
-        assert not replacement_entered.wait(timeout=0.2)
-        allow_final_unlock.set()
-        assert replacement_entered.wait(timeout=5)
-        assert can_take_exclusive() is False
-        release_replacement.set()
-        _join(first)
-        _join(replacement)
-        assert errors == []
-    finally:
-        allow_final_unlock.set()
-        release_replacement.set()
-        _join(first)
-        _join(replacement)
-        barrier.release()
-
-
-def test_uncertain_final_reader_unlock_poisoned_barrier_rejects_re_admission(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A failed final unlock never reopens admission under unknown OS ownership."""
-    root = tmp_path / "poisoned-admission"
-    root.mkdir()
-    barrier = StoreAdmissionBarrier.acquire(root)
-
-    class FailingWindowsLockApi:
-        def lock(
-            self, _descriptor: int, *, exclusive: bool, nonblocking: bool = False
-        ) -> object:
-            assert exclusive is False
-            return object()
-
-        def unlock(self, _descriptor: int, _token: object) -> object:
-            raise OSError("injected unlock failure")
-
-    monkeypatch.setattr(coordination, "_platform_name", lambda: "nt")
-    monkeypatch.setattr(coordination, "_windows_lock_api", FailingWindowsLockApi)
-    try:
-        # The guarded body also fails.  The release uncertainty is still
-        # recorded by the barrier, while the primary body failure preserves
-        # the public exception contract.
-        with pytest.raises(RuntimeError, match="body failure"):
-            with barrier.ordinary_admission():
-                raise RuntimeError("body failure")
-
-        with pytest.raises(CacheBlobLockReleaseError):
-            with barrier.ordinary_admission():
-                pass
-        with pytest.raises(CacheBlobLockReleaseError):
-            with barrier.aggregate_admission():
-                pass
-    finally:
-        barrier.release()
 
 
 def test_key_registry_retires_entries_after_exception_and_high_cardinality():
@@ -690,7 +519,7 @@ def _retired_scheduler_clear_snapshot_excludes_a_later_independent_process_write
         store.close()
 
 
-def _retired_scheduler_exists_reacquires_once_only_after_an_independent_generation_change(
+def _authority_exists_reacquires_once_only_after_an_independent_generation_change(
     tmp_path, monkeypatch
 ):
     """Existence checks use M1/snapshot/M2 rather than a stale path assertion."""
@@ -700,7 +529,7 @@ def _retired_scheduler_exists_reacquires_once_only_after_an_independent_generati
     key = "same-key"
     try:
         reader.put("old", key=key)
-        original_get_raw = reader.manifest_repository.get_raw
+        original_read_entry = reader.lifecycle_authority.read_entry
         reads = 0
 
         def change_after_snapshot(blob_key: str):
@@ -708,9 +537,13 @@ def _retired_scheduler_exists_reacquires_once_only_after_an_independent_generati
             reads += 1
             if reads == 2:
                 writer.put("new", key=key)
-            return original_get_raw(blob_key)
+            return original_read_entry(blob_key)
 
-        monkeypatch.setattr(reader.manifest_repository, "get_raw", change_after_snapshot)
+        monkeypatch.setattr(
+            reader.lifecycle_authority,
+            "read_entry",
+            change_after_snapshot,
+        )
         assert reader.exists(key) is True
         # M1/M2 then exactly one retry's M1/M2; no unbounded retry loop.
         assert reads == 4

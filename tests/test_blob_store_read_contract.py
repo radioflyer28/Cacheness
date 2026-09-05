@@ -869,19 +869,12 @@ def test_list_rejects_a_nonterminal_authority_entry(
 
 
 def test_list_uses_one_authority_enumeration_without_legacy_reselection(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
-    """Listing never consults a retired manifest repository after selection."""
+    """Listing reads the selected authority directly without a legacy seam."""
     store = BlobStore(tmp_path / "list-disappeared", backend="json")
     try:
         store.put("payload", key="selected-key")
-        monkeypatch.setattr(
-            store,
-            "_load_authenticated_manifest",
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                AssertionError("authority listing must not reselect legacy manifests")
-            ),
-        )
         assert store.list() == ["selected-key"]
     finally:
         store.close()

@@ -37,7 +37,7 @@ from cacheness.storage.integrity import (
     sign_hmac_sha256,
     verify_hmac_sha256,
 )
-from cacheness.storage import coordination
+import cacheness.storage.integrity as integrity_module
 from cacheness.storage.manifest import BlobManifestV1
 from cacheness.config import LifecycleLimits
 
@@ -416,8 +416,8 @@ def test_initialization_authority_uses_the_injected_nonblocking_win32_contract(
 
     provider = ManifestKeyProvider(tmp_path / "blob_manifest_hmac_key.bin")
     provider.key_path.parent.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(coordination, "_platform_name", lambda: "nt")
-    monkeypatch.setattr(coordination, "_windows_lock_api", FakeWindowsLockApi)
+    monkeypatch.setattr(integrity_module, "_key_lock_platform", lambda: "nt")
+    monkeypatch.setattr(integrity_module, "_windows_key_lock_api", FakeWindowsLockApi)
 
     with provider._initialization_lock():
         pass
@@ -484,8 +484,12 @@ def test_windows_initialization_rejects_adapter_without_nonblocking_lock(
 
     provider = ManifestKeyProvider(tmp_path / "blob_manifest_hmac_key.bin")
     provider.key_path.parent.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(coordination, "_platform_name", lambda: "nt")
-    monkeypatch.setattr(coordination, "_windows_lock_api", BlockingOnlyWindowsLockApi)
+    monkeypatch.setattr(integrity_module, "_key_lock_platform", lambda: "nt")
+    monkeypatch.setattr(
+        integrity_module,
+        "_windows_key_lock_api",
+        BlockingOnlyWindowsLockApi,
+    )
 
     with pytest.raises(CacheBlobBackendError) as error:
         with provider._initialization_lock(deadline=1.0):
