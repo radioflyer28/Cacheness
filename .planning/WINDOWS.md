@@ -2,9 +2,9 @@
 schema_version: 1
 open_count: 3
 waived_count: 0
-fixed_count: 19
-total_count: 22
-last_updated: 2026-09-05T01:49:11.994Z
+fixed_count: 20
+total_count: 23
+last_updated: 2026-09-05T03:07:49.009Z
 ---
 
 # Broken Windows Ledger
@@ -36,7 +36,8 @@ last_updated: 2026-09-05T01:49:11.994Z
 | 19 | 02 | deviation | tests/test_blob_store_read_contract.py |  | Future-schema regression now edits raw manifest bytes because the schema model rejects unsupported versions at construction. | fixed |  | 2026-08-30T15:09:46.215Z | 2026-08-30T15:09:54.024Z |
 | 20 | 03 | unrun-verify | tests/test_blob_store_read_contract.py | 841 | Delete verification fixture intercepts lifecycle-evidence retirement; Plan 03-08 owns narrowing the payload-delete monkeypatch. | open |  | 2026-08-30T19:16:36.244Z |  |
 | 21 | 03 | lint-warning | src/cacheness/__init__.py |  | Targeted Ruff baseline: 23 pre-existing F401/F841 findings across untouched __init__.py, config.py, and test_config_validation.py; see Phase 03 deferred-items.md. | open |  | 2026-08-31T12:32:42.489Z |  |
-| 22 | 03 | stub | src/cacheness/storage/lifecycle_authority.py | 169 | Clear, reconciliation, tombstone retirement, and projection transitions are semantic placeholders reserved for later Phase 3 plans. | open |  | 2026-09-05T01:49:11.994Z |  |
+| 22 | 03 | stub | src/cacheness/storage/lifecycle_authority.py | 169 | Clear, reconciliation, tombstone retirement, and projection transitions are semantic placeholders reserved for later Phase 3 plans. | fixed |  | 2026-09-05T01:49:11.994Z | 2026-09-05T03:07:49.009Z |
+| 23 | 03 | deviation | tests/test_blob_store_read_contract.py | 175 | Legacy constructor test requires retired create_manifest_repository setup; authority mode keeps LifecycleAuthority as sole committed truth. | open |  | 2026-09-05T03:07:28.440Z |  |
 
 ````json
 [
@@ -299,9 +300,21 @@ last_updated: 2026-09-05T01:49:11.994Z
     "file": "src/cacheness/storage/lifecycle_authority.py",
     "line": 169,
     "description": "Clear, reconciliation, tombstone retirement, and projection transitions are semantic placeholders reserved for later Phase 3 plans.",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-09-05T01:49:11.994Z",
+    "resolved_at": "2026-09-05T03:07:49.009Z"
+  },
+  {
+    "id": 23,
+    "kind": "deviation",
+    "phase": "03",
+    "file": "tests/test_blob_store_read_contract.py",
+    "line": 175,
+    "description": "Legacy constructor test requires retired create_manifest_repository setup; authority mode keeps LifecycleAuthority as sole committed truth.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-05T03:07:28.440Z",
     "resolved_at": null
   }
 ]

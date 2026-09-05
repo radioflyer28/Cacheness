@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 03
 current_phase_name: Atomic Lifecycle and Recovery Engine
 status: executing
-stopped_at: Completed 03-03-PLAN.md
-last_updated: "2026-09-05T02:21:09.713Z"
+stopped_at: Completed 03-04-PLAN.md
+last_updated: "2026-09-05T03:09:11.398Z"
 last_activity: 2026-09-04
 last_activity_desc: Phase 03 execution started
-state_head: 9312c82e481ecea808dede54ba3de0cf951af034
+state_head: f6bfc83e6d685f1e1aa7ffdf7a864dbcb4ecdabb
 progress:
   total_phases: 8
   completed_phases: 2
   total_plans: 32
-  completed_plans: 25
+  completed_plans: 26
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-08-29)
 ## Current Position
 
 Phase: 03 (Atomic Lifecycle and Recovery Engine) — EXECUTING
-Plan: 4 of 10
+Plan: 5 of 10
 Status: Ready to execute
 Last activity: 2026-09-04 — Phase 03 execution started
 
@@ -78,6 +78,7 @@ Phase 03 rows in this historical table belong to the superseded file-native atte
 | Phase 03 P01 | 1h 12m | 3 tasks | 8 files |
 | Phase 03 P02 | 12min | 3 tasks | 7 files |
 | Phase 03 P03 | 25min | 3 tasks | 8 files |
+| Phase 03 P04 | 41min | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -174,6 +175,9 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 03]: SQLite now verifies DELETE+EXTRA, trusted-schema, the confirmed authority identity, and one absolute busy deadline before lifecycle mutations.
 - [Phase 03]: Every complete authority transition changes entries, operation state, debt, projection revision, and authority revision atomically; uncertain commits reopen and classify the exact operation.
 - [Phase 03]: Windows lifecycle mutation is limited to an offline-provisioned local root whose protected DACL grants ordinary mutation solely to the current token logon SID; native proof is deferred to Plan 09.
+- [Phase 03]: LifecycleAuthority is the only committed-state authority; legacy manifest repositories are not initialized in authority mode.
+- [Phase 03]: Promotion records exact cleanup debt atomically, while reclamation and debt retirement run outside authority transactions.
+- [Phase 03]: Default BlobStore close owns and releases only the authority it constructs; injected resources stay caller-owned.
 
 ### Pending Todos
 
@@ -197,6 +201,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-09-05T02:21:09.668Z
-Stopped at: Completed 03-03-PLAN.md
+Last session: 2026-09-05T03:09:11.351Z
+Stopped at: Completed 03-04-PLAN.md
 Resume file: None

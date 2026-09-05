@@ -114,14 +114,14 @@ Plans:
   4. Operators can dry-run and resume reconciliation to repair, quarantine, or report inconsistent entries without guessing their provenance.
   5. Forced same-key write, delete, and read races have deterministic outcomes without globally serializing operations on distinct keys.
 
-**Plans**: 3/10 plans executed
+**Plans**: 4/10 plans executed
 
 Plans:
 
 - [x] 03-01-PLAN.md — Characterize public contracts, release history, locator, and deletion checkpoint
 - [x] 03-02-PLAN.md — Prove the authority-backed SQLite BlobStore write/read/reopen tracer and in-memory parity
 - [x] 03-03-PLAN.md — Complete hardened SQLite ownership, schema, transactions, deadlines, and rollback
-- [ ] 03-04-PLAN.md — Move put, overwrite, metadata, delete, close, and same-key races onto the authority
+- [x] 03-04-PLAN.md — Move put, overwrite, metadata, delete, close, and same-key races onto the authority
 - [ ] 03-05-PLAN.md — Implement exact clear snapshots and bounded high-water reconciliation
 - [ ] 03-06-PLAN.md — Make JSON a revision-checked projection and seal downstream capability contracts
 - [ ] 03-07-PLAN.md — Delete the abandoned scheduler core and prove it cannot be reached
@@ -207,7 +207,7 @@ Plans:
 |-------|----------------|--------|-----------|
 | 1. Compatibility and Security Baseline | 15/15 | Complete | 2026-08-30 |
 | 2. Canonical Storage and Integrity Contract | 7/7 | Complete    | 2026-08-30 |
-| 3. Atomic Lifecycle and Recovery Engine | 3/10 | In Progress|  |
+| 3. Atomic Lifecycle and Recovery Engine | 4/10 | In Progress|  |
 | 4. Metadata Composition and Topology Contracts | 0/TBD | Not started | - |
 | 5. Payload Backends and Full Matrix Parity | 0/TBD | Not started | - |
 | 6. UnifiedCache Policy Composition | 0/TBD | Not started | - |
