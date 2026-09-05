@@ -34,7 +34,6 @@ from cacheness.metadata import InMemoryBackend, JsonBackend, SqliteBackend
 from cacheness.json_utils import dumps as json_dumps
 from cacheness.json_utils import loads as json_loads
 
-from .coordination import interprocess_open_file_lock
 from .integrity import ManifestKeyProvider, sign_hmac_sha256, verify_hmac_sha256
 from .lifecycle_authority import LifecycleAuthority, ProjectionRevision
 from .manifest import BlobManifestV1
@@ -65,6 +64,7 @@ _BACKEND_OPERATION_ERRORS = (
     ValueError,
     SQLAlchemyError,
 )
+_PROJECTION_PUBLISH_LOCK = RLock()
 
 
 class JsonProjectionExporter:
@@ -181,17 +181,9 @@ class JsonProjectionExporter:
 
     @contextmanager
     def _publish_lock(self):
-        """Serialize derived publication without holding an authority transaction."""
-        lock_path = self.projection_path.with_name(
-            f".{self.projection_path.name}.projection.lock"
-        )
-        with open(lock_path, "a+b") as handle:
-            with interprocess_open_file_lock(
-                handle,
-                exclusive=True,
-                operation="json_projection_publish",
-            ):
-                yield
+        """Order same-process projection writes outside authority transactions."""
+        with _PROJECTION_PUBLISH_LOCK:
+            yield
 
     def export(self) -> ProjectionRevision:
         """Atomically publish a snapshot and clean only its exact revision."""
@@ -677,45 +669,13 @@ class _MetadataManifestRepository:
 
     @contextmanager
     def _json_compare_publish_lock(self):
-        """Serialize one JSON refresh/compare/publish sequence across processes."""
-        if type(self.backend) is not JsonBackend:
-            yield
-            return
-        if (
-            self._json_lock_file_ops is None
-            or self._json_lock_locator is None
-            or self._json_lock_handle is None
-            or self._json_lock_identity is None
-        ):
-            raise CacheBlobBackendError(
-                "JSON canonical manifest authority lock is unavailable",
-                context={"backend": type(self.backend).__name__},
-            )
-        # Do not translate exceptions around ``yield`` here: a backend failure
-        # raised by the caller's compare/publish body must retain its original
-        # operation and cause rather than being mislabeled as lock acquisition.
+        """Order a compatibility projection inside this process only."""
         with self._json_lock_guard:
-            self._json_lock_file_ops.assert_retained_lock_identity(
-                self._json_lock_locator, self._json_lock_identity
-            )
             if self.after_json_lock_validation is not None:
                 self.after_json_lock_validation()
-            with interprocess_open_file_lock(
-                self._json_lock_handle,
-                exclusive=True,
-                operation="json_manifest_authority",
-            ):
-                # The lock descriptor and the managed root are authority data.
-                # Checking again after OS acquisition prevents a contender from
-                # proceeding under an inode that a later repository no longer
-                # uses.
-                self._json_lock_file_ops.assert_retained_lock_identity(
-                    self._json_lock_locator, self._json_lock_identity
-                )
-                if self.after_json_lock_acquisition is not None:
-                    self.after_json_lock_acquisition()
-                self._json_lock_file_ops.assert_root_identity()
-                yield
+            if self.after_json_lock_acquisition is not None:
+                self.after_json_lock_acquisition()
+            yield
 
     def _refresh_json_for_conditional_operation(self) -> None:
         """Refresh JSON through the retained root descriptor while CAS is held."""

@@ -7,15 +7,18 @@ import hmac
 import os
 import secrets
 import stat
+import ctypes
 from contextlib import contextmanager
 from pathlib import Path
 from threading import RLock
 import time
-from typing import BinaryIO, ClassVar, Iterator, Protocol, runtime_checkable
+from typing import BinaryIO, Callable, ClassVar, Iterator, Protocol, runtime_checkable
 
 from cacheness.config import LifecycleLimits
 from cacheness.error_handling import (
+    CacheBlobBackendError,
     CacheBlobLifecycleTimeoutError,
+    CacheBlobLockReleaseError,
     CacheBlobManifestUnauthenticatedError,
     CacheReason,
 )
@@ -99,6 +102,264 @@ class _KeyInitializationGuardRegistry:
                 else:
                     cls._entries[identity] = (lock, current[1] - 1)
 
+
+def _key_lock_platform() -> str:
+    """Resolve the native signing-key lock topology."""
+    return os.name
+
+
+class _KeyLockUnavailable(Exception):
+    """Internal signal for one nonblocking advisory-lock attempt that lost."""
+
+
+class _WindowsKeyLockApi(Protocol):
+    """Minimal Win32 byte-range lock surface kept injectable for tests."""
+
+    def lock(
+        self, file_descriptor: int, *, exclusive: bool, nonblocking: bool = False
+    ) -> object:
+        """Acquire one blocking shared or exclusive whole-file lock."""
+
+    def unlock(self, file_descriptor: int, token: object) -> object:
+        """Release the matching whole-file lock."""
+
+
+class _NativeWindowsKeyLockApi:
+    """Use ``LockFileEx`` so Windows retains shared admission semantics."""
+
+    _LOCKFILE_EXCLUSIVE_LOCK = 0x00000002
+    _LOCKFILE_FAIL_IMMEDIATELY = 0x00000001
+    _ERROR_LOCK_VIOLATION = 33
+    _MAX_DWORD = 0xFFFFFFFF
+    _CAPABILITY_STATUSES = frozenset({1, 5, 50, 120, 1314})
+
+    class _Overlapped(ctypes.Structure):
+        _fields_ = [
+            ("Internal", ctypes.c_size_t),
+            ("InternalHigh", ctypes.c_size_t),
+            ("Offset", ctypes.c_uint32),
+            ("OffsetHigh", ctypes.c_uint32),
+            ("Pointer", ctypes.c_void_p),
+        ]
+
+    def __init__(self) -> None:
+        try:
+            import msvcrt
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        except (AttributeError, ImportError, OSError) as exc:  # pragma: no cover - Windows only.
+            raise CacheBlobBackendError(
+                "Canonical manifest key locking is unavailable on this Windows runtime",
+                context={"operation": "lifecycle_lock"},
+            ) from exc
+
+        self._get_osfhandle = msvcrt.get_osfhandle
+        self._lock_file_ex = kernel32.LockFileEx
+        self._lock_file_ex.argtypes = (
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.POINTER(self._Overlapped),
+        )
+        self._lock_file_ex.restype = ctypes.c_int
+        self._unlock_file_ex = kernel32.UnlockFileEx
+        self._unlock_file_ex.argtypes = (
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.POINTER(self._Overlapped),
+        )
+        self._unlock_file_ex.restype = ctypes.c_int
+
+    def lock(
+        self, file_descriptor: int, *, exclusive: bool, nonblocking: bool = False
+    ) -> object:
+        """Acquire a blocking whole-file lock without downgrading shared callers."""
+        flags = self._LOCKFILE_EXCLUSIVE_LOCK if exclusive else 0
+        if nonblocking:
+            flags |= self._LOCKFILE_FAIL_IMMEDIATELY
+        overlapped = self._Overlapped()
+        handle = ctypes.c_void_p(self._get_osfhandle(file_descriptor))
+        if not self._lock_file_ex(
+            handle,
+            flags,
+            0,
+            self._MAX_DWORD,
+            self._MAX_DWORD,
+            ctypes.byref(overlapped),
+        ):
+            status = ctypes.get_last_error()
+            if nonblocking and status == self._ERROR_LOCK_VIOLATION:
+                raise _KeyLockUnavailable from None
+            self._raise_native_error(status, "LockFileEx")
+        return overlapped
+
+    def unlock(self, file_descriptor: int, token: object) -> object:
+        """Release exactly the byte range acquired by :meth:`lock`."""
+        if not isinstance(token, self._Overlapped):
+            raise TypeError("Windows lifecycle lock token is invalid")
+        handle = ctypes.c_void_p(self._get_osfhandle(file_descriptor))
+        if not self._unlock_file_ex(
+            handle,
+            0,
+            self._MAX_DWORD,
+            self._MAX_DWORD,
+            ctypes.byref(token),
+        ):
+            self._raise_native_error(ctypes.get_last_error(), "UnlockFileEx")
+        return None
+
+    @classmethod
+    def _raise_native_error(cls, status: int, operation: str) -> None:
+        """Keep Win32 policy/capability failures inside BlobStore taxonomy."""
+        native_error = OSError(status, f"{operation} failed")
+        reason = (
+            CacheReason.BLOB_BACKEND_CAPABILITY_UNSUPPORTED
+            if status in cls._CAPABILITY_STATUSES
+            else CacheReason.BLOB_BACKEND_FAILURE
+        )
+        raise CacheBlobBackendError(
+            "BlobStore Windows lifecycle lock failed",
+            context={"operation": operation, "native_status": status},
+            reason=reason,
+        ) from native_error
+
+
+def _key_lock_platform() -> str:
+    """Resolve the runtime lock topology through a narrow test seam."""
+    import os
+
+    return os.name
+
+
+def _windows_key_lock_api() -> _WindowsKeyLockApi:
+    """Construct the production Win32 lock adapter only on Windows."""
+    return _NativeWindowsKeyLockApi()
+
+
+@contextmanager
+def _locked_key_handle(
+    handle: BinaryIO,
+    *,
+    exclusive: bool,
+    operation: str,
+    close_handle: bool = False,
+    nonblocking: bool = False,
+    on_release_failure: Callable[[CacheBlobLockReleaseError], None] | None = None,
+) -> Iterator[None]:
+    """Lock one already-open managed descriptor on every supported OS.
+
+    POSIX uses ``flock`` for shared/exclusive admission. Windows uses Win32
+    ``LockFileEx`` over the same durable lock file, preserving shared ordinary
+    admission instead of silently turning all normal operations into a global
+    exclusive mutex. ``close_handle`` is reserved for short-lived lock
+    descriptors; authority owners retain their descriptor for its whole
+    lifetime and pass the default.
+    """
+    unlock: Callable[[], object] | None = None
+    try:
+        if _key_lock_platform() == "nt":
+            api = _windows_key_lock_api()
+            if nonblocking:
+                try:
+                    token = api.lock(
+                        handle.fileno(), exclusive=exclusive, nonblocking=True
+                    )
+                except TypeError as exc:
+                    # A lifecycle admission retry must never silently turn
+                    # into a blocking Win32 call.  Test adapters and platform
+                    # integrations must provide FAIL_IMMEDIATELY-equivalent
+                    # semantics or be rejected before they can violate the
+                    # absolute deadline.
+                    raise CacheBlobBackendError(
+                        "BlobStore Windows lifecycle lock adapter does not support nonblocking acquisition",
+                        context={"operation": operation},
+                        reason=CacheReason.BLOB_BACKEND_CAPABILITY_UNSUPPORTED,
+                    ) from exc
+            else:
+                token = api.lock(handle.fileno(), exclusive=exclusive)
+
+            def unlock_windows_lock() -> object:
+                return api.unlock(handle.fileno(), token)
+
+            unlock = unlock_windows_lock
+        else:
+            try:
+                import fcntl
+            except ImportError as exc:  # pragma: no cover - exotic non-POSIX runtime.
+                raise CacheBlobBackendError(
+                    "Canonical manifest key locking requires POSIX flock or Win32 LockFileEx",
+                    context={"operation": operation},
+                ) from exc
+            flags = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+            if nonblocking:
+                flags |= fcntl.LOCK_NB
+            try:
+                fcntl.flock(handle.fileno(), flags)
+            except BlockingIOError as exc:
+                if nonblocking:
+                    raise _KeyLockUnavailable from exc
+                raise
+
+            def unlock_posix_lock() -> object:
+                return fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+            unlock = unlock_posix_lock
+    except CacheBlobBackendError:
+        if close_handle:
+            try:
+                handle.close()
+            except OSError:
+                pass
+        raise
+    except OSError as exc:
+        if close_handle:
+            try:
+                handle.close()
+            except OSError:
+                pass
+        raise CacheBlobBackendError(
+            "Canonical manifest key lock could not be acquired",
+            context={"operation": operation},
+        ) from exc
+
+    body_failure: BaseException | None = None
+    try:
+        yield
+    except BaseException as exc:
+        body_failure = exc
+        raise
+    finally:
+        release_failure: BaseException | None = None
+        try:
+            if unlock is not None:
+                unlock()
+        except (OSError, CacheBlobBackendError) as exc:
+            release_failure = exc
+        finally:
+            try:
+                if close_handle:
+                    handle.close()
+            except OSError as exc:
+                if release_failure is None:
+                    release_failure = exc
+        if release_failure is not None:
+            # An unlock error leaves ownership of the kernel lock unknown.  In
+            # particular, suppressing it behind an error raised by the guarded
+            # body would let a retained admission barrier advertise a state it
+            # cannot prove.  Callers must poison that barrier and require a
+            # close/reconstruction before admitting further work.
+            release_error = CacheBlobLockReleaseError(
+                "Canonical manifest key lock could not be released",
+                context={"operation": operation},
+            )
+            if on_release_failure is not None:
+                on_release_failure(release_error)
+            if body_failure is None:
+                raise release_error from release_failure
 
 class ManifestKeyError(CacheBlobManifestUnauthenticatedError, ValueError):
     """Raised when canonical manifest key material cannot be authenticated."""
@@ -359,11 +620,6 @@ class ManifestKeyProvider:
             self._assert_safe_key_metadata(metadata)
             handle = os.fdopen(descriptor, "r+b", closefd=True)
             descriptor = None
-            from .coordination import (
-                InterprocessLockUnavailable,
-                interprocess_open_file_lock,
-            )
-
             if deadline is None:
                 deadline = (
                     time.monotonic()
@@ -381,7 +637,7 @@ class ManifestKeyProvider:
                         context={"operation": "manifest_key_initialization"},
                     )
                 try:
-                    with interprocess_open_file_lock(
+                    with _locked_key_handle(
                         handle,
                         exclusive=True,
                         operation="manifest_key_initialization",
@@ -399,7 +655,7 @@ class ManifestKeyProvider:
                             )
                         yield
                         return
-                except InterprocessLockUnavailable:
+                except _KeyLockUnavailable:
                     # No key or readiness bytes have been read under this
                     # contender.  On expiry the finally block closes this
                     # exact descriptor before exposing the stable timeout.
@@ -490,9 +746,7 @@ class ManifestKeyProvider:
                 raise ManifestKeyError("Canonical manifest key changed before acknowledgement")
             handle = os.fdopen(descriptor, "rb", closefd=True)
             descriptor = None
-            from .coordination import interprocess_open_file_lock
-
-            with interprocess_open_file_lock(
+            with _locked_key_handle(
                 handle, exclusive=True, operation="manifest_key_initialization", close_handle=True
             ):
                 retained_handle = handle
