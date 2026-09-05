@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from cacheness.storage import BlobStore
+
 
 RETIRED_SCHEDULER_MODULES = (
     "cacheness.storage.operation_repository",
@@ -28,13 +30,16 @@ def test_retired_scheduler_has_no_package_or_runtime_reachability() -> None:
 
     for source_path in source_root.rglob("*.py"):
         tree = ast.parse(source_path.read_text(encoding="utf-8"))
-        imported_modules = {
-            alias.name.rsplit(".", 1)[-1]
-            for node in ast.walk(tree)
-            if isinstance(node, (ast.Import, ast.ImportFrom))
-            for alias in node.names
-        }
+        imported_modules = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported_modules.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                if node.module is not None:
+                    imported_modules.add(node.module)
+                imported_modules.update(alias.name for alias in node.names)
         assert retired_modules.isdisjoint(imported_modules), source_path
+        assert set(RETIRED_SCHEDULER_MODULES).isdisjoint(imported_modules), source_path
 
     import cacheness
     import cacheness.storage as storage
@@ -49,3 +54,26 @@ def test_retired_scheduler_has_no_package_or_runtime_reachability() -> None:
         encoding="utf-8"
     )
     assert "operation_repository" not in blob_store_source
+
+
+def test_fresh_and_reopened_stores_never_create_retired_control_artifacts(
+    tmp_path: Path,
+) -> None:
+    """Normal authority-backed use never creates a retired control path."""
+    root = tmp_path / "runtime-tree"
+    store = BlobStore(root, backend="json")
+    try:
+        assert store.get("absent") is None
+        assert store.put({"value": "present"}, key="present") == "present"
+        assert store.lifecycle_authority.read_entry("present") is not None
+    finally:
+        store.close()
+
+    assert not (root / "operations").exists()
+    reopened = BlobStore(root, backend="json")
+    try:
+        assert reopened.get("present") == {"value": "present"}
+        assert reopened.lifecycle_authority.read_entry("present") is not None
+    finally:
+        reopened.close()
+    assert not (root / "operations").exists()

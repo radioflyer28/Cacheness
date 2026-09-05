@@ -14,6 +14,7 @@ import logging
 import sys
 import uuid
 import warnings
+from contextlib import contextmanager
 from functools import wraps
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
@@ -536,27 +537,25 @@ class UnifiedCache:
         """
         @contextmanager
         def _session_context():
-            # A decorator would admit only construction of the context
-            # manager. Hold admission through the caller's full ``with``
-            # lifetime so a clear cannot interleave with the query it yields.
-            with _clear_read_admission(self):
-                if not self._supports_custom_metadata():
-                    raise ValueError("Custom metadata querying not supported - requires SQLite or PostgreSQL backend")
+            if not self._supports_custom_metadata():
+                raise ValueError(
+                    "Custom metadata querying not supported - requires SQLite or PostgreSQL backend"
+                )
 
-                from .custom_metadata import get_custom_metadata_model
+            from .custom_metadata import get_custom_metadata_model
 
-                model_class = get_custom_metadata_model(schema_name)
-                if not model_class:
-                    raise ValueError(f"Unknown custom metadata schema: {schema_name}")
+            model_class = get_custom_metadata_model(schema_name)
+            if not model_class:
+                raise ValueError(f"Unknown custom metadata schema: {schema_name}")
 
-                if not hasattr(self.metadata_backend, "SessionLocal"):
-                    raise ValueError("SQLAlchemy session not available")
+            if not hasattr(self.metadata_backend, "SessionLocal"):
+                raise ValueError("SQLAlchemy session not available")
 
-                session = self.metadata_backend.SessionLocal()
-                try:
-                    yield session.query(model_class)
-                finally:
-                    session.close()
+            session = self.metadata_backend.SessionLocal()
+            try:
+                yield session.query(model_class)
+            finally:
+                session.close()
         
         return _session_context()
 

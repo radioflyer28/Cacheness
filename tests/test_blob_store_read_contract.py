@@ -482,13 +482,13 @@ def test_direct_operations_ignore_corrupt_json_projection(
         store.close()
 
 
-def test_direct_reads_use_authority_without_predecessor_clear_recovery(
+def test_direct_reads_use_lifecycle_authority_without_predecessor_state(
     tmp_path: Path,
 ) -> None:
-    """Direct reads do not construct or depend on scheduler recovery state."""
+    """Direct reads use the authority without constructing predecessor state."""
     store = BlobStore(tmp_path / "authority-read", backend="json")
     try:
-        assert store._clear_recovery is None
+        assert store.lifecycle_authority is not None
         assert store.get("absent") is None
     finally:
         store.close()

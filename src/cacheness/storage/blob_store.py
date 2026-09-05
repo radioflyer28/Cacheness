@@ -93,7 +93,7 @@ from .memory_lifecycle_authority import InMemoryLifecycleAuthority
 from .sqlite_lifecycle_authority import SqliteLifecycleAuthority
 from .path_security import encode_physical_name, resolve_managed_locator
 from .reconciliation import _AuthorityReconciler, ReconciliationReport
-from ..metadata import InMemoryBackend, MetadataBackend as CoreMetadataBackend
+from ..metadata import InMemoryBackend
 from ..metadata import SqliteBackend
 
 # Import CacheConfig for proper handler configuration
@@ -364,7 +364,6 @@ class BlobStore:
             )
             self.lifecycle = AuthorityLifecycleEngine(self, lifecycle_authority)
             self._reconciler = None
-            self._clear_recovery = None
             self._legacy_clear_evidence = None
             self._authority_lifecycle = self.lifecycle
             return
@@ -1211,56 +1210,8 @@ class BlobStore:
         return key
 
     def _manifest_key(self, *, initialize_new_store: bool = False) -> bytes:
-        """Return the strict persistent key without silently downgrading signing."""
-        operation = "get_manifest_key"
-        if initialize_new_store:
-            # Repository availability is a storage boundary, not a key-provider
-            # failure.  Preserve its typed cause instead of misreporting an
-            # unavailable metadata projection as unauthenticated key material.
-            try:
-                has_manifest = bool(
-                    self.manifest_repository.list_page(page_size=1).entries
-                )
-            except CacheStorageError:
-                raise
-        else:
-            has_manifest = True
-        if initialize_new_store and not has_manifest:
-            # Establish current-v2 provenance only after one fail-closed
-            # compatibility proof under the inventory initialization
-            # transition. In particular, a missing key must never turn a raw
-            # primary, sidecar, or pending record into a fresh store. Keep a
-            # typed migration-required result distinct from unavailable key
-            # material so callers can take the documented migration path.
-            self.lifecycle.operation_repository.initialize_new_store()
-        try:
-            if initialize_new_store and not has_manifest:
-                operation = "initialize_manifest_key"
-                initializer = getattr(
-                    self._manifest_key_provider, "get_or_initialize_new_store", None
-                )
-                if callable(initializer):
-                    key = initializer()
-                else:
-                    # An injected provider owns its trust-root provisioning.
-                    # It may expose only the narrow public ``get_key`` protocol.
-                    key = self._manifest_key_provider.get_key()
-            else:
-                key = self._manifest_key_provider.get_key()
-            if type(key) is not bytes or len(key) != 32:
-                raise ManifestKeyError(
-                    "Canonical manifest key provider returned invalid key material"
-                )
-        except Exception as exc:
-            raise CacheBlobManifestUnauthenticatedError(
-                "Canonical BlobStore signing key is unavailable",
-                context={
-                    "operation": operation,
-                    "provider": type(self._manifest_key_provider).__name__,
-                },
-                reason=CacheReason.MANIFEST_SIGNING_KEY_INVALID,
-            ) from exc
-        return key
+        """Compatibility alias for the authority-owned manifest key path."""
+        return self._authority_manifest_key(initialize_new_store=initialize_new_store)
 
     def _delete_or_prove_absent(self, locator: Path) -> None:
         """Remove a contained payload only when deletion is conclusively known."""
