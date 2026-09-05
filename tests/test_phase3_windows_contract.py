@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import inspect
 import os
@@ -27,6 +28,18 @@ def _run_phase3_evidence(*arguments: str) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
     )
+
+
+def _load_evidence_runner():
+    """Load the standalone runner without adding the repository root to sys.path."""
+    specification = importlib.util.spec_from_file_location(
+        "phase3_platform_evidence", EVIDENCE_RUNNER
+    )
+    if specification is None or specification.loader is None:
+        raise RuntimeError("could not load the Phase 3 evidence runner")
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+    return module
 
 
 @pytest.mark.parametrize(
@@ -132,6 +145,35 @@ def test_phase3_runner_reports_a_missing_required_python_as_unavailable() -> Non
     assert evidence["status"] == "UNAVAILABLE"
     assert evidence["requirements"]["python"] == "9.9"
     assert evidence["test_target"]["focused_suite"] == "NOT_RUN"
+
+
+def test_phase3_runner_rejects_a_second_token_report_with_the_current_logon_sid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A denial claim is insufficient when its token is the current session."""
+    verify_platform = _load_evidence_runner()
+
+    report = {
+        "status": "DENIED",
+        "authority_open": "DENIED",
+        "root_mutation": "DENIED",
+        "token_scope": "different-logon-session",
+        "logon_sid": "S-1-5-5-10-20",
+    }
+    monkeypatch.setattr(
+        verify_platform.subprocess,
+        "run",
+        lambda *_arguments, **_kwargs: subprocess.CompletedProcess(
+            args=[], returncode=1, stdout=json.dumps(report), stderr=""
+        ),
+    )
+
+    denied, reason = verify_platform._run_different_token_denial(
+        ["different-token-probe"], current_logon_sid="S-1-5-5-10-20"
+    )
+
+    assert denied is False
+    assert reason == "different_token_not_distinct"
 
 
 @pytest.mark.skipif(os.name != "nt", reason="native Windows evidence target")
