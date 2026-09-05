@@ -73,16 +73,8 @@ def test_projection_export_streams_a_private_authority_backup_and_marks_revision
         assert result.value == dirty_revision
         assert authority.snapshot_state().projection_dirty is False
         document = json.loads(projection_path.read_text(encoding="utf-8"))
-        assert document["entries"][key] == {
-            "cache_key": key,
-            "data_type": "object",
-            "file_size": document["entries"][key]["file_size"],
-            "created_at": document["entries"][key]["created_at"],
-            "metadata": {
-                "tag": "v1",
-                "actual_path": document["entries"][key]["metadata"]["actual_path"],
-            },
-        }
+        assert document["entries"][key] == store.get_metadata(key)
+        assert document["entries"][key]["metadata"]["tag"] == "v1"
         assert document["entries"][key]["metadata"]["actual_path"].startswith(
             "generations/"
         )
@@ -118,6 +110,41 @@ def test_projection_export_failure_keeps_committed_authority_dirty(
 
         assert authority.snapshot_state().projection_dirty is True
         assert store.get(key) == "projection payload"
+    finally:
+        store.close()
+
+
+def test_stale_projection_export_cannot_mark_a_newer_authority_revision_clean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An R snapshot remains labeled R when authority commits R+1 mid-export."""
+    from cacheness.storage import BlobStore
+
+    root = tmp_path / "projection-race"
+    store = BlobStore(root, backend="json")
+    try:
+        store.put("first", key="first")
+        authority = store.lifecycle_authority
+        captured_revision = authority.snapshot_state().revision
+        exporter = JsonProjectionExporter(authority, root / "cache_metadata.json")
+        original_write = exporter._write_snapshot
+
+        def advance_authority_after_snapshot(snapshot_path: Path, revision: object) -> Path:
+            candidate = original_write(snapshot_path, revision)
+            assert authority.open_write_transactions == 0
+            store.put("second", key="second")
+            return candidate
+
+        monkeypatch.setattr(exporter, "_write_snapshot", advance_authority_after_snapshot)
+
+        with pytest.raises(CacheBlobLifecycleConflictError, match="Projection revision changed"):
+            exporter.export()
+
+        document = json.loads((root / "cache_metadata.json").read_text(encoding="utf-8"))
+        assert document["_cacheness_authority_revision"] == captured_revision
+        assert set(document["entries"]) == {"first"}
+        assert authority.snapshot_state().projection_dirty is True
+        assert store.get("second") == "second"
     finally:
         store.close()
 

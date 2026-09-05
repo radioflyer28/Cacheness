@@ -15,6 +15,7 @@ from pathlib import Path
 import sqlite3
 import stat
 import subprocess
+import tempfile
 from threading import Lock
 import time
 from typing import Callable, Iterator, TypeVar
@@ -39,6 +40,7 @@ from .lifecycle_authority import (
     MutationSpec,
     PageToken,
     PreparedMutation,
+    ProjectionBackup,
     ProjectionRevision,
     PromotionResult,
     ReconciliationPage,
@@ -1598,6 +1600,53 @@ class SqliteLifecycleAuthority:
             return ProjectionRevision(revision)
 
         return self._transaction(mark)
+
+    @contextmanager
+    def projection_backup(self) -> Iterator[ProjectionBackup]:
+        """Yield a private consistent backup without retaining a live source handle.
+
+        Projection consumers must never render while holding an authority
+        transaction or connection.  SQLite's online backup copies one
+        consistent read snapshot into a mode-restricted temporary database;
+        the source connection is closed before the caller receives it.
+        """
+        absolute_deadline = self._deadline(None)
+        snapshot_path: Path | None = None
+        try:
+            with self._connection(mutation=False, deadline=absolute_deadline) as source:
+                if source is None:
+                    raise CacheBlobMigrationRequiredError(
+                        "Lifecycle authority is absent for projection export"
+                    )
+                descriptor, name = tempfile.mkstemp(
+                    prefix=".lifecycle-projection-",
+                    suffix=".sqlite3",
+                    dir=self.path.parent,
+                )
+                os.close(descriptor)
+                snapshot_path = Path(name)
+                destination = sqlite3.connect(snapshot_path, isolation_level=None)
+                try:
+                    source.backup(destination)
+                    revision = destination.execute(
+                        "SELECT revision FROM authority_state WHERE singleton = 1"
+                    ).fetchone()
+                    if revision is None or type(revision[0]) is not int:
+                        raise CacheBlobMigrationRequiredError(
+                            "Lifecycle authority projection revision is incompatible"
+                        )
+                finally:
+                    destination.close()
+            self._reach_transaction_boundary("projection.backup.closed_source")
+            yield ProjectionBackup(snapshot_path, ProjectionRevision(revision[0]))
+        except sqlite3.Error as error:
+            self._translate_sqlite_error(error, operation="lifecycle_projection_backup")
+        finally:
+            if snapshot_path is not None:
+                try:
+                    snapshot_path.unlink()
+                except FileNotFoundError:
+                    pass
 
     def snapshot_state(self) -> AuthorityStateSnapshot:
         """Return one bounded authority-state diagnostic without exposing tables."""

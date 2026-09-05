@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 
@@ -199,6 +200,14 @@ class ProjectionRevision:
 
 
 @dataclass(frozen=True)
+class ProjectionBackup:
+    """Private immutable SQLite snapshot used only to render a projection."""
+
+    path: Path
+    revision: ProjectionRevision
+
+
+@dataclass(frozen=True)
 class ReconciliationSnapshot:
     """Immutable authority work boundary captured without payload inspection."""
 
@@ -345,6 +354,8 @@ class LifecycleAuthority(Protocol):
         self, expected: ProjectionRevision | None
     ) -> ProjectionRevision: ...
 
+    def projection_backup(self) -> object: ...
+
     def close(self) -> None: ...
 
 
@@ -358,6 +369,7 @@ __all__ = [
     "MutationSpec",
     "PageToken",
     "PreparedMutation",
+    "ProjectionBackup",
     "ProjectionRevision",
     "PromotionResult",
     "ReconciliationPage",
