@@ -10,7 +10,11 @@ import pytest
 
 from cacheness.error_handling import CacheBlobRecoverableCleanupError
 from cacheness.storage import BlobStore
-from _lifecycle_test_support import CRASH_BOUNDARY_EXIT, crash_public_put
+from _lifecycle_test_support import (
+    CRASH_BOUNDARY_EXIT,
+    authority_whole_state,
+    crash_public_put,
+)
 
 
 class _NativeJsonHandler:
@@ -89,6 +93,77 @@ def test_crash_harness_terminates_a_public_put_at_a_named_boundary(
     )
 
     assert result.returncode == CRASH_BOUNDARY_EXIT
+
+
+@pytest.mark.parametrize(
+    ("boundary", "committed_state", "debt_count"),
+    (
+        ("put.intent_prepared", "old", 0),
+        ("put.before_candidate_publish", "old", 0),
+        ("put.candidate_published", "old", 0),
+        ("put.candidate_verified", "old", 0),
+        ("put.before_promotion", "old", 0),
+        ("put.promoted", "new", 1),
+        ("cleanup.before_payload_delete", "new", 1),
+        ("cleanup.after_payload_delete", "new", 1),
+        ("put.cleanup_retired", "new", 0),
+    ),
+)
+def test_subprocess_crash_reopens_to_one_authoritative_generation_with_indexed_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: str,
+    committed_state: str,
+    debt_count: int,
+) -> None:
+    """Every public put crash preserves old-or-new authority plus exact residue."""
+    root = tmp_path / boundary.replace(".", "-")
+    seeded = BlobStore(root, backend="json")
+    try:
+        seeded.put("old", key="crash-key")
+        previous = seeded.lifecycle_authority.read_entry("crash-key")
+        assert previous is not None
+        before = authority_whole_state(seeded.lifecycle_authority)
+    finally:
+        seeded.close()
+
+    result = crash_public_put(
+        root,
+        boundary=boundary,
+        key="crash-key",
+        value="new",
+    )
+    assert result.returncode == CRASH_BOUNDARY_EXIT
+
+    reopened = BlobStore(root, backend="json")
+    try:
+        after = authority_whole_state(reopened.lifecycle_authority)
+        current = reopened.lifecycle_authority.read_entry("crash-key")
+        assert current is not None
+        assert len(after.entries) == 1
+        assert len(after.cleanup_debt) == debt_count
+        assert len(after.mutation_states) == len(before.mutation_states) + 1
+        assert len(reopened.lifecycle_authority.pending_mutations()) == int(
+            committed_state == "old"
+        )
+        if committed_state == "old":
+            assert current == previous
+        else:
+            assert current.generation != previous.generation
+            assert current.locator != previous.locator
+
+        monkeypatch.setattr(
+            reopened,
+            "_resolve_payload_handler",
+            lambda _manifest: (_ for _ in ()).throw(
+                AssertionError("reconciliation must not deserialize payloads")
+            ),
+        )
+        first = reopened.reconcile()
+        second = reopened.reconcile()
+        assert first.to_dict() == second.to_dict()
+    finally:
+        reopened.close()
 
 
 def test_put_promotes_immutable_generation_through_lifecycle_authority(
