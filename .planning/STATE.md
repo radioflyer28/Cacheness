@@ -3,17 +3,17 @@ gsd_state_version: 1.0
 milestone: v1.0
 current_phase: 03
 current_phase_name: Atomic Lifecycle and Recovery Engine
-status: paused
-stopped_at: Architectural replan decision after non-converging Phase 03 race-fix cycle
-last_updated: "2026-09-04T18:59:08Z"
+status: planned
+stopped_at: Replacement Phase 03 Plan 01 of 10 ready after transactional-authority replan
+last_updated: "2026-09-04T23:43:52Z"
 last_activity: 2026-09-04
-last_activity_desc: Paused iteration-28 fixer after evidence that the file-native lifecycle protocol is not converging
-state_head: f19cc94
+last_activity_desc: Replacement transactional-authority Phase 03 plan set prepared; Plan 01 of 10 is next
+state_head: b861a1c
 progress:
   total_phases: 8
   completed_phases: 2
   total_plans: 32
-  completed_plans: 32
+  completed_plans: 22
 milestone_name: milestone
 ---
 
@@ -28,10 +28,10 @@ See: .planning/PROJECT.md (updated 2026-08-29)
 
 ## Current Position
 
-Phase: 03 (Atomic Lifecycle and Recovery Engine) — VERIFYING
-Plan: 10 of 10
-Status: Paused for architectural replan — repeated race fixes keep adding protocol states and exposing new races
-Last activity: 2026-09-04 — Interrupted iteration-28 fixer at a safe uncommitted checkpoint and audited the 28-cycle finding pattern
+Phase: 03 (Atomic Lifecycle and Recovery Engine) — PLANNED
+Plan: 01 of 10
+Status: Replacement transactional-authority plans ready; execution has not started
+Last activity: 2026-09-04 — Replaced the non-converging file-native scheduler plan set with 10 transactional-authority plans
 
 Progress: [██░░░░░░░░] 2 of 8 phases complete
 
@@ -39,6 +39,8 @@ Progress: [██░░░░░░░░] 2 of 8 phases complete
 
 *Updated after each plan completion*
 **Per-Plan Metrics:**
+
+Phase 03 rows in this historical table belong to the superseded file-native attempt and do not count toward replacement-plan completion; current aggregate completion is 22/32.
 
 | Plan | Duration | Tasks | Files |
 |------|----------|-------|-------|
@@ -139,24 +141,28 @@ Recent decisions affecting current work:
 - [Phase 02]: Exact Phase 1 fixture trees attach in-memory identities and report migration-required; Phase 7 alone owns migration execution.
 - [Phase 02]: Legacy SQLite inspection uses immutable read-only mode so compatibility detection cannot create journal sidecars.
 - [Phase 02]: Every direct read API preserves malformed, future-version, lifecycle, and local-backend failures rather than collapsing them into absence.
-- [Phase 03]: BlobStore publication now uses immutable generation locators and exact manifest CAS as its sole authority transition.
-- [Phase 03]: Reopen recovery acts only on authenticated manifest authority plus validated signed operation evidence; normal reads do not mutate evidence.
-- [Phase 03]: Manifest authority mutations require the authenticated generation plus SHA-256 of the exact canonical record; repository adapters compare opaque bytes only.
-- [Phase 03]: JSON conditional publication refreshes under a short OS-backed lock, while SQLite takes a writer transaction before exact-record comparison.
-- [Phase 03]: LifecycleLimits is declared once in cacheness.config and is passed by identity from CacheConfig through BlobStore, LifecycleEngine, and the operation repository.
-- [Phase 03]: Operation evidence uses a dedicated HMAC domain and exact-byte conditional checkpoint and retirement; grace never authorizes unauthenticated evidence.
-- [Phase 03]: Stale write cleanup reclaims only the operation-bound immutable candidate after exact CAS conflict.
-- [Phase 03]: Delete publishes a signed tombstone before payload reclamation and retires it with exact-record CAS.
-- [Phase 03]: StoreAdmissionBarrier holds aggregate admission only while clear persists its authenticated finite target snapshot; ordinary operations are otherwise concurrent.
-- [Phase 03]: Clear checkpoints exact authenticated target pages and treats changed current records as conflicts, never as authority to delete a later generation.
-- [Phase 03]: Legacy clear evidence is reopen-only; new BlobStore clears are owned exclusively by LifecycleEngine.
-- [Phase 03]: BlobStore ordinary operations bypass predecessor global admission and use StoreAdmissionBarrier only for current clear snapshot establishment.
-- [Phase 03]: Reconciliation defaults to bounded dry-run reports and only applies authenticated, revalidated exact evidence.
-- [Phase 03]: Reconciliation resumes with encrypted authenticated independent manifest and operation cursors.
-- [Phase 03]: Key locks are per BlobStore instance; independent instances remain governed solely by exact manifest CAS.
-- [Phase 03]: BlobStore reads authenticate M1 and M2 around each private snapshot and retry only a proven newer generation once.
-- [Phase 03]: Concurrent close waiters treat CLOSED as terminal and never repeat owned resource release.
-- [Phase 03]: Phase 3 release tests assert canonical lifecycle and exact-CAS authority; legacy metadata projections and clear-recovery hooks are not direct BlobStore mutation authority.
+The following Phase 03 bullets are preserved as superseded file-native implementation evidence from the archived 28-cycle attempt; they are historical context, not claims about replacement-plan execution or the target architecture.
+
+- [Phase 03 superseded]: BlobStore publication now uses immutable generation locators and exact manifest CAS as its sole authority transition.
+- [Phase 03 superseded]: Reopen recovery acts only on authenticated manifest authority plus validated signed operation evidence; normal reads do not mutate evidence.
+- [Phase 03 superseded]: Manifest authority mutations require the authenticated generation plus SHA-256 of the exact canonical record; repository adapters compare opaque bytes only.
+- [Phase 03 superseded]: JSON conditional publication refreshes under a short OS-backed lock, while SQLite takes a writer transaction before exact-record comparison.
+- [Phase 03 superseded]: LifecycleLimits is declared once in cacheness.config and is passed by identity from CacheConfig through BlobStore, LifecycleEngine, and the operation repository.
+- [Phase 03 superseded]: Operation evidence uses a dedicated HMAC domain and exact-byte conditional checkpoint and retirement; grace never authorizes unauthenticated evidence.
+- [Phase 03 superseded]: Stale write cleanup reclaims only the operation-bound immutable candidate after exact CAS conflict.
+- [Phase 03 superseded]: Delete publishes a signed tombstone before payload reclamation and retires it with exact-record CAS.
+- [Phase 03 superseded]: StoreAdmissionBarrier holds aggregate admission only while clear persists its authenticated finite target snapshot; ordinary operations are otherwise concurrent.
+- [Phase 03 superseded]: Clear checkpoints exact authenticated target pages and treats changed current records as conflicts, never as authority to delete a later generation.
+- [Phase 03 superseded]: Legacy clear evidence is reopen-only; new BlobStore clears are owned exclusively by LifecycleEngine.
+- [Phase 03 superseded]: BlobStore ordinary operations bypass predecessor global admission and use StoreAdmissionBarrier only for current clear snapshot establishment.
+- [Phase 03 superseded]: Reconciliation defaults to bounded dry-run reports and only applies authenticated, revalidated exact evidence.
+- [Phase 03 superseded]: Reconciliation resumes with encrypted authenticated independent manifest and operation cursors.
+- [Phase 03 superseded]: Key locks are per BlobStore instance; independent instances remain governed solely by exact manifest CAS.
+- [Phase 03 superseded]: BlobStore reads authenticate M1 and M2 around each private snapshot and retry only a proven newer generation once.
+- [Phase 03 superseded]: Concurrent close waiters treat CLOSED as terminal and never repeat owned resource release.
+- [Phase 03 superseded]: Phase 3 release tests assert canonical lifecycle and exact-CAS authority; legacy metadata projections and clear-recovery hooks are not direct BlobStore mutation authority.
+
+Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one transactional `LifecycleAuthority`, stdlib SQLite as the local persistent adapter, JSON as projection, immutable native payloads outside transactions, and physical retirement of the superseded scheduler.
 
 ### Pending Todos
 

@@ -51,6 +51,8 @@ DATA_76D97E72_START
 - **D-21:** The OS principal that owns a local store is inside the trusted deployment boundary for lifecycle-control availability. Cacheness validates control-object type, containment, identity, and authenticated contents and fails closed when observable substitution occurs, but it does not promise continued operation or immutable per-key authority if that same principal deliberately deletes or rebinds every lifecycle authority object while the store is live. Ordinary Cacheness processes never perform such rebinding. — **Reversibility:** costly — Defending against a hostile store owner would require an external coordinator, privileged mandatory controls, or store-wide serialization and therefore changes the architecture or deployment model.
 - **D-22:** In this milestone, Windows local-store coordination is supported only among processes running as one OS user in one interactive or service session. Cross-user, cross-service, and cross-session access to the same local store is unsupported and must fail or be prevented by deployment ACLs; supporting it later requires an explicit global authority namespace, ACL/security-descriptor contract, and native Windows validation. Advertised Windows compatibility otherwise remains in force. — **Reversibility:** reversible — A later milestone may broaden the topology after implementing and validating that authority contract.
 
+**Windows enforcement contract for D-22/D-31:** An account SID does not identify a logon session and is therefore insufficient. A supported local NTFS authority root must be provisioned before Cacheness starts, with inheritance disabled and a DACL whose sole ordinary mutation grant is the current access token's logon SID (`S-1-5-5-X-Y`). Provisioning and any later DACL repair are offline/deployment responsibilities performed while the store is unavailable. Cacheness resolves that SID from supported Windows token-group evidence, corroborates it with PowerShell/.NET identity data, and only validates the existing root and DACL before authority database creation/open and every mutation; it never creates the Windows root, changes its mode, disables inheritance, or adds/removes/reorders ACEs. Read-only inspection of an absent or empty root remains a zero-mutation empty result, but any mutation against an absent root fails typed and unchanged with the documented actionable PowerShell/`icacls.exe` offline provisioning command. Persistent account-SID mutation grants and inherited or unrelated write ACEs are rejected unchanged. Explicit SYSTEM and built-in Administrators entries are permitted only when narrowly documented and non-mutating; inability to prove the descriptor or current token scope fails typed before SQLite or payload effects. OS ACL enforcement supplies the session boundary—Cacheness must not add a Win32 lock authority. Native acceptance requires proof that Cacheness performs no directory creation, chmod, or ACL write; rejects absent, unsafe, and drifted roots unchanged; permits same-logon-session concurrency; and denies a different-logon-session or service token from opening the authority database or mutating the root. If the second token cannot be exercised, evidence is `UNAVAILABLE`, never passing.
+
 ### Transactional Authority Replan
 
 - **D-23:** The file-native lifecycle scheduler built from operation receipts, inventory events, heads, anchors, cursors, pending-control records, and staged control files is rejected. The replacement removes that protocol rather than wrapping or incrementally repairing it. D-05 through D-20 remain behavioral requirements only where they do not prescribe that discarded mechanism. — **Reversibility:** costly — Reintroducing file-native transactional coordination would require new proof that it is smaller and more reliable than the transactional authority.
@@ -385,7 +387,7 @@ Reconciliation works only from indexed authority rows and exact locators already
 - Work created after the captured high-water belongs to the next run. A row already retired when resumed counts as completed; it must not cause cursor rewind or livelock.
 - Never deserialize a payload to establish lifecycle ownership and never enumerate filenames to discover operation state.
 
-Suggested report fields follow D-13: stable finding ID, authority/run revision, operation ID, key, expected/authoritative generation, exact residue role/locator, proposed action, reason code, disposition (`safe`, `blocked`, or `confirmation_required`), and applied/checkpoint state. Exact reason values are public-contract decisions and must be characterized before renaming; proposed values are [ASSUMED].
+The canonical versioned machine report follows D-13: stable finding ID, authority/run revision, redacted operation provenance, key fingerprint, expected/authoritative generation, exact residue type and role, proposed action, reason code, disposition (`safe`, `blocked`, or `confirmation_required`), and applied/checkpoint state. Wave 0 characterizes the current zero-argument dictionaries as the exact legacy v1 compatibility view; Plan 05 adds a `schema_version: 2` machine envelope and projects v1 from the same underlying finding object. Exact existing reason values remain characterized before renaming, and unknown requested report versions fail explicitly.
 
 ### Pattern 9: JSON as a projection, not an authority
 
@@ -485,7 +487,7 @@ Do not copy a live database file as a backup. Quiesce/close it or use a supporte
 - Use domain exceptions, preserve causes with `raise ... from e`, and avoid broad exceptions that turn corruption/backend failure into a cache miss.
 - Keep new functions focused and do not grow the already-large orchestration modules.
 - Keep optional dependency/runtime checks aligned with packaging extras; no new external dependency is required here.
-- Run targeted pytest and Ruff checks without treating the repository-wide existing Ruff baseline as a clean invariant.
+- Before Phase 3 production edits, check in an exact-scope Ruff baseline whose stable fingerprints normalize repository-relative path, rule code, diagnostic message, and source snippet while excluding line/column. Run a deterministic delta verifier after each plan: removed findings are allowed; unmatched, changed, duplicated-above-baseline, or scope-drift findings fail. New Phase 3 Python files have no baseline entries and must remain clean; final acceptance also runs direct Ruff on those new files. Repository-wide existing debt remains Phase 8.
 
 These constraints are extracted from the supplied `AGENTS.md` project/stack/conventions sections. [VERIFIED: `AGENTS.md:13-22`, `AGENTS.md:119-175`; quoted directives include `Preserve supported public APIs`, `BlobStore owns storage lifecycle`, `Correctness comes first during migration`, and `Maintain Python 3.11+ support`]
 
@@ -519,7 +521,7 @@ Preserve behavior cases while changing their fixture seam:
 | Clear snapshot excludes later writes | Transactional clear target membership through `BlobStore.clear`. |
 | Close drains/blocks instance work | Instance admission and authority resource ownership, not repository lock handles. |
 | Recovery boundedness/resume | Authority high-water/keyset pages and stable reports, not receipt filenames. |
-| Windows behavior | Same SQLite adapter and same-process/session scope; no Win32 fallback protocol expectations. |
+| Windows behavior | Same SQLite adapter; a pre-provisioned protected local-root DACL binds mutation to the current token logon SID and is validated before authority database creation/open and every mutation. Cacheness never creates or changes the root/DACL; absent, unsafe, or drifted roots fail typed and unchanged with offline provisioning guidance, and different-session/service tokens are denied. No Win32 fallback protocol. |
 
 ## Common Pitfalls
 
@@ -614,7 +616,7 @@ Security enforcement is enabled in `.planning/config.json`; Phase 3 therefore re
 |---------------|---------|------------------|
 | V2 Authentication | No user authentication surface | Store signing/authenticity keys remain configuration credentials, not user authentication. |
 | V3 Session Management | No web session surface | Process/connection ownership and post-fork rejection are lifecycle controls, not sessions. |
-| V4 Access Control | Yes at local resource boundary | Contained private store root, owner/session deployment scope, fail-closed topology and resource-type checks. |
+| V4 Access Control | Yes at local resource boundary | Contained private store root, Windows logon-SID-bound protected DACL, fail-closed token/topology/resource-type checks. |
 | V5 Validation, Sanitization and Encoding | Yes | Bound SQL parameters, strict bounded row decoders, enum/version/length validation, canonical manifest verification before trusting locators. |
 | V6 Stored Cryptography | Yes | Reuse established HMAC/canonical manifest signing; never invent custom cryptography. |
 | V7 Error Handling and Logging | Yes | Typed conflict/integrity/backend/timeout outcomes, cause preservation, bounded sanitized logs. |
@@ -743,7 +745,7 @@ Both inspected runtime SQLite versions fall in the official WAL advisory's affec
 | Config file | `pyproject.toml` (`[tool.pytest.ini_options]`) [VERIFIED: `pyproject.toml:83`] |
 | Quick run command | `.venv/bin/pytest -q tests/test_lifecycle_authority_contract.py tests/test_sqlite_lifecycle_authority.py -x` |
 | Full phase command | `.venv/bin/pytest -q tests/test_lifecycle_authority_contract.py tests/test_sqlite_lifecycle_authority.py tests/test_blob_store_atomic_lifecycle.py tests/test_blob_store_reconciliation.py tests/test_blob_store_concurrency.py tests/test_blob_store_close_contract.py -o log_cli=false` |
-| Repository gate | `uv run pytest -q -o log_cli=false` plus `uv run ruff check src tests` under normal approved project tooling |
+| Repository gate | `uv run pytest -q -o log_cli=false` plus `.venv/bin/python tools/verify_phase3_ruff_delta.py` and direct Ruff on Phase 3-new Python files (repository-wide cleanup belongs to Phase 8) |
 
 ### Phase Requirements → Test Map
 
@@ -808,13 +810,13 @@ Avoid timing-only races and sleeps as the synchronization mechanism. Events/barr
 - Confirm database recovery after process termination during write transaction.
 - Reject post-fork inherited authority by PID; fresh child authority succeeds where topology is supported.
 - Verify `close()` releases owned connections and is idempotent.
-- Exercise Windows/macOS/Linux in CI on supported Python versions; no platform-specific receipt/lock behavior is expected.
+- Exercise Windows/macOS/Linux in CI on supported Python versions. Native Windows evidence must derive the current `S-1-5-5-X-Y` logon SID; prove that the local NTFS root was pre-provisioned with the protected DACL; prove Cacheness never creates the root or changes its mode/ACL; reject absent, unsafe, and drifted roots byte-for-byte unchanged with the actionable offline provisioning command; prove same-session concurrency; and prove a different-session/service token cannot open/mutate. Inability to exercise that negative case is blocking unavailability. No platform-specific receipt/lock behavior is expected.
 
 ### Sampling Rate
 
 - **Per task commit:** common authority contract plus the directly changed behavior file.
 - **Per wave merge:** full phase command.
-- **Phase gate:** full repository suite, targeted supported-Python/platform matrix, Ruff delta clean, and crash/concurrency suite green before `$gsd-verify-work`.
+- **Phase gate:** full repository suite, targeted supported-Python/platform matrix, checked-in exact-scope Ruff delta clean, direct Ruff clean on every Phase 3-new Python file, and crash/concurrency suite green before `$gsd-verify-work`.
 
 ### Wave 0 Gaps
 
@@ -838,27 +840,15 @@ Avoid timing-only races and sleeps as the synchronization mechanism. Events/barr
 
 The planner should turn A3, A4, and public compatibility around report/error values into explicit Wave 0 characterization or benchmark tasks. Other assumed names remain implementation discretion and should be locked by the first authority-contract tests.
 
-## Open Questions
+## Resolved Planning Questions
 
-1. **Was any file-native Phase 3 scheduler format released or used outside disposable development worktrees?**
-   - What we know: current main contains the scheduler modules, and the final iteration-28 review identifies unrecoverable unindexed control residue. [VERIFIED: `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-REVIEW.file-native-final.md:64-84`]
-   - What's unclear: whether user stores exist whose only recovery evidence is that internal protocol.
-   - Recommendation: inventory package release history and supported stored formats in Wave 0. If never released, document dev-store rebuild and delete it. If released, add only an exact read-only detector that returns migration-required; do not resume the protocol.
+1. **RESOLVED — file-native scheduler release prevalence.** Plan 03-01 performs a fail-closed repository and package-evidence test before any scheduler deletion. Absence from release tags, release branches, packaged-source manifests, fixtures, changelog, and supported-format documentation binds the decision to disposable-development-store rebuild. Any contrary evidence halts execution and requires a separate read-only migration detector; no scheduler parser or replay path is authorized.
 
-2. **What exact public result/error/reconciliation fields are already compatibility-locked?**
-   - What we know: STOR-08 and earlier phases protect typed outcomes, and D-13 requires stable machine/human reconciliation reports.
-   - What's unclear: which scheduler-era reason strings were public versus internal.
-   - Recommendation: characterize public calls and serialization shapes before naming new authority enum/reason values; map deprecated values at the boundary rather than leaking SQLite errors.
+2. **RESOLVED — public result, error, metadata, and reconciliation fields.** Plan 03-01 Wave 0 characterization freezes exact `CacheReason` values/inheritance, `BlobStore.get_metadata()` keys/nesting, and the zero-argument `ReconciliationFinding`/`ReconciliationReport` dictionary and human-summary fields as the legacy v1 compatibility view before new authority enums or adapters are implemented. Plan 03-05 then adds a versioned canonical v2 machine view containing every D-13 evidence field and implements v1 as an explicit projection adapter from the same object. Internal scheduler-era names receive no compatibility promise unless characterization proves they cross a supported public boundary.
 
-3. **What clear-snapshot writer-hold budget is acceptable at expected maximum local store size?**
-   - What we know: exact clear membership must be transactional, and SQLite has one writer. [CITED: https://www.sqlite.org/lang_transaction.html]
-   - What's unclear: target cardinality and acceptable p95/p99 writer wait.
-   - Recommendation: implement the single-transaction snapshot first, benchmark realistic cardinalities, and set a checked-in threshold. Do not add a chunked weak snapshot preemptively.
+3. **RESOLVED — clear-snapshot budget sequencing.** Exact one-transaction `INSERT ... SELECT` membership is implemented first. Plan 03-10 measures representative cardinalities and writer wait using the production schema, records p50/p95/p99 distributions and provenance, and only then derives checked-in thresholds and safety multipliers. No numeric clear threshold is a release gate before that measurement succeeds.
 
-4. **Where should the authority database live relative to existing metadata paths?**
-   - What we know: it must be under a contained local root and must not be confused with JSON projection or payload files.
-   - What's unclear: the compatibility-safe filename/config mapping.
-   - Recommendation: select one reserved contained locator during planning, characterize collisions with released paths, and fail typed if an incompatible object occupies it. The proposed filename is intentionally not specified here.
+4. **DEFERRED-TO-BLOCKING-CHECKPOINT — persisted authority locator and identity.** Plan 03-01 blocks before database creation for confirmation of the recommended contained locator `.cacheness/lifecycle-authority-v1.sqlite3`, application ID `0x43414348`, schema `user_version=1`, and generated store identity. The checkpoint outcome is written to `03-01-SUMMARY.md`; Plan 03-02 has an explicit precondition on that outcome. An incompatible object at the confirmed locator always fails typed and unchanged.
 
 ## Sources
 
@@ -907,7 +897,9 @@ Recommended plan decomposition:
 3. **SQLite authority — durable local reference:** implement schema identity/migrations, rollback `DELETE` + `synchronous=EXTRA`, explicit short `BEGIN IMMEDIATE` transactions, bounded busy deadlines, integrity checks, local-only capability, and close/fork ownership.
 4. **Lifecycle orchestration — native payload state machine:** rewire put/overwrite/delete around durable intent, immutable publish, verification, conditional promotion, cleanup debt, and retirement without a transaction across payload I/O.
 5. **Clear, reconciliation, and JSON projection:** implement transactional clear targets, indexed high-water/keyset recovery, resumable apply checkpoints, stable reports, and revision-checked JSON rebuild/export.
-6. **Delete the abandoned scheduler:** remove `operation_repository.py`, scheduler record/journal/lock/inventory mechanisms, platform receipt authority, and internal tests; retain only containment, immutable payload I/O, bounded local key/instance coordination, and any proven read-only migration detector.
-7. **Cross-platform acceptance:** run deterministic crash/race tests on supported Python versions and Windows/macOS/Linux, prove D-28 overlap counters, establish transaction/clear/busy budgets, and gate on full regression plus lint delta.
+6. **Delete the abandoned scheduler core:** remove `operation_repository.py`, operation records, clear journals, exports, and scheduler-internal tests after the release-evidence gate.
+7. **Trim retained helpers:** remove platform lock/control authority while separately preserving containment, immutable payload I/O, bounded local key/instance coordination, and projection-only compatibility.
+8. **Crash/runtime/platform acceptance:** run deterministic crash/race tests on supported Python versions, prove D-28 overlap counters, and require native Windows pre-provisioned-root/logon-SID/DACL evidence—including no runtime root/ACL mutation, unchanged absent/unsafe/drift rejection, and a denied different-session/service-token attempt—without treating unavailable evidence as success.
+9. **Measured budget calibration:** benchmark transaction/clear/busy/page/overlap paths against the production schema, then derive thresholds and run full regression plus the checked-in exact-scope Ruff delta and direct Ruff on Phase 3-new Python files.
 
 This decomposition satisfies STOR-03 through STOR-07 without recreating a filesystem database: SQLite stores only small transactional lifecycle authority rows, while payloads remain immutable native handler outputs in their payload backend.
