@@ -20,7 +20,7 @@ from cacheness.error_handling import (
     CacheStorageError,
     CacheUnsafePathError,
 )
-from cacheness.metadata import InMemoryBackend, JsonBackend, SqliteBackend
+from cacheness.metadata import InMemoryBackend
 from cacheness.storage import BlobStore
 from cacheness.storage import blob_store as blob_store_module
 from cacheness.storage.guarded_handler_io import GuardedHandlerIO
@@ -30,6 +30,7 @@ from cacheness.storage.read_contract import (
     CacheReadFailureCategory,
     classify_cache_read_failure,
 )
+from cacheness.storage.sqlite_lifecycle_authority import SqliteLifecycleAuthority
 
 
 class _TracingHandler:
@@ -143,58 +144,79 @@ def test_constructor_failure_closes_managed_root_descriptor(
 def test_failed_initialization_closes_only_internally_owned_backend(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A retained constructor exception cannot defer owned SQLite cleanup to GC."""
-    created: list[SqliteBackend] = []
-    closed: list[SqliteBackend] = []
-    original_init = SqliteBackend.__init__
-    original_close = SqliteBackend.close
+    """A constructor failure releases its default authority and projection."""
+    created_authorities: list[SqliteLifecycleAuthority] = []
+    closed_authorities: list[SqliteLifecycleAuthority] = []
+    created_backends: list[InMemoryBackend] = []
+    closed_backends: list[InMemoryBackend] = []
+    original_for_root = SqliteLifecycleAuthority.for_root
+    original_authority_close = SqliteLifecycleAuthority.close
+    original_backend_init = InMemoryBackend.__init__
+    original_backend_close = InMemoryBackend.close
 
-    def tracked_init(backend: SqliteBackend, *args: Any, **kwargs: Any) -> None:
-        original_init(backend, *args, **kwargs)
-        created.append(backend)
+    def tracked_for_root(*args: Any, **kwargs: Any) -> SqliteLifecycleAuthority:
+        authority = original_for_root(*args, **kwargs)
+        created_authorities.append(authority)
+        return authority
 
-    def tracked_close(backend: SqliteBackend) -> None:
-        if backend in created:
-            closed.append(backend)
-        original_close(backend)
+    def tracked_authority_close(authority: SqliteLifecycleAuthority) -> None:
+        if authority in created_authorities:
+            closed_authorities.append(authority)
+        original_authority_close(authority)
 
-    monkeypatch.setattr(SqliteBackend, "__init__", tracked_init)
-    monkeypatch.setattr(SqliteBackend, "close", tracked_close)
-    def fail_repository_setup(
-        _backend: object, *, lifecycle_limits: object, **_kwargs: object
-    ) -> None:
-        assert lifecycle_limits is not None
-        raise RuntimeError("repository setup failed")
+    def tracked_backend_init(backend: InMemoryBackend) -> None:
+        original_backend_init(backend)
+        created_backends.append(backend)
 
+    def tracked_backend_close(backend: InMemoryBackend) -> None:
+        if backend in created_backends:
+            closed_backends.append(backend)
+        original_backend_close(backend)
+
+    monkeypatch.setattr(SqliteLifecycleAuthority, "for_root", tracked_for_root)
+    monkeypatch.setattr(SqliteLifecycleAuthority, "close", tracked_authority_close)
+    monkeypatch.setattr(InMemoryBackend, "__init__", tracked_backend_init)
+    monkeypatch.setattr(InMemoryBackend, "close", tracked_backend_close)
     monkeypatch.setattr(
         blob_store_module,
-        "create_manifest_repository",
-        fail_repository_setup,
+        "HandlerRegistry",
+        lambda: (_ for _ in ()).throw(RuntimeError("handler setup failed")),
     )
 
     with pytest.raises(RuntimeError) as failure:
-        BlobStore(tmp_path / "owned-sqlite", backend="sqlite")
+        BlobStore(tmp_path / "owned-authority")
 
     retained_failure = failure.value
-    assert retained_failure.args == ("repository setup failed",)
-    assert len(created) == 1
-    assert closed == created
+    assert retained_failure.args == ("handler setup failed",)
+    assert len(created_authorities) == 1
+    assert closed_authorities == created_authorities
+    assert len(created_backends) == 1
+    assert closed_backends == created_backends
 
 
 def test_failed_initialization_does_not_close_caller_injected_backend(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An injected backend remains owned by its caller when setup fails later."""
+    """Injected authority and backend remain owned by their caller on failure."""
     backend = InMemoryBackend()
+    authority = SqliteLifecycleAuthority.for_root(tmp_path / "injected-backend")
     closed: list[InMemoryBackend] = []
+    closed_authorities: list[SqliteLifecycleAuthority] = []
     original_close = InMemoryBackend.close
+    original_authority_close = SqliteLifecycleAuthority.close
 
     def tracked_close(candidate: InMemoryBackend) -> None:
         if candidate is backend:
             closed.append(candidate)
         original_close(candidate)
 
+    def tracked_authority_close(candidate: SqliteLifecycleAuthority) -> None:
+        if candidate is authority:
+            closed_authorities.append(candidate)
+        original_authority_close(candidate)
+
     monkeypatch.setattr(InMemoryBackend, "close", tracked_close)
+    monkeypatch.setattr(SqliteLifecycleAuthority, "close", tracked_authority_close)
     monkeypatch.setattr(
         blob_store_module,
         "HandlerRegistry",
@@ -202,61 +224,81 @@ def test_failed_initialization_does_not_close_caller_injected_backend(
     )
 
     with pytest.raises(RuntimeError, match="handler setup failed"):
-        BlobStore(tmp_path / "injected-backend", backend=backend)
+        BlobStore(
+            tmp_path / "injected-backend",
+            backend=backend,
+            lifecycle_authority=authority,
+        )
 
     assert closed == []
+    assert closed_authorities == []
 
 
 @pytest.mark.parametrize("signal_type", (KeyboardInterrupt, SystemExit))
-@pytest.mark.parametrize(
-    ("backend_name", "backend_type"),
-    (("json", JsonBackend), ("sqlite", SqliteBackend)),
-)
-def test_constructor_cancellation_closes_owned_resources_after_backend_creation(
+def test_constructor_cancellation_closes_owned_authority_resources(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     signal_type: type[BaseException],
-    backend_name: str,
-    backend_type: type[JsonBackend] | type[SqliteBackend],
 ) -> None:
-    """Cancellation after local backend construction releases every owned resource."""
+    """Cancellation after authority setup releases every owned resource."""
     closed_io: list[GuardedHandlerIO] = []
-    closed_backends: list[JsonBackend | SqliteBackend] = []
-    initialized_backends: list[object] = []
+    created_authorities: list[SqliteLifecycleAuthority] = []
+    closed_authorities: list[SqliteLifecycleAuthority] = []
+    created_backends: list[InMemoryBackend] = []
+    closed_backends: list[InMemoryBackend] = []
     original_io_close = GuardedHandlerIO.close
-    original_backend_close = backend_type.close
+    original_for_root = SqliteLifecycleAuthority.for_root
+    original_authority_close = SqliteLifecycleAuthority.close
+    original_backend_init = InMemoryBackend.__init__
+    original_backend_close = InMemoryBackend.close
     cancellation = signal_type("constructor cancellation")
 
     def close_io_spy(adapter: GuardedHandlerIO) -> None:
         closed_io.append(adapter)
         original_io_close(adapter)
 
-    def close_backend_spy(backend: JsonBackend | SqliteBackend) -> None:
-        closed_backends.append(backend)
+    def tracked_for_root(*args: Any, **kwargs: Any) -> SqliteLifecycleAuthority:
+        authority = original_for_root(*args, **kwargs)
+        created_authorities.append(authority)
+        return authority
+
+    def close_authority_spy(authority: SqliteLifecycleAuthority) -> None:
+        if authority in created_authorities:
+            closed_authorities.append(authority)
+        original_authority_close(authority)
+
+    def tracked_backend_init(backend: InMemoryBackend) -> None:
+        original_backend_init(backend)
+        created_backends.append(backend)
+
+    def close_backend_spy(backend: InMemoryBackend) -> None:
+        if backend in created_backends:
+            closed_backends.append(backend)
         original_backend_close(backend)
 
-    def interrupt_repository_setup(
-        backend: object, *, lifecycle_limits: object, **_kwargs: object
-    ) -> None:
-        initialized_backends.append(backend)
-        assert lifecycle_limits is not None
+    def interrupt_handler_setup() -> None:
         raise cancellation
 
     monkeypatch.setattr(GuardedHandlerIO, "close", close_io_spy)
-    monkeypatch.setattr(backend_type, "close", close_backend_spy)
+    monkeypatch.setattr(SqliteLifecycleAuthority, "for_root", tracked_for_root)
+    monkeypatch.setattr(SqliteLifecycleAuthority, "close", close_authority_spy)
+    monkeypatch.setattr(InMemoryBackend, "__init__", tracked_backend_init)
+    monkeypatch.setattr(InMemoryBackend, "close", close_backend_spy)
     monkeypatch.setattr(
         blob_store_module,
-        "create_manifest_repository",
-        interrupt_repository_setup,
+        "HandlerRegistry",
+        interrupt_handler_setup,
     )
 
     with pytest.raises(signal_type) as error:
-        BlobStore(tmp_path / f"owned-{backend_name}", backend=backend_name)
+        BlobStore(tmp_path / "owned-authority-cancellation")
 
     assert error.value is cancellation
     assert len(closed_io) == 1
-    assert len(initialized_backends) == 1
-    assert closed_backends.count(initialized_backends[0]) == 1
+    assert len(created_authorities) == 1
+    assert closed_authorities == created_authorities
+    assert len(created_backends) == 1
+    assert closed_backends == created_backends
 
 
 @pytest.mark.parametrize("signal_type", (KeyboardInterrupt, SystemExit))
