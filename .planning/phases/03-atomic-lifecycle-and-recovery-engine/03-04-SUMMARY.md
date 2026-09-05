@@ -14,9 +14,9 @@ provides:
 affects: [BlobStore, lifecycle authority, storage recovery, concurrency tests]
 
 actuals:
-  tokens: 69080
+  tokens: 93828
   tasks: 2
-  commits: 5
+  commits: 6
 
 tech-stack:
   added: []
@@ -36,6 +36,7 @@ key-files:
     - tests/test_blob_store_atomic_lifecycle.py
     - tests/test_blob_store_concurrency.py
     - tests/test_blob_store_close_contract.py
+    - tests/test_blob_store_read_contract.py
 
 key-decisions:
   - "LifecycleAuthority is the only committed-state authority; legacy manifest repositories are not initialized in authority mode."
@@ -85,7 +86,7 @@ coverage:
         status: pass
     human_judgment: false
 
-duration: 41min
+duration: 48min
 completed: 2026-09-05
 status: complete
 ---
@@ -96,11 +97,11 @@ status: complete
 
 ## Performance
 
-- **Duration:** 41 min
+- **Duration:** 48 min
 - **Started:** 2026-09-05T02:26:44Z
-- **Completed:** 2026-09-05T03:07:49Z
+- **Completed:** 2026-09-05T03:14:38Z
 - **Tasks:** 2
-- **Files modified:** 8
+- **Files modified:** 9
 
 ## Accomplishments
 
@@ -113,6 +114,7 @@ status: complete
 1. **Task 1: Complete put, overwrite, metadata update, and read-race semantics** - `def7305` (test), `bdab579` (feat)
 2. **Task 2: Converge delete, cleanup, per-key coordination, and close** - `c653721` (test), `04831a3` (feat)
 3. **Authority projection compatibility correction** - `f6bfc83` (fix)
+4. **Authority-only constructor fixture migration** - `6295960` (fix)
 
 ## Files Created/Modified
 
@@ -124,6 +126,7 @@ status: complete
 - `tests/test_blob_store_atomic_lifecycle.py` - Authority fault, tombstone, and residue convergence coverage.
 - `tests/test_blob_store_concurrency.py` - CAS, bounded-retry read, and distinct-key overlap coverage.
 - `tests/test_blob_store_close_contract.py` - Close ownership and retry coverage.
+- `tests/test_blob_store_read_contract.py` - Authority-constructor failure, cancellation, and caller-ownership coverage.
 
 ## Decisions Made
 
@@ -167,12 +170,21 @@ status: complete
 - **Verification:** `tests/test_blob_store_read_contract.py -k 'authority_tracer or unsupported_backend'`.
 - **Committed in:** `f6bfc83`
 
-**Total deviations:** 4 auto-fixed (3 Rule 1, 1 Rule 2).
+**5. [Rule 1 - Regression coverage] Migrated constructor ownership fixtures to the authority boundary.**
+- **Found during:** Wave 4 regression verification
+- **Issue:** The old fixtures forced `create_manifest_repository`, which authority mode correctly never constructs.
+- **Fix:** Create and fail after the default `SqliteLifecycleAuthority` and in-memory projection are owned; assert injected authority and backend resources are untouched.
+- **Files modified:** `tests/test_blob_store_read_contract.py`
+- **Verification:** Exact reproduced assertion plus constructor/cancellation subset.
+- **Committed in:** `6295960`
+
+**Total deviations:** 5 auto-fixed (4 Rule 1, 1 Rule 2).
 **Impact on plan:** All changes preserve the authority-only architecture and are required for durable recovery, concurrency safety, or fail-closed compatibility.
 
 ## Issues Encountered
 
-- The full Phase 2 read-contract suite currently fails at `test_failed_initialization_closes_only_internally_owned_backend`. Its setup monkeypatch requires constructor-time `create_manifest_repository` and a managed legacy SQLite projection; authority mode deliberately does neither because that would recreate a second committed-truth path. The authority tracer and unsupported-projection checks pass. This migration item is tracked as open in `.planning/WINDOWS.md` entry 23.
+- `test_failed_initialization_closes_only_internally_owned_backend` and adjacent cancellation fixtures now exercise an internally created `LifecycleAuthority` plus projection, and verify that injected authority/backend resources stay caller-owned. This regression is fixed in `6295960` and `.planning/WINDOWS.md` entry 23 is resolved.
+- The full historical read-contract suite next fails at `test_all_direct_operations_translate_json_admission_refresh_failures` because it still treats `cache_metadata.json` as committed truth. Authority mode correctly ignores that non-authoritative projection; the broader test migration is tracked in `.planning/WINDOWS.md` entry 24.
 
 ## User Setup Required
 
@@ -184,7 +196,7 @@ Authority-backed BlobStore mutations, recovery, and close semantics are ready fo
 
 ## Self-Check: PASSED
 
-All listed source/test artifacts exist and each recorded task commit is reachable from the repository history.
+All listed source/test artifacts exist and each recorded task commit, including `6295960`, is reachable from the repository history.
 
 ---
 *Phase: 03-atomic-lifecycle-and-recovery-engine*

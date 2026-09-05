@@ -2,9 +2,9 @@
 schema_version: 1
 open_count: 3
 waived_count: 0
-fixed_count: 20
-total_count: 23
-last_updated: 2026-09-05T03:07:49.009Z
+fixed_count: 21
+total_count: 24
+last_updated: 2026-09-05T03:14:38.217Z
 ---
 
 # Broken Windows Ledger
@@ -37,7 +37,8 @@ last_updated: 2026-09-05T03:07:49.009Z
 | 20 | 03 | unrun-verify | tests/test_blob_store_read_contract.py | 841 | Delete verification fixture intercepts lifecycle-evidence retirement; Plan 03-08 owns narrowing the payload-delete monkeypatch. | open |  | 2026-08-30T19:16:36.244Z |  |
 | 21 | 03 | lint-warning | src/cacheness/__init__.py |  | Targeted Ruff baseline: 23 pre-existing F401/F841 findings across untouched __init__.py, config.py, and test_config_validation.py; see Phase 03 deferred-items.md. | open |  | 2026-08-31T12:32:42.489Z |  |
 | 22 | 03 | stub | src/cacheness/storage/lifecycle_authority.py | 169 | Clear, reconciliation, tombstone retirement, and projection transitions are semantic placeholders reserved for later Phase 3 plans. | fixed |  | 2026-09-05T01:49:11.994Z | 2026-09-05T03:07:49.009Z |
-| 23 | 03 | deviation | tests/test_blob_store_read_contract.py | 175 | Legacy constructor test requires retired create_manifest_repository setup; authority mode keeps LifecycleAuthority as sole committed truth. | open |  | 2026-09-05T03:07:28.440Z |  |
+| 23 | 03 | deviation | tests/test_blob_store_read_contract.py | 175 | Legacy constructor test requires retired create_manifest_repository setup; authority mode keeps LifecycleAuthority as sole committed truth. | fixed |  | 2026-09-05T03:07:28.440Z | 2026-09-05T03:14:38.123Z |
+| 24 | 03 | deviation | tests/test_blob_store_read_contract.py | 413 | Legacy JSON admission test still treats cache_metadata.json as committed truth; authority mode correctly ignores this non-authoritative projection. | open |  | 2026-09-05T03:14:38.217Z |  |
 
 ````json
 [
@@ -312,9 +313,21 @@ last_updated: 2026-09-05T03:07:49.009Z
     "file": "tests/test_blob_store_read_contract.py",
     "line": 175,
     "description": "Legacy constructor test requires retired create_manifest_repository setup; authority mode keeps LifecycleAuthority as sole committed truth.",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-09-05T03:07:28.440Z",
+    "resolved_at": "2026-09-05T03:14:38.123Z"
+  },
+  {
+    "id": 24,
+    "kind": "deviation",
+    "phase": "03",
+    "file": "tests/test_blob_store_read_contract.py",
+    "line": 413,
+    "description": "Legacy JSON admission test still treats cache_metadata.json as committed truth; authority mode correctly ignores this non-authoritative projection.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-05T03:14:38.217Z",
     "resolved_at": null
   }
 ]
