@@ -8,6 +8,7 @@ outside this seam so a database transaction never spans handler or filesystem I/
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 from typing import Protocol, runtime_checkable
 
 
@@ -27,6 +28,23 @@ class EntryExpectation:
 
     lineage: int | None
     revision: int | None
+    generation: str | None = None
+    manifest_digest: str | None = None
+
+    def __post_init__(self) -> None:
+        for field_name in ("lineage", "revision"):
+            value = getattr(self, field_name)
+            if value is not None and (type(value) is not int or value < 0):
+                raise ValueError(f"{field_name} must be a non-negative integer or None")
+        for field_name in ("generation", "manifest_digest"):
+            value = getattr(self, field_name)
+            if value is not None:
+                _bounded_text(value, field_name)
+        if self.manifest_digest is not None and (
+            len(self.manifest_digest) != 64
+            or any(character not in "0123456789abcdef" for character in self.manifest_digest)
+        ):
+            raise ValueError("manifest_digest must be a lowercase SHA-256 hexadecimal value")
 
     @classmethod
     def absent(cls) -> "EntryExpectation":
@@ -42,6 +60,17 @@ class EntrySnapshot:
     locator: str
     manifest: bytes
     expectation: EntryExpectation
+
+    def __post_init__(self) -> None:
+        for field_name in ("key", "generation", "locator"):
+            _bounded_text(getattr(self, field_name), field_name)
+        if not isinstance(self.manifest, bytes) or len(self.manifest) > _MAX_MANIFEST_BYTES:
+            raise ValueError("manifest must be bounded bytes")
+        if self.expectation.generation != self.generation:
+            raise ValueError("entry expectation generation must corroborate the entry")
+        digest = hashlib.sha256(self.manifest).hexdigest()
+        if self.expectation.manifest_digest != digest:
+            raise ValueError("entry expectation digest must corroborate the manifest")
 
 
 @dataclass(frozen=True)
@@ -113,6 +142,33 @@ class CleanupDebt:
 
     operation_id: str
     locator: str
+    key: str = ""
+    generation: str = ""
+    role: str = "previous_generation"
+
+    def __post_init__(self) -> None:
+        for field_name in ("operation_id", "locator", "role"):
+            _bounded_text(getattr(self, field_name), field_name)
+        for field_name in ("key", "generation"):
+            value = getattr(self, field_name)
+            if value:
+                _bounded_text(value, field_name)
+
+
+@dataclass(frozen=True)
+class AuthorityStateSnapshot:
+    """Bounded complete-state view for diagnostics and contract tests."""
+
+    revision: int
+    projection_dirty: bool
+    mutation_states: tuple[tuple[str, str], ...]
+    cleanup_debt: tuple[CleanupDebt, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.revision) is not int or self.revision < 0:
+            raise ValueError("revision must be a non-negative integer")
+        if type(self.projection_dirty) is not bool:
+            raise ValueError("projection_dirty must be a bool")
 
 
 @dataclass(frozen=True)
@@ -154,6 +210,8 @@ class LifecycleAuthority(Protocol):
 
     def read_entry(self, key: str) -> EntrySnapshot | None: ...
 
+    def snapshot_state(self) -> AuthorityStateSnapshot: ...
+
     def prepare_mutation(self, spec: MutationSpec) -> PreparedMutation: ...
 
     def record_verification(
@@ -191,6 +249,7 @@ class LifecycleAuthority(Protocol):
 
 __all__ = [
     "AuthorityCapabilities",
+    "AuthorityStateSnapshot",
     "CleanupDebt",
     "EntryExpectation",
     "EntrySnapshot",

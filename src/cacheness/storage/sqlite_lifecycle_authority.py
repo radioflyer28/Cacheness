@@ -7,6 +7,7 @@ deliberately absent from this module, keeping SQLite writer transactions short.
 from __future__ import annotations
 
 from contextlib import contextmanager
+import hashlib
 import os
 from pathlib import Path
 import sqlite3
@@ -28,6 +29,7 @@ from cacheness.error_handling import (
 
 from .lifecycle_authority import (
     AuthorityCapabilities,
+    AuthorityStateSnapshot,
     CleanupDebt,
     EntryExpectation,
     EntrySnapshot,
@@ -69,6 +71,7 @@ class SqliteLifecycleAuthority:
         self._state_lock = Lock()
         self._closed = False
         self.open_write_transactions = 0
+        self._transaction_hook: Callable[[str], None] | None = None
 
     @classmethod
     def for_root(
@@ -195,6 +198,14 @@ class SqliteLifecycleAuthority:
             context={"operation": operation},
         ) from error
 
+    def set_transaction_hook_for_test(self, hook: Callable[[str], None] | None) -> None:
+        """Install one deterministic transition seam for authority fault tests."""
+        self._transaction_hook = hook
+
+    def _reach_transaction_boundary(self, boundary: str) -> None:
+        if self._transaction_hook is not None:
+            self._transaction_hook(boundary)
+
     @staticmethod
     def _configure_connection(
         connection: sqlite3.Connection,
@@ -237,13 +248,15 @@ class SqliteLifecycleAuthority:
             connection.execute(
                 "CREATE TABLE entries ("
                 "key TEXT PRIMARY KEY, generation TEXT NOT NULL, locator TEXT NOT NULL, "
-                "manifest BLOB NOT NULL, lineage INTEGER NOT NULL, revision INTEGER NOT NULL)"
+                "manifest BLOB NOT NULL, manifest_digest TEXT NOT NULL, lineage INTEGER NOT NULL, "
+                "revision INTEGER NOT NULL)"
             )
             connection.execute(
                 "CREATE TABLE mutations ("
                 "operation_id TEXT PRIMARY KEY, key TEXT NOT NULL, generation TEXT NOT NULL, "
                 "locator TEXT NOT NULL, expected_lineage INTEGER, expected_revision INTEGER, "
-                "manifest BLOB NOT NULL, verified_digest TEXT, verified_size INTEGER, state TEXT NOT NULL)"
+                "expected_generation TEXT, expected_manifest_digest TEXT, manifest BLOB NOT NULL, "
+                "verified_digest TEXT, verified_size INTEGER, state TEXT NOT NULL)"
             )
             connection.execute(
                 "CREATE TABLE authority_state ("
@@ -252,7 +265,7 @@ class SqliteLifecycleAuthority:
             )
             connection.execute(
                 "CREATE TABLE cleanup_debt ("
-                "debt_id INTEGER PRIMARY KEY, operation_id TEXT NOT NULL, key TEXT NOT NULL, "
+                "debt_id INTEGER PRIMARY KEY AUTOINCREMENT, operation_id TEXT NOT NULL, key TEXT NOT NULL, "
                 "generation TEXT NOT NULL, locator TEXT NOT NULL, role TEXT NOT NULL, "
                 "state TEXT NOT NULL)"
             )
@@ -283,8 +296,99 @@ class SqliteLifecycleAuthority:
                 "INSERT INTO authority_state(singleton, revision, projection_dirty) "
                 "VALUES (1, 0, 0)"
             )
-            connection.execute(f"PRAGMA application_id = {SQLITE_APPLICATION_ID}")
-            connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            connection.execute("PRAGMA application_id = 1128350536")
+            connection.execute("PRAGMA user_version = 1")
+            connection.execute("COMMIT")
+        except BaseException:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+
+    @classmethod
+    def _migrate_schema_layout(cls, connection: sqlite3.Connection) -> None:
+        """Complete the fixed version-one layout before a mutation uses it.
+
+        Plan 03-02's tracer used the same persistent user version but did not
+        yet require the corroborating columns or complete transition tables.
+        This ordered, one-transaction layout completion preserves the confirmed
+        authority identity rather than treating that known predecessor as JSON
+        reconstruction input.
+        """
+        entry_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(entries)")
+        }
+        mutation_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(mutations)")
+        }
+        table_names = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        needs_migration = (
+            "manifest_digest" not in entry_columns
+            or "expected_generation" not in mutation_columns
+            or "expected_manifest_digest" not in mutation_columns
+            or "authority_state" not in table_names
+        )
+        if not needs_migration:
+            return
+        connection.execute("BEGIN EXCLUSIVE")
+        try:
+            if "manifest_digest" not in entry_columns:
+                connection.execute("ALTER TABLE entries ADD COLUMN manifest_digest TEXT")
+                rows = connection.execute("SELECT key, manifest FROM entries").fetchall()
+                for key, manifest in rows:
+                    if not isinstance(manifest, bytes):
+                        raise CacheBlobMigrationRequiredError(
+                            "Lifecycle authority entry cannot be migrated safely"
+                        )
+                    connection.execute(
+                        "UPDATE entries SET manifest_digest = ? WHERE key = ?",
+                        (hashlib.sha256(manifest).hexdigest(), key),
+                    )
+            if "expected_generation" not in mutation_columns:
+                connection.execute("ALTER TABLE mutations ADD COLUMN expected_generation TEXT")
+            if "expected_manifest_digest" not in mutation_columns:
+                connection.execute(
+                    "ALTER TABLE mutations ADD COLUMN expected_manifest_digest TEXT"
+                )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS authority_state ("
+                "singleton INTEGER PRIMARY KEY CHECK (singleton = 1), revision INTEGER NOT NULL, "
+                "projection_dirty INTEGER NOT NULL CHECK (projection_dirty IN (0, 1)))"
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO authority_state(singleton, revision, projection_dirty) "
+                "VALUES (1, 0, 0)"
+            )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS cleanup_debt ("
+                "debt_id INTEGER PRIMARY KEY AUTOINCREMENT, operation_id TEXT NOT NULL, "
+                "key TEXT NOT NULL, generation TEXT NOT NULL, locator TEXT NOT NULL, "
+                "role TEXT NOT NULL, state TEXT NOT NULL)"
+            )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS clear_runs ("
+                "run_id TEXT PRIMARY KEY, state TEXT NOT NULL, revision INTEGER NOT NULL)"
+            )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS clear_targets ("
+                "run_id TEXT NOT NULL, key TEXT NOT NULL, generation TEXT NOT NULL, "
+                "manifest_digest TEXT NOT NULL, state TEXT NOT NULL, "
+                "PRIMARY KEY (run_id, key))"
+            )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS reconciliation_runs ("
+                "run_id TEXT PRIMARY KEY, state TEXT NOT NULL, "
+                "mutation_high_water INTEGER NOT NULL, debt_high_water INTEGER NOT NULL)"
+            )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS reconciliation_actions ("
+                "run_id TEXT NOT NULL, action_id INTEGER NOT NULL, state TEXT NOT NULL, "
+                "PRIMARY KEY (run_id, action_id))"
+            )
             connection.execute("COMMIT")
         except BaseException:
             if connection.in_transaction:
@@ -362,6 +466,8 @@ class SqliteLifecycleAuthority:
             self._configure_connection(connection, initialize=created_new)
             if created_new:
                 self._initialize_schema(connection)
+            elif mutation:
+                self._migrate_schema_layout(connection)
             self._validate_schema(connection)
             yield connection
         except (
@@ -379,10 +485,16 @@ class SqliteLifecycleAuthority:
     @staticmethod
     def _expectation(connection: sqlite3.Connection, key: str) -> EntryExpectation:
         row = connection.execute(
-            "SELECT lineage, revision FROM entries WHERE key = ?", (key,)
+            "SELECT lineage, revision, generation, manifest_digest FROM entries WHERE key = ?",
+            (key,),
         ).fetchone()
         if row is not None:
-            return EntryExpectation(lineage=row[0], revision=row[1])
+            return EntryExpectation(
+                lineage=row[0],
+                revision=row[1],
+                generation=row[2],
+                manifest_digest=row[3],
+            )
         row = connection.execute(
             "SELECT lineage FROM entry_lineage WHERE key = ?", (key,)
         ).fetchone()
@@ -397,6 +509,7 @@ class SqliteLifecycleAuthority:
         callback: Callable[[sqlite3.Connection], _T],
         *,
         deadline: float | None = None,
+        uncertain_classifier: Callable[[], _T] | None = None,
     ) -> _T:
         """Run one bounded state transition with rollback on every failure."""
         absolute_deadline = self._deadline(deadline)
@@ -411,13 +524,21 @@ class SqliteLifecycleAuthority:
             try:
                 result = callback(connection)
                 connection.execute("COMMIT")
+                self._reach_transaction_boundary("authority.transaction.committed")
                 return result
-            except BaseException:
+            except BaseException as error:
+                committed = not connection.in_transaction
                 if connection.in_transaction:
                     try:
                         connection.execute("ROLLBACK")
                     except sqlite3.Error:
                         pass
+                if (
+                    committed
+                    and uncertain_classifier is not None
+                    and isinstance(error, sqlite3.Error)
+                ):
+                    return uncertain_classifier()
                 raise
             finally:
                 with self._state_lock:
@@ -430,7 +551,7 @@ class SqliteLifecycleAuthority:
                 return None
             try:
                 row = connection.execute(
-                    "SELECT generation, locator, manifest, lineage, revision "
+                    "SELECT generation, locator, manifest, manifest_digest, lineage, revision "
                     "FROM entries WHERE key = ?",
                     (key,),
                 ).fetchone()
@@ -438,18 +559,28 @@ class SqliteLifecycleAuthority:
                 self._translate_sqlite_error(error, operation="lifecycle_authority_read")
             if row is None:
                 return None
-            return EntrySnapshot(
-                key,
-                row[0],
-                row[1],
-                bytes(row[2]),
-                EntryExpectation(row[3], row[4]),
-            )
+            try:
+                manifest = bytes(row[2])
+                if hashlib.sha256(manifest).hexdigest() != row[3]:
+                    raise ValueError("manifest digest does not corroborate the entry")
+                return EntrySnapshot(
+                    key,
+                    row[0],
+                    row[1],
+                    manifest,
+                    EntryExpectation(row[4], row[5], row[0], row[3]),
+                )
+            except (TypeError, ValueError) as error:
+                raise CacheBlobBackendError(
+                    "Lifecycle authority entry row is malformed",
+                    context={"operation": "lifecycle_authority_read"},
+                ) from error
 
     def prepare_mutation(self, spec: MutationSpec) -> PreparedMutation:
         def prepare(connection: sqlite3.Connection) -> PreparedMutation:
             existing = connection.execute(
-                "SELECT key, generation, locator, expected_lineage, expected_revision, manifest "
+                "SELECT key, generation, locator, expected_lineage, expected_revision, "
+                "expected_generation, expected_manifest_digest, manifest "
                 "FROM mutations WHERE operation_id = ?",
                 (spec.operation_id,),
             ).fetchone()
@@ -459,6 +590,8 @@ class SqliteLifecycleAuthority:
                 spec.candidate_locator,
                 spec.expected.lineage,
                 spec.expected.revision,
+                spec.expected.generation,
+                spec.expected.manifest_digest,
                 spec.manifest,
             )
             if existing is not None:
@@ -473,8 +606,8 @@ class SqliteLifecycleAuthority:
             connection.execute(
                 "INSERT INTO mutations "
                 "(operation_id, key, generation, locator, expected_lineage, expected_revision, "
-                "manifest, verified_digest, verified_size, state) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, 'prepared')",
+                "expected_generation, expected_manifest_digest, manifest, verified_digest, "
+                "verified_size, state) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 'prepared')",
                 (
                     spec.operation_id,
                     spec.key,
@@ -482,6 +615,8 @@ class SqliteLifecycleAuthority:
                     spec.candidate_locator,
                     spec.expected.lineage,
                     spec.expected.revision,
+                    spec.expected.generation,
+                    spec.expected.manifest_digest,
                     spec.manifest,
                 ),
             )
@@ -517,53 +652,118 @@ class SqliteLifecycleAuthority:
     def promote_mutation(self, prepared: PreparedMutation) -> PromotionResult:
         def promote(connection: sqlite3.Connection) -> PromotionResult:
             row = connection.execute(
-                "SELECT key, generation, locator, expected_lineage, expected_revision, manifest, "
-                "verified_digest, state FROM mutations WHERE operation_id = ?",
+                "SELECT key, generation, locator, expected_lineage, expected_revision, "
+                "expected_generation, expected_manifest_digest, manifest, verified_digest, state "
+                "FROM mutations WHERE operation_id = ?",
                 (prepared.operation_id,),
             ).fetchone()
-            if row is None or row[7] != "prepared" or row[6] is None:
+            if row is None:
+                raise CacheBlobLifecycleConflictError("Mutation does not exist")
+            if row[9] == "promoted":
+                return self._promoted_result(connection, prepared.operation_id)
+            if row[9] != "prepared" or row[8] is None:
                 raise CacheBlobLifecycleConflictError(
                     "Mutation is not verified and prepared"
                 )
-            expected = EntryExpectation(row[3], row[4])
+            expected = EntryExpectation(row[3], row[4], row[5], row[6])
             observed = self._expectation(connection, row[0])
             if not self._matches(expected, observed):
                 raise CacheBlobLifecycleConflictError(
                     "Mutation lineage changed before promotion"
                 )
+            old_entry = connection.execute(
+                "SELECT generation, locator FROM entries WHERE key = ?", (row[0],)
+            ).fetchone()
+            self._reach_transaction_boundary("promote.before_lineage")
             next_lineage_row = connection.execute(
                 "SELECT lineage FROM entry_lineage WHERE key = ?", (row[0],)
             ).fetchone()
             next_lineage = (next_lineage_row[0] if next_lineage_row else 0) + 1
-            revision = next_lineage
+            revision = connection.execute(
+                "SELECT revision FROM authority_state WHERE singleton = 1"
+            ).fetchone()[0] + 1
             connection.execute(
                 "INSERT INTO entry_lineage(key, lineage) VALUES (?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET lineage = excluded.lineage",
                 (row[0], next_lineage),
             )
+            self._reach_transaction_boundary("promote.after_lineage")
+            manifest_digest = hashlib.sha256(bytes(row[7])).hexdigest()
             connection.execute(
-                "INSERT INTO entries(key, generation, locator, manifest, lineage, revision) "
-                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(key) DO UPDATE SET "
+                "INSERT INTO entries(key, generation, locator, manifest, manifest_digest, lineage, revision) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(key) DO UPDATE SET "
                 "generation=excluded.generation, locator=excluded.locator, "
-                "manifest=excluded.manifest, lineage=excluded.lineage, "
+                "manifest=excluded.manifest, manifest_digest=excluded.manifest_digest, "
+                "lineage=excluded.lineage, "
                 "revision=excluded.revision",
-                (row[0], row[1], row[2], row[5], next_lineage, revision),
+                (row[0], row[1], row[2], row[7], manifest_digest, next_lineage, revision),
             )
+            self._reach_transaction_boundary("promote.after_entry")
             connection.execute(
                 "UPDATE mutations SET state = 'promoted' WHERE operation_id = ?",
                 (prepared.operation_id,),
             )
-            return PromotionResult(
-                EntrySnapshot(
-                    row[0],
-                    row[1],
-                    row[2],
-                    bytes(row[5]),
-                    EntryExpectation(next_lineage, revision),
+            self._reach_transaction_boundary("promote.after_mutation")
+            if old_entry is not None and old_entry[1] != row[2]:
+                connection.execute(
+                    "INSERT INTO cleanup_debt(operation_id, key, generation, locator, role, state) "
+                    "VALUES (?, ?, ?, ?, 'previous_generation', 'pending')",
+                    (prepared.operation_id, row[0], old_entry[0], old_entry[1]),
                 )
+            self._reach_transaction_boundary("promote.after_cleanup_debt")
+            connection.execute(
+                "UPDATE authority_state SET revision = ?, projection_dirty = 1 WHERE singleton = 1",
+                (revision,),
             )
+            self._reach_transaction_boundary("promote.after_projection")
+            return self._promoted_result(connection, prepared.operation_id)
 
-        return self._transaction(promote)
+        return self._transaction(
+            promote,
+            uncertain_classifier=lambda: self._classify_promoted_mutation(prepared),
+        )
+
+    def _promoted_result(
+        self, connection: sqlite3.Connection, operation_id: str
+    ) -> PromotionResult:
+        """Read one already-committed promotion without reapplying it."""
+        row = connection.execute(
+            "SELECT m.key, e.generation, e.locator, e.manifest, e.manifest_digest, "
+            "e.lineage, e.revision FROM mutations AS m JOIN entries AS e ON e.key = m.key "
+            "WHERE m.operation_id = ? AND m.state = 'promoted'",
+            (operation_id,),
+        ).fetchone()
+        if row is None or hashlib.sha256(bytes(row[3])).hexdigest() != row[4]:
+            raise CacheBlobBackendError(
+                "Committed lifecycle authority promotion is malformed",
+                context={"operation": "lifecycle_authority_promote"},
+            )
+        debt_rows = connection.execute(
+            "SELECT operation_id, locator, key, generation, role FROM cleanup_debt "
+            "WHERE operation_id = ? AND state = 'pending' ORDER BY debt_id",
+            (operation_id,),
+        ).fetchall()
+        return PromotionResult(
+            EntrySnapshot(
+                row[0],
+                row[1],
+                row[2],
+                bytes(row[3]),
+                EntryExpectation(row[5], row[6], row[1], row[4]),
+            ),
+            tuple(CleanupDebt(*debt_row) for debt_row in debt_rows),
+        )
+
+    def _classify_promoted_mutation(self, prepared: PreparedMutation) -> PromotionResult:
+        """Resolve an ambiguous commit by reading exact durable operation state."""
+        absolute_deadline = self._deadline(None)
+        with self._connection(mutation=False, deadline=absolute_deadline) as connection:
+            if connection is None:
+                raise CacheBlobBackendError(
+                    "Lifecycle authority disappeared while classifying commit uncertainty",
+                    context={"operation": "lifecycle_authority_promote"},
+                )
+            return self._promoted_result(connection, prepared.operation_id)
 
     def abort_mutation(self, prepared: PreparedMutation) -> None:
         self._transaction(
@@ -595,27 +795,155 @@ class SqliteLifecycleAuthority:
         self.delete_entry(key, expected=expected)
 
     def begin_clear(self) -> PageToken:
-        return PageToken(uuid4().hex)
+        token = PageToken(uuid4().hex)
+
+        def begin(connection: sqlite3.Connection) -> PageToken:
+            revision = connection.execute(
+                "SELECT revision FROM authority_state WHERE singleton = 1"
+            ).fetchone()[0]
+            connection.execute(
+                "INSERT INTO clear_runs(run_id, state, revision) VALUES (?, 'active', ?)",
+                (token.value, revision),
+            )
+            rows = connection.execute(
+                "SELECT key, generation, manifest_digest FROM entries ORDER BY key"
+            ).fetchall()
+            for key, generation, manifest_digest in rows:
+                connection.execute(
+                    "INSERT INTO clear_targets(run_id, key, generation, manifest_digest, state) "
+                    "VALUES (?, ?, ?, ?, 'pending')",
+                    (token.value, key, generation, manifest_digest),
+                )
+            return token
+
+        return self._transaction(begin)
 
     def page_clear(self, token: PageToken) -> tuple[EntrySnapshot, ...]:
-        return ()
+        absolute_deadline = self._deadline(None)
+        with self._connection(mutation=False, deadline=absolute_deadline) as connection:
+            if connection is None:
+                return ()
+            rows = connection.execute(
+                "SELECT e.key, e.generation, e.locator, e.manifest, e.manifest_digest, "
+                "e.lineage, e.revision FROM clear_targets AS t JOIN entries AS e ON e.key = t.key "
+                "WHERE t.run_id = ? AND t.state = 'pending' AND e.generation = t.generation "
+                "AND e.manifest_digest = t.manifest_digest ORDER BY t.key LIMIT ?",
+                (token.value, self.lifecycle_limits.manifest_page_size),
+            ).fetchall()
+            return tuple(
+                EntrySnapshot(
+                    row[0],
+                    row[1],
+                    row[2],
+                    bytes(row[3]),
+                    EntryExpectation(row[5], row[6], row[1], row[4]),
+                )
+                for row in rows
+            )
 
     def checkpoint_clear(self, token: PageToken) -> None:
-        return None
+        def checkpoint(connection: sqlite3.Connection) -> None:
+            cursor = connection.execute(
+                "UPDATE clear_runs SET state = 'checkpointed' "
+                "WHERE run_id = ? AND state = 'active'",
+                (token.value,),
+            )
+            if cursor.rowcount != 1:
+                raise CacheBlobLifecycleConflictError("Clear run cannot accept checkpoint")
+
+        self._transaction(checkpoint)
 
     def begin_reconciliation(self) -> PageToken:
-        return PageToken(uuid4().hex)
+        token = PageToken(uuid4().hex)
+
+        def begin(connection: sqlite3.Connection) -> PageToken:
+            mutation_high_water = connection.execute(
+                "SELECT COALESCE(MAX(rowid), 0) FROM mutations"
+            ).fetchone()[0]
+            debt_high_water = connection.execute(
+                "SELECT COALESCE(MAX(debt_id), 0) FROM cleanup_debt"
+            ).fetchone()[0]
+            connection.execute(
+                "INSERT INTO reconciliation_runs(run_id, state, mutation_high_water, debt_high_water) "
+                "VALUES (?, 'active', ?, ?)",
+                (token.value, mutation_high_water, debt_high_water),
+            )
+            return token
+
+        return self._transaction(begin)
 
     def page_reconciliation(self, token: PageToken) -> tuple[CleanupDebt, ...]:
-        return ()
+        absolute_deadline = self._deadline(None)
+        with self._connection(mutation=False, deadline=absolute_deadline) as connection:
+            if connection is None:
+                return ()
+            run = connection.execute(
+                "SELECT debt_high_water FROM reconciliation_runs WHERE run_id = ?",
+                (token.value,),
+            ).fetchone()
+            if run is None:
+                raise CacheBlobLifecycleConflictError("Reconciliation run does not exist")
+            rows = connection.execute(
+                "SELECT operation_id, locator, key, generation, role FROM cleanup_debt "
+                "WHERE state = 'pending' AND debt_id <= ? ORDER BY debt_id LIMIT ?",
+                (run[0], self.lifecycle_limits.operation_page_size),
+            ).fetchall()
+            return tuple(CleanupDebt(*row) for row in rows)
 
     def checkpoint_reconciliation(self, token: PageToken) -> None:
-        return None
+        def checkpoint(connection: sqlite3.Connection) -> None:
+            cursor = connection.execute(
+                "UPDATE reconciliation_runs SET state = 'checkpointed' "
+                "WHERE run_id = ? AND state = 'active'",
+                (token.value,),
+            )
+            if cursor.rowcount != 1:
+                raise CacheBlobLifecycleConflictError(
+                    "Reconciliation run cannot accept checkpoint"
+                )
+
+        self._transaction(checkpoint)
 
     def compare_and_mark_projection(
         self, expected: ProjectionRevision | None
     ) -> ProjectionRevision:
-        return ProjectionRevision(0)
+        def mark(connection: sqlite3.Connection) -> ProjectionRevision:
+            revision, dirty = connection.execute(
+                "SELECT revision, projection_dirty FROM authority_state WHERE singleton = 1"
+            ).fetchone()
+            if expected is not None and expected.value != revision:
+                raise CacheBlobLifecycleConflictError("Projection revision changed")
+            if dirty:
+                connection.execute(
+                    "UPDATE authority_state SET projection_dirty = 0 WHERE singleton = 1"
+                )
+            return ProjectionRevision(revision)
+
+        return self._transaction(mark)
+
+    def snapshot_state(self) -> AuthorityStateSnapshot:
+        """Return one bounded authority-state diagnostic without exposing tables."""
+        absolute_deadline = self._deadline(None)
+        with self._connection(mutation=False, deadline=absolute_deadline) as connection:
+            if connection is None:
+                return AuthorityStateSnapshot(0, False, (), ())
+            revision, dirty = connection.execute(
+                "SELECT revision, projection_dirty FROM authority_state WHERE singleton = 1"
+            ).fetchone()
+            mutations = tuple(
+                (row[0], row[1])
+                for row in connection.execute(
+                    "SELECT operation_id, state FROM mutations ORDER BY operation_id"
+                )
+            )
+            debts = tuple(
+                CleanupDebt(*row)
+                for row in connection.execute(
+                    "SELECT operation_id, locator, key, generation, role FROM cleanup_debt "
+                    "WHERE state = 'pending' ORDER BY debt_id"
+                )
+            )
+            return AuthorityStateSnapshot(revision, dirty == 1, mutations, debts)
 
     def diagnostics(self) -> dict[str, object]:
         """Return read-only integrity diagnostics; this method never repairs."""
