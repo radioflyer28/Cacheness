@@ -14,9 +14,9 @@ provides:
 affects: [BlobStore, LifecycleAuthority, metadata topology, Phase 4 adapters, Phase 7 rebuild tooling]
 
 actuals:
-  tokens: 8175
+  tokens: 8238
   tasks: 2
-  commits: 3
+  commits: 4
 
 tech-stack:
   added: []
@@ -78,7 +78,7 @@ coverage:
         status: pass
     human_judgment: false
 
-duration: 13min
+duration: 19min
 completed: 2026-09-05
 status: complete
 ---
@@ -89,9 +89,9 @@ status: complete
 
 ## Performance
 
-- **Duration:** 13 min
+- **Duration:** 19 min
 - **Started:** 2026-09-05T19:17:52Z
-- **Completed:** 2026-09-05T19:30:38Z
+- **Completed:** 2026-09-05T19:37:10Z
 - **Tasks:** 2
 - **Files modified:** 8
 
@@ -105,6 +105,7 @@ status: complete
 
 1. **Task 1: Rebuild JSON as a revision-checked streaming projection** - `1e3e957` (test), `1c847f7` (feat)
 2. **Task 2: Compose BlobStore through authority capabilities** - `1fb3bd4` (feat)
+3. **Dry-run reconciliation projection correction** - `2cd1fa9` (fix)
 
 ## Files Created/Modified
 
@@ -143,15 +144,24 @@ status: complete
 - **Verification:** `tests/test_blob_store_read_contract.py` and the combined 206-test suite pass.
 - **Committed in:** `1fb3bd4`.
 
+**3. [Rule 1 - Dry-run reconciliation] Kept inspection-only reconciliation from clearing projection debt.**
+- **Found during:** Post-task full-suite regression verification.
+- **Issue:** `reconcile(apply=False)` ran a JSON projection refresh, changing the authority's projection-dirty state even though reconciliation dry-runs are explicitly non-mutating.
+- **Fix:** Run the best-effort derived projection refresh only after `reconcile(apply=True)`.
+- **Files modified:** `src/cacheness/storage/blob_store.py`.
+- **Verification:** Reconciliation and Plan 06 authority suites pass; the escalated full suite passes.
+- **Committed in:** `2cd1fa9`.
+
 ---
 
-**Total deviations:** 2 auto-fixed (Rule 1).
-**Impact on plan:** Both fixes protect the authority-only lifecycle boundary and compatibility behavior without adding new backend adapters or changing public metadata shapes.
+**Total deviations:** 3 auto-fixed (Rule 1).
+**Impact on plan:** All fixes protect the authority-only lifecycle boundary and compatibility behavior without adding new backend adapters or changing public metadata shapes.
 
 ## Issues Encountered
 
 - The plan's `STOR-03` through `STOR-07` identifiers are not present in the current requirements ledger, so no ledger checkboxes or traceability rows could be marked; no unrelated requirements content was changed.
 - State progress recalculation correctly left the phase aggregate untouched because Phase 03 remains in progress; the plan counter and roadmap now report Plan 07 next and 6/10 replacement-plan summaries.
+- The first full-suite attempt could not read the existing `uv` cache under the sandbox; the required cache-access rerun completed successfully.
 
 ## User Setup Required
 
@@ -163,7 +173,7 @@ Phase 4 can consume the capability contract for later PostgreSQL/S3 work without
 
 ## Self-Check: PASSED
 
-All eight modified source/test artifacts and the three Task 1/Task 2 TDD commits are present in repository history.
+All eight modified source/test artifacts and the four Task 1/Task 2/correction commits are present in repository history.
 
 ---
 *Phase: 03-atomic-lifecycle-and-recovery-engine*
