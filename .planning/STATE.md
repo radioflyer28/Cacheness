@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 03
 current_phase_name: Atomic Lifecycle and Recovery Engine
 status: executing
-stopped_at: Completed 03-02-PLAN.md
-last_updated: "2026-09-05T01:50:35.884Z"
+stopped_at: Completed 03-03-PLAN.md
+last_updated: "2026-09-05T02:21:09.713Z"
 last_activity: 2026-09-04
 last_activity_desc: Phase 03 execution started
-state_head: 2e21cf97c961b06cf2e8d64f2d88521fb4566bca
+state_head: 9312c82e481ecea808dede54ba3de0cf951af034
 progress:
   total_phases: 8
   completed_phases: 2
   total_plans: 32
-  completed_plans: 24
+  completed_plans: 25
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-08-29)
 ## Current Position
 
 Phase: 03 (Atomic Lifecycle and Recovery Engine) — EXECUTING
-Plan: 3 of 10
+Plan: 4 of 10
 Status: Ready to execute
 Last activity: 2026-09-04 — Phase 03 execution started
 
@@ -77,6 +77,7 @@ Phase 03 rows in this historical table belong to the superseded file-native atte
 | Phase 03 P10 | 29m | 3 tasks | 7 files |
 | Phase 03 P01 | 1h 12m | 3 tasks | 8 files |
 | Phase 03 P02 | 12min | 3 tasks | 7 files |
+| Phase 03 P03 | 25min | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -170,6 +171,9 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 03]: Confirmed lifecycle authority identity: .cacheness/lifecycle-authority-v1.sqlite3; SQLite application ID 0x43414348; user_version 1; generated store identity. — Blocking-human checkpoint confirmed the one-way local authority identity before Plan 03-02 creates the first database.
 - [Phase 03]: SQLite authority intent precedes native payload publication; verified promotion is the sole visibility transition.
 - [Phase 03]: Authority-composed BlobStore inspection is lazy and rejects established stores missing authority unchanged.
+- [Phase 03]: SQLite now verifies DELETE+EXTRA, trusted-schema, the confirmed authority identity, and one absolute busy deadline before lifecycle mutations.
+- [Phase 03]: Every complete authority transition changes entries, operation state, debt, projection revision, and authority revision atomically; uncertain commits reopen and classify the exact operation.
+- [Phase 03]: Windows lifecycle mutation is limited to an offline-provisioned local root whose protected DACL grants ordinary mutation solely to the current token logon SID; native proof is deferred to Plan 09.
 
 ### Pending Todos
 
@@ -193,6 +197,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-09-05T01:50:35.838Z
-Stopped at: Completed 03-02-PLAN.md
+Last session: 2026-09-05T02:21:09.668Z
+Stopped at: Completed 03-03-PLAN.md
 Resume file: None
