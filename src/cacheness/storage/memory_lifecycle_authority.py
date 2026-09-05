@@ -326,7 +326,7 @@ class InMemoryLifecycleAuthority:
             if target is None:
                 self._clear_states[token.value] = "completed"
                 return
-            if state not in {"completed", "conflicted"}:
+            if state not in {"completed", "conflicted", "blocked"}:
                 raise ValueError("Clear target state is unsupported")
             stored = self._clear_targets[token.value].get(target.key)
             if stored is None or stored[0] != target or stored[1] != "pending":
@@ -338,7 +338,11 @@ class InMemoryLifecycleAuthority:
                     raise CacheBlobLifecycleConflictError(
                         "Clear target completion lacks exact absence proof"
                     )
-            elif current is not None and current.expectation == target.expectation:
+            elif (
+                state == "conflicted"
+                and current is not None
+                and current.expectation == target.expectation
+            ):
                 raise CacheBlobLifecycleConflictError("Clear target has not changed")
             self._clear_targets[token.value][target.key] = (stored[0], state)
             self._clear_cursors[token.value] = target.key

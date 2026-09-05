@@ -1371,7 +1371,7 @@ class SqliteLifecycleAuthority:
                     (token.value,),
                 )
                 return
-            if state not in {"completed", "conflicted"}:
+            if state not in {"completed", "conflicted", "blocked"}:
                 raise ValueError("Clear target state is unsupported")
             row = connection.execute(
                 "SELECT state FROM clear_targets WHERE run_id = ? AND key = ? "
@@ -1400,7 +1400,7 @@ class SqliteLifecycleAuthority:
                     raise CacheBlobLifecycleConflictError(
                         "Clear target completion lacks exact absence proof"
                     )
-            elif current is not None and current == (
+            elif state == "conflicted" and current is not None and current == (
                 target.expectation.lineage,
                 target.expectation.revision,
                 target.generation,

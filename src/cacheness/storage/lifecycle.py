@@ -15,6 +15,9 @@ from uuid import uuid4
 
 from cacheness.error_handling import (
     CacheBlobLifecycleConflictError,
+    CacheBlobManifestMalformedError,
+    CacheBlobManifestUnauthenticatedError,
+    CacheBlobManifestUnsupportedVersionError,
     CacheBlobPayloadMissingError,
     CacheBlobPayloadTamperedError,
     CacheBlobRecoverableCleanupError,
@@ -473,8 +476,20 @@ class AuthorityLifecycleEngine:
                     return removed
                 # Authenticate the snapshot's own canonical bytes before it
                 # participates in an exact-delete attempt.  No handler or
-                # payload bytes are opened for this decision.
-                self._entry_manifest(target, allow_tombstone=True)
+                # payload bytes are opened for this decision.  Ambiguous
+                # evidence stays blocked and cannot revoke another target.
+                try:
+                    self._entry_manifest(target, allow_tombstone=True)
+                except (
+                    CacheBlobLifecycleConflictError,
+                    CacheBlobManifestMalformedError,
+                    CacheBlobManifestUnauthenticatedError,
+                    CacheBlobManifestUnsupportedVersionError,
+                ):
+                    self.authority.checkpoint_clear(token, target, state="blocked")
+                    consumed_actions += 1
+                    consumed_bytes += len(target.manifest)
+                    continue
                 current = self.authority.read_entry(target.key)
                 checkpoint_state = "conflicted"
                 try:
@@ -502,6 +517,12 @@ class AuthorityLifecycleEngine:
                             checkpoint_state = "completed"
                 except CacheBlobLifecycleConflictError:
                     checkpoint_state = "conflicted"
+                except (
+                    CacheBlobManifestMalformedError,
+                    CacheBlobManifestUnauthenticatedError,
+                    CacheBlobManifestUnsupportedVersionError,
+                ):
+                    checkpoint_state = "blocked"
                 self.authority.checkpoint_clear(
                     token, target, state=checkpoint_state
                 )
