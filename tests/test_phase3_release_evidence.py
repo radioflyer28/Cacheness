@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 import subprocess
+import tarfile
+import zipfile
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -49,9 +51,22 @@ def test_scheduler_history_is_after_origin_main_and_absent_from_release_tags() -
 def test_no_released_fixture_or_built_artifact_claims_scheduler_support() -> None:
     """Tracked release surfaces may not silently make scheduler replay necessary."""
     tracked = set(_git("ls-files").splitlines())
-    assert not set(SCHEDULER_PATHS).intersection(
-        path for path in tracked if path.startswith("tests/fixtures/")
-    )
+    scheduler_names = {Path(path).name for path in SCHEDULER_PATHS}
+    release_text_paths = [
+        path
+        for path in tracked
+        if path == "README.md"
+        or path == "pyproject.toml"
+        or path.startswith("docs/")
+        or path.startswith("tests/fixtures/compat/")
+    ]
+    for relative_path in release_text_paths:
+        if relative_path == "docs/lifecycle-authority.md":
+            continue
+        contents = (REPOSITORY_ROOT / relative_path).read_text(
+            encoding="utf-8", errors="ignore"
+        )
+        assert not any(name in contents for name in scheduler_names), relative_path
 
     artifacts = [
         path
@@ -59,7 +74,13 @@ def test_no_released_fixture_or_built_artifact_claims_scheduler_support() -> Non
         if path.suffix in {".whl", ".zip", ".gz"}
     ] if (REPOSITORY_ROOT / "dist").is_dir() else []
     for artifact in artifacts:
-        assert "scheduler" not in artifact.name.lower()
+        if artifact.suffix in {".whl", ".zip"}:
+            with zipfile.ZipFile(artifact) as archive:
+                member_names = archive.namelist()
+        else:
+            with tarfile.open(artifact) as archive:
+                member_names = archive.getnames()
+        assert not any(name in member for member in member_names for name in scheduler_names)
 
 
 def test_documented_rebuild_boundary_is_explicit_and_non_replaying() -> None:

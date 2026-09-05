@@ -8,8 +8,10 @@ import pytest
 
 from _lifecycle_test_support import (
     BoundaryHooks,
+    InjectedLifecycleFault,
     authority_root_snapshot,
     classify_authority_evidence,
+    run_python_subprocess,
 )
 from cacheness.error_handling import (
     CacheBlobBackendError,
@@ -22,6 +24,7 @@ from cacheness.error_handling import (
     CacheBlobRecoverableCleanupError,
     CacheBlobStoreClosedError,
     CacheBlobLifecycleTimeoutError,
+    CacheIntegrityError,
     CacheManifestIntegrityError,
     CacheReason,
     CacheStorageError,
@@ -51,7 +54,7 @@ def test_lifecycle_reason_values_and_typed_error_bases_are_frozen() -> None:
     }
 
     assert {name: CacheReason[name].value for name in expected_reasons} == expected_reasons
-    assert issubclass(CacheBlobIntegrityError, CacheStorageError)
+    assert issubclass(CacheBlobIntegrityError, CacheIntegrityError)
     assert issubclass(CacheManifestIntegrityError, CacheBlobIntegrityError)
     assert issubclass(CacheBlobLifecycleConflictError, CacheStorageError)
     assert issubclass(CacheBlobBackendError, CacheStorageError)
@@ -173,3 +176,11 @@ def test_wrong_object_and_deterministic_boundary_observers_are_explicit(
         "payload.cleanup",
         "authority.transaction.end",
     ]
+
+    hooks.arm_fault("payload.stage")
+    with pytest.raises(InjectedLifecycleFault, match="payload.stage"):
+        hooks.reach("payload.stage")
+
+    subprocess_result = run_python_subprocess("-c", "print('lifecycle-probe')")
+    assert subprocess_result.returncode == 0
+    assert subprocess_result.stdout == "lifecycle-probe\n"
