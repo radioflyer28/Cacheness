@@ -368,6 +368,7 @@ class LifecycleLimits:
     close_wait_seconds: float = 30.0
     key_initialization_timeout_seconds: float = 5.0
     key_initialization_retry_seconds: float = 0.01
+    authority_busy_timeout_seconds: float = 5.0
 
     def __post_init__(self) -> None:
         """Reject invalid operational bounds rather than silently normalizing them."""
@@ -389,6 +390,7 @@ class LifecycleLimits:
             "close_wait_seconds",
             "key_initialization_timeout_seconds",
             "key_initialization_retry_seconds",
+            "authority_busy_timeout_seconds",
         ):
             value = getattr(self, field_name)
             if (

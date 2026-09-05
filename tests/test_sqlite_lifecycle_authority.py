@@ -105,12 +105,13 @@ def test_sqlite_authority_rejects_reserved_symlink_and_wrong_objects_unchanged(
     if not hasattr(os, "symlink"):
         pytest.skip("symlink support is unavailable")
     symlink_root = tmp_path / "symlink-root"
-    target = tmp_path / "target-root"
+    symlink_root.mkdir()
+    target = tmp_path / "reserved-target"
     target.mkdir()
-    symlink_root.symlink_to(target, target_is_directory=True)
+    (symlink_root / ".cacheness").symlink_to(target, target_is_directory=True)
     with pytest.raises(CacheBlobMigrationRequiredError):
         SqliteLifecycleAuthority.for_root(symlink_root).prepare_mutation(_spec("symlink"))
-    assert not (target / ".cacheness").exists()
+    assert not (target / "lifecycle-authority-v1.sqlite3").exists()
 
 
 def test_sqlite_authority_uses_one_absolute_busy_deadline_and_preserves_cause(
@@ -152,4 +153,3 @@ def test_sqlite_authority_rejects_inherited_process_use_and_close_is_idempotent(
     fresh.close()
     with pytest.raises(CacheBlobStoreClosedError):
         fresh.read_entry("authority-key")
-
