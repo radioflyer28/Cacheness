@@ -306,11 +306,18 @@ class BlobStore:
         if lifecycle_authority is not None:
             self._admission_barrier = None
             self._key_coordinator = KeyCoordinatorRegistry()
-            if isinstance(backend, (MetadataBackend, CoreMetadataBackend)):
+            if type(backend) in {InMemoryBackend, JsonBackend, SqliteBackend}:
                 self.backend = backend
-            else:
+            elif backend is None or (
+                isinstance(backend, str) and backend in {"json", "sqlite"}
+            ):
                 self.backend = InMemoryBackend()
                 self._owns_backend = True
+            else:
+                raise CacheBlobBackendError(
+                    "BlobStore metadata backend is unsupported by the authority lifecycle",
+                    context={"backend_type": type(backend).__name__},
+                )
             self.handlers = HandlerRegistry()
             self._manifest_key_provider = (
                 ManifestKeyProvider(
@@ -348,8 +355,8 @@ class BlobStore:
             self.backend = JsonBackend(self.cache_dir / "cache_metadata.json")
             self._owns_backend = True
         elif backend == "sqlite":
-            from .backends import SqliteBackend
-            self.backend = SqliteBackend(self.cache_dir / "cache_metadata.db")
+            from .backends import SqliteBackend as LegacySqliteBackend
+            self.backend = LegacySqliteBackend(self.cache_dir / "cache_metadata.db")
             self._owns_backend = True
         elif isinstance(backend, (MetadataBackend, CoreMetadataBackend)):
             self.backend = backend
