@@ -303,3 +303,69 @@ def test_established_missing_authority_fails_unchanged(tmp_path: Path) -> None:
         store.get("missing")
     store.close()
     assert authority_root_snapshot(root) == before
+
+
+@pytest.mark.parametrize("adapter", ("memory", "sqlite"))
+def test_common_authority_transition_contract(
+    tmp_path: Path, adapter: str
+) -> None:
+    """Memory and SQLite share exact create/overwrite/conflict semantics."""
+    from cacheness.error_handling import CacheBlobLifecycleConflictError
+    from cacheness.storage.lifecycle_authority import (
+        EntryExpectation,
+        MutationSpec,
+        VerificationProof,
+    )
+    from cacheness.storage.memory_lifecycle_authority import InMemoryLifecycleAuthority
+    from cacheness.storage.sqlite_lifecycle_authority import SqliteLifecycleAuthority
+
+    authority = (
+        InMemoryLifecycleAuthority()
+        if adapter == "memory"
+        else SqliteLifecycleAuthority.for_root(tmp_path / "sqlite-contract")
+    )
+    first = authority.prepare_mutation(
+        MutationSpec.create(
+            operation_id="create",
+            key="shared-key",
+            generation="generation-1",
+            candidate_locator="generations/one",
+            expected=EntryExpectation.absent(),
+            manifest=b"manifest-1",
+        )
+    )
+    authority.record_verification(first, VerificationProof("1" * 64, 1))
+    created = authority.promote_mutation(first).entry
+    assert created.manifest == b"manifest-1"
+
+    replacement = authority.prepare_mutation(
+        MutationSpec.create(
+            operation_id="overwrite",
+            key="shared-key",
+            generation="generation-2",
+            candidate_locator="generations/two",
+            expected=created.expectation,
+            manifest=b"manifest-2",
+        )
+    )
+    authority.record_verification(replacement, VerificationProof("2" * 64, 2))
+    replaced = authority.promote_mutation(replacement).entry
+    assert replaced.manifest == b"manifest-2"
+
+    with pytest.raises(CacheBlobLifecycleConflictError):
+        authority.delete_entry("shared-key", expected=created.expectation)
+    authority.close()
+
+
+def test_memory_authorities_are_isolated_and_truthful_about_capabilities() -> None:
+    """Only injection of one memory authority can share same-process state."""
+    from cacheness.storage.memory_lifecycle_authority import InMemoryLifecycleAuthority
+
+    first = InMemoryLifecycleAuthority()
+    second = InMemoryLifecycleAuthority()
+    assert first.capabilities.durable is False
+    assert first.capabilities.multiprocess is False
+    assert first.read_entry("missing") is None
+    assert second.read_entry("missing") is None
+    first.close()
+    second.close()
