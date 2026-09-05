@@ -157,6 +157,10 @@ def test_authority_reconciliation_apply_resumes_bounded_cleanup_debt(
         monkeypatch.setattr(store, "_delete_or_prove_absent", original_delete)
         first = store.reconcile(apply=True)
         assert first.resume_token is not None
+        first_finding = first.machine_view()["findings"]
+        assert len(first_finding) == 1
+        assert first_finding[0]["applied_state"] == "applied"
+        assert first_finding[0]["checkpoint_state"] == "completed"
         assert len(store.lifecycle_authority.pending_cleanup_debts()) == 1
 
         second = store.reconcile(apply=True, resume_token=first.resume_token)

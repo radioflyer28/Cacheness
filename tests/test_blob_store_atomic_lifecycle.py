@@ -96,17 +96,17 @@ def test_crash_harness_terminates_a_public_put_at_a_named_boundary(
 
 
 @pytest.mark.parametrize(
-    ("boundary", "committed_state", "debt_count"),
+    ("boundary", "committed_state", "mutation_state", "debt_count"),
     (
-        ("put.intent_prepared", "old", 0),
-        ("put.before_candidate_publish", "old", 0),
-        ("put.candidate_published", "old", 0),
-        ("put.candidate_verified", "old", 0),
-        ("put.before_promotion", "old", 0),
-        ("put.promoted", "new", 1),
-        ("cleanup.before_payload_delete", "new", 1),
-        ("cleanup.after_payload_delete", "new", 1),
-        ("put.cleanup_retired", "new", 0),
+        ("put.intent_prepared", "old", "prepared", 0),
+        ("put.before_candidate_publish", "old", "prepared", 0),
+        ("put.candidate_published", "old", "prepared", 0),
+        ("put.candidate_verified", "old", "prepared", 0),
+        ("put.before_promotion", "old", "prepared", 0),
+        ("put.promoted", "new", "promoted", 1),
+        ("cleanup.before_payload_delete", "new", "promoted", 1),
+        ("cleanup.after_payload_delete", "new", "promoted", 1),
+        ("put.cleanup_retired", "new", "promoted", 0),
     ),
 )
 def test_subprocess_crash_reopens_to_one_authoritative_generation_with_indexed_evidence(
@@ -114,6 +114,7 @@ def test_subprocess_crash_reopens_to_one_authoritative_generation_with_indexed_e
     monkeypatch: pytest.MonkeyPatch,
     boundary: str,
     committed_state: str,
+    mutation_state: str,
     debt_count: int,
 ) -> None:
     """Every public put crash preserves old-or-new authority plus exact residue."""
@@ -143,14 +144,32 @@ def test_subprocess_crash_reopens_to_one_authoritative_generation_with_indexed_e
         assert len(after.entries) == 1
         assert len(after.cleanup_debt) == debt_count
         assert len(after.mutation_states) == len(before.mutation_states) + 1
+        new_mutation_states = set(after.mutation_states).difference(
+            before.mutation_states
+        )
+        assert len(new_mutation_states) == 1
+        assert next(iter(new_mutation_states))[1] == mutation_state
         assert len(reopened.lifecycle_authority.pending_mutations()) == int(
             committed_state == "old"
         )
         if committed_state == "old":
             assert current == previous
+            assert after.entries == (previous,)
         else:
             assert current.generation != previous.generation
             assert current.locator != previous.locator
+            assert after.entries == (current,)
+        if debt_count:
+            assert after.cleanup_debt == (
+                after.cleanup_debt[0],
+            )
+            debt = after.cleanup_debt[0]
+            assert (debt.key, debt.generation, debt.locator, debt.role) == (
+                "crash-key",
+                previous.generation,
+                previous.locator,
+                "previous_generation",
+            )
 
         monkeypatch.setattr(
             reopened,

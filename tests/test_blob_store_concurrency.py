@@ -9,9 +9,13 @@ from pathlib import Path
 
 import pytest
 
-from cacheness.error_handling import CacheBlobLifecycleConflictError
+from cacheness.error_handling import (
+    CacheBlobLifecycleConflictError,
+    CacheBlobRecoverableCleanupError,
+)
 from cacheness.storage.blob_store import BlobStore
 from cacheness.storage.coordination import KeyCoordinatorRegistry
+from _lifecycle_test_support import ReleaseGate
 
 
 def _put_from_independent_process(
@@ -239,6 +243,94 @@ def test_distinct_key_put_completes_while_another_key_is_pre_cas(tmp_path):
         _join(key_b_thread)
         store.close()
     assert errors == []
+
+
+def test_clear_and_delete_converge_after_an_exact_snapshot(tmp_path: Path) -> None:
+    """A delete racing a paused clear consumes only the snapshot generation."""
+    store = BlobStore(tmp_path / "clear-delete", backend="json")
+    gate = ReleaseGate()
+    clear_result: list[int] = []
+    errors: list[BaseException] = []
+
+    def pause_after_snapshot(boundary: str) -> None:
+        if boundary == "clear.snapshot_committed":
+            gate.wait_at_boundary()
+
+    def clear() -> None:
+        try:
+            clear_result.append(store.clear())
+        except BaseException as error:  # pragma: no cover - re-raised below.
+            errors.append(error)
+
+    try:
+        store.put("present", key="snapshot-key")
+        store.lifecycle.test_hook = pause_after_snapshot
+        clearer = threading.Thread(target=clear)
+        clearer.start()
+        assert gate.arrived.wait(timeout=5)
+
+        assert store.delete("snapshot-key") is True
+        gate.release()
+        _join(clearer)
+
+        assert errors == []
+        assert clear_result == [0]
+        assert store.get("snapshot-key") is None
+        assert store.lifecycle_authority.read_entry("snapshot-key") is None
+        assert store.lifecycle_authority.pending_cleanup_debts() == ()
+    finally:
+        gate.release()
+        store.close()
+
+
+def test_reconciliation_and_mutation_converge_on_distinct_indexed_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reconciliation may retire old debt while a later mutation is paused."""
+    store = BlobStore(tmp_path / "reconcile-mutation", backend="json")
+    gate = ReleaseGate()
+    errors: list[BaseException] = []
+
+    def pause_before_promotion(boundary: str) -> None:
+        if boundary == "put.before_promotion":
+            gate.wait_at_boundary()
+
+    def promote_latest() -> None:
+        try:
+            store.put("latest", key="race-key")
+        except BaseException as error:  # pragma: no cover - re-raised below.
+            errors.append(error)
+
+    try:
+        store.put("old", key="race-key")
+        original_delete = store._delete_or_prove_absent
+        monkeypatch.setattr(
+            store,
+            "_delete_or_prove_absent",
+            lambda _locator: (_ for _ in ()).throw(OSError("defer old cleanup")),
+        )
+        with pytest.raises(CacheBlobRecoverableCleanupError):
+            store.put("middle", key="race-key")
+        monkeypatch.setattr(store, "_delete_or_prove_absent", original_delete)
+
+        store.lifecycle.test_hook = pause_before_promotion
+        mutator = threading.Thread(target=promote_latest)
+        mutator.start()
+        assert gate.arrived.wait(timeout=5)
+
+        report = store.reconcile(apply=True)
+        gate.release()
+        _join(mutator)
+
+        assert len(errors) == 1
+        assert isinstance(errors[0], CacheBlobLifecycleConflictError)
+        assert report.applied is True
+        assert store.get("race-key") == "middle"
+        assert store.lifecycle_authority.pending_cleanup_debts() == ()
+    finally:
+        gate.release()
+        store.close()
 
 
 def _retired_scheduler_clear_snapshot_does_not_delete_a_post_snapshot_key(tmp_path):
