@@ -138,6 +138,27 @@ def test_sqlite_authority_uses_one_absolute_busy_deadline_and_preserves_cause(
     assert authority.open_write_transactions == 0
 
 
+def test_sqlite_authority_rolls_back_every_row_for_a_before_commit_fault(
+    tmp_path: Path,
+) -> None:
+    """A deterministic in-transaction observer fault leaves no partial intent."""
+    authority = SqliteLifecycleAuthority.for_root(tmp_path / "rollback")
+    before = authority.snapshot_state()
+
+    def fail_before_commit(boundary: str) -> None:
+        if boundary == "authority.transaction.before_commit":
+            raise RuntimeError("force transactional rollback")
+
+    authority.set_transaction_hook_for_test(fail_before_commit)
+    with pytest.raises(RuntimeError, match="force transactional rollback"):
+        authority.prepare_mutation(_spec("rollback-operation"))
+
+    assert authority.snapshot_state() == before
+    assert authority.read_entry("authority-key") is None
+    assert authority.pending_mutations() == ()
+    assert authority.pending_cleanup_debts() == ()
+
+
 def test_sqlite_authority_rejects_inherited_process_use_and_close_is_idempotent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
