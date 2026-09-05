@@ -114,7 +114,7 @@ Plans:
   4. Operators can dry-run and resume reconciliation to repair, quarantine, or report inconsistent entries without guessing their provenance.
   5. Forced same-key write, delete, and read races have deterministic outcomes without globally serializing operations on distinct keys.
 
-**Plans**: 10/12 plans executed
+**Plans**: 11/12 plans executed
 
 Plans:
 
@@ -128,7 +128,7 @@ Plans:
 - [x] 03-08-PLAN.md — Trim retained helpers while preserving payload safety and one-authority composition
 - [x] 03-09-PLAN.md — Close deterministic crash, race, Python-version, and platform-runner gates without claiming native Windows qualification
 - [x] 03-12-PLAN.md — Add a digest-bound contract distinguishing repository-runtime evidence from Python 3.11 native-qualification attestation
-- [ ] 03-11-PLAN.md — Capture and attest the current host's UNAVAILABLE/NOT_QUALIFIED Windows evidence after the additive command contract closes
+- [x] 03-11-PLAN.md — Capture and attest the current host's UNAVAILABLE/NOT_QUALIFIED Windows evidence after the additive command contract closes
 - [ ] 03-10-PLAN.md — Measure lifecycle budgets and close final Phase 3 acceptance after 03-11
 
 ### Phase 4: Metadata Composition and Topology Contracts
@@ -209,7 +209,7 @@ Plans:
 |-------|----------------|--------|-----------|
 | 1. Compatibility and Security Baseline | 15/15 | Complete | 2026-08-30 |
 | 2. Canonical Storage and Integrity Contract | 7/7 | Complete    | 2026-08-30 |
-| 3. Atomic Lifecycle and Recovery Engine | 10/12 | In Progress|  |
+| 3. Atomic Lifecycle and Recovery Engine | 11/12 | In Progress|  |
 | 4. Metadata Composition and Topology Contracts | 0/TBD | Not started | - |
 | 5. Payload Backends and Full Matrix Parity | 0/TBD | Not started | - |
 | 6. UnifiedCache Policy Composition | 0/TBD | Not started | - |
