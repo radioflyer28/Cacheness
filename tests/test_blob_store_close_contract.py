@@ -20,9 +20,8 @@ from cacheness.error_handling import (
 from cacheness.metadata import InMemoryBackend
 from cacheness.storage import BlobStore
 from cacheness.storage import coordination
-from cacheness.storage.coordination import StoreAdmissionBarrier, interprocess_file_lock
+from cacheness.storage.coordination import interprocess_file_lock
 from cacheness.storage.path_security import ManagedFileOps
-from cacheness.storage.operation_repository import FileOperationRecordRepository
 
 
 def _join(thread: Thread) -> None:

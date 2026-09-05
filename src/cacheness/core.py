@@ -14,7 +14,6 @@ import logging
 import sys
 import uuid
 import warnings
-from contextlib import contextmanager
 from functools import wraps
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
@@ -31,7 +30,6 @@ from .error_handling import (
 )
 from .handlers import HandlerRegistry
 from .serialization import create_unified_cache_key
-from .storage.clear_recovery import ClearRecoveryCoordinator
 from .storage.guarded_handler_io import GuardedHandlerIO
 from .storage.path_security import encode_physical_name, resolve_managed_locator
 
@@ -39,43 +37,23 @@ logger = logging.getLogger(__name__)
 
 
 def _clear_coordinated(method: Callable) -> Callable:
-    """Serialize a local lifecycle operation with clear/recovery when available."""
+    """Apply the retained cache operation without a second lifecycle authority."""
 
     @wraps(method)
     def wrapped(self, *args, **kwargs):
-        coordinator = self._clear_recovery
-        if coordinator is None:
-            return method(self, *args, **kwargs)
-        with coordinator.mutation_admission():
-            return method(self, *args, **kwargs)
+        return method(self, *args, **kwargs)
 
     return wrapped
 
 
 def _clear_read_coordinated(method: Callable) -> Callable:
-    """Exclude a live clear without forcing terminal cleanup during reads."""
+    """Preserve the public read decorator without retired lifecycle controls."""
 
     @wraps(method)
     def wrapped(self, *args, **kwargs):
-        with _clear_read_admission(self):
-            return method(self, *args, **kwargs)
+        return method(self, *args, **kwargs)
 
     return wrapped
-
-
-@contextmanager
-def _clear_read_admission(cache: "UnifiedCache"):
-    """Hold the root read boundary for one public read or query lifetime."""
-    # Query validation tests and narrowly constructed compatibility callers
-    # may initialize only the query dependencies. They have no local storage
-    # topology to coordinate, so preserve their established no-coordinator
-    # behavior rather than requiring a full UnifiedCache constructor.
-    coordinator = getattr(cache, "_clear_recovery", None)
-    if coordinator is None:
-        yield
-        return
-    with coordinator.read_admission():
-        yield
 
 
 def _normalize_function_args(func: Callable, args: Tuple, kwargs: Dict[str, Any]) -> Dict[str, Any]:
@@ -149,9 +127,7 @@ class UnifiedCache:
         # Initialize metadata backend
         self._init_metadata_backend(metadata_backend)
 
-        # Global clear recovery must be installed before any normal lifecycle
-        # work can observe a prepared or committed journal from a prior run.
-        self._init_clear_recovery()
+        self._init_lifecycle_state()
 
         # Initialize custom metadata support
         self._init_custom_metadata_support()
@@ -161,11 +137,7 @@ class UnifiedCache:
 
         # Clean up expired entries on initialization
         if self.config.storage.cleanup_on_init:
-            if self._clear_recovery is None:
-                self._cleanup_expired()
-            else:
-                with self._clear_recovery.mutation_admission():
-                    self._cleanup_expired()
+            self._cleanup_expired()
 
         logger.info(
             f"✅ Unified cache initialized: {self.cache_dir} (backend: {self.actual_backend})"
@@ -276,34 +248,9 @@ class UnifiedCache:
                 actual_backend = "json"  # Store the actual backend used for reporting
         self.actual_backend = actual_backend
 
-    def _init_clear_recovery(self) -> None:
-        """Install/recover the shared clear-only primitive for exact local backends."""
-        self._clear_recovery = None
-        if not ClearRecoveryCoordinator.can_coordinate(self.metadata_backend):
-            return
-
-        self._clear_recovery = ClearRecoveryCoordinator(
-            self.guarded_handler_io.file_ops,
-            self.metadata_backend,
-            physical_name=self._clear_recovery_physical_name,
-        )
-        try:
-            with self._clear_recovery.admission():
-                self._clear_recovery.recover()
-        except Exception:
-            self.guarded_handler_io.close()
-            raise
-
-    def _clear_recovery_physical_name(
-        self,
-        cache_key: str,
-        snapshot_entry: Dict[str, Any],
-    ) -> str:
-        """Bind UnifiedCache journal payloads to its own opaque namespace."""
-        prefix = snapshot_entry.get("prefix")
-        if not isinstance(prefix, str):
-            raise ValueError("Clear recovery snapshot prefix is invalid")
-        return self._storage_id_for_cache_key(cache_key, prefix)
+    def _init_lifecycle_state(self) -> None:
+        """Initialize cache-local state without creating lifecycle controls."""
+        self._lifecycle_state = "ready"
 
     def _supports_custom_metadata(self) -> bool:
         """Check if custom metadata is supported (requires SQLite or PostgreSQL backend with SQLAlchemy)."""
@@ -1552,33 +1499,18 @@ class UnifiedCache:
 
     @_clear_coordinated
     def clear_all(self):
-        """Clear all cache entries through the shared recoverable primitive."""
-        coordinator = self._clear_recovery
-        if (
-            coordinator is None
-            or coordinator.backend is not self.metadata_backend
-            or not ClearRecoveryCoordinator.can_coordinate(self.metadata_backend)
-        ):
-            raise ClearRecoveryCoordinator.unsupported_error(self.metadata_backend)
-
+        """Clear known cache entries without reviving a second authority."""
         entries = self.metadata_backend.list_entries()
         self._preflight_entries(entries, operation="clear_all")
-        mappings = [
-            (
-                entry["cache_key"],
+        for entry in entries:
+            self._delete_or_prove_absent(
                 self._entry_locator(
-                    entry,
-                    entry["cache_key"],
-                    operation="clear_all",
-                ),
+                    entry, entry["cache_key"], operation="clear_all"
+                )
             )
-            for entry in entries
-        ]
-        removed_count = coordinator.clear(mappings)
-        logger.info(
-            f"Cleared {removed_count} cache entries through recoverable clear"
-        )
-        return removed_count
+            self.metadata_backend.remove_entry(entry["cache_key"])
+        logger.info(f"Cleared {len(entries)} cache entries")
+        return len(entries)
 
     @_clear_read_coordinated
     def get_stats(self) -> Dict[str, Any]:

@@ -36,12 +36,6 @@ from cacheness.storage import coordination
 from cacheness.storage import path_security
 from cacheness.storage import manifest_repository as manifest_repository_module
 from cacheness.storage.path_security import ManagedFileOps, resolve_managed_locator
-from cacheness.storage.operation_repository import (
-    FileOperationRecordRepository,
-    OperationCursor,
-    PendingControlCursor,
-    ReconciliationCheckpointCursor,
-)
 
 
 def _record(label: str) -> bytes:

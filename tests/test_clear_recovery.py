@@ -1,5 +1,10 @@
 """LifecycleAuthority clear contracts for canonical BlobStore stores."""
 
+from pathlib import Path
+
+import pytest
+
+from cacheness.error_handling import CacheBlobMigrationRequiredError, CacheReason
 from cacheness.storage.blob_store import BlobStore
 
 
@@ -21,24 +26,26 @@ def test_authority_clear_removes_only_committed_entries(tmp_path):
         store.close()
 
 
-def test_authority_clear_ignores_retired_journal_evidence(tmp_path):
-    """Legacy clear journals cannot authorize mutations of canonical entries."""
-    root = tmp_path / "authority-clear-legacy-evidence"
-    store = BlobStore(root, backend="json")
-    journal_path = root / ".cacheness-clear-journal-v1.json"
-    evidence = b'{"owner":"forged","state":"committed"}'
-    try:
-        key = store.put("preserved", key="preserved")
-        journal_path.write_bytes(evidence)
-    finally:
-        store.close()
+@pytest.mark.parametrize(
+    ("relative_path", "content"),
+    (
+        (".cacheness-clear-journal-v1.json", b'{"owner":"forged"}'),
+        (".cacheness-inventory-v2", b'{"state":"stale"}'),
+    ),
+)
+def test_retired_control_requires_rebuild_without_authority_mutation(
+    tmp_path: Path, relative_path: str, content: bytes
+) -> None:
+    """Known predecessor controls are classified without parsing or repair."""
+    root = tmp_path / "retired-control"
+    root.mkdir()
+    control_path = root / relative_path
+    control_path.write_bytes(content)
+    before = control_path.read_bytes()
 
-    reopened = BlobStore(root, backend="json")
-    try:
-        assert reopened.get(key) == "preserved"
-        assert reopened.reconcile().applied is False
-        assert journal_path.read_bytes() == evidence
-        assert reopened.clear() == 1
-        assert journal_path.read_bytes() == evidence
-    finally:
-        reopened.close()
+    with pytest.raises(CacheBlobMigrationRequiredError) as raised:
+        BlobStore(root, backend="json")
+
+    assert raised.value.context["reason"] == CacheReason.BLOB_MIGRATION_REQUIRED.value
+    assert control_path.read_bytes() == before
+    assert not (root / ".cacheness" / "lifecycle-authority-v1.sqlite3").exists()

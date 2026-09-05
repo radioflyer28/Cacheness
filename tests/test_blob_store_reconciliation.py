@@ -6,14 +6,17 @@ import pytest
 
 from cacheness import CacheConfig
 from cacheness.config import LifecycleLimits
-from cacheness.error_handling import CacheBlobRecoverableCleanupError
+from cacheness.error_handling import (
+    CacheBlobMigrationRequiredError,
+    CacheBlobRecoverableCleanupError,
+)
 from cacheness.storage import BlobStore
 
 
-def test_retired_scheduler_evidence_is_ignored_without_mutation(
+def test_retired_control_requires_rebuild_without_mutation(
     tmp_path: Path,
 ) -> None:
-    """Unauthenticated predecessor evidence cannot influence authority recovery."""
+    """A predecessor control cannot be replayed into an authority store."""
     root = tmp_path / "retired-evidence"
     key = "authority-key"
     evidence_path = root / "operations" / ("a" * 32 + ".json")
@@ -30,16 +33,12 @@ def test_retired_scheduler_evidence_is_ignored_without_mutation(
     finally:
         store.close()
 
-    reopened = BlobStore(root, backend="json")
-    try:
-        report = reopened.reconcile()
-        assert report.applied is False
-        assert report.findings == ()
-        assert evidence_path.read_bytes() == evidence
-        assert payload_path.read_bytes() == payload_before
-        assert reopened.get(key) == {"state": "committed"}
-    finally:
-        reopened.close()
+    with pytest.raises(CacheBlobMigrationRequiredError):
+        BlobStore(root, backend="json")
+
+    assert evidence_path.read_bytes() == evidence
+    assert payload_path.read_bytes() == payload_before
+    assert not (root / ".cacheness" / "lifecycle-authority-v1.sqlite3-journal").exists()
 
 
 def test_apply_reconciliation_reclaims_exact_debt_without_revoking_winner(

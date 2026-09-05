@@ -42,15 +42,6 @@ from .lifecycle_authority import (
 )
 from .manifest import BlobManifestV1
 from .manifest_repository import ManifestCursor, ManifestPage
-from .operation_record import OperationCheckpoint, OperationTransition
-from .operation_repository import (
-    OperationCursor,
-    OperationPage,
-    PendingControlCursor,
-    PendingControlPage,
-    ReconciliationCheckpointCursor,
-    ReconciliationCheckpointPage,
-)
 from .path_security import resolve_managed_locator
 
 

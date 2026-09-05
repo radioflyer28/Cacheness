@@ -39,6 +39,7 @@ Usage:
 
 import hashlib
 import logging
+import stat
 import uuid
 from copy import deepcopy
 from dataclasses import replace
@@ -50,6 +51,7 @@ from ..error_handling import (
     CacheBlobBackendError,
     CacheBlobLifecycleConflictError,
     CacheBlobLifecycleTimeoutError,
+    CacheBlobMigrationRequiredError,
     CacheBlobManifestMalformedError,
     CacheBlobManifestUnauthenticatedError,
     CacheBlobManifestUnsupportedVersionError,
@@ -62,8 +64,7 @@ from ..error_handling import (
     CacheStorageError,
 )
 from .backends import MetadataBackend, JsonBackend
-from .clear_recovery import ClearRecoveryCoordinator, LegacyClearEvidenceAdapter
-from .coordination import InstanceAdmission, KeyCoordinatorRegistry, StoreAdmissionBarrier
+from .coordination import InstanceAdmission, KeyCoordinatorRegistry
 from .guarded_handler_io import GuardedHandlerIO
 from .handlers import HandlerRegistry
 from .integrity import (
@@ -80,12 +81,7 @@ from .manifest import (
     canonical_signing_bytes_from_record,
     decode_canonical_manifest_record,
 )
-from .manifest_repository import (
-    JsonProjectionExporter,
-    ManifestCursor,
-    ManifestExpectation,
-    create_manifest_repository,
-)
+from .manifest_repository import JsonProjectionExporter, ManifestCursor, ManifestExpectation
 from .legacy_manifest import LegacyManifestIdentity, recognize_legacy_fixture_tree
 from .lifecycle import AuthorityLifecycleEngine
 from .lifecycle_authority import (
@@ -96,7 +92,7 @@ from .lifecycle_authority import (
 from .memory_lifecycle_authority import InMemoryLifecycleAuthority
 from .sqlite_lifecycle_authority import SqliteLifecycleAuthority
 from .path_security import encode_physical_name, resolve_managed_locator
-from .reconciliation import _AuthorityReconciler, _Reconciler, ReconciliationReport
+from .reconciliation import _AuthorityReconciler, ReconciliationReport
 from ..metadata import InMemoryBackend, MetadataBackend as CoreMetadataBackend
 from ..metadata import SqliteBackend
 
@@ -133,8 +129,33 @@ _IMMUTABLE_METADATA_PATCH_FIELDS = frozenset(
 )
 
 
+_RETIRED_SCHEDULER_CONTROL_SENTINELS = (
+    (".cacheness-clear-journal-v1.json", stat.S_IFREG),
+    (".cacheness-inventory-v2", stat.S_IFREG),
+    ("operations", stat.S_IFDIR),
+)
+
+
+def _retired_scheduler_control(root: Path) -> str | None:
+    """Classify one exact retired control without opening or parsing it."""
+    try:
+        root_stat = root.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISDIR(root_stat.st_mode):
+        return None
+    for name, expected_type in _RETIRED_SCHEDULER_CONTROL_SENTINELS:
+        try:
+            candidate_stat = (root / name).lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_IFMT(candidate_stat.st_mode) == expected_type:
+            return name
+    return None
+
+
 def _ordinary_admitted(method: Callable) -> Callable:
-    """Admit ordinary BlobStore work outside a finite clear snapshot boundary."""
+    """Admit public BlobStore work through the instance lifecycle boundary."""
 
     @wraps(method)
     def wrapped(self, *args, **kwargs):
@@ -142,38 +163,9 @@ def _ordinary_admitted(method: Callable) -> Callable:
         # exact evidence tree an operator is being asked to migrate.
         self._require_canonical_store()
         with self._instance_admission.operation():
-            if self._authority_mode:
-                return method(self, *args, **kwargs)
-            with self._admission_barrier.ordinary_admission():
-                self._refresh_metadata_view_for_lifecycle()
-                return method(self, *args, **kwargs)
+            return method(self, *args, **kwargs)
 
     return wrapped
-
-
-def _raise_translated_recovery_failure(
-    coordinator: ClearRecoveryCoordinator, error: CacheStorageError
-) -> None:
-    """Map tagged recovery-admission failures into the direct BlobStore API."""
-    if isinstance(error, (CacheBlobBackendError, CacheBlobLifecycleConflictError)):
-        raise error
-
-    if not ClearRecoveryCoordinator.is_lifecycle_conflict(error) and (
-        "clear_recovery_failure" not in error.context
-    ):
-        raise error
-
-    if ClearRecoveryCoordinator.is_lifecycle_conflict(error):
-        translated_type = CacheBlobLifecycleConflictError
-    else:
-        translated_type = CacheBlobBackendError
-    raise translated_type(
-        str(error),
-        context={
-            **error.context,
-            "backend": error.context.get("backend", coordinator.kind),
-        },
-    ) from error
 
 
 class BlobStore:
@@ -269,6 +261,13 @@ class BlobStore:
         lifecycle_authority: LifecycleAuthority | None,
     ) -> None:
         """Finish initialization after the managed-root descriptor is acquired."""
+        retired_control = _retired_scheduler_control(self.cache_dir)
+        if retired_control is not None:
+            raise CacheBlobMigrationRequiredError(
+                "Retired scheduler control requires an explicit local-store rebuild",
+                context={"control_class": "retired_scheduler_control"},
+                reason=CacheReason.BLOB_MIGRATION_REQUIRED,
+            )
         self._legacy_identity: LegacyManifestIdentity | None = None
         # A compatibility fixture is recognized only when it presents the
         # fixed provenance filename.  This is not a directory scan and runs
@@ -369,81 +368,6 @@ class BlobStore:
             self._legacy_clear_evidence = None
             self._authority_lifecycle = self.lifecycle
             return
-        self._authority_lifecycle = None
-        # Exact legacy fixtures are read-only migration evidence. They reject
-        # every public operation before admission, so creating a lifecycle lock
-        # for them would itself mutate the fixture merely by opening it.
-        self._admission_barrier = (
-            None
-            if self._legacy_identity is not None
-            else StoreAdmissionBarrier.acquire(self.guarded_handler_io.root)
-        )
-        # This is intentionally per instance.  Same-process independent
-        # stores still exercise the manifest repository's CAS authority.
-        self._key_coordinator = KeyCoordinatorRegistry()
-        
-        # Initialize metadata backend
-        if self._legacy_identity is not None:
-            self.backend = InMemoryBackend()
-            self._owns_backend = True
-        elif backend is None or backend == "json":
-            self.backend = JsonBackend(self.cache_dir / "cache_metadata.json")
-            self._owns_backend = True
-        elif backend == "sqlite":
-            from .backends import SqliteBackend as LegacySqliteBackend
-            self.backend = LegacySqliteBackend(self.cache_dir / "cache_metadata.db")
-            self._owns_backend = True
-        elif isinstance(backend, (MetadataBackend, CoreMetadataBackend)):
-            self.backend = backend
-        else:
-            raise ValueError(f"Unknown backend type: {backend}")
-        
-        # Initialize handler registry
-        self.handlers = HandlerRegistry()
-        self._manifest_key_provider = (
-            ManifestKeyProvider(
-                self.cache_dir / "blob_manifest_hmac_key.bin",
-                lifecycle_limits=self.lifecycle_limits,
-            )
-            if manifest_key_provider is None
-            else manifest_key_provider
-        )
-        self.manifest_repository = create_manifest_repository(
-            self.backend,
-            lifecycle_limits=self.lifecycle_limits,
-            file_ops=self.guarded_handler_io.file_ops,
-            # The scheduler is control authority: it must be signed by the
-            # same persistent store trust root as the canonical manifests,
-            # rather than by a public or independently replaceable key.
-            inventory_key_provider=self._manifest_key,
-        )
-        self.lifecycle = AuthorityLifecycleEngine(self, self.lifecycle_authority)
-        self._reconciler = _Reconciler(self, lifecycle_limits=self.lifecycle_limits)
-
-        # The predecessor coordinator remains an exact local compatibility
-        # parser. It has no new-operation call site: fresh clear authority is
-        # owned by LifecycleEngine and its signed operation records.
-        self._clear_recovery = None
-        self._legacy_clear_evidence = None
-        if (
-            self._legacy_identity is None
-            and ClearRecoveryCoordinator.can_coordinate(self.backend)
-        ):
-            self._clear_recovery = ClearRecoveryCoordinator(
-                self.guarded_handler_io.file_ops,
-                self.backend,
-            )
-            self._legacy_clear_evidence = LegacyClearEvidenceAdapter(
-                self.guarded_handler_io.file_ops,
-                self.backend,
-            )
-            try:
-                if self._legacy_clear_evidence.has_evidence():
-                    with self._clear_recovery.admission():
-                        self._legacy_clear_evidence.recover()
-                        self._reconcile_sqlite_manifest_records_after_clear()
-            except CacheStorageError as exc:
-                _raise_translated_recovery_failure(self._clear_recovery, exc)
 
     def _validate_authority_capabilities(
         self, capabilities: AuthorityCapabilities | object | None
@@ -499,22 +423,6 @@ class BlobStore:
                 self._released_resources["authority"] = True
             except Exception:
                 logger.exception("Failed to close internally created lifecycle authority")
-        lifecycle = getattr(self, "lifecycle", None)
-        operation_repository = getattr(lifecycle, "operation_repository", None)
-        operation_close = getattr(operation_repository, "close", None)
-        if callable(operation_close):
-            try:
-                operation_close()
-            except Exception:
-                logger.exception("Failed to close BlobStore lifecycle operation locks")
-        repository_close = getattr(
-            getattr(self, "manifest_repository", None), "close", None
-        )
-        if callable(repository_close):
-            try:
-                repository_close()
-            except Exception:
-                logger.exception("Failed to close BlobStore manifest repository lock root")
         if self._owns_backend and hasattr(self, "backend"):
             try:
                 self.backend.close()
@@ -525,11 +433,6 @@ class BlobStore:
                 self.guarded_handler_io.close()
             except Exception:
                 logger.exception("Failed to close BlobStore managed-root descriptor")
-        if getattr(self, "_admission_barrier", None) is not None:
-            try:
-                self._admission_barrier.release()
-            except Exception:
-                logger.exception("Failed to release BlobStore admission barrier")
 
     @property
     def legacy_identity(self) -> LegacyManifestIdentity | None:
@@ -1097,53 +1000,20 @@ class BlobStore:
             self._instance_admission.finish_close(closed=closed)
 
     def _release_owned_resources(self) -> None:
-        """Release successful owned resources once, leaving failed work retryable.
-
-        The lifecycle operation repository retains bounded authority-lock
-        descriptors.  Flush and close them before the shared managed-root
-        descriptor is released.
-        """
-        if self._authority_mode:
-            if self._owns_lifecycle_authority and not self._released_resources["authority"]:
-                self.lifecycle_authority.close()
-                self._released_resources["authority"] = True
-            if (
-                self.guarded_handler_io is not None
-                and not self._released_resources["guarded_handler_io"]
-            ):
-                self.guarded_handler_io.close()
-                self._released_resources["guarded_handler_io"] = True
-            if self._owns_backend and not self._released_resources["backend"]:
-                self.backend.close()
-                self._released_resources["backend"] = True
-            self._released_resources["admission_barrier"] = True
-            return
-        operation_repository = self.lifecycle.operation_repository
-        flush = getattr(operation_repository, "flush", None)
-        if callable(flush):
-            flush()
-        operation_close = getattr(operation_repository, "close", None)
-        if callable(operation_close):
-            operation_close()
-
-        if not self._released_resources["manifest_repository"]:
-            repository_close = getattr(self.manifest_repository, "close", None)
-            if callable(repository_close):
-                repository_close()
-            self._released_resources["manifest_repository"] = True
-
-        if not self._released_resources["guarded_handler_io"]:
+        """Release resources owned by this authority-backed BlobStore once."""
+        if self._owns_lifecycle_authority and not self._released_resources["authority"]:
+            self.lifecycle_authority.close()
+            self._released_resources["authority"] = True
+        if (
+            self.guarded_handler_io is not None
+            and not self._released_resources["guarded_handler_io"]
+        ):
             self.guarded_handler_io.close()
             self._released_resources["guarded_handler_io"] = True
-
         if self._owns_backend and not self._released_resources["backend"]:
             self.backend.close()
             self._released_resources["backend"] = True
-
-        if not self._released_resources["admission_barrier"]:
-            if self._admission_barrier is not None:
-                self._admission_barrier.release()
-            self._released_resources["admission_barrier"] = True
+        self._released_resources["admission_barrier"] = True
     
     def __enter__(self):
         self._instance_admission.require_open()

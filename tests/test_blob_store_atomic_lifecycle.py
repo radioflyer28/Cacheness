@@ -22,12 +22,6 @@ from cacheness.metadata import InMemoryBackend
 from cacheness.storage import BlobStore
 from cacheness.storage.manifest import BlobManifestV1
 from cacheness.storage.manifest_repository import ManifestCursor, ManifestPage
-from cacheness.storage.operation_record import (
-    ClearTarget,
-    ClearTargetCheckpoint,
-    ClearTargetPage,
-)
-from cacheness.storage.operation_repository import FileOperationRecordRepository
 from cacheness.storage.path_security import ManagedFileOps, resolve_managed_locator
 
 
