@@ -894,6 +894,7 @@ class SqliteLifecycleAuthority:
                 self.open_write_transactions += 1
             try:
                 result = callback(connection)
+                self._reach_transaction_boundary("authority.transaction.before_commit")
                 connection.execute("COMMIT")
                 self._reach_transaction_boundary("authority.transaction.committed")
                 return result

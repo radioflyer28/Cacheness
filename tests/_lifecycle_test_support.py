@@ -16,6 +16,7 @@ import stat
 import subprocess
 import sys
 from threading import Event
+from typing import Any
 
 
 CRASH_BOUNDARY_EXIT = 86
@@ -131,6 +132,29 @@ class AuthorityPathState:
     mtime_ns: int
     size: int
     sha256: str | None
+
+
+@dataclass(frozen=True)
+class AuthorityWholeState:
+    """Public, payload-free snapshot of all authority state used by a test."""
+
+    entries: tuple[Any, ...]
+    revision: int
+    projection_dirty: bool
+    mutation_states: tuple[tuple[str, str], ...]
+    cleanup_debt: tuple[Any, ...]
+
+
+def authority_whole_state(authority: Any) -> AuthorityWholeState:
+    """Read the authority's complete semantic state without opening payloads."""
+    snapshot = authority.snapshot_state()
+    return AuthorityWholeState(
+        entries=authority.list_entries(),
+        revision=snapshot.revision,
+        projection_dirty=snapshot.projection_dirty,
+        mutation_states=snapshot.mutation_states,
+        cleanup_debt=snapshot.cleanup_debt,
+    )
 
 
 def _object_type(file_stat: os.stat_result) -> str:
