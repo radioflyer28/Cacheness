@@ -2,9 +2,9 @@
 schema_version: 1
 open_count: 2
 waived_count: 0
-fixed_count: 22
-total_count: 24
-last_updated: 2026-09-05T03:30:17Z
+fixed_count: 24
+total_count: 26
+last_updated: 2026-09-05T19:32:43.069Z
 ---
 
 # Broken Windows Ledger
@@ -39,6 +39,8 @@ last_updated: 2026-09-05T03:30:17Z
 | 22 | 03 | stub | src/cacheness/storage/lifecycle_authority.py | 169 | Clear, reconciliation, tombstone retirement, and projection transitions are semantic placeholders reserved for later Phase 3 plans. | fixed |  | 2026-09-05T01:49:11.994Z | 2026-09-05T03:07:49.009Z |
 | 23 | 03 | deviation | tests/test_blob_store_read_contract.py | 175 | Legacy constructor test requires retired create_manifest_repository setup; authority mode keeps LifecycleAuthority as sole committed truth. | fixed |  | 2026-09-05T03:07:28.440Z | 2026-09-05T03:14:38.123Z |
 | 24 | 03 | deviation | tests/test_blob_store_read_contract.py | 413 | Legacy JSON admission test still treats cache_metadata.json as committed truth; authority mode correctly ignores this non-authoritative projection. | fixed |  | 2026-09-05T03:14:38.217Z | 2026-09-05T03:30:17Z |
+| 25 | 03 | deviation | src/cacheness/storage/manifest_repository.py | 205 | A stale revision-R renderer is prevented from replacing a newer revision-R+1 JSON projection. | fixed |  | 2026-09-05T19:32:18.274Z | 2026-09-05T19:32:42.970Z |
+| 26 | 03 | deviation | tests/test_blob_store_read_contract.py |  | Mutation contracts rebuild a corrupt JSON projection from committed authority state while direct reads remain non-mutating. | fixed |  | 2026-09-05T19:32:18.392Z | 2026-09-05T19:32:43.069Z |
 
 ````json
 [
@@ -329,6 +331,30 @@ last_updated: 2026-09-05T03:30:17Z
     "reason": "",
     "recorded_at": "2026-09-05T03:14:38.217Z",
     "resolved_at": "2026-09-05T03:30:17Z"
+  },
+  {
+    "id": 25,
+    "kind": "deviation",
+    "phase": "03",
+    "file": "src/cacheness/storage/manifest_repository.py",
+    "line": 205,
+    "description": "A stale revision-R renderer is prevented from replacing a newer revision-R+1 JSON projection.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-09-05T19:32:18.274Z",
+    "resolved_at": "2026-09-05T19:32:42.970Z"
+  },
+  {
+    "id": 26,
+    "kind": "deviation",
+    "phase": "03",
+    "file": "tests/test_blob_store_read_contract.py",
+    "line": null,
+    "description": "Mutation contracts rebuild a corrupt JSON projection from committed authority state while direct reads remain non-mutating.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-09-05T19:32:18.392Z",
+    "resolved_at": "2026-09-05T19:32:43.069Z"
   }
 ]
 ````
