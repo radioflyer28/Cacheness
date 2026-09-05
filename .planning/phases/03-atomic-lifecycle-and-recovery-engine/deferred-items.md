@@ -7,3 +7,10 @@
 - **Evidence:** exits 1 with 23 F401/F841 findings, all in `src/cacheness/__init__.py`, `src/cacheness/config.py`, and `tests/test_config_validation.py`.
 - **Scope proof:** `git diff --name-only a5fe465..HEAD -- src/cacheness/__init__.py src/cacheness/config.py tests/test_config_validation.py` produced no paths; none of the three files changed in 03-10.
 - **Disposition:** do not expand this final lifecycle verification plan into unrelated lint cleanup. Lint on all 03-10 changed tests passes.
+
+## SQLite backend interpreter-shutdown destructor warning
+
+- **Status:** open, pre-existing reliability capture candidate
+- **Evidence:** the completed full suite logs `SqliteBackend.__del__` attempting cleanup after Python has cleared `sys.meta_path`, producing a non-failing `ImportError` during interpreter shutdown.
+- **Scope proof:** the warning occurred after a successful 749-passing Plan 03-07 suite and is unrelated to retired scheduler reachability.
+- **Disposition:** retain as a future reliability item; do not mix destructor behavior into the scheduler-retirement change.
