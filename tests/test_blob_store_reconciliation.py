@@ -70,3 +70,51 @@ def test_apply_reconciliation_reclaims_exact_debt_without_revoking_winner(
         assert store.get(key) == {"generation": "winner"}
     finally:
         store.close()
+
+
+def test_authority_reconciliation_exposes_stable_v2_machine_view_without_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dry-run reports one redacted authority finding without changing state."""
+    store = BlobStore(tmp_path / "v2-authority-report", backend="json")
+    try:
+        key = store.put({"generation": "old"}, key="report-key")
+        monkeypatch.setattr(
+            store,
+            "_delete_or_prove_absent",
+            lambda _locator: (_ for _ in ()).throw(OSError("defer cleanup")),
+        )
+        with pytest.raises(CacheBlobRecoverableCleanupError):
+            store.put({"generation": "winner"}, key=key)
+
+        before = store.lifecycle_authority.snapshot_state()
+        first = store.reconcile()
+        second = store.reconcile()
+
+        assert first.to_dict() == second.to_dict()
+        assert store.lifecycle_authority.snapshot_state() == before
+        machine_view = first.machine_view()
+        assert machine_view["schema_version"] == 2
+        assert machine_view["findings"]
+        assert set(machine_view["findings"][0]) == {
+            "applied_state",
+            "authoritative_generation",
+            "authority_revision",
+            "checkpoint_state",
+            "disposition",
+            "expected_generation",
+            "finding_id",
+            "key_fingerprint",
+            "operation_provenance",
+            "proposed_action",
+            "reason_code",
+            "residue_role",
+            "residue_type",
+            "run_revision",
+        }
+        assert "report-key" not in repr(machine_view)
+        with pytest.raises(ValueError, match="Unsupported reconciliation report version"):
+            first.machine_view(version=99)
+    finally:
+        store.close()
