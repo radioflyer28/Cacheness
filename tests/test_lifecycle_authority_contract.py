@@ -266,3 +266,40 @@ def test_sqlite_authority_rejects_aba_stale_absence_preparation(tmp_path: Path) 
     authority.record_verification_for_test(stale)
     with pytest.raises(CacheBlobLifecycleConflictError):
         authority.promote_mutation(stale)
+
+
+def test_authority_empty_inspection_is_lazy_and_zero_mutation(tmp_path: Path) -> None:
+    """Absent compatible roots stay absent through read-only lifecycle calls."""
+    from cacheness.storage import BlobStore
+    from cacheness.storage.sqlite_lifecycle_authority import SqliteLifecycleAuthority
+
+    root = tmp_path / "missing-parent" / "empty-store"
+    before = authority_root_snapshot(root)
+    store = BlobStore(root, lifecycle_authority=SqliteLifecycleAuthority.for_root(root))
+    assert store.get("missing") is None
+    assert store.get_metadata("missing") is None
+    assert store.exists("missing") is False
+    store.close()
+    assert authority_root_snapshot(root) == before
+
+    reopened = BlobStore(root, lifecycle_authority=SqliteLifecycleAuthority.for_root(root))
+    assert reopened.get("missing") is None
+    reopened.close()
+    assert authority_root_snapshot(root) == before
+
+
+def test_established_missing_authority_fails_unchanged(tmp_path: Path) -> None:
+    """Payload evidence without authority is never silently interpreted as empty."""
+    from cacheness.storage import BlobStore
+    from cacheness.storage.sqlite_lifecycle_authority import SqliteLifecycleAuthority
+    from cacheness.error_handling import CacheBlobMigrationRequiredError
+
+    root = tmp_path / "established-store"
+    root.mkdir()
+    (root / "payload.bin").write_bytes(b"existing payload")
+    before = authority_root_snapshot(root)
+    store = BlobStore(root, lifecycle_authority=SqliteLifecycleAuthority.for_root(root))
+    with pytest.raises(CacheBlobMigrationRequiredError):
+        store.get("missing")
+    store.close()
+    assert authority_root_snapshot(root) == before
