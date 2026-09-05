@@ -14,6 +14,22 @@ qualification-attestation:
   backlog_phase: 999.1
   future_required_status: PASS
   future_required_exit_code: 0
+source-binding:
+  source_summary_path: ".planning/phases/03-atomic-lifecycle-and-recovery-engine/03-09-SUMMARY.md"
+  source_summary_sha256: 426189ec064f6beb333d41d9adc8c90b83affcfaaf4495f5113a773a2ed7f177
+  completion_commit: 947f76d
+  implementation_commits:
+    - 9abeb10
+    - f9e64e7
+    - 5735e1a
+    - 5165dc1
+    - d74ec66
+    - 5488478
+    - f05e6c1
+    - 7888814
+    - a846c10
+    - 7d59ff4
+    - d0dcc73
 ---
 
 # Plan 03-09 Platform Evidence Addendum
@@ -21,6 +37,12 @@ qualification-attestation:
 This additive contract gives downstream plans separate, machine-readable roles for
 the two Phase 3 runners. It does not amend, reinterpret, or replace the completed
 Plan 03-09 summary or any of its implementation commits.
+
+## Source binding
+
+The frontmatter binds this artifact to the exact completed Plan 03-09 summary bytes,
+its close-out commit, and every existing Task 1 and Task 2 implementation commit.
+The binding is provenance only: it neither replays nor replaces that completed work.
 
 ## Command roles
 
