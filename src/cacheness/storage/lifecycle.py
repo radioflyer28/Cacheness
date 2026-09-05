@@ -1800,23 +1800,24 @@ class AuthorityLifecycleEngine:
 
     def put(self, data: Any, *, key: str, metadata: dict[str, Any] | None) -> str:
         handler = self.store.handlers.get_handler(data)
-        with self.store.guarded_handler_io.stage(handler, data, self.store.config) as staged:
-            generation = uuid.uuid4().hex
-            locator = Path("generations") / f"{generation}{staged.suffix}"
-            prepared = self.authority.prepare_mutation(
-                MutationSpec.create(
-                    operation_id=uuid.uuid4().hex,
-                    key=key,
-                    generation=generation,
-                    candidate_locator=locator.as_posix(),
-                    expected=(
-                        existing.expectation
-                        if (existing := self.authority.read_entry(key)) is not None
-                        else self.store._authority_absent_expectation()
-                    ),
-                )
+        generation = uuid.uuid4().hex
+        locator = Path("generations") / generation
+        prepared = self.authority.prepare_mutation(
+            MutationSpec.create(
+                operation_id=uuid.uuid4().hex,
+                key=key,
+                generation=generation,
+                candidate_locator=locator.as_posix(),
+                expected=(
+                    existing.expectation
+                    if (existing := self.authority.read_entry(key)) is not None
+                    else self.store._authority_absent_expectation()
+                ),
             )
-            published = self.store.guarded_handler_io.publish_generation(staged, locator)
+        )
+        guarded_io = self.store._materialize_authority_store()
+        with guarded_io.stage(handler, data, self.store.config) as staged:
+            published = guarded_io.publish_generation(staged, locator)
             digest, byte_size = sha256_and_size(published["actual_path"])
             handler_metadata = dict(published.get("metadata", {}))
             manifest = BlobManifestV1(

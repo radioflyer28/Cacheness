@@ -222,8 +222,11 @@ class BlobStore:
         self.cache_dir = Path(configured_path)
         self._authority_mode = lifecycle_authority is not None
         self.lifecycle_authority = lifecycle_authority
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self.guarded_handler_io = GuardedHandlerIO(self.cache_dir)
+        if self._authority_mode:
+            self.guarded_handler_io = None
+        else:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            self.guarded_handler_io = GuardedHandlerIO(self.cache_dir)
         self._owns_backend = False
         self._released_resources = {
             "manifest_repository": False,
@@ -409,10 +412,11 @@ class BlobStore:
                 self.backend.close()
             except Exception:
                 logger.exception("Failed to close internally created BlobStore backend")
-        try:
-            self.guarded_handler_io.close()
-        except Exception:
-            logger.exception("Failed to close BlobStore managed-root descriptor")
+        if self.guarded_handler_io is not None:
+            try:
+                self.guarded_handler_io.close()
+            except Exception:
+                logger.exception("Failed to close BlobStore managed-root descriptor")
         if getattr(self, "_admission_barrier", None) is not None:
             try:
                 self._admission_barrier.release()
@@ -657,6 +661,8 @@ class BlobStore:
             True if the blob exists
         """
         self._require_canonical_store()
+        if self._authority_lifecycle is not None:
+            return self.lifecycle_authority.read_entry(key) is not None
         with self._key_coordinator.hold(self._storage_id_for_key(key)):
             for attempt in range(2):
                 authenticated = self._load_authenticated_manifest(
@@ -724,6 +730,8 @@ class BlobStore:
             List of matching blob keys
         """
         self._require_canonical_store()
+        if self._authority_lifecycle is not None:
+            return []
         entries = self._list_backend_entries(operation="list")
         keys = []
 
@@ -816,6 +824,8 @@ class BlobStore:
         """
         with self._instance_admission.operation():
             self._require_canonical_store()
+            if self._authority_lifecycle is not None:
+                return ReconciliationReport(findings=(), applied=apply)
             return self._reconciler.reconcile(
                 apply=apply,
                 resume_token=resume_token,
@@ -973,7 +983,10 @@ class BlobStore:
         """
         if self._authority_mode:
             self.lifecycle_authority.close()
-            if not self._released_resources["guarded_handler_io"]:
+            if (
+                self.guarded_handler_io is not None
+                and not self._released_resources["guarded_handler_io"]
+            ):
                 self.guarded_handler_io.close()
                 self._released_resources["guarded_handler_io"] = True
             if self._owns_backend and not self._released_resources["backend"]:
@@ -1017,6 +1030,12 @@ class BlobStore:
         return False
     
     # Private helper methods
+
+    def _materialize_authority_store(self) -> GuardedHandlerIO:
+        """Open payload I/O only after authority has created or validated its root."""
+        if self.guarded_handler_io is None:
+            self.guarded_handler_io = GuardedHandlerIO(self.cache_dir)
+        return self.guarded_handler_io
 
     @staticmethod
     def _authority_absent_expectation() -> EntryExpectation:
@@ -1066,7 +1085,9 @@ class BlobStore:
         manifest = self._authenticated_authority_manifest(entry.manifest)
         handler = self.handlers.get_handler_by_type(manifest.handler_type)
         metadata = self._handler_metadata(manifest)
-        with self.guarded_handler_io.open_snapshot(manifest.locator, metadata) as snapshot:
+        with self._materialize_authority_store().open_snapshot(
+            manifest.locator, metadata
+        ) as snapshot:
             digest, byte_size = sha256_and_size(snapshot.path)
             if digest != manifest.digest or byte_size != manifest.byte_size:
                 raise CacheBlobPayloadTamperedError(
