@@ -214,6 +214,29 @@ def test_default_store_promotes_authority_backed_metadata_without_scheduler_arti
         store.close()
 
 
+def test_clear_snapshot_preserves_post_snapshot_create_and_overwrite(
+    tmp_path: Path,
+) -> None:
+    """Clear removes only the exact generations captured in its authority snapshot."""
+    root = tmp_path / "clear-snapshot-post-snapshot-writes"
+    store = BlobStore(root, backend="json")
+    try:
+        store.put({"generation": "old"}, key="existing")
+
+        def create_after_snapshot(boundary: str) -> None:
+            if boundary == "clear.snapshot_committed":
+                store.put({"generation": "new"}, key="existing")
+                store.put({"generation": "post-snapshot"}, key="late")
+
+        store.lifecycle.test_hook = create_after_snapshot
+        store.clear()
+
+        assert store.get("existing") == {"generation": "new"}
+        assert store.get("late") == {"generation": "post-snapshot"}
+    finally:
+        store.close()
+
+
 @pytest.mark.skipif(os.name != "posix", reason="special-node substitution fixture")
 @pytest.mark.parametrize("replacement_kind", ("symlink", "hard_link", "fifo", "inode"))
 def _retired_scheduler_candidate_verification_rejects_every_substituted_inode_before_manifest_cas(
