@@ -292,7 +292,9 @@ def test_verify_optional_summary_must_mirror_the_qualification_record(tmp_path: 
         summary,
         f"""---
 windows-qualification:
+  artifact_path: "{paths['artifact']}"
   artifact_sha256: {_digest(paths['artifact'])}
+  contract_summary_path: "{paths['contract_summary']}"
   contract_summary_sha256: {_digest(paths['contract_summary'])}
   qualification_attestation_command: \"{' '.join(helper.QUALIFICATION_ARGV)}\"
   runner_status: UNAVAILABLE
