@@ -73,6 +73,32 @@ class _UnsupportedBackend(InMemoryBackend):
     """An inherited metadata backend that is not an exact canonical identity."""
 
 
+def test_authority_tracer_put_read_and_reopen_uses_committed_authority(
+    tmp_path: Path,
+) -> None:
+    """A direct store round-trip keeps native bytes outside authority writes."""
+    from cacheness.storage.sqlite_lifecycle_authority import SqliteLifecycleAuthority
+
+    root = tmp_path / "authority-tracer"
+    authority = SqliteLifecycleAuthority.for_root(root)
+    store = BlobStore(root, lifecycle_authority=authority)
+    events: list[str] = []
+    store.handlers = _SingleHandlerRegistry(_TracingHandler(events))
+
+    assert not authority.path.exists()
+    assert store.put("native payload", key="tracer") == "tracer"
+    assert authority.open_write_transactions == 0
+    assert store.get("tracer") == "native payload"
+    assert events == ["handler"]
+    store.close()
+
+    reopened_authority = SqliteLifecycleAuthority.for_root(root)
+    reopened = BlobStore(root, lifecycle_authority=reopened_authority)
+    reopened.handlers = _SingleHandlerRegistry(_TracingHandler([]))
+    assert reopened.get("tracer") == "native payload"
+    reopened.close()
+
+
 def _replace_signed_manifest(
     store: BlobStore, key: str, **changes: Any
 ) -> BlobManifestV1:

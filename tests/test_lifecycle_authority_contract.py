@@ -184,3 +184,85 @@ def test_wrong_object_and_deterministic_boundary_observers_are_explicit(
     subprocess_result = run_python_subprocess("-c", "print('lifecycle-probe')")
     assert subprocess_result.returncode == 0
     assert subprocess_result.stdout == "lifecycle-probe\n"
+
+
+# =============================================================================
+# Transactional authority tracer (Plan 03-02)
+# =============================================================================
+
+
+def test_sqlite_authority_tracer_persists_intent_promotes_and_reopens(
+    tmp_path: Path,
+) -> None:
+    """One short authority transaction is the sole visibility switch."""
+    from cacheness.storage.lifecycle_authority import (
+        EntryExpectation,
+        MutationSpec,
+        VerificationProof,
+    )
+    from cacheness.storage.sqlite_lifecycle_authority import SqliteLifecycleAuthority
+
+    root = tmp_path / "tracer-store"
+    authority = SqliteLifecycleAuthority.for_root(root)
+    assert not (root / ".cacheness" / "lifecycle-authority-v1.sqlite3").exists()
+
+    prepared = authority.prepare_mutation(
+        MutationSpec.create(
+            operation_id="op-1",
+            key="tracer-key",
+            generation="generation-1",
+            candidate_locator="generations/generation-1.trace",
+            expected=EntryExpectation.absent(),
+        )
+    )
+    assert authority.open_write_transactions == 0
+    assert authority.read_entry("tracer-key") is None
+    authority.record_verification(
+        prepared,
+        VerificationProof(digest="a" * 64, byte_size=7),
+    )
+    promoted = authority.promote_mutation(prepared)
+    assert promoted.entry.key == "tracer-key"
+    assert authority.open_write_transactions == 0
+    authority.close()
+
+    reopened = SqliteLifecycleAuthority.for_root(root)
+    entry = reopened.read_entry("tracer-key")
+    assert entry is not None
+    assert entry.manifest == promoted.entry.manifest
+    assert entry.generation == "generation-1"
+    reopened.close()
+
+
+def test_sqlite_authority_rejects_aba_stale_absence_preparation(tmp_path: Path) -> None:
+    """An absence observed before create/delete cannot promote after ABA."""
+    from cacheness.error_handling import CacheBlobLifecycleConflictError
+    from cacheness.storage.lifecycle_authority import EntryExpectation, MutationSpec
+    from cacheness.storage.sqlite_lifecycle_authority import SqliteLifecycleAuthority
+
+    authority = SqliteLifecycleAuthority.for_root(tmp_path / "aba-store")
+    stale = authority.prepare_mutation(
+        MutationSpec.create(
+            operation_id="stale",
+            key="key",
+            generation="stale-generation",
+            candidate_locator="generations/stale.trace",
+            expected=EntryExpectation.absent(),
+        )
+    )
+    winner = authority.prepare_mutation(
+        MutationSpec.create(
+            operation_id="winner",
+            key="key",
+            generation="winner-generation",
+            candidate_locator="generations/winner.trace",
+            expected=EntryExpectation.absent(),
+        )
+    )
+    authority.record_verification_for_test(winner)
+    authority.promote_mutation(winner)
+    authority.delete_entry("key", expected=authority.read_entry("key").expectation)
+
+    authority.record_verification_for_test(stale)
+    with pytest.raises(CacheBlobLifecycleConflictError):
+        authority.promote_mutation(stale)
