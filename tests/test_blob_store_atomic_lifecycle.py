@@ -237,6 +237,40 @@ def test_clear_snapshot_preserves_post_snapshot_create_and_overwrite(
         store.close()
 
 
+def test_clear_resumes_after_delete_before_progress_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A restarted clear proves the prior target absent without deleting twice."""
+    root = tmp_path / "clear-resume-after-delete"
+    store = BlobStore(root, backend="json")
+    deletion_attempts: list[Path] = []
+    original_delete = store._delete_or_prove_absent
+
+    def observe_delete(locator: Path) -> None:
+        deletion_attempts.append(locator)
+        original_delete(locator)
+
+    monkeypatch.setattr(store, "_delete_or_prove_absent", observe_delete)
+    try:
+        store.put({"generation": "only"}, key="resume-key")
+
+        def interrupt_after_delete(boundary: str) -> None:
+            if boundary == "clear.after_target_delete":
+                raise _SimulatedProcessLoss("interrupted after exact target deletion")
+
+        store.lifecycle.test_hook = interrupt_after_delete
+        with pytest.raises(_SimulatedProcessLoss):
+            store.clear()
+        assert len(deletion_attempts) == 1
+
+        store.lifecycle.test_hook = None
+        assert store.clear() == 0
+        assert len(deletion_attempts) == 1
+        assert store.get("resume-key") is None
+    finally:
+        store.close()
+
+
 @pytest.mark.skipif(os.name != "posix", reason="special-node substitution fixture")
 @pytest.mark.parametrize("replacement_kind", ("symlink", "hard_link", "fifo", "inode"))
 def _retired_scheduler_candidate_verification_rejects_every_substituted_inode_before_manifest_cas(

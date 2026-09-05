@@ -514,13 +514,19 @@ class SqliteLifecycleAuthority:
             )
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS clear_runs ("
-                "run_id TEXT PRIMARY KEY, state TEXT NOT NULL, revision INTEGER NOT NULL)"
+                "run_id TEXT PRIMARY KEY, state TEXT NOT NULL, revision INTEGER NOT NULL, "
+                "last_key TEXT NOT NULL DEFAULT '')"
             )
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS clear_targets ("
-                "run_id TEXT NOT NULL, key TEXT NOT NULL, generation TEXT NOT NULL, "
-                "manifest_digest TEXT NOT NULL, state TEXT NOT NULL, "
+                "run_id TEXT NOT NULL, key TEXT NOT NULL, lineage INTEGER NOT NULL, "
+                "entry_revision INTEGER NOT NULL, generation TEXT NOT NULL, locator TEXT NOT NULL, "
+                "manifest BLOB NOT NULL, manifest_digest TEXT NOT NULL, state TEXT NOT NULL, "
                 "PRIMARY KEY (run_id, key))"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS clear_targets_page "
+                "ON clear_targets(run_id, state, key)"
             )
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS reconciliation_runs ("
@@ -583,11 +589,25 @@ class SqliteLifecycleAuthority:
                 cls._initialize_schema(connection)
                 return
 
+            clear_run_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(clear_runs)")
+            } if "clear_runs" in table_names else set()
+            clear_target_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(clear_targets)")
+            } if "clear_targets" in table_names else set()
+
             needs_migration = (
                 "manifest_digest" not in entry_columns
                 or "expected_generation" not in mutation_columns
                 or "expected_manifest_digest" not in mutation_columns
                 or "authority_state" not in table_names
+                or "last_key" not in clear_run_columns
+                or not {
+                    "lineage",
+                    "entry_revision",
+                    "locator",
+                    "manifest",
+                }.issubset(clear_target_columns)
             )
             if not needs_migration:
                 connection.execute("COMMIT")
@@ -627,13 +647,19 @@ class SqliteLifecycleAuthority:
             )
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS clear_runs ("
-                "run_id TEXT PRIMARY KEY, state TEXT NOT NULL, revision INTEGER NOT NULL)"
+                "run_id TEXT PRIMARY KEY, state TEXT NOT NULL, revision INTEGER NOT NULL, "
+                "last_key TEXT NOT NULL DEFAULT '')"
             )
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS clear_targets ("
-                "run_id TEXT NOT NULL, key TEXT NOT NULL, generation TEXT NOT NULL, "
-                "manifest_digest TEXT NOT NULL, state TEXT NOT NULL, "
+                "run_id TEXT NOT NULL, key TEXT NOT NULL, lineage INTEGER NOT NULL, "
+                "entry_revision INTEGER NOT NULL, generation TEXT NOT NULL, locator TEXT NOT NULL, "
+                "manifest BLOB NOT NULL, manifest_digest TEXT NOT NULL, state TEXT NOT NULL, "
                 "PRIMARY KEY (run_id, key))"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS clear_targets_page "
+                "ON clear_targets(run_id, state, key)"
             )
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS reconciliation_runs ("
@@ -644,6 +670,40 @@ class SqliteLifecycleAuthority:
                 "CREATE TABLE IF NOT EXISTS reconciliation_actions ("
                 "run_id TEXT NOT NULL, action_id INTEGER NOT NULL, state TEXT NOT NULL, "
                 "PRIMARY KEY (run_id, action_id))"
+            )
+            if "clear_runs" in table_names and "last_key" not in clear_run_columns:
+                connection.execute(
+                    "ALTER TABLE clear_runs ADD COLUMN last_key TEXT NOT NULL DEFAULT ''"
+                )
+            for column, declaration in (
+                ("lineage", "INTEGER"),
+                ("entry_revision", "INTEGER"),
+                ("locator", "TEXT"),
+                ("manifest", "BLOB"),
+            ):
+                if (
+                    "clear_targets" in table_names
+                    and column not in clear_target_columns
+                ):
+                    connection.execute(
+                        f"ALTER TABLE clear_targets ADD COLUMN {column} {declaration}"
+                    )
+            connection.execute(
+                "UPDATE clear_targets SET "
+                "lineage = (SELECT lineage FROM entries WHERE entries.key = clear_targets.key), "
+                "entry_revision = (SELECT revision FROM entries WHERE entries.key = clear_targets.key), "
+                "locator = (SELECT locator FROM entries WHERE entries.key = clear_targets.key), "
+                "manifest = (SELECT manifest FROM entries WHERE entries.key = clear_targets.key) "
+                "WHERE state = 'pending' AND manifest IS NULL"
+            )
+            connection.execute(
+                "UPDATE clear_targets SET state = 'conflicted' "
+                "WHERE state = 'pending' AND (lineage IS NULL OR entry_revision IS NULL "
+                "OR locator IS NULL OR manifest IS NULL)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS clear_targets_page "
+                "ON clear_targets(run_id, state, key)"
             )
             connection.execute("COMMIT")
         except BaseException:
@@ -1200,25 +1260,33 @@ class SqliteLifecycleAuthority:
         self.delete_entry(key, expected=expected)
 
     def begin_clear(self) -> PageToken:
-        token = PageToken(uuid4().hex)
-
         def begin(connection: sqlite3.Connection) -> PageToken:
+            active = connection.execute(
+                "SELECT run_id FROM clear_runs WHERE state = 'active' ORDER BY rowid LIMIT 1"
+            ).fetchone()
+            if active is not None:
+                return PageToken(str(active[0]))
+            token = PageToken(uuid4().hex)
             revision = connection.execute(
                 "SELECT revision FROM authority_state WHERE singleton = 1"
             ).fetchone()[0]
             connection.execute(
-                "INSERT INTO clear_runs(run_id, state, revision) VALUES (?, 'active', ?)",
+                "INSERT INTO clear_runs(run_id, state, revision, last_key) "
+                "VALUES (?, 'active', ?, '')",
                 (token.value, revision),
             )
-            rows = connection.execute(
-                "SELECT key, generation, manifest_digest FROM entries ORDER BY key"
-            ).fetchall()
-            for key, generation, manifest_digest in rows:
-                connection.execute(
-                    "INSERT INTO clear_targets(run_id, key, generation, manifest_digest, state) "
-                    "VALUES (?, ?, ?, ?, 'pending')",
-                    (token.value, key, generation, manifest_digest),
-                )
+            # SQLite owns membership in this one short transaction.  The
+            # target rows retain the exact authenticated bytes and expectation
+            # needed to revalidate later destructive work without a second
+            # inventory or any filename discovery.
+            connection.execute(
+                "INSERT INTO clear_targets("
+                "run_id, key, lineage, entry_revision, generation, locator, manifest, "
+                "manifest_digest, state) "
+                "SELECT ?, key, lineage, revision, generation, locator, manifest, "
+                "manifest_digest, 'pending' FROM entries",
+                (token.value,),
+            )
             return token
 
         return self._transaction(begin)
@@ -1228,12 +1296,18 @@ class SqliteLifecycleAuthority:
         with self._connection(mutation=False, deadline=absolute_deadline) as connection:
             if connection is None:
                 return ()
+            run = connection.execute(
+                "SELECT state, last_key FROM clear_runs WHERE run_id = ?", (token.value,)
+            ).fetchone()
+            if run is None:
+                raise CacheBlobLifecycleConflictError("Clear run does not exist")
+            if run[0] != "active":
+                return ()
             rows = connection.execute(
-                "SELECT e.key, e.generation, e.locator, e.manifest, e.manifest_digest, "
-                "e.lineage, e.revision FROM clear_targets AS t JOIN entries AS e ON e.key = t.key "
-                "WHERE t.run_id = ? AND t.state = 'pending' AND e.generation = t.generation "
-                "AND e.manifest_digest = t.manifest_digest ORDER BY t.key LIMIT ?",
-                (token.value, self.lifecycle_limits.manifest_page_size),
+                "SELECT key, generation, locator, manifest, manifest_digest, lineage, entry_revision "
+                "FROM clear_targets WHERE run_id = ? AND state = 'pending' AND key > ? "
+                "ORDER BY key LIMIT ?",
+                (token.value, run[1], self.lifecycle_limits.manifest_page_size),
             ).fetchall()
             return tuple(
                 EntrySnapshot(
@@ -1246,15 +1320,76 @@ class SqliteLifecycleAuthority:
                 for row in rows
             )
 
-    def checkpoint_clear(self, token: PageToken) -> None:
+    def checkpoint_clear(
+        self,
+        token: PageToken,
+        target: EntrySnapshot | None = None,
+        *,
+        state: str = "completed",
+    ) -> None:
         def checkpoint(connection: sqlite3.Connection) -> None:
+            run = connection.execute(
+                "SELECT state FROM clear_runs WHERE run_id = ?", (token.value,)
+            ).fetchone()
+            if target is None and run is not None and run[0] == "completed":
+                return
+            if run is None or run[0] != "active":
+                raise CacheBlobLifecycleConflictError("Clear run cannot accept checkpoint")
+            if target is None:
+                connection.execute(
+                    "UPDATE clear_runs SET state = 'completed' WHERE run_id = ?",
+                    (token.value,),
+                )
+                return
+            if state not in {"completed", "conflicted"}:
+                raise ValueError("Clear target state is unsupported")
+            row = connection.execute(
+                "SELECT state FROM clear_targets WHERE run_id = ? AND key = ? "
+                "AND lineage = ? AND entry_revision = ? AND generation = ? "
+                "AND manifest_digest = ?",
+                (
+                    token.value,
+                    target.key,
+                    target.expectation.lineage,
+                    target.expectation.revision,
+                    target.generation,
+                    target.expectation.manifest_digest,
+                ),
+            ).fetchone()
+            if row is None or row[0] != "pending":
+                raise CacheBlobLifecycleConflictError("Clear target is no longer pending")
+            current = connection.execute(
+                "SELECT lineage, revision, generation, manifest_digest FROM entries WHERE key = ?",
+                (target.key,),
+            ).fetchone()
+            if state == "completed":
+                lineage = connection.execute(
+                    "SELECT lineage FROM entry_lineage WHERE key = ?", (target.key,)
+                ).fetchone()
+                if current is not None or lineage is None or lineage[0] <= target.expectation.lineage:
+                    raise CacheBlobLifecycleConflictError(
+                        "Clear target completion lacks exact absence proof"
+                    )
+            elif current is not None and current == (
+                target.expectation.lineage,
+                target.expectation.revision,
+                target.generation,
+                target.expectation.manifest_digest,
+            ):
+                raise CacheBlobLifecycleConflictError("Clear target has not changed")
             cursor = connection.execute(
-                "UPDATE clear_runs SET state = 'checkpointed' "
-                "WHERE run_id = ? AND state = 'active'",
-                (token.value,),
+                "UPDATE clear_targets SET state = ? WHERE run_id = ? AND key = ? "
+                "AND state = 'pending'",
+                (state, token.value, target.key),
             )
             if cursor.rowcount != 1:
-                raise CacheBlobLifecycleConflictError("Clear run cannot accept checkpoint")
+                raise CacheBlobLifecycleConflictError("Clear target cannot accept checkpoint")
+            connection.execute(
+                "UPDATE clear_runs SET last_key = ?, state = CASE WHEN NOT EXISTS "
+                "(SELECT 1 FROM clear_targets WHERE run_id = ? AND state = 'pending') "
+                "THEN 'completed' ELSE 'active' END WHERE run_id = ?",
+                (target.key, token.value, token.value),
+            )
 
         self._transaction(checkpoint)
 

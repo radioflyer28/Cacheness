@@ -247,7 +247,13 @@ class LifecycleAuthority(Protocol):
 
     def page_clear(self, token: PageToken) -> tuple[EntrySnapshot, ...]: ...
 
-    def checkpoint_clear(self, token: PageToken) -> None: ...
+    def checkpoint_clear(
+        self,
+        token: PageToken,
+        target: EntrySnapshot | None = None,
+        *,
+        state: str = "completed",
+    ) -> None: ...
 
     def begin_reconciliation(self) -> PageToken: ...
 

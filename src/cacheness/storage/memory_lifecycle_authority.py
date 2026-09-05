@@ -6,6 +6,7 @@ import hashlib
 from threading import RLock
 from uuid import uuid4
 
+from cacheness.config import LifecycleLimits
 from cacheness.error_handling import CacheBlobLifecycleConflictError, CacheBlobStoreClosedError
 
 from .lifecycle_authority import (
@@ -28,13 +29,19 @@ class InMemoryLifecycleAuthority:
 
     capabilities = AuthorityCapabilities(durable=False, multiprocess=False)
 
-    def __init__(self) -> None:
+    def __init__(self, *, lifecycle_limits: LifecycleLimits | None = None) -> None:
         self._lock = RLock()
+        self.lifecycle_limits = (
+            LifecycleLimits() if lifecycle_limits is None else lifecycle_limits
+        )
+        if not isinstance(self.lifecycle_limits, LifecycleLimits):
+            raise TypeError("lifecycle_limits must be a LifecycleLimits instance")
         self._entries: dict[str, EntrySnapshot] = {}
         self._lineages: dict[str, int] = {}
         self._mutations: dict[str, tuple[MutationSpec, VerificationProof | None, str]] = {}
         self._debts: list[CleanupDebt] = []
-        self._clear_targets: dict[str, tuple[EntrySnapshot, ...]] = {}
+        self._clear_targets: dict[str, dict[str, tuple[EntrySnapshot, str]]] = {}
+        self._clear_cursors: dict[str, str] = {}
         self._clear_states: dict[str, str] = {}
         self._reconciliation_states: dict[str, str] = {}
         self._revision = 0
@@ -262,12 +269,23 @@ class InMemoryLifecycleAuthority:
         self.delete_entry(key, expected=expected)
 
     def begin_clear(self) -> PageToken:
-        token = PageToken(uuid4().hex)
-
         def begin() -> PageToken:
-            self._clear_targets[token.value] = tuple(
-                self._copy(entry) for _, entry in sorted(self._entries.items())
+            active = next(
+                (
+                    run_id
+                    for run_id, state in self._clear_states.items()
+                    if state == "active"
+                ),
+                None,
             )
+            if active is not None:
+                return PageToken(active)
+            token = PageToken(uuid4().hex)
+            self._clear_targets[token.value] = {
+                key: (self._copy(entry), "pending")
+                for key, entry in self._entries.items()
+            }
+            self._clear_cursors[token.value] = ""
             self._clear_states[token.value] = "active"
             return token
 
@@ -276,13 +294,53 @@ class InMemoryLifecycleAuthority:
     def page_clear(self, token: PageToken) -> tuple[EntrySnapshot, ...]:
         self._require_open()
         with self._lock:
-            return self._clear_targets.get(token.value, ())
+            if token.value not in self._clear_states:
+                raise CacheBlobLifecycleConflictError("Clear run does not exist")
+            cursor = self._clear_cursors[token.value]
+            targets = self._clear_targets[token.value]
+            return tuple(
+                self._copy(entry)
+                for key, (entry, state) in sorted(targets.items())
+                if state == "pending" and key > cursor
+            )[: self.lifecycle_limits.manifest_page_size]
 
-    def checkpoint_clear(self, token: PageToken) -> None:
+    def checkpoint_clear(
+        self,
+        token: PageToken,
+        target: EntrySnapshot | None = None,
+        *,
+        state: str = "completed",
+    ) -> None:
         def checkpoint() -> None:
-            if self._clear_states.get(token.value) != "active":
+            current_state = self._clear_states.get(token.value)
+            if target is None and current_state == "completed":
+                return
+            if current_state != "active":
                 raise CacheBlobLifecycleConflictError("Clear run cannot accept checkpoint")
-            self._clear_states[token.value] = "checkpointed"
+            if target is None:
+                self._clear_states[token.value] = "completed"
+                return
+            if state not in {"completed", "conflicted"}:
+                raise ValueError("Clear target state is unsupported")
+            stored = self._clear_targets[token.value].get(target.key)
+            if stored is None or stored[0] != target or stored[1] != "pending":
+                raise CacheBlobLifecycleConflictError("Clear target is no longer pending")
+            current = self._entries.get(target.key)
+            if state == "completed":
+                lineage = self._lineages.get(target.key, 0)
+                if current is not None or lineage <= (target.expectation.lineage or 0):
+                    raise CacheBlobLifecycleConflictError(
+                        "Clear target completion lacks exact absence proof"
+                    )
+            elif current is not None and current.expectation == target.expectation:
+                raise CacheBlobLifecycleConflictError("Clear target has not changed")
+            self._clear_targets[token.value][target.key] = (stored[0], state)
+            self._clear_cursors[token.value] = target.key
+            if not any(
+                target_state == "pending"
+                for _, target_state in self._clear_targets[token.value].values()
+            ):
+                self._clear_states[token.value] = "completed"
 
         self._transition(checkpoint)
 

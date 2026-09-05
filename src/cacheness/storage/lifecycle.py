@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
+import time
 from typing import Any, Callable
 from uuid import uuid4
 
@@ -438,16 +439,74 @@ class AuthorityLifecycleEngine:
         return keys
 
     def clear(self) -> int:
-        """Delete one authenticated authority snapshot only after full preflight."""
-        entries = self.authority.list_entries()
-        for entry in entries:
-            self._entry_manifest(entry, allow_tombstone=True)
+        """Remove one bounded, authority-owned clear snapshot safely.
+
+        ``begin_clear`` commits immutable target membership before this method
+        reaches any payload operation.  A restart returns the active run rather
+        than creating a second snapshot, allowing a crash between deletion and
+        checkpointing to converge without ever targeting post-snapshot state.
+        """
+        token = self.authority.begin_clear()
+        self._reach("clear.snapshot_committed")
+        deadline = time.monotonic() + self.lifecycle_limits.authority_busy_timeout_seconds
+        byte_budget = self.lifecycle_limits.max_operation_record_bytes
+        action_budget = self.lifecycle_limits.max_reconcile_actions
         removed = 0
-        for entry in entries:
-            try:
-                removed += int(self.delete(entry.key, expected=entry.expectation))
-            except CacheBlobLifecycleConflictError:
-                continue
+        consumed_bytes = 0
+        consumed_actions = 0
+
+        while (
+            consumed_actions < action_budget
+            and consumed_bytes < byte_budget
+            and time.monotonic() < deadline
+        ):
+            targets = self.authority.page_clear(token)
+            if not targets:
+                self.authority.checkpoint_clear(token)
+                return removed
+            for target in targets:
+                if (
+                    consumed_actions >= action_budget
+                    or consumed_bytes + len(target.manifest) > byte_budget
+                    or time.monotonic() >= deadline
+                ):
+                    return removed
+                # Authenticate the snapshot's own canonical bytes before it
+                # participates in an exact-delete attempt.  No handler or
+                # payload bytes are opened for this decision.
+                self._entry_manifest(target, allow_tombstone=True)
+                current = self.authority.read_entry(target.key)
+                checkpoint_state = "conflicted"
+                try:
+                    if current is None:
+                        # The authority checkpoint verifies lineage advanced
+                        # beyond the captured target before accepting absence.
+                        checkpoint_state = "completed"
+                    elif current.expectation == target.expectation:
+                        self._reach("clear.before_target_delete", key=target.key)
+                        removed += int(self.delete(target.key, expected=target.expectation))
+                        self._reach("clear.after_target_delete", key=target.key)
+                        checkpoint_state = "completed"
+                    else:
+                        current_manifest = self._entry_manifest(
+                            current, allow_tombstone=True
+                        )
+                        debts = self.authority.pending_cleanup_debts(key=target.key)
+                        owns_target = any(
+                            debt.generation == target.generation
+                            and debt.locator == target.locator
+                            for debt in debts
+                        )
+                        if current_manifest.state == "tombstoned" and owns_target:
+                            self.delete(target.key, expected=current.expectation)
+                            checkpoint_state = "completed"
+                except CacheBlobLifecycleConflictError:
+                    checkpoint_state = "conflicted"
+                self.authority.checkpoint_clear(
+                    token, target, state=checkpoint_state
+                )
+                consumed_actions += 1
+                consumed_bytes += len(target.manifest)
         return removed
 
     def reconcile(self) -> int:
