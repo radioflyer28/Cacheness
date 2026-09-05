@@ -14,9 +14,9 @@ provides:
 affects: [BlobStore, lifecycle authority, storage recovery, concurrency tests]
 
 actuals:
-  tokens: 103492
+  tokens: 119361
   tasks: 2
-  commits: 7
+  commits: 8
 
 tech-stack:
   added: []
@@ -37,6 +37,12 @@ key-files:
     - tests/test_blob_store_concurrency.py
     - tests/test_blob_store_close_contract.py
     - tests/test_blob_store_read_contract.py
+    - tests/test_blob_manifest.py
+    - tests/test_blob_manifest_backends.py
+    - tests/test_blob_store_integrity.py
+    - tests/test_blob_store_reconciliation.py
+    - tests/test_clear_recovery.py
+    - tests/test_filesystem_containment.py
 
 key-decisions:
   - "LifecycleAuthority is the only committed-state authority; legacy manifest repositories are not initialized in authority mode."
@@ -86,7 +92,7 @@ coverage:
         status: pass
     human_judgment: false
 
-duration: 64min
+duration: 103min
 completed: 2026-09-05
 status: complete
 ---
@@ -97,17 +103,18 @@ status: complete
 
 ## Performance
 
-- **Duration:** 64 min
+- **Duration:** 103 min
 - **Started:** 2026-09-05T02:26:44Z
-- **Completed:** 2026-09-05T03:30:17Z
+- **Completed:** 2026-09-05T04:09:22Z
 - **Tasks:** 2
-- **Files modified:** 9
+- **Files modified:** 15
 
 ## Accomplishments
 
 - Replaced scheduler-mediated writes with durable authority prepare → native publish → verify → promote flow, keeping visibility in the authority alone.
 - Implemented CAS-safe overwrite/metadata/delete paths, authenticated exact cleanup debt, signed tombstones, and bounded one-retry reads.
 - Added deterministic concurrency and close coverage for one-winner mutation races, distinct-key overlap, tombstone recovery, and resource ownership.
+- Migrated residual manifest, JSON projection, scheduler, and journal fixtures to LifecycleAuthority evidence; full repository verification is green.
 
 ## Task Commits
 
@@ -116,6 +123,7 @@ status: complete
 3. **Authority projection compatibility correction** - `f6bfc83` (fix)
 4. **Authority-only constructor fixture migration** - `6295960` (fix)
 5. **Authority-only read-contract compatibility migration** - `054c524` (fix)
+6. **Authority-only repository-suite migration** - `9a8d962` (fix)
 
 ## Files Created/Modified
 
@@ -128,6 +136,9 @@ status: complete
 - `tests/test_blob_store_concurrency.py` - CAS, bounded-retry read, and distinct-key overlap coverage.
 - `tests/test_blob_store_close_contract.py` - Close ownership and retry coverage.
 - `tests/test_blob_store_read_contract.py` - Authority-constructor failure, cancellation, and caller-ownership coverage.
+- `tests/test_blob_manifest.py` and `tests/test_blob_manifest_backends.py` - Native custom-handler and backend-neutral authority-entry coverage.
+- `tests/test_blob_store_integrity.py`, `tests/test_blob_store_reconciliation.py`, and `tests/test_clear_recovery.py` - Signed authority-entry, exact-debt, and no-scheduler recovery coverage.
+- `tests/test_filesystem_containment.py` - Authority-locator containment and all-or-error clear preflight coverage.
 
 ## Decisions Made
 
@@ -187,13 +198,22 @@ status: complete
 - **Verification:** Entire `tests/test_blob_store_read_contract.py` suite (40 passed), all Plan 04 behavior suites (37 passed), and Phase 3 Ruff delta.
 - **Committed in:** `054c524`
 
-**Total deviations:** 6 auto-fixed (5 Rule 1, 1 Rule 2).
+**7. [Rule 1 - Authority-only compatibility] Completed the stale full-suite migration and preserved fail-closed authority boundaries.**
+- **Found during:** Wave 4 full repository verification.
+- **Issue:** Remaining tests inspected retired manifest repositories, JSON projections, clear journals, or absolute payload paths. The sweep also exposed three authority-mode regressions: custom compatibility handlers lost their published native format, absent reads created a storage root, and a corrupt later authority entry could let `clear()` partially revoke earlier entries.
+- **Fix:** Preserve signed native `storage_format` in handler metadata, defer managed-root materialization until payload work is necessary, authenticate/preflight the entire clear snapshot before deletion, and convert stale fixtures to `LifecycleAuthority` entry/debt contracts.
+- **Files modified:** `src/cacheness/storage/blob_store.py`, `src/cacheness/storage/lifecycle.py`, `tests/test_blob_manifest.py`, `tests/test_blob_manifest_backends.py`, `tests/test_blob_store_close_contract.py`, `tests/test_blob_store_integrity.py`, `tests/test_blob_store_read_contract.py`, `tests/test_blob_store_reconciliation.py`, `tests/test_clear_recovery.py`, `tests/test_filesystem_containment.py`.
+- **Verification:** Full repository suite reached 100% with exit status 0; Plan 04 behavior suite (37 passed); authority/manifest/read/containment suite passed with 3 capability skips; compileall; Phase 3 Ruff delta.
+- **Committed in:** `9a8d962`
+
+**Total deviations:** 7 auto-fixed (6 Rule 1, 1 Rule 2).
 **Impact on plan:** All changes preserve the authority-only architecture and are required for durable recovery, concurrency safety, or fail-closed compatibility.
 
 ## Issues Encountered
 
 - `test_failed_initialization_closes_only_internally_owned_backend` and adjacent cancellation fixtures now exercise an internally created `LifecycleAuthority` plus projection, and verify that injected authority/backend resources stay caller-owned. This regression is fixed in `6295960` and `.planning/WINDOWS.md` entry 23 is resolved.
 - The historical JSON-projection and manifest-repository fixtures now assert the authority-only contract. Corrupt or unavailable projections neither authorize nor block committed reads or mutations; `.planning/WINDOWS.md` entry 24 is resolved in `054c524`.
+- The full repository suite now completes successfully. Capability-dependent PostgreSQL, TensorFlow, device-node, Windows-junction, and sandbox-denied AF_UNIX socket fixtures remain explicitly skipped without weakening authority validation.
 
 ## User Setup Required
 
@@ -201,11 +221,11 @@ None - no external service configuration required.
 
 ## Next Phase Readiness
 
-Authority-backed BlobStore mutations, recovery, and close semantics are ready for remaining Phase 3 integration. The complete historical read-contract suite is green under the authority-only contract.
+Authority-backed BlobStore mutations, recovery, and close semantics are ready for remaining Phase 3 integration. The complete repository suite is green under the authority-only contract.
 
 ## Self-Check: PASSED
 
-All listed source/test artifacts exist and each recorded task commit, including `054c524`, is reachable from the repository history.
+All listed source/test artifacts exist and each recorded task commit, including `9a8d962`, is reachable from the repository history.
 
 ---
 *Phase: 03-atomic-lifecycle-and-recovery-engine*
