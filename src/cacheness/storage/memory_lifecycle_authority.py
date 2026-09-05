@@ -20,6 +20,9 @@ from .lifecycle_authority import (
     PreparedMutation,
     ProjectionRevision,
     PromotionResult,
+    ReconciliationPage,
+    ReconciliationSnapshot,
+    ReconciliationWork,
     VerificationProof,
 )
 
@@ -39,11 +42,13 @@ class InMemoryLifecycleAuthority:
         self._entries: dict[str, EntrySnapshot] = {}
         self._lineages: dict[str, int] = {}
         self._mutations: dict[str, tuple[MutationSpec, VerificationProof | None, str]] = {}
+        self._mutation_order: list[str] = []
         self._debts: list[CleanupDebt] = []
         self._clear_targets: dict[str, dict[str, tuple[EntrySnapshot, str]]] = {}
         self._clear_cursors: dict[str, str] = {}
         self._clear_states: dict[str, str] = {}
         self._reconciliation_states: dict[str, str] = {}
+        self._reconciliation_snapshots: dict[str, ReconciliationSnapshot] = {}
         self._revision = 0
         self._projection_dirty = False
         self._closed = False
@@ -110,6 +115,7 @@ class InMemoryLifecycleAuthority:
             if self._expectation(spec.key) != spec.expected:
                 raise CacheBlobLifecycleConflictError("Mutation expectation no longer matches authority")
             self._mutations[spec.operation_id] = (spec, None, "prepared")
+            self._mutation_order.append(spec.operation_id)
             return PreparedMutation(spec.operation_id, spec)
 
         return self._transition(prepare)
@@ -345,13 +351,76 @@ class InMemoryLifecycleAuthority:
         self._transition(checkpoint)
 
     def begin_reconciliation(self) -> PageToken:
-        token = PageToken(uuid4().hex)
-
         def begin() -> PageToken:
+            active = next(
+                (
+                    run_id
+                    for run_id, state in self._reconciliation_states.items()
+                    if state == "active"
+                ),
+                None,
+            )
+            if active is not None:
+                return PageToken(active)
+            token = PageToken(uuid4().hex)
             self._reconciliation_states[token.value] = "active"
+            self._reconciliation_snapshots[token.value] = ReconciliationSnapshot(
+                self._revision,
+                len(self._mutation_order),
+                len(self._debts),
+                token.value,
+            )
             return token
 
         return self._transition(begin)
+
+    def reconciliation_snapshot(
+        self, token: PageToken | None = None
+    ) -> ReconciliationSnapshot:
+        self._require_open()
+        with self._lock:
+            if token is not None:
+                snapshot = self._reconciliation_snapshots.get(token.value)
+                if snapshot is None:
+                    raise CacheBlobLifecycleConflictError("Reconciliation run does not exist")
+                return snapshot
+            return ReconciliationSnapshot(
+                self._revision,
+                len(self._mutation_order),
+                len(self._debts),
+            )
+
+    def page_reconciliation_work(
+        self,
+        snapshot: ReconciliationSnapshot,
+        *,
+        mutation_cursor: int,
+        debt_cursor: int,
+    ) -> ReconciliationPage:
+        self._require_open()
+        with self._lock:
+            page_size = max(1, self.lifecycle_limits.operation_page_size // 2)
+            mutation_stop = min(snapshot.mutation_high_water, mutation_cursor + page_size)
+            debt_stop = min(snapshot.debt_high_water, debt_cursor + page_size)
+            works: list[ReconciliationWork] = []
+            for row_id in range(mutation_cursor + 1, mutation_stop + 1):
+                operation_id = self._mutation_order[row_id - 1]
+                spec, _proof, state = self._mutations[operation_id]
+                if state == "prepared":
+                    works.append(
+                        ReconciliationWork(
+                            "mutation",
+                            row_id,
+                            state,
+                            mutation=PreparedMutation(operation_id, spec),
+                        )
+                    )
+            for row_id in range(debt_cursor + 1, debt_stop + 1):
+                debt = self._debts[row_id - 1]
+                works.append(
+                    ReconciliationWork("debt", row_id, "pending", debt=debt)
+                )
+            return ReconciliationPage(tuple(works), mutation_stop, debt_stop)
 
     def page_reconciliation(self, token: PageToken) -> tuple[CleanupDebt, ...]:
         self._require_open()
@@ -360,13 +429,22 @@ class InMemoryLifecycleAuthority:
                 raise CacheBlobLifecycleConflictError("Reconciliation run does not exist")
             return tuple(self._debts)
 
-    def checkpoint_reconciliation(self, token: PageToken) -> None:
+    def checkpoint_reconciliation(
+        self,
+        token: PageToken,
+        work: ReconciliationWork | None = None,
+        *,
+        state: str = "completed",
+    ) -> None:
         def checkpoint() -> None:
             if self._reconciliation_states.get(token.value) != "active":
                 raise CacheBlobLifecycleConflictError(
                     "Reconciliation run cannot accept checkpoint"
                 )
-            self._reconciliation_states[token.value] = "checkpointed"
+            if work is None:
+                self._reconciliation_states[token.value] = "completed"
+            elif state not in {"completed", "blocked", "conflicted"}:
+                raise ValueError("Reconciliation checkpoint state is unsupported")
 
         self._transition(checkpoint)
 

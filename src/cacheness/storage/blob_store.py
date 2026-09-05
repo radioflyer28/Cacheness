@@ -90,7 +90,7 @@ from .lifecycle import AuthorityLifecycleEngine
 from .lifecycle_authority import EntryExpectation, LifecycleAuthority
 from .sqlite_lifecycle_authority import SqliteLifecycleAuthority
 from .path_security import encode_physical_name, resolve_managed_locator
-from .reconciliation import _Reconciler, ReconciliationReport
+from .reconciliation import _AuthorityReconciler, _Reconciler, ReconciliationReport
 from ..metadata import InMemoryBackend, MetadataBackend as CoreMetadataBackend
 from ..metadata import SqliteBackend
 
@@ -848,13 +848,12 @@ class BlobStore:
         with self._instance_admission.operation():
             self._require_canonical_store()
             if self._authority_lifecycle is not None:
-                reclaimed = self._authority_lifecycle.reconcile() if apply else 0
-                return ReconciliationReport(
-                    findings=(),
-                    resume_token=None,
-                    applied=bool(reclaimed),
-                    manifest_records_seen=0,
-                    operation_records_seen=reclaimed,
+                return _AuthorityReconciler(
+                    self, lifecycle_limits=self.lifecycle_limits
+                ).reconcile(
+                    apply=apply,
+                    resume_token=resume_token,
+                    now=now,
                 )
             return self._reconciler.reconcile(
                 apply=apply,

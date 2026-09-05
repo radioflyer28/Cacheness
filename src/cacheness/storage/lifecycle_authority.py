@@ -145,6 +145,7 @@ class CleanupDebt:
     key: str = ""
     generation: str = ""
     role: str = "previous_generation"
+    debt_id: int | None = None
 
     def __post_init__(self) -> None:
         for field_name in ("operation_id", "locator", "role"):
@@ -153,6 +154,10 @@ class CleanupDebt:
             value = getattr(self, field_name)
             if value:
                 _bounded_text(value, field_name)
+        if self.debt_id is not None and (
+            type(self.debt_id) is not int or self.debt_id <= 0
+        ):
+            raise ValueError("debt_id must be a positive integer or None")
 
 
 @dataclass(frozen=True)
@@ -191,6 +196,63 @@ class ProjectionRevision:
     """Revision returned when a non-authoritative projection is marked current."""
 
     value: int
+
+
+@dataclass(frozen=True)
+class ReconciliationSnapshot:
+    """Immutable authority work boundary captured without payload inspection."""
+
+    authority_revision: int
+    mutation_high_water: int
+    debt_high_water: int
+    run_id: str | None = None
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "authority_revision",
+            "mutation_high_water",
+            "debt_high_water",
+        ):
+            value = getattr(self, field_name)
+            if type(value) is not int or value < 0:
+                raise ValueError(f"{field_name} must be a non-negative integer")
+        if self.run_id is not None:
+            _bounded_text(self.run_id, "run_id")
+
+
+@dataclass(frozen=True)
+class ReconciliationWork:
+    """One authority-indexed residue row; never a payload inventory item."""
+
+    source: str
+    row_id: int
+    state: str
+    mutation: PreparedMutation | None = None
+    debt: CleanupDebt | None = None
+
+    def __post_init__(self) -> None:
+        if self.source not in {"mutation", "debt"}:
+            raise ValueError("Reconciliation work source is unsupported")
+        if type(self.row_id) is not int or self.row_id <= 0:
+            raise ValueError("Reconciliation work row_id must be positive")
+        _bounded_text(self.state, "state")
+        if (self.mutation is None) == (self.debt is None):
+            raise ValueError("Reconciliation work must carry exactly one residue")
+
+
+@dataclass(frozen=True)
+class ReconciliationPage:
+    """One bounded independent-keyset page over mutation and debt rows."""
+
+    works: tuple[ReconciliationWork, ...]
+    mutation_cursor: int
+    debt_cursor: int
+
+    def __post_init__(self) -> None:
+        for field_name in ("mutation_cursor", "debt_cursor"):
+            value = getattr(self, field_name)
+            if type(value) is not int or value < 0:
+                raise ValueError(f"{field_name} must be a non-negative integer")
 
 
 @dataclass(frozen=True)
@@ -257,9 +319,27 @@ class LifecycleAuthority(Protocol):
 
     def begin_reconciliation(self) -> PageToken: ...
 
+    def reconciliation_snapshot(
+        self, token: PageToken | None = None
+    ) -> ReconciliationSnapshot: ...
+
+    def page_reconciliation_work(
+        self,
+        snapshot: ReconciliationSnapshot,
+        *,
+        mutation_cursor: int,
+        debt_cursor: int,
+    ) -> ReconciliationPage: ...
+
     def page_reconciliation(self, token: PageToken) -> tuple[CleanupDebt, ...]: ...
 
-    def checkpoint_reconciliation(self, token: PageToken) -> None: ...
+    def checkpoint_reconciliation(
+        self,
+        token: PageToken,
+        work: ReconciliationWork | None = None,
+        *,
+        state: str = "completed",
+    ) -> None: ...
 
     def compare_and_mark_projection(
         self, expected: ProjectionRevision | None
@@ -280,5 +360,8 @@ __all__ = [
     "PreparedMutation",
     "ProjectionRevision",
     "PromotionResult",
+    "ReconciliationPage",
+    "ReconciliationSnapshot",
+    "ReconciliationWork",
     "VerificationProof",
 ]

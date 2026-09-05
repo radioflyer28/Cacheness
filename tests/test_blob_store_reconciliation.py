@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+from cacheness import CacheConfig
+from cacheness.config import LifecycleLimits
 from cacheness.error_handling import CacheBlobRecoverableCleanupError
 from cacheness.storage import BlobStore
 
@@ -89,6 +91,13 @@ def test_authority_reconciliation_exposes_stable_v2_machine_view_without_mutatio
             store.put({"generation": "winner"}, key=key)
 
         before = store.lifecycle_authority.snapshot_state()
+        monkeypatch.setattr(
+            store,
+            "_resolve_payload_handler",
+            lambda _manifest: (_ for _ in ()).throw(
+                AssertionError("reconciliation must not resolve a payload handler")
+            ),
+        )
         first = store.reconcile()
         second = store.reconcile()
 
@@ -116,5 +125,45 @@ def test_authority_reconciliation_exposes_stable_v2_machine_view_without_mutatio
         assert "report-key" not in repr(machine_view)
         with pytest.raises(ValueError, match="Unsupported reconciliation report version"):
             first.machine_view(version=99)
+    finally:
+        store.close()
+
+
+def test_authority_reconciliation_apply_resumes_bounded_cleanup_debt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A signed resume token continues each captured debt row exactly once."""
+    config = CacheConfig(
+        lifecycle_limits=LifecycleLimits(
+            operation_page_size=1,
+            max_reconcile_actions=1,
+        )
+    )
+    store = BlobStore(tmp_path / "resumable-authority-report", backend="json", config=config)
+    try:
+        store.put({"generation": "old-a"}, key="a")
+        store.put({"generation": "old-b"}, key="b")
+        original_delete = store._delete_or_prove_absent
+        monkeypatch.setattr(
+            store,
+            "_delete_or_prove_absent",
+            lambda _locator: (_ for _ in ()).throw(OSError("defer cleanup")),
+        )
+        with pytest.raises(CacheBlobRecoverableCleanupError):
+            store.put({"generation": "new-a"}, key="a")
+        with pytest.raises(CacheBlobRecoverableCleanupError):
+            store.put({"generation": "new-b"}, key="b")
+
+        monkeypatch.setattr(store, "_delete_or_prove_absent", original_delete)
+        first = store.reconcile(apply=True)
+        assert first.resume_token is not None
+        assert len(store.lifecycle_authority.pending_cleanup_debts()) == 1
+
+        second = store.reconcile(apply=True, resume_token=first.resume_token)
+        assert second.resume_token is None
+        assert store.lifecycle_authority.pending_cleanup_debts() == ()
+        assert store.get("a") == {"generation": "new-a"}
+        assert store.get("b") == {"generation": "new-b"}
     finally:
         store.close()

@@ -41,6 +41,9 @@ from .lifecycle_authority import (
     PreparedMutation,
     ProjectionRevision,
     PromotionResult,
+    ReconciliationPage,
+    ReconciliationSnapshot,
+    ReconciliationWork,
     VerificationProof,
 )
 
@@ -531,7 +534,8 @@ class SqliteLifecycleAuthority:
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS reconciliation_runs ("
                 "run_id TEXT PRIMARY KEY, state TEXT NOT NULL, mutation_high_water INTEGER NOT NULL, "
-                "debt_high_water INTEGER NOT NULL)"
+                "debt_high_water INTEGER NOT NULL, authority_revision INTEGER NOT NULL, "
+                "mutation_cursor INTEGER NOT NULL DEFAULT 0, debt_cursor INTEGER NOT NULL DEFAULT 0)"
             )
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS reconciliation_actions ("
@@ -595,6 +599,10 @@ class SqliteLifecycleAuthority:
             clear_target_columns = {
                 row[1] for row in connection.execute("PRAGMA table_info(clear_targets)")
             } if "clear_targets" in table_names else set()
+            reconciliation_columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(reconciliation_runs)")
+            } if "reconciliation_runs" in table_names else set()
 
             needs_migration = (
                 "manifest_digest" not in entry_columns
@@ -608,6 +616,11 @@ class SqliteLifecycleAuthority:
                     "locator",
                     "manifest",
                 }.issubset(clear_target_columns)
+                or not {
+                    "authority_revision",
+                    "mutation_cursor",
+                    "debt_cursor",
+                }.issubset(reconciliation_columns)
             )
             if not needs_migration:
                 connection.execute("COMMIT")
@@ -664,7 +677,9 @@ class SqliteLifecycleAuthority:
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS reconciliation_runs ("
                 "run_id TEXT PRIMARY KEY, state TEXT NOT NULL, "
-                "mutation_high_water INTEGER NOT NULL, debt_high_water INTEGER NOT NULL)"
+                "mutation_high_water INTEGER NOT NULL, debt_high_water INTEGER NOT NULL, "
+                "authority_revision INTEGER NOT NULL, mutation_cursor INTEGER NOT NULL DEFAULT 0, "
+                "debt_cursor INTEGER NOT NULL DEFAULT 0)"
             )
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS reconciliation_actions ("
@@ -705,6 +720,21 @@ class SqliteLifecycleAuthority:
                 "CREATE INDEX IF NOT EXISTS clear_targets_page "
                 "ON clear_targets(run_id, state, key)"
             )
+            if "reconciliation_runs" in table_names:
+                for column, declaration in (
+                    ("authority_revision", "INTEGER NOT NULL DEFAULT 0"),
+                    ("mutation_cursor", "INTEGER NOT NULL DEFAULT 0"),
+                    ("debt_cursor", "INTEGER NOT NULL DEFAULT 0"),
+                ):
+                    if column not in reconciliation_columns:
+                        connection.execute(
+                            f"ALTER TABLE reconciliation_runs ADD COLUMN {column} {declaration}"
+                        )
+                connection.execute(
+                    "UPDATE reconciliation_runs SET authority_revision = "
+                    "(SELECT revision FROM authority_state WHERE singleton = 1) "
+                    "WHERE authority_revision = 0"
+                )
             connection.execute("COMMIT")
         except BaseException:
             if connection.in_transaction:
@@ -1394,23 +1424,111 @@ class SqliteLifecycleAuthority:
         self._transaction(checkpoint)
 
     def begin_reconciliation(self) -> PageToken:
-        token = PageToken(uuid4().hex)
-
         def begin(connection: sqlite3.Connection) -> PageToken:
+            active = connection.execute(
+                "SELECT run_id FROM reconciliation_runs WHERE state = 'active' "
+                "ORDER BY rowid LIMIT 1"
+            ).fetchone()
+            if active is not None:
+                return PageToken(str(active[0]))
+            token = PageToken(uuid4().hex)
             mutation_high_water = connection.execute(
                 "SELECT COALESCE(MAX(rowid), 0) FROM mutations"
             ).fetchone()[0]
             debt_high_water = connection.execute(
                 "SELECT COALESCE(MAX(debt_id), 0) FROM cleanup_debt"
             ).fetchone()[0]
+            authority_revision = connection.execute(
+                "SELECT revision FROM authority_state WHERE singleton = 1"
+            ).fetchone()[0]
             connection.execute(
-                "INSERT INTO reconciliation_runs(run_id, state, mutation_high_water, debt_high_water) "
-                "VALUES (?, 'active', ?, ?)",
-                (token.value, mutation_high_water, debt_high_water),
+                "INSERT INTO reconciliation_runs("
+                "run_id, state, mutation_high_water, debt_high_water, authority_revision, "
+                "mutation_cursor, debt_cursor) VALUES (?, 'active', ?, ?, ?, 0, 0)",
+                (token.value, mutation_high_water, debt_high_water, authority_revision),
             )
             return token
 
         return self._transaction(begin)
+
+    def reconciliation_snapshot(
+        self, token: PageToken | None = None
+    ) -> ReconciliationSnapshot:
+        absolute_deadline = self._deadline(None)
+        with self._connection(mutation=False, deadline=absolute_deadline) as connection:
+            if connection is None:
+                return ReconciliationSnapshot(0, 0, 0)
+            if token is not None:
+                row = connection.execute(
+                    "SELECT authority_revision, mutation_high_water, debt_high_water "
+                    "FROM reconciliation_runs WHERE run_id = ?",
+                    (token.value,),
+                ).fetchone()
+                if row is None:
+                    raise CacheBlobLifecycleConflictError("Reconciliation run does not exist")
+                return ReconciliationSnapshot(row[0], row[1], row[2], token.value)
+            revision = connection.execute(
+                "SELECT revision FROM authority_state WHERE singleton = 1"
+            ).fetchone()[0]
+            mutation_high_water = connection.execute(
+                "SELECT COALESCE(MAX(rowid), 0) FROM mutations"
+            ).fetchone()[0]
+            debt_high_water = connection.execute(
+                "SELECT COALESCE(MAX(debt_id), 0) FROM cleanup_debt"
+            ).fetchone()[0]
+            return ReconciliationSnapshot(revision, mutation_high_water, debt_high_water)
+
+    def page_reconciliation_work(
+        self,
+        snapshot: ReconciliationSnapshot,
+        *,
+        mutation_cursor: int,
+        debt_cursor: int,
+    ) -> ReconciliationPage:
+        if mutation_cursor < 0 or debt_cursor < 0:
+            raise ValueError("Reconciliation cursors must be non-negative")
+        absolute_deadline = self._deadline(None)
+        with self._connection(mutation=False, deadline=absolute_deadline) as connection:
+            if connection is None:
+                return ReconciliationPage((), mutation_cursor, debt_cursor)
+            page_size = max(1, self.lifecycle_limits.operation_page_size // 2)
+            mutation_rows = connection.execute(
+                "SELECT rowid, operation_id, key, generation, locator, expected_lineage, "
+                "expected_revision, expected_generation, expected_manifest_digest, manifest, state "
+                "FROM mutations WHERE rowid > ? AND rowid <= ? AND state = 'prepared' "
+                "ORDER BY rowid LIMIT ?",
+                (mutation_cursor, snapshot.mutation_high_water, page_size),
+            ).fetchall()
+            debt_rows = connection.execute(
+                "SELECT debt_id, operation_id, locator, key, generation, role, state "
+                "FROM cleanup_debt WHERE debt_id > ? AND debt_id <= ? "
+                "ORDER BY debt_id LIMIT ?",
+                (debt_cursor, snapshot.debt_high_water, page_size),
+            ).fetchall()
+            works: list[ReconciliationWork] = []
+            for row in mutation_rows:
+                prepared = PreparedMutation(
+                    row[1],
+                    MutationSpec.create(
+                        operation_id=row[1],
+                        key=row[2],
+                        generation=row[3],
+                        candidate_locator=row[4],
+                        expected=EntryExpectation(row[5], row[6], row[7], row[8]),
+                        manifest=bytes(row[9]),
+                    ),
+                )
+                works.append(ReconciliationWork("mutation", row[0], row[10], mutation=prepared))
+            for row in debt_rows:
+                debt = CleanupDebt(row[1], row[2], row[3], row[4], row[5], row[0])
+                works.append(ReconciliationWork("debt", row[0], row[6], debt=debt))
+            next_mutation = (
+                mutation_rows[-1][0]
+                if mutation_rows
+                else snapshot.mutation_high_water
+            )
+            next_debt = debt_rows[-1][0] if debt_rows else snapshot.debt_high_water
+            return ReconciliationPage(tuple(works), next_mutation, next_debt)
 
     def page_reconciliation(self, token: PageToken) -> tuple[CleanupDebt, ...]:
         absolute_deadline = self._deadline(None)
@@ -1430,10 +1548,30 @@ class SqliteLifecycleAuthority:
             ).fetchall()
             return tuple(CleanupDebt(*row) for row in rows)
 
-    def checkpoint_reconciliation(self, token: PageToken) -> None:
+    def checkpoint_reconciliation(
+        self,
+        token: PageToken,
+        work: ReconciliationWork | None = None,
+        *,
+        state: str = "completed",
+    ) -> None:
         def checkpoint(connection: sqlite3.Connection) -> None:
+            if work is not None:
+                if state not in {"completed", "blocked", "conflicted"}:
+                    raise ValueError("Reconciliation checkpoint state is unsupported")
+                column = "mutation_cursor" if work.source == "mutation" else "debt_cursor"
+                cursor = connection.execute(
+                    f"UPDATE reconciliation_runs SET {column} = MAX({column}, ?) "
+                    "WHERE run_id = ? AND state = 'active'",
+                    (work.row_id, token.value),
+                )
+                if cursor.rowcount != 1:
+                    raise CacheBlobLifecycleConflictError(
+                        "Reconciliation run cannot accept checkpoint"
+                    )
+                return
             cursor = connection.execute(
-                "UPDATE reconciliation_runs SET state = 'checkpointed' "
+                "UPDATE reconciliation_runs SET state = 'completed' "
                 "WHERE run_id = ? AND state = 'active'",
                 (token.value,),
             )
