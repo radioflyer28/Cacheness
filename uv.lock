@@ -106,6 +106,7 @@ source = { editable = "." }
 dependencies = [
     { name = "cachetools" },
     { name = "cryptography" },
+    { name = "numpy" },
     { name = "xxhash" },
 ]
 
@@ -180,6 +181,7 @@ requires-dist = [
     { name = "cryptography", specifier = ">=46.0.3" },
     { name = "dill", marker = "extra == 'recommended'", specifier = ">=0.4.0" },
     { name = "duckdb-engine", marker = "extra == 'recommended'", specifier = ">=0.16.0" },
+    { name = "numpy", specifier = ">=2.0.0" },
     { name = "numpy", marker = "extra == 'recommended'", specifier = ">=2.0.0" },
     { name = "orjson", marker = "extra == 'recommended'", specifier = ">=3.8.0" },
     { name = "pandas", marker = "extra == 'dataframes'", specifier = ">=2.0.0,<4.0.0" },
