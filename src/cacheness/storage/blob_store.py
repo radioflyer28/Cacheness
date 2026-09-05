@@ -1117,6 +1117,10 @@ class BlobStore:
         """Authenticate authority-owned canonical bytes before trusting locators."""
         try:
             manifest = BlobManifestV1.from_canonical_bytes(raw)
+        except CacheManifestUnsupportedVersionError as exc:
+            raise CacheBlobManifestUnsupportedVersionError(
+                "Authority manifest schema version is unsupported"
+            ) from exc
         except CacheManifestIntegrityError as exc:
             raise CacheBlobManifestMalformedError("Authority manifest is malformed") from exc
         allowed_states = {"committed", "tombstoned"} if allow_tombstone else {"committed"}

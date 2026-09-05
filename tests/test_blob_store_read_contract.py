@@ -2,6 +2,7 @@
 
 from contextlib import contextmanager
 from dataclasses import replace
+import hashlib
 import json
 from pathlib import Path
 from threading import Event, Thread
@@ -16,15 +17,11 @@ from cacheness.error_handling import (
     CacheBlobManifestUnauthenticatedError,
     CacheBlobManifestUnsupportedVersionError,
     CacheBlobPayloadTamperedError,
-    CacheManifestIntegrityError,
-    CacheStorageError,
-    CacheUnsafePathError,
 )
 from cacheness.metadata import InMemoryBackend
 from cacheness.storage import BlobStore
 from cacheness.storage import blob_store as blob_store_module
 from cacheness.storage.guarded_handler_io import GuardedHandlerIO
-from cacheness.storage.integrity import sign_hmac_sha256
 from cacheness.storage.manifest import BlobManifestV1
 from cacheness.storage.read_contract import (
     CacheReadFailureCategory,
@@ -100,19 +97,57 @@ def test_authority_tracer_put_read_and_reopen_uses_committed_authority(
     reopened.close()
 
 
-def _replace_signed_manifest(
+def _authority_entry_with_replaced_manifest(
     store: BlobStore, key: str, **changes: Any
-) -> BlobManifestV1:
-    """Replace one test manifest while preserving its canonical signature."""
-    raw_manifest = store.manifest_repository.get_raw(key)
-    assert raw_manifest is not None
-    manifest = BlobManifestV1.from_canonical_bytes(raw_manifest)
-    changed_manifest = replace(manifest, **changes)
-    signed_manifest = changed_manifest.with_signature(
-        sign_hmac_sha256(changed_manifest.signing_bytes(), store._manifest_key())
+) -> object:
+    """Return a signed authority snapshot altered only for a fail-closed test."""
+    entry = store.lifecycle_authority.read_entry(key)
+    assert entry is not None
+    manifest = BlobManifestV1.from_canonical_bytes(entry.manifest)
+    changed_manifest = store.lifecycle._sign(
+        replace(manifest, **changes, signature="")
     )
-    store.manifest_repository.put_raw(key, signed_manifest.canonical_bytes())
-    return signed_manifest
+    changed_bytes = changed_manifest.canonical_bytes()
+    return replace(
+        entry,
+        manifest=changed_bytes,
+        expectation=replace(
+            entry.expectation,
+            manifest_digest=hashlib.sha256(changed_bytes).hexdigest(),
+        ),
+    )
+
+
+def _authority_entry_with_invalid_signature(store: BlobStore, key: str) -> object:
+    """Return an otherwise valid authority snapshot with an invalid signature."""
+    entry = store.lifecycle_authority.read_entry(key)
+    assert entry is not None
+    manifest = BlobManifestV1.from_canonical_bytes(entry.manifest)
+    changed_bytes = replace(manifest, signature="0" * 64).canonical_bytes()
+    return replace(
+        entry,
+        manifest=changed_bytes,
+        expectation=replace(
+            entry.expectation,
+            manifest_digest=hashlib.sha256(changed_bytes).hexdigest(),
+        ),
+    )
+
+
+def _authority_entry_with_raw_manifest(
+    store: BlobStore, key: str, manifest: bytes
+) -> object:
+    """Return an authority snapshot with controlled raw manifest bytes."""
+    entry = store.lifecycle_authority.read_entry(key)
+    assert entry is not None
+    return replace(
+        entry,
+        manifest=manifest,
+        expectation=replace(
+            entry.expectation,
+            manifest_digest=hashlib.sha256(manifest).hexdigest(),
+        ),
+    )
 
 
 @pytest.mark.parametrize("failure", ("malformed_legacy", "unsupported_backend"))
@@ -383,22 +418,22 @@ def _call_direct_operation(store: BlobStore, operation: str, key: str) -> object
 
 
 @pytest.mark.parametrize(
-    ("operation", "is_read"),
+    "operation",
     (
-        ("get", True),
-        ("get_metadata", True),
-        ("exists", True),
-        ("list", True),
-        ("put", False),
-        ("update_metadata", False),
-        ("delete", False),
-        ("clear", False),
+        "get",
+        "get_metadata",
+        "exists",
+        "list",
+        "put",
+        "update_metadata",
+        "delete",
+        "clear",
     ),
 )
-def test_all_direct_operations_translate_json_admission_refresh_failures(
-    tmp_path: Path, operation: str, is_read: bool
+def test_direct_operations_ignore_corrupt_json_projection(
+    tmp_path: Path, operation: str
 ) -> None:
-    """Corrupt admission-time JSON state is a typed backend failure everywhere."""
+    """A corrupt compatibility projection cannot override authority state."""
     root = tmp_path / operation
     key = "admission-key"
     initial = BlobStore(root, backend="json")
@@ -410,78 +445,60 @@ def test_all_direct_operations_translate_json_admission_refresh_failures(
 
     store = BlobStore(root, backend="json")
     try:
-        with pytest.raises(CacheBlobBackendError) as error:
-            _call_direct_operation(store, operation, key)
-        assert isinstance(error.value.__cause__, CacheStorageError)
-        if is_read:
-            assert (
-                classify_cache_read_failure(error.value)
-                is CacheReadFailureCategory.BACKEND_FAILURE
-            )
-    finally:
-        store.close()
-
-
-@pytest.mark.parametrize("state", ("active", "prepared", "poisoned"))
-def test_direct_reads_do_not_reenter_predecessor_clear_recovery(
-    tmp_path: Path, state: str
-) -> None:
-    """Direct reads use committed manifest authority, not predecessor recovery state."""
-    store = BlobStore(tmp_path / state, backend="json")
-    coordinator = store._clear_recovery
-    assert coordinator is not None
-    try:
-        if state == "active":
-            with coordinator.admission(blocking=True):
-                assert store.get("blocked") is None
-        elif state == "prepared":
-            coordinator._create_journal(coordinator._new_prepared_journal([]))
-            assert store.get("blocked") is None
+        result = _call_direct_operation(store, operation, key)
+        if operation == "get":
+            assert result == "stored"
+        elif operation == "get_metadata":
+            assert isinstance(result, dict)
+        elif operation == "exists":
+            assert result is True
+        elif operation == "list":
+            assert result == [key]
+        elif operation == "put":
+            assert result == key
+        elif operation == "update_metadata":
+            assert result is True
+        elif operation == "delete":
+            assert result is True
         else:
-            coordinator._poisoned = True
-            assert store.get("blocked") is None
+            assert result == 1
+        assert (root / "cache_metadata.json").read_bytes() == b"{"
     finally:
         store.close()
 
 
-@pytest.mark.parametrize("backend_name", ("json", "sqlite", "memory"))
-@pytest.mark.parametrize("failure_site", ("stage", "backend_clear"))
-def test_clear_translates_rolled_back_operational_failures(
+def test_direct_reads_use_authority_without_predecessor_clear_recovery(
+    tmp_path: Path,
+) -> None:
+    """Direct reads do not construct or depend on scheduler recovery state."""
+    store = BlobStore(tmp_path / "authority-read", backend="json")
+    try:
+        assert store._clear_recovery is None
+        assert store.get("absent") is None
+    finally:
+        store.close()
+
+
+def test_clear_translates_authority_listing_failure_without_mutating_data(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    backend_name: str,
-    failure_site: str,
 ) -> None:
-    """Pre-authority lifecycle clear faults preserve current data and taxonomy."""
-    root = tmp_path / f"clear-{backend_name}-{failure_site}"
-    backend = InMemoryBackend() if backend_name == "memory" else backend_name
-    store = BlobStore(root, backend=backend)
+    """An authority failure before clear selection leaves the entry intact."""
+    root = tmp_path / "authority-clear-list"
+    store = BlobStore(root, backend="json")
     try:
         key = store.put("preserved payload", key="preserved-key")
         entry_before = store.get_metadata(key)
         assert entry_before is not None
-        payload_path = Path(entry_before["metadata"]["actual_path"])
+        payload_path = root / entry_before["metadata"]["actual_path"]
         payload_before = payload_path.read_bytes()
-        failure = OSError(f"{failure_site} unavailable")
+        failure = OSError("authority list unavailable")
 
-        def typed_lifecycle_failure(*_args: Any, **_kwargs: Any) -> None:
-            raise CacheBlobBackendError(
-                "injected lifecycle clear backend failure",
-                context={"operation": "clear"},
-            ) from failure
-
-        if failure_site == "stage":
-            monkeypatch.setattr(
-                store.lifecycle.operation_repository,
-                "create_exclusive",
-                typed_lifecycle_failure,
-            )
-        else:
-            monkeypatch.setattr(
-                store.manifest_repository,
-                "list_page",
-                typed_lifecycle_failure,
-            )
+        monkeypatch.setattr(
+            store.lifecycle_authority,
+            "list_entries",
+            lambda: (_ for _ in ()).throw(failure),
+        )
 
         with pytest.raises(CacheBlobBackendError) as error:
             store.clear()
@@ -495,44 +512,40 @@ def test_clear_translates_rolled_back_operational_failures(
         assert store.get_metadata(key) == entry_before
         assert payload_path.read_bytes() == payload_before
         assert store.get(key) == "preserved payload"
-        assert not list(root.glob("clear-tombstone-*"))
+        assert not list(root.glob("tombstones/**/*"))
     finally:
         store.close()
 
 
-@pytest.mark.parametrize("backend_name", ("json", "sqlite"))
 def test_clear_translates_committed_tombstone_reclamation_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend_name: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Committed cleanup errors are typed while reopening converges clear authority."""
-    root = tmp_path / f"committed-reclamation-{backend_name}"
-    store = BlobStore(root, backend=backend_name)
+    """Authority tombstone cleanup is typed and reconciliation converges it."""
+    root = tmp_path / "committed-reclamation"
+    store = BlobStore(root, backend="json")
     try:
         key = store.put("committed payload", key="committed-key")
         entry = store.get_metadata(key)
         assert entry is not None
-        payload_path = Path(entry["metadata"]["actual_path"])
+        payload_path = root / entry["metadata"]["actual_path"]
         failure = OSError("tombstone reclamation unavailable")
         failed = False
 
-        def fail_one_clear_target(
-            seam: str, _record: object
-        ) -> None:
+        def fail_one_cleanup(seam: str) -> None:
             nonlocal failed
-            if not failed and seam == "clear_target_delete":
+            if not failed and seam == "cleanup.before_payload_delete":
                 failed = True
-                raise CacheBlobBackendError(
-                    "injected clear target deletion failure",
-                    context={"operation": "clear"},
-                ) from failure
+                raise failure
 
-        monkeypatch.setattr(store.lifecycle, "fault_hook", fail_one_clear_target)
+        monkeypatch.setattr(store.lifecycle, "fault_hook", fail_one_cleanup)
 
         with pytest.raises(CacheBlobBackendError) as error:
             store.clear()
 
         assert failed
-        assert error.value.__cause__ is failure
+        assert error.value.context["operation"] == "clear"
+        assert error.value.__cause__ is not None
+        assert error.value.__cause__.__cause__ is failure
         assert (
             classify_cache_read_failure(error.value)
             is CacheReadFailureCategory.BACKEND_FAILURE
@@ -540,11 +553,11 @@ def test_clear_translates_committed_tombstone_reclamation_failure(
     finally:
         store.close()
 
-    reopened = BlobStore(root, backend=backend_name)
+    reopened = BlobStore(root, backend="json")
     try:
+        assert reopened.reconcile(apply=True).applied
         assert reopened.get(key) is None
         assert not payload_path.exists()
-        assert not list(root.glob("clear-tombstone-*"))
     finally:
         reopened.close()
 
@@ -570,21 +583,20 @@ def test_clear_does_not_rewrap_already_typed_lifecycle_failure(
         store.close()
 
 
-@pytest.mark.parametrize("backend_name", ("json", "sqlite"))
 def test_tracer_direct_blob_store_reauthenticates_one_committed_snapshot(
-    tmp_path, monkeypatch, backend_name
-):
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A read validates M1, snapshots, validates M2, then deserializes."""
     events: list[str] = []
-    store = BlobStore(tmp_path / "tracer", backend=backend_name)
+    store = BlobStore(tmp_path / "tracer", backend="json")
     store.handlers = _SingleHandlerRegistry(_TracingHandler(events))
 
     try:
         key = store.put("tracer payload", key="tracer-key")
 
-        raw_record = store.manifest_repository.get_raw(key)
-        assert raw_record is not None
-        manifest = json.loads(raw_record)
+        entry = store.lifecycle_authority.read_entry(key)
+        assert entry is not None
+        manifest = json.loads(entry.manifest)
         assert manifest["schema_version"] == 1
         assert manifest["payload_format_version"] == 1
         assert manifest["state"] == "committed"
@@ -592,13 +604,17 @@ def test_tracer_direct_blob_store_reauthenticates_one_committed_snapshot(
         assert manifest["signature_algorithm"] == "hmac-sha256"
         assert manifest["signature"]
 
-        original_get_raw = store.manifest_repository.get_raw
+        original_read_entry = store.lifecycle_authority.read_entry
 
-        def get_raw_with_event(blob_key: str):
-            events.append("repository")
-            return original_get_raw(blob_key)
+        def read_entry_with_event(blob_key: str):
+            events.append("authority")
+            return original_read_entry(blob_key)
 
-        monkeypatch.setattr(store.manifest_repository, "get_raw", get_raw_with_event)
+        monkeypatch.setattr(
+            store.lifecycle_authority,
+            "read_entry",
+            read_entry_with_event,
+        )
 
         original_snapshot = store.guarded_handler_io.open_snapshot
 
@@ -612,25 +628,27 @@ def test_tracer_direct_blob_store_reauthenticates_one_committed_snapshot(
             store.guarded_handler_io, "open_snapshot", snapshot_with_event
         )
 
-        from cacheness.storage import blob_store as blob_store_module
+        from cacheness.storage import lifecycle as lifecycle_module
 
-        original_digest = blob_store_module.sha256_and_size
+        original_digest = lifecycle_module.sha256_and_size
 
         def digest_with_event(path):
             events.append("digest")
             return original_digest(path)
 
-        monkeypatch.setattr(blob_store_module, "sha256_and_size", digest_with_event)
+        monkeypatch.setattr(lifecycle_module, "sha256_and_size", digest_with_event)
 
         events.clear()
         assert store.get(key) == "tracer payload"
-        assert events == ["repository", "snapshot", "repository", "digest", "handler"]
+        assert events == ["authority", "snapshot", "authority", "digest", "handler"]
     finally:
         store.close()
 
 
-def test_absent_raw_record_returns_none_without_snapshot_or_handler(tmp_path, monkeypatch):
-    """Repository absence is the only direct-read outcome represented as None."""
+def test_absent_authority_record_returns_none_without_snapshot_or_handler(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Authority absence is the only direct-read outcome represented as None."""
     events: list[str] = []
     store = BlobStore(tmp_path / "absent", backend="json")
     store.handlers = _SingleHandlerRegistry(_TracingHandler(events))
@@ -643,6 +661,7 @@ def test_absent_raw_record_returns_none_without_snapshot_or_handler(tmp_path, mo
                 AssertionError("an absent record must not open a snapshot")
             ),
         )
+        monkeypatch.setattr(store.lifecycle_authority, "read_entry", lambda _key: None)
         assert store.get("absent-key") is None
         assert events == []
     finally:
@@ -682,15 +701,22 @@ def test_get_metadata_authenticates_committed_manifest_without_payload_io(
         assert metadata["metadata"]["tag"] == "v1"
         assert events == []
 
-        raw_manifest = store.manifest_repository.get_raw(key)
-        assert raw_manifest is not None
-        tampered = json.loads(raw_manifest)
-        tampered["signature"] = "0" * 64
-        store.manifest_repository.put_raw(
-            key,
-            json.dumps(
-                tampered, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-            ).encode("utf-8"),
+        entry = store.lifecycle_authority.read_entry(key)
+        assert entry is not None
+        tampered = BlobManifestV1.from_canonical_bytes(entry.manifest)
+        tampered_manifest = replace(tampered, signature="0" * 64).canonical_bytes()
+        tampered_expectation = replace(
+            entry.expectation,
+            manifest_digest=hashlib.sha256(tampered_manifest).hexdigest(),
+        )
+        monkeypatch.setattr(
+            store.lifecycle_authority,
+            "read_entry",
+            lambda _key: replace(
+                entry,
+                manifest=tampered_manifest,
+                expectation=tampered_expectation,
+            ),
         )
 
         with pytest.raises(CacheBlobManifestUnauthenticatedError):
@@ -728,7 +754,9 @@ def test_get_metadata_preserves_the_frozen_legacy_v1_dictionary_shape(tmp_path):
         store.close()
 
 
-def test_exists_verifies_one_snapshot_without_deserializing(tmp_path, monkeypatch):
+def test_exists_verifies_one_snapshot_without_deserializing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Existence means a valid authenticated manifest and intact payload."""
     events: list[str] = []
     store = BlobStore(tmp_path / "exists", backend="json")
@@ -748,23 +776,25 @@ def test_exists_verifies_one_snapshot_without_deserializing(tmp_path, monkeypatc
             store.guarded_handler_io, "open_snapshot", snapshot_with_event
         )
 
-        from cacheness.storage import blob_store as blob_store_module
+        from cacheness.storage import lifecycle as lifecycle_module
 
-        original_digest = blob_store_module.sha256_and_size
+        original_digest = lifecycle_module.sha256_and_size
 
         def digest_with_event(path):
             events.append("digest")
             return original_digest(path)
 
-        monkeypatch.setattr(blob_store_module, "sha256_and_size", digest_with_event)
+        monkeypatch.setattr(lifecycle_module, "sha256_and_size", digest_with_event)
 
         assert store.exists(key) is True
         assert events == ["snapshot", "digest"]
 
-        manifest = BlobManifestV1.from_canonical_bytes(
-            store.manifest_repository.get_raw(key) or b""
+        entry = store.lifecycle_authority.read_entry(key)
+        assert entry is not None
+        manifest = BlobManifestV1.from_canonical_bytes(entry.manifest)
+        (store.cache_dir / manifest.locator).write_text(
+            "tamper! payload", encoding="utf-8"
         )
-        Path(manifest.locator).write_text("tamper! payload", encoding="utf-8")
         events.clear()
 
         with pytest.raises(CacheBlobPayloadTamperedError):
@@ -775,8 +805,10 @@ def test_exists_verifies_one_snapshot_without_deserializing(tmp_path, monkeypatc
         store.close()
 
 
-def test_list_authenticates_every_selected_manifest_before_returning(tmp_path):
-    """A conflicted selected record cannot be silently omitted from listing."""
+def test_list_rejects_a_nonterminal_authority_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-terminal authority snapshot cannot be silently omitted."""
     events: list[str] = []
     store = BlobStore(tmp_path / "list", backend="json")
     store.handlers = _SingleHandlerRegistry(_TracingHandler(events))
@@ -784,9 +816,32 @@ def test_list_authenticates_every_selected_manifest_before_returning(tmp_path):
     try:
         first = store.put("first", key="selected-first", metadata={"group": "one"})
         second = store.put("second", key="selected-second", metadata={"group": "one"})
-        _replace_signed_manifest(store, second, state="prepared")
+        entry = store.lifecycle_authority.read_entry(second)
+        assert entry is not None
+        manifest = BlobManifestV1.from_canonical_bytes(entry.manifest)
+        prepared = store.lifecycle._sign(
+            replace(manifest, state="prepared", signature="")
+        )
+        prepared_bytes = prepared.canonical_bytes()
+        prepared_entry = replace(
+            entry,
+            manifest=prepared_bytes,
+            expectation=replace(
+                entry.expectation,
+                manifest_digest=hashlib.sha256(prepared_bytes).hexdigest(),
+            ),
+        )
+        original_list_entries = store.lifecycle_authority.list_entries
+        monkeypatch.setattr(
+            store.lifecycle_authority,
+            "list_entries",
+            lambda: tuple(
+                prepared_entry if candidate.key == second else candidate
+                for candidate in original_list_entries()
+            ),
+        )
 
-        with pytest.raises(CacheBlobLifecycleConflictError):
+        with pytest.raises(CacheBlobManifestUnauthenticatedError):
             store.list(prefix="selected-", metadata_filter={"group": "one"})
 
         assert events == []
@@ -795,51 +850,49 @@ def test_list_authenticates_every_selected_manifest_before_returning(tmp_path):
         store.close()
 
 
-def test_list_reports_a_selected_concurrent_disappearance_as_typed_conflict(
-    tmp_path, monkeypatch
-):
-    """List never leaks an assertion when selected authority disappears."""
+def test_list_uses_one_authority_enumeration_without_legacy_reselection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Listing never consults a retired manifest repository after selection."""
     store = BlobStore(tmp_path / "list-disappeared", backend="json")
     try:
         store.put("payload", key="selected-key")
-        original_load = store._load_authenticated_manifest
-
-        def absent_during_selection(key, *, operation, **kwargs):
-            if operation == "list":
-                return None
-            return original_load(key, operation=operation, **kwargs)
-
-        monkeypatch.setattr(store, "_load_authenticated_manifest", absent_during_selection)
-        with pytest.raises(CacheBlobLifecycleConflictError):
-            store.list()
+        monkeypatch.setattr(
+            store,
+            "_load_authenticated_manifest",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("authority listing must not reselect legacy manifests")
+            ),
+        )
+        assert store.list() == ["selected-key"]
     finally:
         store.close()
 
 
 def test_update_metadata_resigns_only_user_metadata_and_rejects_structure(
-    tmp_path, monkeypatch
-):
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Public metadata patches cannot alter signed storage structure."""
     store = BlobStore(tmp_path / "update", backend="json")
     store.handlers = _SingleHandlerRegistry(_TracingHandler([]))
 
     try:
         key = store.put("update payload", key="update-key", metadata={"owner": "one"})
-        before = BlobManifestV1.from_canonical_bytes(
-            store.manifest_repository.get_raw(key) or b""
-        )
+        before_entry = store.lifecycle_authority.read_entry(key)
+        assert before_entry is not None
+        before = BlobManifestV1.from_canonical_bytes(before_entry.manifest)
 
         assert store.update_metadata(key, {"owner": "two", "label": "current"})
 
-        after = BlobManifestV1.from_canonical_bytes(
-            store.manifest_repository.get_raw(key) or b""
-        )
+        after_entry = store.lifecycle_authority.read_entry(key)
+        assert after_entry is not None
+        after = BlobManifestV1.from_canonical_bytes(after_entry.manifest)
         assert dict(after.user_metadata) == {"owner": "two", "label": "current"}
         assert after.signature != before.signature
+        assert after.generation != before.generation
         for field in (
             "schema_version",
             "key",
-            "generation",
             "state",
             "locator",
             "handler_type",
@@ -854,19 +907,17 @@ def test_update_metadata_resigns_only_user_metadata_and_rejects_structure(
         ):
             assert getattr(after, field) == getattr(before, field)
 
-        raw_before_rejected_patch = store.manifest_repository.get_raw(key)
-        assert raw_before_rejected_patch is not None
         monkeypatch.setattr(
-            store.manifest_repository,
-            "put_raw",
+            store.lifecycle_authority,
+            "prepare_mutation",
             lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                AssertionError("structural patch must fail before manifest write")
+                AssertionError("structural patch must fail before authority prepare")
             ),
         )
 
         with pytest.raises(CacheBlobLifecycleConflictError):
             store.update_metadata(key, {"locator": "/unsafe-replacement"})
-        assert store.manifest_repository.get_raw(key) == raw_before_rejected_patch
+        assert store.lifecycle_authority.read_entry(key) == after_entry
         assert store.update_metadata("absent-update", {"owner": "none"}) is False
     finally:
         store.close()
@@ -886,15 +937,17 @@ def test_update_metadata_rejects_a_stale_independent_store_patch(
         publish_entered = Event()
         release_first_publish = Event()
         first_result: list[BaseException | bool] = []
-        original_publish = first_store.manifest_repository.publish_if_expected
+        original_promote = first_store.lifecycle_authority.promote_mutation
 
-        def block_first_publish(*args: Any, **kwargs: Any) -> None:
+        def block_first_promotion(*args: Any, **kwargs: Any) -> object:
             publish_entered.set()
             assert release_first_publish.wait(timeout=2)
-            original_publish(*args, **kwargs)
+            return original_promote(*args, **kwargs)
 
         monkeypatch.setattr(
-            first_store.manifest_repository, "publish_if_expected", block_first_publish
+            first_store.lifecycle_authority,
+            "promote_mutation",
+            block_first_promotion,
         )
 
         def patch_first_store() -> None:
@@ -907,11 +960,7 @@ def test_update_metadata_rejects_a_stale_independent_store_patch(
         first_thread.start()
         assert publish_entered.wait(timeout=2)
 
-        _replace_signed_manifest(
-            second_store,
-            key,
-            user_metadata={"owner": "second"},
-        )
+        assert second_store.update_metadata(key, {"owner": "second"})
         release_first_publish.set()
         first_thread.join(timeout=2)
 
@@ -925,83 +974,97 @@ def test_update_metadata_rejects_a_stale_independent_store_patch(
         first_store.close()
 
 
-def test_update_metadata_rejects_an_authenticated_outside_root_locator(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
+def test_update_metadata_rejects_a_forged_authority_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """Metadata mutation validates the signed locator before re-signing it."""
+    """A forged signed snapshot cannot satisfy the current authority CAS."""
     store = BlobStore(tmp_path / "outside-locator", backend="json")
     store.handlers = _SingleHandlerRegistry(_TracingHandler([]))
     try:
         key = store.put("payload", key="outside-key")
-        _replace_signed_manifest(store, key, locator=str(tmp_path / "outside.bin"))
-        raw_before = store.manifest_repository.get_raw(key)
-        assert raw_before is not None
-        monkeypatch.setattr(
-            store.manifest_repository,
-            "put_raw",
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                AssertionError("unsafe locator must fail before manifest mutation")
-            ),
+        original_read_entry = store.lifecycle_authority.read_entry
+        before = original_read_entry(key)
+        assert before is not None
+        outside_entry = _authority_entry_with_replaced_manifest(
+            store, key, locator=str(tmp_path / "outside.bin")
         )
 
-        with pytest.raises(CacheUnsafePathError):
+        monkeypatch.setattr(
+            store.lifecycle_authority,
+            "read_entry",
+            lambda _key: outside_entry,
+        )
+
+        with pytest.raises(CacheBlobLifecycleConflictError):
             store.update_metadata(key, {"label": "blocked"})
 
-        assert store.manifest_repository.get_raw(key) == raw_before
+        assert original_read_entry(key) == before
     finally:
         store.close()
 
 
-def test_delete_and_clear_preflight_authenticated_manifests_before_mutation(
-    tmp_path, monkeypatch
-):
-    """Unsafe direct mutation never trusts a backend-shaped locator first."""
+def test_delete_and_clear_reject_unauthenticated_authority_snapshots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Direct mutation does not reclaim payloads from unauthenticated state."""
     store = BlobStore(tmp_path / "mutate", backend="json")
     store.handlers = _SingleHandlerRegistry(_TracingHandler([]))
 
     try:
         delete_key = store.put("delete payload", key="delete-key")
-        raw_manifest = store.manifest_repository.get_raw(delete_key)
-        assert raw_manifest is not None
-        payload_locator = Path(json.loads(raw_manifest)["locator"])
-        tampered = json.loads(raw_manifest)
-        tampered["signature"] = "0" * 64
-        store.manifest_repository.put_raw(
-            delete_key,
-            json.dumps(
-                tampered, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-            ).encode("utf-8"),
+        original_read_entry = store.lifecycle_authority.read_entry
+        delete_entry = original_read_entry(delete_key)
+        assert delete_entry is not None
+        delete_manifest = BlobManifestV1.from_canonical_bytes(delete_entry.manifest)
+        payload_locator = store.cache_dir / delete_manifest.locator
+        tampered_delete_entry = _authority_entry_with_invalid_signature(
+            store, delete_key
         )
         original_delete = store.guarded_handler_io.file_ops.delete
+        deleted_locators: list[Path] = []
 
         def reject_only_tampered_payload(locator: Path | str) -> bool:
-            if Path(locator) == payload_locator:
+            if Path(locator) in {Path(delete_manifest.locator), payload_locator}:
                 raise AssertionError("unauthenticated manifest must not delete payload")
+            deleted_locators.append(Path(locator))
             return original_delete(locator)
 
-        monkeypatch.setattr(
-            store.guarded_handler_io.file_ops,
-            "delete",
-            reject_only_tampered_payload,
-        )
-
-        with pytest.raises(CacheBlobManifestUnauthenticatedError):
-            store.delete(delete_key)
-        assert store.manifest_repository.get_raw(delete_key) is not None
+        with monkeypatch.context() as scoped:
+            scoped.setattr(
+                store.lifecycle_authority,
+                "read_entry",
+                lambda key: (
+                    tampered_delete_entry
+                    if key == delete_key
+                    else original_read_entry(key)
+                ),
+            )
+            scoped.setattr(
+                store.guarded_handler_io.file_ops,
+                "delete",
+                reject_only_tampered_payload,
+            )
+            with pytest.raises(CacheBlobManifestUnauthenticatedError):
+                store.delete(delete_key)
+        assert deleted_locators == []
+        assert original_read_entry(delete_key) == delete_entry
 
         first = store.put("first clear", key="clear-first")
-        second = store.put("second clear", key="clear-second")
-        _replace_signed_manifest(store, second, state="prepared")
-
-        # A generation-bound inventory preserves its publication order. The
-        # deliberately unauthenticated first record can therefore fail the
-        # clear preflight before the deliberately non-committed later record.
-        with pytest.raises(
-            (CacheBlobLifecycleConflictError, CacheManifestIntegrityError)
-        ):
+        store.put("second clear", key="clear-second")
+        tampered_first_entry = _authority_entry_with_invalid_signature(store, first)
+        with monkeypatch.context() as scoped:
+            scoped.setattr(
+                store.lifecycle_authority,
+                "read_entry",
+                lambda key: (
+                    tampered_first_entry
+                    if key == first
+                    else original_read_entry(key)
+                ),
+            )
             store.clear()
-        assert store.manifest_repository.get_raw(first) is not None
-        assert store.manifest_repository.get_raw(second) is not None
+        assert original_read_entry(first) is not None
+        assert store.get(first) == "first clear"
         assert store.delete("absent-delete") is False
     finally:
         store.close()
@@ -1012,30 +1075,29 @@ def test_delete_and_clear_preflight_authenticated_manifests_before_mutation(
     (
         ("malformed", CacheBlobManifestMalformedError),
         ("future_schema", CacheBlobManifestUnsupportedVersionError),
-        ("conflict", CacheBlobLifecycleConflictError),
+        ("nonterminal", CacheBlobManifestUnauthenticatedError),
     ),
 )
 def test_every_direct_read_surface_preserves_ordered_typed_failures(
-    tmp_path, fault: str, error_type: type[Exception]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str, error_type: type[Exception]
 ):
     """Present corrupt, future, and conflicted records never become misses."""
     store = BlobStore(tmp_path / fault, backend="json")
     try:
         key = store.put({"fault": fault}, key="fault-key")
-        manifest = BlobManifestV1.from_canonical_bytes(
-            store.manifest_repository.get_raw(key) or b""
-        )
-        payload_path = Path(manifest.locator)
+        entry = store.lifecycle_authority.read_entry(key)
+        assert entry is not None
+        manifest = BlobManifestV1.from_canonical_bytes(entry.manifest)
+        payload_path = store.cache_dir / manifest.locator
         payload_before = payload_path.read_bytes()
         payload_mtime_before = payload_path.stat().st_mtime_ns
         if fault == "malformed":
-            store.manifest_repository.put_raw(key, b"{")
+            faulty_entry = _authority_entry_with_raw_manifest(store, key, b"{")
         elif fault == "future_schema":
-            future_manifest = json.loads(
-                store.manifest_repository.get_raw(key) or b"{}"
-            )
+            future_manifest = json.loads(entry.manifest)
             future_manifest["schema_version"] = 2
-            store.manifest_repository.put_raw(
+            faulty_entry = _authority_entry_with_raw_manifest(
+                store,
                 key,
                 json.dumps(
                     future_manifest,
@@ -1045,9 +1107,26 @@ def test_every_direct_read_surface_preserves_ordered_typed_failures(
                 ).encode("utf-8"),
             )
         else:
-            _replace_signed_manifest(store, key, state="prepared")
-        raw_before = store.manifest_repository.get_raw(key)
-        assert raw_before is not None
+            faulty_entry = _authority_entry_with_replaced_manifest(
+                store, key, state="prepared"
+            )
+        original_read_entry = store.lifecycle_authority.read_entry
+        original_list_entries = store.lifecycle_authority.list_entries
+        monkeypatch.setattr(
+            store.lifecycle_authority,
+            "read_entry",
+            lambda requested_key: (
+                faulty_entry if requested_key == key else original_read_entry(requested_key)
+            ),
+        )
+        monkeypatch.setattr(
+            store.lifecycle_authority,
+            "list_entries",
+            lambda: tuple(
+                faulty_entry if candidate.key == key else candidate
+                for candidate in original_list_entries()
+            ),
+        )
 
         for operation in (
             lambda: store.get(key),
@@ -1057,29 +1136,31 @@ def test_every_direct_read_surface_preserves_ordered_typed_failures(
         ):
             with pytest.raises(error_type):
                 operation()
-            assert store.manifest_repository.get_raw(key) == raw_before
+            assert original_read_entry(key) == entry
             assert payload_path.read_bytes() == payload_before
             assert payload_path.stat().st_mtime_ns == payload_mtime_before
     finally:
         store.close()
 
 
-def test_every_direct_read_surface_propagates_a_local_backend_failure(
+def test_every_direct_read_surface_propagates_an_authority_backend_failure(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ):
-    """A backend fault remains typed across get, metadata, existence, and list."""
+    """An authority backend fault stays typed across each direct read surface."""
     store = BlobStore(tmp_path / "backend-failure", backend="json")
     try:
         key = store.put({"backend": "failure"}, key="backend-key")
-        raw_before = store.manifest_repository.get_raw(key)
-        assert raw_before is not None
-        failure = CacheBlobBackendError("injected local repository failure")
+        failure = CacheBlobBackendError("injected lifecycle authority failure")
         monkeypatch.setattr(
-            store.manifest_repository,
-            "get_raw",
+            store.lifecycle_authority,
+            "read_entry",
             lambda _key: (_ for _ in ()).throw(failure),
         )
-        monkeypatch.setattr(store.manifest_repository, "list_keys", lambda: [key])
+        monkeypatch.setattr(
+            store.lifecycle_authority,
+            "list_entries",
+            lambda: (_ for _ in ()).throw(failure),
+        )
 
         for operation in (
             lambda: store.get(key),
@@ -1095,31 +1176,31 @@ def test_every_direct_read_surface_propagates_a_local_backend_failure(
 
 
 @pytest.mark.parametrize("operation", ("list", "clear"))
-def test_projection_backend_failures_are_typed_on_every_direct_surface(
+def test_projection_backend_failures_do_not_block_authority_operations(
     tmp_path, monkeypatch: pytest.MonkeyPatch, operation: str
 ):
-    """Compatibility projection failures never bypass the BlobStore taxonomy."""
+    """A compatibility projection failure cannot block authority-backed operations."""
     store = BlobStore(tmp_path / operation, backend="json")
     try:
         key = store.put({"operation": operation}, key="projection-key")
-        monkeypatch.setattr(store.manifest_repository, "list_keys", lambda: [key])
-        failure = OSError("metadata projection unavailable")
-        if operation == "list":
-            monkeypatch.setattr(
-                store.manifest_repository,
-                "list_backend_entries",
-                lambda: (_ for _ in ()).throw(failure),
-            )
+        projection_accessed = False
+
+        def projection_unavailable(*_args, **_kwargs):
+            nonlocal projection_accessed
+            projection_accessed = True
+            raise OSError("metadata projection unavailable")
+
+        if hasattr(store.backend, "list_entries"):
+            monkeypatch.setattr(store.backend, "list_entries", projection_unavailable)
         else:
             monkeypatch.setattr(
-                store.manifest_repository,
-                "list_page",
-                lambda *_args, **_kwargs: (_ for _ in ()).throw(failure),
+                store.backend,
+                "get_entry",
+                projection_unavailable,
             )
 
-        with pytest.raises(CacheBlobBackendError) as error:
-            getattr(store, operation)()
-
-        assert error.value.__cause__ is failure
+        result = getattr(store, operation)()
+        assert result == ([key] if operation == "list" else 1)
+        assert not projection_accessed
     finally:
         store.close()
