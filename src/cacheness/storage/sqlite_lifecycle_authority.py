@@ -7,17 +7,20 @@ deliberately absent from this module, keeping SQLite writer transactions short.
 from __future__ import annotations
 
 from contextlib import contextmanager
+import csv
 import hashlib
+import json
 import os
 from pathlib import Path
 import sqlite3
 import stat
+import subprocess
 from threading import Lock
 import time
 from typing import Callable, Iterator, TypeVar
 from uuid import uuid4
 
-from cacheness.config import LifecycleLimits
+from cacheness.config import LifecycleAuthorityTopology, LifecycleLimits
 from cacheness.error_handling import (
     CacheBlobBackendError,
     CacheBlobLifecycleConflictError,
@@ -49,6 +52,11 @@ _MAX_STORE_IDENTITY_BYTES = 64
 _T = TypeVar("_T")
 
 
+def _platform_name() -> str:
+    """Resolve platform through a narrow contract-test seam."""
+    return os.name
+
+
 class SqliteLifecycleAuthority:
     """One SQLite authority with method-scoped, process-owned connections."""
 
@@ -59,6 +67,7 @@ class SqliteLifecycleAuthority:
         root: Path | str,
         *,
         lifecycle_limits: LifecycleLimits | None = None,
+        lifecycle_topology: LifecycleAuthorityTopology | None = None,
     ) -> None:
         self.root = Path(root).expanduser().resolve(strict=False)
         self.path = self.root / AUTHORITY_RELATIVE_PATH
@@ -67,6 +76,13 @@ class SqliteLifecycleAuthority:
         )
         if not isinstance(self.lifecycle_limits, LifecycleLimits):
             raise TypeError("lifecycle_limits must be a LifecycleLimits instance")
+        self.lifecycle_topology = (
+            LifecycleAuthorityTopology()
+            if lifecycle_topology is None
+            else lifecycle_topology
+        )
+        if not isinstance(self.lifecycle_topology, LifecycleAuthorityTopology):
+            raise TypeError("lifecycle_topology must be a LifecycleAuthorityTopology instance")
         self._owner_pid = os.getpid()
         self._state_lock = Lock()
         self._closed = False
@@ -79,9 +95,14 @@ class SqliteLifecycleAuthority:
         root: Path | str,
         *,
         lifecycle_limits: LifecycleLimits | None = None,
+        lifecycle_topology: LifecycleAuthorityTopology | None = None,
     ) -> "SqliteLifecycleAuthority":
         """Return a non-materializing authority; mutation creates its database."""
-        return cls(root, lifecycle_limits=lifecycle_limits)
+        return cls(
+            root,
+            lifecycle_limits=lifecycle_limits,
+            lifecycle_topology=lifecycle_topology,
+        )
 
     def _require_owned_open(self) -> None:
         if self._closed:
@@ -140,8 +161,157 @@ class SqliteLifecycleAuthority:
             context={"authority_path": str(self.path), "classification": state},
         )
 
+    def _windows_offline_provisioning_command(self) -> str:
+        """Return deployment-only guidance without creating or changing the root."""
+        root = str(self.root).replace("'", "''")
+        return (
+            "$root = '"
+            + root
+            + "'; $logonSid = (whoami /groups /fo csv | ConvertFrom-Csv | "
+            "Where-Object { $_.SID -match '^S-1-5-5-[0-9]+-[0-9]+$' } | "
+            "Select-Object -First 1 -ExpandProperty SID); "
+            "if (-not $logonSid) { throw 'No current-token logon SID found.' }; "
+            "icacls.exe $root /inheritance:r; "
+            "icacls.exe $root /grant:r \"*$logonSid:(OI)(CI)(M)\" "
+            "\"*S-1-5-18:(OI)(CI)(RX)\" \"*S-1-5-32-544:(OI)(CI)(RX)\"; "
+            "icacls.exe $root /verify"
+        )
+
+    def _raise_windows_topology_error(self, message: str) -> None:
+        command = self._windows_offline_provisioning_command()
+        raise CacheBlobBackendError(
+            f"{message}. Provision the root offline before Cacheness starts: {command}",
+            context={
+                "authority_path": str(self.path),
+                "offline_provisioning": command,
+            },
+            reason=CacheReason.BLOB_BACKEND_CAPABILITY_UNSUPPORTED,
+        )
+
+    @staticmethod
+    def _run_windows_command(arguments: list[str]) -> subprocess.CompletedProcess[str]:
+        """Run a read-only Windows inspection command without a shell."""
+        return subprocess.run(
+            arguments,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+    def _current_windows_logon_sid(self) -> str:
+        result = self._run_windows_command(["whoami", "/groups", "/fo", "csv", "/nh"])
+        if result.returncode != 0:
+            self._raise_windows_topology_error("Current token logon SID cannot be inspected")
+        for row in csv.reader(result.stdout.splitlines()):
+            for value in row:
+                if value.startswith("S-1-5-5-") and value.count("-") == 5:
+                    return value
+        self._raise_windows_topology_error("Current token has no logon SID")
+
+    def _read_windows_acl_evidence(self) -> dict[str, object]:
+        verify = self._run_windows_command(["icacls.exe", str(self.root), "/verify"])
+        if verify.returncode != 0:
+            self._raise_windows_topology_error("Windows root DACL verification failed")
+        script = (
+            "$root = $args[0]; $identity = "
+            "[System.Security.Principal.WindowsIdentity]::GetCurrent(); "
+            "$acl = Get-Acl -LiteralPath $root; "
+            "[pscustomobject]@{ account_sid = $identity.User.Value; "
+            "protected = $acl.AreAccessRulesProtected; rules = @($acl.Access | "
+            "ForEach-Object { [pscustomobject]@{ sid = $_.IdentityReference.Translate("
+            "[System.Security.Principal.SecurityIdentifier]).Value; "
+            "rights = $_.FileSystemRights.ToString(); type = $_.AccessControlType.ToString(); "
+            "inherited = $_.IsInherited } }) } | ConvertTo-Json -Compress"
+        )
+        result = self._run_windows_command(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script, str(self.root)]
+        )
+        if result.returncode != 0:
+            self._raise_windows_topology_error("Windows root ACL cannot be inspected")
+        try:
+            evidence = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            self._raise_windows_topology_error("Windows root ACL proof is malformed")
+        if not isinstance(evidence, dict):
+            self._raise_windows_topology_error("Windows root ACL proof is malformed")
+        return evidence
+
+    @staticmethod
+    def _windows_rights_allow_mutation(rights: object) -> bool:
+        if not isinstance(rights, str):
+            return True
+        normalized = rights.replace(" ", "").lower()
+        mutation_rights = (
+            "fullcontrol",
+            "modify",
+            "write",
+            "appenddata",
+            "createfiles",
+            "deleted",
+            "delete",
+            "changepermissions",
+            "takeownership",
+        )
+        return any(right in normalized for right in mutation_rights)
+
+    def _validate_windows_root(self) -> None:
+        """Prove the pre-provisioned one-logon-session DACL without modifying it."""
+        try:
+            root_stat = self.root.lstat()
+        except FileNotFoundError:
+            self._raise_windows_topology_error("Windows lifecycle root is absent")
+        if not stat.S_ISDIR(root_stat.st_mode) or stat.S_ISLNK(root_stat.st_mode):
+            self._raise_windows_topology_error("Windows lifecycle root is unsafe")
+        logon_sid = self._current_windows_logon_sid()
+        evidence = self._read_windows_acl_evidence()
+        account_sid = evidence.get("account_sid")
+        rules = evidence.get("rules")
+        if (
+            not isinstance(account_sid, str)
+            or not account_sid
+            or not isinstance(evidence.get("protected"), bool)
+            or evidence["protected"] is not True
+            or not isinstance(rules, list)
+        ):
+            self._raise_windows_topology_error("Windows lifecycle root DACL is unprovable")
+
+        allowed_non_mutating = {"S-1-5-18", "S-1-5-32-544"}
+        logon_mutation_grant = False
+        for rule in rules:
+            if not isinstance(rule, dict):
+                self._raise_windows_topology_error("Windows lifecycle root DACL is malformed")
+            sid = rule.get("sid")
+            inherited = rule.get("inherited")
+            access_type = rule.get("type")
+            mutates = self._windows_rights_allow_mutation(rule.get("rights"))
+            if not isinstance(sid, str) or not sid or inherited is not False:
+                self._raise_windows_topology_error("Windows lifecycle root DACL has drifted")
+            if access_type != "Allow":
+                self._raise_windows_topology_error("Windows lifecycle root DACL has unsupported ACEs")
+            if sid == logon_sid:
+                logon_mutation_grant = logon_mutation_grant or mutates
+                continue
+            if sid == account_sid or mutates or sid not in allowed_non_mutating:
+                self._raise_windows_topology_error("Windows lifecycle root DACL has unsafe grants")
+        if not logon_mutation_grant:
+            self._raise_windows_topology_error("Windows lifecycle root lacks the logon-SID mutation grant")
+
+    def _validate_mutation_topology(self) -> None:
+        """Reject unsupported declared topology before SQLite or payload effects."""
+        if self.lifecycle_topology.filesystem != "local" or (
+            self.lifecycle_topology.principal_scope != "current_user_current_session"
+        ):
+            raise CacheBlobBackendError(
+                "Lifecycle authority topology is unsupported",
+                context={"topology": self.lifecycle_topology.principal_scope},
+                reason=CacheReason.BLOB_BACKEND_CAPABILITY_UNSUPPORTED,
+            )
+        if _platform_name() == "nt":
+            self._validate_windows_root()
+
     def _materialize_database_file(self) -> bool:
         """Create only the contained database leaf and report whether this won."""
+        self._validate_mutation_topology()
         state = self._classify_for_open()
         rejected_states = {
             "wrong_root",
@@ -152,13 +322,6 @@ class SqliteLifecycleAuthority:
         if state in rejected_states:
             self._reject_non_authority_state(state)
         if state == "missing":
-            if os.name == "nt":
-                raise CacheBlobBackendError(
-                    "Windows lifecycle roots must be provisioned before mutation; "
-                    "see docs/lifecycle-authority.md",
-                    context={"authority_path": str(self.path)},
-                    reason=CacheReason.BLOB_BACKEND_CAPABILITY_UNSUPPORTED,
-                )
             self.root.mkdir(mode=0o700, parents=True, exist_ok=False)
         reserved = self.root / AUTHORITY_RELATIVE_PATH.parent
         if not reserved.exists():

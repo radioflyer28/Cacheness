@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from typing import Optional, List, Union
 from pathlib import Path
 
+from cacheness.error_handling import CacheConfigurationError
+
 logger = logging.getLogger(__name__)
 
 
@@ -350,6 +352,31 @@ class SecurityConfig:
 
 
 @dataclass(frozen=True)
+class LifecycleAuthorityTopology:
+    """Explicit local-authority deployment capability requested by a caller.
+
+    The only supported durable SQLite topology is one current OS user in one
+    current interactive or service session on a local filesystem.  Broader
+    requests are rejected during configuration rather than downgraded later.
+    """
+
+    filesystem: str = "local"
+    principal_scope: str = "current_user_current_session"
+
+    def __post_init__(self) -> None:
+        if self.filesystem != "local":
+            raise CacheConfigurationError(
+                "Lifecycle authority requires a local filesystem",
+                context={"filesystem": self.filesystem},
+            )
+        if self.principal_scope != "current_user_current_session":
+            raise CacheConfigurationError(
+                "Lifecycle authority supports only the current user and session",
+                context={"principal_scope": self.principal_scope},
+            )
+
+
+@dataclass(frozen=True)
 class LifecycleLimits:
     """Explicit caller-owned bounds for BlobStore lifecycle operations.
 
@@ -413,6 +440,9 @@ class CacheConfig:
     handlers: HandlerConfig = field(default_factory=HandlerConfig)
     security: SecurityConfig = field(default_factory=SecurityConfig)
     lifecycle_limits: LifecycleLimits = field(default_factory=LifecycleLimits)
+    lifecycle_topology: LifecycleAuthorityTopology = field(
+        default_factory=LifecycleAuthorityTopology
+    )
 
     def __init__(
         self,
@@ -424,6 +454,7 @@ class CacheConfig:
         handlers: Optional[HandlerConfig] = None,
         security: Optional[SecurityConfig] = None,
         lifecycle_limits: Optional[LifecycleLimits] = None,
+        lifecycle_topology: Optional[LifecycleAuthorityTopology] = None,
         # Backwards compatibility parameters
         cache_dir: Optional[str] = None,
         default_ttl_hours: Optional[float] = None,
@@ -483,6 +514,17 @@ class CacheConfig:
             raise ValueError("lifecycle_limits must be a LifecycleLimits instance")
         self.lifecycle_limits = (
             LifecycleLimits() if lifecycle_limits is None else lifecycle_limits
+        )
+        if lifecycle_topology is not None and not isinstance(
+            lifecycle_topology, LifecycleAuthorityTopology
+        ):
+            raise ValueError(
+                "lifecycle_topology must be a LifecycleAuthorityTopology instance"
+            )
+        self.lifecycle_topology = (
+            LifecycleAuthorityTopology()
+            if lifecycle_topology is None
+            else lifecycle_topology
         )
 
         # Apply backwards compatibility mappings
@@ -1094,6 +1136,7 @@ def load_config_from_dict(data: dict) -> CacheConfig:
         "handlers",
         "security",
         "lifecycle_limits",
+        "lifecycle_topology",
     }
     is_nested = any(key in sub_config_names for key in data.keys())
     
@@ -1111,6 +1154,11 @@ def load_config_from_dict(data: dict) -> CacheConfig:
             if "lifecycle_limits" in data
             else None
         )
+        lifecycle_topology = (
+            LifecycleAuthorityTopology(**data["lifecycle_topology"])
+            if "lifecycle_topology" in data
+            else None
+        )
         
         return CacheConfig(
             storage=storage,
@@ -1121,6 +1169,7 @@ def load_config_from_dict(data: dict) -> CacheConfig:
             handlers=handlers,
             security=security,
             lifecycle_limits=lifecycle_limits,
+            lifecycle_topology=lifecycle_topology,
         )
     else:
         # Flat format - use CacheConfig's backwards compatibility
@@ -1226,6 +1275,7 @@ def save_config_to_json(config: CacheConfig, path: Union[str, Path], indent: int
         "handlers": asdict(config.handlers),
         "security": asdict(config.security),
         "lifecycle_limits": asdict(config.lifecycle_limits),
+        "lifecycle_topology": asdict(config.lifecycle_topology),
     }
     
     path = Path(path)
@@ -1269,6 +1319,7 @@ def save_config_to_yaml(config: CacheConfig, path: Union[str, Path]) -> None:
         "handlers": asdict(config.handlers),
         "security": asdict(config.security),
         "lifecycle_limits": asdict(config.lifecycle_limits),
+        "lifecycle_topology": asdict(config.lifecycle_topology),
     }
     
     path = Path(path)

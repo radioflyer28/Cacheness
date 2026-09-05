@@ -51,13 +51,13 @@ rebuild-or-migration outcome. Only a contained regular existing authority file
 may receive a read-only identity/integrity open, with no SQLite journal or
 sidecar creation.
 
-## Recommended local authority identity — pending confirmation
+## Confirmed local authority identity
 
-Task 3 is the blocking persisted-identity decision. The recommended contract is
-one local authority at `.cacheness/lifecycle-authority-v1.sqlite3`, SQLite
-application ID `0x43414348`, schema `user_version = 1`, and a generated store
-identity row. Later plans must not create the database until a human confirms
-this exact locator and identity.
+The durable contract is one local authority at
+`.cacheness/lifecycle-authority-v1.sqlite3`, SQLite application ID
+`0x43414348`, schema `user_version = 1`, and a generated store-identity row.
+`LifecycleAuthority` is the sole authority for lifecycle state: the JSON
+projection is observational only and cannot authorize a mutation.
 
 ## Windows local root contract
 
@@ -70,8 +70,9 @@ are unsupported.
 Cacheness must validate the current token, existing root, and DACL before the
 first authority database creation/open and before every mutation. It must never
 create the root, change its mode, disable inheritance, or add, remove, or reorder
-ACEs. Absent, unsafe, drifted, or unprovable roots must fail typed and unchanged
-while returning this offline provisioning instruction.
+ACEs. The deployed DACL has **inheritance disabled**. Absent, unsafe, drifted,
+or unprovable roots must fail typed and unchanged while returning this offline
+provisioning instruction.
 
 Run the following **only while the store is unavailable**, as the deployment
 operator. Replace the root path before use; the script resolves the current
@@ -91,11 +92,11 @@ icacls.exe $root /inheritance:r | Out-Null
 icacls.exe $root /remove:g "*$accountSid" | Out-Null
 icacls.exe $root /grant:r "*$logonSid:(OI)(CI)(M)" `
     "*S-1-5-18:(OI)(CI)(RX)" "*S-1-5-32-544:(OI)(CI)(RX)" | Out-Null
-icacls.exe $root
+icacls.exe $root /verify
+Get-Acl -LiteralPath $root
 ```
 
 The resulting DACL must contain no inherited, account-SID, or unrelated write
-ACE. A same-logon-session deployment is the only positive topology. A different
-session or service token must be denied for authority open and root mutation;
-if that token cannot be exercised on a native Windows host, the evidence is
-`UNAVAILABLE`, never a passing substitute.
+ACE. A same-logon-session deployment is the only positive topology. A different session
+or service token must be denied for authority open and root mutation; if that token cannot
+be exercised on a native Windows host, the evidence is `UNAVAILABLE`, never a passing substitute.
