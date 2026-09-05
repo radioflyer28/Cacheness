@@ -253,6 +253,38 @@ def test_partial_owned_resource_failure_is_typed_and_retries_without_double_clos
     assert backend_close_calls == [None, None]
 
 
+def test_close_retry_does_not_reclose_an_already_released_owned_authority(
+    tmp_path, monkeypatch
+):
+    """A later owned-resource failure cannot repeat authority release on retry."""
+    store = _configured_store(tmp_path / "authority-close-retry")
+    authority_close_calls: list[None] = []
+    original_authority_close = store.lifecycle_authority.close
+    original_guarded_close = store.guarded_handler_io.close
+    guarded_attempts = 0
+
+    def authority_close() -> None:
+        authority_close_calls.append(None)
+        original_authority_close()
+
+    def guarded_close() -> None:
+        nonlocal guarded_attempts
+        guarded_attempts += 1
+        if guarded_attempts == 1:
+            raise OSError("injected descriptor close failure")
+        original_guarded_close()
+
+    monkeypatch.setattr(store.lifecycle_authority, "close", authority_close)
+    monkeypatch.setattr(store.guarded_handler_io, "close", guarded_close)
+
+    with pytest.raises(CacheBlobBackendError):
+        store.close()
+    assert authority_close_calls == [None]
+
+    store.close()
+    assert authority_close_calls == [None]
+
+
 @pytest.mark.parametrize("failing_index", (0, 1, 2))
 def test_operation_repository_retains_every_failed_lock_close_for_retry(
     tmp_path: Path, failing_index: int
