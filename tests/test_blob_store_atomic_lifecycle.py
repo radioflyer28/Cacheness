@@ -10,6 +10,7 @@ import pytest
 
 from cacheness.error_handling import CacheBlobRecoverableCleanupError
 from cacheness.storage import BlobStore
+from _lifecycle_test_support import CRASH_BOUNDARY_EXIT, crash_public_put
 
 
 class _NativeJsonHandler:
@@ -74,6 +75,20 @@ class _FailingSerializationHandler(_NativeJsonHandler):
         del data, file_path, config
         self.events.append("private_serialization")
         raise RuntimeError("native serialization failed")
+
+
+def test_crash_harness_terminates_a_public_put_at_a_named_boundary(
+    tmp_path: Path,
+) -> None:
+    """A subprocess can stop a public put without timing-based coordination."""
+    result = crash_public_put(
+        tmp_path / "crash-harness",
+        boundary="put.intent_prepared",
+        key="crash-key",
+        value="new",
+    )
+
+    assert result.returncode == CRASH_BOUNDARY_EXIT
 
 
 def test_put_promotes_immutable_generation_through_lifecycle_authority(
