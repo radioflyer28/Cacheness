@@ -14,9 +14,9 @@ provides:
 affects: [BlobStore, lifecycle authority, storage recovery, concurrency tests]
 
 actuals:
-  tokens: 93828
+  tokens: 103492
   tasks: 2
-  commits: 6
+  commits: 7
 
 tech-stack:
   added: []
@@ -86,7 +86,7 @@ coverage:
         status: pass
     human_judgment: false
 
-duration: 48min
+duration: 64min
 completed: 2026-09-05
 status: complete
 ---
@@ -97,9 +97,9 @@ status: complete
 
 ## Performance
 
-- **Duration:** 48 min
+- **Duration:** 64 min
 - **Started:** 2026-09-05T02:26:44Z
-- **Completed:** 2026-09-05T03:14:38Z
+- **Completed:** 2026-09-05T03:30:17Z
 - **Tasks:** 2
 - **Files modified:** 9
 
@@ -115,6 +115,7 @@ status: complete
 2. **Task 2: Converge delete, cleanup, per-key coordination, and close** - `c653721` (test), `04831a3` (feat)
 3. **Authority projection compatibility correction** - `f6bfc83` (fix)
 4. **Authority-only constructor fixture migration** - `6295960` (fix)
+5. **Authority-only read-contract compatibility migration** - `054c524` (fix)
 
 ## Files Created/Modified
 
@@ -178,13 +179,21 @@ status: complete
 - **Verification:** Exact reproduced assertion plus constructor/cancellation subset.
 - **Committed in:** `6295960`
 
-**Total deviations:** 5 auto-fixed (4 Rule 1, 1 Rule 2).
+**6. [Rule 1 - Error taxonomy] Migrated residual projection fixtures and preserved unsupported authority-schema translation.**
+- **Found during:** Wave 4 full historical read-contract verification.
+- **Issue:** Direct-operation tests treated `cache_metadata.json` and retired manifest-repository seams as committed truth; malformed authority schema bytes no longer retained the established typed unsupported-version error.
+- **Fix:** Assert direct reads and mutations use `LifecycleAuthority` despite corrupt or unavailable projections, move backend-failure coverage to authority operations, and translate an unsupported authority manifest schema to `CacheBlobManifestUnsupportedVersionError`.
+- **Files modified:** `src/cacheness/storage/blob_store.py`, `tests/test_blob_store_read_contract.py`
+- **Verification:** Entire `tests/test_blob_store_read_contract.py` suite (40 passed), all Plan 04 behavior suites (37 passed), and Phase 3 Ruff delta.
+- **Committed in:** `054c524`
+
+**Total deviations:** 6 auto-fixed (5 Rule 1, 1 Rule 2).
 **Impact on plan:** All changes preserve the authority-only architecture and are required for durable recovery, concurrency safety, or fail-closed compatibility.
 
 ## Issues Encountered
 
 - `test_failed_initialization_closes_only_internally_owned_backend` and adjacent cancellation fixtures now exercise an internally created `LifecycleAuthority` plus projection, and verify that injected authority/backend resources stay caller-owned. This regression is fixed in `6295960` and `.planning/WINDOWS.md` entry 23 is resolved.
-- The full historical read-contract suite next fails at `test_all_direct_operations_translate_json_admission_refresh_failures` because it still treats `cache_metadata.json` as committed truth. Authority mode correctly ignores that non-authoritative projection; the broader test migration is tracked in `.planning/WINDOWS.md` entry 24.
+- The historical JSON-projection and manifest-repository fixtures now assert the authority-only contract. Corrupt or unavailable projections neither authorize nor block committed reads or mutations; `.planning/WINDOWS.md` entry 24 is resolved in `054c524`.
 
 ## User Setup Required
 
@@ -192,11 +201,11 @@ None - no external service configuration required.
 
 ## Next Phase Readiness
 
-Authority-backed BlobStore mutations, recovery, and close semantics are ready for remaining Phase 3 integration. The legacy read-contract constructor fixture must be migrated to authority assertions before the full historical suite can be green.
+Authority-backed BlobStore mutations, recovery, and close semantics are ready for remaining Phase 3 integration. The complete historical read-contract suite is green under the authority-only contract.
 
 ## Self-Check: PASSED
 
-All listed source/test artifacts exist and each recorded task commit, including `6295960`, is reachable from the repository history.
+All listed source/test artifacts exist and each recorded task commit, including `054c524`, is reachable from the repository history.
 
 ---
 *Phase: 03-atomic-lifecycle-and-recovery-engine*
