@@ -5,6 +5,17 @@ status: draft
 nyquist_compliant: false
 wave_0_complete: false
 created: 2026-09-04
+windows-qualification:
+  current_host_status: UNAVAILABLE
+  milestone_status: NOT_QUALIFIED
+  native_evidence: false
+  windows_qualified: false
+  backlog_phase: 999.1
+  future_required_status: PASS
+  future_required_exit_code: 0
+  future_powershell_command: "uv run --python 3.11 --frozen python verify_platform.py --phase3 --require-system Windows --require-python 3.11 --phase3-root $env:CACHENESS_PHASE3_WINDOWS_ROOT"
+  root_environment_variable: CACHENESS_PHASE3_WINDOWS_ROOT
+  second_token_environment_variable: CACHENESS_PHASE3_WINDOWS_SECOND_TOKEN_COMMAND_JSON
 ---
 
 # Phase 03 — Validation Strategy
@@ -30,7 +41,7 @@ created: 2026-09-04
 
 - **After every task commit:** Run the common authority contract plus the directly changed behavior file.
 - **After every plan wave:** Run the full Phase 3 command.
-- **Before `$gsd-verify-work`:** Run the full Phase 3 command, full repository suite, compatibility corpus, a real `uv run --python 3.11 --frozen` focused run, the repository Python 3.13 run, attached native-Windows evidence, the checked-in exact-scope Ruff delta gate, and direct Ruff on every Phase 3-new Python file.
+- **Before `$gsd-verify-work`:** Run the full Phase 3 command, full repository suite, compatibility corpus, a real `uv run --python 3.11 --frozen` focused run, the repository Python 3.13 run, a freshly captured and immediately verified current-host Windows-qualification artifact, the checked-in exact-scope Ruff delta gate, and direct Ruff on every Phase 3-new Python file. The artifact must be `UNAVAILABLE`/`NOT_QUALIFIED` with `native_evidence: false` and backlog Phase 999.1 on this host; it is not native Windows evidence.
 - **Max feedback latency:** 30 seconds for focused tests; split longer crash/platform matrices into explicit gate jobs.
 
 ---
@@ -60,6 +71,7 @@ created: 2026-09-04
 - Reconciliation uses captured high-water IDs and monotonic keyset cursors with independent row/action/byte limits; no filename inventory or offset pagination is accepted.
 - Empty compatible store inspection is lazy: get/get_metadata/exists/list and repeated dry-run reconciliation return normal empty results without creating a root, authority database, JSON, journal, temporary, or control object. Established/legacy/scheduler/future/corrupt/wrong-object evidence without authority fails typed and unchanged before any mkdir/open.
 - Windows D-22 is limited to one logon session on a local NTFS root provisioned before Cacheness starts, with inheritance disabled and the protected DACL's sole ordinary mutation grant bound to the current token's `S-1-5-5-X-Y` logon SID rather than the persistent account SID. Read-only inspection of an absent/empty root remains zero-mutation empty; any Windows mutation against an absent root fails typed and unchanged with the documented actionable offline PowerShell/`icacls.exe` provisioning command. Cacheness only validates the token/root/DACL before authority database creation/open and every mutation and never creates the Windows root, changes mode, disables inheritance, or edits ACEs. Native evidence must prove no directory/mode/ACL write, unchanged rejection of absent/unsafe/drifted roots, same-session multiprocess SQLite success, and a different-session/service-token denial for authority open and root mutation. If that second token cannot be exercised, the gate is `UNAVAILABLE`, not pass.
+- D-32 closes only the current-host evidence obligation: this milestone must atomically capture and freshly verify the fixed Python 3.11 command's exit 2, canonical `UNAVAILABLE` JSON, `NOT_QUALIFIED`, `native_evidence: false`, and backlog Phase 999.1 record. Protected-NTFS-root proof, Python 3.11 native execution, same-session contention, different-session/service-token denial, and scheduler-retirement PASS remain unsatisfied prerequisites for a future Windows-qualified release. The future PowerShell command is `uv run --python 3.11 --frozen python verify_platform.py --phase3 --require-system Windows --require-python 3.11 --phase3-root $env:CACHENESS_PHASE3_WINDOWS_ROOT`; it requires `CACHENESS_PHASE3_WINDOWS_ROOT` and `CACHENESS_PHASE3_WINDOWS_SECOND_TOKEN_COMMAND_JSON` to be supplied by the eligible environment.
 
 ---
 
@@ -80,7 +92,7 @@ created: 2026-09-04
 
 ## Manual-Only Verifications
 
-No lifecycle behavior is accepted as manual-only. Native Windows and supported-Python execution use automated commands. Because Phase 8 owns the permanent CI matrix, Plan 09 has a blocking evidence checkpoint: a non-Windows host, or a Windows host unable to exercise a genuinely different logon-session/service token, records `UNAVAILABLE` and cannot approve the native-Windows gate. Python 3.11 must actually execute through repository/uv interpreter selection; missing-interpreter output is a blocker, not a passing skip.
+No lifecycle behavior is accepted as manual-only. Native Windows and supported-Python execution use automated commands. Because Phase 8 owns the permanent CI matrix, this milestone records a non-Windows host, or a Windows host unable to exercise a genuinely different logon-session/service token, as atomically attested `UNAVAILABLE`/`NOT_QUALIFIED` evidence with `native_evidence: false`; it cannot approve a native-Windows gate. Python 3.11 must actually execute through repository/uv interpreter selection; missing-interpreter output is a blocker, not a passing skip. The current artifact verifies only an unavailable system and Phase 999.1 must later run `uv run --python 3.11 --frozen python verify_platform.py --phase3 --require-system Windows --require-python 3.11 --phase3-root $env:CACHENESS_PHASE3_WINDOWS_ROOT` with the provisioned-root and distinct-token environment variables before any Windows-qualified release.
 
 ---
 
@@ -96,7 +108,7 @@ No lifecycle behavior is accepted as manual-only. Native Windows and supported-P
 - [ ] Canonical reconciliation machine reports use a versioned v2 envelope and every finding includes authoritative/expected generation, operation provenance, residue type/role, proposed action, reason, disposition, and checkpoint state; the exact legacy v1 dictionary remains available through its characterized adapter.
 - [ ] No authority transaction spans handler or payload backend I/O.
 - [ ] No file-native receipt, inventory, head, tail, anchor, cursor, pending-control, or authority-lock protocol remains reachable.
-- [ ] Full repository suite and compatibility corpus pass; real Python 3.11/3.13 and native-Windows evidence is attached; the exact-scope Ruff delta contains no unmatched finding and every Phase 3-new Python file passes direct Ruff (repository-wide debt remains Phase 8).
+- [ ] Full repository suite and compatibility corpus pass; real Python 3.11/3.13 runs and a freshly verified `UNAVAILABLE`/`NOT_QUALIFIED` artifact are attached; the exact-scope Ruff delta contains no unmatched finding and every Phase 3-new Python file passes direct Ruff (repository-wide debt remains Phase 8). Native protected-root, Python 3.11, same-session, different-token, and scheduler-retirement `PASS` evidence remains required by Phase 999.1 before a Windows-qualified release.
 - [ ] `nyquist_compliant: true` and `wave_0_complete: true` are set only after implementation evidence is complete.
 
-**Approval:** pending replacement-plan execution and verification
+**Approval:** current-host D-32 evidence is acceptable only after the fixed-command artifact is freshly captured and verified as `UNAVAILABLE`/`NOT_QUALIFIED`; it is not a native Windows qualification. Final Phase 3 approval remains pending Plan 03-10 verification, and Phase 999.1 remains mandatory before any Windows-qualified release.

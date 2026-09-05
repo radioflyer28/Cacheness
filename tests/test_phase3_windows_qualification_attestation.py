@@ -154,6 +154,7 @@ def _fake_runner(stdout: bytes, returncode: int = 2):
     def run(argv, **kwargs):
         assert tuple(argv) == _load_helper().QUALIFICATION_ARGV
         assert kwargs["shell"] is False
+        assert "VIRTUAL_ENV" not in kwargs["env"]
         return subprocess.CompletedProcess(argv, returncode, stdout=stdout, stderr=b"secret")
 
     return run

@@ -197,6 +197,11 @@ def run_fixed_command(
     *, subprocess_runner: SubprocessRunner = subprocess.run
 ) -> subprocess.CompletedProcess[bytes]:
     """Run the one fixed qualification argv without a shell or caller override."""
+    environment = os.environ.copy()
+    # The helper itself may run from the repository's pinned .venv.  Leaving that
+    # activation marker in place makes uv reject the required Python 3.11 selector
+    # before it can invoke the fixed runner.
+    environment.pop("VIRTUAL_ENV", None)
     return subprocess_runner(
         QUALIFICATION_ARGV,
         cwd=REPOSITORY_ROOT,
@@ -204,6 +209,7 @@ def run_fixed_command(
         check=False,
         capture_output=True,
         text=False,
+        env=environment,
     )
 
 
