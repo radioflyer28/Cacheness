@@ -153,3 +153,21 @@ def test_sqlite_authority_rejects_inherited_process_use_and_close_is_idempotent(
     fresh.close()
     with pytest.raises(CacheBlobStoreClosedError):
         fresh.read_entry("authority-key")
+
+
+def test_sqlite_authority_rejects_malformed_row_values_before_entry_exposure(
+    tmp_path: Path,
+) -> None:
+    """Malformed indexed row data is not converted into a usable authority entry."""
+    root = tmp_path / "malformed"
+    database = _create_database(root)
+    connection = sqlite3.connect(database)
+    connection.execute(
+        "INSERT INTO entries VALUES (?, ?, ?, ?, ?, ?)",
+        ("bad", "generation", "locator", b"manifest", -1, 1),
+    )
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(CacheBlobBackendError):
+        SqliteLifecycleAuthority.for_root(root).read_entry("bad")

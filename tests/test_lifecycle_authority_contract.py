@@ -29,6 +29,7 @@ from cacheness.error_handling import (
     CacheReason,
     CacheStorageError,
 )
+from cacheness.storage.lifecycle_authority import EntryExpectation
 from cacheness.storage.reconciliation import (
     ReconciliationAction,
     ReconciliationFinding,
@@ -369,3 +370,138 @@ def test_memory_authorities_are_isolated_and_truthful_about_capabilities() -> No
     assert second.read_entry("missing") is None
     first.close()
     second.close()
+
+
+# =============================================================================
+# Complete transition atomicity (Plan 03-03)
+# =============================================================================
+
+
+def _prepare_verified_mutation(
+    authority: object,
+    *,
+    operation_id: str,
+    expected: object,
+    generation: str,
+    locator: str,
+):
+    """Prepare one deterministic authority promotion through its public seam."""
+    from cacheness.storage.lifecycle_authority import MutationSpec, VerificationProof
+
+    prepared = authority.prepare_mutation(
+        MutationSpec.create(
+            operation_id=operation_id,
+            key="atomic-key",
+            generation=generation,
+            candidate_locator=locator,
+            expected=expected,
+            manifest=f"manifest-{generation}".encode(),
+        )
+    )
+    authority.record_verification(
+        prepared,
+        VerificationProof(digest=(generation[-1] * 64), byte_size=1),
+    )
+    return prepared
+
+
+def test_sqlite_promotion_rolls_back_every_participating_authority_row(
+    tmp_path: Path,
+) -> None:
+    """A promotion fault leaves entry, mutation, debt, projection, and revision intact."""
+    from cacheness.storage.sqlite_lifecycle_authority import SqliteLifecycleAuthority
+
+    authority = SqliteLifecycleAuthority.for_root(tmp_path / "atomic")
+    first = _prepare_verified_mutation(
+        authority,
+        operation_id="first",
+        expected=EntryExpectation.absent(),
+        generation="generation-1",
+        locator="generations/one",
+    )
+    previous = authority.promote_mutation(first).entry
+    replacement = _prepare_verified_mutation(
+        authority,
+        operation_id="replacement",
+        expected=previous.expectation,
+        generation="generation-2",
+        locator="generations/two",
+    )
+    before = authority.snapshot_state()
+    hooks = BoundaryHooks()
+    authority.set_transaction_hook_for_test(hooks.reach)
+    hooks.arm_fault("promote.after_entry")
+
+    with pytest.raises(InjectedLifecycleFault, match="promote.after_entry"):
+        authority.promote_mutation(replacement)
+
+    assert authority.read_entry("atomic-key") == previous
+    assert authority.snapshot_state() == before
+
+    promoted = authority.promote_mutation(replacement)
+    after = authority.snapshot_state()
+    assert promoted.entry.generation == "generation-2"
+    assert promoted.cleanup_debt[0].locator == "generations/one"
+    assert after.revision == before.revision + 1
+    assert after.projection_dirty is True
+    assert authority.promote_mutation(replacement) == promoted
+
+
+def test_sqlite_classifies_an_uncertain_commit_by_reopening_exact_operation_state(
+    tmp_path: Path,
+) -> None:
+    """A post-commit SQLite error returns the proven committed promotion, never retries."""
+    from cacheness.storage.sqlite_lifecycle_authority import SqliteLifecycleAuthority
+
+    authority = SqliteLifecycleAuthority.for_root(tmp_path / "uncertain")
+    prepared = _prepare_verified_mutation(
+        authority,
+        operation_id="uncertain-operation",
+        expected=EntryExpectation.absent(),
+        generation="generation-1",
+        locator="generations/one",
+    )
+    hooks = BoundaryHooks()
+    authority.set_transaction_hook_for_test(hooks.reach)
+    hooks.arm_fault("authority.transaction.committed", sqlite3.OperationalError("uncertain"))
+
+    promoted = authority.promote_mutation(prepared)
+
+    assert promoted.entry.generation == "generation-1"
+    assert authority.read_entry("atomic-key") == promoted.entry
+    assert authority.snapshot_state().mutation_states == (("uncertain-operation", "promoted"),)
+
+
+@pytest.mark.parametrize("adapter", ("memory", "sqlite"))
+def test_complete_clear_reconciliation_and_projection_transitions_use_authority_state(
+    tmp_path: Path, adapter: str
+) -> None:
+    """Both adapters expose real complete-state methods rather than placeholders."""
+    from cacheness.storage.memory_lifecycle_authority import InMemoryLifecycleAuthority
+    from cacheness.storage.sqlite_lifecycle_authority import SqliteLifecycleAuthority
+
+    authority = (
+        InMemoryLifecycleAuthority()
+        if adapter == "memory"
+        else SqliteLifecycleAuthority.for_root(tmp_path / "complete-transitions")
+    )
+    prepared = _prepare_verified_mutation(
+        authority,
+        operation_id="create",
+        expected=EntryExpectation.absent(),
+        generation="generation-1",
+        locator="generations/one",
+    )
+    authority.promote_mutation(prepared)
+
+    clear = authority.begin_clear()
+    assert tuple(entry.key for entry in authority.page_clear(clear)) == ("atomic-key",)
+    authority.checkpoint_clear(clear)
+
+    reconciliation = authority.begin_reconciliation()
+    assert authority.page_reconciliation(reconciliation) == ()
+    authority.checkpoint_reconciliation(reconciliation)
+
+    revision = authority.snapshot_state().revision
+    assert authority.compare_and_mark_projection(None).value == revision
+    assert authority.snapshot_state().projection_dirty is False
