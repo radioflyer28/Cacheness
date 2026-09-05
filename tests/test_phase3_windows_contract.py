@@ -140,10 +140,10 @@ def test_native_windows_phase3_evidence_target_requires_complete_security_proof(
     root = os.environ.get("CACHENESS_PHASE3_WINDOWS_ROOT")
     if not root:
         pytest.fail("CACHENESS_PHASE3_WINDOWS_ROOT must name the pre-provisioned root")
-    if not os.environ.get("CACHENESS_PHASE3_WINDOWS_SECOND_TOKEN_COMMAND"):
+    if not os.environ.get("CACHENESS_PHASE3_WINDOWS_SECOND_TOKEN_COMMAND_JSON"):
         pytest.fail(
-            "CACHENESS_PHASE3_WINDOWS_SECOND_TOKEN_COMMAND must exercise a different "
-            "logon-session or service token"
+            "CACHENESS_PHASE3_WINDOWS_SECOND_TOKEN_COMMAND_JSON must contain a "
+            "different-logon-session or service-token command"
         )
 
     result = _run_phase3_evidence(
