@@ -131,3 +131,41 @@ def test_retained_helpers_have_no_file_native_lock_or_control_authority() -> Non
             "promote_durable_pending_control",
         )
     )
+
+
+def test_blob_store_has_one_authority_and_only_projection_manifest_compatibility() -> None:
+    """Authority lifecycle is exclusive; JSON is a derived export, never a fallback."""
+    storage_root = Path(__file__).parents[1] / "src" / "cacheness" / "storage"
+    blob_store_source = storage_root / "blob_store.py"
+    manifest_repository_source = storage_root / "manifest_repository.py"
+
+    assert _defined_names(manifest_repository_source) == {"JsonProjectionExporter"}
+
+    blob_store_text = blob_store_source.read_text(encoding="utf-8")
+    manifest_repository_text = manifest_repository_source.read_text(encoding="utf-8")
+    assert all(
+        forbidden not in blob_store_text
+        for forbidden in (
+            "_authority_mode",
+            "self.manifest_repository",
+            "ManifestCursor",
+            "ManifestExpectation",
+            "_authority_lifecycle is not None",
+            "_reconciler",
+        )
+    )
+    assert all(
+        forbidden not in manifest_repository_text
+        for forbidden in (
+            "ManifestExpectation",
+            "ManifestCursor",
+            "ManifestRepository",
+            "JsonManifestRepository",
+            "SqliteManifestRepository",
+            "InMemoryManifestRepository",
+            "create_manifest_repository",
+            "JsonBackend",
+            "SqliteBackend",
+            "InMemoryBackend",
+        )
+    )
