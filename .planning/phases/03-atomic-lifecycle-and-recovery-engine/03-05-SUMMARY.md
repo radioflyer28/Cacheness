@@ -140,6 +140,7 @@ status: complete
 
 - The historical `test_clear_translates_authority_listing_failure_without_mutating_data` expects a pre-snapshot `list_entries()` call. Plan 05 explicitly replaces that materialized preflight with an authority transaction and indexed target rows, so that assertion is intentionally incompatible with the delivered contract. The plan's required verifies and the valid Phase 3 authority suite pass.
 - A validation command referenced a non-existent `tests/test_phase3_scheduler_retirement.py`; the existing Phase 3 authority-suite files were run directly instead.
+- The plan's `STOR-05`, `STOR-06`, and `STOR-07` identifiers are not present in the current requirements ledger, so the workflow could not mark corresponding ledger rows complete; no unrelated requirements content was changed.
 
 ## User Setup Required
 
