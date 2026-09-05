@@ -2,12 +2,31 @@
 
 from __future__ import annotations
 
+import json
 import inspect
+import os
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
 from cacheness.error_handling import CacheBlobBackendError, CacheConfigurationError
+
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+EVIDENCE_RUNNER = REPOSITORY_ROOT / "verify_platform.py"
+
+
+def _run_phase3_evidence(*arguments: str) -> subprocess.CompletedProcess[str]:
+    """Run the repository evidence command without relying on a machine path."""
+    return subprocess.run(
+        [sys.executable, str(EVIDENCE_RUNNER), "--phase3", *arguments],
+        cwd=REPOSITORY_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
 
 
 @pytest.mark.parametrize(
@@ -76,3 +95,68 @@ def test_windows_contract_documentation_binds_the_current_logon_sid() -> None:
     assert "Get-Acl" in documentation
     assert "icacls.exe" in documentation
     assert "different session" in documentation.lower()
+
+
+def test_phase3_runner_reports_non_windows_evidence_as_unavailable() -> None:
+    """A non-Windows host cannot silently pass the native security target."""
+    if os.name == "nt":
+        pytest.skip("native Windows has a runnable evidence target")
+
+    result = _run_phase3_evidence(
+        "--require-system",
+        "Windows",
+        "--require-python",
+        f"{sys.version_info.major}.{sys.version_info.minor}",
+    )
+
+    assert result.returncode == 2
+    evidence = json.loads(result.stdout)
+    assert evidence["status"] == "UNAVAILABLE"
+    assert evidence["host"]["system"] != "Windows"
+    assert evidence["python"]["major_minor"] == (
+        f"{sys.version_info.major}.{sys.version_info.minor}"
+    )
+    assert evidence["sqlite"]["journal_mode"] == "delete"
+    assert evidence["sqlite"]["synchronous"] == "extra"
+    assert evidence["topology"]["commit_authority"] == "sqlite"
+    assert evidence["test_target"]["native_windows"] == "UNAVAILABLE"
+    assert "icacls.exe" in evidence["offline_provisioning"]
+
+
+def test_phase3_runner_reports_a_missing_required_python_as_unavailable() -> None:
+    """Interpreter selection failures are blockers instead of passing skips."""
+    result = _run_phase3_evidence("--require-python", "9.9")
+
+    assert result.returncode == 2
+    evidence = json.loads(result.stdout)
+    assert evidence["status"] == "UNAVAILABLE"
+    assert evidence["requirements"]["python"] == "9.9"
+    assert evidence["test_target"]["focused_suite"] == "NOT_RUN"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows evidence target")
+def test_native_windows_phase3_evidence_target_requires_complete_security_proof() -> None:
+    """Native execution cannot pass without the configured cross-token proof."""
+    root = os.environ.get("CACHENESS_PHASE3_WINDOWS_ROOT")
+    if not root:
+        pytest.fail("CACHENESS_PHASE3_WINDOWS_ROOT must name the pre-provisioned root")
+    if not os.environ.get("CACHENESS_PHASE3_WINDOWS_SECOND_TOKEN_COMMAND"):
+        pytest.fail(
+            "CACHENESS_PHASE3_WINDOWS_SECOND_TOKEN_COMMAND must exercise a different "
+            "logon-session or service token"
+        )
+
+    result = _run_phase3_evidence(
+        "--require-system",
+        "Windows",
+        "--require-python",
+        f"{sys.version_info.major}.{sys.version_info.minor}",
+        "--phase3-root",
+        root,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    evidence = json.loads(result.stdout)
+    assert evidence["status"] == "PASS"
+    assert evidence["test_target"]["native_windows"] == "PASS"
+    assert evidence["topology"]["different_token"] == "DENIED"
