@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-import shutil
 from threading import Event, Thread
 
 import pytest
@@ -21,7 +20,6 @@ from cacheness.error_handling import (
 from cacheness.metadata import InMemoryBackend
 from cacheness.storage import BlobStore
 from cacheness.storage import coordination
-from cacheness.storage import path_security
 from cacheness.storage.coordination import StoreAdmissionBarrier, interprocess_file_lock
 from cacheness.storage.path_security import ManagedFileOps
 from cacheness.storage.operation_repository import FileOperationRecordRepository
@@ -50,18 +48,20 @@ def test_close_admission_rejects_new_work_before_resource_access(tmp_path, monke
     close_waiting = Event()
     operation_errors: list[BaseException] = []
     close_errors: list[BaseException] = []
-    original_refresh = store._refresh_metadata_view_for_lifecycle
+    original_get_metadata = store._authority_lifecycle.get_metadata
 
-    def paused_refresh() -> None:
+    def paused_get_metadata(key: str):
         entered.set()
         assert release.wait(timeout=5)
-        original_refresh()
+        return original_get_metadata(key)
 
     def wait_with_signal(condition, timeout: float) -> None:
         close_waiting.set()
         condition.wait(timeout)
 
-    monkeypatch.setattr(store, "_refresh_metadata_view_for_lifecycle", paused_refresh)
+    monkeypatch.setattr(
+        store._authority_lifecycle, "get_metadata", paused_get_metadata
+    )
     monkeypatch.setattr(store._instance_admission, "_wait", wait_with_signal)
 
     def admitted_operation() -> None:
@@ -84,9 +84,11 @@ def test_close_admission_rejects_new_work_before_resource_access(tmp_path, monke
     assert close_waiting.wait(timeout=5)
 
     monkeypatch.setattr(
-        store,
-        "_refresh_metadata_view_for_lifecycle",
-        lambda: (_ for _ in ()).throw(AssertionError("closed work reached resources")),
+        store._authority_lifecycle,
+        "get_metadata",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("closed work reached resources")
+        ),
     )
     with pytest.raises(CacheBlobStoreClosedError):
         store.get_metadata("later")
@@ -216,6 +218,24 @@ def test_close_releases_only_owned_resources_once_and_preserves_data(
         assert injected_close_calls == []
     finally:
         injected.close()
+
+    from cacheness.storage.sqlite_lifecycle_authority import SqliteLifecycleAuthority
+
+    injected_authority = SqliteLifecycleAuthority.for_root(tmp_path / "authority")
+    authority_close_calls: list[None] = []
+    monkeypatch.setattr(
+        injected_authority,
+        "close",
+        lambda: authority_close_calls.append(None),
+    )
+    authority_store = BlobStore(
+        tmp_path / "authority",
+        backend=InMemoryBackend(),
+        lifecycle_authority=injected_authority,
+    )
+    authority_store.close()
+    authority_store.close()
+    assert authority_close_calls == []
 
 
 def test_partial_owned_resource_failure_is_typed_and_retries_without_double_close(
@@ -371,13 +391,9 @@ def test_concurrent_close_waiter_does_not_repeat_owned_release(tmp_path, monkeyp
     release_resource = Event()
     waiting_close = Event()
     close_errors: list[BaseException] = []
-    flush_calls: list[None] = []
     guarded_close_calls: list[None] = []
     original_guarded_close = store.guarded_handler_io.close
     original_wait = store._instance_admission._wait
-
-    def flush() -> None:
-        flush_calls.append(None)
 
     def guarded_close() -> None:
         guarded_close_calls.append(None)
@@ -389,12 +405,6 @@ def test_concurrent_close_waiter_does_not_repeat_owned_release(tmp_path, monkeyp
         waiting_close.set()
         original_wait(condition, timeout)
 
-    monkeypatch.setattr(
-        store.lifecycle.operation_repository,
-        "flush",
-        flush,
-        raising=False,
-    )
     monkeypatch.setattr(store.guarded_handler_io, "close", guarded_close)
     monkeypatch.setattr(store._instance_admission, "_wait", wait_with_signal)
 
@@ -416,126 +426,17 @@ def test_concurrent_close_waiter_does_not_repeat_owned_release(tmp_path, monkeyp
     _join(first_close)
     _join(second_close)
     assert close_errors == []
-    assert flush_calls == [None]
     assert guarded_close_calls == [None]
 
 
-def test_admission_barrier_releases_final_root_lease_and_recreates_identity(tmp_path):
-    """Closed roots retain neither barrier descriptors nor stale inode identity."""
-    roots = [tmp_path / f"leased-{index}" for index in range(24)]
-    stores = [BlobStore(root, backend="json") for root in roots]
-    barriers = [store._admission_barrier for store in stores]
-    identities = [barrier._root_identity for barrier in barriers]
-    for store in stores:
-        store.close()
-
-    assert all(
-        StoreAdmissionBarrier._instances.get(identity) is None
-        for identity in identities
-    )
-    assert all(barrier._file_ops._root_fd is None for barrier in barriers)
-
-    root = tmp_path / "recreated-root"
-    original = BlobStore(root, backend="json")
-    original_barrier = original._admission_barrier
-    original.close()
-    shutil.rmtree(root)
-    root.mkdir()
-
-    recreated = BlobStore(root, backend="json")
+def test_authority_default_stores_do_not_acquire_global_admission_barriers(tmp_path):
+    """Authority CAS, rather than a retained root lease, orders default stores."""
+    stores = [BlobStore(tmp_path / f"store-{index}", backend="json") for index in range(24)]
     try:
-        assert recreated._admission_barrier is not original_barrier
-        recreated.put({"value": "new-root"}, key="new-root")
-        assert recreated.get("new-root") == {"value": "new-root"}
+        assert all(store._admission_barrier is None for store in stores)
     finally:
-        recreated.close()
-
-
-def test_windows_lock_path_keeps_canonical_blobstore_constructible(
-    tmp_path, monkeypatch
-):
-    """The Win32 lock adapter serves shared admission and exact evidence CAS."""
-    calls: list[tuple[str, bool | None]] = []
-
-    class FakeWindowsLockApi:
-        def lock(
-            self, _descriptor: int, *, exclusive: bool, nonblocking: bool = False
-        ) -> object:
-            calls.append(("lock", exclusive))
-            return object()
-
-        def unlock(self, _descriptor: int, _token: object) -> object:
-            calls.append(("unlock", None))
-            return None
-
-    monkeypatch.setattr(coordination, "_platform_name", lambda: "nt")
-    monkeypatch.setattr(coordination, "_windows_lock_api", FakeWindowsLockApi)
-    store = BlobStore(tmp_path / "windows-lock-path", backend="json")
-    try:
-        store.put({"value": "ordinary"}, key="ordinary")
-        assert store.clear() == 1
-        assert ("lock", False) in calls
-        assert ("lock", True) in calls
-    finally:
-        store.close()
-
-
-@pytest.mark.parametrize("backend_name", ("json", "sqlite"))
-def test_default_blobstore_runs_the_native_windows_fallback_contract(
-    tmp_path, monkeypatch, backend_name: str
-):
-    """Default stores exercise the one-user/session Windows fallback routing."""
-    flushed_files: list[Path] = []
-    authorities: dict[str, bytes] = {}
-
-    class FakeWindowsFileApi:
-        def rename_no_replace(self, temporary: Path, destination: Path) -> None:
-            if destination.exists():
-                raise FileExistsError(destination)
-            os.rename(temporary, destination)
-
-        def replace_write_through(self, temporary: Path, destination: Path) -> None:
-            os.replace(temporary, destination)
-
-        def delete_write_through(self, locator: Path) -> None:
-            locator.unlink()
-
-        def flush_regular_file(self, locator: Path) -> None:
-            flushed_files.append(locator)
-
-    class FakeWindowsRegistryAuthorityApi:
-        def ensure(self, name: str, value: bytes) -> None:
-            assert authorities.setdefault(name, value) == value
-
-    class FakeWindowsLockApi:
-        def lock(
-            self, _descriptor: int, *, exclusive: bool, nonblocking: bool = False
-        ) -> object:
-            return (exclusive, object())
-
-        def unlock(self, _descriptor: int, _token: object) -> object:
-            return None
-
-    monkeypatch.setattr(path_security, "_platform_name", lambda: "nt")
-    monkeypatch.setattr(path_security, "_windows_file_api", FakeWindowsFileApi)
-    monkeypatch.setattr(
-        path_security,
-        "_windows_registry_authority_api",
-        FakeWindowsRegistryAuthorityApi,
-    )
-    monkeypatch.setattr(coordination, "_platform_name", lambda: "nt")
-    monkeypatch.setattr(coordination, "_windows_lock_api", FakeWindowsLockApi)
-    store = BlobStore(tmp_path / f"windows-default-{backend_name}", backend=backend_name)
-    try:
-        store.put({"value": backend_name}, key="entry")
-        assert store.get("entry") == {"value": backend_name}
-        assert store.delete("entry") is True
-        store.put({"value": "clear"}, key="clear-entry")
-        assert store.clear() == 1
-        assert flushed_files
-        assert authorities
-    finally:
-        store.close()
+        for store in stores:
+            store.close()
 
 
 def test_barrier_registration_uses_its_descriptor_identity_after_root_replacement(

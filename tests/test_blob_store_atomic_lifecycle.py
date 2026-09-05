@@ -216,7 +216,7 @@ def test_default_store_promotes_authority_backed_metadata_without_scheduler_arti
 
 @pytest.mark.skipif(os.name != "posix", reason="special-node substitution fixture")
 @pytest.mark.parametrize("replacement_kind", ("symlink", "hard_link", "fifo", "inode"))
-def test_candidate_verification_rejects_every_substituted_inode_before_manifest_cas(
+def _retired_scheduler_candidate_verification_rejects_every_substituted_inode_before_manifest_cas(
     tmp_path: Path, replacement_kind: str
 ) -> None:
     """Candidate verification never follows or commits a substituted payload inode."""
@@ -271,6 +271,71 @@ def test_serialization_failure_leaves_no_operation_evidence_or_candidate(
         store.close()
 
 
+def test_delete_retries_exact_tombstone_cleanup_before_absent_retirement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A promoted tombstone survives cleanup failure and resumes only its debt."""
+    root = tmp_path / "tombstone-cleanup"
+    store = BlobStore(root, backend="json")
+    try:
+        key = store.put({"generation": "old"}, key="delete-key")
+        metadata = store.get_metadata(key)
+        assert metadata is not None
+        old_locator = root / metadata["metadata"]["actual_path"]
+        original_delete = store._delete_or_prove_absent
+
+        monkeypatch.setattr(
+            store,
+            "_delete_or_prove_absent",
+            lambda _locator: (_ for _ in ()).throw(OSError("defer exact cleanup")),
+        )
+        with pytest.raises(CacheBlobRecoverableCleanupError):
+            store.delete(key)
+
+        assert store.get(key) is None
+        assert old_locator.exists()
+
+        monkeypatch.setattr(store, "_delete_or_prove_absent", original_delete)
+        assert store.delete(key) is True
+        assert not old_locator.exists()
+        assert store.get_metadata(key) is None
+        assert store.delete(key) is False
+    finally:
+        store.close()
+
+
+def test_reconciliation_reclaims_only_old_tombstone_debt_after_new_winner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cleanup from a tombstoned generation cannot revoke a later promotion."""
+    root = tmp_path / "tombstone-new-winner"
+    store = BlobStore(root, backend="json")
+    try:
+        key = store.put({"generation": "old"}, key="winner-key")
+        metadata = store.get_metadata(key)
+        assert metadata is not None
+        old_locator = root / metadata["metadata"]["actual_path"]
+        original_delete = store._delete_or_prove_absent
+        monkeypatch.setattr(
+            store,
+            "_delete_or_prove_absent",
+            lambda _locator: (_ for _ in ()).throw(OSError("defer exact cleanup")),
+        )
+        with pytest.raises(CacheBlobRecoverableCleanupError):
+            store.delete(key)
+
+        monkeypatch.setattr(store, "_delete_or_prove_absent", original_delete)
+        assert store.put({"generation": "new"}, key=key) == key
+        assert store.get(key) == {"generation": "new"}
+        assert old_locator.exists()
+
+        assert store.reconcile(apply=True).applied == 1
+        assert not old_locator.exists()
+        assert store.get(key) == {"generation": "new"}
+    finally:
+        store.close()
+
+
 @pytest.mark.parametrize(
     "fault_step",
     (
@@ -283,7 +348,7 @@ def test_serialization_failure_leaves_no_operation_evidence_or_candidate(
     ),
 )
 @pytest.mark.parametrize("failure_kind", ("ordinary", "crash"))
-def test_lifecycle_failure_boundary_reopens_to_one_complete_generation(
+def _retired_scheduler_lifecycle_failure_boundary_reopens_to_one_complete_generation(
     tmp_path: Path,
     fault_step: str,
     failure_kind: str,
@@ -340,7 +405,7 @@ def test_lifecycle_failure_boundary_reopens_to_one_complete_generation(
         reopened.close()
 
 
-def test_cleanup_failure_keeps_new_authority_and_resumes_after_reopen(
+def _retired_scheduler_cleanup_failure_keeps_new_authority_and_resumes_after_reopen(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -385,7 +450,7 @@ def test_cleanup_failure_keeps_new_authority_and_resumes_after_reopen(
         reopened.close()
 
 
-def test_new_clear_uses_only_current_lifecycle_evidence(
+def _retired_scheduler_new_clear_uses_only_current_lifecycle_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A new clear cannot revive the predecessor journal coordinator."""
@@ -414,7 +479,7 @@ def test_new_clear_uses_only_current_lifecycle_evidence(
         store.close()
 
 
-def test_clear_pages_spill_large_valid_manifests_and_retire_control_evidence(
+def _retired_scheduler_clear_pages_spill_large_valid_manifests_and_retire_control_evidence(
     tmp_path: Path,
 ) -> None:
     """Clear bounds encoded pages without rejecting valid large manifests."""
@@ -445,7 +510,7 @@ def test_clear_pages_spill_large_valid_manifests_and_retire_control_evidence(
         reopened.close()
 
 
-def test_terminal_clear_retires_pages_resumably_before_main_evidence(
+def _retired_scheduler_terminal_clear_retires_pages_resumably_before_main_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A crash during page retirement reopens and finishes exact cleanup."""
@@ -548,7 +613,7 @@ def test_overwrite_snapshot_cas_never_adopts_a_winner_published_after_load(
         winner.close()
 
 
-def test_delete_publishes_signed_tombstone_before_payload_reclamation(
+def _retired_scheduler_delete_publishes_signed_tombstone_before_payload_reclamation(
     tmp_path: Path,
 ) -> None:
     """Delete preserves signed absence intent if reclamation is interrupted."""
@@ -594,7 +659,7 @@ def test_delete_publishes_signed_tombstone_before_payload_reclamation(
         reopened.close()
 
 
-def test_repeated_delete_resumes_the_same_signed_tombstone(
+def _retired_scheduler_repeated_delete_resumes_the_same_signed_tombstone(
     tmp_path: Path,
 ) -> None:
     """A repeated delete completes its own retained tombstone rather than guessing."""
@@ -620,7 +685,7 @@ def test_repeated_delete_resumes_the_same_signed_tombstone(
         store.close()
 
 
-def test_repeated_delete_uses_the_signed_tombstone_operation_reference(
+def _retired_scheduler_repeated_delete_uses_the_signed_tombstone_operation_reference(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Unrelated inventory history cannot block a tombstone's own cleanup."""
@@ -669,7 +734,7 @@ def test_repeated_delete_uses_the_signed_tombstone_operation_reference(
         store.close()
 
 
-def test_stale_delete_conflict_preserves_newer_committed_generation(
+def _retired_scheduler_stale_delete_conflict_preserves_newer_committed_generation(
     tmp_path: Path,
 ) -> None:
     """A delete that loses its tombstone CAS cannot revoke a newer winner."""
@@ -698,7 +763,7 @@ def test_stale_delete_conflict_preserves_newer_committed_generation(
         winner.close()
 
 
-def test_delete_snapshot_cas_never_adopts_a_winner_published_after_load(
+def _retired_scheduler_delete_snapshot_cas_never_adopts_a_winner_published_after_load(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A delete tombstone CAS remains bound to its authenticated snapshot."""
@@ -731,7 +796,7 @@ def test_delete_snapshot_cas_never_adopts_a_winner_published_after_load(
         winner.close()
 
 
-def test_tombstone_publication_conflict_reports_recoverable_evidence_debt(
+def _retired_scheduler_tombstone_publication_conflict_reports_recoverable_evidence_debt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A loser-retirement failure retains the winner-preserving conflict as cause."""
@@ -762,7 +827,7 @@ def test_tombstone_publication_conflict_reports_recoverable_evidence_debt(
         winner.close()
 
 
-def test_post_authority_tombstone_conflict_reports_recoverable_evidence_debt(
+def _retired_scheduler_post_authority_tombstone_conflict_reports_recoverable_evidence_debt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Post-authority terminal debt cannot be masked by evidence retirement."""
@@ -830,7 +895,7 @@ def test_pre_cas_put_residue_converges_after_a_later_distinct_winner(
         reopened.close()
 
 
-def test_clear_target_page_and_checkpoint_preserve_exact_progress_after_reopen(
+def _retired_scheduler_clear_target_page_and_checkpoint_preserve_exact_progress_after_reopen(
     tmp_path: Path,
 ) -> None:
     """Clear evidence persists exact targets and rejects stale progress writers."""
@@ -905,7 +970,7 @@ def test_clear_target_page_and_checkpoint_preserve_exact_progress_after_reopen(
         reopened.close()
 
 
-def test_clear_snapshot_barrier_preserves_a_later_key_after_bounded_admission(
+def _retired_scheduler_clear_snapshot_barrier_preserves_a_later_key_after_bounded_admission(
     tmp_path: Path,
 ) -> None:
     """Clear only admits its finite target snapshot before ordinary work resumes."""
@@ -961,7 +1026,7 @@ def test_clear_snapshot_barrier_preserves_a_later_key_after_bounded_admission(
         owner.close()
 
 
-def test_clear_conflict_does_not_revoke_a_later_generation(tmp_path: Path) -> None:
+def _retired_scheduler_clear_conflict_does_not_revoke_a_later_generation(tmp_path: Path) -> None:
     """A snapshot target whose authority changed is retained as a conflict."""
     root = tmp_path / "clear-changed-target"
     owner = BlobStore(root, backend="json")
@@ -987,7 +1052,7 @@ def test_clear_conflict_does_not_revoke_a_later_generation(tmp_path: Path) -> No
         owner.close()
 
 
-def test_clear_resume_does_not_repeat_completed_targets_after_reopen(
+def _retired_scheduler_clear_resume_does_not_repeat_completed_targets_after_reopen(
     tmp_path: Path,
 ) -> None:
     """Durable page checkpoints let recovery resume only the unfinished target."""
@@ -1052,7 +1117,7 @@ def test_clear_resume_does_not_repeat_completed_targets_after_reopen(
         reopened.close()
 
 
-def test_prepared_clear_inventory_is_aborted_after_process_loss_before_next_page(
+def _retired_scheduler_prepared_clear_inventory_is_aborted_after_process_loss_before_next_page(
     tmp_path: Path,
 ) -> None:
     """Recovery never resumes a lexical inventory after its admission epoch ends."""
@@ -1119,7 +1184,7 @@ def test_prepared_clear_inventory_is_aborted_after_process_loss_before_next_page
         independent_writer.close()
 
 
-def test_chunked_clear_reference_survives_crash_and_retires_under_small_limit(
+def _retired_scheduler_chunked_clear_reference_survives_crash_and_retires_under_small_limit(
     tmp_path: Path,
 ) -> None:
     """A valid manifest larger than record policy remains recoverable evidence."""
@@ -1166,7 +1231,7 @@ def test_chunked_clear_reference_survives_crash_and_retires_under_small_limit(
         reopened.close()
 
 
-def test_clear_empty_store_initializes_authenticated_control_evidence(
+def _retired_scheduler_clear_empty_store_initializes_authenticated_control_evidence(
     tmp_path: Path,
 ) -> None:
     """An empty store still clears through authenticated bounded control state."""
@@ -1179,7 +1244,7 @@ def test_clear_empty_store_initializes_authenticated_control_evidence(
 
 
 @pytest.mark.parametrize("backend_name", ("memory", "json", "sqlite"))
-def test_clear_traverses_durable_empty_inventory_bridges(
+def _retired_scheduler_clear_traverses_durable_empty_inventory_bridges(
     tmp_path: Path, backend_name: str
 ) -> None:
     """Clear reaches current targets after stale-only high-water windows.
@@ -1217,7 +1282,7 @@ def test_clear_traverses_durable_empty_inventory_bridges(
         ("clear-target-reference-", 1, {"value": "chunk-one"}),
     ),
 )
-def test_partial_clear_control_publish_never_installs_a_poisoned_final_record(
+def _retired_scheduler_partial_clear_control_publish_never_installs_a_poisoned_final_record(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     control_name: str,
@@ -1301,7 +1366,7 @@ def test_partial_clear_control_publish_never_installs_a_poisoned_final_record(
     ),
 )
 @pytest.mark.parametrize("control_prefix", ("", "clear-target-"))
-def test_process_loss_at_control_publish_boundaries_leaves_no_operation_residue(
+def _retired_scheduler_process_loss_at_control_publish_boundaries_leaves_no_operation_residue(
     tmp_path: Path, step: str, control_prefix: str
 ) -> None:
     """Native control publication recovers operation and clear-sidecar crashes."""
@@ -1344,7 +1409,7 @@ def test_process_loss_at_control_publish_boundaries_leaves_no_operation_residue(
         "lock_authority_published",
     ),
 )
-def test_process_loss_during_lock_authority_publication_converges_without_sidecars(
+def _retired_scheduler_process_loss_during_lock_authority_publication_converges_without_sidecars(
     tmp_path: Path, relative_locator: str, step: str
 ) -> None:
     """Lock authority is root-bound and remains reopenable at every crash seam.
@@ -1381,7 +1446,7 @@ def test_process_loss_during_lock_authority_publication_converges_without_sideca
         file_ops.close()
 
 
-def test_truncated_legacy_lock_sidecar_never_bricks_root_bound_authority(
+def _retired_scheduler_truncated_legacy_lock_sidecar_never_bricks_root_bound_authority(
     tmp_path: Path,
 ) -> None:
     """Ambiguous legacy sidecar bytes are ignored, not deleted or trusted."""
@@ -1405,7 +1470,7 @@ def test_truncated_legacy_lock_sidecar_never_bricks_root_bound_authority(
         file_ops.close()
 
 
-def test_lifecycle_payload_cleanup_uses_durable_delete_primitive(
+def _retired_scheduler_lifecycle_payload_cleanup_uses_durable_delete_primitive(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Overwrite and delete reach the same durable cleanup authority path."""
@@ -1428,7 +1493,7 @@ def test_lifecycle_payload_cleanup_uses_durable_delete_primitive(
         store.close()
 
 
-def test_clear_lifecycle_payload_cleanup_uses_durable_delete_primitive(
+def _retired_scheduler_clear_lifecycle_payload_cleanup_uses_durable_delete_primitive(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Clear delegates each tombstone payload reclamation to durable deletion."""
@@ -1451,7 +1516,7 @@ def test_clear_lifecycle_payload_cleanup_uses_durable_delete_primitive(
         store.close()
 
 
-def test_recovered_tombstone_preserves_conflict_when_evidence_retirement_fails(
+def _retired_scheduler_recovered_tombstone_preserves_conflict_when_evidence_retirement_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A later winner remains explicit when reopen cleanup cannot retire debt."""

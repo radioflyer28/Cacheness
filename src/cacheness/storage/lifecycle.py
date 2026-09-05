@@ -66,6 +66,7 @@ class AuthorityLifecycleEngine:
                     "put.candidate_published": "candidate_published",
                     "put.candidate_verified": "candidate_verified",
                     "put.before_promotion": "manifest_publish",
+                    "delete.before_tombstone_promotion": "tombstone_publish",
                     "cleanup.after_payload_delete": "cleanup_completed",
                     "put.cleanup_retired": "evidence_retired",
                 }.get(boundary, boundary)

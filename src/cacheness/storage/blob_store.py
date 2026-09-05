@@ -227,6 +227,7 @@ class BlobStore:
         self.guarded_handler_io = GuardedHandlerIO(self.cache_dir)
         self._owns_backend = False
         self._released_resources = {
+            "authority": False,
             "manifest_repository": False,
             "guarded_handler_io": False,
             "backend": False,
@@ -404,6 +405,12 @@ class BlobStore:
 
     def _close_failed_initialization_resources(self) -> None:
         """Release only resources this incomplete store has taken ownership of."""
+        if self._owns_lifecycle_authority and self.lifecycle_authority is not None:
+            try:
+                self.lifecycle_authority.close()
+                self._released_resources["authority"] = True
+            except Exception:
+                logger.exception("Failed to close internally created lifecycle authority")
         lifecycle = getattr(self, "lifecycle", None)
         operation_repository = getattr(lifecycle, "operation_repository", None)
         operation_close = getattr(operation_repository, "close", None)
@@ -997,8 +1004,9 @@ class BlobStore:
         descriptor is released.
         """
         if self._authority_mode:
-            if self._owns_lifecycle_authority:
+            if self._owns_lifecycle_authority and not self._released_resources["authority"]:
                 self.lifecycle_authority.close()
+                self._released_resources["authority"] = True
             if (
                 self.guarded_handler_io is not None
                 and not self._released_resources["guarded_handler_io"]

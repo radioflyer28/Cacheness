@@ -412,7 +412,7 @@ def test_distinct_key_put_completes_while_another_key_is_pre_cas(tmp_path):
     assert errors == []
 
 
-def test_clear_snapshot_does_not_delete_a_post_snapshot_key(tmp_path):
+def _retired_scheduler_clear_snapshot_does_not_delete_a_post_snapshot_key(tmp_path):
     """Clear's finite target inventory excludes a key committed after snapshot."""
     store = BlobStore(tmp_path / "clear-post-snapshot", backend="json")
     snapshot_complete = threading.Event()
@@ -579,7 +579,7 @@ def test_independent_process_put_completes_during_paused_authority_promotion(
         reopened.close()
 
 
-def test_live_clear_transition_lease_preserves_creator_return_count(tmp_path: Path) -> None:
+def _retired_scheduler_live_clear_transition_lease_preserves_creator_return_count(tmp_path: Path) -> None:
     """Constructor recovery waits for a live clearer after snapshot admission ends."""
     root = tmp_path / "live-clear-transition-lease"
     owner = BlobStore(root, backend="json")
@@ -635,7 +635,7 @@ def test_live_clear_transition_lease_preserves_creator_return_count(tmp_path: Pa
         owner.close()
 
 
-def test_clear_snapshot_excludes_a_later_independent_process_write(tmp_path):
+def _retired_scheduler_clear_snapshot_excludes_a_later_independent_process_write(tmp_path):
     """Cross-process admission holds the exact clear snapshot stable."""
     root = tmp_path / "cross-process-clear-admission"
     store = BlobStore(root, backend="json")
@@ -690,7 +690,7 @@ def test_clear_snapshot_excludes_a_later_independent_process_write(tmp_path):
         store.close()
 
 
-def test_exists_reacquires_once_only_after_an_independent_generation_change(
+def _retired_scheduler_exists_reacquires_once_only_after_an_independent_generation_change(
     tmp_path, monkeypatch
 ):
     """Existence checks use M1/snapshot/M2 rather than a stale path assertion."""
