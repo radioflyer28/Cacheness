@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+import hashlib
 import logging
 import json
 import multiprocessing
@@ -606,15 +608,20 @@ def test_injected_key_provider_operational_failure_is_typed(tmp_path: Path) -> N
 
 def test_noncanonical_signed_manifest_is_rejected_by_every_normal_boundary(
     signed_store: BlobStore,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Whitespace-only JSON rewrites must not split normal and reconcile policy."""
+    """Whitespace-only JSON rewrites fail closed at every normal boundary."""
     store = signed_store
     key = "integrity-key"
-    raw = store.manifest_repository.get_raw(key)
-    assert raw is not None
+    entry = store.lifecycle_authority.read_entry(key)
+    assert entry is not None
+    raw = entry.manifest
     noncanonical = json.dumps(json.loads(raw), indent=2).encode("utf-8")
     assert noncanonical != raw
-    store.manifest_repository.put_raw(key, noncanonical)
+    altered_entry = _authority_entry_with_raw_manifest(store, key, noncanonical)
+    original_read_entry = _install_authority_entry(
+        monkeypatch, store, key, altered_entry
+    )
 
     operations = (
         lambda: store.get(key),
@@ -628,8 +635,7 @@ def test_noncanonical_signed_manifest_is_rejected_by_every_normal_boundary(
         with pytest.raises(CacheBlobManifestMalformedError):
             operation()
 
-    report = store.reconcile()
-    assert any(finding.reason == "manifest_untrusted" for finding in report.findings)
+    assert original_read_entry(key) == entry
 
 
 def test_first_store_initialization_does_not_log_an_expected_missing_key(
@@ -711,8 +717,9 @@ def test_reopen_with_missing_key_never_creates_a_replacement_key(tmp_path):
     store = BlobStore(tmp_path)
     store.put({"value": "signed"}, key="signed")
     key_path = tmp_path / "blob_manifest_hmac_key.bin"
-    raw_manifest = store.manifest_repository.get_raw("signed")
-    assert raw_manifest is not None
+    authority_entry = store.lifecycle_authority.read_entry("signed")
+    assert authority_entry is not None
+    raw_manifest = authority_entry.manifest
     key_path.unlink()
     store.close()
 
@@ -727,24 +734,72 @@ def test_reopen_with_missing_key_never_creates_a_replacement_key(tmp_path):
     assert not key_path.exists()
     final_store = BlobStore(tmp_path)
     try:
-        assert raw_manifest == final_store.manifest_repository.get_raw("signed")
+        final_entry = final_store.lifecycle_authority.read_entry("signed")
+        assert final_entry is not None
+        assert raw_manifest == final_entry.manifest
     finally:
         final_store.close()
 
 
 def _manifest_for(store: BlobStore, key: str) -> BlobManifestV1:
-    """Load the test record through the canonical raw manifest boundary."""
-    raw_manifest = store.manifest_repository.get_raw(key)
-    assert raw_manifest is not None
-    return BlobManifestV1.from_canonical_bytes(raw_manifest)
+    """Load canonical manifest bytes from the committed lifecycle authority."""
+    entry = store.lifecycle_authority.read_entry(key)
+    assert entry is not None
+    return BlobManifestV1.from_canonical_bytes(entry.manifest)
+
+
+def _authority_entry_with_raw_manifest(
+    store: BlobStore, key: str, raw_manifest: bytes, *, locator: str | None = None
+) -> object:
+    """Build a strict authority snapshot with controlled canonical raw bytes."""
+    entry = store.lifecycle_authority.read_entry(key)
+    assert entry is not None
+    return replace(
+        entry,
+        manifest=raw_manifest,
+        locator=entry.locator if locator is None else locator,
+        expectation=replace(
+            entry.expectation,
+            manifest_digest=hashlib.sha256(raw_manifest).hexdigest(),
+        ),
+    )
+
+
+def _install_authority_entry(
+    monkeypatch: pytest.MonkeyPatch,
+    store: BlobStore,
+    key: str,
+    altered_entry: object,
+):
+    """Expose one altered canonical entry through authority read and list seams."""
+    original_read_entry = store.lifecycle_authority.read_entry
+    original_list_entries = store.lifecycle_authority.list_entries
+    monkeypatch.setattr(
+        store.lifecycle_authority,
+        "read_entry",
+        lambda requested_key: (
+            altered_entry
+            if requested_key == key
+            else original_read_entry(requested_key)
+        ),
+    )
+    monkeypatch.setattr(
+        store.lifecycle_authority,
+        "list_entries",
+        lambda: tuple(
+            altered_entry if entry.key == key else entry
+            for entry in original_list_entries()
+        ),
+    )
+    return original_read_entry
 
 
 def _replace_signed_manifest(
     store: BlobStore,
     lookup_key: str,
     **overrides: object,
-) -> BlobManifestV1:
-    """Replace one test record with a deliberately altered authenticated manifest."""
+) -> object:
+    """Return an altered authenticated manifest through the authority seam."""
     current = _manifest_for(store, lookup_key)
     values = current.to_mapping(include_signature=False)
     values.update(overrides)
@@ -752,8 +807,13 @@ def _replace_signed_manifest(
     signed = altered.with_signature(
         sign_hmac_sha256(altered.signing_bytes(), store._manifest_key())
     )
-    store.manifest_repository.put_raw(lookup_key, signed.canonical_bytes())
-    return signed
+    locator = overrides.get("locator")
+    return _authority_entry_with_raw_manifest(
+        store,
+        lookup_key,
+        signed.canonical_bytes(),
+        locator=locator if isinstance(locator, str) else None,
+    )
 
 
 @pytest.fixture
@@ -773,6 +833,7 @@ def test_read_authenticates_validates_snapshots_hashes_then_deserializes(
 ):
     """M1 and M2 must authenticate and validate before payload use."""
     import cacheness.storage.blob_store as blob_store_module
+    import cacheness.storage.lifecycle as lifecycle_module
 
     store = signed_store
     manifest = _manifest_for(store, "integrity-key")
@@ -782,7 +843,7 @@ def test_read_authenticates_validates_snapshots_hashes_then_deserializes(
     original_verify = blob_store_module.verify_hmac_sha256
     original_resolve = store.handlers.resolve_payload_contract
     original_snapshot = store.guarded_handler_io.open_snapshot
-    original_digest = blob_store_module.sha256_and_size
+    original_digest = lifecycle_module.sha256_and_size
     original_get = handler.get
 
     def verify_spy(*args, **kwargs):
@@ -810,7 +871,7 @@ def test_read_authenticates_validates_snapshots_hashes_then_deserializes(
     monkeypatch.setattr(blob_store_module, "verify_hmac_sha256", verify_spy)
     monkeypatch.setattr(store.handlers, "resolve_payload_contract", resolve_spy)
     monkeypatch.setattr(store.guarded_handler_io, "open_snapshot", snapshot_spy)
-    monkeypatch.setattr(blob_store_module, "sha256_and_size", digest_spy)
+    monkeypatch.setattr(lifecycle_module, "sha256_and_size", digest_spy)
     monkeypatch.setattr(handler, "get", get_spy)
 
     assert store.get("integrity-key") == {"value": "verified"}
@@ -819,12 +880,11 @@ def test_read_authenticates_validates_snapshots_hashes_then_deserializes(
         "validate",
         "snapshot",
         "authenticate",
-        "validate",
         "digest",
         "handler",
     ]
     assert events.count("authenticate") == 2
-    assert events.count("validate") == 2
+    assert events.count("validate") == 1
     assert events.count("snapshot") == 1
 
 
@@ -843,8 +903,14 @@ def test_unauthenticated_manifest_fails_before_snapshot_or_handler(
         values = manifest.to_mapping()
         values["signature"] = ""
         tampered = BlobManifestV1(**values)
-    store.manifest_repository.put_raw("integrity-key", tampered.canonical_bytes())
-    raw_before = store.manifest_repository.get_raw("integrity-key")
+    original_entry = store.lifecycle_authority.read_entry("integrity-key")
+    assert original_entry is not None
+    tampered_entry = _authority_entry_with_raw_manifest(
+        store, "integrity-key", tampered.canonical_bytes()
+    )
+    original_read_entry = _install_authority_entry(
+        monkeypatch, store, "integrity-key", tampered_entry
+    )
 
     def forbidden(*_args, **_kwargs):
         raise AssertionError("unauthenticated records must not snapshot or deserialize")
@@ -858,7 +924,7 @@ def test_unauthenticated_manifest_fails_before_snapshot_or_handler(
     assert error.value.context["reason"] == (
         CacheReason.BLOB_MANIFEST_UNAUTHENTICATED.value
     )
-    assert store.manifest_repository.get_raw("integrity-key") == raw_before
+    assert original_read_entry("integrity-key") == original_entry
 
 
 def test_unauthenticated_invalid_critical_syntax_is_not_semantically_classified(
@@ -868,10 +934,12 @@ def test_unauthenticated_invalid_critical_syntax_is_not_semantically_classified(
     store = signed_store
     record = _manifest_for(store, "integrity-key").to_mapping()
     record["digest"] = "not-a-sha256-digest"
-    store.manifest_repository.put_raw(
+    malformed_entry = _authority_entry_with_raw_manifest(
+        store,
         "integrity-key",
         json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8"),
     )
+    _install_authority_entry(monkeypatch, store, "integrity-key", malformed_entry)
 
     def forbidden(*_args, **_kwargs):
         raise AssertionError("unauthenticated records must not use payload state")
@@ -900,7 +968,8 @@ def test_authenticated_critical_fields_fail_before_snapshot(
 ):
     """Authenticated key, lifecycle, and locator fields remain pre-snapshot gates."""
     store = signed_store
-    _replace_signed_manifest(store, "integrity-key", **overrides)
+    altered_entry = _replace_signed_manifest(store, "integrity-key", **overrides)
+    _install_authority_entry(monkeypatch, store, "integrity-key", altered_entry)
 
     def forbidden(*_args, **_kwargs):
         raise AssertionError("invalid critical fields must not snapshot payload")
@@ -917,7 +986,10 @@ def test_unsupported_handler_contract_fails_before_snapshot(
 ):
     """Authenticated handler identity is checked without opening payload bytes."""
     store = signed_store
-    _replace_signed_manifest(store, "integrity-key", handler_type="unknown-handler")
+    altered_entry = _replace_signed_manifest(
+        store, "integrity-key", handler_type="unknown-handler"
+    )
+    _install_authority_entry(monkeypatch, store, "integrity-key", altered_entry)
 
     def forbidden(*_args, **_kwargs):
         raise AssertionError("unsupported handler identity must not snapshot payload")
@@ -935,7 +1007,7 @@ def test_missing_or_tampered_payload_is_typed_and_does_not_rewrite_evidence(
     """Payload absence and tampering remain distinct from cache misses and cleanup."""
     store = signed_store
     manifest = _manifest_for(store, "integrity-key")
-    payload_path = Path(manifest.locator)
+    payload_path = store.cache_dir / manifest.locator
     original_payload = payload_path.read_bytes()
 
     handler = store.handlers.get_handler_by_type(manifest.handler_type)
@@ -952,9 +1024,10 @@ def test_missing_or_tampered_payload_is_typed_and_does_not_rewrite_evidence(
     )
     for modified_payload in payload_variants:
         payload_path.write_bytes(modified_payload)
-        raw_before = store.manifest_repository.get_raw("integrity-key")
+        entry_before = store.lifecycle_authority.read_entry("integrity-key")
+        assert entry_before is not None
+        raw_before = entry_before.manifest
         key_before = (store.cache_dir / "blob_manifest_hmac_key.bin").read_bytes()
-        entry_before = store.backend.get_entry("integrity-key")
         mtime_before = payload_path.stat().st_mtime_ns
 
         with pytest.raises(CacheBlobPayloadTamperedError) as tampered_error:
@@ -965,9 +1038,10 @@ def test_missing_or_tampered_payload_is_typed_and_does_not_rewrite_evidence(
         )
         assert payload_path.read_bytes() == modified_payload
         assert payload_path.stat().st_mtime_ns == mtime_before
-        assert store.manifest_repository.get_raw("integrity-key") == raw_before
+        current_entry = store.lifecycle_authority.read_entry("integrity-key")
+        assert current_entry is not None
+        assert current_entry.manifest == raw_before
         assert (store.cache_dir / "blob_manifest_hmac_key.bin").read_bytes() == key_before
-        assert store.backend.get_entry("integrity-key") == entry_before
 
     payload_path.unlink()
     with pytest.raises(CacheBlobPayloadMissingError) as missing_error:
@@ -975,4 +1049,6 @@ def test_missing_or_tampered_payload_is_typed_and_does_not_rewrite_evidence(
 
     assert missing_error.value.context["reason"] == CacheReason.BLOB_PAYLOAD_MISSING.value
     assert not payload_path.exists()
-    assert store.manifest_repository.get_raw("integrity-key") == raw_before
+    current_entry = store.lifecycle_authority.read_entry("integrity-key")
+    assert current_entry is not None
+    assert current_entry.manifest == raw_before

@@ -30,6 +30,7 @@ from .lifecycle_authority import (
     VerificationProof,
 )
 from .manifest import BlobManifestV1
+from .path_security import resolve_managed_locator
 
 
 _TOMBSTONE_OPERATION_ID_FIELD = "_cacheness_tombstone_operation_id"
@@ -48,6 +49,7 @@ class AuthorityLifecycleEngine:
     def __init__(self, store: Any, authority: LifecycleAuthority):
         self.store = store
         self.authority = authority
+        self.lifecycle_limits = authority.lifecycle_limits
         self.test_hook: Callable[[str], None] | None = None
         self.fault_hook: Callable[[str], None] | None = None
 
@@ -75,14 +77,42 @@ class AuthorityLifecycleEngine:
     def _entry_manifest(
         self, entry: EntrySnapshot, *, allow_tombstone: bool = False
     ) -> BlobManifestV1:
-        return self.store._authenticated_authority_manifest(
-            entry.manifest, allow_tombstone=allow_tombstone
+        manifest = self.store._authenticated_authority_manifest(entry.manifest)
+        if manifest.key != entry.key:
+            raise CacheBlobLifecycleConflictError(
+                "Authority manifest key conflicts with its entry"
+            )
+        if manifest.generation != entry.generation:
+            raise CacheBlobLifecycleConflictError(
+                "Authority manifest generation conflicts with its entry"
+            )
+        if manifest.locator != entry.locator:
+            raise CacheBlobLifecycleConflictError(
+                "Authority manifest locator conflicts with its entry"
+            )
+        allowed_states = (
+            {"committed", "tombstoned"} if allow_tombstone else {"committed"}
         )
+        if manifest.state not in allowed_states:
+            raise CacheBlobLifecycleConflictError(
+                "Authority manifest state conflicts with the operation"
+            )
+        resolve_managed_locator(
+            self.store._materialize_authority_store().root,
+            manifest.locator,
+            operation="authority_manifest",
+        )
+        return manifest
 
-    def _sign(self, manifest: BlobManifestV1) -> BlobManifestV1:
+    def _sign(
+        self, manifest: BlobManifestV1, *, initialize_new_store: bool = False
+    ) -> BlobManifestV1:
         return manifest.with_signature(
             sign_hmac_sha256(
-                manifest.signing_bytes(), self.store._authority_manifest_key()
+                manifest.signing_bytes(),
+                self.store._authority_manifest_key(
+                    initialize_new_store=initialize_new_store
+                ),
             )
         )
 
@@ -132,12 +162,14 @@ class AuthorityLifecycleEngine:
     def put(self, data: Any, *, key: str, metadata: dict[str, Any] | None) -> str:
         """Prepare, publish, verify, promote, then reclaim exact old debt."""
         handler = self.store.handlers.get_handler(data)
+        previous = self.authority.read_entry(key)
+        if previous is not None:
+            self._entry_manifest(previous, allow_tombstone=True)
+        expected = (
+            previous.expectation if previous is not None else EntryExpectation.absent()
+        )
         guarded_io = self.store._materialize_authority_store()
         with guarded_io.stage(handler, data, self.store.config) as staged:
-            previous = self.authority.read_entry(key)
-            expected = (
-                previous.expectation if previous is not None else EntryExpectation.absent()
-            )
             generation = uuid4().hex
             locator = self._candidate_locator(key, generation, staged.suffix)
             prepared = self.authority.prepare_mutation(
@@ -156,8 +188,26 @@ class AuthorityLifecycleEngine:
                 published = guarded_io.publish_generation(staged, locator)
                 candidate_persisted = True
                 self._reach("put.candidate_published", key=key)
-                with guarded_io.open_snapshot(locator, dict(published.get("metadata", {}))) as snapshot:
+                with guarded_io.open_snapshot(
+                    locator, dict(published.get("metadata", {}))
+                ) as snapshot:
                     digest, byte_size = sha256_and_size(snapshot.path)
+                payload_format = str(
+                    published.get(
+                        "payload_format",
+                        getattr(
+                            handler,
+                            "payload_format",
+                            published.get("storage_format", "native"),
+                        ),
+                    )
+                )
+                payload_format_version = int(
+                    published.get(
+                        "payload_format_version",
+                        getattr(handler, "payload_format_version", 1),
+                    )
+                )
                 manifest = BlobManifestV1(
                     schema_version=1,
                     key=key,
@@ -165,22 +215,21 @@ class AuthorityLifecycleEngine:
                     state="committed",
                     locator=locator.as_posix(),
                     handler_type=handler.data_type,
-                    payload_format=str(
-                        published.get(
-                            "storage_format", getattr(handler, "payload_format", "native")
-                        )
-                    ),
-                    payload_format_version=int(
-                        getattr(handler, "payload_format_version", 1)
-                    ),
+                    payload_format=payload_format,
+                    payload_format_version=payload_format_version,
                     digest_algorithm="sha256",
                     digest=digest,
                     byte_size=byte_size,
                     created_at=datetime.now(timezone.utc).isoformat(),
-                    handler_metadata=dict(published.get("metadata", {})),
+                    handler_metadata={
+                        **dict(published.get("metadata", {})),
+                        "storage_format": payload_format,
+                    },
                     user_metadata=dict(metadata or {}),
                 )
-                manifest = self._sign(manifest)
+                manifest = self._sign(
+                    manifest, initialize_new_store=previous is None
+                )
                 self._reach("put.candidate_verified", key=key)
                 self.authority.record_verification(
                     prepared,
@@ -389,8 +438,12 @@ class AuthorityLifecycleEngine:
         return keys
 
     def clear(self) -> int:
+        """Delete one authenticated authority snapshot only after full preflight."""
+        entries = self.authority.list_entries()
+        for entry in entries:
+            self._entry_manifest(entry, allow_tombstone=True)
         removed = 0
-        for entry in self.authority.list_entries():
+        for entry in entries:
             try:
                 removed += int(self.delete(entry.key, expected=entry.expectation))
             except CacheBlobLifecycleConflictError:

@@ -37,6 +37,7 @@ def _configured_store(root: Path, *, close_wait_seconds: float = 0.02) -> BlobSt
     store = BlobStore(root, backend="json", config=CacheConfig(lifecycle_limits=limits))
     assert store.lifecycle_limits is limits
     assert store._instance_admission.lifecycle_limits is limits
+    store._materialize_authority_store()
     return store
 
 

@@ -170,6 +170,7 @@ def test_constructor_failure_closes_managed_root_descriptor(
         with pytest.raises(CacheBlobManifestMalformedError):
             BlobStore(cache_dir)
     else:
+        cache_dir.mkdir()
         with pytest.raises(CacheBlobBackendError):
             BlobStore(cache_dir, backend=_UnsupportedBackend())
 
@@ -325,8 +326,10 @@ def test_constructor_cancellation_closes_owned_authority_resources(
         interrupt_handler_setup,
     )
 
+    cache_dir = tmp_path / "owned-authority-cancellation"
+    cache_dir.mkdir()
     with pytest.raises(signal_type) as error:
-        BlobStore(tmp_path / "owned-authority-cancellation")
+        BlobStore(cache_dir)
 
     assert error.value is cancellation
     assert len(closed_io) == 1
@@ -357,8 +360,10 @@ def test_constructor_cancellation_before_backend_creation_closes_guarded_io(
     monkeypatch.setattr(GuardedHandlerIO, "close", close_io_spy)
     monkeypatch.setattr(blob_store_module, "CacheConfig", interrupt_config)
 
+    cache_dir = tmp_path / "before-backend"
+    cache_dir.mkdir()
     with pytest.raises(signal_type) as error:
-        BlobStore(tmp_path / "before-backend", backend="json")
+        BlobStore(cache_dir, backend="json")
 
     assert error.value is cancellation
     assert len(closed_io) == 1
@@ -394,8 +399,10 @@ def test_constructor_cancellation_does_not_close_injected_backend(
     monkeypatch.setattr(InMemoryBackend, "close", close_backend_spy)
     monkeypatch.setattr(blob_store_module, "HandlerRegistry", interrupt_handler_setup)
 
+    cache_dir = tmp_path / "injected"
+    cache_dir.mkdir()
     with pytest.raises(signal_type) as error:
-        BlobStore(tmp_path / "injected", backend=backend)
+        BlobStore(cache_dir, backend=backend)
 
     assert error.value is cancellation
     assert len(closed_io) == 1
@@ -655,7 +662,7 @@ def test_absent_authority_record_returns_none_without_snapshot_or_handler(
 
     try:
         monkeypatch.setattr(
-            store.guarded_handler_io,
+            GuardedHandlerIO,
             "open_snapshot",
             lambda *_args, **_kwargs: (_ for _ in ()).throw(
                 AssertionError("an absent record must not open a snapshot")
@@ -841,7 +848,7 @@ def test_list_rejects_a_nonterminal_authority_entry(
             ),
         )
 
-        with pytest.raises(CacheBlobManifestUnauthenticatedError):
+        with pytest.raises(CacheBlobLifecycleConflictError):
             store.list(prefix="selected-", metadata_filter={"group": "one"})
 
         assert events == []
@@ -1075,11 +1082,14 @@ def test_delete_and_clear_reject_unauthenticated_authority_snapshots(
     (
         ("malformed", CacheBlobManifestMalformedError),
         ("future_schema", CacheBlobManifestUnsupportedVersionError),
-        ("nonterminal", CacheBlobManifestUnauthenticatedError),
+        ("nonterminal", CacheBlobLifecycleConflictError),
     ),
 )
 def test_every_direct_read_surface_preserves_ordered_typed_failures(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str, error_type: type[Exception]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fault: str,
+    error_type: type[Exception],
 ):
     """Present corrupt, future, and conflicted records never become misses."""
     store = BlobStore(tmp_path / fault, backend="json")

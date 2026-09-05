@@ -223,8 +223,9 @@ class BlobStore:
         self._authority_mode = True
         self._owns_lifecycle_authority = lifecycle_authority is None
         self.lifecycle_authority = lifecycle_authority
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self.guarded_handler_io = GuardedHandlerIO(self.cache_dir)
+        self.guarded_handler_io = (
+            GuardedHandlerIO(self.cache_dir) if self.cache_dir.is_dir() else None
+        )
         self._owns_backend = False
         self._released_resources = {
             "authority": False,
@@ -1065,6 +1066,7 @@ class BlobStore:
     def _materialize_authority_store(self) -> GuardedHandlerIO:
         """Open payload I/O only after authority has created or validated its root."""
         if self.guarded_handler_io is None:
+            self.cache_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
             self.guarded_handler_io = GuardedHandlerIO(self.cache_dir)
         return self.guarded_handler_io
 
@@ -1073,40 +1075,48 @@ class BlobStore:
         """Return the explicit absence token used by authority preparation."""
         return EntryExpectation.absent()
 
-    def _authority_manifest_key(self) -> bytes:
+    def _authority_manifest_key(self, *, initialize_new_store: bool = False) -> bytes:
         """Initialize the persistent key only after authority intent commits."""
+        key_context = {
+            "operation": (
+                "initialize_manifest_key"
+                if initialize_new_store
+                else "get_manifest_key"
+            ),
+            "provider": type(self._manifest_key_provider).__name__,
+        }
+        initialize_or_get = getattr(
+            self._manifest_key_provider,
+            "get_or_initialize_new_store",
+            None,
+        )
         try:
-            key = self._manifest_key_provider.get_key()
-        except ManifestKeyError:
-            initializer = getattr(
-                self._manifest_key_provider,
-                "initialize_new_store",
-                None,
-            )
-            if not callable(initializer):
-                raise CacheBlobManifestUnauthenticatedError(
-                    "Canonical BlobStore signing key is unavailable",
-                    context={"operation": "authority_manifest_key"},
-                    reason=CacheReason.MANIFEST_SIGNING_KEY_INVALID,
-                ) from None
-            try:
-                key = initializer()
-            except Exception as exc:
-                raise CacheBlobManifestUnauthenticatedError(
-                    "Canonical BlobStore signing key is unavailable",
-                    context={"operation": "authority_manifest_key"},
-                    reason=CacheReason.MANIFEST_SIGNING_KEY_INVALID,
-                ) from exc
+            if initialize_new_store and callable(initialize_or_get):
+                key = initialize_or_get()
+            else:
+                try:
+                    key = self._manifest_key_provider.get_key()
+                except ManifestKeyError:
+                    if not initialize_new_store:
+                        raise
+                    initializer = getattr(
+                        self._manifest_key_provider,
+                        "initialize_new_store",
+                        None,
+                    )
+                    if not callable(initializer):
+                        raise
+                    key = initializer()
         except Exception as exc:
             raise CacheBlobManifestUnauthenticatedError(
                 "Canonical BlobStore signing key is unavailable",
-                context={"operation": "authority_manifest_key"},
+                context=key_context,
                 reason=CacheReason.MANIFEST_SIGNING_KEY_INVALID,
             ) from exc
         if type(key) is not bytes or len(key) != 32:
             raise CacheBlobManifestUnauthenticatedError(
                 "Canonical BlobStore signing key is invalid",
-                context={"operation": "authority_manifest_key"},
+                context=key_context,
                 reason=CacheReason.MANIFEST_SIGNING_KEY_INVALID,
             )
         return key
@@ -1116,20 +1126,31 @@ class BlobStore:
     ) -> BlobManifestV1:
         """Authenticate authority-owned canonical bytes before trusting locators."""
         try:
-            manifest = BlobManifestV1.from_canonical_bytes(raw)
+            raw_record = decode_canonical_manifest_record(raw)
         except CacheManifestUnsupportedVersionError as exc:
             raise CacheBlobManifestUnsupportedVersionError(
                 "Authority manifest schema version is unsupported"
             ) from exc
         except CacheManifestIntegrityError as exc:
             raise CacheBlobManifestMalformedError("Authority manifest is malformed") from exc
-        allowed_states = {"committed", "tombstoned"} if allow_tombstone else {"committed"}
-        if manifest.state not in allowed_states or not verify_hmac_sha256(
-            manifest.signing_bytes(), manifest.signature, self._authority_manifest_key()
+        if not verify_hmac_sha256(
+            canonical_signing_bytes_from_record(raw_record),
+            raw_record.get("signature"),
+            self._authority_manifest_key(),
         ):
             raise CacheBlobManifestUnauthenticatedError(
                 "Authority manifest cannot be authenticated"
             )
+        try:
+            manifest = BlobManifestV1.from_mapping(raw_record)
+        except CacheManifestUnsupportedVersionError as exc:
+            raise CacheBlobManifestUnsupportedVersionError(
+                "Authority manifest schema version is unsupported"
+            ) from exc
+        except CacheManifestIntegrityError as exc:
+            raise CacheBlobManifestMalformedError("Authority manifest is malformed") from exc
+        if manifest.canonical_bytes() != raw:
+            raise CacheBlobManifestMalformedError("Authority manifest is not canonical")
         return manifest
 
     def _authority_get(self, key: str) -> Optional[Any]:

@@ -329,9 +329,9 @@ def test_custom_handler_round_trips_with_declared_default_payload_contract(
 
     try:
         key = store.put("custom payload", key="custom-key")
-        manifest = BlobManifestV1.from_canonical_bytes(
-            store.manifest_repository.get_raw(key) or b""
-        )
+        entry = store.lifecycle_authority.read_entry(key)
+        assert entry is not None
+        manifest = BlobManifestV1.from_canonical_bytes(entry.manifest)
 
         assert (manifest.payload_format, manifest.payload_format_version) == (
             custom_handler.payload_format,

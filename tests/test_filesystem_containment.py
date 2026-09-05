@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+import hashlib
 import os
 import shutil
 import socket
@@ -408,7 +410,12 @@ def test_managed_reads_reject_special_nodes_before_they_can_block(
         original_directory = Path.cwd()
         try:
             os.chdir(root)
-            socket_handle.bind(locator.name)
+            try:
+                socket_handle.bind(locator.name)
+            except PermissionError:
+                socket_handle.close()
+                socket_handle = None
+                pytest.skip("AF_UNIX socket creation is unavailable in this sandbox")
         finally:
             os.chdir(original_directory)
     else:
@@ -560,9 +567,10 @@ def _format_handlers() -> tuple[_FormatHandler, _FormatHandler]:
 
 
 def _payloads_for_key(store: BlobStore, key: str) -> list[Path]:
-    """Return all managed payloads sharing a logical key's physical base."""
+    """Return immutable authority-generation payloads for one logical key."""
     storage_id = store._storage_id_for_key(key)
-    return sorted(store.cache_dir.glob(f"{storage_id}*"))
+    generation_dir = store.cache_dir / "generations" / storage_id
+    return sorted(generation_dir.glob("*")) if generation_dir.exists() else []
 
 
 def _is_descendant(path: Path, root: Path) -> bool:
@@ -609,7 +617,7 @@ def test_blob_store_keeps_logical_key_while_handlers_only_see_private_paths(tmp_
         assert all(not _is_descendant(path, root) for path in handler.put_paths)
         assert all(not _is_descendant(path, root) for path in handler.get_paths)
         assert all(handler.get_paths_alive)
-        actual_path = Path(entry["metadata"]["actual_path"])
+        actual_path = store.cache_dir / entry["metadata"]["actual_path"]
         assert _is_descendant(actual_path, root)
         assert logical_key not in str(actual_path)
     finally:
@@ -628,22 +636,23 @@ def test_blob_store_first_write_authority_conflict_removes_candidate(
     store = BlobStore(root)
     store.handlers = registry
 
-    def reject_authority_publish(*_args: Any, **_kwargs: Any) -> None:
-        raise CacheBlobLifecycleConflictError("authority publish lost")
+    def reject_authority_promotion(*_args: Any, **_kwargs: Any) -> None:
+        raise CacheBlobLifecycleConflictError("authority promotion lost")
 
     try:
         monkeypatch.setattr(
-            store.manifest_repository,
-            "publish_if_expected",
-            reject_authority_publish,
+            store.lifecycle_authority,
+            "promote_mutation",
+            reject_authority_promotion,
         )
 
-        with pytest.raises(CacheBlobLifecycleConflictError, match="authority publish lost"):
+        with pytest.raises(CacheBlobLifecycleConflictError, match="authority promotion lost"):
             store.put("replacement", key="first-write")
 
         assert store.get_metadata("first-write") is None
         assert _payloads_for_key(store, "first-write") == []
-        assert not list((root / "operations").glob("*.json"))
+        assert store.lifecycle_authority.pending_mutations() == ()
+        assert store.lifecycle_authority.pending_cleanup_debts() == ()
     finally:
         store.close()
 
@@ -663,14 +672,14 @@ def test_blob_store_cross_format_authority_conflict_preserves_prior_evidence(
         "handler_compression": old_handler.compression,
     }
 
-    def reject_authority_publish(*_args: Any, **_kwargs: Any) -> None:
-        raise CacheBlobLifecycleConflictError("authority publish lost")
+    def reject_authority_promotion(*_args: Any, **_kwargs: Any) -> None:
+        raise CacheBlobLifecycleConflictError("authority promotion lost")
 
     try:
         store.put("old value", key=key, metadata=initial_metadata)
         entry_before = deepcopy(store.get_metadata(key))
         assert entry_before is not None
-        old_path = Path(entry_before["metadata"]["actual_path"])
+        old_path = root / entry_before["metadata"]["actual_path"]
         old_bytes = old_path.read_bytes()
         assert old_path.suffix == old_handler.suffix
         assert entry_before["data_type"] == old_handler.data_type
@@ -683,12 +692,12 @@ def test_blob_store_cross_format_authority_conflict_preserves_prior_evidence(
 
         registry.current = replacement_handler
         monkeypatch.setattr(
-            store.manifest_repository,
-            "publish_if_expected",
-            reject_authority_publish,
+            store.lifecycle_authority,
+            "promote_mutation",
+            reject_authority_promotion,
         )
 
-        with pytest.raises(CacheBlobLifecycleConflictError, match="authority publish lost"):
+        with pytest.raises(CacheBlobLifecycleConflictError, match="authority promotion lost"):
             store.put(
                 "replacement value",
                 key=key,
@@ -702,7 +711,7 @@ def test_blob_store_cross_format_authority_conflict_preserves_prior_evidence(
         assert old_path.read_bytes() == old_bytes
         assert _payloads_for_key(store, key) == [old_path]
         assert store.get(key) == "old value"
-        assert not list((root / "operations").glob("*.json"))
+        assert store.lifecycle_authority.pending_mutations() == ()
     finally:
         store.close()
 
@@ -718,40 +727,38 @@ def test_blob_store_candidate_cleanup_failure_is_explicit_and_chained(
     store.handlers = _SwitchingHandlerRegistry(handler)
     cleanup_attempts: list[Path] = []
 
-    def reject_authority_publish(*_args: Any, **_kwargs: Any) -> None:
-        raise CacheBlobLifecycleConflictError("authority publish lost")
+    def reject_authority_promotion(*_args: Any, **_kwargs: Any) -> None:
+        raise CacheBlobLifecycleConflictError("authority promotion lost")
 
-    def cannot_prove_cleanup(locator: Path | str) -> bool:
+    def cannot_prove_cleanup(locator: Path) -> None:
         cleanup_attempts.append(Path(locator))
         if cleanup_outcome == "raise":
             raise OSError("candidate cleanup unavailable")
-        return False
+        raise CacheStorageError("candidate cleanup could not be proved")
 
     try:
         monkeypatch.setattr(
-            store.manifest_repository,
-            "publish_if_expected",
-            reject_authority_publish,
+            store.lifecycle_authority,
+            "promote_mutation",
+            reject_authority_promotion,
         )
         monkeypatch.setattr(
-            store.guarded_handler_io.file_ops,
-            "delete",
+            store,
+            "_delete_or_prove_absent",
             cannot_prove_cleanup,
         )
 
         with pytest.raises(CacheBlobRecoverableCleanupError) as exc_info:
             store.put("replacement", key="cleanup-proof")
 
-        assert exc_info.value.context["key"] == "cleanup-proof"
         assert exc_info.value.context["operation_id"]
         assert len(cleanup_attempts) == 1
         assert store.get_metadata("cleanup-proof") is None
         candidates = _payloads_for_key(store, "cleanup-proof")
         assert len(candidates) == 1
-        assert "-generation-" in candidates[0].name
-        records = list(store.lifecycle.operation_repository.iter_raw())
-        assert len(records) == 1
-        assert str(candidates[0].relative_to(root)).encode() in records[0][1]
+        debt = store.lifecycle_authority.pending_cleanup_debts()
+        assert len(debt) == 1
+        assert debt[0].locator == candidates[0].relative_to(root).as_posix()
     finally:
         store.close()
 
@@ -771,18 +778,19 @@ def test_blob_store_post_commit_prior_cleanup_keeps_new_metadata_authoritative(
         store.put("old value", key=key)
         entry_before = store.get_metadata(key)
         assert entry_before is not None
-        old_path = Path(entry_before["metadata"]["actual_path"])
-        delete = store.guarded_handler_io.file_ops.delete
+        old_locator = Path(entry_before["metadata"]["actual_path"])
+        old_path = root / old_locator
+        delete_or_prove_absent = store._delete_or_prove_absent
 
-        def fail_old_payload_cleanup(locator: Path | str) -> bool:
-            if Path(locator) == old_path:
-                return False
-            return delete(locator)
+        def fail_old_payload_cleanup(locator: Path) -> None:
+            if locator == old_locator:
+                raise CacheStorageError("old payload cleanup unavailable")
+            delete_or_prove_absent(locator)
 
         registry.current = replacement_handler
         monkeypatch.setattr(
-            store.guarded_handler_io.file_ops,
-            "delete",
+            store,
+            "_delete_or_prove_absent",
             fail_old_payload_cleanup,
         )
 
@@ -791,7 +799,7 @@ def test_blob_store_post_commit_prior_cleanup_keeps_new_metadata_authoritative(
 
         entry_after = store.get_metadata(key)
         assert entry_after is not None
-        new_path = Path(entry_after["metadata"]["actual_path"])
+        new_path = root / entry_after["metadata"]["actual_path"]
         assert entry_after["data_type"] == replacement_handler.data_type
         assert entry_after["metadata"]["storage_format"] == replacement_handler.storage_format
         assert new_path != old_path
@@ -813,7 +821,7 @@ def test_blob_store_clear_removes_guarded_payloads_before_metadata(tmp_path):
         first_key = store.put("first", key="first")
         second_key = store.put("second", key="second")
         payload_paths = [
-            Path(store.get_metadata(key)["metadata"]["actual_path"])
+            root / store.get_metadata(key)["metadata"]["actual_path"]
             for key in (first_key, second_key)
         ]
 
@@ -844,7 +852,7 @@ def test_blob_store_clear_keeps_tombstone_authority_when_reclamation_fails(
         entries_before = [store.get_metadata(key) for key in keys]
         assert all(entry is not None for entry in entries_before)
         payload_paths = [
-            Path(entry["metadata"]["actual_path"])
+            root / entry["metadata"]["actual_path"]
             for entry in entries_before
             if entry is not None
         ]
@@ -853,7 +861,7 @@ def test_blob_store_clear_keeps_tombstone_authority_when_reclamation_fails(
 
         def fail_one_payload_delete(locator):
             nonlocal payload_delete_count
-            if Path(locator) in payload_paths:
+            if root / Path(locator) in payload_paths:
                 payload_delete_count += 1
                 if payload_delete_count == failing_payload_delete:
                     raise RuntimeError("payload delete unavailable")
@@ -868,24 +876,30 @@ def test_blob_store_clear_keeps_tombstone_authority_when_reclamation_fails(
         assert isinstance(error.value.__cause__, CacheBlobRecoverableCleanupError)
         assert isinstance(error.value.__cause__.__cause__, CacheStorageError)
         failed_key = keys[failing_payload_delete - 1]
-        raw_manifest = store.manifest_repository.get_raw(failed_key)
-        assert raw_manifest is not None
-        tombstone = BlobManifestV1.from_canonical_bytes(raw_manifest)
+        entry = store.lifecycle_authority.read_entry(failed_key)
+        assert entry is not None
+        tombstone = BlobManifestV1.from_canonical_bytes(entry.manifest)
         assert tombstone.state == "tombstoned"
         assert tombstone.signature
-        with pytest.raises(CacheBlobLifecycleConflictError):
-            store.get(failed_key)
+        assert store.get(failed_key) is None
         assert payload_paths[failing_payload_delete - 1].exists()
-        assert list(store.lifecycle.operation_repository.iter_raw())
+        assert store.lifecycle_authority.pending_cleanup_debts()
     finally:
         store.close()
 
     assert failed_key is not None
     reopened = BlobStore(root)
+    reopened.handlers = _SingleHandlerRegistry(_InstrumentedHandler())
     try:
-        assert all(reopened.get(key) is None for key in keys)
-        assert all(not path.exists() for path in payload_paths)
-        assert list(reopened.lifecycle.operation_repository.iter_raw()) == []
+        assert reopened.reconcile(apply=True).applied is True
+        assert all(reopened.get(key) is None for key in keys[:failing_payload_delete])
+        assert [reopened.get(key) for key in keys[failing_payload_delete:]] == [
+            "first",
+            "second",
+        ][failing_payload_delete:]
+        assert all(not path.exists() for path in payload_paths[:failing_payload_delete])
+        assert all(path.exists() for path in payload_paths[failing_payload_delete:])
+        assert reopened.lifecycle_authority.pending_cleanup_debts() == ()
     finally:
         reopened.close()
 
@@ -904,7 +918,7 @@ def test_blob_store_clear_does_not_use_metadata_bulk_clear_as_authority(
         entries_before = [store.get_metadata(key) for key in keys]
         assert all(entry is not None for entry in entries_before)
         payload_paths = [
-            Path(entry["metadata"]["actual_path"])
+            root / entry["metadata"]["actual_path"]
             for entry in entries_before
             if entry is not None
         ]
@@ -917,7 +931,7 @@ def test_blob_store_clear_does_not_use_metadata_bulk_clear_as_authority(
         assert all(store.get(key) is None for key in keys)
         assert all(not path.exists() for path in payload_paths)
         assert store.backend.list_entries() == []
-        assert list(store.lifecycle.operation_repository.iter_raw()) == []
+        assert store.lifecycle_authority.list_entries() == ()
     finally:
         store.close()
 
@@ -925,7 +939,7 @@ def test_blob_store_clear_does_not_use_metadata_bulk_clear_as_authority(
 def test_blob_store_clear_pre_authority_fault_preserves_committed_payload(
     tmp_path,
 ):
-    """A pre-tombstone fault retains clear evidence and reopens to deletion."""
+    """A pre-promotion clear fault aborts without revoking the committed entry."""
     root = tmp_path / "blob-root"
     handler = _InstrumentedHandler()
     store = BlobStore(root)
@@ -935,13 +949,13 @@ def test_blob_store_clear_pre_authority_fault_preserves_committed_payload(
         key = store.put("payload", key="entry")
         entry_before = store.get_metadata(key)
         assert entry_before is not None
-        payload_path = Path(entry_before["metadata"]["actual_path"])
+        payload_path = root / entry_before["metadata"]["actual_path"]
         payload_bytes = payload_path.read_bytes()
-        raw_before = store.manifest_repository.get_raw(key)
-        assert raw_before is not None
+        authority_before = store.lifecycle_authority.read_entry(key)
+        assert authority_before is not None
 
-        def interrupt_before_tombstone_authority(seam, _record):
-            if seam == "tombstone_publish":
+        def interrupt_before_tombstone_authority(seam):
+            if seam == "delete.before_tombstone_promotion":
                 raise RuntimeError("tombstone publication unavailable")
 
         store.lifecycle.fault_hook = interrupt_before_tombstone_authority
@@ -951,23 +965,18 @@ def test_blob_store_clear_pre_authority_fault_preserves_committed_payload(
 
         assert store.get_metadata(key) == entry_before
         assert payload_path.read_bytes() == payload_bytes
-        assert store.manifest_repository.get_raw(key) == raw_before
+        assert store.lifecycle_authority.read_entry(key) == authority_before
         assert store.get(key) == "payload"
-        interrupted_records = list(store.lifecycle.operation_repository.iter_raw())
-        assert any(
-            b'"key":"entry"' in raw and b'"transition":"tombstone"' in raw
-            for _operation_id, raw in interrupted_records
-        )
-        assert not list(root.glob("clear-tombstone-*"))
+        assert store.lifecycle_authority.pending_mutations() == ()
+        assert store.lifecycle_authority.pending_cleanup_debts() == ()
     finally:
         store.close()
 
     reopened = BlobStore(root)
     reopened.handlers = _SingleHandlerRegistry(_InstrumentedHandler())
     try:
-        assert reopened.manifest_repository.get_raw(key) is None
-        assert not payload_path.exists()
-        assert reopened.get(key) is None
+        assert reopened.get(key) == "payload"
+        assert payload_path.exists()
     finally:
         reopened.close()
 
@@ -985,20 +994,26 @@ def test_blob_store_clear_records_tombstone_before_current_payload_cleanup_fails
     try:
         keys = [store.put("first", key="first"), store.put("second", key="second")]
         payload_paths = [
-            Path(store.get_metadata(key)["metadata"]["actual_path"])
+            root / store.get_metadata(key)["metadata"]["actual_path"]
             for key in keys
         ]
 
-        def interrupt_post_authority_cleanup(seam, record):
+        def interrupt_post_authority_cleanup(seam):
             nonlocal interrupted_key
-            if seam != "payload_cleanup" or interrupted_key is not None:
+            if seam != "cleanup.before_payload_delete" or interrupted_key is not None:
                 return
-            raw_manifest = store.manifest_repository.get_raw(record.key)
-            assert raw_manifest is not None
-            tombstone = BlobManifestV1.from_canonical_bytes(raw_manifest)
+            entries = store.lifecycle_authority.list_entries()
+            tombstone_entry = next(
+                entry
+                for entry in entries
+                if entry.key in keys
+                and BlobManifestV1.from_canonical_bytes(entry.manifest).state
+                == "tombstoned"
+            )
+            tombstone = BlobManifestV1.from_canonical_bytes(tombstone_entry.manifest)
             assert tombstone.state == "tombstoned"
             assert tombstone.signature
-            interrupted_key = record.key
+            interrupted_key = tombstone_entry.key
             raise RuntimeError("payload cleanup unavailable")
 
         store.lifecycle.fault_hook = interrupt_post_authority_cleanup
@@ -1009,22 +1024,26 @@ def test_blob_store_clear_records_tombstone_before_current_payload_cleanup_fails
         assert error.value.context["operation"] == "clear"
         assert isinstance(error.value.__cause__, CacheBlobRecoverableCleanupError)
         assert interrupted_key is not None
-        with pytest.raises(CacheBlobLifecycleConflictError):
-            store.get(interrupted_key)
+        assert store.get(interrupted_key) is None
         assert payload_paths[keys.index(interrupted_key)].exists()
-        assert list(store.lifecycle.operation_repository.iter_raw())
+        assert store.lifecycle_authority.pending_cleanup_debts()
     finally:
         store.close()
 
     reopened = BlobStore(root)
+    reopened.handlers = _SingleHandlerRegistry(_InstrumentedHandler())
     try:
-        assert all(reopened.get(key) is None for key in keys)
-        assert all(not path.exists() for path in payload_paths)
+        assert reopened.reconcile(apply=True).applied is True
+        assert reopened.get(interrupted_key) is None
+        assert not payload_paths[keys.index(interrupted_key)].exists()
+        pending_key = next(key for key in keys if key != interrupted_key)
+        assert reopened.get(pending_key) == "second"
+        assert payload_paths[keys.index(pending_key)].exists()
     finally:
         reopened.close()
 
 
-def test_persisted_locator_raises_before_deserialization(tmp_path):
+def test_persisted_locator_raises_before_deserialization(tmp_path, monkeypatch):
     """Unsafe persisted locators remain typed errors, not reads or cache misses."""
     outside = tmp_path / "outside"
     outside.write_text("outside", encoding="utf-8")
@@ -1034,25 +1053,34 @@ def test_persisted_locator_raises_before_deserialization(tmp_path):
     store.handlers = _SingleHandlerRegistry(blob_handler)
     try:
         key = store.put("inside", key="safe")
-        entry = store.backend.get_entry(key)
+        entry = store.lifecycle_authority.read_entry(key)
         assert entry is not None
 
-        # BlobStore reads the authenticated canonical manifest, not the legacy
-        # backend projection. Re-sign this trusted fixture so locator containment
-        # is the first rejected boundary rather than manifest integrity.
-        raw_manifest = store.manifest_repository.get_raw(key)
-        assert raw_manifest is not None
-        manifest_data = BlobManifestV1.from_canonical_bytes(raw_manifest).to_mapping()
+        # Inject a re-signed authority entry rather than a projection.  Locator
+        # containment must reject it before a handler sees any payload bytes.
+        manifest_data = BlobManifestV1.from_canonical_bytes(entry.manifest).to_mapping()
         manifest_data["locator"] = str(outside)
         manifest_data.pop("signature")
         unsigned_manifest = BlobManifestV1(**manifest_data)
         tampered_manifest = unsigned_manifest.with_signature(
-            sign_hmac_sha256(unsigned_manifest.signing_bytes(), store._manifest_key())
+            sign_hmac_sha256(
+                unsigned_manifest.signing_bytes(), store._authority_manifest_key()
+            )
         )
-        store.manifest_repository.put_raw(
-            key,
-            tampered_manifest.canonical_bytes(),
-            entry_data=entry,
+        tampered_raw = tampered_manifest.canonical_bytes()
+        tampered_entry = replace(
+            entry,
+            locator=str(outside),
+            manifest=tampered_raw,
+            expectation=replace(
+                entry.expectation,
+                manifest_digest=hashlib.sha256(tampered_raw).hexdigest(),
+            ),
+        )
+        monkeypatch.setattr(
+            store.lifecycle_authority,
+            "read_entry",
+            lambda requested_key: tampered_entry if requested_key == key else None,
         )
 
         with pytest.raises(CacheUnsafePathError):
@@ -1520,8 +1548,8 @@ def test_high_level_handler_io_rejects_untrusted_entries_before_deserialization(
     assert cache.metadata_backend.get_entry(key) is entry
 
 
-def test_high_level_locator_preflight_blocks_multi_entry_mutation(tmp_path):
-    """Legacy projections cannot redirect canonical cleanup outside the root."""
+def test_high_level_locator_preflight_blocks_multi_entry_mutation(tmp_path, monkeypatch):
+    """Unsafe signed authority locators fail closed before multi-entry mutation."""
     outside = tmp_path / "outside"
     outside.write_text("outside", encoding="utf-8")
 
@@ -1531,16 +1559,52 @@ def test_high_level_locator_preflight_blocks_multi_entry_mutation(tmp_path):
     try:
         safe_key = store.put("safe", key="safe")
         unsafe_key = store.put("unsafe", key="unsafe")
-        unsafe_entry = store.backend.get_entry(unsafe_key)
+        unsafe_entry = store.lifecycle_authority.read_entry(unsafe_key)
         assert unsafe_entry is not None
-        unsafe_entry["metadata"]["actual_path"] = str(outside)
-        store.backend.put_entry(unsafe_key, unsafe_entry)
+        manifest_data = BlobManifestV1.from_canonical_bytes(
+            unsafe_entry.manifest
+        ).to_mapping()
+        manifest_data["locator"] = str(outside)
+        manifest_data.pop("signature")
+        unsigned_manifest = BlobManifestV1(**manifest_data)
+        tampered_raw = unsigned_manifest.with_signature(
+            sign_hmac_sha256(
+                unsigned_manifest.signing_bytes(), store._authority_manifest_key()
+            )
+        ).canonical_bytes()
+        tampered_entry = replace(
+            unsafe_entry,
+            locator=str(outside),
+            manifest=tampered_raw,
+            expectation=replace(
+                unsafe_entry.expectation,
+                manifest_digest=hashlib.sha256(tampered_raw).hexdigest(),
+            ),
+        )
+        original_read_entry = store.lifecycle_authority.read_entry
+        original_list_entries = store.lifecycle_authority.list_entries
+        monkeypatch.setattr(
+            store.lifecycle_authority,
+            "read_entry",
+            lambda key: tampered_entry if key == unsafe_key else original_read_entry(key),
+        )
+        monkeypatch.setattr(
+            store.lifecycle_authority,
+            "list_entries",
+            lambda: tuple(
+                tampered_entry if entry.key == unsafe_key else entry
+                for entry in original_list_entries()
+            ),
+        )
 
         with pytest.raises(CacheUnsafePathError):
             store.list()
-        assert store.clear() == 2
-        assert store.get(safe_key) is None
-        assert store.get(unsafe_key) is None
+        with pytest.raises(CacheBlobBackendError) as clear_error:
+            store.clear()
+        assert isinstance(clear_error.value.__cause__, CacheUnsafePathError)
+        assert store.get(safe_key) == "safe"
+        with pytest.raises(CacheUnsafePathError):
+            store.get(unsafe_key)
         assert outside.read_text(encoding="utf-8") == "outside"
     finally:
         store.close()

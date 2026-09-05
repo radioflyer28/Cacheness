@@ -272,20 +272,25 @@ def test_sqlite_publication_rolls_back_both_records_on_raw_write_failure(
 
 
 @pytest.mark.parametrize(
-    ("backend", "expected_repository"),
+    "backend",
     (
-        ("json", JsonManifestRepository),
-        ("sqlite", SqliteManifestRepository),
-        (InMemoryBackend(), InMemoryManifestRepository),
+        "json",
+        "sqlite",
+        InMemoryBackend(),
     ),
 )
-def test_blob_store_selects_the_exact_supported_local_repository(
-    tmp_path: Path, backend, expected_repository
+def test_blob_store_commits_supported_local_projections_to_lifecycle_authority(
+    tmp_path: Path, backend
 ):
-    """BlobStore makes the raw-record boundary concrete for each local identity."""
-    store = BlobStore(tmp_path / expected_repository.__name__, backend=backend)
+    """Supported projections do not replace the authority manifest boundary."""
+    store = BlobStore(tmp_path / str(backend), backend=backend)
     try:
-        assert type(store.manifest_repository) is expected_repository
+        key = store.put("authority payload", key="authority-key")
+        assert store.manifest_repository is None
+        entry = store.lifecycle_authority.read_entry(key)
+        assert entry is not None
+        assert BlobManifestV1.from_canonical_bytes(entry.manifest).key == key
+        assert store.get(key) == "authority payload"
     finally:
         store.close()
 
