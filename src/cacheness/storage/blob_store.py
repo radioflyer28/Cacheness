@@ -81,13 +81,19 @@ from .manifest import (
     decode_canonical_manifest_record,
 )
 from .manifest_repository import (
+    JsonProjectionExporter,
     ManifestCursor,
     ManifestExpectation,
     create_manifest_repository,
 )
 from .legacy_manifest import LegacyManifestIdentity, recognize_legacy_fixture_tree
 from .lifecycle import AuthorityLifecycleEngine
-from .lifecycle_authority import EntryExpectation, LifecycleAuthority
+from .lifecycle_authority import (
+    AuthorityCapabilities,
+    EntryExpectation,
+    LifecycleAuthority,
+)
+from .memory_lifecycle_authority import InMemoryLifecycleAuthority
 from .sqlite_lifecycle_authority import SqliteLifecycleAuthority
 from .path_security import encode_physical_name, resolve_managed_locator
 from .reconciliation import _AuthorityReconciler, _Reconciler, ReconciliationReport
@@ -294,14 +300,29 @@ class BlobStore:
         self._instance_admission = InstanceAdmission(self.lifecycle_limits)
         self._immutable_metadata_patch_fields = _IMMUTABLE_METADATA_PATCH_FIELDS
         if lifecycle_authority is None:
-            lifecycle_authority = SqliteLifecycleAuthority.for_root(
-                self.cache_dir,
-                lifecycle_limits=self.lifecycle_limits,
-                lifecycle_topology=getattr(
-                    self.config,
-                    "lifecycle_topology",
-                    None,
-                ),
+            if backend == "memory":
+                self._validate_authority_capabilities(
+                    InMemoryLifecycleAuthority.capabilities
+                )
+                lifecycle_authority = InMemoryLifecycleAuthority(
+                    lifecycle_limits=self.lifecycle_limits
+                )
+            else:
+                self._validate_authority_capabilities(
+                    SqliteLifecycleAuthority.capabilities
+                )
+                lifecycle_authority = SqliteLifecycleAuthority.for_root(
+                    self.cache_dir,
+                    lifecycle_limits=self.lifecycle_limits,
+                    lifecycle_topology=getattr(
+                        self.config,
+                        "lifecycle_topology",
+                        None,
+                    ),
+                )
+        else:
+            self._validate_authority_capabilities(
+                getattr(lifecycle_authority, "capabilities", None)
             )
         self.lifecycle_authority = lifecycle_authority
         if lifecycle_authority is not None:
@@ -309,9 +330,13 @@ class BlobStore:
             self._key_coordinator = KeyCoordinatorRegistry()
             if type(backend) in {InMemoryBackend, JsonBackend, SqliteBackend}:
                 self.backend = backend
-            elif backend is None or (
-                isinstance(backend, str) and backend in {"json", "sqlite"}
-            ):
+            elif backend == "json":
+                self.backend = JsonBackend(self.cache_dir / "cache_metadata.json")
+                self._owns_backend = True
+            elif backend == "memory":
+                self.backend = InMemoryBackend()
+                self._owns_backend = True
+            elif backend is None or backend == "sqlite":
                 self.backend = InMemoryBackend()
                 self._owns_backend = True
             else:
@@ -329,6 +354,15 @@ class BlobStore:
                 else manifest_key_provider
             )
             self.manifest_repository = None
+            self._projection_exporter = (
+                JsonProjectionExporter(
+                    lifecycle_authority,
+                    self.backend.metadata_file,
+                    page_size=self.lifecycle_limits.manifest_page_size,
+                )
+                if type(self.backend) is JsonBackend
+                else None
+            )
             self.lifecycle = AuthorityLifecycleEngine(self, lifecycle_authority)
             self._reconciler = None
             self._clear_recovery = None
@@ -410,6 +444,52 @@ class BlobStore:
                         self._reconcile_sqlite_manifest_records_after_clear()
             except CacheStorageError as exc:
                 _raise_translated_recovery_failure(self._clear_recovery, exc)
+
+    def _validate_authority_capabilities(
+        self, capabilities: AuthorityCapabilities | object | None
+    ) -> None:
+        """Reject a topology whose selected authority cannot satisfy its claims."""
+        if not isinstance(capabilities, AuthorityCapabilities):
+            raise CacheBlobBackendError(
+                "Lifecycle authority does not declare semantic capabilities",
+                context={"operation": "select_lifecycle_authority"},
+                reason=CacheReason.BLOB_BACKEND_CAPABILITY_UNSUPPORTED,
+            )
+        topology = self.config.lifecycle_topology
+        required = {
+            "durable": topology.durable,
+            "multiprocess": topology.multiprocess,
+            "exact_cas": topology.exact_cas,
+            "indexed_paging": topology.indexed_paging,
+            "projection": topology.projection,
+            "transactional": True,
+        }
+        unavailable = [
+            name
+            for name, requested in required.items()
+            if requested and not getattr(capabilities, name)
+        ]
+        if unavailable:
+            raise CacheBlobBackendError(
+                "Lifecycle authority cannot satisfy requested topology capabilities",
+                context={
+                    "operation": "select_lifecycle_authority",
+                    "unsupported_capabilities": unavailable,
+                },
+                reason=CacheReason.BLOB_BACKEND_CAPABILITY_UNSUPPORTED,
+            )
+
+    def _export_compatible_projection(self) -> None:
+        """Best-effort JSON refresh after a committed authority transition."""
+        if self._projection_exporter is None:
+            return
+        try:
+            self._projection_exporter.export()
+        except (CacheBlobBackendError, CacheBlobLifecycleConflictError) as error:
+            logger.warning(
+                "BlobStore JSON projection remains dirty after authority commit: %s",
+                error,
+            )
 
     def _close_failed_initialization_resources(self) -> None:
         """Release only resources this incomplete store has taken ownership of."""
@@ -501,6 +581,7 @@ class BlobStore:
                 if self._authority_lifecycle is not None
                 else self.lifecycle.put(data, key=blob_key, metadata=metadata)
             )
+        self._export_compatible_projection()
         logger.debug(f"Stored blob {stored_key} through the lifecycle engine")
         return stored_key
     
@@ -614,7 +695,10 @@ class BlobStore:
         """
         self._require_canonical_store()
         if self._authority_lifecycle is not None:
-            return self._authority_lifecycle.update_metadata(key, metadata)
+            updated = self._authority_lifecycle.update_metadata(key, metadata)
+            if updated:
+                self._export_compatible_projection()
+            return updated
         with self._key_coordinator.hold(self._storage_id_for_key(key)):
             if not isinstance(metadata, dict):
                 raise CacheBlobManifestMalformedError(
@@ -669,6 +753,8 @@ class BlobStore:
         self._require_canonical_store()
         with self._key_coordinator.hold(self._storage_id_for_key(key)):
             deleted = self._authority_lifecycle.delete(key=key)
+        if deleted:
+            self._export_compatible_projection()
         if deleted:
             logger.debug(f"Deleted blob {key} through the lifecycle engine")
         return deleted
@@ -829,6 +915,7 @@ class BlobStore:
                     "BlobStore clear lifecycle could not complete",
                     context={"operation": "clear"},
                 ) from exc
+        self._export_compatible_projection()
         logger.debug("Cleared %s BlobStore targets through the lifecycle engine", cleared)
         return cleared
 
@@ -848,13 +935,15 @@ class BlobStore:
         with self._instance_admission.operation():
             self._require_canonical_store()
             if self._authority_lifecycle is not None:
-                return _AuthorityReconciler(
+                report = _AuthorityReconciler(
                     self, lifecycle_limits=self.lifecycle_limits
                 ).reconcile(
                     apply=apply,
                     resume_token=resume_token,
                     now=now,
                 )
+                self._export_compatible_projection()
+                return report
             return self._reconciler.reconcile(
                 apply=apply,
                 resume_token=resume_token,

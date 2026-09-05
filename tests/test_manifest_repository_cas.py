@@ -87,12 +87,10 @@ def test_projection_export_failure_keeps_committed_authority_dirty(
 ) -> None:
     """A derived-output failure never rolls back or marks committed state clean."""
     from cacheness.storage import BlobStore
-    from cacheness.error_handling import CacheBlobBackendError
 
     root = tmp_path / "projection-failure"
     store = BlobStore(root, backend="json")
     try:
-        key = store.put("projection payload", key="projection-key")
         authority = store.lifecycle_authority
         original_replace = manifest_repository_module.os.replace
 
@@ -105,9 +103,7 @@ def test_projection_export_failure_keeps_committed_authority_dirty(
             manifest_repository_module.os, "replace", fail_projection_publish
         )
 
-        with pytest.raises(CacheBlobBackendError, match="projection"):
-            JsonProjectionExporter(authority, root / "cache_metadata.json").export()
-
+        key = store.put("projection payload", key="projection-key")
         assert authority.snapshot_state().projection_dirty is True
         assert store.get(key) == "projection payload"
     finally:
@@ -141,9 +137,9 @@ def test_stale_projection_export_cannot_mark_a_newer_authority_revision_clean(
             exporter.export()
 
         document = json.loads((root / "cache_metadata.json").read_text(encoding="utf-8"))
-        assert document["_cacheness_authority_revision"] == captured_revision
-        assert set(document["entries"]) == {"first"}
-        assert authority.snapshot_state().projection_dirty is True
+        assert document["_cacheness_authority_revision"] == captured_revision + 1
+        assert set(document["entries"]) == {"first", "second"}
+        assert authority.snapshot_state().projection_dirty is False
         assert store.get("second") == "second"
     finally:
         store.close()

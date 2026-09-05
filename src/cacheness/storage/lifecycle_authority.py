@@ -271,6 +271,9 @@ class AuthorityCapabilities:
     durable: bool
     multiprocess: bool
     transactional: bool = True
+    exact_cas: bool = True
+    indexed_paging: bool = True
+    projection: bool = True
 
 
 @runtime_checkable

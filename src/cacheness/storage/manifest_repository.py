@@ -179,6 +179,20 @@ class JsonProjectionExporter:
                 pass
             raise
 
+    @contextmanager
+    def _publish_lock(self):
+        """Serialize derived publication without holding an authority transaction."""
+        lock_path = self.projection_path.with_name(
+            f".{self.projection_path.name}.projection.lock"
+        )
+        with open(lock_path, "a+b") as handle:
+            with interprocess_open_file_lock(
+                handle,
+                exclusive=True,
+                operation="json_projection_publish",
+            ):
+                yield
+
     def export(self) -> ProjectionRevision:
         """Atomically publish a snapshot and clean only its exact revision."""
         backup = getattr(self.authority, "projection_backup", None)
@@ -191,10 +205,14 @@ class JsonProjectionExporter:
         try:
             with backup() as snapshot:
                 candidate = self._write_snapshot(snapshot.path, snapshot.revision)
-            os.replace(candidate, self.projection_path)
-            self._fsync_directory(self.projection_path)
-            candidate = None
-            return self.authority.compare_and_mark_projection(snapshot.revision)
+            with self._publish_lock():
+                current_revision = self.authority.snapshot_state().revision
+                if current_revision != snapshot.revision.value:
+                    raise CacheBlobLifecycleConflictError("Projection revision changed")
+                os.replace(candidate, self.projection_path)
+                self._fsync_directory(self.projection_path)
+                candidate = None
+                return self.authority.compare_and_mark_projection(snapshot.revision)
         except (CacheBlobBackendError, CacheBlobLifecycleConflictError):
             raise
         except (CacheError, OSError, sqlite3.Error, ValueError) as error:

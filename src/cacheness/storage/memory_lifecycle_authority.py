@@ -30,7 +30,13 @@ from .lifecycle_authority import (
 class InMemoryLifecycleAuthority:
     """Copy-on-read authority suitable only for one process and test stores."""
 
-    capabilities = AuthorityCapabilities(durable=False, multiprocess=False)
+    capabilities = AuthorityCapabilities(
+        durable=False,
+        multiprocess=False,
+        exact_cas=True,
+        indexed_paging=True,
+        projection=False,
+    )
 
     def __init__(self, *, lifecycle_limits: LifecycleLimits | None = None) -> None:
         self._lock = RLock()

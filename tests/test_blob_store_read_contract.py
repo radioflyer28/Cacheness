@@ -17,6 +17,7 @@ from cacheness.error_handling import (
     CacheBlobManifestUnauthenticatedError,
     CacheBlobManifestUnsupportedVersionError,
     CacheBlobPayloadTamperedError,
+    CacheReason,
 )
 from cacheness.metadata import InMemoryBackend
 from cacheness.storage import BlobStore
@@ -469,7 +470,14 @@ def test_direct_operations_ignore_corrupt_json_projection(
             assert result is True
         else:
             assert result == 1
-        assert (root / "cache_metadata.json").read_bytes() == b"{"
+        projection_path = root / "cache_metadata.json"
+        if operation in {"get", "get_metadata", "exists", "list"}:
+            assert projection_path.read_bytes() == b"{"
+        else:
+            projection = json.loads(projection_path.read_text(encoding="utf-8"))
+            assert projection["_cacheness_authority_revision"] == (
+                store.lifecycle_authority.snapshot_state().revision
+            )
     finally:
         store.close()
 
@@ -1215,5 +1223,64 @@ def test_projection_backend_failures_do_not_block_authority_operations(
         result = getattr(store, operation)()
         assert result == ([key] if operation == "list" else 1)
         assert not projection_accessed
+    finally:
+        store.close()
+
+
+# =============================================================================
+# Authority composition and capability honesty (Plan 03-06)
+# =============================================================================
+
+
+def test_memory_authority_requires_explicit_ephemeral_topology_before_staging(
+    tmp_path: Path,
+) -> None:
+    """Memory cannot silently satisfy the default durable multiprocess request."""
+    from cacheness.config import CacheConfig, LifecycleAuthorityTopology
+    from cacheness.storage.memory_lifecycle_authority import InMemoryLifecycleAuthority
+
+    root = tmp_path / "memory-authority"
+    with pytest.raises(CacheBlobBackendError) as error:
+        BlobStore(root, backend="memory")
+
+    assert (
+        error.value.context["reason"]
+        == CacheReason.BLOB_BACKEND_CAPABILITY_UNSUPPORTED.value
+    )
+    assert not root.exists()
+
+    ephemeral = CacheConfig(
+        lifecycle_topology=LifecycleAuthorityTopology(
+            durable=False,
+            multiprocess=False,
+            projection=False,
+        )
+    )
+    store = BlobStore(root, backend="memory", config=ephemeral)
+    try:
+        assert type(store.lifecycle_authority) is InMemoryLifecycleAuthority
+        assert store.lifecycle_authority.capabilities.durable is False
+        assert store.lifecycle_authority.capabilities.multiprocess is False
+        assert store.put("memory payload", key="memory-key") == "memory-key"
+        assert store.get("memory-key") == "memory payload"
+    finally:
+        store.close()
+
+
+def test_json_backend_is_a_rebuildable_authority_projection(tmp_path: Path) -> None:
+    """Public JSON metadata is derived from SQLite authority, never read as truth."""
+    from cacheness.metadata import JsonBackend
+
+    root = tmp_path / "json-projection"
+    store = BlobStore(root, backend="json")
+    try:
+        key = store.put("projected", key="projected-key", metadata={"source": "test"})
+
+        assert type(store.backend) is JsonBackend
+        projection = json.loads((root / "cache_metadata.json").read_text(encoding="utf-8"))
+        assert projection["entries"][key] == store.get_metadata(key)
+        assert projection["_cacheness_authority_revision"] == (
+            store.lifecycle_authority.snapshot_state().revision
+        )
     finally:
         store.close()

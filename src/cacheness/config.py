@@ -362,6 +362,11 @@ class LifecycleAuthorityTopology:
 
     filesystem: str = "local"
     principal_scope: str = "current_user_current_session"
+    durable: bool = True
+    multiprocess: bool = True
+    exact_cas: bool = True
+    indexed_paging: bool = True
+    projection: bool = True
 
     def __post_init__(self) -> None:
         if self.filesystem != "local":
@@ -374,6 +379,18 @@ class LifecycleAuthorityTopology:
                 "Lifecycle authority supports only the current user and session",
                 context={"principal_scope": self.principal_scope},
             )
+        for field_name in (
+            "durable",
+            "multiprocess",
+            "exact_cas",
+            "indexed_paging",
+            "projection",
+        ):
+            if type(getattr(self, field_name)) is not bool:
+                raise CacheConfigurationError(
+                    "Lifecycle authority capability requirements must be booleans",
+                    context={"field": field_name},
+                )
 
 
 @dataclass(frozen=True)
