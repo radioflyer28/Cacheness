@@ -16,7 +16,7 @@ affects: [BlobStore, LifecycleAuthority, lifecycle recovery, Phase 7 tooling]
 actuals:
   tokens: 18294
   tasks: 2
-  commits: 5
+  commits: 7
 
 tech-stack:
   added: []
@@ -36,6 +36,7 @@ key-files:
     - src/cacheness/storage/blob_store.py
     - tests/test_blob_store_atomic_lifecycle.py
     - tests/test_blob_store_reconciliation.py
+    - tests/test_blob_store_read_contract.py
 
 key-decisions:
   - "Clear targets retain exact authenticated entry bytes and lineage, then advance only after exact deletion, absence proof, conflict, or blocked evidence."
@@ -102,6 +103,7 @@ status: complete
 1. **Task 1: Snapshot and resume exact clear targets transactionally** - `abd5a5b` (test), `1581d4b` (feat)
 2. **Task 2: Reconcile indexed intent and cleanup debt with stable resumable reports** - `24acf0b` (test), `930e1b1` (feat)
 3. **Authority clear safety correction** - `10409de` (fix)
+4. **Authority clear failure-boundary compatibility** - `917af6d` (test), `43c110d` (fix)
 
 ## Files Created/Modified
 
@@ -131,14 +133,21 @@ status: complete
 - **Verification:** `test_delete_and_clear_reject_unauthenticated_authority_snapshots` and the Phase 3 authority suite pass.
 - **Committed in:** `10409de`.
 
+**2. [Rule 1 - Compatibility boundary] Migrated clear failure translation to the transactional snapshot seam.**
+- **Found during:** Full repository regression verification.
+- **Issue:** A historical test injected failure through retired `list_entries()` materialization, so it no longer exercised `BlobStore.clear()` after clear membership moved into one authority transaction.
+- **Fix:** Injected failure at `begin_clear()` and added bounded clear-page preflight translation, preserving typed `CacheBlobBackendError` behavior and exact no-mutation evidence without restoring a listing or scheduler seam.
+- **Files modified:** `tests/test_blob_store_read_contract.py`, `src/cacheness/storage/lifecycle.py`.
+- **Verification:** The complete read-contract file passes 40 tests; the Plan 05 authority/clear/reconciliation set, Ruff delta, and compile gate pass.
+- **Committed in:** `917af6d`, `43c110d`.
+
 ---
 
-**Total deviations:** 1 auto-fixed (Rule 1).
+**Total deviations:** 2 auto-fixed (Rule 1).
 **Impact on plan:** The correction enforces the plan's provenance and fail-closed requirements without expanding architecture or authority scope.
 
 ## Issues Encountered
 
-- The historical `test_clear_translates_authority_listing_failure_without_mutating_data` expects a pre-snapshot `list_entries()` call. Plan 05 explicitly replaces that materialized preflight with an authority transaction and indexed target rows, so that assertion is intentionally incompatible with the delivered contract. The plan's required verifies and the valid Phase 3 authority suite pass.
 - A validation command referenced a non-existent `tests/test_phase3_scheduler_retirement.py`; the existing Phase 3 authority-suite files were run directly instead.
 - The plan's `STOR-05`, `STOR-06`, and `STOR-07` identifiers are not present in the current requirements ledger, so the workflow could not mark corresponding ledger rows complete; no unrelated requirements content was changed.
 
@@ -148,12 +157,12 @@ None - no external service configuration required.
 
 ## Next Phase Readiness
 
-Clear and reconciliation now expose transactional authority state suitable for downstream operator tooling and later backend adapters. The historical listing-specific test should be rewritten in a later compatibility-test cleanup to exercise `begin_clear` failure rather than the retired materialized listing seam.
+Clear and reconciliation now expose transactional authority state suitable for downstream operator tooling and later backend adapters. The historical clear failure test now exercises the transactional `begin_clear` boundary directly, and the complete read-contract suite is green.
 
 ## Self-Check: PASSED
 
 All listed source and test artifacts exist, and every Task 1, Task 2, and
-fail-closed correction commit is reachable from the repository history.
+fail-closed/compatibility correction commit is reachable from repository history.
 
 ---
 *Phase: 03-atomic-lifecycle-and-recovery-engine*
