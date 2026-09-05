@@ -18,6 +18,9 @@ import sys
 from threading import Event
 
 
+CRASH_BOUNDARY_EXIT = 86
+
+
 class InjectedLifecycleFault(RuntimeError):
     """A deterministic fault raised from an armed lifecycle boundary."""
 
@@ -73,6 +76,48 @@ def run_python_subprocess(*arguments: str) -> subprocess.CompletedProcess[str]:
         check=False,
         capture_output=True,
         text=True,
+    )
+
+
+def crash_public_put(
+    root: Path,
+    *,
+    boundary: str,
+    key: str,
+    value: str,
+) -> subprocess.CompletedProcess[str]:
+    """Abruptly terminate one public BlobStore put at an exact lifecycle seam.
+
+    The child installs only the public lifecycle timing hook and exits directly
+    from that callback.  No sleep, polling, or private authority table access
+    participates in the crash ordering.
+    """
+    script = """
+import os
+import sys
+
+from cacheness.storage import BlobStore
+
+root, boundary, key, value = sys.argv[1:]
+store = BlobStore(root, backend="json")
+
+def crash_at(reached):
+    if reached == boundary:
+        os._exit(86)
+
+store.lifecycle.test_hook = crash_at
+try:
+    store.put(value, key=key)
+finally:
+    store.close()
+"""
+    return run_python_subprocess(
+        "-c",
+        script,
+        str(root),
+        boundary,
+        key,
+        value,
     )
 
 
