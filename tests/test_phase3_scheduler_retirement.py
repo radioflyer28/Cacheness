@@ -17,6 +17,16 @@ RETIRED_SCHEDULER_MODULES = (
 )
 
 
+def _defined_names(source_path: Path) -> set[str]:
+    """Return the top-level implementation names owned by one module."""
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    return {
+        node.name
+        for node in tree.body
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+
 @pytest.mark.parametrize("module_name", RETIRED_SCHEDULER_MODULES)
 def test_retired_scheduler_modules_are_not_importable(module_name: str) -> None:
     """The public package cannot resolve a second lifecycle authority."""
@@ -77,3 +87,47 @@ def test_fresh_and_reopened_stores_never_create_retired_control_artifacts(
     finally:
         reopened.close()
     assert not (root / "operations").exists()
+
+
+def test_retained_helpers_have_no_file_native_lock_or_control_authority() -> None:
+    """Retained helpers only order local work and protect payload I/O."""
+    storage_root = Path(__file__).parents[1] / "src" / "cacheness" / "storage"
+    coordination_source = storage_root / "coordination.py"
+    path_security_source = storage_root / "path_security.py"
+
+    assert _defined_names(coordination_source).isdisjoint(
+        {
+            "InterprocessLockUnavailable",
+            "_WindowsLockApi",
+            "_NativeWindowsLockApi",
+            "_windows_lock_api",
+            "interprocess_open_file_lock",
+            "interprocess_file_lock",
+            "lock_stripe_index",
+            "StoreAdmissionBarrier",
+        }
+    )
+    assert _defined_names(path_security_source).isdisjoint(
+        {
+            "_WindowsRegistryAuthorityApi",
+            "_windows_registry_authority_api",
+        }
+    )
+
+    coordination_text = coordination_source.read_text(encoding="utf-8")
+    path_security_text = path_security_source.read_text(encoding="utf-8")
+    assert all(
+        forbidden not in coordination_text
+        for forbidden in ("LockFileEx", "UnlockFileEx", "fcntl.flock")
+    )
+    assert all(
+        forbidden not in path_security_text
+        for forbidden in (
+            "CreateMutexW",
+            "RegCreateKeyExW",
+            "user.cacheness.lifecycle-lock.",
+            "ensure_lifecycle_lock",
+            "assert_retained_lock_identity",
+            "promote_durable_pending_control",
+        )
+    )
