@@ -942,7 +942,11 @@ class BlobStore:
                     resume_token=resume_token,
                     now=now,
                 )
-                self._export_compatible_projection()
+                # Dry-run reconciliation is explicitly an inspection: a JSON
+                # projection refresh would acknowledge existing projection
+                # debt and violate that non-mutating contract.
+                if apply:
+                    self._export_compatible_projection()
                 return report
             return self._reconciler.reconcile(
                 apply=apply,
