@@ -632,6 +632,34 @@ def test_get_metadata_authenticates_committed_manifest_without_payload_io(
         store.close()
 
 
+def test_get_metadata_preserves_the_frozen_legacy_v1_dictionary_shape(tmp_path):
+    """Authority work must leave direct metadata dictionaries structurally intact."""
+    store = BlobStore(tmp_path / "frozen-metadata", backend="json")
+    try:
+        key = store.put("metadata shape", key="metadata-shape")
+
+        metadata = store.get_metadata(key)
+
+        assert metadata is not None
+        assert set(metadata) == {
+            "cache_key",
+            "created_at",
+            "data_type",
+            "file_size",
+            "metadata",
+        }
+        assert metadata["cache_key"] == key
+        assert set(metadata["metadata"]) == {
+            "actual_path",
+            "compression_codec",
+            "object_type",
+            "serializer",
+            "storage_format",
+        }
+    finally:
+        store.close()
+
+
 def test_exists_verifies_one_snapshot_without_deserializing(tmp_path, monkeypatch):
     """Existence means a valid authenticated manifest and intact payload."""
     events: list[str] = []
