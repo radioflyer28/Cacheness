@@ -460,39 +460,23 @@ def test_clear_snapshot_does_not_delete_a_post_snapshot_key(tmp_path):
         store.close()
 
 
-@pytest.mark.parametrize("stage", ("event", "tail", "head"))
-def test_distinct_key_put_helps_a_paused_scheduler_receipt_and_reopens(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str
+def test_distinct_key_put_completes_during_paused_authority_promotion(
+    tmp_path: Path,
 ) -> None:
-    """No scheduler durability boundary may serialize unrelated BlobStore puts.
-
-    The second public put must finish while the first is paused before its
-    immutable event/tail/head receipt create.  It therefore proves both the
-    reverse help path and that no family/store lease remains held across the
-    stalled fsync-equivalent boundary.
-    """
-    root = tmp_path / f"receipt-{stage}"
+    """A paused key's promotion cannot serialize another key's payload work."""
+    root = tmp_path / "authority-promotion"
     store = BlobStore(root, backend="json")
-    repository = store.lifecycle.operation_repository
     entered = threading.Event()
     release = threading.Event()
     second_done = threading.Event()
     errors: list[BaseException] = []
-    original_create = repository.file_ops.create_bytes_durable_exclusive
 
-    def pause_one_receipt(locator: Path, payload: bytes) -> Path:
-        if (
-            locator.parent.name == "primary"
-            and locator.name.startswith(f"{stage}-")
-            and not entered.is_set()
-        ):
+    def pause_before_promotion(seam: str, record: object) -> None:
+        if seam == "manifest_publish" and record.key == "key-a":
             entered.set()
             assert release.wait(timeout=5)
-        return original_create(locator, payload)
 
-    monkeypatch.setattr(
-        repository.file_ops, "create_bytes_durable_exclusive", pause_one_receipt
-    )
+    store.lifecycle.fault_hook = pause_before_promotion
 
     def put(key: str, value: str, done: threading.Event | None = None) -> None:
         try:
@@ -531,36 +515,23 @@ def test_distinct_key_put_helps_a_paused_scheduler_receipt_and_reopens(
         reopened.close()
 
 
-@pytest.mark.parametrize("stage", ("event", "tail", "head"))
-def test_independent_process_put_completes_during_paused_scheduler_receipt(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str
+def test_independent_process_put_completes_during_paused_authority_promotion(
+    tmp_path: Path,
 ) -> None:
-    """The receipt chain orders cross-process writers without a shared lease."""
-    root = tmp_path / f"receipt-process-{stage}"
+    """SQLite-only promotion does not hold a store lease across payload work."""
+    root = tmp_path / "authority-process-promotion"
     store = BlobStore(root, backend="json")
-    # A child constructor may legitimately take aggregate recovery admission.
-    # Open it before the parent starts its ordinary write so this probe isolates
-    # scheduler publication rather than constructor-admission timing.
     store.put("seed", key="seed-key")
-    repository = store.lifecycle.operation_repository
     entered = threading.Event()
     release = threading.Event()
     errors: list[BaseException] = []
-    original_create = repository.file_ops.create_bytes_durable_exclusive
 
-    def pause_one_receipt(locator: Path, payload: bytes) -> Path:
-        if (
-            locator.parent.name == "primary"
-            and locator.name.startswith(f"{stage}-")
-            and not entered.is_set()
-        ):
+    def pause_before_promotion(seam: str, record: object) -> None:
+        if seam == "manifest_publish" and record.key == "parent-key":
             entered.set()
             assert release.wait(timeout=30)
-        return original_create(locator, payload)
 
-    monkeypatch.setattr(
-        repository.file_ops, "create_bytes_durable_exclusive", pause_one_receipt
-    )
+    store.lifecycle.fault_hook = pause_before_promotion
 
     def first_put() -> None:
         try:
@@ -758,49 +729,44 @@ def test_read_write_retry_once_when_an_independent_writer_commits_new_generation
     writer = BlobStore(root, backend="json")
     key = "race-key"
     snapshots = 0
-    repository_reads = 0
+    authority_reads = 0
     try:
         reader.put("first", key=key)
         original_snapshot = reader.guarded_handler_io.open_snapshot
-        original_get_raw = reader.manifest_repository.get_raw
+        original_read_entry = reader.lifecycle_authority.read_entry
 
         def count_reader_authority_reads(blob_key: str):
-            nonlocal repository_reads
-            repository_reads += 1
-            return original_get_raw(blob_key)
+            nonlocal authority_reads
+            authority_reads += 1
+            return original_read_entry(blob_key)
 
         monkeypatch.setattr(
-            reader.manifest_repository, "get_raw", count_reader_authority_reads
-        )
-        monkeypatch.setattr(
-            reader.lifecycle.operation_repository,
-            "list_page",
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                AssertionError("reads must not consult operation evidence")
-            ),
+            reader.lifecycle_authority,
+            "read_entry",
+            count_reader_authority_reads,
         )
 
         @contextmanager
         def replace_before_first_snapshot(locator, metadata):
             nonlocal snapshots
             snapshots += 1
-            if snapshots == 1:
-                writer.put("second", key=key)
             with original_snapshot(locator, metadata) as snapshot:
+                if snapshots == 1:
+                    writer.put("second", key=key)
                 yield snapshot
 
         reader.guarded_handler_io.open_snapshot = replace_before_first_snapshot
 
         assert reader.get(key) == "second"
         assert snapshots == 2
-        assert repository_reads == 4
+        assert authority_reads == 4
     finally:
         writer.close()
         reader.close()
 
 
-def test_read_delete_race_is_a_typed_lifecycle_conflict(tmp_path):
-    """A delete after M1 cannot turn a committed read into a payload miss."""
+def test_read_delete_race_retries_to_authoritative_absence(tmp_path):
+    """A delete after M1 is observed as tombstoned absence, never a stale read."""
     root = tmp_path / "read-delete"
     reader = BlobStore(root, backend="json")
     deleter = BlobStore(root, backend="json")
@@ -821,8 +787,7 @@ def test_read_delete_race_is_a_typed_lifecycle_conflict(tmp_path):
 
         reader.guarded_handler_io.open_snapshot = delete_before_first_snapshot
 
-        with pytest.raises(CacheBlobLifecycleConflictError):
-            reader.get(key)
+        assert reader.get(key) is None
         assert snapshots == 1
     finally:
         deleter.close()

@@ -176,13 +176,76 @@ class InMemoryLifecycleAuthority:
 
         return self._transition(promote)
 
-    def abort_mutation(self, prepared: PreparedMutation) -> None:
+    def abort_mutation(
+        self, prepared: PreparedMutation, *, candidate_persisted: bool = False
+    ) -> None:
         def abort() -> None:
             mutation = self._mutations.get(prepared.operation_id)
-            if mutation is not None and mutation[0] == prepared.spec and mutation[2] != "promoted":
-                del self._mutations[prepared.operation_id]
+            if mutation is None or mutation[0] != prepared.spec:
+                return
+            if mutation[2] == "promoted":
+                return
+            if candidate_persisted:
+                debt = CleanupDebt(
+                    prepared.operation_id,
+                    prepared.spec.candidate_locator,
+                    prepared.spec.key,
+                    prepared.spec.generation,
+                    "candidate",
+                )
+                if debt not in self._debts:
+                    self._debts.append(debt)
+                self._mutations[prepared.operation_id] = (
+                    mutation[0],
+                    mutation[1],
+                    "aborted",
+                )
+                return
+            del self._mutations[prepared.operation_id]
 
         self._transition(abort)
+
+    def list_entries(self) -> tuple[EntrySnapshot, ...]:
+        """Return immutable committed/tombstone entry snapshots by key."""
+        self._require_open()
+        with self._lock:
+            return tuple(self._copy(entry) for _, entry in sorted(self._entries.items()))
+
+    def pending_cleanup_debts(
+        self,
+        *,
+        key: str | None = None,
+        operation_id: str | None = None,
+    ) -> tuple[CleanupDebt, ...]:
+        """Return only exact still-pending cleanup work from authority state."""
+        self._require_open()
+        with self._lock:
+            return tuple(
+                debt
+                for debt in self._debts
+                if (key is None or debt.key == key)
+                and (operation_id is None or debt.operation_id == operation_id)
+            )
+
+    def pending_mutations(self) -> tuple[PreparedMutation, ...]:
+        """Return indexed, pre-promotion operations for exact recovery only."""
+        self._require_open()
+        with self._lock:
+            return tuple(
+                PreparedMutation(operation_id, spec)
+                for operation_id, (spec, _proof, state) in sorted(self._mutations.items())
+                if state == "prepared"
+            )
+
+    def retire_cleanup_debt(self, debt: CleanupDebt) -> None:
+        """Retire one exact debt idempotently after external reclamation."""
+        def retire() -> None:
+            try:
+                self._debts.remove(debt)
+            except ValueError:
+                return
+
+        self._transition(retire)
 
     def delete_entry(self, key: str, *, expected: EntryExpectation) -> None:
         def delete() -> None:

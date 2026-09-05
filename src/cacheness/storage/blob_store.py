@@ -86,9 +86,9 @@ from .manifest_repository import (
     create_manifest_repository,
 )
 from .legacy_manifest import LegacyManifestIdentity, recognize_legacy_fixture_tree
-from .lifecycle import LifecycleEngine
 from .lifecycle import AuthorityLifecycleEngine
 from .lifecycle_authority import EntryExpectation, LifecycleAuthority
+from .sqlite_lifecycle_authority import SqliteLifecycleAuthority
 from .path_security import encode_physical_name, resolve_managed_locator
 from .reconciliation import _Reconciler, ReconciliationReport
 from ..metadata import InMemoryBackend, MetadataBackend as CoreMetadataBackend
@@ -220,13 +220,11 @@ class BlobStore:
             else cache_dir
         )
         self.cache_dir = Path(configured_path)
-        self._authority_mode = lifecycle_authority is not None
+        self._authority_mode = True
+        self._owns_lifecycle_authority = lifecycle_authority is None
         self.lifecycle_authority = lifecycle_authority
-        if self._authority_mode:
-            self.guarded_handler_io = None
-        else:
-            self.cache_dir.mkdir(parents=True, exist_ok=True)
-            self.guarded_handler_io = GuardedHandlerIO(self.cache_dir)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.guarded_handler_io = GuardedHandlerIO(self.cache_dir)
         self._owns_backend = False
         self._released_resources = {
             "manifest_repository": False,
@@ -292,11 +290,26 @@ class BlobStore:
         )
         self.lifecycle_limits = self.config.lifecycle_limits
         self._instance_admission = InstanceAdmission(self.lifecycle_limits)
+        self._immutable_metadata_patch_fields = _IMMUTABLE_METADATA_PATCH_FIELDS
+        if lifecycle_authority is None:
+            lifecycle_authority = SqliteLifecycleAuthority.for_root(
+                self.cache_dir,
+                lifecycle_limits=self.lifecycle_limits,
+                lifecycle_topology=getattr(
+                    self.config,
+                    "lifecycle_topology",
+                    None,
+                ),
+            )
+        self.lifecycle_authority = lifecycle_authority
         if lifecycle_authority is not None:
             self._admission_barrier = None
             self._key_coordinator = KeyCoordinatorRegistry()
-            self.backend = InMemoryBackend()
-            self._owns_backend = True
+            if isinstance(backend, (MetadataBackend, CoreMetadataBackend)):
+                self.backend = backend
+            else:
+                self.backend = InMemoryBackend()
+                self._owns_backend = True
             self.handlers = HandlerRegistry()
             self._manifest_key_provider = (
                 ManifestKeyProvider(
@@ -307,11 +320,11 @@ class BlobStore:
                 else manifest_key_provider
             )
             self.manifest_repository = None
-            self.lifecycle = None
+            self.lifecycle = AuthorityLifecycleEngine(self, lifecycle_authority)
             self._reconciler = None
             self._clear_recovery = None
             self._legacy_clear_evidence = None
-            self._authority_lifecycle = AuthorityLifecycleEngine(self, lifecycle_authority)
+            self._authority_lifecycle = self.lifecycle
             return
         self._authority_lifecycle = None
         # Exact legacy fixtures are read-only migration evidence. They reject
@@ -361,7 +374,7 @@ class BlobStore:
             # rather than by a public or independently replaceable key.
             inventory_key_provider=self._manifest_key,
         )
-        self.lifecycle = LifecycleEngine(self, lifecycle_limits=self.lifecycle_limits)
+        self.lifecycle = AuthorityLifecycleEngine(self, self.lifecycle_authority)
         self._reconciler = _Reconciler(self, lifecycle_limits=self.lifecycle_limits)
 
         # The predecessor coordinator remains an exact local compatibility
@@ -489,7 +502,7 @@ class BlobStore:
         """
         self._require_canonical_store()
         if self._authority_lifecycle is not None:
-            return self._authority_get(key)
+            return self._authority_lifecycle.get(key)
         with self._key_coordinator.hold(self._storage_id_for_key(key)):
             for attempt in range(2):
                 authenticated = self._load_authenticated_manifest(
@@ -560,11 +573,7 @@ class BlobStore:
         """
         self._require_canonical_store()
         if self._authority_lifecycle is not None:
-            entry = self.lifecycle_authority.read_entry(key)
-            if entry is None:
-                return None
-            manifest = self._authenticated_authority_manifest(entry.manifest)
-            return self._manifest_entry_data(manifest)
+            return self._authority_lifecycle.get_metadata(key)
         with self._key_coordinator.hold(self._storage_id_for_key(key)):
             authenticated = self._load_authenticated_manifest(
                 key,
@@ -590,7 +599,7 @@ class BlobStore:
         """
         self._require_canonical_store()
         if self._authority_lifecycle is not None:
-            return self.lifecycle_authority.read_entry(key) is not None
+            return self._authority_lifecycle.update_metadata(key, metadata)
         with self._key_coordinator.hold(self._storage_id_for_key(key)):
             if not isinstance(metadata, dict):
                 raise CacheBlobManifestMalformedError(
@@ -644,7 +653,7 @@ class BlobStore:
         """
         self._require_canonical_store()
         with self._key_coordinator.hold(self._storage_id_for_key(key)):
-            deleted = self.lifecycle.delete(key=key)
+            deleted = self._authority_lifecycle.delete(key=key)
         if deleted:
             logger.debug(f"Deleted blob {key} through the lifecycle engine")
         return deleted
@@ -662,7 +671,7 @@ class BlobStore:
         """
         self._require_canonical_store()
         if self._authority_lifecycle is not None:
-            return self.lifecycle_authority.read_entry(key) is not None
+            return self._authority_lifecycle.exists(key)
         with self._key_coordinator.hold(self._storage_id_for_key(key)):
             for attempt in range(2):
                 authenticated = self._load_authenticated_manifest(
@@ -731,7 +740,7 @@ class BlobStore:
         """
         self._require_canonical_store()
         if self._authority_lifecycle is not None:
-            return []
+            return self._authority_lifecycle.list(prefix, metadata_filter)
         entries = self._list_backend_entries(operation="list")
         keys = []
 
@@ -796,9 +805,8 @@ class BlobStore:
         """
         with self._instance_admission.operation():
             self._require_canonical_store()
-            self._refresh_metadata_view_for_lifecycle()
             try:
-                cleared = self.lifecycle.clear()
+                cleared = self._authority_lifecycle.clear()
             except (CacheBlobBackendError, CacheBlobLifecycleConflictError):
                 raise
             except (CacheStorageError, OSError) as exc:
@@ -825,7 +833,14 @@ class BlobStore:
         with self._instance_admission.operation():
             self._require_canonical_store()
             if self._authority_lifecycle is not None:
-                return ReconciliationReport(findings=(), applied=apply)
+                reclaimed = self._authority_lifecycle.reconcile() if apply else 0
+                return ReconciliationReport(
+                    findings=(),
+                    resume_token=None,
+                    applied=bool(reclaimed),
+                    manifest_records_seen=0,
+                    operation_records_seen=reclaimed,
+                )
             return self._reconciler.reconcile(
                 apply=apply,
                 resume_token=resume_token,
@@ -982,7 +997,8 @@ class BlobStore:
         descriptor is released.
         """
         if self._authority_mode:
-            self.lifecycle_authority.close()
+            if self._owns_lifecycle_authority:
+                self.lifecycle_authority.close()
             if (
                 self.guarded_handler_io is not None
                 and not self._released_resources["guarded_handler_io"]
@@ -1045,10 +1061,27 @@ class BlobStore:
     def _authority_manifest_key(self) -> bytes:
         """Initialize the persistent key only after authority intent commits."""
         try:
+            key = self._manifest_key_provider.get_key()
+        except ManifestKeyError:
             initializer = getattr(
-                self._manifest_key_provider, "get_or_initialize_new_store", None
+                self._manifest_key_provider,
+                "initialize_new_store",
+                None,
             )
-            key = initializer() if callable(initializer) else self._manifest_key_provider.get_key()
+            if not callable(initializer):
+                raise CacheBlobManifestUnauthenticatedError(
+                    "Canonical BlobStore signing key is unavailable",
+                    context={"operation": "authority_manifest_key"},
+                    reason=CacheReason.MANIFEST_SIGNING_KEY_INVALID,
+                ) from None
+            try:
+                key = initializer()
+            except Exception as exc:
+                raise CacheBlobManifestUnauthenticatedError(
+                    "Canonical BlobStore signing key is unavailable",
+                    context={"operation": "authority_manifest_key"},
+                    reason=CacheReason.MANIFEST_SIGNING_KEY_INVALID,
+                ) from exc
         except Exception as exc:
             raise CacheBlobManifestUnauthenticatedError(
                 "Canonical BlobStore signing key is unavailable",
@@ -1063,13 +1096,16 @@ class BlobStore:
             )
         return key
 
-    def _authenticated_authority_manifest(self, raw: bytes) -> BlobManifestV1:
+    def _authenticated_authority_manifest(
+        self, raw: bytes, *, allow_tombstone: bool = False
+    ) -> BlobManifestV1:
         """Authenticate authority-owned canonical bytes before trusting locators."""
         try:
             manifest = BlobManifestV1.from_canonical_bytes(raw)
         except CacheManifestIntegrityError as exc:
             raise CacheBlobManifestMalformedError("Authority manifest is malformed") from exc
-        if manifest.state != "committed" or not verify_hmac_sha256(
+        allowed_states = {"committed", "tombstoned"} if allow_tombstone else {"committed"}
+        if manifest.state not in allowed_states or not verify_hmac_sha256(
             manifest.signing_bytes(), manifest.signature, self._authority_manifest_key()
         ):
             raise CacheBlobManifestUnauthenticatedError(

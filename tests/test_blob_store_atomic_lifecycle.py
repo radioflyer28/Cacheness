@@ -142,48 +142,41 @@ def test_tracer_json_put_uses_immutable_generation_cas_and_native_bytes(
     store = BlobStore(tmp_path / "store", backend="json")
     store.handlers = _SingleHandlerRegistry(_NativeJsonHandler(events))
     lifecycle_events: list[str] = []
-    store.lifecycle.test_hook = lambda step, _record: lifecycle_events.append(step)
+    store.lifecycle.test_hook = lifecycle_events.append
 
     try:
         key = store.put({"generation": 1}, key="tracer-key")
-        first_manifest = store._load_authenticated_manifest(
-            key,
-            operation="test",
-            require_locator=True,
-        )
-        assert first_manifest is not None
-        first_locator = first_manifest[2]
-        assert first_locator is not None
+        first_metadata = store.get_metadata(key)
+        assert first_metadata is not None
+        first_locator = store.cache_dir / first_metadata["metadata"]["actual_path"]
         assert json.loads(first_locator.read_text(encoding="utf-8")) == {"generation": 1}
 
         assert store.put({"generation": 2}, key=key) == key
-        second_manifest = store._load_authenticated_manifest(
-            key,
-            operation="test",
-            require_locator=True,
-        )
-        assert second_manifest is not None
-        second_locator = second_manifest[2]
-        assert second_locator is not None
+        second_metadata = store.get_metadata(key)
+        assert second_metadata is not None
+        second_locator = store.cache_dir / second_metadata["metadata"]["actual_path"]
         assert second_locator != first_locator
-        assert second_manifest[0].state == "committed"
-        assert "generation" in second_locator.name
+        assert second_locator.parent.parent.name == "generations"
         assert not first_locator.exists()
         assert store.get(key) == {"generation": 2}
         assert not list((store.cache_dir / "operations").glob("*.json"))
         assert lifecycle_events == [
-            "evidence_created",
-            "candidate_published",
-            "candidate_verified",
-            "authority_published",
-            "cleanup_completed",
-            "evidence_retired",
-            "evidence_created",
-            "candidate_published",
-            "candidate_verified",
-            "authority_published",
-            "cleanup_completed",
-            "evidence_retired",
+            "put.intent_prepared",
+            "put.before_candidate_publish",
+            "put.candidate_published",
+            "put.candidate_verified",
+            "put.before_promotion",
+            "put.promoted",
+            "put.cleanup_retired",
+            "put.intent_prepared",
+            "put.before_candidate_publish",
+            "put.candidate_published",
+            "put.candidate_verified",
+            "put.before_promotion",
+            "put.promoted",
+            "cleanup.before_payload_delete",
+            "cleanup.after_payload_delete",
+            "put.cleanup_retired",
         ]
         assert events == [
             "private_serialization",
@@ -518,7 +511,9 @@ def test_stale_overwrite_conflict_reclaims_only_loser_candidate(
         assert winner.get(key) == {"generation": "winner"}
         assert contender.get(key) == {"generation": "winner"}
         assert not list((root / "operations").glob("*.json"))
-        generation_payloads = list(root.glob("*generation-*"))
+        generation_payloads = [
+            path for path in (root / "generations").rglob("*") if path.is_file()
+        ]
         assert len(generation_payloads) == 1
     finally:
         contender.close()
@@ -526,7 +521,7 @@ def test_stale_overwrite_conflict_reclaims_only_loser_candidate(
 
 
 def test_overwrite_snapshot_cas_never_adopts_a_winner_published_after_load(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     """An overwrite CAS remains bound to the exact authenticated first read."""
     root = tmp_path / "overwrite-snapshot-cas"
@@ -534,20 +529,15 @@ def test_overwrite_snapshot_cas_never_adopts_a_winner_published_after_load(
     winner = BlobStore(root, backend="json")
     try:
         key = contender.put({"generation": "old"}, key="snapshot-key")
-        original_load = contender._load_authenticated_manifest_with_raw
         published_winner = False
 
-        def load_then_publish(*args: object, **kwargs: object):
+        def publish_after_candidate(step: str, _record: object) -> None:
             nonlocal published_winner
-            snapshot = original_load(*args, **kwargs)
-            if kwargs.get("operation") == "overwrite" and not published_winner:
+            if step == "candidate_verified" and not published_winner:
                 published_winner = True
                 winner.put({"generation": "winner"}, key=key)
-            return snapshot
 
-        monkeypatch.setattr(
-            contender, "_load_authenticated_manifest_with_raw", load_then_publish
-        )
+        contender.lifecycle.test_hook = publish_after_candidate
         with pytest.raises(CacheBlobLifecycleConflictError):
             contender.put({"generation": "stale"}, key=key)
 
@@ -814,16 +804,15 @@ def test_pre_cas_put_residue_converges_after_a_later_distinct_winner(
         if replacement:
             contender.put({"generation": "old"}, key=key)
 
-        def interrupt_before_cas(seam: str, record: Any) -> None:
-            nonlocal candidate_locator
-            if seam == "manifest_publish":
-                candidate_locator = root / record.candidate_locator
-                raise RuntimeError("interrupted before manifest CAS")
+        def interrupt_before_cas(seam: str) -> None:
+            if seam == "put.before_promotion":
+                raise _SimulatedProcessLoss("interrupted before authority CAS")
 
         contender.lifecycle.fault_hook = interrupt_before_cas
-        with pytest.raises(RuntimeError, match="interrupted before manifest CAS"):
+        with pytest.raises(_SimulatedProcessLoss, match="interrupted before authority CAS"):
             contender.put({"generation": "interrupted"}, key=key)
-        assert candidate_locator is not None and candidate_locator.exists()
+        candidates = [path for path in (root / "generations").rglob("*") if path.is_file()]
+        candidate_locator = candidates[-1]
 
         winner.put({"generation": "winner"}, key=key)
         assert winner.get(key) == {"generation": "winner"}
@@ -834,8 +823,9 @@ def test_pre_cas_put_residue_converges_after_a_later_distinct_winner(
     reopened = BlobStore(root, backend="json")
     try:
         assert reopened.get(key) == {"generation": "winner"}
+        reopened.reconcile(apply=True)
         assert candidate_locator is not None and not candidate_locator.exists()
-        assert not list((root / "operations").glob("[0-9a-f]" * 32 + ".json"))
+        assert not (root / "operations").exists()
     finally:
         reopened.close()
 

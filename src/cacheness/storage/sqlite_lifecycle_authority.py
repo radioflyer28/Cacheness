@@ -46,6 +46,15 @@ from .lifecycle_authority import (
 
 
 AUTHORITY_RELATIVE_PATH = Path(".cacheness") / "lifecycle-authority-v1.sqlite3"
+_BOOTSTRAP_ROOT_NAMES = frozenset(
+    {
+        ".cacheness",
+        "generations",
+        "blob_manifest_hmac_key.bin",
+        "blob_manifest_hmac_key.bin.ready",
+        "blob_manifest_hmac_key.bin.initializing.lock",
+    }
+)
 SQLITE_APPLICATION_ID = 0x43414348
 SCHEMA_VERSION = 1
 _MAX_STORE_IDENTITY_BYTES = 64
@@ -154,6 +163,57 @@ class SqliteLifecycleAuthority:
         if not stat.S_ISREG(database_stat.st_mode) or stat.S_ISLNK(database_stat.st_mode):
             return "invalid_authority"
         return "authority"
+
+    def _is_pristine_reserved_bootstrap(self) -> bool:
+        """Recognize only the empty namespace between root and leaf creation.
+
+        The first mutator creates ``.cacheness`` before it can create the
+        exclusive SQLite leaf. Another mutator may observe that narrow window.
+        It is safe to join the bootstrap only when the root contains exactly
+        that contained, non-symlink directory and the directory is empty;
+        every other established root remains a migration-required store.
+        """
+        reserved = self.root / AUTHORITY_RELATIVE_PATH.parent
+        try:
+            root_entries = tuple(self.root.iterdir())
+            reserved_stat = reserved.lstat()
+        except FileNotFoundError:
+            return False
+        return (
+            root_entries == (reserved,)
+            and stat.S_ISDIR(reserved_stat.st_mode)
+            and not stat.S_ISLNK(reserved_stat.st_mode)
+            and not any(reserved.iterdir())
+        )
+
+    def _may_be_inflight_authority_bootstrap(self) -> bool:
+        """Return whether only new-authority bootstrap artifacts are present."""
+        reserved = self.root / AUTHORITY_RELATIVE_PATH.parent
+        try:
+            root_entries = tuple(self.root.iterdir())
+            reserved_stat = reserved.lstat()
+        except FileNotFoundError:
+            return False
+        return (
+            self.path not in root_entries
+            and all(entry.name in _BOOTSTRAP_ROOT_NAMES for entry in root_entries)
+            and reserved in root_entries
+            and stat.S_ISDIR(reserved_stat.st_mode)
+            and not stat.S_ISLNK(reserved_stat.st_mode)
+            and not any(reserved.iterdir())
+        )
+
+    def _await_inflight_authority_leaf(self, deadline: float) -> bool:
+        """Join a bounded concurrent bootstrap without adopting old evidence."""
+        while True:
+            if self._classify_for_open() == "authority":
+                return False
+            if not self._may_be_inflight_authority_bootstrap():
+                self._reject_non_authority_state("established")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self._reject_non_authority_state("established")
+            time.sleep(min(0.001, remaining))
 
     def _reject_non_authority_state(self, state: str) -> None:
         raise CacheBlobMigrationRequiredError(
@@ -309,7 +369,7 @@ class SqliteLifecycleAuthority:
         if _platform_name() == "nt":
             self._validate_windows_root()
 
-    def _materialize_database_file(self) -> bool:
+    def _materialize_database_file(self, deadline: float) -> bool:
         """Create only the contained database leaf and report whether this won."""
         self._validate_mutation_topology()
         state = self._classify_for_open()
@@ -317,15 +377,35 @@ class SqliteLifecycleAuthority:
             "wrong_root",
             "invalid_reserved_directory",
             "invalid_authority",
-            "established",
         }
         if state in rejected_states:
             self._reject_non_authority_state(state)
+        if state == "established":
+            # The directory/file classification is necessarily a read-only
+            # observation. Re-check immediately before rejecting so a sibling
+            # that won the O_EXCL leaf creation is never mistaken for legacy
+            # evidence in this small TOCTOU window.
+            if self._classify_for_open() == "authority":
+                return False
+            if self._is_pristine_reserved_bootstrap():
+                pass
+            elif self._may_be_inflight_authority_bootstrap():
+                return self._await_inflight_authority_leaf(deadline)
+            elif self._classify_for_open() == "authority":
+                return False
+            else:
+                self._reject_non_authority_state(state)
         if state == "missing":
             self.root.mkdir(mode=0o700, parents=True, exist_ok=False)
         reserved = self.root / AUTHORITY_RELATIVE_PATH.parent
         if not reserved.exists():
-            reserved.mkdir(mode=0o700, exist_ok=False)
+            try:
+                reserved.mkdir(mode=0o700, exist_ok=False)
+            except FileExistsError:
+                # A concurrent first writer may have created the reserved
+                # namespace after our classification. Revalidate its exact
+                # object type below; never treat this race as success alone.
+                pass
         reserved_stat = reserved.lstat()
         if not stat.S_ISDIR(reserved_stat.st_mode) or stat.S_ISLNK(reserved_stat.st_mode):
             self._reject_non_authority_state("invalid_reserved_directory")
@@ -404,59 +484,61 @@ class SqliteLifecycleAuthority:
         """Create the complete version-one normalized authority schema once."""
         connection.execute("BEGIN EXCLUSIVE")
         try:
-            connection.execute("CREATE TABLE store_identity (identity TEXT NOT NULL)")
+            connection.execute("CREATE TABLE IF NOT EXISTS store_identity (identity TEXT NOT NULL)")
             connection.execute(
-                "CREATE TABLE entry_lineage (key TEXT PRIMARY KEY, lineage INTEGER NOT NULL)"
+                "CREATE TABLE IF NOT EXISTS entry_lineage (key TEXT PRIMARY KEY, lineage INTEGER NOT NULL)"
             )
             connection.execute(
-                "CREATE TABLE entries ("
+                "CREATE TABLE IF NOT EXISTS entries ("
                 "key TEXT PRIMARY KEY, generation TEXT NOT NULL, locator TEXT NOT NULL, "
                 "manifest BLOB NOT NULL, manifest_digest TEXT NOT NULL, lineage INTEGER NOT NULL, "
                 "revision INTEGER NOT NULL)"
             )
             connection.execute(
-                "CREATE TABLE mutations ("
+                "CREATE TABLE IF NOT EXISTS mutations ("
                 "operation_id TEXT PRIMARY KEY, key TEXT NOT NULL, generation TEXT NOT NULL, "
                 "locator TEXT NOT NULL, expected_lineage INTEGER, expected_revision INTEGER, "
                 "expected_generation TEXT, expected_manifest_digest TEXT, manifest BLOB NOT NULL, "
                 "verified_digest TEXT, verified_size INTEGER, state TEXT NOT NULL)"
             )
             connection.execute(
-                "CREATE TABLE authority_state ("
+                "CREATE TABLE IF NOT EXISTS authority_state ("
                 "singleton INTEGER PRIMARY KEY CHECK (singleton = 1), revision INTEGER NOT NULL, "
                 "projection_dirty INTEGER NOT NULL CHECK (projection_dirty IN (0, 1)))"
             )
             connection.execute(
-                "CREATE TABLE cleanup_debt ("
+                "CREATE TABLE IF NOT EXISTS cleanup_debt ("
                 "debt_id INTEGER PRIMARY KEY AUTOINCREMENT, operation_id TEXT NOT NULL, key TEXT NOT NULL, "
                 "generation TEXT NOT NULL, locator TEXT NOT NULL, role TEXT NOT NULL, "
                 "state TEXT NOT NULL)"
             )
             connection.execute(
-                "CREATE TABLE clear_runs ("
+                "CREATE TABLE IF NOT EXISTS clear_runs ("
                 "run_id TEXT PRIMARY KEY, state TEXT NOT NULL, revision INTEGER NOT NULL)"
             )
             connection.execute(
-                "CREATE TABLE clear_targets ("
+                "CREATE TABLE IF NOT EXISTS clear_targets ("
                 "run_id TEXT NOT NULL, key TEXT NOT NULL, generation TEXT NOT NULL, "
                 "manifest_digest TEXT NOT NULL, state TEXT NOT NULL, "
                 "PRIMARY KEY (run_id, key))"
             )
             connection.execute(
-                "CREATE TABLE reconciliation_runs ("
+                "CREATE TABLE IF NOT EXISTS reconciliation_runs ("
                 "run_id TEXT PRIMARY KEY, state TEXT NOT NULL, mutation_high_water INTEGER NOT NULL, "
                 "debt_high_water INTEGER NOT NULL)"
             )
             connection.execute(
-                "CREATE TABLE reconciliation_actions ("
+                "CREATE TABLE IF NOT EXISTS reconciliation_actions ("
                 "run_id TEXT NOT NULL, action_id INTEGER NOT NULL, state TEXT NOT NULL, "
                 "PRIMARY KEY (run_id, action_id))"
             )
             connection.execute(
-                "INSERT INTO store_identity(identity) VALUES (lower(hex(randomblob(16))))"
+                "INSERT INTO store_identity(identity) "
+                "SELECT lower(hex(randomblob(16))) "
+                "WHERE NOT EXISTS (SELECT 1 FROM store_identity)"
             )
             connection.execute(
-                "INSERT INTO authority_state(singleton, revision, projection_dirty) "
+                "INSERT OR IGNORE INTO authority_state(singleton, revision, projection_dirty) "
                 "VALUES (1, 0, 0)"
             )
             connection.execute("PRAGMA application_id = 1128350536")
@@ -477,28 +559,39 @@ class SqliteLifecycleAuthority:
         authority identity rather than treating that known predecessor as JSON
         reconstruction input.
         """
-        entry_columns = {
-            row[1] for row in connection.execute("PRAGMA table_info(entries)")
-        }
-        mutation_columns = {
-            row[1] for row in connection.execute("PRAGMA table_info(mutations)")
-        }
-        table_names = {
-            row[0]
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
-            )
-        }
-        needs_migration = (
-            "manifest_digest" not in entry_columns
-            or "expected_generation" not in mutation_columns
-            or "expected_manifest_digest" not in mutation_columns
-            or "authority_state" not in table_names
-        )
-        if not needs_migration:
-            return
         connection.execute("BEGIN EXCLUSIVE")
         try:
+            # Read the layout only after taking SQLite's exclusive writer
+            # transaction. A concurrent first-use creator can expose a
+            # partially initialized schema to a second connector; deciding
+            # which ALTER statements to run before this boundary races that
+            # creator and can attempt the same migration twice.
+            entry_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(entries)")
+            }
+            mutation_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(mutations)")
+            }
+            table_names = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+            if "entries" not in table_names:
+                connection.execute("ROLLBACK")
+                cls._initialize_schema(connection)
+                return
+
+            needs_migration = (
+                "manifest_digest" not in entry_columns
+                or "expected_generation" not in mutation_columns
+                or "expected_manifest_digest" not in mutation_columns
+                or "authority_state" not in table_names
+            )
+            if not needs_migration:
+                connection.execute("COMMIT")
+                return
             if "manifest_digest" not in entry_columns:
                 connection.execute("ALTER TABLE entries ADD COLUMN manifest_digest TEXT")
                 rows = connection.execute("SELECT key, manifest FROM entries").fetchall()
@@ -599,9 +692,11 @@ class SqliteLifecycleAuthority:
         created_new = False
         if mutation:
             self._remaining(deadline)
-            created_new = self._materialize_database_file()
+            created_new = self._materialize_database_file(deadline)
         else:
             state = self._classify_for_open()
+            if state == "established" and self._is_pristine_reserved_bootstrap():
+                state = "ready"
             if state in {"missing", "ready"}:
                 yield None
                 return
@@ -631,6 +726,27 @@ class SqliteLifecycleAuthority:
                 self._initialize_schema(connection)
             elif mutation:
                 self._migrate_schema_layout(connection)
+            application_id = connection.execute("PRAGMA application_id").fetchone()[0]
+            table_rows = connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+            if application_id == 0 and not table_rows:
+                # An O_EXCL winner made the database leaf visible but has not
+                # committed its first schema transaction yet. SQLite remains
+                # the only cross-process authority: close this observer and
+                # retry the exact bounded open rather than classifying a live
+                # zero-byte bootstrap as incompatible stored evidence.
+                connection.close()
+                connection = None
+                time.sleep(
+                    min(
+                        0.001,
+                        self._remaining(deadline),
+                    )
+                )
+                with self._connection(mutation=mutation, deadline=deadline) as retry:
+                    yield retry
+                return
             self._validate_schema(connection)
             yield connection
         except (
@@ -928,12 +1044,130 @@ class SqliteLifecycleAuthority:
                 )
             return self._promoted_result(connection, prepared.operation_id)
 
-    def abort_mutation(self, prepared: PreparedMutation) -> None:
-        self._transaction(
-            lambda connection: connection.execute(
-                "DELETE FROM mutations WHERE operation_id = ?", (prepared.operation_id,)
+    def abort_mutation(
+        self, prepared: PreparedMutation, *, candidate_persisted: bool = False
+    ) -> None:
+        """Retire pre-publication intent or retain exact candidate cleanup debt."""
+        def abort(connection: sqlite3.Connection) -> None:
+            row = connection.execute(
+                "SELECT key, generation, locator, state FROM mutations WHERE operation_id = ?",
+                (prepared.operation_id,),
+            ).fetchone()
+            if row is None or row[3] == "promoted":
+                return
+            if not candidate_persisted:
+                connection.execute(
+                    "DELETE FROM mutations WHERE operation_id = ?",
+                    (prepared.operation_id,),
+                )
+                return
+            connection.execute(
+                "UPDATE mutations SET state = 'aborted' WHERE operation_id = ?",
+                (prepared.operation_id,),
             )
-        )
+            existing = connection.execute(
+                "SELECT 1 FROM cleanup_debt WHERE operation_id = ? AND locator = ? "
+                "AND role = 'candidate' AND state = 'pending'",
+                (prepared.operation_id, row[2]),
+            ).fetchone()
+            if existing is None:
+                connection.execute(
+                    "INSERT INTO cleanup_debt(operation_id, key, generation, locator, role, state) "
+                    "VALUES (?, ?, ?, ?, 'candidate', 'pending')",
+                    (prepared.operation_id, row[0], row[1], row[2]),
+                )
+
+        self._transaction(abort)
+
+    def list_entries(self) -> tuple[EntrySnapshot, ...]:
+        """Return bounded committed/tombstone snapshots through the authority."""
+        absolute_deadline = self._deadline(None)
+        with self._connection(mutation=False, deadline=absolute_deadline) as connection:
+            if connection is None:
+                return ()
+            rows = connection.execute(
+                "SELECT key, generation, locator, manifest, manifest_digest, lineage, revision "
+                "FROM entries ORDER BY key"
+            ).fetchall()
+            return tuple(
+                EntrySnapshot(
+                    row[0],
+                    row[1],
+                    row[2],
+                    bytes(row[3]),
+                    EntryExpectation(row[5], row[6], row[1], row[4]),
+                )
+                for row in rows
+            )
+
+    def pending_cleanup_debts(
+        self,
+        *,
+        key: str | None = None,
+        operation_id: str | None = None,
+    ) -> tuple[CleanupDebt, ...]:
+        """Return exact pending debt without turning a projection into authority."""
+        filters = ["state = 'pending'"]
+        values: list[str] = []
+        if key is not None:
+            filters.append("key = ?")
+            values.append(key)
+        if operation_id is not None:
+            filters.append("operation_id = ?")
+            values.append(operation_id)
+        absolute_deadline = self._deadline(None)
+        with self._connection(mutation=False, deadline=absolute_deadline) as connection:
+            if connection is None:
+                return ()
+            rows = connection.execute(
+                "SELECT operation_id, locator, key, generation, role FROM cleanup_debt "
+                f"WHERE {' AND '.join(filters)} ORDER BY debt_id",
+                values,
+            ).fetchall()
+            return tuple(CleanupDebt(*row) for row in rows)
+
+    def retire_cleanup_debt(self, debt: CleanupDebt) -> None:
+        """Retire one exact, already reclaimed debt idempotently."""
+        def retire(connection: sqlite3.Connection) -> None:
+            connection.execute(
+                "DELETE FROM cleanup_debt WHERE operation_id = ? AND locator = ? "
+                "AND key = ? AND generation = ? AND role = ? AND state = 'pending'",
+                (
+                    debt.operation_id,
+                    debt.locator,
+                    debt.key,
+                    debt.generation,
+                    debt.role,
+                ),
+            )
+
+        self._transaction(retire)
+
+    def pending_mutations(self) -> tuple[PreparedMutation, ...]:
+        """Return only indexed pre-promotion operations for recovery."""
+        absolute_deadline = self._deadline(None)
+        with self._connection(mutation=False, deadline=absolute_deadline) as connection:
+            if connection is None:
+                return ()
+            rows = connection.execute(
+                "SELECT operation_id, key, generation, locator, expected_lineage, "
+                "expected_revision, expected_generation, expected_manifest_digest, manifest "
+                "FROM mutations WHERE state = 'prepared' ORDER BY rowid"
+            ).fetchall()
+            return tuple(
+                PreparedMutation(
+                    row[0],
+                    MutationSpec.create(
+                        operation_id=row[0],
+                        key=row[1],
+                        generation=row[2],
+                        candidate_locator=row[3],
+                        expected=EntryExpectation(row[4], row[5], row[6], row[7]),
+                        manifest=bytes(row[8]),
+                    ),
+                )
+                for row in rows
+            )
 
     def delete_entry(self, key: str, *, expected: EntryExpectation) -> None:
         def delete(connection: sqlite3.Connection) -> None:
@@ -950,6 +1184,14 @@ class SqliteLifecycleAuthority:
                 "INSERT INTO entry_lineage(key, lineage) VALUES (?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET lineage = excluded.lineage",
                 (key, next_lineage),
+            )
+            revision = connection.execute(
+                "SELECT revision FROM authority_state WHERE singleton = 1"
+            ).fetchone()[0] + 1
+            connection.execute(
+                "UPDATE authority_state SET revision = ?, projection_dirty = 1 "
+                "WHERE singleton = 1",
+                (revision,),
             )
 
         self._transaction(delete)
