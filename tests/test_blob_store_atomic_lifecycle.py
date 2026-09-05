@@ -194,6 +194,33 @@ def test_tracer_json_put_uses_immutable_generation_cas_and_native_bytes(
         store.close()
 
 
+def test_default_store_promotes_authority_backed_metadata_without_scheduler_artifacts(
+    tmp_path: Path,
+) -> None:
+    """Public writes keep old/new native generations under one authority."""
+    events: list[str] = []
+    root = tmp_path / "authority-backed-store"
+    store = BlobStore(root, backend="json")
+    store.handlers = _SingleHandlerRegistry(_NativeJsonHandler(events))
+
+    try:
+        assert store.put({"generation": 1}, key="authority-key", metadata={"phase": 1}) == "authority-key"
+        assert store.get("authority-key") == {"generation": 1}
+
+        assert store.update_metadata("authority-key", {"phase": 2, "owner": "tests"})
+        metadata = store.get_metadata("authority-key")
+        assert metadata is not None
+        assert metadata["metadata"]["phase"] == 2
+        assert metadata["metadata"]["owner"] == "tests"
+
+        assert store.put({"generation": 2}, key="authority-key") == "authority-key"
+        assert store.get("authority-key") == {"generation": 2}
+        assert (root / ".cacheness" / "lifecycle-authority-v1.sqlite3").is_file()
+        assert not (root / "operations").exists()
+    finally:
+        store.close()
+
+
 @pytest.mark.skipif(os.name != "posix", reason="special-node substitution fixture")
 @pytest.mark.parametrize("replacement_kind", ("symlink", "hard_link", "fifo", "inode"))
 def test_candidate_verification_rejects_every_substituted_inode_before_manifest_cas(
