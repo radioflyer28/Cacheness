@@ -467,6 +467,24 @@ class AuthorityLifecycleEngine:
             if not targets:
                 self.authority.checkpoint_clear(token)
                 return removed
+            # A bounded authority page still needs a fail-closed current-entry
+            # locator check before it mutates any member.  This is intentionally
+            # page-local: clear never materializes every target or enumerates
+            # payload names, and each destructive action reloads the current
+            # entry below for its exact revalidation.
+            for target in targets:
+                current = self.authority.read_entry(target.key)
+                if current is None:
+                    continue
+                try:
+                    self._entry_manifest(current, allow_tombstone=True)
+                except (
+                    CacheBlobLifecycleConflictError,
+                    CacheBlobManifestMalformedError,
+                    CacheBlobManifestUnauthenticatedError,
+                    CacheBlobManifestUnsupportedVersionError,
+                ):
+                    continue
             for target in targets:
                 if (
                     consumed_actions >= action_budget
