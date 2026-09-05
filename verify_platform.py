@@ -12,6 +12,7 @@ import multiprocessing
 import os
 import platform
 from queue import Empty
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -337,7 +338,9 @@ def _validate_native_windows_root(root: Path) -> tuple[bool, str]:
     return True, "protected_dacl_validated"
 
 
-def _run_different_token_denial(command: list[str]) -> tuple[bool, str]:
+def _run_different_token_denial(
+    command: list[str], *, current_logon_sid: str
+) -> tuple[bool, str]:
     """Require a second-token helper to prove both authority denials."""
     completed = subprocess.run(
         command,
@@ -352,6 +355,13 @@ def _run_different_token_denial(command: list[str]) -> tuple[bool, str]:
         return False, "different_token_evidence_malformed"
     if not isinstance(report, dict):
         return False, "different_token_evidence_malformed"
+    reported_logon_sid = report.get("logon_sid")
+    if (
+        not isinstance(reported_logon_sid, str)
+        or re.fullmatch(r"S-1-5-5-[0-9]+-[0-9]+", reported_logon_sid) is None
+        or reported_logon_sid == current_logon_sid
+    ):
+        return False, "different_token_not_distinct"
     denied = (
         completed.returncode != 0
         and report.get("status") == "DENIED"
@@ -454,7 +464,12 @@ def _collect_native_windows_evidence(
     command = _parse_second_token_command()
     if command is None:
         return PHASE3_UNAVAILABLE, "different_token_unavailable"
-    denied, denial_reason = _run_different_token_denial(command)
+    from cacheness.storage.sqlite_lifecycle_authority import SqliteLifecycleAuthority
+
+    current_logon_sid = SqliteLifecycleAuthority.for_root(root)._current_windows_logon_sid()
+    denied, denial_reason = _run_different_token_denial(
+        command, current_logon_sid=current_logon_sid
+    )
     evidence["topology"]["different_token"] = "DENIED" if denied else "NOT_DENIED"
     if not denied:
         return PHASE3_FAIL, denial_reason
