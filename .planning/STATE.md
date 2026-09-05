@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 03
 current_phase_name: Atomic Lifecycle and Recovery Engine
 status: executing
-stopped_at: Completed 03-04-PLAN.md
-last_updated: "2026-09-05T03:09:11.398Z"
+stopped_at: Completed 03-05-PLAN.md
+last_updated: "2026-09-05T04:35:06.214Z"
 last_activity: 2026-09-04
 last_activity_desc: Phase 03 execution started
-state_head: f6bfc83e6d685f1e1aa7ffdf7a864dbcb4ecdabb
+state_head: 10409de967a53c78040662b29186d88e6975d25a
 progress:
   total_phases: 8
   completed_phases: 2
   total_plans: 32
-  completed_plans: 26
+  completed_plans: 27
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-08-29)
 ## Current Position
 
 Phase: 03 (Atomic Lifecycle and Recovery Engine) — EXECUTING
-Plan: 5 of 10
+Plan: 6 of 10
 Status: Ready to execute
 Last activity: 2026-09-04 — Phase 03 execution started
 
@@ -79,6 +79,7 @@ Phase 03 rows in this historical table belong to the superseded file-native atte
 | Phase 03 P02 | 12min | 3 tasks | 7 files |
 | Phase 03 P03 | 25min | 3 tasks | 8 files |
 | Phase 03 P04 | 41min | 2 tasks | 8 files |
+| Phase 03 P05 | 18min | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -178,6 +179,8 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 03]: LifecycleAuthority is the only committed-state authority; legacy manifest repositories are not initialized in authority mode.
 - [Phase 03]: Promotion records exact cleanup debt atomically, while reclamation and debt retirement run outside authority transactions.
 - [Phase 03]: Default BlobStore close owns and releases only the authority it constructs; injected resources stay caller-owned.
+- [Phase 03]: Clear targets retain exact authenticated entry bytes and lineage, then advance only after exact deletion, absence proof, conflict, or blocked evidence.
+- [Phase 03]: Reconciliation v2 is the canonical authority report; zero-argument v1 dictionaries and summaries remain pure projections from the same findings.
 
 ### Pending Todos
 
@@ -201,6 +204,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-09-05T03:09:11.351Z
-Stopped at: Completed 03-04-PLAN.md
+Last session: 2026-09-05T04:35:06.166Z
+Stopped at: Completed 03-05-PLAN.md
 Resume file: None
