@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 03
 current_phase_name: Atomic Lifecycle and Recovery Engine
 status: executing
-stopped_at: Completed 03-07-PLAN.md
-last_updated: "2026-09-05T20:09:45.924Z"
+stopped_at: Completed 03-08-PLAN.md
+last_updated: "2026-09-05T20:36:53.395Z"
 last_activity: 2026-09-04
 last_activity_desc: Phase 03 execution started
-state_head: ae71c12d4869ede395944969721d4562d5746786
+state_head: 8a3040ee5b0690614153ea99a40f7d062599a322
 progress:
   total_phases: 8
   completed_phases: 2
   total_plans: 32
-  completed_plans: 29
+  completed_plans: 30
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-08-29)
 ## Current Position
 
 Phase: 03 (Atomic Lifecycle and Recovery Engine) — EXECUTING
-Plan: 8 of 10
+Plan: 9 of 10
 Status: Ready to execute
 Last activity: 2026-09-04 — Phase 03 execution started
 
@@ -82,6 +82,7 @@ Phase 03 rows in this historical table belong to the superseded file-native atte
 | Phase 03 P05 | 18min | 2 tasks | 8 files |
 | Phase 03 P06 | 13min | 2 tasks | 8 files |
 | Phase 03 P07 | 27m | 2 tasks | 13 files |
+| Phase 03 P08 | 35min | 2 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -187,6 +188,8 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 03]: Authority selection validates semantic capabilities before construction; memory is explicit same-process-only and injected authority ownership is preserved.
 - [Phase 03]: Retired development controls use exact name/type classification and fail rebuild-required before authority bootstrap or mutation.
 - [Phase 03]: LifecycleAuthority is the sole runtime reconciliation and recovery authority; the file-native reconciler has no compatibility path.
+- [Phase 03]: BlobStore selects one LifecycleAuthority; JSON is revision-bound projection only.
+- [Phase 03]: Retained coordination is process-local ordering and close admission only; payload safety stays in filesystem helpers.
 
 ### Pending Todos
 
@@ -210,6 +213,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-09-05T20:09:45.878Z
-Stopped at: Completed 03-07-PLAN.md
+Last session: 2026-09-05T20:36:53.350Z
+Stopped at: Completed 03-08-PLAN.md
 Resume file: None

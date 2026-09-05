@@ -2,9 +2,9 @@
 schema_version: 1
 open_count: 2
 waived_count: 0
-fixed_count: 25
-total_count: 27
-last_updated: 2026-09-05T19:38:04.145Z
+fixed_count: 26
+total_count: 28
+last_updated: 2026-09-05T20:37:24.296Z
 ---
 
 # Broken Windows Ledger
@@ -42,6 +42,7 @@ last_updated: 2026-09-05T19:38:04.145Z
 | 25 | 03 | deviation | src/cacheness/storage/manifest_repository.py | 205 | A stale revision-R renderer is prevented from replacing a newer revision-R+1 JSON projection. | fixed |  | 2026-09-05T19:32:18.274Z | 2026-09-05T19:32:42.970Z |
 | 26 | 03 | deviation | tests/test_blob_store_read_contract.py |  | Mutation contracts rebuild a corrupt JSON projection from committed authority state while direct reads remain non-mutating. | fixed |  | 2026-09-05T19:32:18.392Z | 2026-09-05T19:32:43.069Z |
 | 27 | 03 | deviation | src/cacheness/storage/blob_store.py | 948 | Dry-run reconciliation remains projection-free so it cannot acknowledge JSON projection debt or mutate authority state. | fixed |  | 2026-09-05T19:38:04.027Z | 2026-09-05T19:38:04.145Z |
+| 28 | 03 | deviation | tests/test_blob_manifest_backends.py |  | Legacy repository/admission test seams were replaced by authority contracts during Plan 03-08. | fixed |  | 2026-09-05T20:37:02.486Z | 2026-09-05T20:37:24.296Z |
 
 ````json
 [
@@ -368,6 +369,18 @@ last_updated: 2026-09-05T19:38:04.145Z
     "reason": "",
     "recorded_at": "2026-09-05T19:38:04.027Z",
     "resolved_at": "2026-09-05T19:38:04.145Z"
+  },
+  {
+    "id": 28,
+    "kind": "deviation",
+    "phase": "03",
+    "file": "tests/test_blob_manifest_backends.py",
+    "line": null,
+    "description": "Legacy repository/admission test seams were replaced by authority contracts during Plan 03-08.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-09-05T20:37:02.486Z",
+    "resolved_at": "2026-09-05T20:37:24.296Z"
   }
 ]
 ````
