@@ -213,3 +213,14 @@ Plans:
 | 6. UnifiedCache Policy Composition | 0/TBD | Not started | - |
 | 7. Explicit Migration and Rebuild Cutover | 0/TBD | Not started | - |
 | 8. Production Gates and Performance Stabilization | 0/TBD | Not started | - |
+
+## Backlog
+
+### Phase 999.1: Qualify native Windows lifecycle authority (BACKLOG)
+
+**Goal:** Run the Phase 3 native-Windows release qualification in an eligible Python 3.11 NTFS environment and attach the machine-readable evidence.
+**Requirements:** TBD
+**Plans:** 0 plans
+
+Plans:
+- [ ] Verify protected-DACL provisioning, same-session SQLite contention, and different-token denial; promote with $gsd-review-backlog when ready.
