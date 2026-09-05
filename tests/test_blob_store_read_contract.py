@@ -486,24 +486,26 @@ def test_direct_reads_use_authority_without_predecessor_clear_recovery(
         store.close()
 
 
-def test_clear_translates_authority_listing_failure_without_mutating_data(
+def test_clear_translates_authority_snapshot_failure_without_mutating_data(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An authority failure before clear selection leaves the entry intact."""
-    root = tmp_path / "authority-clear-list"
+    """A transactional clear-snapshot failure leaves committed state intact."""
+    root = tmp_path / "authority-clear-snapshot"
     store = BlobStore(root, backend="json")
     try:
         key = store.put("preserved payload", key="preserved-key")
         entry_before = store.get_metadata(key)
         assert entry_before is not None
+        authority_entry_before = store.lifecycle_authority.read_entry(key)
+        assert authority_entry_before is not None
         payload_path = root / entry_before["metadata"]["actual_path"]
         payload_before = payload_path.read_bytes()
-        failure = OSError("authority list unavailable")
+        failure = OSError("authority clear snapshot unavailable")
 
         monkeypatch.setattr(
             store.lifecycle_authority,
-            "list_entries",
+            "begin_clear",
             lambda: (_ for _ in ()).throw(failure),
         )
 
@@ -517,6 +519,7 @@ def test_clear_translates_authority_listing_failure_without_mutating_data(
             is CacheReadFailureCategory.BACKEND_FAILURE
         )
         assert store.get_metadata(key) == entry_before
+        assert store.lifecycle_authority.read_entry(key) == authority_entry_before
         assert payload_path.read_bytes() == payload_before
         assert store.get(key) == "preserved payload"
         assert not list(root.glob("tombstones/**/*"))
