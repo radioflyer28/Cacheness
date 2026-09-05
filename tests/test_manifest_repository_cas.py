@@ -27,6 +27,7 @@ from cacheness.error_handling import (
 from cacheness.metadata import InMemoryBackend, JsonBackend, SqliteBackend
 from cacheness.storage.manifest_repository import (
     InMemoryManifestRepository,
+    JsonProjectionExporter,
     JsonManifestRepository,
     ManifestExpectation,
     SqliteManifestRepository,
@@ -46,6 +47,79 @@ from cacheness.storage.operation_repository import (
 def _record(label: str) -> bytes:
     """Return deliberately opaque canonical-record stand-ins for repository tests."""
     return f"canonical-manifest-record::{label}".encode("utf-8")
+
+
+# =============================================================================
+# Authority JSON projection (Plan 03-06)
+# =============================================================================
+
+
+def test_projection_export_streams_a_private_authority_backup_and_marks_revision_clean(
+    tmp_path: Path,
+) -> None:
+    """Committed SQLite rows rebuild the public JSON shape without live reads."""
+    from cacheness.storage import BlobStore
+
+    root = tmp_path / "projection-store"
+    store = BlobStore(root, backend="json")
+    try:
+        key = store.put("projection payload", key="projection-key", metadata={"tag": "v1"})
+        authority = store.lifecycle_authority
+        dirty_revision = authority.snapshot_state().revision
+        projection_path = root / "cache_metadata.json"
+
+        result = JsonProjectionExporter(authority, projection_path).export()
+
+        assert result.value == dirty_revision
+        assert authority.snapshot_state().projection_dirty is False
+        document = json.loads(projection_path.read_text(encoding="utf-8"))
+        assert document["entries"][key] == {
+            "cache_key": key,
+            "data_type": "object",
+            "file_size": document["entries"][key]["file_size"],
+            "created_at": document["entries"][key]["created_at"],
+            "metadata": {
+                "tag": "v1",
+                "actual_path": document["entries"][key]["metadata"]["actual_path"],
+            },
+        }
+        assert document["entries"][key]["metadata"]["actual_path"].startswith(
+            "generations/"
+        )
+    finally:
+        store.close()
+
+
+def test_projection_export_failure_keeps_committed_authority_dirty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A derived-output failure never rolls back or marks committed state clean."""
+    from cacheness.storage import BlobStore
+    from cacheness.error_handling import CacheBlobBackendError
+
+    root = tmp_path / "projection-failure"
+    store = BlobStore(root, backend="json")
+    try:
+        key = store.put("projection payload", key="projection-key")
+        authority = store.lifecycle_authority
+        original_replace = manifest_repository_module.os.replace
+
+        def fail_projection_publish(source: object, destination: object) -> None:
+            if Path(destination) == root / "cache_metadata.json":
+                raise OSError("projection publish failed")
+            original_replace(source, destination)
+
+        monkeypatch.setattr(
+            manifest_repository_module.os, "replace", fail_projection_publish
+        )
+
+        with pytest.raises(CacheBlobBackendError, match="projection"):
+            JsonProjectionExporter(authority, root / "cache_metadata.json").export()
+
+        assert authority.snapshot_state().projection_dirty is True
+        assert store.get(key) == "projection payload"
+    finally:
+        store.close()
 
 
 def test_pending_recovery_filters_unrelated_names_before_its_action_bound(
