@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 03
 current_phase_name: Atomic Lifecycle and Recovery Engine
 status: executing
-stopped_at: Completed 03-08-PLAN.md
-last_updated: "2026-09-05T20:36:53.395Z"
+stopped_at: Completed 03-09-PLAN.md
+last_updated: "2026-09-05T23:05:09.512Z"
 last_activity: 2026-09-04
 last_activity_desc: Phase 03 execution started
-state_head: 8a3040ee5b0690614153ea99a40f7d062599a322
+state_head: d255d4c5424c9c499a32b670c7909e13a10c377b
 progress:
   total_phases: 8
   completed_phases: 2
   total_plans: 33
-  completed_plans: 30
+  completed_plans: 31
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-08-29)
 ## Current Position
 
 Phase: 03 (Atomic Lifecycle and Recovery Engine) — EXECUTING
-Plan: 9 of 11
+Plan: 10 of 11
 Status: Ready to execute
 Last activity: 2026-09-04 — Phase 03 execution started
 
@@ -83,6 +83,7 @@ Phase 03 rows in this historical table belong to the superseded file-native atte
 | Phase 03 P06 | 13min | 2 tasks | 8 files |
 | Phase 03 P07 | 27m | 2 tasks | 13 files |
 | Phase 03 P08 | 35min | 2 tasks | 11 files |
+| Phase 03 P09 | 8min | 2 tasks | 12 files |
 
 ## Accumulated Context
 
@@ -190,6 +191,9 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 03]: LifecycleAuthority is the sole runtime reconciliation and recovery authority; the file-native reconciler has no compatibility path.
 - [Phase 03]: BlobStore selects one LifecycleAuthority; JSON is revision-bound projection only.
 - [Phase 03]: Retained coordination is process-local ordering and close admission only; payload safety stays in filesystem helpers.
+- [Phase 03]: Non-Windows platform evidence remains canonical UNAVAILABLE with exit code 2 and is not Windows qualification.
+- [Phase 03]: Native Windows denial proof requires a genuinely different session or service token; same-session evidence alone is insufficient.
+- [Phase 03]: NumPy is a declared base runtime dependency because normal package import paths require it.
 
 ### Pending Todos
 
@@ -213,6 +217,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-09-05T20:36:53.350Z
-Stopped at: Completed 03-08-PLAN.md
+Last session: 2026-09-05T23:05:09.465Z
+Stopped at: Completed 03-09-PLAN.md
 Resume file: None

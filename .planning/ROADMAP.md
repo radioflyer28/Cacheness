@@ -114,7 +114,7 @@ Plans:
   4. Operators can dry-run and resume reconciliation to repair, quarantine, or report inconsistent entries without guessing their provenance.
   5. Forced same-key write, delete, and read races have deterministic outcomes without globally serializing operations on distinct keys.
 
-**Plans**: 8/11 plans executed
+**Plans**: 9/11 plans executed
 
 Plans:
 
@@ -126,7 +126,7 @@ Plans:
 - [x] 03-06-PLAN.md — Make JSON a revision-checked projection and seal downstream capability contracts
 - [x] 03-07-PLAN.md — Delete the abandoned scheduler core and prove it cannot be reached
 - [x] 03-08-PLAN.md — Trim retained helpers while preserving payload safety and one-authority composition
-- [ ] 03-09-PLAN.md — Close deterministic crash, race, Python-version, and platform-runner gates without claiming native Windows qualification
+- [x] 03-09-PLAN.md — Close deterministic crash, race, Python-version, and platform-runner gates without claiming native Windows qualification
 - [ ] 03-11-PLAN.md — Capture and attest the current host's UNAVAILABLE/NOT_QUALIFIED Windows evidence after 03-09 closes
 - [ ] 03-10-PLAN.md — Measure lifecycle budgets and close final Phase 3 acceptance after 03-11
 
@@ -208,7 +208,7 @@ Plans:
 |-------|----------------|--------|-----------|
 | 1. Compatibility and Security Baseline | 15/15 | Complete | 2026-08-30 |
 | 2. Canonical Storage and Integrity Contract | 7/7 | Complete    | 2026-08-30 |
-| 3. Atomic Lifecycle and Recovery Engine | 8/11 | In Progress|  |
+| 3. Atomic Lifecycle and Recovery Engine | 9/11 | In Progress|  |
 | 4. Metadata Composition and Topology Contracts | 0/TBD | Not started | - |
 | 5. Payload Backends and Full Matrix Parity | 0/TBD | Not started | - |
 | 6. UnifiedCache Policy Composition | 0/TBD | Not started | - |
@@ -224,4 +224,5 @@ Plans:
 **Plans:** 0 plans
 
 Plans:
+
 - [ ] Verify protected-DACL provisioning, same-session SQLite contention, and different-token denial; promote with $gsd-review-backlog when ready.
