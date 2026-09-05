@@ -224,8 +224,8 @@ class LifecycleAuthority(Protocol):
 
     def delete_entry(self, key: str, *, expected: EntryExpectation) -> None: ...
 
-    # The remaining complete transitions are intentionally semantic placeholders
-    # for the next lifecycle waves; callers never access adapter tables directly.
+    # Additional complete transitions stay semantic; callers never access adapter
+    # tables directly.
     def retire_tombstone(self, key: str, *, expected: EntryExpectation) -> None: ...
 
     def begin_clear(self) -> PageToken: ...
