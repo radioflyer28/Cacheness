@@ -192,7 +192,7 @@ Plans:
 **Wave 19** *(blocked on Wave 18 completion)*
 
 - 03-19-PLAN.md — **Superseded by ADR 0001**; retained as interrupted implementation history and excluded from canonical counts
-- [ ] 03-20-PLAN.md — Preserve real Plan 03-19 integrity fixes, remove deadline-driven authority complexity, and qualify topology-specific recovery/bounded outcomes
+- [ ] 03-20-PLAN.md — Preserve real Plan 03-19 integrity fixes, cover partial exclusive-publication crashes, remove deadline-driven authority complexity, then qualify committed topology-specific recovery/bounded outcomes from a detached worktree
 
 ### Phase 4: Metadata Composition and Topology Contracts
 

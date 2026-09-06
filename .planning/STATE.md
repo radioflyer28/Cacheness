@@ -5,9 +5,9 @@ current_phase: 03
 current_phase_name: Atomic Lifecycle and Recovery Engine
 status: planned
 stopped_at: Plan 03-20 ready; Plan 03-19 superseded by ADR 0001
-last_updated: "2026-09-06T14:30:00Z"
+last_updated: "2026-09-06T16:15:59Z"
 last_activity: 2026-09-06
-last_activity_desc: Replanned the Phase 3 tail around topology-specific integrity, recovery, typed contention outcomes, and benchmark/runtime separation
+last_activity_desc: Revised Plan 03-20 with partial-publication crash coverage and post-Task-3 detached-worktree qualification
 state_head: 781d86c4f8fe6b24276e031fe206a351d8059364
 progress:
   total_phases: 8
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-08-29)
 Phase: 03 (Atomic Lifecycle and Recovery Engine) — PLANNED
 Plan: 20 of 20 (19 canonical; 03-19 is superseded)
 Status: Plan 03-20 ready for execution
-Last activity: 2026-09-06 — Replanned the unfinished tail from ADR 0001; preserve integrity/recovery repairs and remove deadline-driven coordination complexity
+Last activity: 2026-09-06 — Revised Plan 03-20 so partial-stream/file-to-directory-fsync crashes are explicit and clean qualification runs only after Tasks 1-3 commit
 
 Progress: [██░░░░░░░░] 2 of 8 phases complete
 
@@ -242,6 +242,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-09-06T14:30:00Z
+Last session: 2026-09-06T16:15:59Z
 Stopped at: Plan 03-20 ready; Plan 03-19 superseded by ADR 0001
 Resume file: None

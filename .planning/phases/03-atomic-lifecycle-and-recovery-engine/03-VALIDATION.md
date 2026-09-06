@@ -44,7 +44,7 @@ describe the combined resources as one ACID transaction.
 | Requirement / evidence | Class | Acceptance target |
 |---|---|---|
 | STOR-03 | Integrity | A read observes the old or new authenticated complete generation, never a mixture. |
-| STOR-04 | Recovery + integrity | Pre-promotion interruption preserves the old generation plus exact intent; post-promotion interruption preserves the new generation plus cleanup debt. |
+| STOR-04 | Recovery + integrity | Pre-promotion interruption preserves the old generation plus exact intent, including process loss during `create_stream_durable_exclusive` copying and after file fsync but before containing-directory fsync; post-promotion interruption preserves the new generation plus cleanup debt. |
 | STOR-05 | Integrity + recovery | Overwrite/delete/clear/close repeat safely and never reclaim a live locator. |
 | STOR-06 | Recovery | Dry-run is non-mutating; apply uses indexed high-water/keyset work, exact revalidation, checkpoints, and resume. |
 | STOR-07 | Integrity + progress | SQLite lineage CAS prevents disagreement; a contender may succeed, conflict, or return a typed retryable timeout. |
@@ -52,11 +52,21 @@ describe the combined resources as one ACID transaction.
 
 ### Independent command groups
 
-- **Correctness:** `uv run --isolated --python 3.11 --all-extras --group dev --frozen pytest -q tests/test_lifecycle_authority_contract.py tests/test_blob_store_read_contract.py tests/test_blob_store_atomic_lifecycle.py tests/test_projection_mutation_contract.py tests/test_projection_sql_atomicity.py tests/test_filesystem_containment.py -o log_cli=false`
-- **Recovery:** `uv run --isolated --python 3.11 --all-extras --group dev --frozen pytest -q tests/test_sqlite_lifecycle_authority.py tests/test_blob_store_reconciliation.py tests/test_blob_store_close_contract.py tests/test_sqlite_metadata_bootstrap_atomicity.py tests/test_phase3_postreview_concurrency.py -k "interruption or crash or rollback or cleanup or reconcile or clear or close or bootstrap" -o log_cli=false`
-- **Progress:** `uv run --isolated --python 3.11 --all-extras --group dev --frozen pytest -q tests/test_blob_store_concurrency.py tests/test_sqlite_authority_admission.py tests/test_sqlite_concurrency.py tests/test_sqlite_concurrency_temp.py -o log_cli=false`; the pass condition is safe success/conflict/typed-retryable-timeout accounting, not every contender succeeding within a fixed small interval.
-- **Performance:** `uv run --isolated --python 3.11 --all-extras --group dev --frozen python benchmarks/lifecycle_authority_benchmark.py --verify-baseline benchmarks/lifecycle_authority_baseline.json`; this command checks named statistical workload envelopes only.
-- **Repository:** after implementation is committed, run `uv run --isolated --python 3.11 --all-extras --group dev --frozen pytest -q -o log_cli=false` from a clean detached worktree and run the Phase 3 Ruff-delta verifier there. Protect the original workspace's compatibility WAL/SHM sidecars with before/after lstat and SHA-256 fingerprints.
+- **Task 3 focused benchmark/config:** before Task 3 commits, run `uv run --isolated --python 3.11 --all-extras --group dev --frozen pytest -q tests/test_config_validation.py -o log_cli=false`, then the performance command, Phase 3 Ruff-delta verifier, and direct Ruff on Task 3's owned Python/test files. This is focused local evidence, not phase qualification.
+- **Task 4 correctness:** after Task 3 commits, run `uv run --isolated --python 3.11 --all-extras --group dev --frozen pytest -q tests/test_lifecycle_authority_contract.py tests/test_blob_store_read_contract.py tests/test_blob_store_atomic_lifecycle.py tests/test_projection_mutation_contract.py tests/test_projection_sql_atomicity.py tests/test_filesystem_containment.py -o log_cli=false` from the clean detached Task 1/2/3 commit.
+- **Task 4 recovery:** run `uv run --isolated --python 3.11 --all-extras --group dev --frozen pytest -q tests/test_sqlite_lifecycle_authority.py tests/test_blob_store_atomic_lifecycle.py tests/test_blob_store_reconciliation.py tests/test_blob_store_close_contract.py tests/test_sqlite_metadata_bootstrap_atomicity.py tests/test_phase3_postreview_concurrency.py -k "interruption or crash or streaming or fsync or rollback or cleanup or reconcile or clear or close or bootstrap" -o log_cli=false`; the partial-stream and file-fsync/directory-fsync-gap cases must be selected.
+- **Task 4 progress:** run `uv run --isolated --python 3.11 --all-extras --group dev --frozen pytest -q tests/test_blob_store_concurrency.py tests/test_sqlite_authority_admission.py tests/test_sqlite_concurrency.py tests/test_sqlite_concurrency_temp.py -o log_cli=false`; the pass condition is safe success/conflict/typed-retryable-timeout accounting, not every contender succeeding within a fixed small interval.
+- **Task 4 performance:** run `uv run --isolated --python 3.11 --all-extras --group dev --frozen python benchmarks/lifecycle_authority_benchmark.py --verify-baseline benchmarks/lifecycle_authority_baseline.json`; this checks named statistical workload envelopes only.
+- **Task 4 repository qualification:** after all four groups pass independently, run the Phase 3 Ruff-delta verifier, scoped direct Ruff, and `uv run --isolated --python 3.11 --all-extras --group dev --frozen pytest -q -o log_cli=false` from the same clean detached worktree. Protect the original workspace's compatibility WAL/SHM sidecars with before/after lstat and SHA-256 fingerprints.
+
+### Task and validation ownership
+
+| Task | Files it may modify | Validation responsibility |
+|---|---|---|
+| Task 1 | Five runtime/tracer files named in 03-20 | End-to-end SQLite/filesystem tracer, including the two partial-publication crash boundaries. |
+| Task 2 | Five integrity/concurrency test files named in 03-20 | Retained fail-closed regressions and guarantee-class rewrites. |
+| Task 3 | Lifecycle benchmark, lifecycle baseline JSON, config validation test | Focused local benchmark/config verification before commit. |
+| Task 4 | `03-20-SUMMARY.md` only | Read-only detached-worktree qualification of committed Tasks 1-3 and protected-sidecar identity proof. |
 
 ### Stop-condition gate
 
@@ -115,7 +125,7 @@ target above supersedes it.
 | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |-------------|------------|-----------------|-----------|-------------------|-------------|--------|
 | STOR-03 | T-03-01 partial visibility | Every fault boundary exposes the old or new complete generation; promotion is one authority transaction | contract + subprocess crash | `.venv/bin/pytest -q tests/test_lifecycle_authority_contract.py tests/test_blob_store_atomic_lifecycle.py -x` | Contract file ❌ W0; BlobStore file requires rewrite | ⬜ pending |
-| STOR-04 | T-03-02 unindexed residue | Durable intent precedes persistent payload side effects; exact indexed work/debt survives reopen | fault + recovery | `.venv/bin/pytest -q tests/test_sqlite_lifecycle_authority.py tests/test_blob_store_reconciliation.py -x` | SQLite file ❌ W0; reconciliation requires rewrite | ⬜ pending |
+| STOR-04 | T-03-02 unindexed residue | Durable intent precedes persistent payload side effects; exact indexed work/debt survives reopen, including partial exclusive streaming and the file-fsync/directory-fsync gap | fault + recovery | Use the authoritative Task 4 recovery command above | Existing files; Plan 03-20 adds the two missing publication-boundary cases | ⬜ pending |
 | STOR-05 | T-03-03 stale cleanup | Overwrite/delete/clear/close are idempotent and never reclaim a current generation | interface + integration | `.venv/bin/pytest -q tests/test_blob_store_atomic_lifecycle.py tests/test_blob_store_close_contract.py -x` | Existing files require scheduler-decoupled rewrite | ⬜ pending |
 | STOR-06 | T-03-04 unsafe repair | Dry-run is non-mutating; apply is indexed, bounded, exact, resumable, and revalidated | adversarial + reopen | `.venv/bin/pytest -q tests/test_blob_store_reconciliation.py -x` | Existing file requires replacement internals | ⬜ pending |
 | STOR-07 | T-03-05 race/ABA | Same-key CAS has one winner; ABA is rejected; distinct-key payload work overlaps outside transactions | deterministic concurrency | `.venv/bin/pytest -q tests/test_blob_store_concurrency.py -x` | Existing file requires receipt/barrier test replacement | ⬜ pending |
