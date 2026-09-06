@@ -6,7 +6,6 @@ deliberately absent from this module, keeping SQLite writer transactions short.
 
 from __future__ import annotations
 
-from collections import deque
 from contextlib import contextmanager
 import csv
 import hashlib
@@ -17,7 +16,7 @@ import sqlite3
 import stat
 import subprocess
 import tempfile
-from threading import Condition, Event, Lock
+from threading import Lock
 import time
 from typing import Callable, Iterator, TypeVar
 from uuid import uuid4
@@ -65,99 +64,7 @@ SQLITE_APPLICATION_ID = 0x43414348
 SCHEMA_VERSION = 1
 _MAX_STORE_IDENTITY_BYTES = 64
 _SQLITE_BUSY_TIMEOUT_SAFETY_MILLISECONDS = 5
-_AUTHORITY_TIMEOUT_STAGES = frozenset(
-    {
-        "writer_admission",
-        "scheduler_dispatch",
-        "sqlite_busy",
-        "connection_open",
-        "connection_configure",
-        "schema_initialize",
-        "schema_validate",
-        "entry_read",
-        "expectation_read",
-        "entry_list",
-        "clear_read",
-        "reconciliation_read",
-        "projection_backup",
-        "diagnostics_read",
-        "transaction_body",
-    }
-)
 _T = TypeVar("_T")
-
-
-class _WriterAdmissionTicket:
-    """One same-process request for the short SQLite writer interval."""
-
-    def __init__(self) -> None:
-        self.cancelled = False
-        self.eligible = False
-        self.granted = False
-
-
-class _WriterAdmissionGate:
-    """FIFO state for one canonical authority database path.
-
-    The gate is an admission optimization only. SQLite and the lifecycle CAS
-    rows remain the cross-process correctness boundary.
-    """
-
-    def __init__(self) -> None:
-        self.condition = Condition(Lock())
-        self.tickets: deque[_WriterAdmissionTicket] = deque()
-        self.owner: _WriterAdmissionTicket | None = None
-        self.references = 0
-
-
-class _StagedConnection:
-    """Route one authority operation's SQL through its fixed timeout stage."""
-
-    def __init__(
-        self,
-        authority: "SqliteLifecycleAuthority",
-        connection: sqlite3.Connection,
-        *,
-        deadline: float,
-        started_at: float,
-        stage: str,
-    ) -> None:
-        self._authority = authority
-        self._connection = connection
-        self._deadline = deadline
-        self._started_at = started_at
-        self._stage = stage
-
-    def execute(self, statement: str, parameters: object = ()) -> sqlite3.Cursor:
-        return self._authority._execute_for_stage(
-            self._connection,
-            statement,
-            parameters=parameters,
-            deadline=self._deadline,
-            started_at=self._started_at,
-            stage=self._stage,
-        )
-
-    def __getattr__(self, name: str) -> object:
-        return getattr(self._connection, name)
-
-
-# The registry lock only protects map/refcount changes.  It is deliberately
-# never held while a thread waits for a ticket or performs SQLite work.
-_WRITER_ADMISSION_REGISTRY_LOCK = Lock()
-_WRITER_ADMISSION_REGISTRY: dict[str, _WriterAdmissionGate] = {}
-
-
-def _reset_writer_admission_after_fork() -> None:
-    """Replace copied process-local writer coordination in a forked child."""
-    global _WRITER_ADMISSION_REGISTRY
-    global _WRITER_ADMISSION_REGISTRY_LOCK
-    _WRITER_ADMISSION_REGISTRY = {}
-    _WRITER_ADMISSION_REGISTRY_LOCK = Lock()
-
-
-if hasattr(os, "register_at_fork"):
-    os.register_at_fork(after_in_child=_reset_writer_admission_after_fork)
 
 
 def _platform_name() -> str:
@@ -195,21 +102,12 @@ class SqliteLifecycleAuthority:
         self._state_lock = Lock()
         self._bootstrap_lock = Lock()
         self._schema_lock = Lock()
-        self._bootstrap_started = False
-        self._bootstrap_ready_event = Event()
         self._schema_ready = False
         self._closed = False
         self.open_write_transactions = 0
-        self._admission_ticket_lock = Lock()
-        self._admission_tickets: dict[_WriterAdmissionTicket, _WriterAdmissionGate] = {}
         self._monotonic_clock: Callable[[], float] | None = None
-        self._admission_waiter: Callable[[Condition, float], None] = (
-            self._wait_on_admission_condition
-        )
-        self._admission_observer: Callable[[str, float], None] | None = None
         self._transaction_hook: Callable[[str], None] | None = None
         self._bootstrap_hook: Callable[[str], None] | None = None
-        self._sql_boundary_observer: Callable[[str, str], None] | None = None
 
     @classmethod
     def for_root(
@@ -242,44 +140,10 @@ class SqliteLifecycleAuthority:
             return float(deadline)
         return self._now() + self.lifecycle_limits.authority_busy_timeout_seconds
 
-    @staticmethod
-    def _wait_on_admission_condition(condition: Condition, timeout: float) -> None:
-        """Wait once while the caller owns the admission Condition."""
-        condition.wait(timeout=timeout)
-
     def _now(self) -> float:
         """Resolve the production clock lazily while retaining an explicit test seam."""
         clock = time.monotonic if self._monotonic_clock is None else self._monotonic_clock
         return clock()
-
-    def set_admission_observer_for_test(
-        self, observer: Callable[[str, float], None] | None
-    ) -> None:
-        """Install an inert-by-default observer outside admission coordination locks."""
-        self._admission_observer = observer
-
-    def set_admission_timing_for_test(
-        self,
-        *,
-        clock: Callable[[], float] | None = None,
-        waiter: Callable[[Condition, float], None] | None = None,
-    ) -> None:
-        """Install deterministic clock/wait seams for admission-only tests."""
-        self._monotonic_clock = clock
-        self._admission_waiter = (
-            self._wait_on_admission_condition if waiter is None else waiter
-        )
-
-    @classmethod
-    def admission_registry_size_for_test(cls) -> int:
-        """Return active per-path admission gates for deterministic retirement tests."""
-        with _WRITER_ADMISSION_REGISTRY_LOCK:
-            return len(_WRITER_ADMISSION_REGISTRY)
-
-    def _observe_admission(self, event: str) -> None:
-        observer = self._admission_observer
-        if observer is not None:
-            observer(event, self._now())
 
     def _deadline_timeout(
         self,
@@ -288,8 +152,6 @@ class SqliteLifecycleAuthority:
         started_at: float,
         deadline: float | None = None,
     ) -> CacheBlobLifecycleTimeoutError:
-        if stage not in _AUTHORITY_TIMEOUT_STAGES:
-            raise AssertionError(f"Unsupported lifecycle timeout stage: {stage}")
         now = self._now()
         elapsed = max(0.0, now - started_at)
         remaining = None if deadline is None else max(0.0, deadline - now)
@@ -304,6 +166,7 @@ class SqliteLifecycleAuthority:
                     self.lifecycle_limits.authority_busy_timeout_seconds
                 ),
                 "authority_path": str(self.path),
+                "retryable": True,
             },
         )
 
@@ -386,7 +249,6 @@ class SqliteLifecycleAuthority:
             started_at=started_at,
             stage=stage,
         )
-        self._observe_sql_boundary(stage, statement)
         try:
             return connection.execute(statement, parameters)
         except sqlite3.Error as error:
@@ -641,8 +503,6 @@ class SqliteLifecycleAuthority:
                 ):
                     self._reject_non_authority_state(state)
                 state = "ready"
-            if state in {"missing", "ready"}:
-                self._bootstrap_started = True
             if state == "missing":
                 self._reach_bootstrap_boundary("authority.bootstrap.before_root")
                 try:
@@ -693,31 +553,6 @@ class SqliteLifecycleAuthority:
                 os.close(descriptor)
                 return True
 
-    def _await_local_bootstrap_completion(
-        self,
-        *,
-        deadline: float,
-        started_at: float,
-    ) -> None:
-        """Wait once for this instance's visible-but-uncommitted first leaf."""
-        with self._schema_lock:
-            wait_for_bootstrap = self._bootstrap_started and not self._schema_ready
-        if not wait_for_bootstrap:
-            return
-        remaining = self._remaining_for_stage(
-            deadline,
-            stage="schema_validate",
-            started_at=started_at,
-        )
-        self._bootstrap_ready_event.wait(remaining)
-        with self._schema_lock:
-            if not self._schema_ready:
-                raise self._deadline_timeout(
-                    stage="schema_validate",
-                    started_at=started_at,
-                    deadline=deadline,
-                )
-
     @staticmethod
     def _is_busy_error(error: sqlite3.Error) -> bool:
         """Classify only SQLite primary BUSY/LOCKED codes, never error text."""
@@ -737,8 +572,6 @@ class SqliteLifecycleAuthority:
     ) -> None:
         if operation != "lifecycle_authority":
             raise AssertionError("Lifecycle SQLite errors require canonical operation")
-        if stage not in _AUTHORITY_TIMEOUT_STAGES:
-            raise AssertionError(f"Unsupported lifecycle timeout stage: {stage}")
         if self._is_busy_error(error):
             raise self._deadline_timeout(
                 stage=stage,
@@ -773,167 +606,6 @@ class SqliteLifecycleAuthority:
     def _reach_bootstrap_boundary(self, boundary: str) -> None:
         if self._bootstrap_hook is not None:
             self._bootstrap_hook(boundary)
-
-    def set_sql_boundary_observer_for_test(
-        self,
-        observer: Callable[[str, str], None] | None,
-    ) -> None:
-        """Install a test-only observer immediately before one staged SQL boundary."""
-        self._sql_boundary_observer = observer
-
-    def _observe_sql_boundary(self, stage: str, statement: str) -> None:
-        observer = self._sql_boundary_observer
-        if observer is not None:
-            observer(stage, statement)
-
-    def _acquire_writer_admission_gate(self) -> tuple[str, _WriterAdmissionGate]:
-        """Acquire one process-local reference without waiting under registry lock."""
-        canonical_path = str(self.path.resolve(strict=False))
-        with _WRITER_ADMISSION_REGISTRY_LOCK:
-            gate = _WRITER_ADMISSION_REGISTRY.get(canonical_path)
-            if gate is None:
-                gate = _WriterAdmissionGate()
-                _WRITER_ADMISSION_REGISTRY[canonical_path] = gate
-            gate.references += 1
-        return canonical_path, gate
-
-    @staticmethod
-    def _remove_ticket_locked(
-        gate: _WriterAdmissionGate,
-        ticket: _WriterAdmissionTicket,
-    ) -> bool:
-        """Remove one exact ticket while holding the per-path Condition."""
-        if ticket not in gate.tickets:
-            return False
-        gate.tickets.remove(ticket)
-        ticket.cancelled = True
-        if gate.owner is ticket:
-            gate.owner = None
-        gate.condition.notify_all()
-        return True
-
-    def _register_admission_ticket(
-        self,
-        ticket: _WriterAdmissionTicket,
-        gate: _WriterAdmissionGate,
-    ) -> None:
-        """Make close() able to cancel a queued ticket without stealing owners."""
-        with self._state_lock:
-            if self._closed:
-                raise CacheBlobStoreClosedError("Lifecycle authority is closed")
-            with self._admission_ticket_lock:
-                self._admission_tickets[ticket] = gate
-
-    def _unregister_admission_ticket(self, ticket: _WriterAdmissionTicket) -> None:
-        with self._admission_ticket_lock:
-            self._admission_tickets.pop(ticket, None)
-
-    @staticmethod
-    def _retire_writer_admission_gate(
-        canonical_path: str,
-        gate: _WriterAdmissionGate,
-    ) -> None:
-        """Drop only an unreferenced ownerless and queue-empty per-path gate."""
-        with gate.condition:
-            is_idle = gate.owner is None and not gate.tickets
-        if not is_idle:
-            return
-        with _WRITER_ADMISSION_REGISTRY_LOCK:
-            if (
-                gate.references == 0
-                and _WRITER_ADMISSION_REGISTRY.get(canonical_path) is gate
-            ):
-                del _WRITER_ADMISSION_REGISTRY[canonical_path]
-
-    def _release_writer_admission_gate(
-        self,
-        canonical_path: str,
-        gate: _WriterAdmissionGate,
-    ) -> None:
-        with _WRITER_ADMISSION_REGISTRY_LOCK:
-            if gate.references <= 0:  # pragma: no cover - internal ownership guard
-                raise AssertionError("writer admission gate reference underflow")
-            gate.references -= 1
-            should_retire = gate.references == 0
-        if should_retire:
-            self._retire_writer_admission_gate(canonical_path, gate)
-
-    @contextmanager
-    def _admit_writer(
-        self,
-        *,
-        deadline: float,
-        started_at: float,
-    ) -> Iterator[None]:
-        """Admit one ordinary SQLite writer under the caller's sole deadline.
-
-        Observers run after each condition transition so test instrumentation
-        cannot hold either the registry lock or this per-path queue lock.
-        """
-        canonical_path, gate = self._acquire_writer_admission_gate()
-        ticket = _WriterAdmissionTicket()
-        registered = False
-        released = False
-        try:
-            self._register_admission_ticket(ticket, gate)
-            registered = True
-            with gate.condition:
-                gate.tickets.append(ticket)
-                gate.condition.notify_all()
-            self._observe_admission("writer_admission.enqueued")
-
-            while True:
-                became_eligible = False
-                with gate.condition:
-                    if ticket.cancelled:
-                        raise CacheBlobStoreClosedError("Lifecycle authority is closed")
-                    if gate.owner is None and gate.tickets and gate.tickets[0] is ticket:
-                        if not ticket.eligible:
-                            ticket.eligible = True
-                            became_eligible = True
-                    else:
-                        remaining = self._remaining_for_stage(
-                            deadline,
-                            stage="writer_admission",
-                            started_at=started_at,
-                        )
-                        self._admission_waiter(gate.condition, remaining)
-                        continue
-
-                if became_eligible:
-                    self._observe_admission("writer_admission.eligible")
-                self._remaining_for_stage(
-                    deadline,
-                    stage="scheduler_dispatch",
-                    started_at=started_at,
-                )
-
-                granted = False
-                with gate.condition:
-                    if ticket.cancelled:
-                        raise CacheBlobStoreClosedError("Lifecycle authority is closed")
-                    if gate.owner is None and gate.tickets and gate.tickets[0] is ticket:
-                        gate.owner = ticket
-                        ticket.granted = True
-                        granted = True
-                if not granted:
-                    continue
-                self._observe_admission("writer_admission.granted")
-                self._remaining_for_stage(
-                    deadline,
-                    stage="scheduler_dispatch",
-                    started_at=started_at,
-                )
-                yield
-                return
-        finally:
-            with gate.condition:
-                released = self._remove_ticket_locked(gate, ticket)
-            if registered:
-                self._unregister_admission_ticket(ticket)
-            if released:
-                self._observe_admission("writer_admission.released")
-            self._release_writer_admission_gate(canonical_path, gate)
 
     def _configure_connection(
         self,
@@ -1408,10 +1080,6 @@ class SqliteLifecycleAuthority:
                 return
             if state != "authority":
                 self._reject_non_authority_state(state)
-            self._await_local_bootstrap_completion(
-                deadline=deadline,
-                started_at=started_at,
-            )
 
         connection: sqlite3.Connection | None = None
         try:
@@ -1465,25 +1133,13 @@ class SqliteLifecycleAuthority:
                     if not self._schema_ready:
                         if created_new:
                             self._initialize_schema(
-                                _StagedConnection(
-                                    self,
-                                    connection,
-                                    deadline=deadline,
-                                    started_at=started_at,
-                                    stage="schema_initialize",
-                                ),
+                                connection,
                                 deadline=deadline,
                                 started_at=started_at,
                             )
                         else:
                             self._migrate_schema_layout(
-                                _StagedConnection(
-                                    self,
-                                    connection,
-                                    deadline=deadline,
-                                    started_at=started_at,
-                                    stage="schema_initialize",
-                                ),
+                                connection,
                                 deadline=deadline,
                                 started_at=started_at,
                             )
@@ -1493,7 +1149,6 @@ class SqliteLifecycleAuthority:
                             started_at=started_at,
                         )
                         self._schema_ready = True
-                        self._bootstrap_ready_event.set()
                         self._reach_bootstrap_boundary(
                             "authority.schema_ready.published"
                         )
@@ -1532,13 +1187,10 @@ class SqliteLifecycleAuthority:
     def _read_connection(
         self,
         *,
-        stage: str,
         deadline: float | None = None,
         started_at: float | None = None,
-    ) -> Iterator[_StagedConnection | None]:
-        """Yield a read-only staged connection under one outer operation budget."""
-        if stage not in _AUTHORITY_TIMEOUT_STAGES:
-            raise AssertionError(f"Unsupported lifecycle timeout stage: {stage}")
+    ) -> Iterator[sqlite3.Connection | None]:
+        """Yield a read-only connection under one caller-owned operation budget."""
         if started_at is None:
             started_at = self._now()
         absolute_deadline = self._deadline(deadline)
@@ -1550,13 +1202,7 @@ class SqliteLifecycleAuthority:
             if connection is None:
                 yield None
                 return
-            yield _StagedConnection(
-                self,
-                connection,
-                deadline=absolute_deadline,
-                started_at=started_at,
-                stage=stage,
-            )
+            yield connection
 
     @staticmethod
     def _expectation(connection: sqlite3.Connection, key: str) -> EntryExpectation:
@@ -1582,7 +1228,7 @@ class SqliteLifecycleAuthority:
 
     def _transaction(
         self,
-        callback: Callable[[_StagedConnection], _T],
+        callback: Callable[[sqlite3.Connection], _T],
         *,
         deadline: float | None = None,
         uncertain_classifier: Callable[[float, float], _T] | None = None,
@@ -1591,102 +1237,73 @@ class SqliteLifecycleAuthority:
         self._require_owned_open()
         started_at = self._now()
         absolute_deadline = self._deadline(deadline)
-        with self._admit_writer(
+        with self._connection(
+            mutation=True,
             deadline=absolute_deadline,
             started_at=started_at,
-        ):
-            self._observe_admission("sqlite.connection_preflight.started")
-            with self._connection(
-                mutation=True,
+        ) as connection:
+            assert connection is not None
+            self._apply_stage_busy_timeout(
+                connection,
                 deadline=absolute_deadline,
                 started_at=started_at,
-            ) as connection:
-                assert connection is not None
-                self._observe_admission("sqlite.connection_preflight.finished")
-                self._observe_admission("sqlite.begin.attempt")
-                self._apply_stage_busy_timeout(
-                    connection,
+                stage="sqlite_busy",
+            )
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+            except sqlite3.Error as error:
+                self._translate_sqlite_error(
+                    error,
+                    operation="lifecycle_authority",
+                    stage="sqlite_busy",
                     deadline=absolute_deadline,
                     started_at=started_at,
-                    stage="scheduler_dispatch",
                 )
-                self._remaining_for_stage(
-                    absolute_deadline,
-                    stage="scheduler_dispatch",
+                raise AssertionError("SQLite error translation must raise")
+            with self._state_lock:
+                self.open_write_transactions += 1
+            try:
+                result = callback(connection)
+                self._reach_transaction_boundary("authority.transaction.before_commit")
+                self._execute_for_stage(
+                    connection,
+                    "COMMIT",
+                    deadline=absolute_deadline,
                     started_at=started_at,
+                    stage="sqlite_busy",
                 )
-                try:
-                    connection.execute("BEGIN IMMEDIATE")
-                except sqlite3.Error as error:
-                    if self._is_busy_error(error):
-                        self._observe_admission("sqlite.begin.timed_out")
-                        raise self._deadline_timeout(
-                            stage="sqlite_busy",
-                            started_at=started_at,
-                            deadline=absolute_deadline,
-                        ) from error
-                    self._translate_sqlite_error(
-                        error,
-                        operation="lifecycle_authority",
-                        stage="sqlite_busy",
-                        deadline=absolute_deadline,
-                        started_at=started_at,
-                    )
-                    raise AssertionError("SQLite error translation must raise")
-                self._observe_admission("sqlite.begin.acquired")
-                with self._state_lock:
-                    self.open_write_transactions += 1
-                try:
-                    result = callback(
-                        _StagedConnection(
-                            self,
-                            connection,
-                            deadline=absolute_deadline,
-                            started_at=started_at,
-                            stage="transaction_body",
+                self._reach_transaction_boundary("authority.transaction.committed")
+                return result
+            except BaseException as error:
+                committed = not connection.in_transaction
+                if connection.in_transaction:
+                    try:
+                        connection.execute("ROLLBACK")
+                    except sqlite3.Error as rollback_error:
+                        error.add_note(
+                            "Lifecycle authority rollback failed after primary error: "
+                            f"{rollback_error}"
                         )
-                    )
-                    self._reach_transaction_boundary("authority.transaction.before_commit")
-                    self._execute_for_stage(
-                        connection,
-                        "COMMIT",
-                        deadline=absolute_deadline,
-                        started_at=started_at,
-                        stage="transaction_body",
-                    )
-                    self._reach_transaction_boundary("authority.transaction.committed")
-                    return result
-                except BaseException as error:
-                    committed = not connection.in_transaction
-                    if connection.in_transaction:
-                        try:
-                            connection.execute("ROLLBACK")
-                        except sqlite3.Error as rollback_error:
-                            error.add_note(
-                                "Lifecycle authority rollback failed after primary error: "
-                                f"{rollback_error}"
-                            )
-                    sqlite_error = (
-                        error
-                        if isinstance(error, sqlite3.Error)
-                        else error.__cause__
-                        if isinstance(error.__cause__, sqlite3.Error)
-                        else None
-                    )
-                    if (
-                        committed
-                        and uncertain_classifier is not None
-                        and isinstance(sqlite_error, sqlite3.Error)
-                    ):
-                        return uncertain_classifier(absolute_deadline, started_at)
-                    raise
-                finally:
-                    self._observe_admission("transaction.finished")
-                    with self._state_lock:
-                        self.open_write_transactions -= 1
+                sqlite_error = (
+                    error
+                    if isinstance(error, sqlite3.Error)
+                    else error.__cause__
+                    if isinstance(error.__cause__, sqlite3.Error)
+                    else None
+                )
+                if (
+                    committed
+                    and uncertain_classifier is not None
+                    and isinstance(sqlite_error, sqlite3.Error)
+                ):
+                    return uncertain_classifier(absolute_deadline, started_at)
+                raise
+            finally:
+                with self._state_lock:
+                    self.open_write_transactions -= 1
 
     def read_entry(self, key: str) -> EntrySnapshot | None:
-        with self._read_connection(stage="entry_read") as connection:
+        with self._read_connection() as connection:
             if connection is None:
                 return None
             row = connection.execute(
@@ -1715,7 +1332,7 @@ class SqliteLifecycleAuthority:
 
     def read_expectation(self, key: str) -> EntryExpectation:
         """Read exact present or absent lineage without decoding a manifest."""
-        with self._read_connection(stage="expectation_read") as connection:
+        with self._read_connection() as connection:
             if connection is None:
                 return EntryExpectation.absent()
             return self._expectation(connection, key)
@@ -1919,7 +1536,6 @@ class SqliteLifecycleAuthority:
     ) -> PromotionResult:
         """Resolve an ambiguous commit by reading exact durable operation state."""
         with self._read_connection(
-            stage="entry_read",
             deadline=deadline,
             started_at=started_at,
         ) as connection:
@@ -1967,7 +1583,7 @@ class SqliteLifecycleAuthority:
 
     def list_entries(self) -> tuple[EntrySnapshot, ...]:
         """Return bounded committed/tombstone snapshots through the authority."""
-        with self._read_connection(stage="entry_list") as connection:
+        with self._read_connection() as connection:
             if connection is None:
                 return ()
             rows = connection.execute(
@@ -2000,7 +1616,7 @@ class SqliteLifecycleAuthority:
         if operation_id is not None:
             filters.append("operation_id = ?")
             values.append(operation_id)
-        with self._read_connection(stage="clear_read") as connection:
+        with self._read_connection() as connection:
             if connection is None:
                 return ()
             rows = connection.execute(
@@ -2029,7 +1645,7 @@ class SqliteLifecycleAuthority:
 
     def pending_mutations(self) -> tuple[PreparedMutation, ...]:
         """Return only indexed pre-promotion operations for recovery."""
-        with self._read_connection(stage="reconciliation_read") as connection:
+        with self._read_connection() as connection:
             if connection is None:
                 return ()
             rows = connection.execute(
@@ -2115,7 +1731,7 @@ class SqliteLifecycleAuthority:
         return self._transaction(begin)
 
     def page_clear(self, token: PageToken) -> tuple[EntrySnapshot, ...]:
-        with self._read_connection(stage="clear_read") as connection:
+        with self._read_connection() as connection:
             if connection is None:
                 return ()
             run = connection.execute(
@@ -2246,7 +1862,7 @@ class SqliteLifecycleAuthority:
     def reconciliation_snapshot(
         self, token: PageToken | None = None
     ) -> ReconciliationSnapshot:
-        with self._read_connection(stage="reconciliation_read") as connection:
+        with self._read_connection() as connection:
             if connection is None:
                 return ReconciliationSnapshot(0, 0, 0)
             if token is not None:
@@ -2278,7 +1894,7 @@ class SqliteLifecycleAuthority:
     ) -> ReconciliationPage:
         if mutation_cursor < 0 or debt_cursor < 0:
             raise ValueError("Reconciliation cursors must be non-negative")
-        with self._read_connection(stage="reconciliation_read") as connection:
+        with self._read_connection() as connection:
             if connection is None:
                 return ReconciliationPage((), mutation_cursor, debt_cursor)
             page_size = max(1, self.lifecycle_limits.operation_page_size // 2)
@@ -2321,7 +1937,7 @@ class SqliteLifecycleAuthority:
             return ReconciliationPage(tuple(works), next_mutation, next_debt)
 
     def page_reconciliation(self, token: PageToken) -> tuple[CleanupDebt, ...]:
-        with self._read_connection(stage="reconciliation_read") as connection:
+        with self._read_connection() as connection:
             if connection is None:
                 return ()
             run = connection.execute(
@@ -2498,7 +2114,7 @@ class SqliteLifecycleAuthority:
 
     def snapshot_state(self) -> AuthorityStateSnapshot:
         """Return one bounded authority-state diagnostic without exposing tables."""
-        with self._read_connection(stage="diagnostics_read") as connection:
+        with self._read_connection() as connection:
             if connection is None:
                 return AuthorityStateSnapshot(0, False, (), ())
             revision, dirty = connection.execute(
@@ -2521,7 +2137,7 @@ class SqliteLifecycleAuthority:
 
     def diagnostics(self) -> dict[str, object]:
         """Return read-only integrity diagnostics; this method never repairs."""
-        with self._read_connection(stage="diagnostics_read") as connection:
+        with self._read_connection() as connection:
             if connection is None:
                 raise CacheBlobMigrationRequiredError("Lifecycle authority is absent")
             identity = connection.execute("SELECT identity FROM store_identity").fetchone()[0]
@@ -2546,17 +2162,9 @@ class SqliteLifecycleAuthority:
             }
 
     def close(self) -> None:
-        """Close the instance boundary without stealing an active writer ticket."""
+        """Close this instance boundary without changing durable authority state."""
         with self._state_lock:
             self._closed = True
-            with self._admission_ticket_lock:
-                queued_tickets = tuple(self._admission_tickets.items())
-        for ticket, gate in queued_tickets:
-            with gate.condition:
-                if gate.owner is not ticket:
-                    ticket.cancelled = True
-                    self._remove_ticket_locked(gate, ticket)
-                    gate.condition.notify_all()
 
 
 __all__ = [

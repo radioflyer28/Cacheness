@@ -402,8 +402,7 @@ class LifecycleLimits:
     perform repository, recovery, or payload work here.
     """
 
-    # Derived from the checked-in lifecycle-authority production-schema
-    # baseline. Recalibration must update the evidence and this mapping together.
+    # Caller-owned operational policy; benchmark evidence remains independent.
     max_operation_record_bytes: int = 131_072
     max_operation_field_bytes: int = 8_192
     manifest_page_size: int = 256
@@ -414,7 +413,7 @@ class LifecycleLimits:
     close_wait_seconds: float = 30.0
     key_initialization_timeout_seconds: float = 5.0
     key_initialization_retry_seconds: float = 0.01
-    authority_busy_timeout_seconds: float = 0.187
+    authority_busy_timeout_seconds: float = 5.0
 
     def __post_init__(self) -> None:
         """Reject invalid operational bounds rather than silently normalizing them."""

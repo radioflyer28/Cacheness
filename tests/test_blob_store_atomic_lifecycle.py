@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import json
+from multiprocessing import get_context
+import os
 from pathlib import Path
+import stat
 from typing import Any
 
 import pytest
 
 from cacheness.error_handling import CacheBlobRecoverableCleanupError
 from cacheness.storage import BlobStore
+from cacheness.storage import path_security
 from _lifecycle_test_support import (
     CRASH_BOUNDARY_EXIT,
     authority_whole_state,
@@ -81,6 +85,44 @@ class _FailingSerializationHandler(_NativeJsonHandler):
         raise RuntimeError("native serialization failed")
 
 
+_EXCLUSIVE_STREAM_CRASH_EXIT = 91
+
+
+def _crash_during_live_exclusive_stream(root: str, boundary: str) -> None:
+    """Crash in a child after durable intent and inside real native publication."""
+    store = BlobStore(root, backend="json")
+    guarded_io = store._materialize_authority_store()
+    file_ops = guarded_io.file_ops
+    if boundary == "stream_copy":
+        original_write_all = file_ops._write_all
+
+        def crash_after_first_write(descriptor: int, chunk: bytes) -> None:
+            original_write_all(descriptor, chunk)
+            pending = store.lifecycle_authority.pending_mutations()
+            assert len(pending) == 1
+            assert pending[0].spec.candidate_locator
+            os._exit(_EXCLUSIVE_STREAM_CRASH_EXIT)
+
+        file_ops._write_all = crash_after_first_write
+    elif boundary == "file_fsync":
+        original_fsync = path_security.os.fsync
+
+        def crash_after_candidate_fsync(descriptor: int) -> None:
+            original_fsync(descriptor)
+            if stat.S_ISREG(os.fstat(descriptor).st_mode):
+                pending = store.lifecycle_authority.pending_mutations()
+                assert len(pending) == 1
+                assert pending[0].spec.candidate_locator
+                os._exit(_EXCLUSIVE_STREAM_CRASH_EXIT)
+
+        path_security.os.fsync = crash_after_candidate_fsync
+    else:  # pragma: no cover - parametrized caller defines all supported boundaries.
+        raise AssertionError(f"Unknown exclusive-stream crash boundary: {boundary}")
+
+    store.put({"generation": "new", "payload": "x" * 16_384}, key="crash-key")
+    os._exit(1)
+
+
 def test_crash_harness_terminates_a_public_put_at_a_named_boundary(
     tmp_path: Path,
 ) -> None:
@@ -93,6 +135,59 @@ def test_crash_harness_terminates_a_public_put_at_a_named_boundary(
     )
 
     assert result.returncode == CRASH_BOUNDARY_EXIT
+
+
+@pytest.mark.parametrize("boundary", ("stream_copy", "file_fsync"))
+def test_live_exclusive_stream_crash_preserves_prior_generation_and_exact_debt(
+    tmp_path: Path,
+    boundary: str,
+) -> None:
+    """Partial native publication stays indexed to its prepared mutation only."""
+    root = tmp_path / boundary
+    seeded = BlobStore(root, backend="json")
+    try:
+        seeded.put({"generation": "old"}, key="crash-key")
+        previous = seeded.lifecycle_authority.read_entry("crash-key")
+        assert previous is not None
+        previous_payload = (root / previous.locator).read_bytes()
+    finally:
+        seeded.close()
+
+    unrelated = root / "operator-owned.txt"
+    unrelated.write_bytes(b"unrelated bytes")
+    child = get_context("spawn").Process(
+        target=_crash_during_live_exclusive_stream,
+        args=(str(root), boundary),
+    )
+    child.start()
+    child.join(timeout=10)
+    assert not child.is_alive()
+    assert child.exitcode == _EXCLUSIVE_STREAM_CRASH_EXIT
+
+    reopened = BlobStore(root, backend="json")
+    try:
+        current = reopened.lifecycle_authority.read_entry("crash-key")
+        pending = reopened.lifecycle_authority.pending_mutations()
+        assert current == previous
+        assert (root / current.locator).read_bytes() == previous_payload
+        assert reopened.get("crash-key") == {"generation": "old"}
+        assert len(pending) == 1
+        prepared = pending[0]
+        assert prepared.spec.key == "crash-key"
+        assert prepared.spec.candidate_locator != previous.locator
+        candidate = root / prepared.spec.candidate_locator
+        first_dry_run = reopened.reconcile()
+        second_dry_run = reopened.reconcile()
+        assert first_dry_run.to_dict() == second_dry_run.to_dict()
+
+        applied = reopened.reconcile(apply=True)
+        assert applied.applied is True
+        assert reopened.lifecycle_authority.pending_mutations() == ()
+        assert not candidate.exists()
+        assert unrelated.read_bytes() == b"unrelated bytes"
+        assert reopened.lifecycle_authority.read_entry("crash-key") == previous
+    finally:
+        reopened.close()
 
 
 @pytest.mark.parametrize(
