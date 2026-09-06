@@ -114,23 +114,64 @@ Plans:
   4. Operators can dry-run and resume reconciliation to repair, quarantine, or report inconsistent entries without guessing their provenance.
   5. Forced same-key write, delete, and read races have deterministic outcomes without globally serializing operations on distinct keys.
 
-**Plans**: 13/13 plans executed
+**Plans**: 13/14 plans executed
 
 Plans:
+**Wave 1**
 
 - [x] 03-01-PLAN.md — Characterize public contracts, release history, locator, and deletion checkpoint
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [x] 03-02-PLAN.md — Prove the authority-backed SQLite BlobStore write/read/reopen tracer and in-memory parity
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
 - [x] 03-03-PLAN.md — Complete hardened SQLite ownership, schema, transactions, deadlines, and rollback
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
 - [x] 03-04-PLAN.md — Move put, overwrite, metadata, delete, close, and same-key races onto the authority
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
 - [x] 03-05-PLAN.md — Implement exact clear snapshots and bounded high-water reconciliation
+
+**Wave 6** *(blocked on Wave 5 completion)*
+
 - [x] 03-06-PLAN.md — Make JSON a revision-checked projection and seal downstream capability contracts
+
+**Wave 7** *(blocked on Wave 6 completion)*
+
 - [x] 03-07-PLAN.md — Delete the abandoned scheduler core and prove it cannot be reached
+
+**Wave 8** *(blocked on Wave 7 completion)*
+
 - [x] 03-08-PLAN.md — Trim retained helpers while preserving payload safety and one-authority composition
+
+**Wave 9** *(blocked on Wave 8 completion)*
+
 - [x] 03-09-PLAN.md — Close deterministic crash, race, Python-version, and platform-runner gates without claiming native Windows qualification
+
+**Wave 10** *(blocked on Wave 9 completion)*
+
 - [x] 03-12-PLAN.md — Add a digest-bound contract distinguishing repository-runtime evidence from Python 3.11 native-qualification attestation
+
+**Wave 11** *(blocked on Wave 10 completion)*
+
 - [x] 03-11-PLAN.md — Capture and attest the current host's UNAVAILABLE/NOT_QUALIFIED Windows evidence after the additive command contract closes
+
+**Wave 12** *(blocked on Wave 11 completion)*
+
 - [x] 03-10-PLAN.md — Measure lifecycle budgets and close final Phase 3 acceptance after 03-11
+
+**Wave 13** *(blocked on Wave 12 completion)*
+
 - [x] 03-13-PLAN.md — Isolate the complete repository suite, remove nested environment mutation, and close Plan 03-10 only on green evidence
+
+**Wave 14** *(blocked on Wave 13 completion)*
+
+- [ ] 03-14-PLAN.md — Make facade projections generation-conditional, committed-only, and coherent under deterministic races
 
 ### Phase 4: Metadata Composition and Topology Contracts
 
@@ -210,7 +251,7 @@ Plans:
 |-------|----------------|--------|-----------|
 | 1. Compatibility and Security Baseline | 15/15 | Complete | 2026-08-30 |
 | 2. Canonical Storage and Integrity Contract | 7/7 | Complete    | 2026-08-30 |
-| 3. Atomic Lifecycle and Recovery Engine | 13/13 | In Progress|  |
+| 3. Atomic Lifecycle and Recovery Engine | 13/14 | In Progress|  |
 | 4. Metadata Composition and Topology Contracts | 0/TBD | Not started | - |
 | 5. Payload Backends and Full Matrix Parity | 0/TBD | Not started | - |
 | 6. UnifiedCache Policy Composition | 0/TBD | Not started | - |
