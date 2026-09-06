@@ -96,6 +96,18 @@ _WRITER_ADMISSION_REGISTRY_LOCK = Lock()
 _WRITER_ADMISSION_REGISTRY: dict[str, _WriterAdmissionGate] = {}
 
 
+def _reset_writer_admission_after_fork() -> None:
+    """Replace copied process-local writer coordination in a forked child."""
+    global _WRITER_ADMISSION_REGISTRY
+    global _WRITER_ADMISSION_REGISTRY_LOCK
+    _WRITER_ADMISSION_REGISTRY = {}
+    _WRITER_ADMISSION_REGISTRY_LOCK = Lock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_writer_admission_after_fork)
+
+
 def _platform_name() -> str:
     """Resolve platform through a narrow contract-test seam."""
     return os.name
@@ -254,6 +266,21 @@ class SqliteLifecycleAuthority:
         if remaining <= 0:
             raise self._deadline_timeout(stage=stage, started_at=started_at)
         return remaining
+
+    @staticmethod
+    def _busy_timeout_milliseconds(remaining_seconds: float) -> int:
+        """Floor a remaining deadline budget without granting extra wait time."""
+        return max(0, int(remaining_seconds * 1000))
+
+    @staticmethod
+    def _set_busy_timeout(
+        connection: sqlite3.Connection,
+        milliseconds: int,
+    ) -> None:
+        """Apply one generated SQLite busy budget without parameter interpolation."""
+        if type(milliseconds) is not int or milliseconds < 0:
+            raise ValueError("SQLite busy timeout must be a non-negative integer")
+        connection.execute(f"PRAGMA busy_timeout = {milliseconds}")
 
     def _classify_for_open(self) -> str:
         """Classify authority objects without opening SQLite or creating a path."""
@@ -1242,12 +1269,21 @@ class SqliteLifecycleAuthority:
                 deadline=absolute_deadline,
                 started_at=started_at,
             ):
+                self._observe_admission("sqlite.begin.attempt")
+                remaining = self._remaining_for_stage(
+                    absolute_deadline,
+                    stage="scheduler_dispatch",
+                    started_at=started_at,
+                )
+                self._set_busy_timeout(
+                    connection,
+                    self._busy_timeout_milliseconds(remaining),
+                )
                 self._remaining_for_stage(
                     absolute_deadline,
                     stage="scheduler_dispatch",
                     started_at=started_at,
                 )
-                self._observe_admission("sqlite.begin.attempt")
                 try:
                     connection.execute("BEGIN IMMEDIATE")
                 except sqlite3.Error as error:
