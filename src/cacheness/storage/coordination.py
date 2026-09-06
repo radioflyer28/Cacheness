@@ -83,8 +83,23 @@ class InstanceState(str, Enum):
     CLOSED = "closed"
 
 
+@dataclass(eq=False)
+class _ClearTicket:
+    """One FIFO clear contender that is deliberately unadmitted while queued."""
+
+    thread_id: int
+    cancelled: bool = False
+
+
 class InstanceAdmission:
-    """Admit instance work and serialize only its owned close transition."""
+    """Admit instance work and bound only clear's snapshot exclusion window.
+
+    ``LifecycleAuthority`` remains the cross-instance correctness boundary.
+    This class only prevents one instance from closing over admitted work and
+    briefly excludes ordinary calls while a clear records its finite authority
+    snapshot.  A clear keeps one drain reference throughout cleanup, but that
+    does not keep the ordinary gate closed after snapshot establishment.
+    """
 
     def __init__(
         self,
@@ -98,6 +113,10 @@ class InstanceAdmission:
         self._state = InstanceState.OPEN
         self._in_flight = 0
         self._admitted_threads: dict[int, int] = {}
+        self._ordinary_admission_open = True
+        self._clear_queue: list[_ClearTicket] = []
+        self._active_clear: _ClearTicket | None = None
+        self._snapshot_owner: _ClearTicket | None = None
         self._release_in_progress = False
         self._monotonic = monotonic
         self._wait = self._condition_wait if wait is None else wait
@@ -129,23 +148,127 @@ class InstanceAdmission:
         """Admit one operation and always release its drain reference."""
         thread_id = get_ident()
         with self._condition:
-            self._raise_if_not_open()
-            self._in_flight += 1
-            self._admitted_threads[thread_id] = (
-                self._admitted_threads.get(thread_id, 0) + 1
-            )
+            if self._admitted_threads.get(thread_id, 0):
+                # A facade holds one outer admission across its compatibility
+                # projection work.  Nested BlobStore calls must share that
+                # reference so close cannot slip between the authority commit
+                # and the last public side effect, nor double-count it.
+                nested = True
+            else:
+                nested = False
+            if nested:
+                pass
+            else:
+                deadline = self._monotonic() + self.lifecycle_limits.close_wait_seconds
+                while (
+                    self._state is InstanceState.OPEN
+                    and not self._ordinary_admission_open
+                ):
+                    self._wait_for_gate(deadline, operation="ordinary admission")
+                self._raise_if_not_open()
+                self._add_admitted_reference(thread_id)
         try:
             yield
         finally:
+            if not nested:
+                with self._condition:
+                    self._remove_admitted_reference(thread_id)
+
+    @contextmanager
+    def clear_operation(self) -> Iterator[Callable[[], None]]:
+        """Own one full clear and yield its short snapshot-window releaser.
+
+        Queued clear callers never count as admitted work.  The elected caller
+        becomes the only active clear, obtains one in-flight reference, and
+        closes ordinary admission only while it persists ``begin_clear``.
+        Callers must invoke the yielded function immediately after that short
+        authority operation; the outer context safely repeats it on failures.
+        """
+        ticket = _ClearTicket(thread_id=get_ident())
+        entered = False
+        snapshot_released = False
+
+        def release_snapshot() -> None:
+            nonlocal snapshot_released
             with self._condition:
-                self._in_flight -= 1
-                remaining = self._admitted_threads[thread_id] - 1
-                if remaining:
-                    self._admitted_threads[thread_id] = remaining
-                else:
-                    del self._admitted_threads[thread_id]
-                if self._in_flight == 0:
+                if snapshot_released:
+                    return
+                snapshot_released = True
+                if self._snapshot_owner is ticket:
+                    self._snapshot_owner = None
+                if self._state is InstanceState.OPEN:
+                    self._ordinary_admission_open = True
+                # A queued clear still cannot proceed because ``_active_clear``
+                # remains this ticket until the outer context has finished.
+                self._condition.notify_all()
+
+        try:
+            with self._condition:
+                self._clear_queue.append(ticket)
+                deadline = self._monotonic() + self.lifecycle_limits.close_wait_seconds
+                while True:
+                    if ticket.cancelled or self._state is not InstanceState.OPEN:
+                        self._discard_clear_ticket(ticket)
+                        raise CacheBlobStoreClosedError(
+                            "BlobStore is closing or closed",
+                            context={"state": self._state.value},
+                        )
+                    if (
+                        self._active_clear is None
+                        and self._clear_queue
+                        and self._clear_queue[0] is ticket
+                    ):
+                        self._clear_queue.pop(0)
+                        self._active_clear = ticket
+                        self._add_admitted_reference(ticket.thread_id)
+                        entered = True
+                        self._snapshot_owner = ticket
+                        self._ordinary_admission_open = False
+                        while self._in_flight != 1:
+                            self._wait_for_gate(
+                                deadline, operation="clear snapshot admission"
+                            )
+                        break
+                    self._wait_for_gate(deadline, operation="clear admission")
+            yield release_snapshot
+        finally:
+            if entered:
+                release_snapshot()
+                with self._condition:
+                    if self._active_clear is ticket:
+                        self._active_clear = None
+                        self._remove_admitted_reference(ticket.thread_id)
                     self._condition.notify_all()
+
+    def _wait_for_gate(self, deadline: float, *, operation: str) -> None:
+        """Wait for one condition transition without permitting an infinite hang."""
+        remaining = deadline - self._monotonic()
+        if remaining <= 0:
+            raise CacheBlobCloseTimeoutError(
+                "BlobStore admission timed out waiting for lifecycle work",
+                context={"operation": operation, "state": self._state.value},
+            )
+        self._wait(self._condition, remaining)
+
+    def _add_admitted_reference(self, thread_id: int) -> None:
+        """Count one already-authorized operation while holding the condition."""
+        self._in_flight += 1
+        self._admitted_threads[thread_id] = self._admitted_threads.get(thread_id, 0) + 1
+
+    def _remove_admitted_reference(self, thread_id: int) -> None:
+        """Release one reference and wake clear/close waiters under the condition."""
+        self._in_flight -= 1
+        remaining = self._admitted_threads[thread_id] - 1
+        if remaining:
+            self._admitted_threads[thread_id] = remaining
+        else:
+            del self._admitted_threads[thread_id]
+        self._condition.notify_all()
+
+    def _discard_clear_ticket(self, ticket: _ClearTicket) -> None:
+        """Remove a rejected waiter without touching admitted-work accounting."""
+        if ticket in self._clear_queue:
+            self._clear_queue.remove(ticket)
 
     def begin_close(self) -> bool:
         """Start close and say whether this caller owns resource release."""
@@ -161,6 +284,11 @@ class InstanceAdmission:
                 return False
             if self._state is InstanceState.OPEN:
                 self._state = InstanceState.CLOSING
+                self._ordinary_admission_open = False
+                for ticket in self._clear_queue:
+                    ticket.cancelled = True
+                self._clear_queue.clear()
+                self._condition.notify_all()
 
             while self._in_flight or self._release_in_progress:
                 remaining = deadline - self._monotonic()

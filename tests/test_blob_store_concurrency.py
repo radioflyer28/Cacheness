@@ -292,12 +292,15 @@ def test_clear_and_delete_converge_after_an_exact_snapshot(tmp_path: Path) -> No
         clearer.start()
         assert gate.arrived.wait(timeout=5)
 
-        assert store.delete("snapshot-key") is True
+        # A clear now closes ordinary admission only until this exact snapshot
+        # commits. Release that short gate before racing the delete; the clear
+        # and delete may then each prove the other's exact target absent.
         gate.release()
+        store.delete("snapshot-key")
         _join(clearer)
 
         assert errors == []
-        assert clear_result == [0]
+        assert clear_result in ([0], [1])
         assert store.get("snapshot-key") is None
         assert store.lifecycle_authority.read_entry("snapshot-key") is None
         assert store.lifecycle_authority.pending_cleanup_debts() == ()

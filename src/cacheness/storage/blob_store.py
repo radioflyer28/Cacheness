@@ -309,7 +309,7 @@ class BlobStore:
     @_ordinary_admitted
     def put(self, data: Any, key: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> str:
         """Store one native handler payload through the selected authority."""
-        return self._put_with_result(data, key=key, metadata=metadata).key
+        return self._put_with_result_admitted(data, key=key, metadata=metadata).key
 
     def _put_with_result(
         self,
@@ -320,6 +320,24 @@ class BlobStore:
         projection_context: Optional[str] = None,
     ):
         """Run a put while retaining private authority context for the facade."""
+        self._require_canonical_store()
+        with self._instance_admission.operation():
+            return self._put_with_result_admitted(
+                data,
+                key=key,
+                metadata=metadata,
+                projection_context=projection_context,
+            )
+
+    def _put_with_result_admitted(
+        self,
+        data: Any,
+        key: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        *,
+        projection_context: Optional[str] = None,
+    ):
+        """Store one payload after exactly one public or facade admission."""
         blob_key = (
             self._compute_content_hash(data) if self.content_addressable
             else key if key is not None else self._generate_unique_key()
@@ -377,10 +395,14 @@ class BlobStore:
 
     def clear(self) -> int:
         """Clear one authority-owned membership snapshot."""
-        with self._instance_admission.operation():
+        with self._instance_admission.clear_operation() as release_snapshot:
             self._require_canonical_store()
             try:
-                cleared = self.lifecycle.clear()
+                try:
+                    token = self.lifecycle.begin_clear()
+                finally:
+                    release_snapshot()
+                cleared = self.lifecycle.complete_clear(token)
             except (CacheBlobBackendError, CacheBlobLifecycleConflictError):
                 raise
             except (CacheStorageError, OSError) as exc:

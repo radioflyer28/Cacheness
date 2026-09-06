@@ -1726,48 +1726,56 @@ class UnifiedCache:
         expected_projection_locator = self._projection_locator_from_entry(
             pre_operation_projection
         )
-        try:
-            put_result = self._cache_blob_store._put_with_result(
-                data,
-                key=cache_key,
-                metadata={
-                    "prefix": prefix,
-                    "description": description,
-                    **(
-                        {
-                            "cache_key_params": self._canonical_cache_key_params(
-                                kwargs
-                            )
-                        }
-                        if self.config.metadata.store_cache_key_params
-                        else {}
-                    ),
-                },
-                projection_context=expected_projection_locator,
-            )
-        except BaseException:
-            # The compatibility projection is installed before authority
-            # promotion so that signing/integrity failures preserve the public
-            # cache contract. Every failed lifecycle outcome must therefore
-            # re-render it from the current committed authority (or remove it
-            # when no generation exists) before the original failure escapes.
+        # Hold one facade-level admission reference through every public
+        # consequence of the authority mutation.  ``_put_with_result`` sees
+        # this existing reference and deliberately does not double-count it.
+        # This prevents close from releasing authority resources between the
+        # immutable promotion and the compatibility policy work below.
+        with self._cache_blob_store._instance_admission.operation():
             try:
-                self._repair_projection_after_failed_put(cache_key)
-            except Exception:
-                logger.exception(
-                    "Unable to repair compatibility projection after failed put: %s",
-                    cache_key,
+                put_result = self._cache_blob_store._put_with_result(
+                    data,
+                    key=cache_key,
+                    metadata={
+                        "prefix": prefix,
+                        "description": description,
+                        **(
+                            {
+                                "cache_key_params": self._canonical_cache_key_params(
+                                    kwargs
+                                )
+                            }
+                            if self.config.metadata.store_cache_key_params
+                            else {}
+                        ),
+                    },
+                    projection_context=expected_projection_locator,
                 )
-            raise
-        self.guarded_handler_io = self._cache_blob_store.guarded_handler_io
-        if custom_metadata and self._supports_custom_metadata():
-            self._store_custom_metadata(
-                cache_key,
-                custom_metadata,
-                expected_locator=str(self._authority_payload_locator(put_result.promoted.locator)),
-            )
-        self._enforce_size_limit()
-        return cache_key
+            except BaseException:
+                # The compatibility projection is installed before authority
+                # promotion so that signing/integrity failures preserve the public
+                # cache contract. Every failed lifecycle outcome must therefore
+                # re-render it from the current committed authority (or remove it
+                # when no generation exists) before the original failure escapes.
+                try:
+                    self._repair_projection_after_failed_put(cache_key)
+                except Exception:
+                    logger.exception(
+                        "Unable to repair compatibility projection after failed put: %s",
+                        cache_key,
+                    )
+                raise
+            self.guarded_handler_io = self._cache_blob_store.guarded_handler_io
+            if custom_metadata and self._supports_custom_metadata():
+                self._store_custom_metadata(
+                    cache_key,
+                    custom_metadata,
+                    expected_locator=str(
+                        self._authority_payload_locator(put_result.promoted.locator)
+                    ),
+                )
+            self._enforce_size_limit()
+            return cache_key
 
     def _put_legacy(
         self,

@@ -30,6 +30,7 @@ from .lifecycle_authority import (
     EntrySnapshot,
     LifecycleAuthority,
     MutationSpec,
+    PageToken,
     PreparedMutation,
     VerificationProof,
 )
@@ -504,8 +505,17 @@ class AuthorityLifecycleEngine:
         than creating a second snapshot, allowing a crash between deletion and
         checkpointing to converge without ever targeting post-snapshot state.
         """
+        token = self.begin_clear()
+        return self.complete_clear(token)
+
+    def begin_clear(self) -> PageToken:
+        """Persist the finite clear membership inside the short admission window."""
         token = self.authority.begin_clear()
         self._reach("clear.snapshot_committed")
+        return token
+
+    def complete_clear(self, token: PageToken) -> int:
+        """Reclaim one already-persisted clear snapshot outside admission gating."""
         deadline = time.monotonic() + self.lifecycle_limits.authority_busy_timeout_seconds
         byte_budget = self.lifecycle_limits.max_operation_record_bytes
         action_budget = self.lifecycle_limits.max_reconcile_actions
