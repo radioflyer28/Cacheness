@@ -140,6 +140,7 @@ def test_independent_write_write_race_has_one_cas_winner(tmp_path):
     root = tmp_path / "write-write"
     first = BlobStore(root, backend="json")
     second = BlobStore(root, backend="json")
+    first.initialize()
     barrier = threading.Barrier(2)
     results: list[str] = []
     errors: list[BaseException] = []
