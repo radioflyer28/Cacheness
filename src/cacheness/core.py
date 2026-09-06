@@ -14,7 +14,7 @@ import logging
 import sys
 import uuid
 import warnings
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from collections.abc import Mapping
 from dataclasses import replace
 from functools import wraps
@@ -42,6 +42,12 @@ from .storage.path_security import encode_physical_name, resolve_managed_locator
 logger = logging.getLogger(__name__)
 
 
+def _facade_operation_lock(instance: Any):
+    """Return instance admission when a compatibility test double omits it."""
+    lock = getattr(instance, "_lock", None)
+    return lock if lock is not None else nullcontext()
+
+
 def _clear_coordinated(method: Callable) -> Callable:
     """Order one facade's mutations without replacing lifecycle authority."""
 
@@ -50,7 +56,7 @@ def _clear_coordinated(method: Callable) -> Callable:
         # The BlobStore authority remains the cross-process compare-and-swap
         # owner. This lock only prevents one UnifiedCache instance from opening
         # competing SQLite transactions for independent local operations.
-        with self._lock:
+        with _facade_operation_lock(self):
             return method(self, *args, **kwargs)
 
     return wrapped
@@ -61,7 +67,7 @@ def _clear_read_coordinated(method: Callable) -> Callable:
 
     @wraps(method)
     def wrapped(self, *args, **kwargs):
-        with self._lock:
+        with _facade_operation_lock(self):
             return method(self, *args, **kwargs)
 
     return wrapped

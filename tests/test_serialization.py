@@ -144,6 +144,11 @@ class TestUnifiedSerialization:
 class TestcachenessIntegration:
     """Test integration of unified serialization with cache system."""
 
+    @pytest.fixture(autouse=True)
+    def _isolate_default_cache_root(self, tmp_path, monkeypatch):
+        """Exercise the public default path without sharing repository cache state."""
+        monkeypatch.chdir(tmp_path)
+
     def test_cache_consistency(self):
         """Test that cacheness and decorators use consistent serialization."""
 
