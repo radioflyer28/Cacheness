@@ -33,6 +33,19 @@ from cacheness.config import (
 import cacheness
 
 
+LIFECYCLE_BASELINE_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "benchmarks"
+    / "lifecycle_authority_baseline.json"
+)
+
+
+def _derived_lifecycle_limits() -> dict[str, int | float]:
+    """Load the checked-in measured configuration contract for defaults."""
+    with LIFECYCLE_BASELINE_PATH.open(encoding="utf-8") as handle:
+        return json.load(handle)["derived"]["configuration"]
+
+
 # =============================================================================
 # Test Fixtures
 # =============================================================================
@@ -175,11 +188,16 @@ class TestLifecycleLimits:
     def test_defaults_exports_and_blobstore_identity(self, temp_dir):
         """One config-owned limits instance reaches the direct storage facade unchanged."""
         limits = LifecycleLimits()
-        assert limits.max_operation_record_bytes == 1_048_576
+        measured = _derived_lifecycle_limits()
+        assert limits.max_operation_record_bytes == measured["max_operation_record_bytes"]
         assert limits.max_operation_field_bytes == 8_192
         assert limits.manifest_page_size == 256
-        assert limits.operation_page_size == 256
-        assert limits.max_reconcile_actions == 10_000
+        assert limits.operation_page_size == measured["operation_page_size"]
+        assert limits.max_reconcile_actions == measured["max_reconcile_actions"]
+        assert (
+            limits.authority_busy_timeout_seconds
+            == measured["authority_busy_timeout_seconds"]
+        )
         assert limits.orphan_grace_seconds == 300.0
         assert limits.close_wait_seconds == 30.0
         assert cacheness.LifecycleLimits is LifecycleLimits
