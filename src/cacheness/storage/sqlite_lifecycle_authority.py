@@ -374,6 +374,17 @@ class SqliteLifecycleAuthority:
         if _platform_name() == "nt":
             self._validate_windows_root()
 
+    def preflight_mutation(self) -> None:
+        """Reject an unusable mutation topology before materializing authority state.
+
+        In particular, a Windows root is an offline-provisioned trust boundary.
+        This method intentionally performs only ownership and DACL/topology
+        inspection; it must run before any read can cause SQLite bootstrap or
+        any payload helper can create the configured root.
+        """
+        self._require_owned_open()
+        self._validate_mutation_topology()
+
     def _materialize_database_file(self, deadline: float) -> bool:
         """Create only the contained database leaf and report whether this won."""
         self._validate_mutation_topology()

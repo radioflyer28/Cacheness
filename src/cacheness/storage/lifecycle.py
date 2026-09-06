@@ -166,6 +166,10 @@ class AuthorityLifecycleEngine:
     def put(self, data: Any, *, key: str, metadata: dict[str, Any] | None) -> str:
         """Prepare, publish, verify, promote, then reclaim exact old debt."""
         handler = self.store.handlers.get_handler(data)
+        # A Windows authority root is a deployment-provisioned security
+        # boundary. Validate it before read_entry can bootstrap SQLite or
+        # guarded handler I/O can create the managed payload root.
+        self.authority.preflight_mutation()
         previous = self.authority.read_entry(key)
         if previous is not None:
             self._entry_manifest(previous, allow_tombstone=True)

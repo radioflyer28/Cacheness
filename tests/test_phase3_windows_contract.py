@@ -86,6 +86,26 @@ def test_windows_contract_absent_root_fails_before_database_or_root_creation(
     assert "icacls.exe" in str(captured.value)
 
 
+def test_windows_blobstore_put_preflights_absent_root_before_payload_materialization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The public write boundary rejects an unprovisioned Windows root unchanged."""
+    import cacheness.storage.sqlite_lifecycle_authority as sqlite_authority
+    from cacheness.storage import BlobStore
+
+    root = tmp_path / "missing-public-windows-root"
+    monkeypatch.setattr(sqlite_authority, "_platform_name", lambda: "nt")
+    store = BlobStore(root, backend="json")
+    try:
+        with pytest.raises(CacheBlobBackendError) as captured:
+            store.put({"value": "must-not-materialize"}, key="windows-preflight")
+
+        assert not root.exists()
+        assert "offline before Cacheness starts" in str(captured.value)
+    finally:
+        store.close()
+
+
 def test_windows_contract_shape_keeps_sqlite_as_the_only_commit_authority() -> None:
     """The adapter validates deployment scope without adding a custom lock protocol."""
     import cacheness.storage.sqlite_lifecycle_authority as sqlite_authority

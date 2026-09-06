@@ -64,6 +64,10 @@ class InMemoryLifecycleAuthority:
         if self._closed:
             raise CacheBlobStoreClosedError("Lifecycle authority is closed")
 
+    def preflight_mutation(self) -> None:
+        """Verify this ephemeral authority is open without allocating state."""
+        self._require_open()
+
     def _transition(self, callback):
         self._require_open()
         with self._lock:
