@@ -13,7 +13,11 @@ import pytest
 
 from cacheness.config import CacheConfig
 from cacheness.core import UnifiedCache
-from cacheness.error_handling import CacheQueryValidationError
+from cacheness.error_handling import (
+    CacheIntegrityError,
+    CacheQueryValidationError,
+    CacheReason,
+)
 from cacheness.json_utils import dumps as json_dumps
 from cacheness.metadata import CacheEntry, CachedMetadataBackend, SqliteBackend
 
@@ -210,3 +214,66 @@ def test_query_meta_body_has_no_concrete_sql_session_dependency() -> None:
     names = {node.id for node in ast.walk(function) if isinstance(node, ast.Name)}
 
     assert {"SessionLocal", "engine", "CacheEntry", "SQLAlchemy"}.isdisjoint(names)
+
+
+@pytest.mark.parametrize("enable_memory_cache", (False, True))
+@pytest.mark.parametrize(
+    "filters",
+    (
+        {},
+        {"experiment": "corrupt"},
+        {"enabled": True},
+        {"score": 1},
+        {"nested.region": "north"},
+    ),
+)
+def test_public_query_meta_rejects_malformed_live_parameter_evidence(
+    tmp_path, enable_memory_cache: bool, filters: dict[str, object]
+) -> None:
+    """Exact live rows must fail closed before any empty or filtered query."""
+    cache = UnifiedCache(
+        CacheConfig(
+            cache_dir=str(tmp_path / f"malformed-{enable_memory_cache}"),
+            metadata_backend="sqlite",
+            enable_memory_cache=enable_memory_cache,
+            store_cache_key_params=True,
+        )
+    )
+    try:
+        cache_key = cache.put(
+            "value", experiment="corrupt", enabled=True, score=1,
+            nested={"region": "north"},
+        )
+        metadata_backend = cache.metadata_backend
+        backend = (
+            metadata_backend.backend
+            if isinstance(metadata_backend, CachedMetadataBackend)
+            else metadata_backend
+        )
+        assert isinstance(backend, SqliteBackend)
+        with backend.SessionLocal() as session:
+            entry = session.get(CacheEntry, cache_key)
+            assert entry is not None
+            entry.cache_key_params = "{"
+            session.commit()
+
+        with pytest.raises(CacheIntegrityError) as error:
+            cache.query_meta(**filters)
+
+        assert error.value.context == {
+            "reason": CacheReason.METADATA_CORRUPT.value,
+            "backend": "sqlite",
+            "operation": "query_entries_by_key_params",
+            "field": "cache_key_params",
+            "cache_key": cache_key,
+            "sqlite_type": "text",
+            "byte_size": 1,
+        }
+        with sqlite3.connect(backend.db_file) as connection:
+            assert connection.execute(
+                "SELECT cache_key_params FROM cache_entries WHERE cache_key = ?",
+                (cache_key,),
+            ).fetchone() == ("{",)
+        assert backend.engine.pool.checkedout() == 0
+    finally:
+        cache.close()
