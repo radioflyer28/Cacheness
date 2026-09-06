@@ -3,17 +3,17 @@ gsd_state_version: 1.0
 milestone: v1.0
 current_phase: 03
 current_phase_name: Atomic Lifecycle and Recovery Engine
-status: planned
-stopped_at: Planned gap closure through 03-17-PLAN.md; ready for execution
-last_updated: "2026-09-06T05:25:21.641Z"
+status: executing
+stopped_at: Completed 03-15-PLAN.md
+last_updated: "2026-09-06T05:57:42.449Z"
 last_activity: 2026-09-06
-last_activity_desc: Planned Phase 03 gap closure Plans 03-15 through 03-17
-state_head: aaea66f055680c94c2edd48a4162077047a29b83
+last_activity_desc: Plan 03-15 complete; ready for Plan 03-16
+state_head: bea8565655417aa03a21d2b6518fb727735e3150
 progress:
   total_phases: 8
   completed_phases: 2
   total_plans: 39
-  completed_plans: 36
+  completed_plans: 37
 milestone_name: milestone
 ---
 
@@ -28,10 +28,10 @@ See: .planning/PROJECT.md (updated 2026-08-29)
 
 ## Current Position
 
-Phase: 03 (Atomic Lifecycle and Recovery Engine) — READY TO EXECUTE
-Plan: 14 of 17
-Status: Gap closure planned — Plans 03-15 through 03-17 pending
-Last activity: 2026-09-06 — Planned Phase 03 gap closure Plans 03-15 through 03-17
+Phase: 03 (Atomic Lifecycle and Recovery Engine) — EXECUTING
+Plan: 15 of 17
+Status: Plan 03-15 complete — ready for Plan 03-16
+Last activity: 2026-09-06 — Plan 03-15 complete; ready for Plan 03-16
 
 Progress: [██░░░░░░░░] 2 of 8 phases complete
 
@@ -88,6 +88,7 @@ Phase 03 rows in this historical table belong to the superseded file-native atte
 | Phase 03 P11 | 13m | 2 tasks | 4 files |
 | Phase 03 P13 | 8m | 2 tasks | 5 files |
 | Phase 03 P14 | 1h 29min | 3 tasks | 8 files |
+| Phase 03 P15 | 31min | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -205,6 +206,9 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 03]: Darwin remains UNAVAILABLE/NOT_QUALIFIED with native_evidence false; Phase 999.1 requires native Windows PASS/exit 0.
 - [Phase 03]: Projection metadata is derived compatibility state; only authenticated committed authority manifests can make facade rows live. — Prevents stale or tombstoned projections from participating in cache policy or recovery.
 - [Phase 03]: Projection mutation and custom-link binding require exact generation-specific locator tokens; mismatches change no row or link. — Preserves a concurrently promoted generation while allowing idempotent same-token repair.
+- [Phase 03]: Clear active ownership spans full cleanup while the snapshot admission gate lasts only through begin_clear.
+- [Phase 03]: Projection and custom-link replacement require the operation's exact promoted authority lineage and captured M1 locator.
+- [Phase 03]: Canonical empty state uses BlobStore authority operations; legacy cleanup requires explicit recognized composition.
 
 ### Pending Todos
 
@@ -228,6 +232,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-09-06T04:39:31.574Z
-Stopped at: Completed 03-14-PLAN.md; awaiting Phase 03 verification
+Last session: 2026-09-06T05:57:42.402Z
+Stopped at: Completed 03-15-PLAN.md
 Resume file: None
