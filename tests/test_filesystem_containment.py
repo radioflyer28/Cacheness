@@ -34,6 +34,7 @@ from cacheness.storage.manifest import BlobManifestV1
 from cacheness.storage import path_security
 from cacheness.storage.path_security import (
     ManagedFileOps,
+    _WindowsFileApi,
     resolve_managed_locator,
     resolve_storage_root,
     validate_blob_id,
@@ -68,6 +69,30 @@ def test_validate_blob_id_rejects_hostile_cross_platform_identifiers(blob_id, re
 def test_validate_blob_id_accepts_only_opaque_backend_identifiers(blob_id):
     """Valid IDs preserve the restrictive D-12 grammar exactly."""
     assert validate_blob_id(blob_id) == blob_id
+
+
+@pytest.mark.parametrize(
+    ("error_number", "error_type"),
+    [
+        (2, FileNotFoundError),
+        (3, FileNotFoundError),
+        (80, FileExistsError),
+        (183, FileExistsError),
+        (5, OSError),
+    ],
+)
+def test_windows_file_api_maps_native_error_codes_without_constructing_win32(
+    monkeypatch: pytest.MonkeyPatch,
+    error_number: int,
+    error_type: type[OSError],
+) -> None:
+    """The injectable native-error seam never masks an OS failure with AttributeError."""
+    monkeypatch.setattr(_WindowsFileApi, "_last_error", staticmethod(lambda: error_number))
+
+    with pytest.raises(error_type) as captured:
+        _WindowsFileApi._raise_last_error("test-native-operation")
+
+    assert captured.value.errno == error_number
 
 
 def test_resolved_root_allows_a_configured_root_symlink(tmp_path):

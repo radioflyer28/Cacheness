@@ -71,6 +71,10 @@ class _WindowsFileApi:
     _FILE_DISPOSITION_INFO = 4
     _MOVEFILE_REPLACE_EXISTING = 0x00000001
     _MOVEFILE_WRITE_THROUGH = 0x00000008
+    _ERROR_FILE_NOT_FOUND = 2
+    _ERROR_PATH_NOT_FOUND = 3
+    _ERROR_FILE_EXISTS = 80
+    _ERROR_ALREADY_EXISTS = 183
 
     class _FileDispositionInfo(ctypes.Structure):
         _fields_ = [("DeleteFile", ctypes.c_int)]
@@ -144,6 +148,8 @@ class _WindowsFileApi:
     @classmethod
     def _raise_last_error(cls, operation: str) -> NoReturn:
         error_number = cls._last_error()
+        if error_number in {cls._ERROR_FILE_NOT_FOUND, cls._ERROR_PATH_NOT_FOUND}:
+            raise FileNotFoundError(error_number, f"{operation} failed")
         if error_number in {cls._ERROR_FILE_EXISTS, cls._ERROR_ALREADY_EXISTS}:
             raise FileExistsError(error_number, f"{operation} failed")
         raise OSError(error_number, f"{operation} failed")
