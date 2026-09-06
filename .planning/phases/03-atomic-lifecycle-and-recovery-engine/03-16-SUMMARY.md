@@ -12,9 +12,9 @@ provides:
   - Cached SQL custom-metadata protocol delegation and signed PostgreSQL metadata parity
 affects: [03-17, unified-cache, blobstore, metadata-projection]
 actuals:
-  tokens: 13165
+  tokens: 13270
   tasks: 3
-  commits: 6
+  commits: 7
 tech-stack:
   added: []
   patterns:
@@ -91,7 +91,7 @@ status: complete
 
 1. **Task 1: Prove one atomic SQL projection winner across independent adapters** - `375ced8` (test), `d80a8b3` (feat)
 2. **Task 2: Delegate cached SQL custom metadata through explicit backend protocols** - `317da28` (test), `d31e40e` (feat)
-3. **Task 3: Restore PostgreSQL nested signing inputs and prevent valid-entry retirement** - `6ca32e0` (test), `fafd682` (feat)
+3. **Task 3: Restore PostgreSQL nested signing inputs and prevent valid-entry retirement** - `6ca32e0` (test), `fafd682` (feat), `e0d09fe` (fix)
 
 ## Files Created/Modified
 
@@ -136,13 +136,13 @@ status: complete
 - **Verification:** Cached SQLite/PostgreSQL-mapped facade tests pass.
 - **Committed in:** `d31e40e`
 
-**3. [Rule 1 - Signature parity] Canonicalized signed cache-key parameter ordering**
+**3. [Rule 1 - Signature parity] Canonicalized signed cache-key parameter ordering and rejected non-mapping persisted values**
 - **Found during:** Task 3
 - **Issue:** Lifecycle manifest canonical JSON and PostgreSQL read-back could present the same parameter mapping in different insertion orders, while HMAC input used order-sensitive `str(dict)`.
-- **Fix:** Canonicalize the map before signing and restore the decoded value at the nested signature-visible metadata path.
+- **Fix:** Canonicalize the map before signing, restore the decoded value at the nested signature-visible metadata path, and raise a typed storage error when JSON decodes to a non-mapping value such as `null` or `[]`.
 - **Files modified:** `src/cacheness/core.py`, `src/cacheness/storage/backends/postgresql_backend.py`, `tests/test_cached_custom_metadata.py`
 - **Verification:** Signed public PostgreSQL-mapped get/list/stats workflow and malformed fail-closed coverage pass.
-- **Committed in:** `fafd682`
+- **Committed in:** `fafd682`, `e0d09fe`
 
 **Total deviations:** 3 auto-fixed (Rule 1)
 
@@ -162,7 +162,7 @@ Plan 03-17 can consume database-native projection and metadata protocol contract
 ## Self-Check: PASSED
 
 - Confirmed all five plan source/test artifacts and this summary exist.
-- Confirmed the TDD and implementation commits `375ced8`, `d80a8b3`, `317da28`, `d31e40e`, `6ca32e0`, and `fafd682` exist in repository history.
+- Confirmed the TDD and implementation commits `375ced8`, `d80a8b3`, `317da28`, `d31e40e`, `6ca32e0`, `fafd682`, and `e0d09fe` exist in repository history.
 - Scanned plan-owned source and test files for intentional placeholders or rendering stubs; none were introduced.
 
 ---
