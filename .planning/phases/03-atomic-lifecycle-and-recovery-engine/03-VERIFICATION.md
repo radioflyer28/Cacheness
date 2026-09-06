@@ -1,122 +1,62 @@
 ---
 phase: 03-atomic-lifecycle-and-recovery-engine
-verified: 2026-09-06T04:58:51Z
+verified: 2026-09-06T17:50:59Z
 status: gaps_found
-score: 3/8 must-haves verified
+score: 3/8
 behavior_unverified: 0
 overrides_applied: 0
-replanned_by: 03-20-PLAN.md
-replan_basis: docs/adr/0001-topology-specific-storage-guarantees.md
 re_verification:
   previous_status: gaps_found
   previous_score: 3/8
   gaps_closed:
-    - "Plan 03-14 closes the previously reported key-only stale teardown, live-tombstone projection, and mixed-pair defects in its covered schedules."
+    - "The nine pre-ADR facade admission, projection ownership/CAS, cached-wrapper, locator, and PostgreSQL parity gaps were closed by Plans 03-15 through 03-18."
   gaps_remaining:
-    - "UnifiedCache uses BlobStore's unadmitted private put seam."
-    - "Pre-promotion projection replacement destroys M1 custom-metadata links when M2 later fails."
-    - "Projection retry may adopt and overwrite a peer's pending candidate token."
-    - "SQLite/PostgreSQL projection compare-and-mutate is not atomic across independent adapters."
-    - "Fresh-root SQLite bootstrap races across authority instances/processes."
-    - "Cached SQL metadata wrappers do not delegate custom-metadata APIs."
-    - "Empty authority snapshots are misclassified as legacy and can delete an in-flight first generation."
-    - "Same-key put accepts an uncontained persisted locator as a mutation token."
-    - "PostgreSQL reconstructs cache_key_params outside nested metadata, breaking signature parity."
+    - "CR-01: non-persisted in-memory abort leaves a dangling reconciliation row."
+    - "CR-02: retiring in-memory cleanup debt invalidates resume cursors."
+    - "CR-03: SQLite point/list reads silently erase corrupt committed cache_key_params."
+    - "CR-04: readers misclassify a transient first-writer SQLite leaf as incompatible."
   regressions: []
 gaps:
-  - truth: "Repeated overwrite, delete, clear, and close operations converge safely while cleaning both payload and metadata state."
+  - truth: "A non-persisted aborted in-memory mutation remains safely reconcilable."
     status: failed
-    reason: "CR-01: UnifiedCache.put calls unadmitted BlobStore._put_with_result, so close or clear can pass an in-flight facade mutation."
+    reason: "CR-01: abort_mutation deletes the mutation mapping but retains its operation ID in the ordered reconciliation index; public dry-run raises KeyError."
     artifacts:
-      - path: src/cacheness/storage/blob_store.py
-        issue: "put is admitted, but _put_with_result is not."
-      - path: src/cacheness/core.py
-        issue: "The facade calls the unadmitted seam directly."
+      - path: src/cacheness/storage/memory_lifecycle_authority.py
+        issue: "_mutation_order retains an ID removed from _mutations."
     missing:
-      - "Admit the result-returning put seam and split out one already-admitted implementation."
-      - "A deterministic facade-put versus close/clear barrier regression."
-  - truth: "Failures preserve the last valid generation and leave all residue detectable."
+      - "Retain a stable terminal reconciliation row or remove it without invalidating captured high-water identity."
+      - "Add public dry-run/apply coverage after a pre-publication abort."
+  - truth: "Resumable in-memory cleanup retires every captured debt exactly once."
     status: failed
-    reason: "CR-02: candidate projection publication deletes M1 custom links before M2 is signed, verified, or promoted; failed overwrite repair cannot reconstruct them."
+    reason: "CR-02: cleanup debts use mutable list positions as row IDs; applying one page shrinks the list, so a signed resume cursor skips work and eventually raises IndexError."
     artifacts:
-      - path: src/cacheness/core.py
-        issue: "_prepare_authority_projection publishes the token-changing candidate before authority promotion."
-      - path: src/cacheness/metadata.py
-        issue: "SQLite deletes CacheMetadataLink rows on that token change."
-      - path: src/cacheness/storage/backends/postgresql_backend.py
-        issue: "PostgreSQL performs the same destructive transition."
+      - path: src/cacheness/storage/memory_lifecycle_authority.py
+        issue: "Debt high-water/cursor values address a shrinking _debts list."
     missing:
-      - "Preserve M1 link ownership until exact M2 promotion succeeds."
-      - "Failed-overwrite regressions starting from linked M1 at each failure boundary."
-  - truth: "Forced same-key races have deterministic outcomes without globally serializing distinct keys."
+      - "Assign stable monotonic debt IDs and page by stable ID/high-water."
+      - "Add a multi-page public apply/resume regression for the memory topology."
+  - truth: "Corrupt committed SQLite metadata fails closed without mutating a valid authority generation."
     status: failed
-    reason: "CR-03: a projection mismatch retry substitutes the currently visible locator, which may be another operation's pending candidate."
-    artifacts:
-      - path: src/cacheness/core.py
-        issue: "_prepare_authority_projection re-reads and adopts a peer token without proving committed ownership."
-    missing:
-      - "Never adopt an observed peer token; mismatch must conflict unless it is proved to be the same committed snapshot."
-      - "A two-pending-candidate barrier test."
-  - truth: "A write exposes only an old or new complete generation."
-    status: failed
-    reason: "CR-04: SQL projection comparison and mutation are not cross-instance atomic. SQLite uses an instance-local lock around SELECT-then-write; PostgreSQL expected-absence locks no row."
+    reason: "CR-03: get_entry and list_entries suppress malformed non-null cache_key_params. Under strict signing, public get treats the omitted field as an invalid signature and deletes the valid canonical authority entry."
     artifacts:
       - path: src/cacheness/metadata.py
-        issue: "SQLite lacks BEGIN IMMEDIATE or one conditional statement spanning independent adapters."
-      - path: src/cacheness/storage/backends/postgresql_backend.py
-        issue: "FOR UPDATE cannot serialize two absent-row creators."
+        issue: "Malformed cache_key_params is silently omitted at the point/list read seams."
+      - path: src/cacheness/core.py
+        issue: "Derived projection corruption can trigger retirement of the valid authority snapshot."
     missing:
-      - "Database-native per-key CAS with deterministic mismatch classification."
-      - "Independent SQLite and real PostgreSQL concurrency tests."
-  - truth: "Repeated operations converge safely."
+      - "Use the strict bounded decoder for live point/list observations and raise key-attributed METADATA_CORRUPT."
+      - "Prove strict-signing public get/list leaves authority, payload, and corrupt evidence unchanged."
+  - truth: "A reader racing first SQLite initialization receives only absence or a declared typed retryable outcome."
     status: failed
-    reason: "CR-05: fresh-root bootstrap is protected only by one authority instance's lock; a losing instance reaches mkdir(exist_ok=False) and raises FileExistsError."
+    reason: "CR-04: the first writer exposes an empty exclusive leaf before schema/application identity commits; a reader classifies it as durable authority and raises CacheBlobMigrationRequiredError."
     artifacts:
       - path: src/cacheness/storage/sqlite_lifecycle_authority.py
-        issue: "Missing-root creation does not catch and safely reclassify FileExistsError."
+        issue: "Read-side classification cannot distinguish the exact pristine initialization leaf from durable incompatible evidence."
+      - path: tests/test_sqlite_bootstrap_concurrency.py
+        issue: "Competing mutators are covered, but reader-versus-initializer after leaf creation is not."
     missing:
-      - "Bounded safe reclassification/join after a competing root creator wins."
-      - "Unseeded fresh-root two-authority and two-process tests."
-  - truth: "UnifiedCache remains a functional compatibility facade over BlobStore authority."
-    status: failed
-    reason: "CR-06: CachedMetadataBackend delegates projection mutation but not store_custom_metadata_if_current or a safe query/session seam."
-    artifacts:
-      - path: src/cacheness/metadata.py
-        issue: "The wrapper exposes neither custom-metadata delegation nor SessionLocal/engine."
-      - path: src/cacheness/core.py
-        issue: "Public custom metadata put/query cannot reach the wrapped SQL backend."
-    missing:
-      - "Explicit wrapper custom-metadata store/query/session delegation."
-      - "SQLite/PostgreSQL memory-cache parity tests through public APIs."
-  - truth: "Repeated overwrite, delete, clear, and close operations converge safely."
-    status: failed
-    reason: "CR-07: clear_all treats an empty committed-key list as legacy permission and removes candidate state; invalidate and absent-snapshot retirement remain key-only."
-    artifacts:
-      - path: src/cacheness/core.py
-        issue: "clear_all uses an empty-list heuristic; _retire_exact_authority_snapshot removes by key when snapshot is None."
-    missing:
-      - "Use explicit legacy classification and exact-token projection teardown."
-      - "First-put versus clear/invalidate tests across independent facades."
-  - truth: "A write exposes only an old or new complete generation."
-    status: failed
-    reason: "CR-08: same-key put reads actual_path as a CAS token without containment validation, allowing hostile persisted evidence to be overwritten."
-    artifacts:
-      - path: src/cacheness/core.py
-        issue: "put uses _projection_locator_from_entry instead of fail-closed _entry_locator before mutation."
-    missing:
-      - "Validate top-level and nested locators before payload/projection mutation."
-      - "Hostile same-key locator zero-mutation tests."
-  - truth: "UnifiedCache remains a functional compatibility facade over BlobStore authority."
-    status: failed
-    reason: "CR-09: PostgreSQL restores cache_key_params at result top level while signing verification reads metadata.cache_key_params."
-    artifacts:
-      - path: src/cacheness/storage/backends/postgresql_backend.py
-        issue: "_entry_to_dict writes result['cache_key_params'] instead of nested metadata."
-      - path: src/cacheness/core.py
-        issue: "Signature verification reads only nested metadata."
-    missing:
-      - "Restore nested cache_key_params, retaining a top-level alias only if required."
-      - "End-to-end PostgreSQL signing/key-params parity coverage."
+      - "Recognize the exact pristine leaf under SQLite's bounded coordination without adding another authority or process-local correctness gate."
+      - "Add a deterministic independent reader-versus-first-writer barrier test."
 decision_coverage:
   honored: 32
   total: 32
@@ -125,142 +65,91 @@ decision_coverage:
 
 # Phase 3: Atomic Lifecycle and Recovery Engine Verification Report
 
-> **ADR 0001 replan notice (2026-09-06):** This report remains historical
-> `gaps_found` evidence and is not converted to a pass. Plans 03-15 through
-> 03-18 subsequently closed CR-01 through CR-04, CR-06 through CR-09, and
-> WR-01 under their focused regressions. CR-05 remains a bootstrap recovery
-> concern. WR-02 and the later Plan 03-19 `deadlock_prevention` miss are now
-> classified as progress/performance evidence: a stable typed retryable SQLite
-> contention timeout is a valid bounded outcome and every contender need not
-> succeed within 0.187 seconds. Plan 03-20 owns fresh verification against the
-> SQLite-authority/local-filesystem topology; native Windows remains
-> UNAVAILABLE/NOT_QUALIFIED and non-blocking for this phase.
-
 **Phase Goal:** Object lifecycle operations preserve an old or new complete generation and leave every incomplete outcome recoverable.
-**Verified:** 2026-09-06T04:58:51Z
 **Status:** gaps_found
-**Re-verification:** Yes — after Plan 03-14
+**Score:** 3/8 must-haves verified
+**Re-verification:** Yes — after ADR-driven Plan 03-20
 
-## Goal Achievement
+## Verdict
 
-### Observable Truths
+Phase 3 is not complete. Four observed safety/recovery defects remain. This verdict follows [ADR 0001](../../../docs/adr/0001-topology-specific-storage-guarantees.md): it does not require cross-resource ACID, universal contender success, starvation freedom, or completion within the historical 0.187-second benchmark sample.
+
+Plan 03-20 made the correct architectural correction. SQLite remains the sole local durable lifecycle authority; filesystem payloads are immutable external effects recovered from durable intent; BUSY/LOCKED may return contextual retryable timeout; the runtime default is caller-owned `5.0` seconds; benchmark evidence is separate; and the retired authority-wide FIFO/stage machinery should not return.
+
+## Observable Truths
 
 | # | Truth | Status | Evidence |
 | --- | --- | --- | --- |
-| 1 | A write or overwrite exposes either the previous complete generation or the new complete generation, never mixed payload and metadata state. | ✗ FAILED | CR-02/03/04/07/08/09 leave destructive pre-promotion changes, token theft, non-atomic SQL transitions, unsafe empty-state cleanup, hostile-token acceptance, and PostgreSQL signing mismatch. |
-| 2 | Failures preserve the last valid generation and leave all residue detectable. | ✗ FAILED | A failed M2 can permanently remove M1 custom-metadata links before authority promotion. |
-| 3 | Repeated overwrite, delete, clear, and close converge safely while cleaning payload and metadata. | ✗ FAILED | Unadmitted puts, fresh-root bootstrap races, and empty-snapshot fallback permit close/clear/bootstrap failure or committed authority with a deleted payload. |
-| 4 | Operators can dry-run and resume reconciliation without guessing provenance. | ✓ VERIFIED | Canonical authority-indexed reconciliation and its focused behavioral coverage remain present; no fresh finding invalidates that engine itself. |
-| 5 | Forced same-key races are deterministic without globally serializing distinct keys. | ✗ FAILED | SQL projection CAS is not cross-instance atomic and retry can overwrite a peer's pending token; tests omit both schedules. |
-| 6 | Release limits derive from a checked-in measured baseline. | ✓ VERIFIED | Baseline and Ruff-delta artifacts remain present/wired; Plan 14 artifact query passed 9/9. |
-| 7 | Darwin remains unavailable, not native Windows evidence, with a future gate mandatory. | ✓ VERIFIED | Fixed Python 3.11 command exited 2 with `UNAVAILABLE`; `native_evidence: false`, Phase 999.1 remains required. |
-| 8 | UnifiedCache remains a functional compatibility facade over BlobStore authority. | ✗ FAILED | CR-01, CR-06, and CR-09 break admission, cached custom metadata, and PostgreSQL signing/key-parameter parity. |
+| 1 | Writes expose only an old or new complete generation. | ✓ VERIFIED | Candidate publication, exact promotion, cleanup debt, and partial-stream/fsync interruption coverage remain present and wired. |
+| 2 | Failures preserve the last valid generation and detectable residue. | ✗ FAILED | CR-01 and CR-03 leave unreconcilable evidence or permit projection corruption to delete valid canonical state. |
+| 3 | Repeated overwrite/delete/clear/close converge safely. | ✗ FAILED | CR-02 breaks bounded memory cleanup resume. |
+| 4 | Operators can dry-run and resume reconciliation. | ✗ FAILED | CR-01 raises `KeyError`; CR-02 raises `IndexError`. |
+| 5 | Forced same-key races have deterministic topology-valid outcomes without global serialization. | ✗ FAILED | CR-04 returns false migration-required during valid first initialization. |
+| 6 | Performance evidence does not define runtime failure semantics. | ✓ VERIFIED | Runtime default `5.0`; benchmark-local limit `0.075`; `0.187` retained only as historical provenance. |
+| 7 | Native Windows remains honestly unqualified. | ✓ VERIFIED | Darwin evidence remains `UNAVAILABLE`/`NOT_QUALIFIED`. |
+| 8 | UnifiedCache remains a safe compatibility facade over BlobStore authority. | ✗ FAILED | CR-03 strict-signing reproduction returned a miss and removed the valid authority generation. |
 
-**Score:** 3/8 truths verified (0 present-but-behavior-unverified)
+## Exact Gaps
 
-### Required Artifacts
+### CR-01 — dangling in-memory mutation row
 
-| Artifact | Expected | Status | Details |
-| --- | --- | --- | --- |
-| `src/cacheness/storage/lifecycle.py` | Transactional lifecycle engine | ⚠️ PARTIAL | Canonical transitions are substantive, but the pre-promotion hook enables destructive derived-state mutation. |
-| `src/cacheness/storage/blob_store.py` | Canonical lifecycle composition/admission | ✗ FAILED | Public put is admitted; the private result seam called by UnifiedCache is not. |
-| `src/cacheness/storage/sqlite_lifecycle_authority.py` | Durable multiprocess authority/bootstrap | ✗ FAILED | Fresh-root creation is not safely joined across independent instances/processes. |
-| `src/cacheness/metadata.py` | Exact projection and cached-wrapper parity | ✗ FAILED | SQLite CAS is instance-locked; wrapper omits custom metadata; destructor emits shutdown errors. |
-| `src/cacheness/storage/backends/postgresql_backend.py` | PostgreSQL parity | ✗ FAILED | Absence CAS is not serialized and key-parameter nesting disagrees with signing. |
-| `src/cacheness/core.py` | Safe policy facade | ✗ FAILED | Admission, pre-promotion ownership, empty-snapshot, hostile-locator, and wrapper call chains are incomplete. |
-| `tests/test_unified_cache_lifecycle_authority.py` | Deterministic facade races | ⚠️ PARTIAL | Covered schedules pass; admitted close/clear, linked failed overwrite, two candidates, and empty first-put cleanup are absent. |
-| `tests/test_projection_mutation_contract.py` | Cross-adapter atomic contract | ⚠️ PARTIAL | SQL paths are sequential/mocked; no independent SQLite or real PostgreSQL contention and no public cached-wrapper workflow. |
+`abort_mutation(..., candidate_persisted=False)` removes `_mutations[operation_id]` but leaves the ID in `_mutation_order`. A direct public reconciliation probe deterministically raised `KeyError`. This violates STOR-04 and STOR-06 for the explicitly supported same-process memory topology.
 
-The mechanical Plan 14 checks reported 9/9 artifacts present and 6/6 pattern links found. That establishes existence and nominal wiring, not the failed runtime invariants above.
+### CR-02 — mutable in-memory debt cursor
 
-### Key Link Verification
+Reconciliation snapshots and resume tokens store list positions while apply removes debts from that list. With three debts and an action budget of one, two resumes advanced and the next raised `IndexError`, leaving work pending. This violates STOR-05 and STOR-06.
 
-| From | To | Via | Status | Details |
-| --- | --- | --- | --- | --- |
-| `UnifiedCache.put` | BlobStore admission | private put result seam | ✗ NOT WIRED | `_put_with_result` bypasses `_ordinary_admitted`. |
-| Lifecycle promotion | projection/link ownership | token transition | ✗ PARTIAL | Candidate replacement deletes old links before promotion. |
-| Projection repository | SQLite/PostgreSQL concurrency | atomic CAS | ✗ PARTIAL | Instance/row locks do not cover independent SQLite adapters or PostgreSQL absence. |
-| Cached wrapper | custom metadata | exact-current store/query | ✗ NOT WIRED | Required methods/session abstraction are absent. |
-| PostgreSQL projection | signer | nested key params | ✗ NOT WIRED | Read-back nesting differs from verification. |
-| BlobStore | LifecycleAuthority | manifests/reconciliation | ✓ WIRED | Direct lifecycle authority remains canonical. |
+### CR-03 — permissive SQLite point/list metadata decoding
 
-### Data-Flow Trace (Level 4)
+`SqliteBackend.get_entry()` and `list_entries()` omit malformed non-null `cache_key_params` instead of raising `CacheIntegrityError`. With that field included in strict signing, a public `get()` returned `None` and deleted the otherwise valid authority entry. This violates the ADR's fail-closed corrupt-metadata invariant and STOR-04.
 
-No rendered UI data exists. Relevant flow is application → UnifiedCache → BlobStore admission/lifecycle → authority promotion → projection/custom links. The canonical authority segment is substantive; admission and projection/link branches fail as above.
+### CR-04 — transient SQLite bootstrap leaf misclassified
 
-### Behavioral Spot-Checks
+The first mutator closes an empty O_EXCL-created database leaf before committing application/schema identity. A reader can classify that exact transient state as a durable authority and raise migration-required. The independent clean full-suite run observed this at `test_query_meta_concurrent_access`; ten immediate focused reruns passed, confirming a narrow intermittent first-use window rather than an allowed BUSY/LOCKED timeout. This violates STOR-07.
 
-| Behavior | Command | Result | Status |
-| --- | --- | --- | --- |
-| Plan 14 focused facade/projection tests | `uv run --isolated --python 3.11 --all-extras --group dev --frozen pytest -q tests/test_unified_cache_lifecycle_authority.py tests/test_projection_mutation_contract.py -o log_cli=false` | 25 passed | ✓ PASS, but omits CR-01–CR-07 schedules |
-| Complete frozen Python 3.11 suite | `uv run --isolated --python 3.11 --all-extras --group dev --frozen pytest -q -o log_cli=false` | Passed with documented skips; emitted repeated destructor tracebacks | ⚠️ PASS WITH WR-01 OBSERVED |
-| Fixed Windows command | `uv run --python 3.11 --frozen python verify_platform.py --phase3 --require-system Windows --require-python 3.11` | Exit 2, Darwin `UNAVAILABLE` JSON | ✓ EXPECTED UNAVAILABLE |
+## Warning
 
-### Probe Execution
+WR-01 is confirmed but non-blocking: `_translate_sqlite_error()` maps all remaining `sqlite3.DatabaseError` subclasses, including operational I/O/full/read-only/open failures, to migration-required. The failure remains closed, but the type and rebuild guidance are wrong. Correct it with SQLite primary-code classification while preserving BUSY/LOCKED as retryable lifecycle timeout.
 
-No phase-declared `probe-*.sh` scripts were found. Phase checks use pytest/tool commands.
+## Artifact and Wiring Check
 
-### Requirements Coverage
+Plan 03-20's mechanical checks passed: 5/5 required artifacts exist and 5/5 declared key links are present. The implementation is substantive and nominally wired. The four gaps are runtime invariant failures that existence/pattern checks cannot detect.
+
+## Behavioral Evidence
+
+| Check | Result |
+| --- | --- |
+| Focused lifecycle/bootstrap command over `test_blob_store_atomic_lifecycle.py`, `test_phase3_postreview_concurrency.py`, and `test_sqlite_bootstrap_concurrency.py` | 31 passed |
+| Clean detached Python 3.11 full suite | Failed once at `test_query_meta_concurrent_access` with `Lifecycle authority application ID is incompatible` |
+| Immediate focused repetition of that test | 10/10 passed; confirms intermittency, not correctness |
+| In-memory abort followed by public dry-run reconciliation | `KeyError` |
+| Multi-page in-memory cleanup apply/resume | `IndexError` |
+| Strict-signing SQLite projection corruption then public get | miss returned; valid authority entry deleted |
+| Read from exact transient empty authority leaf | `CacheBlobMigrationRequiredError` |
+
+No phase probe scripts exist. No unreferenced `TBD`, `FIXME`, or `XXX` marker was found in the reviewed implementation scope. The test gaps are precise: no memory abort/reconciliation regression, no memory multi-page debt regression, no strict-signing live point/list corruption preservation test, and no reader-versus-first-initializer barrier.
+
+## Requirements Coverage
 
 | Requirement | Status | Evidence |
 | --- | --- | --- |
-| STOR-03 | ✗ BLOCKED | Pre-promotion link destruction, token theft, non-atomic SQL CAS, and unsafe first-put cleanup violate complete-generation visibility. |
-| STOR-04 | ✗ BLOCKED | Failed overwrite can retain M1 authority/payload but lose M1 custom links. |
-| STOR-05 | ✗ BLOCKED | Unadmitted put versus close/clear, bootstrap race, and empty-snapshot fallback do not converge. |
-| STOR-06 | ⚠️ PARTIAL | Canonical reconciliation is intact, but cannot reconstruct deleted custom links. |
-| STOR-07 | ✗ BLOCKED | Pending-candidate and independent SQL races lack deterministic semantics. |
+| STOR-03 | ✓ SATISFIED | Old-or-new complete generation visibility remains proven. |
+| STOR-04 | ✗ BLOCKED | CR-01 and CR-03. |
+| STOR-05 | ✗ BLOCKED | CR-02. |
+| STOR-06 | ✗ BLOCKED | CR-01 and CR-02. |
+| STOR-07 | ✗ BLOCKED | CR-04. |
 
-No Phase 3 requirement is orphaned. Phases 4–6 broaden composition but do not explicitly defer defects introduced in this Phase 3 seam; none of the nine gaps is deferred.
-
-### Fresh Review Finding Disposition
-
-| Finding | Verdict | Independent evidence |
-| --- | --- | --- |
-| CR-01 admission bypass | CONFIRMED BLOCKER | Only public `put` is decorated; facade calls undecorated `_put_with_result`; close drains admission. |
-| CR-02 failed overwrite link loss | CONFIRMED BLOCKER | Pre-promotion SQL token change deletes links and commits before `promote_mutation`. |
-| CR-03 pending token theft | CONFIRMED BLOCKER | Mismatch retry adopts a fresh metadata locator without proving committed ownership. |
-| CR-04 SQL atomicity | CONFIRMED BLOCKER | SQLite SELECT/write has only `self._lock`; PostgreSQL absence has no locked row. |
-| CR-05 bootstrap | CONFIRMED BLOCKER | Instance-owned lock and uncaught root `mkdir(exist_ok=False)`. |
-| CR-06 cached custom metadata | CONFIRMED BLOCKER | Wrapper has projection delegation but no custom store/session/query seam. |
-| CR-07 empty-state heuristic | CONFIRMED BLOCKER | `clear_all` branches on empty `list`; absent retirement removes by key. |
-| CR-08 hostile locator | CONFIRMED BLOCKER | Authority put uses `_projection_locator_from_entry`, bypassing containment validation. |
-| CR-09 PostgreSQL key params | CONFIRMED BLOCKER | Read-back is top-level; signing verification reads nested metadata. |
-| WR-01 destructor | CONFIRMED WARNING | Full suite independently emitted repeated `sys.meta_path is None` shutdown tracebacks. |
-| WR-02 test coverage | CONFIRMED WARNING | 25 tests pass, but SQL is sequential/mocked and enumerated barriers are absent. |
-
-### Test Quality Audit
-
-| Test Group | Linked Req | Active | Skipped | Circular | Assertion Level | Verdict |
-| --- | --- | --- | --- | --- | --- | --- |
-| Direct lifecycle/reconciliation | STOR-03..07 | Yes | Platform cases only | None observed | Behavioral | ✓ Strong for canonical engine |
-| Unified facade lifecycle | STOR-03..07 | Yes | No | None | Behavioral/barrier | ✗ Missing CR-01/02/03/05/07 schedules |
-| Projection adapters | STOR-03/05/07 | Yes | No | None | Sequential/mocked | ✗ Insufficient for cross-instance SQL and public wrapper/PostgreSQL behavior |
-| Native Windows | D-32 | Target exists | Darwin skip | None | Fixed command | ✓ Honest; cannot qualify Windows |
-
-Disabled requirement tests are limited to native Windows and correctly map to backlog Phase 999.1. No circular oracle was observed. The two insufficient test groups are blockers because they are the only claimed evidence for the affected paths.
-
-### Anti-Patterns Found
-
-| File | Line | Pattern | Severity | Impact |
-| --- | --- | --- | --- | --- |
-| `src/cacheness/metadata.py` | 2407-2409 | destructor calls import/logging close path without finalization guard | ⚠️ Warning | Repeated ignored exceptions after green processes; directly observed. |
-| Changed scope | — | No unreferenced TBD/FIXME/XXX markers | — | No debt-marker blocker. |
-
-### Decision Coverage
-
-All 32 trackable decisions were recognized as honored by the non-blocking decision-coverage check. This heuristic does not override the concrete defects.
+No Phase 3 requirement is orphaned, and no gap is explicitly deferred to Phases 4–8. Plan 03-20's prohibitions are honored: no cross-resource ACID claim, benchmark-derived runtime deadline, universal-success test, second lifecycle authority, sidecar, lease, or restored FIFO scheduler was introduced.
 
 ## Human Verification
 
-N/A — infrastructure/foundation phase. The failures require deterministic automated regressions, not subjective manual testing.
+N/A — infrastructure/foundation phase. Every remaining gap has programmatic evidence and requires automated regression closure, not subjective UAT.
 
-## Gaps Summary
+## Next Action
 
-Phase 3 remains blocked. Plan 03-14 fixes the three prior projection defects in covered schedules but leaves nine adjacent lifecycle violations. Keep the facade put admitted; defer destructive projection/link ownership changes until promotion; make projection CAS database-native; classify canonical empty state explicitly; validate observed locators before mutation; and restore cached/PostgreSQL parity. Add the exact barrier and real-adapter tests before re-verifying.
-
-D-32 remains unchanged: Darwin is `UNAVAILABLE`/`NOT_QUALIFIED`, `native_evidence` is false, and Phase 999.1 still requires native Windows Python 3.11 `PASS` at exit 0.
+Create one focused gap-closure plan for CR-01 through CR-04, carrying WR-01 as a warning fix. Preserve the ADR simplification; do not reintroduce the race-chasing coordination machinery.
 
 ---
 
-_Verified: 2026-09-06T04:58:51Z_  
-_Verifier: gsd-verifier_
+_Verified: 2026-09-06T17:50:59Z_
+_Verifier: the agent (gsd-verifier)_
