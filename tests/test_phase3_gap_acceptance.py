@@ -12,42 +12,24 @@ from cacheness.metadata import SqliteBackend
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 REQUIRED_GAP_NODES = {
-    "CR-01": (
-        "tests/test_unified_cache_adversarial_lifecycle.py::"
-        "test_facade_put_admission_blocks_close_until_authority_promotion_exits",
-    ),
-    "CR-02": (
-        "tests/test_unified_cache_adversarial_lifecycle.py::"
-        "test_linked_m1_survives_a_pre_promotion_verification_failure",
-    ),
-    "CR-03": (
-        "tests/test_unified_cache_adversarial_lifecycle.py::"
-        "test_two_pending_candidates_preserve_m1_links_until_one_promotes",
-    ),
-    "CR-04": (
-        "tests/test_projection_sql_atomicity.py::"
-        "test_sqlite_spawned_processes_have_one_projection_winner",
-    ),
-    "CR-05": (
-        "tests/test_sqlite_bootstrap_concurrency.py::"
-        "test_spawned_fresh_authorities_join_one_root_and_commit_distinct_keys",
-    ),
-    "CR-06": (
-        "tests/test_cached_custom_metadata.py::"
-        "test_cached_sqlite_facade_preserves_live_custom_metadata_across_replacement",
-    ),
-    "CR-07": (
-        "tests/test_unified_cache_adversarial_lifecycle.py::"
-        "test_empty_authority_clear_preserves_a_peer_first_put_after_durable_intent",
-    ),
-    "CR-08": (
-        "tests/test_unified_cache_adversarial_lifecycle.py::"
-        "test_hostile_locator_rejects_same_key_put_without_mutating_m1",
-    ),
-    "CR-09": (
-        "tests/test_cached_custom_metadata.py::"
-        "test_signed_postgresql_cache_key_params_keep_a_valid_projection_live",
-    ),
+    "CR-01": "tests/test_unified_cache_adversarial_lifecycle.py::"
+    "test_facade_put_admission_blocks_close_until_authority_promotion_exits",
+    "CR-02": "tests/test_unified_cache_adversarial_lifecycle.py::"
+    "test_linked_m1_survives_a_pre_promotion_verification_failure",
+    "CR-03": "tests/test_unified_cache_adversarial_lifecycle.py::"
+    "test_two_pending_candidates_preserve_m1_links_until_one_promotes",
+    "CR-04": "tests/test_projection_sql_atomicity.py::"
+    "test_sqlite_spawned_processes_have_one_projection_winner",
+    "CR-05": "tests/test_sqlite_bootstrap_concurrency.py::"
+    "test_spawned_fresh_authorities_join_one_root_and_commit_distinct_keys",
+    "CR-06": "tests/test_cached_custom_metadata.py::"
+    "test_cached_sqlite_facade_preserves_live_custom_metadata_across_replacement",
+    "CR-07": "tests/test_unified_cache_adversarial_lifecycle.py::"
+    "test_empty_authority_clear_preserves_a_peer_first_put_after_durable_intent",
+    "CR-08": "tests/test_unified_cache_adversarial_lifecycle.py::"
+    "test_hostile_locator_rejects_same_key_put_without_mutating_m1",
+    "CR-09": "tests/test_cached_custom_metadata.py::"
+    "test_signed_postgresql_cache_key_params_keep_a_valid_projection_live",
     "WR-01": "tests/test_phase3_gap_acceptance.py::test_sqlite_backend_close_is_explicit_idempotent_and_silent",
     "WR-02": "tests/test_phase3_gap_acceptance.py::test_phase3_gap_acceptance_inventory",
 }
@@ -126,7 +108,7 @@ def test_phase3_gap_acceptance_inventory() -> None:
     }
     nodes = tuple(REQUIRED_GAP_NODES.values())
     collected = subprocess.run(
-        [sys.executable, "-m", "pytest", "--collect-only", "-q", *nodes],
+        [sys.executable, "-m", "pytest", "--collect-only", *nodes],
         cwd=REPOSITORY_ROOT,
         check=False,
         capture_output=True,
@@ -137,7 +119,7 @@ def test_phase3_gap_acceptance_inventory() -> None:
         assert node in collected.stdout
 
     for finding, node in REQUIRED_GAP_NODES.items():
-        function, function_source = _node_function_source(node)
+        function, _function_source = _node_function_source(node)
         marker_names = {
             decorator.func.attr
             for decorator in function.decorator_list
@@ -149,7 +131,15 @@ def test_phase3_gap_acceptance_inventory() -> None:
         assert marker_names.isdisjoint({"skip", "skipif", "xfail"}), (
             f"{finding} must remain active: {node}"
         )
-        assert "pytest.skip" not in function_source, f"{finding} skips its schedule: {node}"
-        assert "pytest.xfail" not in function_source, f"{finding} xfails its schedule: {node}"
+        terminal_marks = {
+            call.func.attr
+            for call in ast.walk(function)
+            if isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Attribute)
+            and isinstance(call.func.value, ast.Name)
+            and call.func.value.id == "pytest"
+        }
+        assert terminal_marks.isdisjoint({"skip", "xfail"}), (
+            f"{finding} skips or xfails its schedule: {node}"
+        )
         assert "tests/test_" in node, f"{finding} is not a real test node: {node}"
-

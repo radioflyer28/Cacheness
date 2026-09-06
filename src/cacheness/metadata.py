@@ -2554,19 +2554,20 @@ class SqliteBackend(MetadataBackend):
             self.legacy_compat_hits += 1
             self.legacy_compat_access_times[cache_key] = datetime.now(timezone.utc).isoformat()
 
-    def close(self):
-        """Close all database connections and clean up resources."""
-        if hasattr(self, 'engine') and self.engine:
-            # Close all connections in the pool
-            self.engine.dispose()
-            # On Windows, we need to be more aggressive
-            import gc
-            gc.collect()  # Force garbage collection to release file handles
-            logger.debug("SQLite engine disposed and connections closed")
+    def close(self) -> None:
+        """Detach and dispose owned SQLAlchemy resources exactly once.
 
-    def __del__(self):
-        """Ensure connections are closed when the backend is garbage collected."""
-        self.close()
+        Cleanup is explicit because interpreter finalization may have already
+        dismantled imports and logging.  Detaching under the backend lock makes
+        repeated close calls inert while allowing the one captured engine to
+        release its pool outside the lock.
+        """
+        with self._lock:
+            engine = self.engine
+            self.engine = None
+            self.SessionLocal = None
+        if engine is not None:
+            engine.dispose()
 
     def __enter__(self):
         """Context manager entry."""
