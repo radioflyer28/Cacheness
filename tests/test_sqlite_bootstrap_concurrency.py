@@ -211,6 +211,43 @@ def test_spawned_fresh_authorities_keep_same_key_cas_deterministic(
         reopened.close()
 
 
+def test_late_regular_leaf_reclassifies_instead_of_rejecting_valid_bootstrap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A leaf created after the final check joins under the original deadline."""
+    root = tmp_path / "late-authority-leaf"
+    reserved = root / AUTHORITY_RELATIVE_PATH.parent
+    database = root / AUTHORITY_RELATIVE_PATH
+    root.mkdir()
+    reserved.mkdir()
+    temporary = reserved / "inflight-observation"
+    temporary.write_bytes(b"temporary observer state")
+
+    authority = SqliteLifecycleAuthority.for_root(root)
+    original_classify = authority._classify_for_open
+    classifications = 0
+
+    def classify_with_late_leaf() -> str:
+        nonlocal classifications
+        state = original_classify()
+        classifications += 1
+        if classifications == 5:
+            assert state == "established"
+            temporary.unlink()
+            descriptor = os.open(database, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            os.close(descriptor)
+        return state
+
+    monkeypatch.setattr(authority, "_classify_for_open", classify_with_late_leaf)
+    try:
+        prepared = authority.prepare_mutation(_bootstrap_spec("late-leaf"))
+        assert database.is_file()
+        authority.abort_mutation(prepared, candidate_persisted=False)
+    finally:
+        authority.close()
+
+
 @pytest.mark.parametrize(
     "substitution",
     ("root-file", "reserved-file", "database-file", "root-symlink", "reserved-symlink", "database-symlink"),
@@ -283,4 +320,3 @@ def test_bootstrap_rejects_wrong_winner_objects_unchanged(
         assert os.readlink(hostile_path) == captured["target"]
     if substitution.endswith("symlink"):
         assert not target.is_dir() or tuple(target.iterdir()) == ()
-

@@ -435,7 +435,12 @@ class SqliteLifecycleAuthority:
                 elif self._classify_for_open() == "authority":
                     return False
                 else:
-                    self._reject_non_authority_state(state)
+                    # The final classification can itself lose the O_EXCL
+                    # leaf race: a peer may create the regular database after
+                    # this read but before rejection. Reuse the bounded
+                    # bootstrap join, which accepts only that authority leaf
+                    # and still rejects every other established object.
+                    return self._await_inflight_authority_leaf(deadline)
             if state == "missing":
                 self._reach_bootstrap_boundary("authority.bootstrap.before_root")
                 try:
