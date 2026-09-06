@@ -462,28 +462,31 @@ def test_unified_cache_precommit_failures_preserve_exact_overwrite_evidence(
         assert cache.metadata_backend.get_entry(cache_key) == entry_before
         assert payload_before.read_bytes() == bytes_before
         assert _candidate_paths(cache) == candidates_before
-        assert cache.get(**cache_key_params) == {"value": "committed"}
+        if boundary == "metadata_publication":
+            # Compatibility publication is deliberately post-authority under
+            # the lifecycle. M1 remains retained forensic evidence while the
+            # next normal read converges the projection to authoritative M2.
+            assert cache.get(**cache_key_params) == {"value": "replacement"}
+        else:
+            assert cache.get(**cache_key_params) == {"value": "committed"}
     finally:
         cache.close()
 
 
-@pytest.mark.parametrize("cleanup_outcome", ("false", "raise"))
-def test_unified_cache_unresolved_candidate_cleanup_is_chained(
-    tmp_path, monkeypatch, cleanup_outcome
+def test_unified_cache_postpromotion_publication_failure_preserves_old_evidence(
+    tmp_path, monkeypatch
 ):
-    """A failed candidate deletion is explicit and leaves prior evidence untouched."""
+    """A derived-write failure must not retire M1 after M2 authority promotion."""
     cache = _cache_with_signing_policy(tmp_path, allow_unsigned=False)
-    cache_key_params = {"candidate_cleanup": cleanup_outcome}
+    cache_key_params = {"postpromotion_publication": "failure"}
     cleanup_attempts: list[Path] = []
 
     def fail_metadata_publication(_cache_key, _entry_data):
         raise RuntimeError("metadata unavailable")
 
-    def cannot_prove_cleanup(locator):
+    def old_payload_cleanup_must_not_run(locator):
         cleanup_attempts.append(Path(locator))
-        if cleanup_outcome == "raise":
-            raise OSError("candidate cleanup unavailable")
-        return False
+        raise AssertionError("M1 cleanup ran before compatibility publication")
 
     try:
         cache.put({"value": "committed"}, **cache_key_params)
@@ -500,15 +503,13 @@ def test_unified_cache_unresolved_candidate_cleanup_is_chained(
         monkeypatch.setattr(
             cache.guarded_handler_io.file_ops,
             "delete",
-            cannot_prove_cleanup,
+            old_payload_cleanup_must_not_run,
         )
 
-        with pytest.raises(CacheStorageError) as exc_info:
+        with pytest.raises(RuntimeError, match="metadata unavailable"):
             cache.put({"value": "replacement"}, **cache_key_params)
 
-        assert isinstance(exc_info.value.__cause__, RuntimeError)
-        assert "metadata unavailable" in str(exc_info.value.__cause__)
-        assert len(cleanup_attempts) == 1
+        assert cleanup_attempts == []
         assert cache.metadata_backend.get_entry(cache_key) == entry_before
         assert payload_before.read_bytes() == bytes_before
     finally:

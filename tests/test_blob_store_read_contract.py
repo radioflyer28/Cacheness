@@ -591,7 +591,9 @@ def test_clear_does_not_rewrap_already_typed_lifecycle_failure(
         def raise_typed_failure() -> int:
             raise typed_failure
 
-        monkeypatch.setattr(store.lifecycle, "clear", raise_typed_failure)
+        # BlobStore owns full-call admission and invokes the lifecycle's two-phase
+        # protocol directly, so fail the begin phase without bypassing it.
+        monkeypatch.setattr(store.lifecycle, "begin_clear", raise_typed_failure)
 
         with pytest.raises(CacheBlobBackendError) as error:
             store.clear()

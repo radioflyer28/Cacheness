@@ -248,6 +248,42 @@ def test_linked_m1_survives_a_pre_promotion_verification_failure(
         cache.close()
 
 
+def test_postpromotion_same_generation_projection_repair_is_idempotent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A peer repair of exact M2 is safe convergence, not a stale-token conflict."""
+    cache = _cache(tmp_path / "same-generation-projection-repair")
+    try:
+        key = cache.put({"generation": "m1"}, race_key="same-generation")
+        conditional_mutation = cache._conditional_projection_mutation
+        repaired = False
+
+        def peer_repairs_m2(cache_key, *, expected_locator, replacement):
+            nonlocal repaired
+            if not repaired:
+                repaired = True
+                conditional_mutation(
+                    cache_key,
+                    expected_locator=expected_locator,
+                    replacement=replacement,
+                )
+            return conditional_mutation(
+                cache_key,
+                expected_locator=expected_locator,
+                replacement=replacement,
+            )
+
+        monkeypatch.setattr(
+            cache, "_conditional_projection_mutation", peer_repairs_m2
+        )
+        assert cache.put({"generation": "m2"}, race_key="same-generation") == key
+        assert repaired
+        assert cache.get(race_key="same-generation") == {"generation": "m2"}
+    finally:
+        cache.close()
+
+
 def test_two_pending_candidates_preserve_m1_links_until_one_promotes(
     tmp_path: Path,
 ) -> None:

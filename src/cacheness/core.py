@@ -1601,6 +1601,22 @@ class UnifiedCache:
             replacement=self._projection_entry_from_manifest(manifest, snapshot),
         )
         if outcome.status == "mismatch":
+            # A concurrent reader can repair the exact promoted generation
+            # before its writer publishes the compatibility row. Revalidate
+            # both sides before treating that as safe convergence: an M3
+            # promotion must still reject this M2 publisher rather than lend
+            # it a newer candidate token.
+            current_snapshot, _current_manifest = self._authority_snapshot_manifest(
+                put_result.key
+            )
+            current_projection = self.metadata_backend.get_entry(put_result.key)
+            if (
+                current_snapshot == promoted
+                and self._projection_matches_authority_snapshot(
+                    current_projection, current_snapshot
+                )
+            ):
+                return str(self._authority_payload_locator(promoted.locator))
             raise CacheBlobLifecycleConflictError(
                 "Compatibility projection changed before promoted publication",
                 context={"operation": "projection_publish", "key": put_result.key},
@@ -1762,6 +1778,7 @@ class UnifiedCache:
                 promoted_locator = self._publish_promoted_authority_projection(
                     put_result
                 )
+                self._cache_blob_store._settle_put_cleanup(put_result)
             except BaseException:
                 # Pre-promotion failures leave M1 untouched. A failure after
                 # promotion may leave a derived row stale, so reconciliation is

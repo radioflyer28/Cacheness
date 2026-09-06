@@ -327,6 +327,7 @@ class BlobStore:
                 key=key,
                 metadata=metadata,
                 projection_context=projection_context,
+                defer_cleanup=True,
             )
 
     def _put_with_result_admitted(
@@ -336,6 +337,7 @@ class BlobStore:
         metadata: Optional[Dict[str, Any]] = None,
         *,
         projection_context: Optional[str] = None,
+        defer_cleanup: bool = False,
     ):
         """Store one payload after exactly one public or facade admission."""
         blob_key = (
@@ -348,9 +350,14 @@ class BlobStore:
                 key=blob_key,
                 metadata=metadata,
                 projection_context=projection_context,
+                defer_cleanup=defer_cleanup,
             )
         self._export_compatible_projection()
         return result
+
+    def _settle_put_cleanup(self, result: Any) -> None:
+        """Finish facade-deferred cleanup after its projection is published."""
+        self.lifecycle.settle_put_cleanup(result)
 
     @_ordinary_admitted
     def get(self, key: str) -> Optional[Any]:

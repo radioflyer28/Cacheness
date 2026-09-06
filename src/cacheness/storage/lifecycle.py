@@ -57,6 +57,7 @@ class LifecyclePutResult:
     promoted: EntrySnapshot | None
     previous: EntrySnapshot | None
     expected_projection_locator: str | None = None
+    cleanup_debt: tuple[CleanupDebt, ...] = ()
 
 
 class AuthorityLifecycleEngine:
@@ -182,6 +183,7 @@ class AuthorityLifecycleEngine:
         key: str,
         metadata: dict[str, Any] | None,
         projection_context: str | None = None,
+        defer_cleanup: bool = False,
     ) -> LifecyclePutResult:
         """Prepare, publish, verify, promote, then reclaim exact old debt."""
         handler = self.store.handlers.get_handler(data)
@@ -299,15 +301,28 @@ class AuthorityLifecycleEngine:
                     raise cleanup_error from error
                 raise
         self._reach("put.promoted", key=key)
-        self._settle_debts(promoted.cleanup_debt)
-        self._reach("put.cleanup_retired", key=key)
+        if not defer_cleanup:
+            self._settle_debts(promoted.cleanup_debt)
+            self._reach("put.cleanup_retired", key=key)
         return LifecyclePutResult(
             key=key,
             expected=expected,
             promoted=promoted.entry,
             previous=previous,
             expected_projection_locator=projection_context,
+            cleanup_debt=tuple(promoted.cleanup_debt),
         )
+
+    def settle_put_cleanup(self, result: LifecyclePutResult) -> None:
+        """Retire the exact old generation retained for facade publication.
+
+        ``UnifiedCache`` publishes its derived compatibility row only after
+        authority promotion. Keeping the retired generation until that derived
+        write succeeds preserves M1 evidence if publication fails, while the
+        direct ``BlobStore.put`` path keeps its immediate cleanup behavior.
+        """
+        self._settle_debts(result.cleanup_debt)
+        self._reach("put.cleanup_retired", key=result.key)
 
     def update_metadata(self, key: str, metadata: dict[str, Any]) -> bool:
         """Promote a new signed metadata revision without changing payload bytes."""
