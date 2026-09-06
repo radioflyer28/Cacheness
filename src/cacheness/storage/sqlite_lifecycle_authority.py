@@ -17,7 +17,7 @@ import sqlite3
 import stat
 import subprocess
 import tempfile
-from threading import Condition, Lock
+from threading import Condition, Event, Lock
 import time
 from typing import Callable, Iterator, TypeVar
 from uuid import uuid4
@@ -145,6 +145,7 @@ class SqliteLifecycleAuthority:
         self._bootstrap_lock = Lock()
         self._schema_lock = Lock()
         self._bootstrap_started = False
+        self._bootstrap_ready_event = Event()
         self._schema_ready = False
         self._closed = False
         self.open_write_transactions = 0
@@ -188,15 +189,6 @@ class SqliteLifecycleAuthority:
                 raise TypeError("deadline must be a monotonic timestamp")
             return float(deadline)
         return self._now() + self.lifecycle_limits.authority_busy_timeout_seconds
-
-    def _remaining(self, deadline: float) -> float:
-        remaining = deadline - self._now()
-        if remaining <= 0:
-            raise CacheBlobLifecycleTimeoutError(
-                "Lifecycle authority busy deadline expired",
-                context={"operation": "lifecycle_authority"},
-            )
-        return remaining
 
     @staticmethod
     def _wait_on_admission_condition(condition: Condition, timeout: float) -> None:
@@ -242,17 +234,22 @@ class SqliteLifecycleAuthority:
         *,
         stage: str,
         started_at: float,
+        deadline: float | None = None,
     ) -> CacheBlobLifecycleTimeoutError:
-        elapsed = max(0.0, self._now() - started_at)
+        now = self._now()
+        elapsed = max(0.0, now - started_at)
+        remaining = None if deadline is None else max(0.0, deadline - now)
         return CacheBlobLifecycleTimeoutError(
             "Lifecycle authority busy deadline expired",
             context={
                 "operation": "lifecycle_authority",
                 "stage": stage,
                 "elapsed_seconds": elapsed,
+                "remaining_seconds": remaining,
                 "authority_busy_timeout_seconds": (
                     self.lifecycle_limits.authority_busy_timeout_seconds
                 ),
+                "authority_path": str(self.path),
             },
         )
 
@@ -265,7 +262,11 @@ class SqliteLifecycleAuthority:
     ) -> float:
         remaining = deadline - self._now()
         if remaining <= 0:
-            raise self._deadline_timeout(stage=stage, started_at=started_at)
+            raise self._deadline_timeout(
+                stage=stage,
+                started_at=started_at,
+                deadline=deadline,
+            )
         return remaining
 
     @staticmethod
@@ -285,6 +286,62 @@ class SqliteLifecycleAuthority:
         if type(milliseconds) is not int or milliseconds < 0:
             raise ValueError("SQLite busy timeout must be a non-negative integer")
         connection.execute(f"PRAGMA busy_timeout = {milliseconds}")
+
+    def _apply_stage_busy_timeout(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        deadline: float,
+        started_at: float,
+        stage: str,
+    ) -> None:
+        """Refresh SQLite's local wait budget without extending one deadline."""
+        remaining = self._remaining_for_stage(
+            deadline,
+            stage=stage,
+            started_at=started_at,
+        )
+        try:
+            self._set_busy_timeout(
+                connection,
+                self._busy_timeout_milliseconds(remaining),
+            )
+        except sqlite3.Error as error:
+            self._translate_sqlite_error(
+                error,
+                operation="lifecycle_authority",
+                stage=stage,
+                deadline=deadline,
+                started_at=started_at,
+            )
+
+    def _execute_for_stage(
+        self,
+        connection: sqlite3.Connection,
+        statement: str,
+        *,
+        deadline: float,
+        started_at: float,
+        stage: str,
+    ) -> sqlite3.Cursor:
+        """Run one potentially contended SQLite statement under the sole budget."""
+        self._apply_stage_busy_timeout(
+            connection,
+            deadline=deadline,
+            started_at=started_at,
+            stage=stage,
+        )
+        try:
+            return connection.execute(statement)
+        except sqlite3.Error as error:
+            self._translate_sqlite_error(
+                error,
+                operation="lifecycle_authority",
+                stage=stage,
+                deadline=deadline,
+                started_at=started_at,
+            )
+            raise AssertionError("SQLite error translation must raise")
 
     def _classify_for_open(self) -> str:
         """Classify authority objects without opening SQLite or creating a path."""
@@ -333,41 +390,15 @@ class SqliteLifecycleAuthority:
             and not any(reserved.iterdir())
         )
 
-    def _may_be_inflight_authority_bootstrap(self) -> bool:
-        """Return whether only new-authority bootstrap artifacts are present."""
-        reserved = self.root / AUTHORITY_RELATIVE_PATH.parent
+    def _has_only_new_authority_bootstrap_artifacts(self) -> bool:
+        """Recognize the bounded payload-stage artifacts preceding O_EXCL leaf creation."""
         try:
             root_entries = tuple(self.root.iterdir())
-            reserved_stat = reserved.lstat()
         except FileNotFoundError:
             return False
-        return (
-            self.path not in root_entries
-            and all(entry.name in _BOOTSTRAP_ROOT_NAMES for entry in root_entries)
-            and reserved in root_entries
-            and stat.S_ISDIR(reserved_stat.st_mode)
-            and not stat.S_ISLNK(reserved_stat.st_mode)
-            and not any(reserved.iterdir())
+        return self.path not in root_entries and all(
+            entry.name in _BOOTSTRAP_ROOT_NAMES for entry in root_entries
         )
-
-    def _await_inflight_authority_leaf(self, deadline: float) -> bool:
-        """Join a bounded concurrent bootstrap without adopting old evidence."""
-        while True:
-            if self._classify_for_open() == "authority":
-                return False
-            if not self._may_be_inflight_authority_bootstrap():
-                # ``_classify_for_open`` may observe the leaf just before a
-                # peer wins O_EXCL, while the namespace scan that follows
-                # observes that new regular leaf. Reclassify once before
-                # rejecting so a valid in-flight winner is joined, not
-                # mistaken for established legacy evidence.
-                if self._classify_for_open() == "authority":
-                    return False
-                self._reject_non_authority_state("established")
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                self._reject_non_authority_state("established")
-            time.sleep(min(0.001, remaining))
 
     def _reject_non_authority_state(self, state: str) -> None:
         raise CacheBlobMigrationRequiredError(
@@ -534,69 +565,38 @@ class SqliteLifecycleAuthority:
         self._require_owned_open()
         self._validate_mutation_topology()
 
-    def _materialize_database_file(self, deadline: float) -> bool:
+    def _materialize_database_file(self, deadline: float, *, started_at: float) -> bool:
         """Create only the contained database leaf and report whether this won."""
         self._validate_mutation_topology()
-        if self._classify_for_open() == "authority":
-            return False
-        # Several same-process keys may reach their first authority mutation
-        # together. Coordinate only the root-to-leaf bootstrap interval; once
-        # the SQLite leaf exists, independent lifecycle transactions continue
-        # through SQLite without a process-wide operation lock.
         with self._bootstrap_lock:
             state = self._classify_for_open()
-            if state != "authority" and not self._bootstrap_started:
-                if state in {"missing", "ready"}:
-                    self._bootstrap_started = True
-            return self._materialize_database_file_after_bootstrap_lock(deadline)
-
-    def _materialize_database_file_after_bootstrap_lock(self, deadline: float) -> bool:
-        """Materialize a new leaf after same-process bootstrap admission."""
-        rejected_states = {
-            "wrong_root",
-            "invalid_reserved_directory",
-            "invalid_authority",
-        }
-        while True:
-            state = self._classify_for_open()
-            if state == "missing":
-                self._reach_bootstrap_boundary("authority.bootstrap.classified")
             if state == "authority":
                 return False
-            if state in rejected_states:
+            if state in {
+                "wrong_root",
+                "invalid_reserved_directory",
+                "invalid_authority",
+            }:
                 self._reject_non_authority_state(state)
             if state == "established":
-                # The directory/file classification is necessarily a read-only
-                # observation. Re-check immediately before rejecting so a sibling
-                # that won the O_EXCL leaf creation is never mistaken for legacy
-                # evidence in this small TOCTOU window.
-                if self._classify_for_open() == "authority":
-                    return False
-                if self._is_pristine_reserved_bootstrap():
-                    pass
-                elif self._may_be_inflight_authority_bootstrap():
-                    return self._await_inflight_authority_leaf(deadline)
-                elif self._classify_for_open() == "authority":
-                    return False
-                else:
-                    # The final classification can itself lose the O_EXCL
-                    # leaf race: a peer may create the regular database after
-                    # this read but before rejection. Reuse the bounded
-                    # bootstrap join, which accepts only that authority leaf
-                    # and still rejects every other established object.
-                    return self._await_inflight_authority_leaf(deadline)
+                if not (
+                    self._is_pristine_reserved_bootstrap()
+                    or self._has_only_new_authority_bootstrap_artifacts()
+                ):
+                    self._reject_non_authority_state(state)
+                state = "ready"
+            if state in {"missing", "ready"}:
+                self._bootstrap_started = True
             if state == "missing":
                 self._reach_bootstrap_boundary("authority.bootstrap.before_root")
                 try:
                     self.root.mkdir(mode=0o700, parents=True, exist_ok=False)
                 except FileExistsError:
-                    # An independent fresh-root winner may have created any
-                    # object after our missing classification. Restart the
-                    # complete non-following classification under the one
-                    # caller deadline; never infer that this alone is a
-                    # usable authority bootstrap.
-                    self._remaining(deadline)
-                    continue
+                    state = self._classify_for_open()
+                    if state == "authority":
+                        return False
+                    if state not in {"ready", "missing"}:
+                        self._reject_non_authority_state(state)
             reserved = self.root / AUTHORITY_RELATIVE_PATH.parent
             if not reserved.exists():
                 self._reach_bootstrap_boundary("authority.bootstrap.before_reserved")
@@ -612,6 +612,11 @@ class SqliteLifecycleAuthority:
                 self._reject_non_authority_state("invalid_reserved_directory")
 
             self._reach_bootstrap_boundary("authority.bootstrap.before_leaf")
+            self._remaining_for_stage(
+                deadline,
+                stage="connection_open",
+                started_at=started_at,
+            )
             try:
                 descriptor = os.open(
                     self.path,
@@ -627,12 +632,54 @@ class SqliteLifecycleAuthority:
                 os.close(descriptor)
                 return True
 
+    def _await_local_bootstrap_completion(
+        self,
+        *,
+        deadline: float,
+        started_at: float,
+    ) -> None:
+        """Wait once for this instance's visible-but-uncommitted first leaf."""
+        with self._schema_lock:
+            wait_for_bootstrap = self._bootstrap_started and not self._schema_ready
+        if not wait_for_bootstrap:
+            return
+        remaining = self._remaining_for_stage(
+            deadline,
+            stage="schema_validate",
+            started_at=started_at,
+        )
+        self._bootstrap_ready_event.wait(remaining)
+        with self._schema_lock:
+            if not self._schema_ready:
+                raise self._deadline_timeout(
+                    stage="schema_validate",
+                    started_at=started_at,
+                    deadline=deadline,
+                )
+
     @staticmethod
     def _is_busy_error(error: sqlite3.Error) -> bool:
-        message = str(error).lower()
-        return "busy" in message or "locked" in message
+        """Classify only SQLite primary BUSY/LOCKED codes, never error text."""
+        error_code = getattr(error, "sqlite_errorcode", None)
+        if type(error_code) is not int:
+            return False
+        return (error_code & 0xFF) in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
 
-    def _translate_sqlite_error(self, error: sqlite3.Error, *, operation: str) -> None:
+    def _translate_sqlite_error(
+        self,
+        error: sqlite3.Error,
+        *,
+        operation: str,
+        stage: str | None = None,
+        deadline: float | None = None,
+        started_at: float | None = None,
+    ) -> None:
+        if self._is_busy_error(error) and stage is not None and started_at is not None:
+            raise self._deadline_timeout(
+                stage=stage,
+                started_at=started_at,
+                deadline=deadline,
+            ) from error
         if self._is_busy_error(error):
             raise CacheBlobLifecycleTimeoutError(
                 "Lifecycle authority busy deadline expired",
@@ -808,24 +855,74 @@ class SqliteLifecycleAuthority:
                 self._observe_admission("writer_admission.released")
             self._release_writer_admission_gate(canonical_path, gate)
 
-    @staticmethod
     def _configure_connection(
+        self,
         connection: sqlite3.Connection,
         *,
         initialize: bool,
+        deadline: float,
+        started_at: float,
     ) -> None:
         """Configure and read back every connection-level authority pragma."""
         if initialize:
-            mode = connection.execute("PRAGMA journal_mode = DELETE").fetchone()[0]
+            mode = self._execute_for_stage(
+                connection,
+                "PRAGMA journal_mode = DELETE",
+                deadline=deadline,
+                started_at=started_at,
+                stage="connection_configure",
+            ).fetchone()[0]
         else:
-            mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
-        connection.execute("PRAGMA synchronous = EXTRA")
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA trusted_schema = OFF")
+            mode = self._execute_for_stage(
+                connection,
+                "PRAGMA journal_mode",
+                deadline=deadline,
+                started_at=started_at,
+                stage="connection_configure",
+            ).fetchone()[0]
+        self._execute_for_stage(
+            connection,
+            "PRAGMA synchronous = EXTRA",
+            deadline=deadline,
+            started_at=started_at,
+            stage="connection_configure",
+        )
+        self._execute_for_stage(
+            connection,
+            "PRAGMA foreign_keys = ON",
+            deadline=deadline,
+            started_at=started_at,
+            stage="connection_configure",
+        )
+        self._execute_for_stage(
+            connection,
+            "PRAGMA trusted_schema = OFF",
+            deadline=deadline,
+            started_at=started_at,
+            stage="connection_configure",
+        )
 
-        synchronous = connection.execute("PRAGMA synchronous").fetchone()[0]
-        foreign_keys = connection.execute("PRAGMA foreign_keys").fetchone()[0]
-        trusted_schema = connection.execute("PRAGMA trusted_schema").fetchone()[0]
+        synchronous = self._execute_for_stage(
+            connection,
+            "PRAGMA synchronous",
+            deadline=deadline,
+            started_at=started_at,
+            stage="connection_configure",
+        ).fetchone()[0]
+        foreign_keys = self._execute_for_stage(
+            connection,
+            "PRAGMA foreign_keys",
+            deadline=deadline,
+            started_at=started_at,
+            stage="connection_configure",
+        ).fetchone()[0]
+        trusted_schema = self._execute_for_stage(
+            connection,
+            "PRAGMA trusted_schema",
+            deadline=deadline,
+            started_at=started_at,
+            stage="connection_configure",
+        ).fetchone()[0]
         if (
             str(mode).lower() != "delete"
             or synchronous != 3
@@ -838,10 +935,31 @@ class SqliteLifecycleAuthority:
                 reason=CacheReason.BLOB_BACKEND_CAPABILITY_UNSUPPORTED,
             )
 
-    @classmethod
-    def _initialize_schema(cls, connection: sqlite3.Connection) -> None:
+    def _initialize_schema(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        deadline: float,
+        started_at: float,
+    ) -> None:
         """Create the complete version-one normalized authority schema once."""
-        connection.execute("BEGIN EXCLUSIVE")
+        self._apply_stage_busy_timeout(
+            connection,
+            deadline=deadline,
+            started_at=started_at,
+            stage="schema_initialize",
+        )
+        try:
+            connection.execute("BEGIN EXCLUSIVE")
+        except sqlite3.Error as error:
+            self._translate_sqlite_error(
+                error,
+                operation="lifecycle_authority",
+                stage="schema_initialize",
+                deadline=deadline,
+                started_at=started_at,
+            )
+        self._reach_bootstrap_boundary("authority.schema_initialize.exclusive_acquired")
         try:
             connection.execute("CREATE TABLE IF NOT EXISTS store_identity (identity TEXT NOT NULL)")
             connection.execute(
@@ -910,13 +1028,19 @@ class SqliteLifecycleAuthority:
             connection.execute("PRAGMA application_id = 1128350536")
             connection.execute("PRAGMA user_version = 1")
             connection.execute("COMMIT")
+            self._reach_bootstrap_boundary("authority.schema_initialize.committed")
         except BaseException:
             if connection.in_transaction:
                 connection.execute("ROLLBACK")
             raise
 
-    @classmethod
-    def _migrate_schema_layout(cls, connection: sqlite3.Connection) -> None:
+    def _migrate_schema_layout(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        deadline: float,
+        started_at: float,
+    ) -> None:
         """Complete the fixed version-one layout before a mutation uses it.
 
         Plan 03-02's tracer used the same persistent user version but did not
@@ -925,7 +1049,22 @@ class SqliteLifecycleAuthority:
         authority identity rather than treating that known predecessor as JSON
         reconstruction input.
         """
-        connection.execute("BEGIN EXCLUSIVE")
+        self._apply_stage_busy_timeout(
+            connection,
+            deadline=deadline,
+            started_at=started_at,
+            stage="schema_initialize",
+        )
+        try:
+            connection.execute("BEGIN EXCLUSIVE")
+        except sqlite3.Error as error:
+            self._translate_sqlite_error(
+                error,
+                operation="lifecycle_authority",
+                stage="schema_initialize",
+                deadline=deadline,
+                started_at=started_at,
+            )
         try:
             # Read the layout only after taking SQLite's exclusive writer
             # transaction. A concurrent first-use creator can expose a
@@ -946,7 +1085,11 @@ class SqliteLifecycleAuthority:
             }
             if "entries" not in table_names:
                 connection.execute("ROLLBACK")
-                cls._initialize_schema(connection)
+                self._initialize_schema(
+                    connection,
+                    deadline=deadline,
+                    started_at=started_at,
+                )
                 return
 
             clear_run_columns = {
@@ -1097,11 +1240,28 @@ class SqliteLifecycleAuthority:
                 connection.execute("ROLLBACK")
             raise
 
-    @classmethod
-    def _validate_schema(cls, connection: sqlite3.Connection) -> None:
+    def _validate_schema(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        deadline: float,
+        started_at: float,
+    ) -> None:
         """Reject an unknown database before it participates in a transition."""
-        application_id = connection.execute("PRAGMA application_id").fetchone()[0]
-        version = connection.execute("PRAGMA user_version").fetchone()[0]
+        application_id = self._execute_for_stage(
+            connection,
+            "PRAGMA application_id",
+            deadline=deadline,
+            started_at=started_at,
+            stage="schema_validate",
+        ).fetchone()[0]
+        version = self._execute_for_stage(
+            connection,
+            "PRAGMA user_version",
+            deadline=deadline,
+            started_at=started_at,
+            stage="schema_validate",
+        ).fetchone()[0]
         if application_id != SQLITE_APPLICATION_ID:
             raise CacheBlobMigrationRequiredError(
                 "Lifecycle authority application ID is incompatible"
@@ -1115,7 +1275,13 @@ class SqliteLifecycleAuthority:
                 "Lifecycle authority schema version is incompatible"
             )
 
-        rows = connection.execute("SELECT identity FROM store_identity").fetchall()
+        rows = self._execute_for_stage(
+            connection,
+            "SELECT identity FROM store_identity",
+            deadline=deadline,
+            started_at=started_at,
+            stage="schema_validate",
+        ).fetchall()
         if len(rows) != 1 or not isinstance(rows[0][0], str):
             raise CacheBlobMigrationRequiredError(
                 "Lifecycle authority store identity is incompatible"
@@ -1132,21 +1298,23 @@ class SqliteLifecycleAuthority:
         *,
         mutation: bool,
         deadline: float,
+        started_at: float | None = None,
     ) -> Iterator[sqlite3.Connection | None]:
         """Open, harden, validate, and close one process/thread-owned connection."""
         self._require_owned_open()
+        if started_at is None:
+            started_at = self._now()
         created_new = False
         if mutation:
-            self._remaining(deadline)
-            created_new = self._materialize_database_file(deadline)
+            created_new = self._materialize_database_file(
+                deadline,
+                started_at=started_at,
+            )
         else:
             state = self._classify_for_open()
-            if state == "established" and self._bootstrap_started:
-                self._await_inflight_authority_leaf(deadline)
-                state = self._classify_for_open()
             if state == "established" and (
                 self._is_pristine_reserved_bootstrap()
-                or self._may_be_inflight_authority_bootstrap()
+                or self._has_only_new_authority_bootstrap_artifacts()
             ):
                 # A concurrent first writer may have made the reserved
                 # namespace (and other bounded bootstrap artifacts) visible
@@ -1160,64 +1328,95 @@ class SqliteLifecycleAuthority:
                 return
             if state != "authority":
                 self._reject_non_authority_state(state)
+            self._await_local_bootstrap_completion(
+                deadline=deadline,
+                started_at=started_at,
+            )
 
         connection: sqlite3.Connection | None = None
         try:
-            remaining = self._remaining(deadline)
+            remaining = self._remaining_for_stage(
+                deadline,
+                stage="connection_open",
+                started_at=started_at,
+            )
             if mutation:
-                connection = sqlite3.connect(
-                    self.path,
-                    isolation_level=None,
-                    timeout=remaining,
-                    check_same_thread=True,
-                )
+                try:
+                    connection = sqlite3.connect(
+                        self.path,
+                        isolation_level=None,
+                        timeout=remaining,
+                        check_same_thread=True,
+                    )
+                except sqlite3.Error as error:
+                    self._translate_sqlite_error(
+                        error,
+                        operation="lifecycle_authority",
+                        stage="connection_open",
+                        deadline=deadline,
+                        started_at=started_at,
+                    )
             else:
-                connection = sqlite3.connect(
-                    f"{self.path.as_uri()}?mode=ro",
-                    uri=True,
-                    isolation_level=None,
-                    timeout=remaining,
-                    check_same_thread=True,
-                )
-            self._configure_connection(connection, initialize=created_new)
-            if created_new:
-                with self._schema_lock:
-                    self._initialize_schema(connection)
-                    self._schema_ready = True
-            elif mutation:
-                # Schema reconciliation is a first-use concern for an
-                # authority instance. Repeating an EXCLUSIVE migration
-                # transaction before every short state transition turns
-                # independent-key writers into a queue and can exhaust the
-                # measured SQLite admission bound. The lock covers only this
-                # bounded one-time compatibility check, never payload work or
-                # ordinary lifecycle transactions.
+                try:
+                    connection = sqlite3.connect(
+                        f"{self.path.as_uri()}?mode=ro",
+                        uri=True,
+                        isolation_level=None,
+                        timeout=remaining,
+                        check_same_thread=True,
+                    )
+                except sqlite3.Error as error:
+                    self._translate_sqlite_error(
+                        error,
+                        operation="lifecycle_authority",
+                        stage="connection_open",
+                        deadline=deadline,
+                        started_at=started_at,
+                    )
+            assert connection is not None
+            self._configure_connection(
+                connection,
+                initialize=created_new,
+                deadline=deadline,
+                started_at=started_at,
+            )
+            if mutation:
                 with self._schema_lock:
                     if not self._schema_ready:
-                        self._migrate_schema_layout(connection)
+                        if created_new:
+                            self._initialize_schema(
+                                connection,
+                                deadline=deadline,
+                                started_at=started_at,
+                            )
+                        else:
+                            self._migrate_schema_layout(
+                                connection,
+                                deadline=deadline,
+                                started_at=started_at,
+                            )
+                        self._validate_schema(
+                            connection,
+                            deadline=deadline,
+                            started_at=started_at,
+                        )
                         self._schema_ready = True
-            application_id = connection.execute("PRAGMA application_id").fetchone()[0]
-            table_rows = connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
-            ).fetchall()
-            if application_id == 0 and not table_rows:
-                # An O_EXCL winner made the database leaf visible but has not
-                # committed its first schema transaction yet. SQLite remains
-                # the only cross-process authority: close this observer and
-                # retry the exact bounded open rather than classifying a live
-                # zero-byte bootstrap as incompatible stored evidence.
-                connection.close()
-                connection = None
-                time.sleep(
-                    min(
-                        0.001,
-                        self._remaining(deadline),
-                    )
+                        self._bootstrap_ready_event.set()
+                        self._reach_bootstrap_boundary(
+                            "authority.schema_ready.published"
+                        )
+                    else:
+                        self._validate_schema(
+                            connection,
+                            deadline=deadline,
+                            started_at=started_at,
+                        )
+            else:
+                self._validate_schema(
+                    connection,
+                    deadline=deadline,
+                    started_at=started_at,
                 )
-                with self._connection(mutation=mutation, deadline=deadline) as retry:
-                    yield retry
-                return
-            self._validate_schema(connection)
             yield connection
         except (
             CacheBlobBackendError,
@@ -1226,9 +1425,13 @@ class SqliteLifecycleAuthority:
         ):
             raise
         except sqlite3.Error as error:
-            if not created_new and "file is not a database" in str(error).lower():
-                self._reject_non_authority_state("invalid_authority")
-            self._translate_sqlite_error(error, operation="lifecycle_authority_open")
+            self._translate_sqlite_error(
+                error,
+                operation="lifecycle_authority",
+                stage="schema_validate",
+                deadline=deadline,
+                started_at=started_at,
+            )
         finally:
             if connection is not None:
                 connection.close()
@@ -1263,25 +1466,27 @@ class SqliteLifecycleAuthority:
         uncertain_classifier: Callable[[], _T] | None = None,
     ) -> _T:
         """Run one bounded state transition with rollback on every failure."""
+        self._require_owned_open()
         started_at = self._now()
         absolute_deadline = self._deadline(deadline)
-        self._observe_admission("sqlite.connection_preflight.started")
-        with self._connection(mutation=True, deadline=absolute_deadline) as connection:
-            assert connection is not None
-            self._observe_admission("sqlite.connection_preflight.finished")
-            with self._admit_writer(
+        with self._admit_writer(
+            deadline=absolute_deadline,
+            started_at=started_at,
+        ):
+            self._observe_admission("sqlite.connection_preflight.started")
+            with self._connection(
+                mutation=True,
                 deadline=absolute_deadline,
                 started_at=started_at,
-            ):
+            ) as connection:
+                assert connection is not None
+                self._observe_admission("sqlite.connection_preflight.finished")
                 self._observe_admission("sqlite.begin.attempt")
-                remaining = self._remaining_for_stage(
-                    absolute_deadline,
-                    stage="scheduler_dispatch",
-                    started_at=started_at,
-                )
-                self._set_busy_timeout(
+                self._apply_stage_busy_timeout(
                     connection,
-                    self._busy_timeout_milliseconds(remaining),
+                    deadline=absolute_deadline,
+                    started_at=started_at,
+                    stage="scheduler_dispatch",
                 )
                 self._remaining_for_stage(
                     absolute_deadline,
@@ -1296,10 +1501,14 @@ class SqliteLifecycleAuthority:
                         raise self._deadline_timeout(
                             stage="sqlite_busy",
                             started_at=started_at,
+                            deadline=absolute_deadline,
                         ) from error
                     self._translate_sqlite_error(
                         error,
-                        operation="lifecycle_authority_begin",
+                        operation="lifecycle_authority",
+                        stage="sqlite_busy",
+                        deadline=absolute_deadline,
+                        started_at=started_at,
                     )
                     raise AssertionError("SQLite error translation must raise")
                 self._observe_admission("sqlite.begin.acquired")
