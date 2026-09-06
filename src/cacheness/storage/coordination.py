@@ -239,6 +239,14 @@ class InstanceAdmission:
                         self._active_clear = None
                         self._remove_admitted_reference(ticket.thread_id)
                     self._condition.notify_all()
+            else:
+                # A contender may fail before it becomes the active clear.
+                # Remove only its exact FIFO ticket; close may already have
+                # discarded it, in which case this remains intentionally
+                # idempotent and must not affect the active clear's reference.
+                with self._condition:
+                    self._discard_clear_ticket(ticket)
+                    self._condition.notify_all()
 
     def _wait_for_gate(self, deadline: float, *, operation: str) -> None:
         """Wait for one condition transition without permitting an infinite hang."""
