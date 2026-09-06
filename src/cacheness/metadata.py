@@ -2387,6 +2387,16 @@ class SqliteBackend(MetadataBackend):
             session.commit()
 
     def list_entries(self) -> List[Dict[str, Any]]:
+        """List projections while translating only SQLite DBAPI failures."""
+        try:
+            return self._list_entries()
+        except DBAPIError as error:
+            raise CacheMetadataError(
+                "SQLite metadata listing failed",
+                context={"backend": "sqlite", "operation": "list_entries"},
+            ) from error
+
+    def _list_entries(self) -> List[Dict[str, Any]]:
         """List all cache entries using columns directly - zero JSON parsing overhead for backend data."""
         if self._legacy_layout is not None:
             uri = self._legacy_database_uri()
