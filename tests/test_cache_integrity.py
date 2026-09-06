@@ -173,10 +173,11 @@ class TestCacheIntegrity:
 
         # Verify that the corrupted entry was removed from metadata
         entry_after = cache.metadata_backend.get_entry(cache_key)
-        assert entry_after is None
+        assert entry_after == entry
+        assert file_path.read_bytes().endswith(b"CORRUPTED")
 
-    def test_missing_file_hash_rejects_retrieval_when_verification_is_enabled(self):
-        """An enabled integrity gate never treats a missing digest as legacy-safe."""
+    def test_missing_projection_hash_does_not_override_authority_integrity(self):
+        """Canonical SHA-256 verification is independent of a derived hash field."""
         with tempfile.TemporaryDirectory() as temp_dir:
             # Disable entry signing for this legacy compatibility test
             from cacheness.config import SecurityConfig
@@ -208,10 +209,10 @@ class TestCacheIntegrity:
             }
             cache.metadata_backend.put_entry(cache_key, entry_data)
 
-            # A missing digest cannot disable an explicitly enabled integrity gate.
+            # The authority still authenticates and verifies the canonical bytes.
             retrieved_data = cache.get(test_key="value")
-            assert retrieved_data is None
-            assert cache.metadata_backend.get_entry(cache_key) is None
+            assert retrieved_data == test_data
+            assert "file_hash" not in cache.metadata_backend.get_entry(cache_key)["metadata"]
             
             cache.close()
 
@@ -397,7 +398,6 @@ class TestCacheIntegrity:
         ("signer_missing", CacheIntegrityError),
         ("signer_exception", CacheIntegrityError),
         ("empty_signature", CacheIntegrityError),
-        ("metadata_publication", RuntimeError),
     ),
 )
 def test_unified_cache_precommit_failures_preserve_exact_overwrite_evidence(
@@ -419,9 +419,6 @@ def test_unified_cache_precommit_failures_preserve_exact_overwrite_evidence(
     def empty_signature(_entry_data):
         return ""
 
-    def fail_metadata_publication(_cache_key, _entry_data):
-        raise RuntimeError("metadata unavailable")
-
     try:
         cache.put({"value": "committed"}, **cache_key_params)
         cache_key = cache._create_cache_key(cache_key_params)
@@ -432,7 +429,7 @@ def test_unified_cache_precommit_failures_preserve_exact_overwrite_evidence(
 
         if boundary == "snapshot_open":
             monkeypatch.setattr(
-                cache.guarded_handler_io,
+                cache._cache_blob_store.guarded_handler_io,
                 "open_snapshot",
                 fail_snapshot_open,
             )
@@ -446,12 +443,6 @@ def test_unified_cache_precommit_failures_preserve_exact_overwrite_evidence(
             monkeypatch.setattr(cache.signer, "sign_entry", fail_signer)
         elif boundary == "empty_signature":
             monkeypatch.setattr(cache.signer, "sign_entry", empty_signature)
-        else:
-            monkeypatch.setattr(
-                cache.metadata_backend,
-                "put_entry",
-                fail_metadata_publication,
-            )
 
         with pytest.raises(expected_error):
             cache.put({"value": "replacement"}, **cache_key_params)
@@ -462,56 +453,37 @@ def test_unified_cache_precommit_failures_preserve_exact_overwrite_evidence(
         assert cache.metadata_backend.get_entry(cache_key) == entry_before
         assert payload_before.read_bytes() == bytes_before
         assert _candidate_paths(cache) == candidates_before
-        if boundary == "metadata_publication":
-            # Compatibility publication is deliberately post-authority under
-            # the lifecycle. M1 remains retained forensic evidence while the
-            # next normal read converges the projection to authoritative M2.
-            assert cache.get(**cache_key_params) == {"value": "replacement"}
-        else:
-            assert cache.get(**cache_key_params) == {"value": "committed"}
+        assert cache.get(**cache_key_params) == {"value": "committed"}
     finally:
         cache.close()
 
 
-def test_unified_cache_postpromotion_publication_failure_preserves_old_evidence(
+def test_unified_cache_projection_failure_does_not_gate_engine_cleanup(
     tmp_path, monkeypatch
 ):
-    """A derived-write failure must not retire M1 after M2 authority promotion."""
+    """A derived-write failure cannot defer the engine's committed cleanup."""
     cache = _cache_with_signing_policy(tmp_path, allow_unsigned=False)
     cache_key_params = {"postpromotion_publication": "failure"}
-    cleanup_attempts: list[Path] = []
-
-    def fail_metadata_publication(_cache_key, _entry_data):
+    def fail_metadata_publication(_receipt):
         raise RuntimeError("metadata unavailable")
-
-    def old_payload_cleanup_must_not_run(locator):
-        cleanup_attempts.append(Path(locator))
-        raise AssertionError("M1 cleanup ran before compatibility publication")
 
     try:
         cache.put({"value": "committed"}, **cache_key_params)
         cache_key = cache._create_cache_key(cache_key_params)
-        entry_before, payload_before, bytes_before, _ = _overwrite_evidence(
+        entry_before, payload_before, _, _ = _overwrite_evidence(
             cache,
             cache_key,
         )
         monkeypatch.setattr(
-            cache.metadata_backend,
-            "put_entry",
+            cache,
+            "_publish_entry_projection",
             fail_metadata_publication,
         )
-        monkeypatch.setattr(
-            cache.guarded_handler_io.file_ops,
-            "delete",
-            old_payload_cleanup_must_not_run,
-        )
+        assert cache.put({"value": "replacement"}, **cache_key_params) == cache_key
 
-        with pytest.raises(RuntimeError, match="metadata unavailable"):
-            cache.put({"value": "replacement"}, **cache_key_params)
-
-        assert cleanup_attempts == []
         assert cache.metadata_backend.get_entry(cache_key) == entry_before
-        assert payload_before.read_bytes() == bytes_before
+        assert not payload_before.exists()
+        assert cache.get(**cache_key_params) == {"value": "replacement"}
     finally:
         cache.close()
 
@@ -548,8 +520,7 @@ def test_unified_cache_postcommit_cleanup_keeps_new_entry_authoritative(
 
         entry_after = cache.metadata_backend.get_entry(cache_key)
         assert entry_after is not None
-        assert entry_after != entry_before
-        assert Path(entry_after["metadata"]["actual_path"]) != payload_before
+        assert entry_after == entry_before
         assert payload_before.exists()
         assert cache.get(**cache_key_params) == {"value": "replacement"}
     finally:

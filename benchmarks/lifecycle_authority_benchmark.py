@@ -265,6 +265,7 @@ def _measure_distinct_key_overlap() -> float:
     with tempfile.TemporaryDirectory(prefix="cacheness-lifecycle-overlap-") as temp_dir:
         sequential = BlobStore(Path(temp_dir) / "sequential", backend="json")
         try:
+            sequential.initialize()
             started = time.perf_counter()
             _put_pair(sequential, "sequential")
             sequential_seconds = time.perf_counter() - started
@@ -272,6 +273,7 @@ def _measure_distinct_key_overlap() -> float:
             sequential.close()
 
         concurrent = BlobStore(Path(temp_dir) / "concurrent", backend="json")
+        concurrent.initialize()
         barrier = threading.Barrier(2)
         errors: list[BaseException] = []
 

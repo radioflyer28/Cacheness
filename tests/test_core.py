@@ -383,6 +383,7 @@ class TestCacheness:
 
     def test_concurrent_access(self, cache):
         """Test thread safety of cache operations."""
+        cache.initialize()
         import threading
         import time
 
@@ -602,7 +603,6 @@ class TestMemoryCacheConfig:
     def test_memory_cache_functional_test(self):
         """Test that memory cache layer actually works."""
         import tempfile
-        import time
         
         with tempfile.TemporaryDirectory() as temp_dir:
             # Create cache with memory cache layer enabled

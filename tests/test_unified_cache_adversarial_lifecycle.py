@@ -17,7 +17,7 @@ from cacheness.custom_metadata import (
 from cacheness.error_handling import (
     CacheBlobLifecycleConflictError,
     CacheBlobStoreClosedError,
-    CacheUnsafePathError,
+    CacheMetadataError,
 )
 from cacheness.metadata import Base, CacheEntry
 from cacheness.storage import BlobStore
@@ -363,7 +363,7 @@ def test_two_pending_candidates_preserve_m1_links_until_one_promotes(
         first.close()
 
 
-def test_hostile_locator_rejects_same_key_put_without_mutating_m1(
+def test_hostile_projection_cannot_redirect_put_or_custom_metadata(
     tmp_path: Path,
 ) -> None:
     """A persisted outside-root projection is not a replacement CAS token."""
@@ -387,14 +387,16 @@ def test_hostile_locator_rejects_same_key_put_without_mutating_m1(
             row.actual_path = str(outside)
             session.commit()
 
-        with pytest.raises(CacheUnsafePathError):
+        with pytest.raises(CacheMetadataError) as failure:
             cache.put(
                 {"generation": "m2"},
                 custom_metadata=Plan15LinkedMetadata(label="m2"),
                 race_key="hostile-put",
             )
 
-        assert cache._cache_blob_store.lifecycle_authority.read_entry(key) == authority_before
+        assert failure.value.context["committed"] is True
+        assert cache._cache_blob_store.lifecycle_authority.read_entry(key) != authority_before
+        assert cache.get(race_key="hostile-put") == {"generation": "m2"}
         unchanged = cache.metadata_backend.get_entry(key)
         assert unchanged is not None
         assert unchanged["metadata"]["actual_path"] == str(outside)
@@ -501,7 +503,7 @@ def test_empty_authority_invalidate_preserves_a_peer_first_put_after_durable_int
         writer.start()
         assert intent_prepared.wait(timeout=5)
         second.invalidate(cache_key=key)
-        assert delete_calls == [key]
+        assert delete_calls == []
 
         release.set()
         _join(writer)
@@ -534,10 +536,10 @@ def test_explicit_legacy_empty_clear_uses_fallback_only_when_recognized(
         cache.close()
 
 
-def test_nested_hostile_locator_rejects_same_key_put_without_authority_mutation(
+def test_nested_hostile_projection_cannot_redirect_canonical_overwrite(
     tmp_path: Path,
 ) -> None:
-    """A JSON projection's nested locator is preflighted before an overwrite."""
+    """A derived JSON locator cannot become authority or redirect cleanup."""
     cache = cacheness(
         CacheConfig(
             cache_dir=str(tmp_path / "nested-hostile-put-locator"),
@@ -555,23 +557,11 @@ def test_nested_hostile_locator_rejects_same_key_put_without_authority_mutation(
         assert projection is not None
         projection["metadata"]["actual_path"] = str(outside)
         cache.metadata_backend.put_entry(key, projection)
-        files_before = {
-            path.relative_to(cache.cache_dir): path.read_bytes()
-            for path in cache.cache_dir.rglob("*")
-            if path.is_file()
-        }
+        assert cache.put({"generation": "m2"}, race_key="nested-hostile-put") == key
 
-        with pytest.raises(CacheUnsafePathError):
-            cache.put({"generation": "m2"}, race_key="nested-hostile-put")
-
-        assert cache._cache_blob_store.lifecycle_authority.read_entry(key) == authority_before
+        assert cache._cache_blob_store.lifecycle_authority.read_entry(key) != authority_before
         assert cache.metadata_backend.get_entry(key) == projection
-        files_after = {
-            path.relative_to(cache.cache_dir): path.read_bytes()
-            for path in cache.cache_dir.rglob("*")
-            if path.is_file()
-        }
-        assert files_after == files_before
+        assert cache.get(race_key="nested-hostile-put") == {"generation": "m2"}
         assert outside.read_bytes() == b"outside"
     finally:
         cache.close()

@@ -12,7 +12,6 @@ import math
 import sys
 import pytest
 from pathlib import Path
-from datetime import datetime
 
 from cacheness.core import UnifiedCache
 from cacheness.config import CacheConfig
@@ -616,6 +615,7 @@ class TestQueryMetaIntegration:
 
     def test_query_meta_concurrent_access(self, temp_cache):
         """Test query_meta with concurrent cache operations."""
+        temp_cache.initialize()
         import threading
         import time
         

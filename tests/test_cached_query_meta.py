@@ -424,7 +424,7 @@ def test_public_query_meta_rejects_values_larger_than_manifest_byte_bound(tmp_pa
 
 
 def test_stale_corrupt_projection_does_not_mask_an_exact_live_query(tmp_path) -> None:
-    """Permissive observation hides stale corrupt JSON until authority selects rows."""
+    """Exact SQL filtering avoids stale rows; directly observing them fails closed."""
     cache = UnifiedCache(
         CacheConfig(
             cache_dir=str(tmp_path / "stale-corrupt"),
@@ -456,10 +456,13 @@ def test_stale_corrupt_projection_does_not_mask_an_exact_live_query(tmp_path) ->
         assert [entry["cache_key"] for entry in cache.query_meta(experiment="live")] == [
             live_key
         ]
-        stale = next(
-            entry for entry in backend.list_entries() if entry["cache_key"] == "stale-key"
-        )
-        assert "cache_key_params" not in stale["metadata"]
+        with pytest.raises(CacheIntegrityError) as failure:
+            backend.list_entries()
+        assert failure.value.context["operation"] == "list_entries"
+        with sqlite3.connect(backend.db_file) as connection:
+            assert connection.execute(
+                "SELECT hex(cache_key_params) FROM cache_entries WHERE cache_key = 'stale-key'"
+            ).fetchone() == ("FF",)
         assert backend.engine.pool.checkedout() == 0
     finally:
         cache.close()

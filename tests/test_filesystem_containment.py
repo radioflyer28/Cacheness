@@ -1068,7 +1068,9 @@ def test_blob_store_clear_records_tombstone_before_current_payload_cleanup_fails
         reopened.close()
 
 
-def test_persisted_locator_raises_before_deserialization(tmp_path, monkeypatch):
+def test_persisted_locator_raises_before_deserialization(
+    tmp_path, monkeypatch, rewrite_authority_manifest
+):
     """Unsafe persisted locators remain typed errors, not reads or cache misses."""
     outside = tmp_path / "outside"
     outside.write_text("outside", encoding="utf-8")
@@ -1127,7 +1129,9 @@ def test_persisted_locator_raises_before_deserialization(tmp_path, monkeypatch):
     key = cache.put("inside", identity="safe")
     entry = cache.metadata_backend.get_entry(key)
     assert entry is not None
-    entry["metadata"]["actual_path"] = str(outside)
+    rewrite_authority_manifest(
+        cache._cache_blob_store, key, lambda fields: fields.update(locator=str(outside))
+    )
 
     with pytest.raises(CacheUnsafePathError):
         cache.get(cache_key=key)
@@ -1520,12 +1524,13 @@ def _instrumented_cache(tmp_path, *, delete_invalid_signatures: bool = True):
     return cache, handler
 
 
-def test_high_level_handler_io_verifies_private_snapshot_before_handler(tmp_path):
+def test_high_level_handler_io_verifies_private_snapshot_before_handler(tmp_path, monkeypatch):
     """Digest and signature verification precede deserialization on one snapshot."""
     cache, handler = _instrumented_cache(tmp_path)
     key = cache.put("payload", identity="ordered")
     events: list[str] = []
-    original_hash = cache._calculate_file_hash
+    import cacheness.storage.lifecycle as lifecycle_module
+    original_hash = lifecycle_module.sha256_and_size
     original_verify = cache.signer.verify_entry
 
     def record_hash(path: Path):
@@ -1537,7 +1542,7 @@ def test_high_level_handler_io_verifies_private_snapshot_before_handler(tmp_path
         events.append("signature")
         return original_verify(entry_data, signature)
 
-    cache._calculate_file_hash = record_hash
+    monkeypatch.setattr(lifecycle_module, "sha256_and_size", record_hash)
     cache.signer.verify_entry = record_verify
 
     assert cache.get(cache_key=key) == "payload"
@@ -1548,7 +1553,7 @@ def test_high_level_handler_io_verifies_private_snapshot_before_handler(tmp_path
 
 @pytest.mark.parametrize("rejection", ["hash", "signature", "legacy", "unsigned"])
 def test_high_level_handler_io_rejects_untrusted_entries_before_deserialization(
-    tmp_path, rejection
+    tmp_path, rejection, rewrite_authority_manifest
 ):
     """Bad integrity/current-or-legacy signatures never reach a handler."""
     cache, handler = _instrumented_cache(tmp_path, delete_invalid_signatures=False)
@@ -1568,12 +1573,27 @@ def test_high_level_handler_io_rejects_untrusted_entries_before_deserialization(
         metadata.pop("entry_signature")
         cache.config.security.allow_unsigned_entries = False
 
+    def change(fields):
+        user = fields["user_metadata"]
+        if rejection == "hash":
+            user["file_hash"] = "not-the-payload-hash"
+        elif rejection == "signature":
+            user["entry_signature"] = "not-a-valid-signature"
+        else:
+            user.pop("entry_signature")
+            if rejection == "legacy":
+                user["legacy_entry_signature"] = "not-a-valid-legacy-signature"
+
+    rewrite_authority_manifest(cache._cache_blob_store, key, change)
+
     assert cache.get(cache_key=key) is None
     assert handler.events == []
     assert cache.metadata_backend.get_entry(key) is entry
 
 
-def test_high_level_locator_preflight_blocks_multi_entry_mutation(tmp_path, monkeypatch):
+def test_high_level_locator_preflight_blocks_multi_entry_mutation(
+    tmp_path, monkeypatch, rewrite_authority_manifest
+):
     """Unsafe signed authority locators fail closed before multi-entry mutation."""
     outside = tmp_path / "outside"
     outside.write_text("outside", encoding="utf-8")
@@ -1639,7 +1659,10 @@ def test_high_level_locator_preflight_blocks_multi_entry_mutation(tmp_path, monk
     unsafe_key = cache.put("unsafe", identity="unsafe")
     unsafe_entry = cache.metadata_backend.get_entry(unsafe_key)
     assert unsafe_entry is not None
-    unsafe_entry["metadata"]["actual_path"] = str(outside)
+    rewrite_authority_manifest(
+        cache._cache_blob_store, unsafe_key,
+        lambda fields: fields.update(locator=str(outside)),
+    )
 
     stats_before = cache.metadata_backend.get_stats()
     with pytest.raises(CacheUnsafePathError):

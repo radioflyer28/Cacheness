@@ -24,6 +24,8 @@ from typing import Optional, Dict, Any, List, Callable, Tuple
 from .config import CacheConfig, _DEFAULT_TTL, create_cache_config
 from .error_handling import (
     CacheBlobBackendError,
+    CacheBlobIntegrityError,
+    CacheBlobStoreClosedError,
     CacheBlobLifecycleConflictError,
     CacheIntegrityError,
     CacheLegacyFormatError,
@@ -56,6 +58,8 @@ def _clear_coordinated(method: Callable) -> Callable:
     def wrapped(self, *args, **kwargs):
         # BlobStore owns key and store admission. Holding the historical facade
         # lock here would serialize payload I/O and distinct-key authority work.
+        if getattr(self, "_closed", False):
+            raise CacheBlobStoreClosedError("Cache is closed")
         return method(self, *args, **kwargs)
 
     return wrapped
@@ -66,6 +70,8 @@ def _clear_read_coordinated(method: Callable) -> Callable:
 
     @wraps(method)
     def wrapped(self, *args, **kwargs):
+        if getattr(self, "_closed", False):
+            raise CacheBlobStoreClosedError("Cache is closed")
         return method(self, *args, **kwargs)
 
     return wrapped
@@ -128,6 +134,7 @@ class UnifiedCache:
         """
         # Use provided config or create default
         self.config = config or CacheConfig()
+        self._closed = False
 
         self.cache_dir = Path(self.config.storage.cache_dir)
         # Do not materialize the public cache root before the lifecycle
@@ -377,8 +384,7 @@ class UnifiedCache:
     ):
         """Store custom metadata using link table architecture."""
         if not self._supports_custom_metadata():
-            logger.warning("Custom metadata not supported - requires SQLite or PostgreSQL backend")
-            return
+            raise CacheMetadataError("Requested custom metadata is unsupported")
 
         try:
             metadata_objects = self._normalize_custom_metadata(custom_metadata)
@@ -388,10 +394,7 @@ class UnifiedCache:
                 self.metadata_backend, "store_custom_metadata_if_current", None
             )
             if expected_locator is None or not callable(conditional_store):
-                logger.warning(
-                    "Custom metadata storage requires an exact-current backend protocol"
-                )
-                return
+                raise CacheMetadataError("Custom metadata requires an exact-current backend")
             conditional_store(cache_key, expected_locator, metadata_objects)
             logger.debug("Stored custom metadata for cache key %s", cache_key)
             return
@@ -399,6 +402,7 @@ class UnifiedCache:
             raise
         except Exception as e:
             logger.error(f"Failed to store custom metadata: {e}")
+            raise
 
     def _get_custom_metadata(self, cache_key: str) -> Dict[str, Any]:
         """Retrieve custom metadata for a cache key."""
@@ -826,7 +830,7 @@ class UnifiedCache:
     ) -> bool:
         """Check if cache entry is expired."""
         if entry is None:
-            entry = self.metadata_backend.get_entry(cache_key)
+            _, entry = self._authority_snapshot_entry(cache_key)
         if not entry:
             return True
 
@@ -934,9 +938,6 @@ class UnifiedCache:
         """Remove expired entries through their observed authority generation."""
         authority_keys = self._cache_blob_store.list()
         if self._recognized_legacy_backend() is None:
-            self._preflight_entries(
-                self.metadata_backend.list_entries(), operation="cleanup_expired"
-            )
             removed_count = 0
             for cache_key in authority_keys:
                 snapshot, entry = self._authority_snapshot_entry(cache_key)
@@ -969,135 +970,33 @@ class UnifiedCache:
         if removed_count > 0:
             logger.info(f"Cleaned up {removed_count} expired cache entries")
 
-    def _pending_authority_projection_locators(self) -> dict[str, frozenset[str]]:
-        """Return exact published candidate locators that are not yet committed.
 
-        Prepared mutations are lifecycle evidence rather than normal-read
-        authority. Candidates no longer publish projections; the locator set
-        remains a defensive classification seam for historical residue during
-        authority-derived repair.
-        """
-        locators: dict[str, set[str]] = {}
-        for prepared in self._cache_blob_store.lifecycle_authority.pending_mutations():
-            locators.setdefault(prepared.spec.key, set()).add(
-                str(self._authority_payload_locator(prepared.spec.candidate_locator))
-            )
-        return {
-            cache_key: frozenset(candidate_locators)
-            for cache_key, candidate_locators in locators.items()
-        }
-
-    def _is_pending_authority_projection(
-        self,
-        cache_key: str,
-        entry: Any,
-        pending_locators: dict[str, frozenset[str]] | None = None,
-    ) -> bool:
-        """Return whether a projection row names a currently prepared candidate."""
-        locator = self._projection_locator_from_entry(entry)
-        if locator is None:
-            return False
-        if pending_locators is None:
-            pending_locators = self._pending_authority_projection_locators()
-        return locator in pending_locators.get(
-            cache_key, frozenset()
+    def _cache_entry(self, info) -> Dict[str, Any]:
+        """Render authenticated engine metadata for the existing cache policy."""
+        entry = self._plain_projection_value(info.metadata)
+        metadata = entry["metadata"]
+        metadata["actual_path"] = str(self._authority_payload_locator(info.locator))
+        metadata["authority_generation"] = info.generation
+        entry.update(
+            prefix=metadata.get("prefix", ""),
+            description=metadata.get("description", ""),
+            created_at=self._projection_created_at(entry["created_at"]),
+            _cache_key_params_serialized=True,
         )
+        return entry
 
     def _authority_snapshot_entry(self, cache_key: str):
-        """Return a matching authority snapshot and compatibility projection.
-
-        The metadata backend is deliberately a projection for authority-backed
-        cache entries.  Refresh it before applying cache policy so a stale
-        projection can neither select nor retire a newer payload generation.
-        """
+        """Observe canonical metadata without reading or repairing a projection."""
         if self._recognized_legacy_backend() is not None:
-            # The documented immutable legacy adapters predate LifecycleAuthority
-            # and are intentionally read-only compatibility evidence.  They
-            # cannot be conditionally repaired without mutating their source.
             return None, self.metadata_backend.get_entry(cache_key)
-        for attempt in range(2):
-            entry = self.metadata_backend.get_entry(cache_key)
-            snapshot, manifest = self._authority_snapshot_manifest(cache_key)
-            projection_differs_from_committed = (
-                entry is not None
-                and (
-                    snapshot is None
-                    or manifest is None
-                    or getattr(manifest, "state", None) != "committed"
-                    or not self._projection_matches_authority_snapshot(entry, snapshot)
-                )
-            )
-            if (
-                projection_differs_from_committed
-                and self._is_pending_authority_projection(cache_key, entry)
-            ):
-                # A candidate may be public in the compatibility backend while
-                # its lifecycle mutation is still prepared. It is never a read
-                # authority. Preserve a previous committed generation for a
-                # direct read without rewriting the candidate underneath its
-                # promoter; without an old generation this remains a miss.
-                if (
-                    snapshot is not None
-                    and manifest is not None
-                    and getattr(manifest, "state", None) == "committed"
-                ):
-                    return snapshot, self._projection_entry_from_manifest(
-                        manifest, snapshot
-                    )
-                return None, None
-            if snapshot is None and entry is not None and not self._is_authority_projection(
-                entry
-            ):
-                # Pre-authority compatibility records stay readable through the
-                # established migration path.  Only a projection inside the
-                # BlobStore-managed root can be an in-flight candidate that
-                # must be hidden while authority has not committed it.
-                return None, entry
-            if (
-                snapshot is None
-                or manifest is None
-                or getattr(manifest, "state", None) != "committed"
-            ):
-                self._sync_authority_projection(
-                    cache_key,
-                    observed_entry=entry,
-                    snapshot=snapshot,
-                    manifest=manifest,
-                )
-                latest = self._cache_blob_store.lifecycle_authority.read_entry(cache_key)
-                if latest == snapshot:
-                    return None, None
-            else:
-                if entry is not None:
-                    self._entry_locator(
-                        entry,
-                        cache_key,
-                        operation="authority_projection",
-                    )
-                if not self._projection_matches_authority_snapshot(entry, snapshot):
-                    self._sync_authority_projection(
-                        cache_key,
-                        observed_entry=entry,
-                        snapshot=snapshot,
-                        manifest=manifest,
-                    )
-                projection = self.metadata_backend.get_entry(cache_key)
-                latest = self._cache_blob_store.lifecycle_authority.read_entry(cache_key)
-                if (
-                    latest == snapshot
-                    and self._projection_matches_authority_snapshot(projection, snapshot)
-                ):
-                    return snapshot, projection
-            if attempt == 1:
-                raise CacheBlobLifecycleConflictError(
-                    "Authority and compatibility projection did not stabilize",
-                    context={
-                        "operation": "authority_projection",
-                        "key": cache_key,
-                        "attempt": attempt + 1,
-                    },
-                )
-        raise AssertionError("bounded authority projection loop exhausted")
+        info = self._cache_blob_store.get_entry_info(cache_key)
+        if info is not None:
+            return info, self._cache_entry(info)
+        # Only the pre-authority compatibility path may read an external locator.
+        entry = self.metadata_backend.get_entry(cache_key)
+        if entry is not None and not self._is_authority_projection(entry):
+            return None, entry
+        return None, None
 
     def _is_authority_projection(self, entry: Any) -> bool:
         """Return whether a row names a payload managed by BlobStore authority."""
@@ -1112,25 +1011,13 @@ class UnifiedCache:
         return True
 
     def _live_authority_projection_pairs(self) -> tuple[tuple[str, str], ...]:
-        """Observe exact committed projection tokens without repairing them."""
-        live_pairs: list[tuple[str, str]] = []
-        projections = {
-            entry["cache_key"]: entry
-            for entry in self.metadata_backend.list_entries()
-        }
-        for authority_entry in self._cache_blob_store.lifecycle_authority.list_entries():
-            observed_entry = projections.get(authority_entry.key)
-            if self._projection_matches_authority_snapshot(
-                observed_entry, authority_entry
-            ):
-                manifest = self._cache_blob_store.lifecycle._entry_manifest(
-                    authority_entry, allow_tombstone=True
-                )
-                if manifest.state == "committed":
-                    locator = self._projection_locator_from_entry(observed_entry)
-                    if locator is not None:
-                        live_pairs.append((authority_entry.key, locator))
-        return tuple(live_pairs)
+        """Give query adapters exact authority tokens, not decoded stale rows."""
+        pairs = []
+        for key in self._cache_blob_store.list():
+            info = self._cache_blob_store.get_entry_info(key)
+            if info is not None:
+                pairs.append((key, str(self._authority_payload_locator(info.locator))))
+        return tuple(pairs)
 
     def _live_authority_projection_keys(self) -> list[str]:
         """Retain key-only observations for existing custom metadata queries."""
@@ -1245,44 +1132,6 @@ class UnifiedCache:
         parsed = datetime.fromisoformat(created_at)
         return parsed.replace(tzinfo=None).isoformat()
 
-    def _projection_matches_authority_snapshot(self, entry: Any, snapshot: Any) -> bool:
-        """Return whether a projection names the exact observed generation.
-
-        Older metadata adapters do not retain arbitrary projection fields such
-        as ``authority_generation``. The managed payload locator is therefore
-        also a durable generation identity. Requiring it prevents a projection
-        refresh from overwriting an intentional integrity-test edit merely
-        because that adapter omitted the auxiliary generation field.
-        """
-        if not isinstance(entry, dict):
-            return False
-        metadata = entry.get("metadata")
-        if not isinstance(metadata, dict):
-            return False
-        actual_path = metadata.get("actual_path")
-        if not isinstance(actual_path, str):
-            return False
-        expected_path = self._authority_payload_locator(snapshot.locator)
-        if Path(actual_path) != expected_path:
-            return False
-        recorded_generation = metadata.get("authority_generation")
-        return recorded_generation is None or recorded_generation == snapshot.generation
-
-    def _authority_snapshot_manifest(self, cache_key: str):
-        """Read and authenticate one coherent authority observation.
-
-        Projection contents must come from the same ``EntrySnapshot``. Mixing
-        a public metadata read with a later authority read can stamp an old
-        locator with a newer generation during an overwrite race.
-        """
-        snapshot = self._cache_blob_store.lifecycle_authority.read_entry(cache_key)
-        if snapshot is None:
-            return None, None
-        manifest = self._cache_blob_store.lifecycle._entry_manifest(
-            snapshot, allow_tombstone=True
-        )
-        return snapshot, manifest
-
     def _prepare_authority_projection(self, manifest, _put_result):
         """Build signing metadata without publishing compatibility state.
 
@@ -1366,58 +1215,25 @@ class UnifiedCache:
             },
         )
 
-    def _publish_promoted_authority_projection(self, put_result) -> str:
-        """Replace M1's projection only when this exact M2 remains authority.
-
-        The pre-operation locator belongs to the caller and is never refreshed
-        from an observed projection.  In particular, a racing candidate cannot
-        lend its token to a losing operation.  SQL backends retire M1 links in
-        the same successful exact-token transaction as this replacement.
-        """
-        promoted = put_result.promoted
-        if promoted is None:
-            raise CacheBlobLifecycleConflictError(
-                "Authority put did not return a promoted generation",
-                context={"operation": "projection_publish", "key": put_result.key},
-            )
-        snapshot, manifest = self._authority_snapshot_manifest(put_result.key)
-        if (
-            snapshot != promoted
-            or manifest is None
-            or manifest.state != "committed"
-            or manifest.locator != promoted.locator
-        ):
-            raise CacheBlobLifecycleConflictError(
-                "Authority advanced before compatibility projection publication",
-                context={"operation": "projection_publish", "key": put_result.key},
-            )
+    def _publish_entry_projection(self, receipt) -> str:
+        """Best-effort derived publication, using the committed receipt only."""
+        # The expected prior token comes from promotion, never from a later
+        # projection read that could lend a newer writer's identity to us.
+        expected_locator = (
+            None if receipt.previous_locator is None
+            else str(self._authority_payload_locator(receipt.previous_locator))
+        )
+        # Validate observed structured evidence, but never use this later read
+        # as the CAS token. Corrupt rows remain untouched for diagnosis.
+        self.metadata_backend.get_entry(receipt.key)
         outcome = self._conditional_projection_mutation(
-            put_result.key,
-            expected_locator=put_result.expected_projection_locator,
-            replacement=self._projection_entry_from_manifest(manifest, snapshot),
+            receipt.key,
+            expected_locator=expected_locator,
+            replacement=self._cache_entry(receipt),
         )
         if outcome.status == "mismatch":
-            # A concurrent reader can repair the exact promoted generation
-            # before its writer publishes the compatibility row. Revalidate
-            # both sides before treating that as safe convergence: an M3
-            # promotion must still reject this M2 publisher rather than lend
-            # it a newer candidate token.
-            current_snapshot, _current_manifest = self._authority_snapshot_manifest(
-                put_result.key
-            )
-            current_projection = self.metadata_backend.get_entry(put_result.key)
-            if (
-                current_snapshot == promoted
-                and self._projection_matches_authority_snapshot(
-                    current_projection, current_snapshot
-                )
-            ):
-                return str(self._authority_payload_locator(promoted.locator))
-            raise CacheBlobLifecycleConflictError(
-                "Compatibility projection changed before promoted publication",
-                context={"operation": "projection_publish", "key": put_result.key},
-            )
-        return str(self._authority_payload_locator(promoted.locator))
+            raise CacheBlobLifecycleConflictError("Derived projection changed")
+        return str(self._authority_payload_locator(receipt.locator))
 
     @staticmethod
     def _projection_locator_from_entry(entry: Any) -> Optional[str]:
@@ -1455,147 +1271,67 @@ class UnifiedCache:
             replacement=replacement,
         )
 
-    def _projection_entry_from_manifest(self, manifest, snapshot) -> Dict[str, Any]:
-        """Render one committed authority observation as compatibility metadata."""
-        metadata = self._plain_projection_value(
-            {**dict(manifest.handler_metadata), **dict(manifest.user_metadata)}
-        )
-        metadata["actual_path"] = str(self._authority_payload_locator(manifest.locator))
-        metadata["authority_generation"] = snapshot.generation
-        return {
-            "data_type": manifest.handler_type,
-            "prefix": metadata.get("prefix", ""),
-            "description": metadata.get("description", ""),
-            "file_size": manifest.byte_size,
-            "created_at": self._projection_created_at(manifest.created_at),
-            "metadata": metadata,
-            "_cache_key_params_serialized": True,
-        }
 
-    def _sync_authority_projection(
-        self,
-        cache_key: str,
-        *,
-        observed_entry: Any = None,
-        snapshot: Any = None,
-        manifest: Any = None,
-    ) -> ProjectionMutationResult:
-        """Repair a compatibility projection from a committed BlobStore entry."""
-        if observed_entry is None:
-            observed_entry = self.metadata_backend.get_entry(cache_key)
-        if snapshot is None and manifest is None:
-            snapshot, manifest = self._authority_snapshot_manifest(cache_key)
-        expected_locator = self._projection_locator_from_entry(observed_entry)
-        if (
-            snapshot is None
-            or manifest is None
-            or getattr(manifest, "state", None) != "committed"
-        ):
-            return self._conditional_projection_mutation(
-                cache_key, expected_locator=expected_locator, replacement=None
-            )
-        return self._conditional_projection_mutation(
-            cache_key,
-            expected_locator=expected_locator,
-            replacement=self._projection_entry_from_manifest(manifest, snapshot),
-        )
-
-    def _repair_projection_after_failed_put(self, cache_key: str) -> None:
-        """Restore only a projection that no longer names committed authority.
-
-        A failure before the projection hook leaves the old projection intact.
-        Rewriting it would change public access timestamps despite no committed
-        mutation. A failure after the hook instead leaves a candidate locator
-        visible, and must be repaired from the authority immediately.
-        """
-        entry = self.metadata_backend.get_entry(cache_key)
-        snapshot, manifest = self._authority_snapshot_manifest(cache_key)
-        if snapshot is None or manifest is None or manifest.state != "committed":
-            self._sync_authority_projection(
-                cache_key, observed_entry=entry, snapshot=snapshot, manifest=manifest
-            )
-            return
-        if not self._projection_matches_authority_snapshot(entry, snapshot):
-            self._sync_authority_projection(
-                cache_key, observed_entry=entry, snapshot=snapshot, manifest=manifest
-            )
+    def initialize(self) -> None:
+        """Finish storage startup before sharing this cache with workers."""
+        if self._closed:
+            raise CacheBlobStoreClosedError("Cache is closed")
+        self._cache_blob_store.initialize()
 
     @_clear_coordinated
     def put(
-        self,
-        data: Any,
-        prefix: str = "",
-        description: str = "",
-        custom_metadata=None,
-        **kwargs,
+        self, data: Any, prefix: str = "", description: str = "",
+        custom_metadata=None, **kwargs,
     ):
-        """Store data through BlobStore and retain metadata as a projection."""
+        """Commit through BlobStore; derived-view failures never revoke it."""
         cache_key = self._create_cache_key(kwargs)
-        # Public callers may replace the compatibility handler registry after
-        # construction.  Keep the authority path on that same registry rather
-        # than selecting a second serializer policy.
         self._cache_blob_store.handlers = self.handlers
-        pre_operation_projection = self.metadata_backend.get_entry(cache_key)
-        if pre_operation_projection is not None:
-            self._entry_locator(
-                pre_operation_projection,
-                cache_key,
-                operation="put",
-                prefix=prefix,
-            )
-        expected_projection_locator = self._projection_locator_from_entry(
-            pre_operation_projection
+        receipt = self._cache_blob_store.put_entry(
+            data, key=cache_key,
+            metadata={
+                "prefix": prefix, "description": description,
+                **({"cache_key_params": self._canonical_cache_key_params(kwargs)}
+                   if self.config.metadata.store_cache_key_params else {}),
+            },
         )
-        # Hold one facade-level admission reference through every public
-        # consequence of the authority mutation.  ``_put_with_result`` sees
-        # this existing reference and deliberately does not double-count it.
-        # This prevents close from releasing authority resources between the
-        # immutable promotion and the compatibility policy work below.
-        with self._cache_blob_store._instance_admission.operation():
+        projection_error = None
+        try:
+            if self._closed:
+                raise CacheBlobStoreClosedError("Cache closed after storage commit")
+            promoted_locator = self._publish_entry_projection(receipt)
+        except Exception as error:
+            # Optional external adapters may raise arbitrary errors. This is
+            # explicitly post-commit diagnostic handling, not storage rollback.
+            projection_error = error
+            logger.warning(
+                "Blob committed; optional cache projection was not published: %s",
+                error, extra={"committed": True, "key": cache_key,
+                              "generation": receipt.generation},
+            )
+        if custom_metadata:
             try:
-                put_result = self._cache_blob_store._put_with_result(
-                    data,
-                    key=cache_key,
-                    metadata={
-                        "prefix": prefix,
-                        "description": description,
-                        **(
-                            {
-                                "cache_key_params": self._canonical_cache_key_params(
-                                    kwargs
-                                )
-                            }
-                            if self.config.metadata.store_cache_key_params
-                            else {}
-                        ),
-                    },
-                    projection_context=expected_projection_locator,
-                )
-                promoted_locator = self._publish_promoted_authority_projection(
-                    put_result
-                )
-                self._cache_blob_store._settle_put_cleanup(put_result)
-            except BaseException:
-                # Pre-promotion failures leave M1 untouched. A failure after
-                # promotion may leave a derived row stale, so reconciliation is
-                # authority-derived and never reconstructs/destructs a candidate.
-                try:
-                    self._repair_projection_after_failed_put(cache_key)
-                except Exception:
-                    logger.exception(
-                        "Unable to repair compatibility projection after failed put: %s",
-                        cache_key,
-                    )
-                raise
-            self.guarded_handler_io = self._cache_blob_store.guarded_handler_io
-            if custom_metadata and self._supports_custom_metadata():
+                if projection_error is not None:
+                    raise projection_error
+                if self._closed:
+                    raise CacheBlobStoreClosedError("Cache closed after storage commit")
                 self._store_custom_metadata(
-                    cache_key,
-                    custom_metadata,
-                    expected_locator=promoted_locator,
+                    cache_key, custom_metadata, expected_locator=promoted_locator,
                 )
-            self._enforce_size_limit()
-            return cache_key
+            except Exception as error:
+                raise CacheMetadataError(
+                    "Blob committed but requested custom metadata did not commit",
+                    context={"committed": True, "key": cache_key,
+                             "generation": receipt.generation,
+                             "operation": "custom_metadata"},
+                ) from error
+        # Cache policy follows storage. Failure cannot turn a commit into rollback.
+        if not self._closed:
+            try:
+                self._enforce_size_limit()
+            except Exception as error:
+                logger.warning("Blob committed; size policy remains pending: %s", error,
+                               extra={"committed": True, "key": cache_key})
+        return cache_key
 
     def _put_legacy(
         self,
@@ -1824,8 +1560,10 @@ class UnifiedCache:
         metadata: Dict[str, Any],
     ) -> bool:
         """Verify current/legacy signatures before handler deserialization."""
-        if not (self.signer and self.config.security.enable_entry_signing):
+        if not self.config.security.enable_entry_signing:
             return True
+        if self.signer is None:
+            return self.config.security.allow_unsigned_entries
 
         if (
             metadata.get("legacy_entry_signature") is not None
@@ -1853,7 +1591,7 @@ class UnifiedCache:
         return self.config.security.allow_unsigned_entries
 
     def _retire_exact_authority_snapshot(self, cache_key: str, snapshot: Any) -> bool:
-        """Delete only a cache generation still equal to this read observation."""
+        """Retire only the authenticated generation selected by cache policy."""
         if snapshot is None:
             if self._recognized_legacy_backend() is not None:
                 entry = self.metadata_backend.get_entry(cache_key)
@@ -1862,29 +1600,23 @@ class UnifiedCache:
                 self._entry_locator(entry, cache_key, operation="retire_legacy")
                 self.metadata_backend.remove_entry(cache_key)
                 return True
-            expected = self._cache_blob_store.lifecycle_authority.read_expectation(
-                cache_key
-            )
-            try:
-                deleted = self._cache_blob_store.delete(cache_key, expected=expected)
-            except CacheBlobLifecycleConflictError:
-                logger.info("Preserved replacement generation during stale cleanup: %s", cache_key)
-                self._sync_authority_projection(cache_key)
-                return False
-            entry = self.metadata_backend.get_entry(cache_key)
-            if entry is not None:
-                self._entry_locator(entry, cache_key, operation="retire_authority")
-            self._sync_authority_projection(cache_key, observed_entry=entry)
-            return deleted
+            # Absence is already the desired state, not authority to delete a
+            # generation that appeared after this caller observed absence.
+            return False
         try:
-            deleted = self._cache_blob_store.delete(
-                cache_key, expected=snapshot.expectation
-            )
+            deleted = self._cache_blob_store.delete(cache_key, expected=snapshot.expectation)
         except CacheBlobLifecycleConflictError:
             logger.info("Preserved replacement generation during stale cleanup: %s", cache_key)
-            self._sync_authority_projection(cache_key)
             return False
-        self._sync_authority_projection(cache_key)
+        try:
+            # Retire only this generation's derived row; never repair from a
+            # second authority read or borrow a replacement's locator.
+            self._conditional_projection_mutation(
+                cache_key, expected_locator=str(self._authority_payload_locator(snapshot.locator)),
+                replacement=None,
+            )
+        except Exception as error:
+            logger.warning("Canonical deletion completed; derived cleanup pending: %s", error)
         return deleted
 
     def _reject_untrusted_entry(
@@ -1898,6 +1630,51 @@ class UnifiedCache:
 
     @_clear_read_coordinated
     def get(
+        self, cache_key: Optional[str] = None, ttl_hours: Optional[int] = None,
+        prefix: str = "", _legacy_decorator_v0313: bool = False, **kwargs,
+    ) -> Optional[Any]:
+        """Read one verified BlobStore snapshot; keep cache policy above it."""
+        if cache_key is None:
+            cache_key = self._create_cache_key(kwargs)
+        if self._recognized_legacy_backend() is not None or _legacy_decorator_v0313:
+            return self._get_legacy(cache_key, ttl_hours, prefix, _legacy_decorator_v0313)
+        self._cache_blob_store.handlers = self.handlers
+        try:
+            with self._cache_blob_store.open_entry(cache_key) as snapshot:
+                if snapshot is None:
+                    return self._get_legacy(cache_key, ttl_hours, prefix)
+                entry = self._cache_entry(snapshot.info)
+                ttl = _DEFAULT_TTL if ttl_hours is None else ttl_hours
+                if self._is_expired(cache_key, ttl, entry):
+                    self._retire_exact_authority_snapshot(cache_key, snapshot.info)
+                    self._record_cache_miss()
+                    return None
+                if not self._is_signature_authorized(cache_key, entry, entry["metadata"]):
+                    # Invalid authoritative signing evidence is preserved; it
+                    # cannot be repaired or deleted using a compatibility row.
+                    self._record_cache_miss()
+                    return None
+                data = snapshot.read()
+        except CacheUnsafePathError:
+            raise
+        except CacheBlobIntegrityError as error:
+            logger.warning("Canonical cache entry failed integrity validation: %s", error)
+            self._record_cache_miss()
+            return None
+        # Operational failures/conflicts remain typed; they never authorize deletion.
+        try:
+            self._record_successful_read(cache_key, entry)
+        except Exception as error:
+            logger.warning("Cache hit; optional access statistics unavailable: %s", error)
+        return data
+
+    def _record_cache_miss(self) -> None:
+        try:
+            self.metadata_backend.increment_misses()
+        except Exception as error:
+            logger.warning("Cache miss; optional statistics unavailable: %s", error)
+
+    def _get_legacy(
         self,
         cache_key: Optional[str] = None,
         ttl_hours: Optional[int] = None,
@@ -1910,7 +1687,11 @@ class UnifiedCache:
             cache_key = self._create_cache_key(kwargs)
         self._cache_blob_store.handlers = self.handlers
 
-        authority_snapshot, entry = self._authority_snapshot_entry(cache_key)
+        authority_snapshot = None
+        entry = self.metadata_backend.get_entry(cache_key)
+        if self._recognized_legacy_backend() is None and self._is_authority_projection(entry):
+            self._record_cache_miss()
+            return None
         if not entry:
             if not _legacy_decorator_v0313:
                 self.metadata_backend.increment_misses()
@@ -2022,24 +1803,7 @@ class UnifiedCache:
         """Enforce size limits without deleting a generation by key alone."""
         authority_keys = self._cache_blob_store.list()
         if self._recognized_legacy_backend() is None:
-            self._preflight_entries(
-                self.metadata_backend.list_entries(), operation="cleanup_by_size"
-            )
             if not authority_keys:
-                return
-            max_size_mb = self.config.storage.max_cache_size_mb
-            projected_size_mb = self.metadata_backend.get_stats().get(
-                "total_size_mb", 0
-            )
-            # Authority promotion is preceded by an exact projection write, so
-            # the raw compatibility size is a safe fast-path upper bound. Only
-            # a possible limit breach needs the expensive coherent per-key
-            # scan below; scanning after every distinct-key put serializes the
-            # otherwise independent lifecycle through metadata I/O.
-            if (
-                isinstance(projected_size_mb, (int, float))
-                and projected_size_mb <= max_size_mb
-            ):
                 return
             candidates = []
             total_size_bytes = 0
@@ -2070,7 +1834,7 @@ class UnifiedCache:
                     )
                 )
 
-            max_size_bytes = int(max_size_mb * 1024 * 1024)
+            max_size_bytes = int(self.config.storage.max_cache_size_mb * 1024 * 1024)
             if total_size_bytes <= max_size_bytes:
                 return
 
@@ -2119,9 +1883,7 @@ class UnifiedCache:
         if cache_key is None:
             cache_key = self._create_cache_key(kwargs)
 
-        authority_snapshot = self._cache_blob_store.lifecycle_authority.read_entry(
-            cache_key
-        )
+        authority_snapshot = self._cache_blob_store.get_entry_info(cache_key)
         if authority_snapshot is not None:
             if not self._retire_exact_authority_snapshot(cache_key, authority_snapshot):
                 raise CacheBlobLifecycleConflictError(
@@ -2151,15 +1913,23 @@ class UnifiedCache:
     def clear_all(self):
         """Clear known cache entries without reviving a second authority."""
         if self._recognized_legacy_backend() is None:
-            # Compatibility metadata is not lifecycle authority, but malformed
-            # paths remain fail-closed evidence and must block a bulk mutation.
-            entries = self.metadata_backend.list_entries()
-            self._preflight_entries(entries, operation="clear_all")
+            # Capture only authenticated identities for optional derived cleanup.
+            infos = [
+                self._cache_blob_store.get_entry_info(key)
+                for key in self._cache_blob_store.list()
+            ]
             cleared = self._cache_blob_store.clear()
-            for entry in entries:
-                self._sync_authority_projection(
-                    entry["cache_key"], observed_entry=entry
-                )
+            for info in infos:
+                if info is None:
+                    continue
+                try:
+                    self._conditional_projection_mutation(
+                        info.key,
+                        expected_locator=str(self._authority_payload_locator(info.locator)),
+                        replacement=None,
+                    )
+                except Exception as error:
+                    logger.warning("Clear committed; derived cleanup pending: %s", error)
             logger.info("Cleared %s authority-backed cache entries", cleared)
             return cleared
 
@@ -2204,65 +1974,32 @@ class UnifiedCache:
 
     @_clear_read_coordinated
     def list_entries(self) -> List[Dict[str, Any]]:
-        """List all cache entries with metadata."""
-        raw_entries = self.metadata_backend.list_entries()
+        """List canonical metadata; compatibility projections are not read truth."""
         if self._recognized_legacy_backend() is not None:
-            self._preflight_entries(raw_entries, operation="list_entries")
-            for entry in raw_entries:
+            entries = self.metadata_backend.list_entries()
+            self._preflight_entries(entries, operation="list_entries")
+            for entry in entries:
                 entry["expired"] = self._is_expired(entry["cache_key"])
-            return raw_entries
+            return entries
         entries = []
-        authority_entries = {
-            snapshot.key: snapshot
-            for snapshot in self._cache_blob_store.lifecycle_authority.list_entries()
-        }
-        for entry in raw_entries:
-            cache_key = entry["cache_key"]
-            snapshot = authority_entries.get(cache_key)
-            if snapshot is not None and self._projection_matches_authority_snapshot(
-                entry, snapshot
-            ):
-                manifest = self._cache_blob_store.lifecycle._entry_manifest(
-                    snapshot, allow_tombstone=True
-                )
-                if manifest.state != "committed":
-                    continue
-                projection = entry
-            else:
-                try:
-                    snapshot, projection = self._authority_snapshot_entry(cache_key)
-                except CacheBlobLifecycleConflictError:
-                    logger.debug(
-                        "Omitted unstable authority projection from entry list: %s",
-                        cache_key,
-                    )
-                    continue
-            if snapshot is not None and projection is not None:
-                visible_entry = entry.copy()
-                visible_entry["data_type"] = projection["data_type"]
-                visible_entry["description"] = projection["description"]
-                visible_entry["metadata"] = projection["metadata"]
-                if "created_at" in projection:
-                    visible_entry["created"] = self._list_projection_timestamp(
-                        projection["created_at"]
-                    )
-                    visible_entry["last_accessed"] = self._list_projection_timestamp(
-                        projection.get("accessed_at", projection["created_at"])
-                    )
-                    visible_entry["size_mb"] = round(
-                        projection["file_size"] / (1024 * 1024), 3
-                    )
-                entries.append(visible_entry)
-        self._preflight_entries(entries, operation="list_entries")
-
-        # Add expiration status for each entry
-        for entry in entries:
-            entry["expired"] = self._is_expired(entry["cache_key"])
-
+        for key in self._cache_blob_store.list():
+            info = self._cache_blob_store.get_entry_info(key)
+            if info is None:
+                continue
+            entry = self._cache_entry(info)
+            entries.append({
+                "cache_key": key, "data_type": entry["data_type"],
+                "description": entry["description"], "metadata": entry["metadata"],
+                "created": self._list_projection_timestamp(entry["created_at"]),
+                "last_accessed": self._list_projection_timestamp(entry["created_at"]),
+                "size_mb": round(entry["file_size"] / (1024 * 1024), 3),
+                "expired": self._is_expired(key, entry=entry),
+            })
         return entries
 
     def close(self):
         """Close all resources (database connections, etc.)."""
+        self._closed = True
         blob_store = getattr(self, "_cache_blob_store", None)
         blob_io = getattr(blob_store, "guarded_handler_io", None)
         if blob_store is not None:

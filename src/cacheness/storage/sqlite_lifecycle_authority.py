@@ -101,8 +101,6 @@ class SqliteLifecycleAuthority:
         self._owner_pid = os.getpid()
         self._state_lock = Lock()
         self._bootstrap_lock = Lock()
-        self._schema_lock = Lock()
-        self._schema_ready = False
         self._closed = False
         self.open_write_transactions = 0
         self._monotonic_clock: Callable[[], float] | None = None
@@ -483,6 +481,18 @@ class SqliteLifecycleAuthority:
         self._require_owned_open()
         self._validate_mutation_topology()
 
+    def initialize(self) -> None:
+        """Create/validate this catalog before starting shared workers.
+
+        Existing incomplete or obsolete catalogs are never adopted or upgraded.
+        Concurrent first creation is not a supported availability guarantee.
+        """
+        started_at = self._now()
+        with self._connection(
+            mutation=True, deadline=self._deadline(None), started_at=started_at,
+        ):
+            pass
+
     def _materialize_database_file(self, deadline: float, *, started_at: float) -> bool:
         """Create only the contained database leaf and report whether this won."""
         self._validate_mutation_topology()
@@ -578,7 +588,9 @@ class SqliteLifecycleAuthority:
                 started_at=started_at,
                 deadline=deadline,
             ) from error
-        if isinstance(error, sqlite3.DatabaseError):
+        primary = getattr(error, "sqlite_errorcode", None)
+        primary = primary & 0xFF if type(primary) is int else None
+        if primary in {sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB}:
             # A regular leaf can still be hostile or corrupt rather than a
             # lifecycle authority. Treat it as migration-required evidence;
             # do not let connection configuration rewrite or adopt it.
@@ -786,211 +798,6 @@ class SqliteLifecycleAuthority:
                 connection.execute("ROLLBACK")
             raise
 
-    def _migrate_schema_layout(
-        self,
-        connection: sqlite3.Connection,
-        *,
-        deadline: float,
-        started_at: float,
-    ) -> None:
-        """Complete the fixed version-one layout before a mutation uses it.
-
-        Plan 03-02's tracer used the same persistent user version but did not
-        yet require the corroborating columns or complete transition tables.
-        This ordered, one-transaction layout completion preserves the confirmed
-        authority identity rather than treating that known predecessor as JSON
-        reconstruction input.
-        """
-        self._apply_stage_busy_timeout(
-            connection,
-            deadline=deadline,
-            started_at=started_at,
-            stage="schema_initialize",
-        )
-        try:
-            connection.execute("BEGIN EXCLUSIVE")
-        except sqlite3.Error as error:
-            self._translate_sqlite_error(
-                error,
-                operation="lifecycle_authority",
-                stage="schema_initialize",
-                deadline=deadline,
-                started_at=started_at,
-            )
-        try:
-            # Read the layout only after taking SQLite's exclusive writer
-            # transaction. A concurrent first-use creator can expose a
-            # partially initialized schema to a second connector; deciding
-            # which ALTER statements to run before this boundary races that
-            # creator and can attempt the same migration twice.
-            entry_columns = {
-                row[1] for row in connection.execute("PRAGMA table_info(entries)")
-            }
-            mutation_columns = {
-                row[1] for row in connection.execute("PRAGMA table_info(mutations)")
-            }
-            table_names = {
-                row[0]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                )
-            }
-            if "entries" not in table_names:
-                connection.execute("ROLLBACK")
-                self._initialize_schema(
-                    connection,
-                    deadline=deadline,
-                    started_at=started_at,
-                )
-                return
-
-            clear_run_columns = {
-                row[1] for row in connection.execute("PRAGMA table_info(clear_runs)")
-            } if "clear_runs" in table_names else set()
-            clear_target_columns = {
-                row[1] for row in connection.execute("PRAGMA table_info(clear_targets)")
-            } if "clear_targets" in table_names else set()
-            reconciliation_columns = {
-                row[1]
-                for row in connection.execute("PRAGMA table_info(reconciliation_runs)")
-            } if "reconciliation_runs" in table_names else set()
-
-            needs_migration = (
-                "manifest_digest" not in entry_columns
-                or "expected_generation" not in mutation_columns
-                or "expected_manifest_digest" not in mutation_columns
-                or "authority_state" not in table_names
-                or "last_key" not in clear_run_columns
-                or not {
-                    "lineage",
-                    "entry_revision",
-                    "locator",
-                    "manifest",
-                }.issubset(clear_target_columns)
-                or not {
-                    "authority_revision",
-                    "mutation_cursor",
-                    "debt_cursor",
-                }.issubset(reconciliation_columns)
-            )
-            if not needs_migration:
-                connection.execute("COMMIT")
-                return
-            if "manifest_digest" not in entry_columns:
-                connection.execute("ALTER TABLE entries ADD COLUMN manifest_digest TEXT")
-                rows = connection.execute("SELECT key, manifest FROM entries").fetchall()
-                for key, manifest in rows:
-                    if not isinstance(manifest, bytes):
-                        raise CacheBlobMigrationRequiredError(
-                            "Lifecycle authority entry cannot be migrated safely"
-                        )
-                    connection.execute(
-                        "UPDATE entries SET manifest_digest = ? WHERE key = ?",
-                        (hashlib.sha256(manifest).hexdigest(), key),
-                    )
-            if "expected_generation" not in mutation_columns:
-                connection.execute("ALTER TABLE mutations ADD COLUMN expected_generation TEXT")
-            if "expected_manifest_digest" not in mutation_columns:
-                connection.execute(
-                    "ALTER TABLE mutations ADD COLUMN expected_manifest_digest TEXT"
-                )
-            connection.execute(
-                "CREATE TABLE IF NOT EXISTS authority_state ("
-                "singleton INTEGER PRIMARY KEY CHECK (singleton = 1), revision INTEGER NOT NULL, "
-                "projection_dirty INTEGER NOT NULL CHECK (projection_dirty IN (0, 1)))"
-            )
-            connection.execute(
-                "INSERT OR IGNORE INTO authority_state(singleton, revision, projection_dirty) "
-                "VALUES (1, 0, 0)"
-            )
-            connection.execute(
-                "CREATE TABLE IF NOT EXISTS cleanup_debt ("
-                "debt_id INTEGER PRIMARY KEY AUTOINCREMENT, operation_id TEXT NOT NULL, "
-                "key TEXT NOT NULL, generation TEXT NOT NULL, locator TEXT NOT NULL, "
-                "role TEXT NOT NULL, state TEXT NOT NULL)"
-            )
-            connection.execute(
-                "CREATE TABLE IF NOT EXISTS clear_runs ("
-                "run_id TEXT PRIMARY KEY, state TEXT NOT NULL, revision INTEGER NOT NULL, "
-                "last_key TEXT NOT NULL DEFAULT '')"
-            )
-            connection.execute(
-                "CREATE TABLE IF NOT EXISTS clear_targets ("
-                "run_id TEXT NOT NULL, key TEXT NOT NULL, lineage INTEGER NOT NULL, "
-                "entry_revision INTEGER NOT NULL, generation TEXT NOT NULL, locator TEXT NOT NULL, "
-                "manifest BLOB NOT NULL, manifest_digest TEXT NOT NULL, state TEXT NOT NULL, "
-                "PRIMARY KEY (run_id, key))"
-            )
-            connection.execute(
-                "CREATE INDEX IF NOT EXISTS clear_targets_page "
-                "ON clear_targets(run_id, state, key)"
-            )
-            connection.execute(
-                "CREATE TABLE IF NOT EXISTS reconciliation_runs ("
-                "run_id TEXT PRIMARY KEY, state TEXT NOT NULL, "
-                "mutation_high_water INTEGER NOT NULL, debt_high_water INTEGER NOT NULL, "
-                "authority_revision INTEGER NOT NULL, mutation_cursor INTEGER NOT NULL DEFAULT 0, "
-                "debt_cursor INTEGER NOT NULL DEFAULT 0)"
-            )
-            connection.execute(
-                "CREATE TABLE IF NOT EXISTS reconciliation_actions ("
-                "run_id TEXT NOT NULL, action_id INTEGER NOT NULL, state TEXT NOT NULL, "
-                "PRIMARY KEY (run_id, action_id))"
-            )
-            if "clear_runs" in table_names and "last_key" not in clear_run_columns:
-                connection.execute(
-                    "ALTER TABLE clear_runs ADD COLUMN last_key TEXT NOT NULL DEFAULT ''"
-                )
-            for column, declaration in (
-                ("lineage", "INTEGER"),
-                ("entry_revision", "INTEGER"),
-                ("locator", "TEXT"),
-                ("manifest", "BLOB"),
-            ):
-                if (
-                    "clear_targets" in table_names
-                    and column not in clear_target_columns
-                ):
-                    connection.execute(
-                        f"ALTER TABLE clear_targets ADD COLUMN {column} {declaration}"
-                    )
-            connection.execute(
-                "UPDATE clear_targets SET "
-                "lineage = (SELECT lineage FROM entries WHERE entries.key = clear_targets.key), "
-                "entry_revision = (SELECT revision FROM entries WHERE entries.key = clear_targets.key), "
-                "locator = (SELECT locator FROM entries WHERE entries.key = clear_targets.key), "
-                "manifest = (SELECT manifest FROM entries WHERE entries.key = clear_targets.key) "
-                "WHERE state = 'pending' AND manifest IS NULL"
-            )
-            connection.execute(
-                "UPDATE clear_targets SET state = 'conflicted' "
-                "WHERE state = 'pending' AND (lineage IS NULL OR entry_revision IS NULL "
-                "OR locator IS NULL OR manifest IS NULL)"
-            )
-            connection.execute(
-                "CREATE INDEX IF NOT EXISTS clear_targets_page "
-                "ON clear_targets(run_id, state, key)"
-            )
-            if "reconciliation_runs" in table_names:
-                for column, declaration in (
-                    ("authority_revision", "INTEGER NOT NULL DEFAULT 0"),
-                    ("mutation_cursor", "INTEGER NOT NULL DEFAULT 0"),
-                    ("debt_cursor", "INTEGER NOT NULL DEFAULT 0"),
-                ):
-                    if column not in reconciliation_columns:
-                        connection.execute(
-                            f"ALTER TABLE reconciliation_runs ADD COLUMN {column} {declaration}"
-                        )
-                connection.execute(
-                    "UPDATE reconciliation_runs SET authority_revision = "
-                    "(SELECT revision FROM authority_state WHERE singleton = 1) "
-                    "WHERE authority_revision = 0"
-                )
-            connection.execute("COMMIT")
-        except BaseException:
-            if connection.in_transaction:
-                connection.execute("ROLLBACK")
-            raise
 
     def _validate_schema(
         self,
@@ -1026,6 +833,25 @@ class SqliteLifecycleAuthority:
             raise CacheBlobMigrationRequiredError(
                 "Lifecycle authority schema version is incompatible"
             )
+
+        # Known development layouts shared version 1. Validate their required
+        # columns without running DDL, even on the first mutation after reopen.
+        try:
+            connection.execute(
+                "SELECT e.manifest_digest, e.lineage, e.revision, "
+                "m.expected_generation, m.expected_manifest_digest, "
+                "d.debt_id, d.role, c.last_key, t.manifest_digest, "
+                "r.mutation_cursor, r.debt_cursor, a.action_id "
+                "FROM entries e, mutations m, cleanup_debt d, clear_runs c, "
+                "clear_targets t, reconciliation_runs r, reconciliation_actions a "
+                "WHERE 0"
+            )
+        except sqlite3.OperationalError as error:
+            if getattr(error, "sqlite_errorcode", None) == sqlite3.SQLITE_ERROR:
+                raise CacheBlobMigrationRequiredError(
+                    "Lifecycle authority layout requires explicit offline migration or rebuild"
+                ) from error
+            raise
 
         rows = self._execute_for_stage(
             connection,
@@ -1128,42 +954,17 @@ class SqliteLifecycleAuthority:
                 deadline=deadline,
                 started_at=started_at,
             )
-            if mutation:
-                with self._schema_lock:
-                    if not self._schema_ready:
-                        if created_new:
-                            self._initialize_schema(
-                                connection,
-                                deadline=deadline,
-                                started_at=started_at,
-                            )
-                        else:
-                            self._migrate_schema_layout(
-                                connection,
-                                deadline=deadline,
-                                started_at=started_at,
-                            )
-                        self._validate_schema(
-                            connection,
-                            deadline=deadline,
-                            started_at=started_at,
-                        )
-                        self._schema_ready = True
-                        self._reach_bootstrap_boundary(
-                            "authority.schema_ready.published"
-                        )
-                    else:
-                        self._validate_schema(
-                            connection,
-                            deadline=deadline,
-                            started_at=started_at,
-                        )
-            else:
-                self._validate_schema(
+            if created_new:
+                self._initialize_schema(
                     connection,
                     deadline=deadline,
                     started_at=started_at,
                 )
+            self._validate_schema(
+                connection, deadline=deadline, started_at=started_at,
+            )
+            if created_new:
+                self._reach_bootstrap_boundary("authority.schema_ready.published")
             yield connection
         except (
             CacheBlobBackendError,

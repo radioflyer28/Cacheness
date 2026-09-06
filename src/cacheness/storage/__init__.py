@@ -57,6 +57,7 @@ from .security import CacheEntrySigner
 
 # Import BlobStore
 from .blob_store import BlobStore
+from .read_contract import BlobEntry, BlobEntryInfo
 from .manifest import BlobManifestV1
 from .reconciliation import (
     ReconciliationAction,
@@ -97,6 +98,8 @@ except ImportError:
 __all__ = [
     # Main API
     "BlobStore",
+    "BlobEntry",
+    "BlobEntryInfo",
     "BlobManifestV1",
     "CacheBlobManifestMalformedError",
     "CacheBlobManifestUnauthenticatedError",

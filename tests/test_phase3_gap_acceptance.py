@@ -1,4 +1,4 @@
-"""Phase 3 gap-closure acceptance inventory and SQLite teardown contracts."""
+"""Historical Phase 3 gap inventory, adapted to ADR 0001, and SQLite teardown."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ REQUIRED_GAP_NODES = {
     "CR-07": "tests/test_unified_cache_adversarial_lifecycle.py::"
     "test_empty_authority_clear_preserves_a_peer_first_put_after_durable_intent",
     "CR-08": "tests/test_unified_cache_adversarial_lifecycle.py::"
-    "test_hostile_locator_rejects_same_key_put_without_mutating_m1",
+    "test_hostile_projection_cannot_redirect_put_or_custom_metadata",
     "CR-09": "tests/test_cached_custom_metadata.py::"
     "test_signed_postgresql_cache_key_params_keep_a_valid_projection_live",
     "WR-01": "tests/test_phase3_gap_acceptance.py::test_sqlite_backend_close_is_explicit_idempotent_and_silent",

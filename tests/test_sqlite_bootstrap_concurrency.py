@@ -1,4 +1,4 @@
-"""Fresh-root SQLite authority bootstrap race contracts.
+"""Initialized-root SQLite authority concurrency contracts.
 
 The schedules use independent authorities and spawned processes.  Their only
 ordering seams are test-only bootstrap/lifecycle hooks; elapsed time is never
@@ -108,6 +108,8 @@ def test_independent_authority_instances_join_one_fresh_root_then_commit_distinc
 ) -> None:
     """Two first mutators reclassify a valid winner instead of leaking mkdir races."""
     root = tmp_path / "threaded-fresh-root"
+    with BlobStore(root, backend="json") as initializer:
+        initializer.initialize()
     bootstrap_barrier = threading.Barrier(2)
     outcomes: multiprocessing.Queue = multiprocessing.Queue()
     workers = [
@@ -139,6 +141,8 @@ def test_spawned_fresh_authorities_join_one_root_and_commit_distinct_keys(
 ) -> None:
     """Separate spawned interpreters prove bootstrap is not an instance-lock race."""
     root = tmp_path / "spawned-distinct-root"
+    with BlobStore(root, backend="json") as initializer:
+        initializer.initialize()
     context = multiprocessing.get_context("spawn")
     bootstrap_barrier = context.Barrier(2)
     outcomes = context.Queue()
@@ -178,6 +182,8 @@ def test_spawned_fresh_authorities_keep_same_key_cas_deterministic(
 ) -> None:
     """A fresh-root bootstrap join does not weaken expected-generation CAS."""
     root = tmp_path / "spawned-same-key-root"
+    with BlobStore(root, backend="json") as initializer:
+        initializer.initialize()
     context = multiprocessing.get_context("spawn")
     bootstrap_barrier = context.Barrier(2)
     promotion_barrier = context.Barrier(2)

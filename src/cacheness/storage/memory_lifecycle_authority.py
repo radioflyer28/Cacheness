@@ -48,8 +48,10 @@ class InMemoryLifecycleAuthority:
         self._entries: dict[str, EntrySnapshot] = {}
         self._lineages: dict[str, int] = {}
         self._mutations: dict[str, tuple[MutationSpec, VerificationProof | None, str]] = {}
-        self._mutation_order: list[str] = []
-        self._debts: list[CleanupDebt] = []
+        self._mutation_order: dict[str, int] = {}
+        self._mutation_high_water = 0
+        self._debts: dict[int, CleanupDebt] = {}
+        self._debt_high_water = 0
         self._clear_targets: dict[str, dict[str, tuple[EntrySnapshot, str]]] = {}
         self._clear_cursors: dict[str, str] = {}
         self._clear_states: dict[str, str] = {}
@@ -118,7 +120,7 @@ class InMemoryLifecycleAuthority:
                 self._revision,
                 self._projection_dirty,
                 tuple((operation_id, row[2]) for operation_id, row in sorted(self._mutations.items())),
-                tuple(self._debts),
+                tuple(self._debts.values()),
             )
 
     def prepare_mutation(self, spec: MutationSpec) -> PreparedMutation:
@@ -131,7 +133,8 @@ class InMemoryLifecycleAuthority:
             if self._expectation(spec.key) != spec.expected:
                 raise CacheBlobLifecycleConflictError("Mutation expectation no longer matches authority")
             self._mutations[spec.operation_id] = (spec, None, "prepared")
-            self._mutation_order.append(spec.operation_id)
+            self._mutation_high_water += 1
+            self._mutation_order[spec.operation_id] = self._mutation_high_water
             return PreparedMutation(spec.operation_id, spec)
 
         return self._transition(prepare)
@@ -157,7 +160,7 @@ class InMemoryLifecycleAuthority:
         entry = self._entries.get(mutation[0].key)
         if entry is None:
             raise CacheBlobLifecycleConflictError("Promoted mutation has no committed entry")
-        debts = tuple(debt for debt in self._debts if debt.operation_id == operation_id)
+        debts = tuple(debt for debt in self._debts.values() if debt.operation_id == operation_id)
         return PromotionResult(self._copy(entry), debts)
 
     def promote_mutation(self, prepared: PreparedMutation) -> PromotionResult:
@@ -192,7 +195,7 @@ class InMemoryLifecycleAuthority:
             self._entries[spec.key] = entry
             self._mutations[prepared.operation_id] = (spec, proof, "promoted")
             if previous is not None and previous.locator != spec.candidate_locator:
-                self._debts.append(
+                self._add_debt(
                     CleanupDebt(
                         prepared.operation_id,
                         previous.locator,
@@ -222,8 +225,8 @@ class InMemoryLifecycleAuthority:
                     prepared.spec.generation,
                     "candidate",
                 )
-                if debt not in self._debts:
-                    self._debts.append(debt)
+                if debt not in self._debts.values():
+                    self._add_debt(debt)
                 self._mutations[prepared.operation_id] = (
                     mutation[0],
                     mutation[1],
@@ -231,6 +234,7 @@ class InMemoryLifecycleAuthority:
                 )
                 return
             del self._mutations[prepared.operation_id]
+            self._mutation_order.pop(prepared.operation_id, None)
 
         self._transition(abort)
 
@@ -251,7 +255,7 @@ class InMemoryLifecycleAuthority:
         with self._lock:
             return tuple(
                 debt
-                for debt in self._debts
+                for debt in self._debts.values()
                 if (key is None or debt.key == key)
                 and (operation_id is None or debt.operation_id == operation_id)
             )
@@ -269,12 +273,17 @@ class InMemoryLifecycleAuthority:
     def retire_cleanup_debt(self, debt: CleanupDebt) -> None:
         """Retire one exact debt idempotently after external reclamation."""
         def retire() -> None:
-            try:
-                self._debts.remove(debt)
-            except ValueError:
-                return
+            for row_id, pending in self._debts.items():
+                if pending == debt:
+                    del self._debts[row_id]
+                    break
 
         self._transition(retire)
+
+    def _add_debt(self, debt: CleanupDebt) -> None:
+        """Allocate an identity that remains stable after earlier rows retire."""
+        self._debt_high_water += 1
+        self._debts[self._debt_high_water] = debt
 
     def delete_entry(self, key: str, *, expected: EntryExpectation) -> None:
         def delete() -> None:
@@ -386,8 +395,8 @@ class InMemoryLifecycleAuthority:
             self._reconciliation_states[token.value] = "active"
             self._reconciliation_snapshots[token.value] = ReconciliationSnapshot(
                 self._revision,
-                len(self._mutation_order),
-                len(self._debts),
+                self._mutation_high_water,
+                self._debt_high_water,
                 token.value,
             )
             return token
@@ -406,8 +415,8 @@ class InMemoryLifecycleAuthority:
                 return snapshot
             return ReconciliationSnapshot(
                 self._revision,
-                len(self._mutation_order),
-                len(self._debts),
+                self._mutation_high_water,
+                self._debt_high_water,
             )
 
     def page_reconciliation_work(
@@ -420,11 +429,19 @@ class InMemoryLifecycleAuthority:
         self._require_open()
         with self._lock:
             page_size = max(1, self.lifecycle_limits.operation_page_size // 2)
-            mutation_stop = min(snapshot.mutation_high_water, mutation_cursor + page_size)
-            debt_stop = min(snapshot.debt_high_water, debt_cursor + page_size)
+            mutations = sorted(
+                (row_id, operation_id)
+                for operation_id, row_id in self._mutation_order.items()
+                if mutation_cursor < row_id <= snapshot.mutation_high_water
+            )[:page_size]
+            debts = [
+                (row_id, debt) for row_id, debt in self._debts.items()
+                if debt_cursor < row_id <= snapshot.debt_high_water
+            ][:page_size]
+            mutation_stop = mutations[-1][0] if mutations else snapshot.mutation_high_water
+            debt_stop = debts[-1][0] if debts else snapshot.debt_high_water
             works: list[ReconciliationWork] = []
-            for row_id in range(mutation_cursor + 1, mutation_stop + 1):
-                operation_id = self._mutation_order[row_id - 1]
+            for row_id, operation_id in mutations:
                 spec, _proof, state = self._mutations[operation_id]
                 if state == "prepared":
                     works.append(
@@ -435,8 +452,7 @@ class InMemoryLifecycleAuthority:
                             mutation=PreparedMutation(operation_id, spec),
                         )
                     )
-            for row_id in range(debt_cursor + 1, debt_stop + 1):
-                debt = self._debts[row_id - 1]
+            for row_id, debt in debts:
                 works.append(
                     ReconciliationWork("debt", row_id, "pending", debt=debt)
                 )
@@ -447,7 +463,7 @@ class InMemoryLifecycleAuthority:
         with self._lock:
             if token.value not in self._reconciliation_states:
                 raise CacheBlobLifecycleConflictError("Reconciliation run does not exist")
-            return tuple(self._debts)
+            return tuple(self._debts.values())
 
     def checkpoint_reconciliation(
         self,

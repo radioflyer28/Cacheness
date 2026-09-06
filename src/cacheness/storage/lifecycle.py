@@ -6,6 +6,7 @@ authority transaction and native handler bytes are never wrapped.
 
 from __future__ import annotations
 
+from contextlib import contextmanager, ExitStack
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +37,7 @@ from .lifecycle_authority import (
 )
 from .manifest import BlobManifestV1
 from .path_security import resolve_managed_locator
+from .read_contract import BlobEntry, BlobEntryInfo
 
 
 _TOMBSTONE_OPERATION_ID_FIELD = "_cacheness_tombstone_operation_id"
@@ -56,7 +58,6 @@ class LifecyclePutResult:
     expected: EntryExpectation
     promoted: EntrySnapshot | None
     previous: EntrySnapshot | None
-    expected_projection_locator: str | None = None
     cleanup_debt: tuple[CleanupDebt, ...] = ()
 
 
@@ -182,8 +183,6 @@ class AuthorityLifecycleEngine:
         *,
         key: str,
         metadata: dict[str, Any] | None,
-        projection_context: str | None = None,
-        defer_cleanup: bool = False,
     ) -> LifecyclePutResult:
         """Prepare, publish, verify, promote, then reclaim exact old debt."""
         handler = self.store.handlers.get_handler(data)
@@ -191,6 +190,9 @@ class AuthorityLifecycleEngine:
         # boundary. Validate it before read_entry can bootstrap SQLite or
         # guarded handler I/O can create the managed payload root.
         self.authority.preflight_mutation()
+        # The same explicit startup path serves single-process convenience.
+        # Existing catalogs validate only; they are never implicitly migrated.
+        self.store.initialize()
         previous = self.authority.read_entry(key)
         if previous is not None:
             self._entry_manifest(previous, allow_tombstone=True)
@@ -262,6 +264,7 @@ class AuthorityLifecycleEngine:
                     self.store, "_before_authority_promotion", None
                 )
                 if callable(before_promotion):
+                    unsigned_manifest = manifest
                     manifest = before_promotion(
                         manifest,
                         LifecyclePutResult(
@@ -269,12 +272,15 @@ class AuthorityLifecycleEngine:
                             expected=expected,
                             promoted=None,
                             previous=previous,
-                            expected_projection_locator=projection_context,
                         ),
                     )
                     if not isinstance(manifest, BlobManifestV1):
                         raise CacheBlobLifecycleConflictError(
                             "Lifecycle projection hook must return a BlobManifestV1"
+                        )
+                    if replace(manifest, user_metadata=unsigned_manifest.user_metadata) != unsigned_manifest:
+                        raise CacheBlobLifecycleConflictError(
+                            "Compatibility metadata cannot change blob identity or integrity fields"
                         )
                 manifest = self._sign(
                     manifest, initialize_new_store=previous is None
@@ -301,28 +307,23 @@ class AuthorityLifecycleEngine:
                     raise cleanup_error from error
                 raise
         self._reach("put.promoted", key=key)
-        if not defer_cleanup:
+        try:
             self._settle_debts(promoted.cleanup_debt)
-            self._reach("put.cleanup_retired", key=key)
+        except CacheBlobRecoverableCleanupError as error:
+            error.context.update(
+                committed=True, key=key, generation=promoted.entry.generation,
+                expectation=promoted.entry.expectation,
+            )
+            raise
+        self._reach("put.cleanup_retired", key=key)
         return LifecyclePutResult(
             key=key,
             expected=expected,
             promoted=promoted.entry,
             previous=previous,
-            expected_projection_locator=projection_context,
             cleanup_debt=tuple(promoted.cleanup_debt),
         )
 
-    def settle_put_cleanup(self, result: LifecyclePutResult) -> None:
-        """Retire the exact old generation retained for facade publication.
-
-        ``UnifiedCache`` publishes its derived compatibility row only after
-        authority promotion. Keeping the retired generation until that derived
-        write succeeds preserves M1 evidence if publication fails, while the
-        direct ``BlobStore.put`` path keeps its immediate cleanup behavior.
-        """
-        self._settle_debts(result.cleanup_debt)
-        self._reach("put.cleanup_retired", key=result.key)
 
     def update_metadata(self, key: str, metadata: dict[str, Any]) -> bool:
         """Promote a new signed metadata revision without changing payload bytes."""
@@ -441,55 +442,96 @@ class AuthorityLifecycleEngine:
         self.authority.retire_tombstone(key, expected=promoted.entry.expectation)
         return True
 
-    def _read(self, key: str, *, deserialize: bool) -> Any | None:
-        for attempt in range(2):
-            entry = self.authority.read_entry(key)
-            if entry is None:
-                return None
-            manifest = self._entry_manifest(entry, allow_tombstone=True)
-            if manifest.state == "tombstoned":
-                return None
-            handler = self.store._resolve_payload_handler(manifest)
-            try:
-                with self.store._materialize_authority_store().open_snapshot(
-                    manifest.locator, self.store._handler_metadata(manifest)
-                ) as snapshot:
-                    second = self.authority.read_entry(key)
-                    if second is None or second.expectation != entry.expectation:
-                        if attempt == 0:
-                            continue
-                        raise CacheBlobLifecycleConflictError(
-                            "Authority changed during both read attempts",
-                            context={"key": key, "operation": "read"},
-                        )
-                    second_manifest = self._entry_manifest(second, allow_tombstone=True)
-                    if second_manifest.state != "committed":
-                        if attempt == 0:
-                            continue
-                        raise CacheBlobLifecycleConflictError(
-                            "Authority changed during both read attempts",
-                            context={"key": key, "operation": "read"},
-                        )
-                    digest, byte_size = sha256_and_size(snapshot.path)
-                    if digest != manifest.digest or byte_size != manifest.byte_size:
-                        raise CacheBlobPayloadTamperedError(
-                            "Canonical BlobStore payload integrity check failed"
-                        )
-                    return handler.get(snapshot.path, snapshot.metadata) if deserialize else True
-            except FileNotFoundError as exc:
-                if attempt == 0:
-                    continue
-                raise CacheBlobPayloadMissingError("Canonical BlobStore payload is missing") from exc
-        raise CacheBlobLifecycleConflictError(
-            "Authority read exhausted its bounded generation retry",
-            context={"key": key, "operation": "read"},
+    def entry_info(self, entry: EntrySnapshot) -> BlobEntryInfo:
+        """Render metadata from this exact authenticated authority observation."""
+        manifest = self._entry_manifest(entry, allow_tombstone=True)
+        return self._entry_info(entry, manifest)
+
+    def _entry_info(self, entry: EntrySnapshot, manifest: BlobManifestV1) -> BlobEntryInfo:
+        """Render an already authenticated manifest without another observation."""
+        return BlobEntryInfo(
+            entry.key, entry.generation, entry.locator, entry.expectation,
+            self.store._manifest_entry_data(manifest),
         )
 
+    def get_entry_info(self, key: str) -> BlobEntryInfo | None:
+        entry = self.authority.read_entry(key)
+        if entry is None:
+            return None
+        manifest = self._entry_manifest(entry, allow_tombstone=True)
+        return None if manifest.state == "tombstoned" else self._entry_info(entry, manifest)
+
+    @contextmanager
+    def open_entry(self, key: str):
+        """Acquire once; never catch/retry exceptions raised by the caller."""
+        resources = ExitStack()
+        try:
+            for attempt in range(2):
+                entry = self.authority.read_entry(key)
+                if entry is None:
+                    yield None
+                    return
+                manifest = self._entry_manifest(entry, allow_tombstone=True)
+                if manifest.state == "tombstoned":
+                    yield None
+                    return
+                handler = self.store._resolve_payload_handler(manifest)
+                try:
+                    snapshot = resources.enter_context(
+                        self.store._materialize_authority_store().open_snapshot(
+                            manifest.locator, self.store._handler_metadata(manifest)
+                        )
+                    )
+                except FileNotFoundError as exc:
+                    resources.close()
+                    if attempt == 0:
+                        continue
+                    raise CacheBlobPayloadMissingError(
+                        "Canonical BlobStore payload is missing"
+                    ) from exc
+                second = self.authority.read_entry(key)
+                if second is None or second.expectation != entry.expectation:
+                    resources.close()
+                    if attempt == 0:
+                        continue
+                    raise CacheBlobLifecycleConflictError(
+                        "Authority changed during both read attempts",
+                        context={"key": key, "operation": "read"},
+                    )
+                second_manifest = self._entry_manifest(second, allow_tombstone=True)
+                if second_manifest.state != "committed":
+                    resources.close()
+                    if attempt == 0:
+                        continue
+                    raise CacheBlobLifecycleConflictError("Entry is no longer committed")
+                digest, byte_size = sha256_and_size(snapshot.path)
+                if digest != manifest.digest or byte_size != manifest.byte_size:
+                    raise CacheBlobPayloadTamperedError(
+                        "Canonical BlobStore payload integrity check failed"
+                    )
+                result = BlobEntry(
+                    self._entry_info(entry, manifest),
+                    lambda: handler.get(snapshot.path, snapshot.metadata),
+                )
+                try:
+                    yield result
+                finally:
+                    result._release()
+                return
+            raise CacheBlobLifecycleConflictError(
+                "Authority read exhausted its bounded generation retry",
+                context={"key": key, "operation": "read"},
+            )
+        finally:
+            resources.close()
+
     def get(self, key: str) -> Any | None:
-        return self._read(key, deserialize=True)
+        with self.open_entry(key) as entry:
+            return None if entry is None else entry.read()
 
     def exists(self, key: str) -> bool:
-        return bool(self._read(key, deserialize=False))
+        with self.open_entry(key) as entry:
+            return entry is not None
 
     def get_metadata(self, key: str) -> dict[str, Any] | None:
         entry = self.authority.read_entry(key)

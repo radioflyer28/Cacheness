@@ -1,6 +1,10 @@
-"""Pure classification of direct BlobStore failures for future cache policy."""
+"""Authenticated entry receipts, scoped snapshots, and cache failure categories."""
 
 from enum import Enum
+from collections.abc import Mapping
+from dataclasses import dataclass
+from types import MappingProxyType
+from typing import Any, Callable
 
 from cacheness.error_handling import (
     CacheBlobBackendError,
@@ -12,6 +16,58 @@ from cacheness.error_handling import (
     CacheManifestUnsupportedVersionError,
 )
 
+from .lifecycle_authority import EntryExpectation
+
+
+def _freeze_metadata(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _freeze_metadata(item) for key, item in value.items()})
+    if isinstance(value, (tuple, list)):
+        return tuple(_freeze_metadata(item) for item in value)
+    return value
+
+
+@dataclass(frozen=True)
+class BlobEntryInfo:
+    """Authenticated metadata and an opaque conditional-delete expectation."""
+
+    key: str
+    generation: str
+    locator: str
+    expectation: EntryExpectation
+    metadata: Mapping[str, Any]
+    previous_locator: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "metadata", _freeze_metadata(self.metadata))
+
+
+class BlobEntry:
+    """A verified private snapshot, usable only inside ``open_entry``.
+
+    A present entry whose ``read()`` returns None is distinct from absence.
+    The owning BlobStore releases resources when its context exits.
+    """
+
+    def __init__(self, info: BlobEntryInfo, reader: Callable[[], Any]) -> None:
+        self.info = info
+        self._reader: Callable[[], Any] | None = reader
+
+    @property
+    def metadata(self) -> Mapping[str, Any]:
+        return self.info.metadata
+
+    @property
+    def expectation(self) -> EntryExpectation:
+        return self.info.expectation
+
+    def read(self) -> Any:
+        if self._reader is None:
+            raise RuntimeError("Blob entry snapshot is closed")
+        return self._reader()
+
+    def _release(self) -> None:
+        self._reader = None
 
 class CacheReadFailureCategory(str, Enum):
     """Closed direct-read failure categories available to future cache policy."""

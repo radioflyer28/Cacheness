@@ -665,7 +665,7 @@ def test_wrong_signed_split_key_fails_typed_before_handler_or_deletion(
 
 
 def test_unrecognized_legacy_signature_metadata_is_not_treated_as_unsigned(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rewrite_authority_manifest
 ) -> None:
     """Only the exact signed split-map discriminator can select legacy HMAC."""
     cache = UnifiedCache(
@@ -687,6 +687,12 @@ def test_unrecognized_legacy_signature_metadata_is_not_treated_as_unsigned(
     metadata = entry["metadata"]
     metadata.pop("entry_signature")
     metadata["legacy_entry_signature"] = "unrecognized-legacy-signature"
+
+    def change(fields):
+        fields["user_metadata"].pop("entry_signature")
+        fields["user_metadata"]["legacy_entry_signature"] = "unrecognized-legacy-signature"
+
+    rewrite_authority_manifest(cache._cache_blob_store, cache_key, change)
 
     handler = cache.handlers.get_handler_by_type("array")
 

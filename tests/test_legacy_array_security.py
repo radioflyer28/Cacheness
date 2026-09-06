@@ -423,6 +423,7 @@ def test_untrusted_object_arrays_never_reach_object_handler(
     monkeypatch: pytest.MonkeyPatch,
     rejection: str,
     delete_invalid_signatures: bool,
+    rewrite_authority_manifest,
 ) -> None:
     """Authenticity checks finish before the executable ObjectHandler boundary."""
     cache = _trusted_object_array_cache(
@@ -444,6 +445,17 @@ def test_untrusted_object_arrays_never_reach_object_handler(
         else:
             metadata.pop("entry_signature")
 
+        def change(fields):
+            user = fields["user_metadata"]
+            if rejection == "signature":
+                user["entry_signature"] = "wrong-signature"
+            elif rejection == "missing_hash":
+                user.pop("file_hash")
+            elif rejection == "unsigned":
+                user.pop("entry_signature")
+
+        rewrite_authority_manifest(cache._cache_blob_store, key, change)
+
         expected_metadata = deepcopy(metadata)
         expected_bytes = evidence_path.read_bytes()
         handler = cache.handlers.get_handler_by_type("object")
@@ -458,12 +470,9 @@ def test_untrusted_object_arrays_never_reach_object_handler(
 
         assert cache.get(cache_key=key) is None
         assert calls == []
-        if delete_invalid_signatures:
-            assert cache.metadata_backend.get_entry(key) is None
-        else:
-            retained = cache.metadata_backend.get_entry(key)
-            assert retained is entry
-            assert retained["metadata"] == expected_metadata
-            assert evidence_path.read_bytes() == expected_bytes
+        retained = cache.metadata_backend.get_entry(key)
+        assert retained is entry
+        assert retained["metadata"] == expected_metadata
+        assert evidence_path.read_bytes() == expected_bytes
     finally:
         cache.close()

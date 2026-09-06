@@ -140,6 +140,7 @@ class TestCacheIntegration:
 
     def test_concurrent_access(self, cache):
         """Test basic thread safety of cache operations."""
+        cache.initialize()
         import threading
         import time
 

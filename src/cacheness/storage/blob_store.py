@@ -8,6 +8,8 @@ authority or a recovery path.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from dataclasses import replace
 import hashlib
 import logging
 import stat
@@ -54,6 +56,7 @@ from .manifest_repository import JsonProjectionExporter
 from .memory_lifecycle_authority import InMemoryLifecycleAuthority
 from .path_security import encode_physical_name
 from .reconciliation import ReconciliationReport, _AuthorityReconciler
+from .read_contract import BlobEntryInfo
 from .sqlite_lifecycle_authority import SqliteLifecycleAuthority
 
 
@@ -135,6 +138,7 @@ class BlobStore:
             GuardedHandlerIO(self.cache_dir) if self.cache_dir.is_dir() else None
         )
         self._owns_backend = False
+        self._initialized = False
         self._released_resources = {
             "authority": False,
             "guarded_handler_io": False,
@@ -307,37 +311,56 @@ class BlobStore:
         return recognize_legacy_fixture_tree(root)
 
     @_ordinary_admitted
+    def initialize(self) -> None:
+        """Initialize once before workers start; never upgrade existing schemas.
+
+        Ordinary single-process first writes call this same path. Concurrent
+        first initialization is not a supported availability guarantee.
+        """
+        self.lifecycle_authority.preflight_mutation()
+        if self._initialized:
+            return
+        initializer = getattr(self.lifecycle_authority, "initialize", None)
+        if callable(initializer):
+            initializer()
+        self._materialize_authority_store()
+        empty = not self.lifecycle_authority.list_entries()
+        self._authority_manifest_key(initialize_new_store=empty)
+        self._initialized = True
+
+    @contextmanager
+    def open_entry(self, key: str):
+        """Acquire one verified entry; policy can inspect metadata before read()."""
+        self._require_canonical_store()
+        with self._instance_admission.operation():
+            with self.lifecycle.open_entry(key) as entry:
+                yield entry
+
+    @_ordinary_admitted
+    def get_entry_info(self, key: str) -> BlobEntryInfo | None:
+        """Inspect authenticated metadata without reading/deserializing payloads."""
+        return self.lifecycle.get_entry_info(key)
+
+    @_ordinary_admitted
+    def put_entry(self, data: Any, key=None, metadata=None) -> BlobEntryInfo:
+        """Commit an entry and own its cleanup, returning the exact receipt."""
+        result = self._put_with_result_admitted(data, key=key, metadata=metadata)
+        return replace(
+            self.lifecycle.entry_info(result.promoted),
+            previous_locator=None if result.previous is None else result.previous.locator,
+        )
+
+    @_ordinary_admitted
     def put(self, data: Any, key: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> str:
         """Store one native handler payload through the selected authority."""
         return self._put_with_result_admitted(data, key=key, metadata=metadata).key
 
-    def _put_with_result(
-        self,
-        data: Any,
-        key: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-        *,
-        projection_context: Optional[str] = None,
-    ):
-        """Run a put while retaining private authority context for the facade."""
-        self._require_canonical_store()
-        with self._instance_admission.operation():
-            return self._put_with_result_admitted(
-                data,
-                key=key,
-                metadata=metadata,
-                projection_context=projection_context,
-                defer_cleanup=True,
-            )
 
     def _put_with_result_admitted(
         self,
         data: Any,
         key: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
-        *,
-        projection_context: Optional[str] = None,
-        defer_cleanup: bool = False,
     ):
         """Store one payload after exactly one public or facade admission."""
         blob_key = (
@@ -349,15 +372,10 @@ class BlobStore:
                 data,
                 key=blob_key,
                 metadata=metadata,
-                projection_context=projection_context,
-                defer_cleanup=defer_cleanup,
             )
         self._export_compatible_projection()
         return result
 
-    def _settle_put_cleanup(self, result: Any) -> None:
-        """Finish facade-deferred cleanup after its projection is published."""
-        self.lifecycle.settle_put_cleanup(result)
 
     @_ordinary_admitted
     def get(self, key: str) -> Optional[Any]:

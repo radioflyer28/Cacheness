@@ -42,7 +42,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Dict, Any, Optional, List, Union
+from typing import Dict, Any, Optional, List
 
 import logging
 
@@ -146,8 +146,7 @@ def _compat_payload_path(root: Path, persisted_path: Any) -> str:
 
 # Try to import cachetools for entry caching
 try:
-    from cachetools import LRUCache, LFUCache, FIFOCache, RRCache, TTLCache
-    from functools import wraps
+    from cachetools import TTLCache
     import time
     CACHETOOLS_AVAILABLE = True
 except ImportError:
@@ -1848,6 +1847,8 @@ class SqliteBackend(MetadataBackend):
         cache_key: str,
         sqlite_type: Any,
         raw_value: Any,
+        *,
+        operation: str = "query_entries_by_key_params",
     ) -> dict[str, Any]:
         """Decode one persisted query mapping under the canonical manifest bounds."""
         # Import lazily: cacheness.storage imports BlobStore, which imports this
@@ -1867,6 +1868,7 @@ class SqliteBackend(MetadataBackend):
         observed_type = str(sqlite_type).lower()
         common = {
             "field": "cache_key_params",
+            "operation": operation,
             "sqlite_type": observed_type,
             "byte_size": len(raw_value),
         }
@@ -1884,7 +1886,7 @@ class SqliteBackend(MetadataBackend):
                 raw_value.decode("utf-8"),
                 object_pairs_hook=self._reject_duplicate_json_keys,
             )
-        except (UnicodeDecodeError, ValueError, TypeError) as error:
+        except (UnicodeDecodeError, ValueError, TypeError, RecursionError) as error:
             raise self._metadata_query_error(cache_key, **common) from error
         if type(decoded) is not dict:
             raise self._metadata_query_error(cache_key, **common)
@@ -2270,14 +2272,21 @@ class SqliteBackend(MetadataBackend):
         return stats
 
     def get_entry(self, cache_key: str) -> Optional[Dict[str, Any]]:
-        """Get specific cache entry metadata using columns directly - zero JSON parsing."""
+        """Read columns and strictly decode the optional raw parameter mapping."""
         if self._legacy_layout is not None:
             return self._read_legacy_entry(cache_key)
+        from sqlalchemy import LargeBinary, cast
+
         with self.SessionLocal() as session:
-            # Single optimized query - get entry using columns only
+            # Preserve invalid UTF-8 and SQLite type evidence before decoding.
             entry = session.execute(
-                select(CacheEntry).where(CacheEntry.cache_key == cache_key)
-            ).scalar_one_or_none()
+                select(
+                    *(column for column in CacheEntry.__table__.c
+                      if column.name != "cache_key_params"),
+                    func.typeof(CacheEntry.cache_key_params).label("sqlite_type"),
+                    cast(CacheEntry.cache_key_params, LargeBinary).label("raw_params"),
+                ).where(CacheEntry.cache_key == cache_key)
+            ).one_or_none()
 
             if not entry:
                 return None
@@ -2303,12 +2312,11 @@ class SqliteBackend(MetadataBackend):
             if entry.entry_signature is not None:
                 metadata["entry_signature"] = entry.entry_signature
             
-            # Only parse cache_key_params JSON if it exists (should be disabled by default)
-            if entry.cache_key_params is not None:
-                try:
-                    metadata["cache_key_params"] = json_loads(entry.cache_key_params)
-                except (ValueError, TypeError):
-                    pass  # Skip malformed cache_key_params
+            if entry.sqlite_type != "null":
+                metadata["cache_key_params"] = self._decode_cache_key_params(
+                    cache_key, entry.sqlite_type, entry.raw_params,
+                    operation="get_entry",
+                )
 
             return {
                 "description": entry.description,
@@ -2899,9 +2907,7 @@ class SqliteBackend(MetadataBackend):
         from sqlalchemy import LargeBinary, cast
 
         with self.SessionLocal() as session:
-            # Read the persisted JSON through a BLOB-safe projection.  Listing
-            # is deliberately permissive because authority selection decides
-            # which exact rows become live and undergo strict decoding later.
+            # Strictly validate every observed raw parameter mapping.
             entries = session.execute(
                 select(
                     CacheEntry.cache_key,
@@ -2945,14 +2951,11 @@ class SqliteBackend(MetadataBackend):
                 if entry.entry_signature is not None:
                     entry_metadata["entry_signature"] = entry.entry_signature
                 
-                # Only parse cache_key_params JSON if it exists (should be disabled by default)
-                if entry.sqlite_type == "text" and isinstance(entry.raw_params, bytes):
-                    try:
-                        params = json_loads(entry.raw_params.decode("utf-8"))
-                        if type(params) is dict:
-                            entry_metadata["cache_key_params"] = params
-                    except (UnicodeDecodeError, ValueError, TypeError):
-                        pass  # Skip malformed cache_key_params
+                if entry.sqlite_type != "null":
+                    entry_metadata["cache_key_params"] = self._decode_cache_key_params(
+                        entry.cache_key, entry.sqlite_type, entry.raw_params,
+                        operation="list_entries",
+                    )
                         
                 result.append(
                     {
