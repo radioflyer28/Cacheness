@@ -1449,6 +1449,17 @@ class UnifiedCache:
                 )
         metadata["file_hash"] = file_hash
         metadata["authority_generation"] = manifest.generation
+        cache_key_params = metadata.get("cache_key_params")
+        if isinstance(cache_key_params, Mapping):
+            # The lifecycle manifest is canonical JSON, while the signer renders
+            # mappings with ``str(value)``. Give both boundaries one deterministic
+            # insertion order so a backend round trip cannot invalidate a valid
+            # entry signature merely by decoding the same parameters differently.
+            cache_key_params = {
+                str(name): cache_key_params[name]
+                for name in sorted(cache_key_params, key=str)
+            }
+            metadata["cache_key_params"] = cache_key_params
         entry_data = {
             "data_type": manifest.handler_type,
             "prefix": metadata.get("prefix", ""),
@@ -1474,7 +1485,7 @@ class UnifiedCache:
                         cache_key=manifest.key,
                         entry_data=entry_data,
                         metadata=metadata,
-                        cache_key_params=metadata.get("cache_key_params"),
+                        cache_key_params=cache_key_params,
                     )
                 )
                 if not isinstance(signature, str) or not signature:

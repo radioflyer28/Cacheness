@@ -41,7 +41,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from cacheness.error_handling import CacheBlobLifecycleConflictError
+from cacheness.error_handling import CacheBlobLifecycleConflictError, CacheStorageError
 
 logger = logging.getLogger(__name__)
 
@@ -602,15 +602,23 @@ class PostgresBackend(MetadataBackend):
         if entry.entry_signature:
             metadata["entry_signature"] = entry.entry_signature
         
+        # Parse cache_key_params if present
+        if entry.cache_key_params is not None:
+            try:
+                cache_key_params = json_loads(entry.cache_key_params)
+            except (TypeError, ValueError) as exc:
+                raise CacheStorageError(
+                    "PostgreSQL cache_key_params are malformed",
+                    context={"cache_key": entry.cache_key},
+                ) from exc
+            # Signature verification reads nested metadata. Keep the historical
+            # top-level field only as an alias to that same decoded object so
+            # public callers and the signer cannot disagree about its value.
+            metadata["cache_key_params"] = cache_key_params
+            result["cache_key_params"] = cache_key_params
+
         if metadata:
             result["metadata"] = metadata
-        
-        # Parse cache_key_params if present
-        if entry.cache_key_params:
-            try:
-                result["cache_key_params"] = json_loads(entry.cache_key_params)
-            except Exception:
-                pass
         
         return result
     

@@ -11,6 +11,7 @@ from sqlalchemy import Column, String, create_engine
 from sqlalchemy.orm import sessionmaker
 
 from cacheness import CacheConfig, cacheness
+from cacheness.config import SecurityConfig
 from cacheness.custom_metadata import (
     CustomMetadataBase,
     _reset_registry,
@@ -225,3 +226,54 @@ def test_postgresql_cache_key_params_round_trip_at_the_signed_metadata_path() ->
             assert session.get(PgCacheEntry, key).cache_key_params == "{malformed"
     finally:
         backend.close()
+
+
+def test_signed_postgresql_cache_key_params_keep_a_valid_projection_live(
+    tmp_path: Path,
+) -> None:
+    """Public get/list/stats keep a valid signed PostgreSQL projection committed."""
+    signed_fields = [
+        "cache_key",
+        "data_type",
+        "prefix",
+        "file_size",
+        "file_hash",
+        "object_type",
+        "storage_format",
+        "serializer",
+        "compression_codec",
+        "actual_path",
+        "created_at",
+        "cache_key_params",
+    ]
+    cache = cacheness(
+        CacheConfig(
+            cache_dir=str(tmp_path / "signed-postgresql"),
+            metadata_backend="sqlite",
+            store_cache_key_params=True,
+            security=SecurityConfig(
+                enable_entry_signing=True,
+                allow_unsigned_entries=False,
+                delete_invalid_signatures=True,
+                custom_signed_fields=signed_fields,
+            ),
+        )
+    )
+    original_backend = cache.metadata_backend
+    cache.metadata_backend = _cached_postgresql_mapping()
+    cache.actual_backend = "postgresql"
+    try:
+        key = cache.put({"value": "signed"}, run="signed", attempt=2)
+        assert cache.get(cache_key=key) == {"value": "signed"}
+        projection = cache.metadata_backend.get_entry(key)
+        assert projection is not None
+        assert projection["metadata"]["cache_key_params"] == {
+            "run": "str:signed",
+            "attempt": "int:2",
+        }
+        assert [entry["cache_key"] for entry in cache.list_entries()] == [key]
+        assert cache.get_stats()["total_entries"] == 1
+        assert cache._cache_blob_store.lifecycle_authority.read_entry(key) is not None
+    finally:
+        cache.close()
+        original_backend.close()
