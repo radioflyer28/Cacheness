@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 
 import pytest
 
@@ -148,8 +150,23 @@ def _contains_direct_print(node: ast.AST) -> bool:
 
 
 def _ruff_findings() -> list[dict[str, object]]:
+    ruff_executable = Path(sys.executable).parent / (
+        "ruff.exe" if os.name == "nt" else "ruff"
+    )
+    if not ruff_executable.is_file():
+        pytest.fail(
+            "Ruff is unavailable from the running test environment: "
+            f"{ruff_executable}"
+        )
     result = subprocess.run(
-        ["uv", "run", "ruff", "check", "src", "tests", "--output-format", "json"],
+        [
+            str(ruff_executable),
+            "check",
+            "src",
+            "tests",
+            "--output-format",
+            "json",
+        ],
         cwd=PROJECT_ROOT,
         capture_output=True,
         text=True,

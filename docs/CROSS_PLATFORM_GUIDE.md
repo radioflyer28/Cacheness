@@ -127,6 +127,28 @@ with open("file.txt", "rb") as f:
 
 ### Running Tests
 
+#### Complete repository suite
+
+Run the complete repository suite in a fresh, lockfile-backed environment:
+
+```bash
+uv run --isolated --all-extras --group dev --frozen pytest -q -o log_cli=false
+```
+
+This is the supported complete-suite command. It installs all declared extras and
+the development test group in a new isolated environment from `uv.lock`, so it
+does not modify packages beneath an already-running test process.
+
+`uv run pytest` is intentionally not the complete-suite contract: a base
+installation does not include the optional SQLAlchemy, pandas, or S3 dependencies
+that their corresponding repository test modules exercise. During an earlier
+shared-environment run, nested `uv run ruff` resolution removed live package
+files, which then appeared as three public-import failures, 23 S3/botocore setup
+errors, and 13 SQL/pandas failures. That was a test-invocation/test-isolation
+cascade, not evidence of independent S3, SQL-cache, pandas, or public-API product
+defects; reproduce failures from the isolated command before treating them as
+repository behavior failures.
+
 ```bash
 # Run all tests
 uv run pytest tests/ -v
