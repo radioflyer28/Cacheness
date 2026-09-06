@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import sqlite3
 import time
+import json
 
 import pytest
 
@@ -23,6 +24,21 @@ from cacheness.storage.sqlite_lifecycle_authority import (
     SCHEMA_VERSION,
     SqliteLifecycleAuthority,
 )
+
+
+LIFECYCLE_BASELINE_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "benchmarks"
+    / "lifecycle_authority_baseline.json"
+)
+
+
+def _measured_busy_deadline() -> float:
+    """Read the configured busy deadline from checked-in benchmark evidence."""
+    with LIFECYCLE_BASELINE_PATH.open(encoding="utf-8") as handle:
+        return json.load(handle)["derived"]["configuration"][
+            "authority_busy_timeout_seconds"
+        ]
 
 
 def _spec(operation_id: str = "operation-1") -> MutationSpec:
@@ -136,6 +152,20 @@ def test_sqlite_authority_uses_one_absolute_busy_deadline_and_preserves_cause(
     assert elapsed < 0.2
     assert isinstance(captured.value.__cause__, sqlite3.OperationalError)
     assert authority.open_write_transactions == 0
+
+
+def test_default_busy_deadline_is_the_measured_configuration_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The default derives from baseline evidence without timing-sensitive checks."""
+    authority = SqliteLifecycleAuthority.for_root(tmp_path / "default-deadline")
+    monkeypatch.setattr(
+        "cacheness.storage.sqlite_lifecycle_authority.time.monotonic",
+        lambda: 100.0,
+    )
+
+    assert authority._deadline(None) == 100.0 + _measured_busy_deadline()
 
 
 def test_sqlite_authority_rolls_back_every_row_for_a_before_commit_fault(

@@ -11,6 +11,19 @@ from cacheness.error_handling import (
     CacheBlobRecoverableCleanupError,
 )
 from cacheness.storage import BlobStore
+from cacheness.storage.lifecycle_authority import EntryExpectation, MutationSpec
+
+
+def _prepared_spec(operation_id: str, *, manifest: bytes = b"record") -> MutationSpec:
+    """Create one direct authority residue for deterministic budget tests."""
+    return MutationSpec.create(
+        operation_id=operation_id,
+        key=f"key-{operation_id}",
+        generation=f"generation-{operation_id}",
+        candidate_locator=f".cacheness/generations/{operation_id}.payload",
+        expected=EntryExpectation.absent(),
+        manifest=manifest,
+    )
 
 
 def test_retired_control_requires_rebuild_without_mutation(
@@ -170,3 +183,105 @@ def test_authority_reconciliation_apply_resumes_bounded_cleanup_debt(
         assert store.get("b") == {"generation": "new-b"}
     finally:
         store.close()
+
+
+def test_reconciliation_enforces_row_action_byte_and_time_bounds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each configured reconciliation budget stops before a second residue."""
+    row_limited = BlobStore(
+        tmp_path / "row-limited",
+        backend="json",
+        config=CacheConfig(
+            lifecycle_limits=LifecycleLimits(
+                operation_page_size=1,
+                max_reconcile_actions=2,
+                max_operation_record_bytes=1024,
+            )
+        ),
+    )
+    try:
+        row_limited.put("seed", key="seed")
+        row_limited.lifecycle_authority.prepare_mutation(_prepared_spec("row-a"))
+        row_limited.lifecycle_authority.prepare_mutation(_prepared_spec("row-b"))
+        report = row_limited.reconcile()
+        assert report.operation_records_seen == 1
+        assert report.resume_token is not None
+    finally:
+        row_limited.close()
+
+    action_limited = BlobStore(
+        tmp_path / "action-limited",
+        backend="json",
+        config=CacheConfig(
+            lifecycle_limits=LifecycleLimits(
+                operation_page_size=2,
+                max_reconcile_actions=1,
+                max_operation_record_bytes=1024,
+            )
+        ),
+    )
+    try:
+        action_limited.put("seed", key="seed")
+        action_limited.lifecycle_authority.prepare_mutation(_prepared_spec("action-a"))
+        action_limited.lifecycle_authority.prepare_mutation(_prepared_spec("action-b"))
+        report = action_limited.reconcile(apply=True)
+        assert report.operation_records_seen == 1
+        assert report.resume_token is not None
+    finally:
+        action_limited.close()
+
+    byte_limited = BlobStore(
+        tmp_path / "byte-limited",
+        backend="json",
+        config=CacheConfig(
+            lifecycle_limits=LifecycleLimits(
+                operation_page_size=2,
+                max_reconcile_actions=2,
+                max_operation_record_bytes=1,
+            )
+        ),
+    )
+    try:
+        byte_limited.put("seed", key="seed")
+        byte_limited.lifecycle_authority.prepare_mutation(
+            _prepared_spec("bytes", manifest=b"larger-than-one-byte")
+        )
+        report = byte_limited.reconcile()
+        assert report.operation_records_seen == 0
+        assert report.resume_token is not None
+    finally:
+        byte_limited.close()
+
+    time_limited = BlobStore(
+        tmp_path / "time-limited",
+        backend="json",
+        config=CacheConfig(
+            lifecycle_limits=LifecycleLimits(
+                operation_page_size=2,
+                max_reconcile_actions=2,
+                max_operation_record_bytes=1024,
+                authority_busy_timeout_seconds=0.001,
+            )
+        ),
+    )
+    try:
+        time_limited.put("seed", key="seed")
+        time_limited.lifecycle_authority.prepare_mutation(_prepared_spec("time"))
+        times = iter((0.0, 1.0))
+
+        class ExpiredClock:
+            @staticmethod
+            def monotonic() -> float:
+                return next(times)
+
+        monkeypatch.setattr(
+            "cacheness.storage.reconciliation.time",
+            ExpiredClock,
+        )
+        report = time_limited.reconcile()
+        assert report.operation_records_seen == 0
+        assert report.resume_token is not None
+    finally:
+        time_limited.close()

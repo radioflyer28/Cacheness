@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import json
 import multiprocessing
 import threading
 from pathlib import Path
@@ -16,6 +17,28 @@ from cacheness.error_handling import (
 from cacheness.storage.blob_store import BlobStore
 from cacheness.storage.coordination import KeyCoordinatorRegistry
 from _lifecycle_test_support import ReleaseGate
+
+
+LIFECYCLE_BASELINE_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "benchmarks"
+    / "lifecycle_authority_baseline.json"
+)
+
+
+def test_overlap_release_envelope_is_benchmark_only() -> None:
+    """Overlap evidence is auditable without becoming a runtime policy knob."""
+    with LIFECYCLE_BASELINE_PATH.open(encoding="utf-8") as handle:
+        baseline = json.load(handle)
+
+    p05 = baseline["metrics"]["distinct_key_overlap"]["ratio"]["p05"]
+    multiplier = baseline["multipliers"]["distinct_key_overlap"]
+    envelope = baseline["derived"]["release_envelopes"][
+        "distinct_key_overlap_min_ratio"
+    ]
+
+    assert envelope == p05 * multiplier
+    assert "distinct_key_overlap" not in baseline["derived"]["configuration"]
 
 
 def _put_from_independent_process(
