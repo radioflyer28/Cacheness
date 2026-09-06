@@ -549,7 +549,7 @@ class UnifiedCache:
             return []
 
         try:
-            from .custom_metadata import get_custom_metadata_model
+            from .custom_metadata import CacheMetadataLink, get_custom_metadata_model
 
             model_class = get_custom_metadata_model(schema_name)
             if not model_class:
@@ -557,9 +557,21 @@ class UnifiedCache:
                 return []
 
             if hasattr(self.metadata_backend, "SessionLocal"):
+                live_keys = self._live_authority_projection_keys()
+                if not live_keys:
+                    return []
                 # Use context manager to ensure proper session cleanup
                 with self.metadata_backend.SessionLocal() as session:
-                    query = session.query(model_class)
+                    query = (
+                        session.query(model_class)
+                        .join(
+                            CacheMetadataLink,
+                            (CacheMetadataLink.metadata_table == model_class.__tablename__)
+                            & (CacheMetadataLink.metadata_id == model_class.id),
+                        )
+                        .filter(CacheMetadataLink.cache_key.in_(live_keys))
+                        .distinct()
+                    )
                     
                     # Apply optional filters
                     if filters:
@@ -608,7 +620,7 @@ class UnifiedCache:
                     "Custom metadata querying not supported - requires SQLite or PostgreSQL backend"
                 )
 
-            from .custom_metadata import get_custom_metadata_model
+            from .custom_metadata import CacheMetadataLink, get_custom_metadata_model
 
             model_class = get_custom_metadata_model(schema_name)
             if not model_class:
@@ -619,7 +631,20 @@ class UnifiedCache:
 
             session = self.metadata_backend.SessionLocal()
             try:
-                yield session.query(model_class)
+                live_keys = self._live_authority_projection_keys()
+                query = session.query(model_class)
+                if not live_keys:
+                    yield query.filter(False)
+                    return
+                yield (
+                    query.join(
+                        CacheMetadataLink,
+                        (CacheMetadataLink.metadata_table == model_class.__tablename__)
+                        & (CacheMetadataLink.metadata_id == model_class.id),
+                    )
+                    .filter(CacheMetadataLink.cache_key.in_(live_keys))
+                    .distinct()
+                )
             finally:
                 session.close()
         
@@ -796,6 +821,11 @@ class UnifiedCache:
                 # Convert results to dictionaries
                 entries = []
                 for row in result:
+                    snapshot, projection = self._authority_snapshot_entry(
+                        row.cache_key
+                    )
+                    if snapshot is None or projection is None:
+                        continue
                     entry = {
                         'cache_key': row.cache_key,
                         'description': row.description,
@@ -840,6 +870,9 @@ class UnifiedCache:
         if cache_key is None:
             cache_key = self._create_cache_key(kwargs)
 
+        snapshot, projection = self._authority_snapshot_entry(cache_key)
+        if snapshot is None or projection is None:
+            return {}
         return self._get_custom_metadata(cache_key)
 
     def _create_cache_key(self, params: Dict) -> str:
@@ -1175,6 +1208,22 @@ class UnifiedCache:
                     },
                 )
         raise AssertionError("bounded authority projection loop exhausted")
+
+    def _live_authority_projection_keys(self) -> list[str]:
+        """Return only keys whose compatibility rows match live authority state.
+
+        Custom metadata has its own table and link rows, so querying it must
+        not bypass the lifecycle authority that makes tombstones and abandoned
+        candidates invisible everywhere else.  Visiting each key also repairs
+        the stale projection with its observed exact locator; that conditional
+        operation cannot remove a peer's replacement generation.
+        """
+        live_keys: list[str] = []
+        for authority_entry in self._cache_blob_store.lifecycle_authority.list_entries():
+            snapshot, projection = self._authority_snapshot_entry(authority_entry.key)
+            if snapshot is not None and projection is not None:
+                live_keys.append(authority_entry.key)
+        return live_keys
 
     def _recognized_legacy_backend(self):
         """Return only one of the exact metadata compatibility adapters."""
@@ -2080,6 +2129,16 @@ class UnifiedCache:
     def get_stats(self) -> Dict[str, Any]:
         """Get comprehensive cache statistics."""
         stats = self.metadata_backend.get_stats()
+        live_entries = self.list_entries()
+        live_size_mb = sum(entry.get("size_mb", 0) for entry in live_entries)
+        stats["total_entries"] = len(live_entries)
+        stats["dataframe_entries"] = sum(
+            entry.get("data_type") == "dataframe" for entry in live_entries
+        )
+        stats["array_entries"] = sum(
+            entry.get("data_type") == "array" for entry in live_entries
+        )
+        stats["total_size_mb"] = round(live_size_mb, 2)
 
         # Add cache-specific information
         stats.update(
@@ -2096,7 +2155,21 @@ class UnifiedCache:
     @_clear_read_coordinated
     def list_entries(self) -> List[Dict[str, Any]]:
         """List all cache entries with metadata."""
-        entries = self.metadata_backend.list_entries()
+        entries = []
+        for entry in self.metadata_backend.list_entries():
+            cache_key = entry["cache_key"]
+            snapshot, projection = self._authority_snapshot_entry(cache_key)
+            if snapshot is not None and projection is not None:
+                visible_entry = entry.copy()
+                visible_entry["data_type"] = projection["data_type"]
+                visible_entry["description"] = projection["description"]
+                visible_entry["metadata"] = projection["metadata"]
+                visible_entry["created"] = projection["created_at"]
+                visible_entry["last_accessed"] = projection["accessed_at"]
+                visible_entry["size_mb"] = round(
+                    projection["file_size"] / (1024 * 1024), 3
+                )
+                entries.append(visible_entry)
         self._preflight_entries(entries, operation="list_entries")
 
         # Add expiration status for each entry

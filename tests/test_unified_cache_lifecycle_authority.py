@@ -37,7 +37,10 @@ def _two_caches(root: Path):
 def _two_sqlite_caches(root: Path):
     """Open independent facades sharing SQLite compatibility projections."""
     configuration = CacheConfig(
-        cache_dir=str(root), metadata_backend="sqlite", cleanup_on_init=False
+        cache_dir=str(root),
+        metadata_backend="sqlite",
+        cleanup_on_init=False,
+        store_cache_key_params=True,
     )
     return cacheness(configuration), cacheness(configuration)
 
@@ -287,6 +290,124 @@ def test_distinct_key_put_finishes_while_another_payload_is_paused(
     finally:
         resume.set()
         cache.close()
+
+
+def test_tombstone_cleanup_debt_is_invisible_to_all_public_cache_surfaces(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A committed tombstone is absent even while reconciliation owns cleanup."""
+    cache, peer = _two_sqlite_caches(tmp_path / "tombstone-public-surfaces")
+    try:
+        key = cache.put(
+            {"generation": "old"},
+            custom_metadata=ProjectionRaceMetadata(label="old"),
+            race_key="tombstone",
+        )
+        original_delete = cache._cache_blob_store._delete_or_prove_absent
+
+        def leave_cleanup_debt(_locator) -> None:
+            raise OSError("payload cleanup remains for reconciliation")
+
+        monkeypatch.setattr(
+            cache._cache_blob_store,
+            "_delete_or_prove_absent",
+            leave_cleanup_debt,
+        )
+        with pytest.raises(CacheBlobRecoverableCleanupError):
+            cache.invalidate(cache_key=key)
+        monkeypatch.setattr(
+            cache._cache_blob_store,
+            "_delete_or_prove_absent",
+            original_delete,
+        )
+
+        def reject_payload_open(*_args, **_kwargs):
+            raise AssertionError("a tombstone must not be read as payload bytes")
+
+        monkeypatch.setattr(
+            cache._cache_blob_store.guarded_handler_io,
+            "open_snapshot",
+            reject_payload_open,
+        )
+        assert cache.get(race_key="tombstone") is None
+        assert cache.list_entries() == []
+        assert cache.query_meta(race_key="tombstone") == []
+        assert cache.get_custom_metadata_for_entry(cache_key=key) == {}
+        assert cache.query_custom("projection_race") == []
+        with cache.query_custom_session("projection_race") as query:
+            assert query.all() == []
+        stats = cache.get_stats()
+        assert stats["total_entries"] == 0
+        assert stats["total_size_mb"] == 0
+        cache._cleanup_expired()
+        cache._enforce_size_limit()
+        tombstone = cache._cache_blob_store.lifecycle_authority.read_entry(key)
+        assert tombstone is not None
+        report = cache._cache_blob_store.reconcile(apply=False)
+        assert report.findings
+    finally:
+        peer.close()
+        cache.close()
+
+
+def test_authority_read_repairs_an_m1_projection_then_returns_coherent_m2(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One bounded retry returns a replacement, never an M1/M2 hybrid pair."""
+    first, second = _two_sqlite_caches(tmp_path / "authority-read-m2")
+    try:
+        key = first.put({"generation": "m1"}, race_key="coherent-read")
+        first.metadata_backend.remove_entry(key)
+        original_sync = first._sync_authority_projection
+        published = False
+
+        def publish_m2_before_repair(cache_key: str, **kwargs):
+            nonlocal published
+            if cache_key == key and not published:
+                published = True
+                assert second.put({"generation": "m2"}, race_key="coherent-read") == key
+            return original_sync(cache_key, **kwargs)
+
+        monkeypatch.setattr(first, "_sync_authority_projection", publish_m2_before_repair)
+        snapshot, projection = first._authority_snapshot_entry(key)
+
+        assert snapshot is not None and projection is not None
+        assert Path(projection["metadata"]["actual_path"]).name.startswith(
+            snapshot.generation
+        )
+        assert first.get(race_key="coherent-read") == {"generation": "m2"}
+    finally:
+        second.close()
+        first.close()
+
+
+def test_authority_read_raises_after_two_unstable_generation_observations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A forever-changing authority cannot leak a mismatched read pair."""
+    first, second = _two_sqlite_caches(tmp_path / "authority-read-conflict")
+    try:
+        key = first.put({"generation": "m1"}, race_key="unstable-read")
+        first.metadata_backend.remove_entry(key)
+        original_sync = first._sync_authority_projection
+        replacements = iter(("m2", "m3"))
+
+        def replace_on_each_repair(cache_key: str, **kwargs):
+            if cache_key == key:
+                assert second.put(
+                    {"generation": next(replacements)}, race_key="unstable-read"
+                ) == key
+            return original_sync(cache_key, **kwargs)
+
+        monkeypatch.setattr(first, "_sync_authority_projection", replace_on_each_repair)
+        with pytest.raises(CacheBlobLifecycleConflictError, match="did not stabilize"):
+            first._authority_snapshot_entry(key)
+    finally:
+        second.close()
+        first.close()
 
 
 def test_clear_all_preserves_a_generation_published_after_its_snapshot(

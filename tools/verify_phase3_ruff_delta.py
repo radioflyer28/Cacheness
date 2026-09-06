@@ -26,6 +26,7 @@ SCHEMA_VERSION = 1
 EXISTING_PATHS = [
     "src/cacheness/__init__.py",
     "src/cacheness/config.py",
+    "src/cacheness/core.py",
     "src/cacheness/error_handling.py",
     "src/cacheness/metadata.py",
     "src/cacheness/storage/__init__.py",
@@ -35,6 +36,7 @@ EXISTING_PATHS = [
     "src/cacheness/storage/lifecycle.py",
     "src/cacheness/storage/manifest_repository.py",
     "src/cacheness/storage/path_security.py",
+    "src/cacheness/storage/backends/postgresql_backend.py",
     "src/cacheness/storage/reconciliation.py",
     "tests/test_blob_store_atomic_lifecycle.py",
     "tests/test_blob_store_close_contract.py",
@@ -60,6 +62,8 @@ NEW_PATHS = [
     "tests/test_phase3_scheduler_retirement.py",
     "tests/test_phase3_windows_contract.py",
     "tests/test_phase3_ruff_delta.py",
+    "tests/test_projection_mutation_contract.py",
+    "tests/test_unified_cache_lifecycle_authority.py",
     "tools/verify_phase3_ruff_delta.py",
 ]
 

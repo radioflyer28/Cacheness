@@ -188,11 +188,75 @@
       "message": "`sqlalchemy` imported but unused; consider using `importlib.util.find_spec` to test for availability",
       "path": "verify_platform.py",
       "source": "        import sqlalchemy"
+    },
+    {
+      "code": "F401",
+      "fingerprint": "a260e8581b15aa3ede84f7c443c58fc605f3c80fa30b726b03a45ba51c63d996",
+      "message": "`.custom_metadata.get_schema_name_for_model` imported but unused",
+      "path": "src/cacheness/core.py",
+      "source": "            from .custom_metadata import get_custom_metadata_model, CacheMetadataLink, get_schema_name_for_model, get_all_custom_metadata_models"
+    },
+    {
+      "code": "F401",
+      "fingerprint": "9a4e98269da5a86c550bd6bb286953a1947915e78488b5825c24b1adc4301a2c",
+      "message": "`.custom_metadata.get_custom_metadata_model` imported but unused",
+      "path": "src/cacheness/core.py",
+      "source": "            from .custom_metadata import get_custom_metadata_model, CacheMetadataLink"
+    },
+    {
+      "code": "F401",
+      "fingerprint": "41ab3dbd6982e5d03023f0046ffaed18a76353f2719b810734ec16bb8187dc67",
+      "message": "`sqlalchemy.text` imported but unused; consider using `importlib.util.find_spec` to test for availability",
+      "path": "src/cacheness/storage/backends/postgresql_backend.py",
+      "source": "        text,"
+    },
+    {
+      "code": "F401",
+      "fingerprint": "ddbb4818650417fce3c2e797e2239d0a3fcd21c8023c92f7a2d2ba00b63219e4",
+      "message": "`sqlalchemy.inspect` imported but unused; consider using `importlib.util.find_spec` to test for availability",
+      "path": "src/cacheness/storage/backends/postgresql_backend.py",
+      "source": "        inspect,"
+    },
+    {
+      "code": "F401",
+      "fingerprint": "f7ede717e6ddc89719fb16d65f58d05038d7024a7192d43745a1e1241d9b7c0c",
+      "message": "`sqlalchemy.exc.OperationalError` imported but unused; consider using `importlib.util.find_spec` to test for availability",
+      "path": "src/cacheness/storage/backends/postgresql_backend.py",
+      "source": "    from sqlalchemy.exc import OperationalError, IntegrityError"
+    },
+    {
+      "code": "F401",
+      "fingerprint": "b1dfc186ad3f90256f9a6ba8091f0dd7d6b8fa6909ec9c3e21af74ecec2fdb28",
+      "message": "`sqlalchemy.exc.IntegrityError` imported but unused; consider using `importlib.util.find_spec` to test for availability",
+      "path": "src/cacheness/storage/backends/postgresql_backend.py",
+      "source": "    from sqlalchemy.exc import OperationalError, IntegrityError"
+    },
+    {
+      "code": "F401",
+      "fingerprint": "745d317aa434b2191c3bd030c3d773b124b1e04ee346fef8291514f8ba1fbc81",
+      "message": "`psycopg2` imported but unused; consider using `importlib.util.find_spec` to test for availability",
+      "path": "src/cacheness/storage/backends/postgresql_backend.py",
+      "source": "    import psycopg2"
+    },
+    {
+      "code": "F401",
+      "fingerprint": "c8a6368eedd3dd4cc128141395ddffb015eff1f7b9eb2174c62c092ba3b925bc",
+      "message": "`psycopg` imported but unused; consider using `importlib.util.find_spec` to test for availability",
+      "path": "src/cacheness/storage/backends/postgresql_backend.py",
+      "source": "        import psycopg"
+    },
+    {
+      "code": "E402",
+      "fingerprint": "d54c15725abbe6e2fd7e27ba61450d8c68a2f6a0e140676ab1d6f34c8e2888c4",
+      "message": "Module level import not at top of file",
+      "path": "src/cacheness/storage/backends/postgresql_backend.py",
+      "source": "from .base import MetadataBackend"
     }
   ],
   "existing_paths": [
     "src/cacheness/__init__.py",
     "src/cacheness/config.py",
+    "src/cacheness/core.py",
     "src/cacheness/error_handling.py",
     "src/cacheness/metadata.py",
     "src/cacheness/storage/__init__.py",
@@ -202,6 +266,7 @@
     "src/cacheness/storage/lifecycle.py",
     "src/cacheness/storage/manifest_repository.py",
     "src/cacheness/storage/path_security.py",
+    "src/cacheness/storage/backends/postgresql_backend.py",
     "src/cacheness/storage/reconciliation.py",
     "tests/test_blob_store_atomic_lifecycle.py",
     "tests/test_blob_store_close_contract.py",
@@ -231,6 +296,8 @@
     "tests/test_phase3_scheduler_retirement.py",
     "tests/test_phase3_windows_contract.py",
     "tests/test_phase3_ruff_delta.py",
+    "tests/test_projection_mutation_contract.py",
+    "tests/test_unified_cache_lifecycle_authority.py",
     "tools/verify_phase3_ruff_delta.py"
   ],
   "schema_version": 1
