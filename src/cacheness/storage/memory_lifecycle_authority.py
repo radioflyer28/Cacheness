@@ -105,6 +105,12 @@ class InMemoryLifecycleAuthority:
             entry = self._entries.get(key)
             return None if entry is None else self._copy(entry)
 
+    def read_expectation(self, key: str) -> EntryExpectation:
+        """Return exact present or absent lineage for one later mutation CAS."""
+        self._require_open()
+        with self._lock:
+            return self._expectation(key)
+
     def snapshot_state(self) -> AuthorityStateSnapshot:
         self._require_open()
         with self._lock:

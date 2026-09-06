@@ -3,14 +3,27 @@
 from __future__ import annotations
 
 from pathlib import Path
+from threading import Event, Thread
 
 import pytest
+from sqlalchemy import Column, String
 
 from cacheness import CacheConfig, cacheness
+from cacheness.custom_metadata import CustomMetadataBase, custom_metadata_model
 from cacheness.error_handling import (
     CacheBlobLifecycleConflictError,
     CacheBlobRecoverableCleanupError,
 )
+from cacheness.metadata import Base
+
+
+@custom_metadata_model("projection_race")
+class ProjectionRaceMetadata(Base, CustomMetadataBase):
+    """Minimal linked metadata used to prove projection-token ownership."""
+
+    __tablename__ = "custom_projection_race_metadata"
+
+    label = Column(String(100), nullable=False)
 
 
 def _two_caches(root: Path):
@@ -56,6 +69,224 @@ def test_stale_projection_removal_is_a_noop_after_a_peer_replaces_its_token(
     finally:
         second.close()
         first.close()
+
+
+def test_stale_absence_teardown_preserves_m2_custom_metadata_links(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An M1-observed absence cannot remove M2's row or its newly linked data."""
+    first, second = _two_sqlite_caches(tmp_path / "stale-absence-custom-links")
+    try:
+        key = first.put(
+            {"generation": "old"},
+            custom_metadata=ProjectionRaceMetadata(label="old"),
+            race_key="stale-absence",
+        )
+        old_snapshot = first._cache_blob_store.lifecycle_authority.read_entry(key)
+        assert old_snapshot is not None
+        assert first._cache_blob_store.delete(key, expected=old_snapshot.expectation)
+        tombstone = first._cache_blob_store.lifecycle_authority.read_entry(key)
+        if tombstone is not None:
+            assert first._cache_blob_store.delete(
+                key, expected=tombstone.expectation
+            )
+        assert first._cache_blob_store.lifecycle_authority.read_entry(key) is None
+
+        original_snapshot_manifest = first._authority_snapshot_manifest
+        published = False
+
+        def publish_m2_after_absence(cache_key: str):
+            nonlocal published
+            snapshot, manifest = original_snapshot_manifest(cache_key)
+            if cache_key == key and not published:
+                published = True
+                assert second.put(
+                    {"generation": "new"},
+                    custom_metadata=ProjectionRaceMetadata(label="new"),
+                    race_key="stale-absence",
+                ) == key
+            return snapshot, manifest
+
+        monkeypatch.setattr(
+            first, "_authority_snapshot_manifest", publish_m2_after_absence
+        )
+        outcome = first._sync_authority_projection(key)
+
+        assert outcome.status == "mismatch"
+        assert second.get(race_key="stale-absence") == {"generation": "new"}
+        linked = second.get_custom_metadata_for_entry(cache_key=key)
+        assert linked["projection_race"].label == "new"
+        assert [entry["cache_key"] for entry in second.list_entries()] == [key]
+    finally:
+        second.close()
+        first.close()
+
+
+def test_failed_first_put_repair_preserves_peer_projection_and_links(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed candidate repair must not undo M2 after the authority stays absent."""
+    first, second = _two_sqlite_caches(tmp_path / "failed-first-put-custom-links")
+    try:
+        original_record = first._cache_blob_store.lifecycle_authority.record_verification
+        original_repair = first._repair_projection_after_failed_put
+        published = False
+
+        def fail_verification(*_args, **_kwargs):
+            raise OSError("forced verification failure")
+
+        def publish_before_repair(cache_key: str) -> None:
+            nonlocal published
+            if not published:
+                published = True
+                assert second.put(
+                    {"generation": "m2"},
+                    custom_metadata=ProjectionRaceMetadata(label="m2"),
+                    race_key="failed-first-put",
+                ) == cache_key
+            original_repair(cache_key)
+
+        monkeypatch.setattr(
+            first._cache_blob_store.lifecycle_authority,
+            "record_verification",
+            fail_verification,
+        )
+        monkeypatch.setattr(first, "_repair_projection_after_failed_put", publish_before_repair)
+        with pytest.raises(OSError, match="forced verification failure"):
+            first.put({"generation": "candidate"}, race_key="failed-first-put")
+        monkeypatch.setattr(
+            first._cache_blob_store.lifecycle_authority,
+            "record_verification",
+            original_record,
+        )
+
+        assert second.get(race_key="failed-first-put") == {"generation": "m2"}
+        linked = second.get_custom_metadata_for_entry(
+            cache_key=second._create_cache_key({"race_key": "failed-first-put"})
+        )
+        assert linked["projection_race"].label == "m2"
+    finally:
+        second.close()
+        first.close()
+
+
+def test_replacement_before_projection_hook_preserves_m2(
+    tmp_path: Path,
+) -> None:
+    """An A write that captured M1 loses cleanly when B replaces M1 first."""
+    first, second = _two_sqlite_caches(tmp_path / "replacement-before-projection")
+    paused = Event()
+    resume = Event()
+    first_error: list[BaseException] = []
+    try:
+        key = first.put({"generation": "m1"}, race_key="projection-hook")
+
+        def pause_before_projection(boundary: str) -> None:
+            if boundary == "put.candidate_published":
+                paused.set()
+                assert resume.wait(timeout=5)
+
+        def write_a() -> None:
+            try:
+                first.put({"generation": "a"}, race_key="projection-hook")
+            except BaseException as error:
+                first_error.append(error)
+
+        first._cache_blob_store.lifecycle.test_hook = pause_before_projection
+        writer = Thread(target=write_a)
+        writer.start()
+        assert paused.wait(timeout=5)
+        assert second.put({"generation": "m2"}, race_key="projection-hook") == key
+        resume.set()
+        writer.join(timeout=5)
+
+        assert len(first_error) == 1
+        assert isinstance(first_error[0], CacheBlobLifecycleConflictError)
+        assert second.get(race_key="projection-hook") == {"generation": "m2"}
+    finally:
+        resume.set()
+        second.close()
+        first.close()
+
+
+def test_replacement_before_custom_link_rejects_stale_metadata_insert(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A promoted locator must still be current when its links are inserted."""
+    first, second = _two_sqlite_caches(tmp_path / "replacement-before-custom-link")
+    try:
+        original_store = first._store_custom_metadata
+        replaced = False
+
+        def replace_before_link(cache_key: str, custom_metadata, **kwargs) -> None:
+            nonlocal replaced
+            if not replaced:
+                replaced = True
+                assert second.put(
+                    {"generation": "m2"},
+                    custom_metadata=ProjectionRaceMetadata(label="m2"),
+                    race_key="custom-link",
+                ) == cache_key
+            original_store(cache_key, custom_metadata, **kwargs)
+
+        monkeypatch.setattr(first, "_store_custom_metadata", replace_before_link)
+        with pytest.raises(CacheBlobLifecycleConflictError):
+            first.put(
+                {"generation": "a"},
+                custom_metadata=ProjectionRaceMetadata(label="a"),
+                race_key="custom-link",
+            )
+
+        key = second._create_cache_key({"race_key": "custom-link"})
+        assert second.get(race_key="custom-link") == {"generation": "m2"}
+        assert second.get_custom_metadata_for_entry(cache_key=key)["projection_race"].label == "m2"
+        assert [item.label for item in second.query_custom("projection_race")] == ["m2"]
+    finally:
+        second.close()
+        first.close()
+
+
+def test_distinct_key_put_finishes_while_another_payload_is_paused(
+    tmp_path: Path,
+) -> None:
+    """The retained facade lock cannot serialize unrelated payload publication."""
+    cache = _two_sqlite_caches(tmp_path / "distinct-key-overlap")[0]
+    paused = Event()
+    resume = Event()
+    second_finished = Event()
+    try:
+        assert hasattr(cache, "_lock")
+
+        def pause_first(boundary: str) -> None:
+            if boundary == "put.candidate_published" and not paused.is_set():
+                paused.set()
+                assert resume.wait(timeout=5)
+
+        def put_first() -> None:
+            cache.put({"generation": "a"}, race_key="first")
+
+        def put_second() -> None:
+            cache.put({"generation": "b"}, race_key="second")
+            second_finished.set()
+
+        cache._cache_blob_store.lifecycle.test_hook = pause_first
+        first_writer = Thread(target=put_first)
+        second_writer = Thread(target=put_second)
+        first_writer.start()
+        assert paused.wait(timeout=5)
+        second_writer.start()
+        assert second_finished.wait(timeout=5)
+        resume.set()
+        first_writer.join(timeout=5)
+        second_writer.join(timeout=5)
+        assert cache.get(race_key="first") == {"generation": "a"}
+        assert cache.get(race_key="second") == {"generation": "b"}
+    finally:
+        resume.set()
+        cache.close()
 
 
 def test_clear_all_preserves_a_generation_published_after_its_snapshot(
@@ -165,11 +396,9 @@ def test_projection_sync_never_pairs_an_old_locator_with_a_new_generation(
         projection = first.metadata_backend.get_entry(key)
         assert projection is not None
         metadata = projection["metadata"]
-        assert Path(metadata["actual_path"]).name.startswith(old_snapshot.generation)
-        assert metadata.get("authority_generation") == old_snapshot.generation
+        assert not Path(metadata["actual_path"]).name.startswith(old_snapshot.generation)
 
-        # The old observation cannot be mistaken for the replacement. A normal
-        # facade read refreshes the projection and must not retire M2.
+        # The stale M1 observation cannot replace M2 at the projection boundary.
         assert first.get(race_key="projection") == {"generation": "new"}
         assert second.get(race_key="projection") == {"generation": "new"}
     finally:

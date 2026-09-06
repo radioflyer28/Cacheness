@@ -309,14 +309,30 @@ class BlobStore:
     @_ordinary_admitted
     def put(self, data: Any, key: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> str:
         """Store one native handler payload through the selected authority."""
+        return self._put_with_result(data, key=key, metadata=metadata).key
+
+    def _put_with_result(
+        self,
+        data: Any,
+        key: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        *,
+        projection_context: Optional[str] = None,
+    ):
+        """Run a put while retaining private authority context for the facade."""
         blob_key = (
             self._compute_content_hash(data) if self.content_addressable
             else key if key is not None else self._generate_unique_key()
         )
         with self._key_coordinator.hold(self._storage_id_for_key(blob_key)):
-            stored_key = self.lifecycle.put(data, key=blob_key, metadata=metadata)
+            result = self.lifecycle.put(
+                data,
+                key=blob_key,
+                metadata=metadata,
+                projection_context=projection_context,
+            )
         self._export_compatible_projection()
-        return stored_key
+        return result
 
     @_ordinary_admitted
     def get(self, key: str) -> Optional[Any]:

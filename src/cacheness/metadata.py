@@ -35,6 +35,7 @@ import uuid
 import warnings
 from abc import ABC, abstractmethod
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Union
@@ -45,6 +46,29 @@ from .json_utils import dumps as json_dumps, loads as json_loads
 from .error_handling import CacheLegacyFormatError, CacheReason, CacheStorageError
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ProjectionMutationResult:
+    """Outcome of one generation-specific compatibility projection mutation.
+
+    A projection is deliberately not lifecycle authority.  The result makes the
+    only meaningful projection outcomes explicit so stale facade work cannot
+    turn a compare mismatch into a key-only delete.
+    """
+
+    status: str
+    entry: Optional[Dict[str, Any]] = None
+
+    @property
+    def applied(self) -> bool:
+        """Whether this caller changed the current projection row."""
+        return self.status == "applied"
+
+    @property
+    def converged(self) -> bool:
+        """Whether the requested projection state was already present."""
+        return self.status == "converged"
 
 
 _LEGACY_SPLIT_JSON_KEYS = frozenset(
@@ -293,6 +317,22 @@ class MetadataBackend(ABC):
         """Remove all cache entries and return count removed."""
         pass
 
+    def conditional_projection_mutation(
+        self,
+        cache_key: str,
+        *,
+        expected_locator: Optional[str],
+        replacement: Optional[Dict[str, Any]],
+    ) -> ProjectionMutationResult:
+        """Conditionally replace or remove an exact projection identity.
+
+        ``expected_locator`` is the immutable generation identity retained by
+        existing metadata schemas.  ``None`` means exact absence.  Concrete
+        durable adapters must make the comparison and any row/link transition
+        one short local transaction.
+        """
+        raise NotImplementedError("conditional projection mutation is unsupported")
+
     def close(self):
         """Close and clean up any resources (default implementation does nothing)."""
         pass
@@ -432,6 +472,29 @@ class CachedMetadataBackend(MetadataBackend):
                 entry_cache_key = self._cache_key_for_entry(cache_key)
                 self._memory_cache.pop(entry_cache_key, None)
                 logger.debug(f"Memory cache invalidated: {cache_key}")
+
+    def conditional_projection_mutation(
+        self,
+        cache_key: str,
+        *,
+        expected_locator: Optional[str],
+        replacement: Optional[Dict[str, Any]],
+    ) -> ProjectionMutationResult:
+        """Delegate one exact mutation and never retain a stale cache entry."""
+        result = self.backend.conditional_projection_mutation(
+            cache_key,
+            expected_locator=expected_locator,
+            replacement=replacement,
+        )
+        if self._memory_cache is not None:
+            with self._lock:
+                memory_key = self._cache_key_for_entry(cache_key)
+                self._memory_cache.pop(memory_key, None)
+                if result.status != "mismatch":
+                    current = self.backend.get_entry(cache_key)
+                    if current is not None:
+                        self._memory_cache[memory_key] = current
+        return result
     
     def clear_all(self) -> int:
         """Remove all cache entries and clear memory cache."""
@@ -624,6 +687,45 @@ class InMemoryBackend(MetadataBackend):
         """Remove cache entry metadata with O(1) operations (simple unified entry)."""
         with self._lock:
             self._entries.pop(cache_key, None)
+
+    def conditional_projection_mutation(
+        self,
+        cache_key: str,
+        *,
+        expected_locator: Optional[str],
+        replacement: Optional[Dict[str, Any]],
+    ) -> ProjectionMutationResult:
+        """Apply the process-local form of the projection token contract."""
+        with self._lock:
+            current = self._entries.get(cache_key)
+            current_locator = (
+                current.get("metadata", {}).get("actual_path")
+                if isinstance(current, dict)
+                else None
+            )
+            matches = (
+                current is None
+                if expected_locator is None
+                else current is not None and current_locator == expected_locator
+            )
+            if not matches:
+                return ProjectionMutationResult("mismatch")
+            if replacement is None:
+                if current is None:
+                    return ProjectionMutationResult("converged")
+                self._entries.pop(cache_key, None)
+                return ProjectionMutationResult("applied")
+            replacement_locator = replacement.get("metadata", {}).get("actual_path")
+            if not isinstance(replacement_locator, str) or not replacement_locator:
+                raise CacheStorageError(
+                    "Conditional projection replacement requires an actual_path",
+                    context={"cache_key": cache_key},
+                )
+            if current is not None and current_locator == replacement_locator:
+                self.put_entry(cache_key, replacement)
+                return ProjectionMutationResult("converged", self._entries[cache_key])
+            self.put_entry(cache_key, replacement)
+            return ProjectionMutationResult("applied", self._entries[cache_key])
     
     def list_entries(self) -> List[Dict[str, Any]]:
         """List all cache entries - pure in-memory, no caching needed (simple unified entries)."""
@@ -1156,6 +1258,8 @@ class JsonBackend(MetadataBackend):
 
     def get_entry(self, cache_key: str) -> Optional[Dict[str, Any]]:
         with self._lock:
+            if self._legacy_layout is None:
+                self._metadata = self._load_from_disk()
             return self._metadata.get("entries", {}).get(cache_key)
 
     def put_entry(self, cache_key: str, entry_data: Dict[str, Any]) -> None:
@@ -1185,6 +1289,61 @@ class JsonBackend(MetadataBackend):
             candidate.get("entries", {}).pop(cache_key, None)
             self._save_to_disk(candidate)
             self._metadata = candidate
+
+    def conditional_projection_mutation(
+        self,
+        cache_key: str,
+        *,
+        expected_locator: Optional[str],
+        replacement: Optional[Dict[str, Any]],
+    ) -> ProjectionMutationResult:
+        """Apply a local JSON projection CAS; durable cross-instance locking follows."""
+        with self._lock:
+            # A second facade owns a separate in-memory document. Refresh from
+            # the durable projection before comparing its expected token.
+            self._metadata = self._load_from_disk()
+            current = self._metadata.get("entries", {}).get(cache_key)
+            current_locator = (
+                current.get("metadata", {}).get("actual_path")
+                if isinstance(current, dict)
+                else None
+            )
+            matches = (
+                current is None
+                if expected_locator is None
+                else current is not None and current_locator == expected_locator
+            )
+            if not matches:
+                return ProjectionMutationResult("mismatch")
+            if replacement is None:
+                if current is None:
+                    return ProjectionMutationResult("converged")
+                candidate = deepcopy(self._metadata)
+                candidate["entries"].pop(cache_key, None)
+                self._save_to_disk(candidate)
+                self._metadata = candidate
+                return ProjectionMutationResult("applied")
+            replacement_locator = replacement.get("metadata", {}).get("actual_path")
+            if not isinstance(replacement_locator, str) or not replacement_locator:
+                raise CacheStorageError(
+                    "Conditional projection replacement requires an actual_path",
+                    context={"cache_key": cache_key},
+                )
+            candidate = deepcopy(self._metadata)
+            now = datetime.now(timezone.utc).isoformat()
+            candidate.setdefault("entries", {})[cache_key] = {
+                "description": replacement.get("description", ""),
+                "data_type": replacement.get("data_type", "unknown"),
+                "prefix": replacement.get("prefix", ""),
+                "created_at": replacement.get("created_at", now),
+                "accessed_at": replacement.get("accessed_at", now),
+                "file_size": replacement.get("file_size", 0),
+                "metadata": dict(replacement.get("metadata", {})),
+            }
+            self._save_to_disk(candidate)
+            self._metadata = candidate
+            status = "converged" if current_locator == replacement_locator else "applied"
+            return ProjectionMutationResult(status, candidate["entries"][cache_key])
 
     def list_entries(self) -> List[Dict[str, Any]]:
         with self._lock:
@@ -1689,6 +1848,132 @@ class SqliteBackend(MetadataBackend):
                 }
             )
             session.commit()
+
+    @staticmethod
+    def _projection_locator(entry: Optional["CacheEntry"]) -> Optional[str]:
+        """Return the immutable locator identity persisted by SQLite rows."""
+        if entry is None or not isinstance(entry.actual_path, str):
+            return None
+        return entry.actual_path
+
+    @staticmethod
+    def _projection_entry_values(entry_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Render compatibility entry data for an in-transaction ORM update."""
+        metadata = dict(entry_data.get("metadata", {}))
+        cache_key_params = metadata.pop("cache_key_params", None)
+        if cache_key_params is not None:
+            if entry_data.get("_cache_key_params_serialized") is True:
+                serialized_params = json_dumps(cache_key_params)
+            else:
+                try:
+                    from .serialization import serialize_for_cache_key
+
+                    serialized_params = json_dumps(
+                        {
+                            name: serialize_for_cache_key(value)
+                            for name, value in cache_key_params.items()
+                        }
+                    )
+                except Exception:
+                    serialized_params = json_dumps(cache_key_params)
+        else:
+            serialized_params = None
+
+        created_at = entry_data.get("created_at")
+        if isinstance(created_at, str):
+            created_at = datetime.fromisoformat(created_at)
+        if created_at is None:
+            created_at = datetime.now(timezone.utc)
+        accessed_at = entry_data.get("accessed_at")
+        if isinstance(accessed_at, str):
+            accessed_at = datetime.fromisoformat(accessed_at)
+        if accessed_at is None:
+            accessed_at = datetime.now(timezone.utc)
+
+        return {
+            "description": entry_data.get("description", ""),
+            "data_type": entry_data.get("data_type", "unknown"),
+            "prefix": entry_data.get("prefix", ""),
+            "file_size": entry_data.get("file_size", 0),
+            "file_hash": metadata.get("file_hash"),
+            "entry_signature": metadata.get("entry_signature"),
+            "cache_key_params": serialized_params,
+            "object_type": metadata.get("object_type"),
+            "storage_format": metadata.get("storage_format"),
+            "serializer": metadata.get("serializer"),
+            "compression_codec": metadata.get("compression_codec"),
+            "actual_path": metadata.get("actual_path"),
+            "created_at": created_at,
+            "accessed_at": accessed_at,
+        }
+
+    @staticmethod
+    def _cleanup_projection_links(session, cache_key: str) -> None:
+        """Delete token-owned links only when a projection identity changes."""
+        try:
+            from sqlalchemy import inspect
+            from .custom_metadata import CacheMetadataLink
+
+            if inspect(session.bind).has_table(CacheMetadataLink.__tablename__):
+                CacheMetadataLink.cleanup_for_cache_key(session, cache_key)
+        except ImportError:
+            return
+
+    def conditional_projection_mutation(
+        self,
+        cache_key: str,
+        *,
+        expected_locator: Optional[str],
+        replacement: Optional[Dict[str, Any]],
+    ) -> ProjectionMutationResult:
+        """Apply one locator-CAS projection transition and preserve link ownership.
+
+        A replacement with the same locator is an idempotent refresh and keeps
+        links.  A token change atomically removes links belonging to the old
+        row before changing the row.  Any comparison mismatch changes neither.
+        """
+        self._ensure_writable()
+        with self._lock, self.SessionLocal() as session:
+            current = session.execute(
+                select(CacheEntry).where(CacheEntry.cache_key == cache_key)
+            ).scalar_one_or_none()
+            current_locator = self._projection_locator(current)
+            matches = (
+                current is None
+                if expected_locator is None
+                else current is not None and current_locator == expected_locator
+            )
+            if not matches:
+                return ProjectionMutationResult("mismatch")
+
+            if replacement is None:
+                if current is None:
+                    return ProjectionMutationResult("converged")
+                self._cleanup_projection_links(session, cache_key)
+                session.delete(current)
+                session.commit()
+                return ProjectionMutationResult("applied")
+
+            values = self._projection_entry_values(replacement)
+            replacement_locator = values.get("actual_path")
+            if not isinstance(replacement_locator, str) or not replacement_locator:
+                raise CacheStorageError(
+                    "Conditional projection replacement requires an actual_path",
+                    context={"cache_key": cache_key},
+                )
+            if current is None:
+                current = CacheEntry(cache_key=cache_key, **values)
+                session.add(current)
+                session.commit()
+                return ProjectionMutationResult("applied")
+
+            if current_locator != replacement_locator:
+                self._cleanup_projection_links(session, cache_key)
+            for name, value in values.items():
+                setattr(current, name, value)
+            session.commit()
+            status = "converged" if current_locator == replacement_locator else "applied"
+            return ProjectionMutationResult(status)
 
     def remove_entry(self, cache_key: str):
         """Remove cache entry metadata and associated custom metadata links."""

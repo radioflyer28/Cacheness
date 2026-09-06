@@ -959,6 +959,20 @@ class SqliteLifecycleAuthority:
                     context={"operation": "lifecycle_authority_read"},
                 ) from error
 
+    def read_expectation(self, key: str) -> EntryExpectation:
+        """Read exact present or absent lineage without decoding a manifest."""
+        absolute_deadline = self._deadline(None)
+        with self._connection(mutation=False, deadline=absolute_deadline) as connection:
+            if connection is None:
+                return EntryExpectation.absent()
+            try:
+                return self._expectation(connection, key)
+            except sqlite3.Error as error:
+                self._translate_sqlite_error(
+                    error, operation="lifecycle_authority_expectation"
+                )
+                raise AssertionError("SQLite error translation must raise")
+
     def prepare_mutation(self, spec: MutationSpec) -> PreparedMutation:
         def prepare(connection: sqlite3.Connection) -> PreparedMutation:
             existing = connection.execute(

@@ -47,6 +47,17 @@ class _LifecycleHookContext:
     key: str | None
 
 
+@dataclass(frozen=True)
+class LifecyclePutResult:
+    """Private immutable context for one completed authority-backed put."""
+
+    key: str
+    expected: EntryExpectation
+    promoted: EntrySnapshot | None
+    previous: EntrySnapshot | None
+    expected_projection_locator: str | None = None
+
+
 class AuthorityLifecycleEngine:
     """Coordinate immutable native payloads through complete authority calls."""
 
@@ -163,7 +174,14 @@ class AuthorityLifecycleEngine:
                 )
             )
 
-    def put(self, data: Any, *, key: str, metadata: dict[str, Any] | None) -> str:
+    def put(
+        self,
+        data: Any,
+        *,
+        key: str,
+        metadata: dict[str, Any] | None,
+        projection_context: str | None = None,
+    ) -> LifecyclePutResult:
         """Prepare, publish, verify, promote, then reclaim exact old debt."""
         handler = self.store.handlers.get_handler(data)
         # A Windows authority root is a deployment-provisioned security
@@ -174,7 +192,9 @@ class AuthorityLifecycleEngine:
         if previous is not None:
             self._entry_manifest(previous, allow_tombstone=True)
         expected = (
-            previous.expectation if previous is not None else EntryExpectation.absent()
+            previous.expectation
+            if previous is not None
+            else self.authority.read_expectation(key)
         )
         guarded_io = self.store._materialize_authority_store()
         with guarded_io.stage(handler, data, self.store.config) as staged:
@@ -239,7 +259,16 @@ class AuthorityLifecycleEngine:
                     self.store, "_before_authority_promotion", None
                 )
                 if callable(before_promotion):
-                    manifest = before_promotion(manifest)
+                    manifest = before_promotion(
+                        manifest,
+                        LifecyclePutResult(
+                            key=key,
+                            expected=expected,
+                            promoted=None,
+                            previous=previous,
+                            expected_projection_locator=projection_context,
+                        ),
+                    )
                     if not isinstance(manifest, BlobManifestV1):
                         raise CacheBlobLifecycleConflictError(
                             "Lifecycle projection hook must return a BlobManifestV1"
@@ -271,7 +300,13 @@ class AuthorityLifecycleEngine:
         self._reach("put.promoted", key=key)
         self._settle_debts(promoted.cleanup_debt)
         self._reach("put.cleanup_retired", key=key)
-        return key
+        return LifecyclePutResult(
+            key=key,
+            expected=expected,
+            promoted=promoted.entry,
+            previous=previous,
+            expected_projection_locator=projection_context,
+        )
 
     def update_metadata(self, key: str, metadata: dict[str, Any]) -> bool:
         """Promote a new signed metadata revision without changing payload bytes."""
