@@ -39,7 +39,7 @@ import logging
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from cacheness.error_handling import CacheBlobLifecycleConflictError, CacheStorageError
 
@@ -611,6 +611,11 @@ class PostgresBackend(MetadataBackend):
                     "PostgreSQL cache_key_params are malformed",
                     context={"cache_key": entry.cache_key},
                 ) from exc
+            if not isinstance(cache_key_params, Mapping):
+                raise CacheStorageError(
+                    "PostgreSQL cache_key_params must decode to a mapping",
+                    context={"cache_key": entry.cache_key},
+                )
             # Signature verification reads nested metadata. Keep the historical
             # top-level field only as an alias to that same decoded object so
             # public callers and the signer cannot disagree about its value.

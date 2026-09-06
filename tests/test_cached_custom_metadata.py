@@ -215,15 +215,16 @@ def test_postgresql_cache_key_params_round_trip_at_the_signed_metadata_path() ->
         }
         assert entry["cache_key_params"] is entry["metadata"]["cache_key_params"]
 
-        with backend.SessionLocal() as session:
-            row = session.get(PgCacheEntry, key)
-            assert row is not None
-            row.cache_key_params = "{malformed"
-            session.commit()
-        with pytest.raises(CacheStorageError):
-            backend.get_entry(key)
-        with backend.SessionLocal() as session:
-            assert session.get(PgCacheEntry, key).cache_key_params == "{malformed"
+        for malformed_value in ("{malformed", "[]", "null"):
+            with backend.SessionLocal() as session:
+                row = session.get(PgCacheEntry, key)
+                assert row is not None
+                row.cache_key_params = malformed_value
+                session.commit()
+            with pytest.raises(CacheStorageError):
+                backend.get_entry(key)
+            with backend.SessionLocal() as session:
+                assert session.get(PgCacheEntry, key).cache_key_params == malformed_value
     finally:
         backend.close()
 
