@@ -82,9 +82,7 @@ class CacheMetadataConfig:
 
     def __post_init__(self):
         """Validate metadata backend configuration."""
-        # Built-in backends have special validation; custom registered backends are validated at runtime
-        builtin_backends = ["auto", "memory", "json", "sqlite", "sqlite_memory"]
-        # Note: Custom backends are validated when get_metadata_backend() is called
+        # Custom backends are validated when get_metadata_backend() is called.
         
         if self.default_ttl_hours is not None and self.default_ttl_hours <= 0:
             raise ValueError("default_ttl_hours must be positive")
@@ -703,7 +701,6 @@ class CacheConfig:
         local_metadata_backends = {"sqlite", "sqlite_memory", "json", "auto"}
         remote_blob_backends = {"s3", "azure", "gcs"}  # S3 and future cloud backends
         ephemeral_metadata_backends = {"memory"}
-        persistent_blob_backends = {"filesystem", "s3", "azure", "gcs"}
         
         # Check for incompatible combinations
         if metadata_backend in local_metadata_backends and blob_backend in remote_blob_backends:
