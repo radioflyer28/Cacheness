@@ -1,7 +1,7 @@
 # Phase 3: Atomic Lifecycle and Recovery Engine - Context
 
-**Gathered:** 2026-08-30; architecture replanned 2026-09-04
-**Status:** Ready for transactional-authority replanning
+**Gathered:** 2026-08-30; architecture replanned 2026-09-04; audit gap replan 2026-09-06
+**Status:** Gap plans ready; initialization/compatibility changes retain explicit execution checkpoints
 
 <domain>
 ## Phase Boundary
@@ -10,8 +10,11 @@ Build the backend-neutral lifecycle engine below direct `BlobStore` operations s
 write, overwrite, delete, clear, close, and recovery preserve an old or new complete
 generation. This phase defines atomic publication, idempotent reclamation, durable
 recovery evidence, dry-run/resumable reconciliation, and same-key coordination. It
-does not yet implement the complete PostgreSQL/S3 backend matrix, rewire
-`UnifiedCache`, or execute stored-format migrations.
+does not yet implement the complete PostgreSQL/S3 backend matrix or execute
+stored-format migrations. The audit replan brings a thin local `UnifiedCache`
+composition slice forward: normal canonical reads/writes and TTL use the
+supported BlobStore interface, and derived catalog state cannot revoke a valid
+generation. Complete policy/compatibility acceptance remains Phase 6.
 
 </domain>
 
@@ -71,7 +74,19 @@ does not yet implement the complete PostgreSQL/S3 backend matrix, rewire
 - **D-31:** Windows local persistence uses the same SQLite transactional authority and the D-22 one-user/session trust scope. No custom Win32/POSIX lock-file authority, inode/handle identity registry, extended-attribute reservation, or platform-specific receipt protocol is part of the replacement.
 - **D-32:** Native Windows release qualification is deferred because this milestone has no eligible Windows environment. Phase 3 retains the Windows implementation contract and explicit `UNAVAILABLE` outcome, but must not claim that protected-NTFS-root, Python 3.11, same-session contention, or different-token denial evidence exists. That evidence is a prerequisite for a future Windows-qualified release and is tracked in backlog Phase 999.1. — **Reversibility:** reversible — An eligible Windows environment can promote the backlog item without changing lifecycle semantics.
 
-### the agent's Discretion
+### Audit Replan: Product and Contract Clarifications
+
+- **D-33:** Cache instances use `BlobStore` as their engine, not just shared handlers. Separate cache and non-cache namespaces/catalogs are sufficient; a dual-role live store is not required. — **Source:** explicit user clarification, 2026-09-06.
+- **D-34:** Authoritative application metadata belongs with the committed blob descriptor. A compatibility projection may be stale, unavailable, or corrupt without authorizing canonical deletion; normal canonical reads must not repair a second catalog to obtain a coherent generation. — **Source:** ADR 0001, applied to audit finding 1 and CR-03.
+- **D-35:** Plan 03-22 proposes explicit initialization before shared-worker access and maintenance-only schema migration. Non-mutating absent-store inspection and supported single-process convenience use remain characterized. Concurrent first creation is not a required progress guarantee. This supersedes old bootstrap-availability tests only AFTER the plan's compatibility checkpoint is approved. — **Reversibility:** one-way for a published behavior change; checkpoint required, not yet user-approved implementation.
+- **D-36:** Phase 3 proves the existing direct metadata mapping round trip and a thin cache composition through a same-generation BlobStore result. Phase 4 owns BACK-07 catalog field validation/query customization and narrowing adapter transactions before backend expansion; Phase 6 owns full cache policy coverage. No new generic policy plugin, catalog schema version, or payload format is implied. — **Reversibility:** costly; preserve current formats and public wrappers.
+
+These are a GSD phase decision record, not the domain glossary. `CONTEXT.md` at
+the repository root defines the product vocabulary. ADR 0001 supersedes earlier
+mechanism-specific wording, including any reading of D-17/D-20 as cross-process
+lock authority. D-24/D-27 do not require multiplying the existing broad protocol.
+
+### Remaining Implementation Discretion
 
 - Exact class/module names for the lifecycle authority, transaction records, and reconciliation reports.
 - Whether local per-key coordination uses lock striping or dynamically retained locks, provided unrelated keys remain concurrent and retention is bounded.
@@ -86,6 +101,10 @@ does not yet implement the complete PostgreSQL/S3 backend matrix, rewire
 **Downstream agents MUST read these before planning or implementing.**
 
 ### Product and Requirements
+
+- `docs/adr/0001-topology-specific-storage-guarantees.md` — Governing integrity/recovery/progress distinction and mandatory stop conditions.
+- `docs/phase3-architecture-audit-2026-09-06.md` — Evidence and recommendations; not proof of implementation.
+- `.planning/phases/03-atomic-lifecycle-and-recovery-engine/03-GAP-REPLAN.md` — Current bounded gap scope, planned interfaces, checkpoint decisions, and finite acceptance matrix.
 
 - `.planning/PROJECT.md` — Establishes `BlobStore` lifecycle ownership, compatibility, reliability, concurrency, and backend-neutral constraints.
 - `.planning/ROADMAP.md` § Phase 3 — Defines old-or-new generation visibility, failure recovery, idempotent operations, reconciliation, and race success criteria.
@@ -107,6 +126,12 @@ does not yet implement the complete PostgreSQL/S3 backend matrix, rewire
 
 <code_context>
 ## Existing Code Insights
+
+**Historical note:** The implementation references below describe the pre-replan
+file-native engine. Do not revive retired `manifest_repository`, `clear_recovery`,
+or scheduler inventory mechanisms. Current executable evidence is in
+`storage/lifecycle.py`, `sqlite_lifecycle_authority.py`,
+`memory_lifecycle_authority.py`, `reconciliation.py`, `blob_store.py`, and `core.py`.
 
 ### Reusable Assets
 
@@ -147,7 +172,8 @@ does not yet implement the complete PostgreSQL/S3 backend matrix, rewire
 
 - Concrete capability declarations and full metadata-backend conditional publication across JSON, memory, SQLite, and PostgreSQL — Phase 4.
 - Full filesystem, memory, and S3 payload lifecycle implementation and matrix verification — Phase 5.
-- `UnifiedCache` delegation, TTL/eviction/invalidation policy, and miss/statistics translation — Phase 6.
+- Complete `UnifiedCache` delegation, eviction/invalidation coverage, and miss/statistics translation — Phase 6; the canonical local read/write/TTL seam and non-destructive projection behavior are now Phase 3's early proof.
+- Rich catalog schema/query customization and transactional adapter narrowing — Phase 4, BACK-07; do not copy the current broad lifecycle sequencing into more adapters first.
 - Stored-format inventory and copy-verify-switch migration execution — Phase 7; Phase 3 reconciliation handles lifecycle inconsistency, not format migration.
 
 </deferred>

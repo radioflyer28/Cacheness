@@ -11,9 +11,9 @@
 - [x] **STOR-02**: Normal reads expose only committed entry generations.
 - [ ] **STOR-03**: A write exposes either the previous complete generation or the new complete generation, never partial payload or metadata state.
 - [ ] **STOR-04**: A failed write preserves the last valid generation and leaves any residue detectable and recoverable.
-- [ ] **STOR-05**: Overwrite, delete, clear, and close operations are idempotent and clean up both payload and metadata state.
+- [ ] **STOR-05**: Overwrite, delete, clear, and close converge idempotently; incomplete external cleanup remains attributable debt and is reclaimed when required resources are available without deleting a current generation.
 - [ ] **STOR-06**: Operators can run dry-run and resumable reconciliation that detects inconsistent state and safely repairs, quarantines, or reports it.
-- [ ] **STOR-07**: Same-key races have deterministic outcomes through per-key coordination and backend generation checks without globally serializing distinct keys.
+- [ ] **STOR-07**: Within a declared initialized topology, same-key contention preserves integrity through backend generation checks and yields success, conflict, or typed retryable failure; payload work on distinct keys is not globally serialized (short SQLite write transactions may serialize).
 - [x] **STOR-08**: Direct `BlobStore` operations distinguish missing, corrupt, conflict, and backend failures through typed results or exceptions.
 
 ### Backend Unification
@@ -21,9 +21,10 @@
 - [ ] **BACK-01**: Filesystem, memory, and S3 payload backends implement one payload lifecycle contract.
 - [ ] **BACK-02**: JSON, memory, SQLite, and PostgreSQL metadata backends implement one metadata lifecycle contract.
 - [ ] **BACK-03**: Caller-injected and registered backend implementations remain selected rather than being silently replaced by configuration defaults.
-- [ ] **BACK-04**: Every supported combination in the three-payload by four-metadata backend matrix passes the common lifecycle contract.
+- [ ] **BACK-04**: Every explicitly supported pairing of advertised payload and metadata backends passes the lifecycle contract at its declared capability tier; unsupported Cartesian combinations are documented and rejected rather than silently downgraded.
 - [ ] **BACK-05**: PostgreSQL and AWS S3 behavior is verified with real-service integration coverage; compatible S3 services are supported only where explicitly verified.
 - [ ] **BACK-06**: Backends expose durability, process/host sharing, compare-and-swap, streaming, and listing capabilities, and configurations cannot claim guarantees their topology cannot provide.
+- [ ] **BACK-07**: Direct `BlobStore` users can store, validate, query, and update application-defined catalog metadata without implementing a lifecycle backend; supported fields/operators and transactional limits are explicit. Authoritative metadata commits with the blob descriptor; external indexes or ORM links are explicitly derived unless they join that same transaction.
 
 ### Cache Composition
 
@@ -89,6 +90,8 @@ Deferred to future releases and not included in the current roadmap.
 
 ## Traceability
 
+Phase 3 includes an early local composition proof for CACH-01/02/03/06 and existing mapping metadata for BACK-07. It does not mark those full requirements complete: Phase 4 owns catalog customization and Phase 6 owns complete cache policy/compatibility acceptance. Cache instances must use BlobStore as their engine; sharing a live namespace with non-cache stores is not required.
+
 | Requirement | Phase | Status |
 |-------------|-------|--------|
 | STOR-01 | Phase 2 | Complete |
@@ -105,6 +108,7 @@ Deferred to future releases and not included in the current roadmap.
 | BACK-04 | Phase 5 | Pending |
 | BACK-05 | Phase 5 | Pending |
 | BACK-06 | Phase 4 | Pending |
+| BACK-07 | Phase 4 | Pending |
 | CACH-01 | Phase 6 | Pending |
 | CACH-02 | Phase 6 | Pending |
 | CACH-03 | Phase 6 | Pending |
@@ -137,10 +141,10 @@ Deferred to future releases and not included in the current roadmap.
 
 **Coverage:**
 
-- v1 requirements: 43 total
-- Mapped to phases: 43
+- v1 requirements: 44 total
+- Mapped to phases: 44
 - Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-08-29*
-*Last updated: 2026-08-29 after roadmap creation*
+*Last updated: 2026-09-06 after ADR/audit alignment; no new implementation completion claimed*

@@ -2,7 +2,7 @@
 
 ## Overview
 
-Cacheness will move from overlapping cache and storage paths to one production-grade object lifecycle in eight horizontal phases. The roadmap freezes compatibility and hardens exposed boundaries first, defines the canonical storage contract before any backend is allowed to shape it, proves atomicity and recovery in the lifecycle core, brings every metadata and payload backend behind that contract, then rewires `UnifiedCache` as policy over `BlobStore`. Explicit migration and release-quality gates complete the cutover without absorbing the separate `SqlCache` subsystem or prematurely introducing a cache-policy plugin framework.
+Cacheness will move from overlapping cache and storage paths to one storage engine in eight phases. After compatibility/security and canonical storage contracts, Phase 3 proves one initialized SQLite/filesystem lifecycle and a thin cache-over-BlobStore slice before backend expansion. Phase 4 makes catalog customization first-class and narrows transactional adapters; Phase 5 qualifies explicitly supported payload/catalog pairings. Phase 6 completes cache policy and compatibility coverage. Migration and release gates complete the cutover without absorbing `SqlCache` or requiring a dual-role live store. ADR 0001 governs topology-specific integrity, recovery, progress and performance; a common interface does not promise cross-resource ACID or identical availability.
 
 ## Phases
 
@@ -103,7 +103,7 @@ Plans:
 
 ### Phase 3: Atomic Lifecycle and Recovery Engine
 
-**Goal**: Object lifecycle operations preserve an old or new complete generation and leave every incomplete outcome recoverable.
+**Goal**: Within the initialized local SQLite/filesystem topology, preserve complete generations with attributable recovery evidence and prove that cache policy consumes the same BlobStore engine without a second catalog authority.
 **Depends on**: Phase 2
 **Requirements**: STOR-03, STOR-04, STOR-05, STOR-06, STOR-07
 **Success Criteria** (what must be TRUE):
@@ -112,9 +112,11 @@ Plans:
   2. Failures at serialization, payload publication, metadata commit, or old-generation cleanup preserve the last valid generation and leave all residue detectable.
   3. Repeated overwrite, delete, clear, and close operations converge safely while cleaning both payload and metadata state.
   4. Operators can dry-run and resume reconciliation to repair, quarantine, or report inconsistent entries without guessing their provenance.
-  5. Forced same-key write, delete, and read races have deterministic outcomes without globally serializing operations on distinct keys.
+  5. Initialized same-key write/delete/read contention preserves integrity with success, exact conflict or typed retryable timeout; distinct-key payload work overlaps while short SQLite write transactions may serialize.
+  6. Direct application metadata round-trips through BlobStore, and a separate cache instance uses its supported same-generation read/write interface for a local put/get/TTL slice. Corrupt or unavailable derived projections cannot revoke valid blobs.
+  7. Startup and post-commit compatibility changes have recorded approval; incomplete initialization fails closed unchanged, with no concurrent-first-create availability promise or new filesystem publication protocol.
 
-**Plans**: 18/19 canonical plans executed (03-19 superseded)
+**Plans**: 19/24 canonical plans executed; 03-21 through 03-25 pending (03-19 superseded). Verification remains gaps_found; new plans were authored and reviewed inline, not independently checked.
 
 Plans:
 **Wave 1**
@@ -194,17 +196,42 @@ Plans:
 - 03-19-PLAN.md — **Superseded by ADR 0001**; retained as interrupted implementation history and excluded from canonical counts
 - [x] 03-20-PLAN.md — Preserve real Plan 03-19 integrity fixes, cover partial exclusive-publication crashes, remove deadline-driven authority complexity, then qualify committed topology-specific recovery/bounded outcomes from a detached worktree
 
+**Wave 20** *(blocked on Wave 19 completion)*
+
+- [ ] 03-21-PLAN.md — Close bounded memory abort/debt and strict projection-parser gaps; replaces the unexecuted private-bootstrap draft
+
+**Wave 21** *(blocked on Wave 20 completion)*
+
+- [ ] 03-22-PLAN.md — Approve and implement initialization before shared-worker use; classify SQLite operational failures precisely
+
+**Wave 22** *(blocked on Wave 21 completion)*
+
+- [ ] 03-23-PLAN.md — Expose supported same-generation BlobStore entry snapshots and committed receipts with engine-owned cleanup
+
+**Wave 23** *(blocked on Wave 22 completion)*
+
+- [ ] 03-24-PLAN.md — Approve derived-state failure semantics, route canonical cache policy through BlobStore, and remove duplicate facade sequencing
+
+**Wave 24** *(blocked on Wave 23 completion)*
+
+- [ ] 03-25-PLAN.md — Qualify finite public workflows and named failure classes at an exact committed tree; no automatic repair loop
+
+Cross-cutting constraints: one authoritative catalog; immutable native payloads outside transactions; exact-generation deletion; optional projections never revoke valid data; initialization and failure-contract checkpoints; integrity/recovery separate from progress/performance; original dirty fixture evidence preserved; Windows remains UNAVAILABLE/NOT_QUALIFIED.
+
+The current gap design is `03-GAP-REPLAN.md`. The broader adapter protocol is transitional: Phase 3 deepens the caller interface, while Phase 4 must narrow transactional adapters before implementing additional lifecycle backends. Complete CACH-01/02/03/06 and BACK-07 acceptance stays in its owner phase.
+
 ### Phase 4: Metadata Composition and Topology Contracts
 
-**Goal**: Users can select any advertised metadata backend through one composition root and receive only guarantees that the chosen topology can provide.
+**Goal**: Users can customize BlobStore catalog metadata without implementing lifecycle sequencing, select advertised metadata backends through one composition root, and receive only guarantees supported by the topology.
 **Depends on**: Phase 3
-**Requirements**: BACK-02, BACK-03, BACK-06
+**Requirements**: BACK-02, BACK-03, BACK-06, BACK-07
 **Success Criteria** (what must be TRUE):
 
-  1. JSON, memory, SQLite, and PostgreSQL round-trip the same canonical entries and expose the same revision, conflict, tombstone, listing, and lifecycle semantics.
+  1. JSON, memory, SQLite, and PostgreSQL represent the canonical entries through explicitly declared authority/projection roles and supported capability tiers. Centralize lifecycle sequencing and narrow transactional catalog operations before multiplying adapters; do not copy the current broad state machine into every backend.
   2. A caller-injected backend instance remains the selected instance, and a registered backend name resolves through the same construction path used by direct and composed storage.
   3. Users can inspect durability, process/host sharing, compare-and-swap, streaming, and listing capabilities for the active backend pair.
   4. Invalid topology claims, such as durable multi-host storage backed by process-local payloads or unsupported coordination, fail during configuration rather than during a write.
+  5. Direct BlobStore users can define application metadata, validate/query supported fields, update attributes and reopen without implementing a lifecycle backend. Authoritative attributes commit with the descriptor; external ORM links/indexes are explicitly derived unless participating in that same transaction. Specify the schema/extension interface and compatibility impact during Phase 4 discussion; no unchosen schema framework is implied.
 
 **Plans**: TBD
 
@@ -216,7 +243,7 @@ Plans:
 **Success Criteria** (what must be TRUE):
 
   1. Filesystem, memory, and S3 payload backends pass the same immutable-generation, read, delete, list, integrity, resource-cleanup, and reconciliation contract.
-  2. Every allowed combination in the three-payload by four-metadata matrix completes storage lifecycle workflows with no backend-specific behavior leaking to callers.
+  2. Every explicitly supported advertised payload/catalog pairing completes the common workflows at its declared durability/sharing/progress tier. Publish unsupported combinations and reject impossible claims; backend-neutral calls do not hide topology-specific outcomes.
   3. PostgreSQL concurrency and transaction behavior is verified against a real PostgreSQL service, including conflicts and cleanup after partial failure.
   4. AWS S3 is the authoritative remote-object test target for conditional operations, checksums, streaming, pagination, retries, and cleanup; compatible services are claimed only where explicitly verified.
 
@@ -227,6 +254,8 @@ Plans:
 **Goal**: Cache users retain their public workflows while all payload-plus-metadata lifecycle work is delegated to `BlobStore`.
 **Depends on**: Phase 5
 **Requirements**: CACH-01, CACH-02, CACH-03, CACH-04, CACH-05, CACH-06
+
+**Scope carried forward**: Reuse the Phase 3 canonical local read/write/TTL seam. Complete all policy paths, decorators, cached-None behavior, statistics and supported topology coverage; do not recreate the removed facade storage lifecycle or require cache/non-cache namespace sharing.
 **Success Criteria** (what must be TRUE):
 
   1. Existing cache imports, constructors, aliases, configuration names, decorators, and result behavior remain callable through compatibility adapters.
@@ -272,7 +301,7 @@ Plans:
 |-------|----------------|--------|-----------|
 | 1. Compatibility and Security Baseline | 15/15 | Complete | 2026-08-30 |
 | 2. Canonical Storage and Integrity Contract | 7/7 | Complete    | 2026-08-30 |
-| 3. Atomic Lifecycle and Recovery Engine | 19/19 | In Progress|  |
+| 3. Atomic Lifecycle and Recovery Engine | 19/24 | Gap plans ready; verification gaps_found |  |
 | 4. Metadata Composition and Topology Contracts | 0/TBD | Not started | - |
 | 5. Payload Backends and Full Matrix Parity | 0/TBD | Not started | - |
 | 6. UnifiedCache Policy Composition | 0/TBD | Not started | - |

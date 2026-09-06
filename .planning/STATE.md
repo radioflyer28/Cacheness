@@ -3,16 +3,16 @@ gsd_state_version: 1.0
 milestone: v1.0
 current_phase: 03
 current_phase_name: Atomic Lifecycle and Recovery Engine
-status: executing
-stopped_at: Completed 03-20-PLAN.md
-last_updated: "2026-09-06T17:28:14.832Z"
+status: ready_to_execute
+stopped_at: Inline gap planning complete; next 03-21-PLAN.md
+last_updated: "2026-09-06T19:25:46.168Z"
 last_activity: 2026-09-06
-last_activity_desc: Completed Plan 03-20; fresh Phase 03 verification remains pending
-state_head: ea40043aebfbdd6381b9b8347a0704ce2e23b053
+last_activity_desc: Audit-grounded gap plans 03-21 through 03-25 authored and reviewed inline; implementation pending
+state_head: f5d406ac7cec0af4fb403df607b7c967aa9f5319
 progress:
   total_phases: 8
   completed_phases: 2
-  total_plans: 41
+  total_plans: 46
   completed_plans: 41
 milestone_name: milestone
 ---
@@ -21,17 +21,17 @@ milestone_name: milestone
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-08-29)
+See: .planning/PROJECT.md (updated 2026-09-06)
 
 **Core value:** Applications can store and retrieve data reliably through one backend-neutral lifecycle, with caching policy layered above storage without compromising integrity or cleanup correctness.
 **Current focus:** Phase 03 — Atomic Lifecycle and Recovery Engine
 
 ## Current Position
 
-Phase: 03 (Atomic Lifecycle and Recovery Engine) — EXECUTING
-Plan: 20 of 20 (19 canonical; 03-19 is superseded)
-Status: Plan 03-20 complete; fresh phase verification pending
-Last activity: 2026-09-06 — Completed Plan 03-20 with detached-worktree qualification; 03-VERIFICATION.md remains stale pending a fresh verifier
+Phase: 03 (Atomic Lifecycle and Recovery Engine) — READY TO EXECUTE
+Plan: 19 of 24 canonical complete; next 03-21 (03-19 superseded)
+Status: Ready to execute gap plans 03-21 through 03-25; verification remains gaps_found
+Last activity: 2026-09-06 — Completed audit-grounded inline planning and self-review; startup and derived-state compatibility checkpoints remain unapproved until execution
 
 Progress: [██░░░░░░░░] 2 of 8 phases complete
 
@@ -40,7 +40,7 @@ Progress: [██░░░░░░░░] 2 of 8 phases complete
 *Updated after each plan completion*
 **Per-Plan Metrics:**
 
-Phase 03 rows in this historical table include superseded attempts and do not define current completion; authoritative milestone progress is 40 of 41 canonical plans because 03-19 is excluded and 03-20 is the sole pending replacement.
+Phase 03 rows in this historical table include superseded attempts and do not define current completion. Authoritative milestone progress is 41 of 46 canonical plans: Phase 1 has 15, Phase 2 has 7, and Phase 3 has 19 completed plus 5 pending. Plan 03-19 is excluded. Raw filesystem plan counts may include that superseded plan and must not overwrite canonical progress.
 
 | Plan | Duration | Tasks | Files |
 |------|----------|-------|-------|
@@ -225,7 +225,9 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ### Pending Todos
 
-None yet.
+- Execute 03-21, then the dependent 03-22 through 03-25 gap plans; do not execute the replaced private-bootstrap draft or superseded 03-19.
+- Obtain the explicit initialization and derived-state failure-behavior approvals at 03-22/24 before those compatibility changes.
+- Keep Phase 3 gaps_found until exact-commit qualification and fresh verification; no automatic repeated race-fix loop.
 
 ### Blockers/Concerns
 
@@ -245,6 +247,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-09-06T17:28:14.782Z
-Stopped at: Completed 03-20-PLAN.md
+Last session: 2026-09-06
+Stopped at: Inline gap planning complete; next 03-21-PLAN.md
 Resume file: None

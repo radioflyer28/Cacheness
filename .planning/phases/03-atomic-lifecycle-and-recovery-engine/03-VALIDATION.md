@@ -6,7 +6,7 @@ nyquist_compliant: false
 wave_0_complete: false
 created: 2026-09-04
 replanned: 2026-09-06
-replan_target: 03-20-PLAN.md
+replan_target: 03-21 through 03-25
 governing_decision: docs/adr/0001-topology-specific-storage-guarantees.md
 windows-qualification:
   current_host_status: UNAVAILABLE
@@ -24,6 +24,68 @@ windows-qualification:
 # Phase 03 — Validation Strategy
 
 > ADR 0001 validation contract for the SQLite-authority/local-filesystem topology.
+
+## Current authoritative gap acceptance: Plans 03-21 through 03-25
+
+This section supersedes task numbering and bootstrap availability assumptions in
+the historical Plan 20 strategy below. Implementation is pending; no checkbox or
+passing verdict is inferred from planning. Current verification is gaps_found.
+Planning/review was inline at the user's request, not independent agent review.
+
+Shared-process tests initialize the local SQLite/filesystem store before workers
+start. Plans 22 and 24 require explicit compatibility approvals. Incomplete
+initialization must fail typed unchanged, not be adopted or made universally
+available through another filesystem protocol. Canonical cache reads use
+authenticated same-generation BlobStore metadata; optional projection failure
+cannot revoke a valid blob. Memory tests claim one-process behavior only.
+
+### Task coverage and commands
+
+All commands below run from an isolated disposable checkout with its own copied
+fixtures. Never run the compatibility/full suite against the original workspace's
+dirty sqlite-columns-v0314 WAL/SHM. Record lstat identity/size/mtime/ctime and SHA-256
+before/after, and retain those original files unchanged. Each implementation task
+runs its PLAN verify command before commit; no three tasks lack automated checks.
+Checkpoint tasks instead require recorded human approval before runtime edits.
+
+| Plan / tasks | Behavior | Class | Required tests |
+|---|---|---|---|
+| 21.1–2 | Aborted memory mutation; three-debt page/action-size-1 resume, retirement/insertion, apply twice | Recovery + integrity | test_blob_store_reconciliation.py; test_lifecycle_authority_contract.py |
+| 21.3 | Raw strict point/list/query decoder, signed-cache evidence preservation | Integrity | test_cached_query_meta.py; test_query_meta_security.py; test_cache_integrity.py |
+| 22.1–2 | Approved initialize/close/spawn/reopen, single-process convenience, incomplete/foreign state preserved | Progress contract + integrity | test_sqlite_bootstrap_concurrency.py; test_unified_cache_lifecycle_authority.py; read/legacy contracts |
+| 22.3 | Primary/extended/unknown SQLite error codes and caused rollback outcomes | Recovery + progress | test_sqlite_lifecycle_authority.py; test_sqlite_authority_admission.py |
+| 23.1 | Single verified entry, pre-deserialization metadata, None vs absence, snapshot/close lifetime | Integrity | test_blob_store_read_contract.py; test_blob_store_close_contract.py; test_blob_store_integrity.py |
+| 23.2 | Exact committed receipt, pre/post-promotion failures, metadata round trip, engine-owned debt cleanup | Integrity + recovery | test_blob_store_atomic_lifecycle.py; reconciliation/concurrency suites |
+| 24.1–3 | Approved post-commit behavior, cache engine delegation, projection corruption/outage, stale policy, separate namespaces | Integrity + recovery | unified cache lifecycle/adversarial, cached query, integrity, projection CAS/SQL and query_meta suites |
+| 25.1 | Compact public direct-store and cache workflow | User acceptance | test_phase3_local_workflows.py (created in 25.1) |
+| 25.2 | Exact committed full qualification; protected evidence and platform limits | Evidence | Groups below |
+
+Plan 25 runs these groups independently at the SAME implementation commit:
+
+1. **Gap/public workflow:** `uv run --isolated --python 3.11 --all-extras --group dev --frozen pytest -q tests/test_blob_store_reconciliation.py tests/test_cached_query_meta.py tests/test_sqlite_bootstrap_concurrency.py tests/test_sqlite_lifecycle_authority.py tests/test_blob_store_read_contract.py tests/test_unified_cache_lifecycle_authority.py tests/test_unified_cache_adversarial_lifecycle.py tests/test_phase3_local_workflows.py -o log_cli=false`
+2. **Integrity/compatibility/recovery:** `uv run --isolated --python 3.11 --all-extras --group dev --frozen pytest -q tests/test_lifecycle_authority_contract.py tests/test_blob_store_atomic_lifecycle.py tests/test_blob_store_integrity.py tests/test_blob_store_close_contract.py tests/test_blob_store_legacy_contract.py tests/test_cache_integrity.py tests/test_query_meta_security.py tests/test_projection_mutation_contract.py tests/test_projection_sql_atomicity.py tests/test_filesystem_containment.py tests/test_sqlite_metadata_bootstrap_atomicity.py tests/test_phase3_postreview_concurrency.py -o log_cli=false`. Retain the existing partial-stream crash and file-fsync/before-directory-fsync crash tests from Plan 20; confirm selection and collected names in the ledger.
+3. **Progress:** `uv run --isolated --python 3.11 --all-extras --group dev --frozen pytest -q tests/test_blob_store_concurrency.py tests/test_sqlite_authority_admission.py tests/test_sqlite_concurrency.py tests/test_sqlite_concurrency_temp.py tests/test_query_meta.py -o log_cli=false`. Initialized independent-process barriers prove supported sharing; safe success/conflict/typed retryable timeout are accepted, never every contender within 0.187 seconds.
+4. **Development runtime smoke:** Repeat group 1 with `--python 3.13`; record actual interpreters. The full supported-version matrix remains Phase 8.
+5. **Performance only:** `uv run --isolated --python 3.11 --all-extras --group dev --frozen python benchmarks/lifecycle_authority_benchmark.py --verify-baseline benchmarks/lifecycle_authority_baseline.json`. Report environment/distributions and regressions separately. Do not change runtime failure semantics or relax the baseline to pass.
+6. **Lint:** `uv run --isolated --python 3.11 --all-extras --group dev --frozen python tools/verify_phase3_ruff_delta.py`; then `uv run --isolated --python 3.11 --all-extras --group dev --frozen ruff check src/cacheness/storage/memory_lifecycle_authority.py src/cacheness/storage/sqlite_lifecycle_authority.py src/cacheness/storage/blob_store.py src/cacheness/storage/lifecycle.py src/cacheness/storage/read_contract.py src/cacheness/storage/__init__.py src/cacheness/metadata.py src/cacheness/core.py tests/test_blob_store_reconciliation.py tests/test_cached_query_meta.py tests/test_sqlite_bootstrap_concurrency.py tests/test_sqlite_lifecycle_authority.py tests/test_unified_cache_lifecycle_authority.py tests/test_unified_cache_adversarial_lifecycle.py tests/test_blob_store_read_contract.py tests/test_blob_store_atomic_lifecycle.py tests/test_blob_store_close_contract.py tests/test_cache_integrity.py tests/test_phase3_local_workflows.py`.
+7. **Repository gate:** `uv run --isolated --python 3.11 --all-extras --group dev --frozen pytest -q -o log_cli=false` from the clean detached implementation commit. Record counts, skips and all failures, not just the latest rerun.
+
+### Completion and stop conditions
+
+The finite failure matrix is in `03-GAP-REPLAN.md`. Existing tests may change only
+when their exact premise is superseded by an approved contract; record the mapping
+and retain independent integrity assertions. New test files are explicit tasks,
+not assumed fixtures. Protected original sidecars and Windows qualification
+artifacts remain unchanged. Windows is still UNAVAILABLE/NOT_QUALIFIED; Phase
+999.1 must supply native evidence before a Windows-qualified release.
+
+If qualification finds a defect, keep it failed, classify the actual invariant,
+topology and reproduction, and stop. Do not enter another automatic fix/review
+cycle, add coordination machinery or erase an intermittent failure with reruns.
+Missing Python/env or nonzero test/lint exit is not a pass. A fresh phase verifier
+must close `03-VERIFICATION.md`; planning and execution summaries cannot do so.
+
+## Historical Plan 20 validation target (retained evidence)
 
 ---
 
