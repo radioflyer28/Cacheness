@@ -106,6 +106,7 @@ class SqliteLifecycleAuthority:
         self._closed = False
         self.open_write_transactions = 0
         self._transaction_hook: Callable[[str], None] | None = None
+        self._bootstrap_hook: Callable[[str], None] | None = None
 
     @classmethod
     def for_root(
@@ -407,58 +408,75 @@ class SqliteLifecycleAuthority:
 
     def _materialize_database_file_after_bootstrap_lock(self, deadline: float) -> bool:
         """Materialize a new leaf after same-process bootstrap admission."""
-        state = self._classify_for_open()
         rejected_states = {
             "wrong_root",
             "invalid_reserved_directory",
             "invalid_authority",
         }
-        if state in rejected_states:
-            self._reject_non_authority_state(state)
-        if state == "established":
-            # The directory/file classification is necessarily a read-only
-            # observation. Re-check immediately before rejecting so a sibling
-            # that won the O_EXCL leaf creation is never mistaken for legacy
-            # evidence in this small TOCTOU window.
-            if self._classify_for_open() == "authority":
+        while True:
+            state = self._classify_for_open()
+            if state == "missing":
+                self._reach_bootstrap_boundary("authority.bootstrap.classified")
+            if state == "authority":
                 return False
-            if self._is_pristine_reserved_bootstrap():
-                pass
-            elif self._may_be_inflight_authority_bootstrap():
-                return self._await_inflight_authority_leaf(deadline)
-            elif self._classify_for_open() == "authority":
+            if state in rejected_states:
+                self._reject_non_authority_state(state)
+            if state == "established":
+                # The directory/file classification is necessarily a read-only
+                # observation. Re-check immediately before rejecting so a sibling
+                # that won the O_EXCL leaf creation is never mistaken for legacy
+                # evidence in this small TOCTOU window.
+                if self._classify_for_open() == "authority":
+                    return False
+                if self._is_pristine_reserved_bootstrap():
+                    pass
+                elif self._may_be_inflight_authority_bootstrap():
+                    return self._await_inflight_authority_leaf(deadline)
+                elif self._classify_for_open() == "authority":
+                    return False
+                else:
+                    self._reject_non_authority_state(state)
+            if state == "missing":
+                self._reach_bootstrap_boundary("authority.bootstrap.before_root")
+                try:
+                    self.root.mkdir(mode=0o700, parents=True, exist_ok=False)
+                except FileExistsError:
+                    # An independent fresh-root winner may have created any
+                    # object after our missing classification. Restart the
+                    # complete non-following classification under the one
+                    # caller deadline; never infer that this alone is a
+                    # usable authority bootstrap.
+                    self._remaining(deadline)
+                    continue
+            reserved = self.root / AUTHORITY_RELATIVE_PATH.parent
+            if not reserved.exists():
+                self._reach_bootstrap_boundary("authority.bootstrap.before_reserved")
+                try:
+                    reserved.mkdir(mode=0o700, exist_ok=False)
+                except FileExistsError:
+                    # A concurrent first writer may have created the reserved
+                    # namespace after our classification. Revalidate its exact
+                    # object type below; never treat this race as success alone.
+                    pass
+            reserved_stat = reserved.lstat()
+            if not stat.S_ISDIR(reserved_stat.st_mode) or stat.S_ISLNK(reserved_stat.st_mode):
+                self._reject_non_authority_state("invalid_reserved_directory")
+
+            self._reach_bootstrap_boundary("authority.bootstrap.before_leaf")
+            try:
+                descriptor = os.open(
+                    self.path,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                )
+            except FileExistsError:
+                database_stat = self.path.lstat()
+                if not stat.S_ISREG(database_stat.st_mode) or stat.S_ISLNK(database_stat.st_mode):
+                    self._reject_non_authority_state("invalid_authority")
                 return False
             else:
-                self._reject_non_authority_state(state)
-        if state == "missing":
-            self.root.mkdir(mode=0o700, parents=True, exist_ok=False)
-        reserved = self.root / AUTHORITY_RELATIVE_PATH.parent
-        if not reserved.exists():
-            try:
-                reserved.mkdir(mode=0o700, exist_ok=False)
-            except FileExistsError:
-                # A concurrent first writer may have created the reserved
-                # namespace after our classification. Revalidate its exact
-                # object type below; never treat this race as success alone.
-                pass
-        reserved_stat = reserved.lstat()
-        if not stat.S_ISDIR(reserved_stat.st_mode) or stat.S_ISLNK(reserved_stat.st_mode):
-            self._reject_non_authority_state("invalid_reserved_directory")
-
-        try:
-            descriptor = os.open(
-                self.path,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-                0o600,
-            )
-        except FileExistsError:
-            database_stat = self.path.lstat()
-            if not stat.S_ISREG(database_stat.st_mode) or stat.S_ISLNK(database_stat.st_mode):
-                self._reject_non_authority_state("invalid_authority")
-            return False
-        else:
-            os.close(descriptor)
-            return True
+                os.close(descriptor)
+                return True
 
     @staticmethod
     def _is_busy_error(error: sqlite3.Error) -> bool:
@@ -483,6 +501,14 @@ class SqliteLifecycleAuthority:
     def _reach_transaction_boundary(self, boundary: str) -> None:
         if self._transaction_hook is not None:
             self._transaction_hook(boundary)
+
+    def set_bootstrap_hook_for_test(self, hook: Callable[[str], None] | None) -> None:
+        """Install a test-only observer for fresh-root bootstrap boundaries."""
+        self._bootstrap_hook = hook
+
+    def _reach_bootstrap_boundary(self, boundary: str) -> None:
+        if self._bootstrap_hook is not None:
+            self._bootstrap_hook(boundary)
 
     @staticmethod
     def _configure_connection(
@@ -902,6 +928,8 @@ class SqliteLifecycleAuthority:
         ):
             raise
         except sqlite3.Error as error:
+            if not created_new and "file is not a database" in str(error).lower():
+                self._reject_non_authority_state("invalid_authority")
             self._translate_sqlite_error(error, operation="lifecycle_authority_open")
         finally:
             if connection is not None:
