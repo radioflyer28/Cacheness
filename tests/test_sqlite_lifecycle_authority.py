@@ -154,18 +154,18 @@ def test_sqlite_authority_uses_one_absolute_busy_deadline_and_preserves_cause(
     assert authority.open_write_transactions == 0
 
 
-def test_default_busy_deadline_is_the_measured_configuration_bound(
+def test_default_busy_deadline_is_the_caller_policy_default(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The default derives from baseline evidence without timing-sensitive checks."""
+    """The default is caller policy, not a benchmark-derived contract."""
     authority = SqliteLifecycleAuthority.for_root(tmp_path / "default-deadline")
     monkeypatch.setattr(
         "cacheness.storage.sqlite_lifecycle_authority.time.monotonic",
         lambda: 100.0,
     )
 
-    assert authority._deadline(None) == 100.0 + _measured_busy_deadline()
+    assert authority._deadline(None) == 100.0 + 5.0
 
 
 def test_sqlite_authority_rolls_back_every_row_for_a_before_commit_fault(
