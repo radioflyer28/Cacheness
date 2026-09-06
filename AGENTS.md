@@ -23,6 +23,19 @@ The intended audience is Python applications that need local or remote persisten
 
 <!-- GSD:project-end -->
 
+<!-- storage-guarantees:start source:docs/adr/0001-topology-specific-storage-guarantees.md -->
+
+## Storage Lifecycle Design Guardrail
+
+Before planning or changing storage lifecycle, concurrency, recovery, backend
+topology, timeouts, or `UnifiedCache`/`BlobStore` composition, read
+`docs/adr/0001-topology-specific-storage-guarantees.md`. It defines mandatory
+safety invariants, topology-specific progress guarantees, and stop conditions
+that prevent performance targets from becoming unsupported atomicity or
+availability promises.
+
+<!-- storage-guarantees:end -->
+
 <!-- GSD:stack-start source:codebase/STACK.md -->
 
 ## Technology Stack
