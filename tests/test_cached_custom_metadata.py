@@ -17,9 +17,11 @@ from cacheness.custom_metadata import (
     custom_metadata_model,
 )
 from cacheness.error_handling import CacheBlobLifecycleConflictError
+from cacheness.error_handling import CacheStorageError
 from cacheness.core import UnifiedCache
 from cacheness.metadata import Base, CachedMetadataBackend
 from cacheness.storage.backends.postgresql_backend import (
+    PgCacheEntry,
     PgCacheStats,
     PostgresBackend,
     PostgresBase,
@@ -182,5 +184,44 @@ def test_cached_postgresql_mapping_uses_the_same_public_custom_metadata_protocol
                 CachedPostgresqlProjectionMetadata(label="stale"),
                 expected_locator="/projection/m1",
             )
+    finally:
+        backend.close()
+
+
+def test_postgresql_cache_key_params_round_trip_at_the_signed_metadata_path() -> None:
+    """PostgreSQL read-back preserves one decoded value at both API aliases."""
+    cached = _cached_postgresql_mapping()
+    backend = cached.backend
+    key = "0123456789abcdef"
+    try:
+        backend.put_entry(
+            key,
+            {
+                "data_type": "object",
+                "description": "signed projection",
+                "file_size": 1,
+                "metadata": {
+                    "actual_path": "/projection/signed",
+                    "cache_key_params": {"run": "signed", "attempt": 2},
+                },
+            },
+        )
+        entry = backend.get_entry(key)
+        assert entry is not None
+        assert entry["metadata"]["cache_key_params"] == {
+            "run": "signed",
+            "attempt": 2,
+        }
+        assert entry["cache_key_params"] is entry["metadata"]["cache_key_params"]
+
+        with backend.SessionLocal() as session:
+            row = session.get(PgCacheEntry, key)
+            assert row is not None
+            row.cache_key_params = "{malformed"
+            session.commit()
+        with pytest.raises(CacheStorageError):
+            backend.get_entry(key)
+        with backend.SessionLocal() as session:
+            assert session.get(PgCacheEntry, key).cache_key_params == "{malformed"
     finally:
         backend.close()
