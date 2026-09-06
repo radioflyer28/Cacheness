@@ -16,6 +16,7 @@ cache/
 *.db-wal
 *.json
 !.planning/config.json
+!benchmarks/lifecycle_authority_baseline.json
 *.pkl
 *.pkl.*
 *.b2nd

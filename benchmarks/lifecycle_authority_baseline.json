@@ -1,0 +1,202 @@
+{
+  "benchmark": {
+    "authority_schema": {
+      "application_id": 1128350536,
+      "user_version": 1
+    },
+    "cardinalities": {
+      "clear_target_counts": [
+        16,
+        64
+      ],
+      "reconciliation_items": 16,
+      "reconciliation_manifest_bytes": 4096
+    },
+    "command": ".venv/bin/python benchmarks/lifecycle_authority_benchmark.py --record-baseline benchmarks/lifecycle_authority_baseline.json",
+    "environment": {
+      "filesystem": {
+        "block_size": 1048576,
+        "fragment_size": 4096,
+        "kind": "local temporary directory",
+        "name_max": 255
+      },
+      "implementation": "CPython",
+      "platform": "macOS-26.6.2-arm64-arm-64bit",
+      "python": "3.11.16",
+      "sqlite": "3.53.4"
+    },
+    "harness": "production-sqlite-lifecycle-authority",
+    "repetitions": 5,
+    "source_commit": "0fd5357ba6a982f51914f4bce17b13c0727e6232",
+    "warmups": 1
+  },
+  "derived": {
+    "configuration": {
+      "authority_busy_timeout_seconds": 0.187,
+      "max_operation_record_bytes": 131072,
+      "max_reconcile_actions": 32,
+      "operation_page_size": 32
+    },
+    "release_envelopes": {
+      "authority_transition_max_seconds": 0.007018558719428256,
+      "busy_wait_max_seconds": 0.18612480671785306,
+      "clear_snapshot_max_seconds_by_target_count": {
+        "16": 0.0023671319871209563,
+        "64": 0.002392004008870572
+      },
+      "distinct_key_overlap_min_ratio": 0.5727131505403891
+    }
+  },
+  "metrics": {
+    "authority_transition": {
+      "seconds": {
+        "p05": 0.0016317421977873892,
+        "p50": 0.0016418750019511208,
+        "p95": 0.0017498663990409113,
+        "p99": 0.001754639679857064,
+        "samples": [
+          0.00163237500237301,
+          0.001631583996640984,
+          0.0017558330000611022,
+          0.0017259999949601479,
+          0.0016418750019511208
+        ]
+      }
+    },
+    "busy_wait": {
+      "seconds": {
+        "p05": 0.08728347480355296,
+        "p50": 0.08862583299924154,
+        "p95": 0.09264801679964876,
+        "p99": 0.09306240335892653,
+        "samples": [
+          0.09316599999874597,
+          0.0882295420014998,
+          0.08704695800406625,
+          0.0905760840032599,
+          0.08862583299924154
+        ]
+      }
+    },
+    "clear_snapshot": {
+      "seconds_by_target_count": {
+        "16": {
+          "p05": 0.0005160503962542862,
+          "p50": 0.0005264999999781139,
+          "p95": 0.0005890829983400181,
+          "p99": 0.0005917829967802391,
+          "samples": [
+            0.0005755830061389133,
+            0.0005159169959370047,
+            0.0005924579963902943,
+            0.0005264999999781139,
+            0.0005165839975234121
+          ]
+        },
+        "64": {
+          "p05": 0.0005693083992809988,
+          "p50": 0.0005732079953304492,
+          "p95": 0.0005958410009043291,
+          "p99": 0.000598001002217643,
+          "samples": [
+            0.0005985410025459714,
+            0.0005730420016334392,
+            0.0005850409943377599,
+            0.0005683749986928888,
+            0.0005732079953304492
+          ]
+        }
+      }
+    },
+    "distinct_key_overlap": {
+      "ratio": {
+        "p05": 0.7158914381754863,
+        "p50": 0.9785561822389137,
+        "p95": 1.103837975546599,
+        "p99": 1.110413653857088,
+        "samples": [
+          1.11205757343471,
+          0.6667805496417791,
+          0.9123349923103149,
+          1.0709595839941548,
+          0.9785561822389137
+        ]
+      }
+    },
+    "reconciliation_page": {
+      "actions": {
+        "p05": 16.0,
+        "p50": 16.0,
+        "p95": 16.0,
+        "p99": 16.0,
+        "samples": [
+          16,
+          16,
+          16,
+          16,
+          16
+        ]
+      },
+      "bytes": {
+        "p05": 65536.0,
+        "p50": 65536.0,
+        "p95": 65536.0,
+        "p99": 65536.0,
+        "samples": [
+          65536,
+          65536,
+          65536,
+          65536,
+          65536
+        ]
+      },
+      "rows": {
+        "p05": 16.0,
+        "p50": 16.0,
+        "p95": 16.0,
+        "p99": 16.0,
+        "samples": [
+          16,
+          16,
+          16,
+          16,
+          16
+        ]
+      },
+      "seconds": {
+        "p05": 0.0002519086017855443,
+        "p50": 0.00029075000202283263,
+        "p95": 0.000368150403664913,
+        "p99": 0.00038016368373064327,
+        "samples": [
+          0.0003831670037470758,
+          0.00030808400333626196,
+          0.00029075000202283263,
+          0.0002708750034798868,
+          0.0002471670013619587
+        ]
+      }
+    }
+  },
+  "multiplier_rationale": {
+    "authority_transition_latency": "4x p99 is a benchmark-only release envelope.",
+    "busy_deadline": "2x p99 leaves bounded scheduler and filesystem jitter margin.",
+    "clear_snapshot_latency": "4x p99 is a benchmark-only clear-snapshot envelope.",
+    "distinct_key_overlap": "80% of p05 is a benchmark-only minimum overlap envelope.",
+    "reconciliation_actions": "2x p99 preserves page-action headroom.",
+    "reconciliation_bytes": "2x p99 leaves headroom for real canonical records.",
+    "reconciliation_rows": "2x p99 preserves a whole measured indexed page margin.",
+    "reconciliation_time": "2x p99 bounds page execution within the authority deadline."
+  },
+  "multipliers": {
+    "authority_transition_latency": 4.0,
+    "busy_deadline": 2.0,
+    "clear_snapshot_latency": 4.0,
+    "distinct_key_overlap": 0.8,
+    "reconciliation_actions": 2.0,
+    "reconciliation_bytes": 2.0,
+    "reconciliation_rows": 2.0,
+    "reconciliation_time": 2.0
+  },
+  "schema_version": 1
+}
