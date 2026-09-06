@@ -44,7 +44,12 @@ from typing import Dict, Any, Optional, List, Union
 import logging
 
 from .json_utils import dumps as json_dumps, loads as json_loads
-from .error_handling import CacheLegacyFormatError, CacheReason, CacheStorageError
+from .error_handling import (
+    CacheBlobLifecycleConflictError,
+    CacheLegacyFormatError,
+    CacheReason,
+    CacheStorageError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -334,6 +339,25 @@ class MetadataBackend(ABC):
         """
         raise NotImplementedError("conditional projection mutation is unsupported")
 
+    def supports_custom_metadata(self) -> bool:
+        """Whether this backend owns the SQL custom-metadata protocol."""
+        return False
+
+    def store_custom_metadata_if_current(
+        self,
+        cache_key: str,
+        expected_projection_token: str,
+        metadata_objects: list[Any],
+    ) -> None:
+        """Store links only if the exact promoted projection remains current."""
+        raise NotImplementedError("custom metadata storage is unsupported")
+
+    @contextmanager
+    def custom_metadata_session(self):
+        """Yield a backend-owned session for custom-metadata querying."""
+        raise NotImplementedError("custom metadata querying is unsupported")
+        yield  # pragma: no cover - keeps this abstract protocol a generator.
+
     def close(self):
         """Close and clean up any resources (default implementation does nothing)."""
         pass
@@ -496,6 +520,41 @@ class CachedMetadataBackend(MetadataBackend):
                     if current is not None:
                         self._memory_cache[memory_key] = current
         return result
+
+    def supports_custom_metadata(self) -> bool:
+        """Expose only the wrapped backend's explicit custom-metadata support."""
+        return self.backend.supports_custom_metadata()
+
+    def _refresh_cached_entry(self, cache_key: str) -> None:
+        """Invalidate and repopulate a wrapped entry after a delegated mutation."""
+        if self._memory_cache is None:
+            return
+        with self._lock:
+            memory_key = self._cache_key_for_entry(cache_key)
+            self._memory_cache.pop(memory_key, None)
+            current = self.backend.get_entry(cache_key)
+            if current is not None:
+                self._memory_cache[memory_key] = current
+
+    def store_custom_metadata_if_current(
+        self,
+        cache_key: str,
+        expected_projection_token: str,
+        metadata_objects: list[Any],
+    ) -> None:
+        """Delegate exact-current link insertion without leaking SQL internals."""
+        self.backend.store_custom_metadata_if_current(
+            cache_key,
+            expected_projection_token,
+            metadata_objects,
+        )
+        self._refresh_cached_entry(cache_key)
+
+    @contextmanager
+    def custom_metadata_session(self):
+        """Delegate query-session ownership rather than aliasing SessionLocal."""
+        with self.backend.custom_metadata_session() as session:
+            yield session
     
     def clear_all(self) -> int:
         """Remove all cache entries and clear memory cache."""
@@ -2029,6 +2088,83 @@ class SqliteBackend(MetadataBackend):
     def set_projection_transaction_hook_for_test(self, hook) -> None:
         """Install a deterministic test-only boundary before SQLite admission."""
         self._projection_transaction_hook_for_test = hook
+
+    def supports_custom_metadata(self) -> bool:
+        """SQLite owns custom-metadata storage when it is not a legacy reader."""
+        return self._legacy_layout is None and self.SessionLocal is not None
+
+    def _ensure_custom_metadata_tables(self) -> None:
+        """Create registered custom tables through this backend's engine only."""
+        from .custom_metadata import CacheMetadataLink, get_all_custom_metadata_models
+
+        tables = [CacheMetadataLink.__table__]
+        tables.extend(
+            model.__table__
+            for model in get_all_custom_metadata_models().values()
+            if getattr(model, "__table__", None) is not None
+        )
+        Base.metadata.create_all(self.engine, tables=tables)
+
+    def store_custom_metadata_if_current(
+        self,
+        cache_key: str,
+        expected_projection_token: str,
+        metadata_objects: list[Any],
+    ) -> None:
+        """Link custom metadata inside the same SQLite writer transaction.
+
+        The check precedes every object/link insert while ``BEGIN IMMEDIATE``
+        owns the database writer.  A stale operation therefore rolls back both
+        its object rows and links rather than attaching them to a newer M2 row.
+        """
+        self._ensure_writable()
+        self._ensure_custom_metadata_tables()
+        from .custom_metadata import (
+            CacheMetadataLink,
+            get_custom_metadata_model,
+        )
+
+        with self._lock, self.SessionLocal() as session:
+            try:
+                session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+                current = session.execute(
+                    select(CacheEntry).where(
+                        CacheEntry.cache_key == cache_key,
+                        CacheEntry.actual_path == expected_projection_token,
+                    )
+                ).scalar_one_or_none()
+                if current is None:
+                    raise CacheBlobLifecycleConflictError(
+                        "Compatibility projection changed before custom metadata linking",
+                        context={"operation": "custom_metadata", "key": cache_key},
+                    )
+                for metadata_instance in metadata_objects:
+                    schema_name = getattr(type(metadata_instance), "_schema_name", None)
+                    model_class = get_custom_metadata_model(schema_name)
+                    if model_class is None or not isinstance(
+                        metadata_instance, model_class
+                    ):
+                        continue
+                    session.add(metadata_instance)
+                    session.flush()
+                    session.add(
+                        CacheMetadataLink(
+                            cache_key=cache_key,
+                            metadata_table=model_class.__tablename__,
+                            metadata_id=metadata_instance.id,
+                        )
+                    )
+                session.commit()
+            except Exception:
+                session.rollback()
+                raise
+
+    @contextmanager
+    def custom_metadata_session(self):
+        """Yield a SQLite session while retaining backend-owned lifetime."""
+        self._ensure_writable()
+        with self.SessionLocal() as session:
+            yield session
 
     def remove_entry(self, cache_key: str):
         """Remove cache entry metadata and associated custom metadata links."""

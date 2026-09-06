@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from threading import RLock
+from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import Column, String
+from sqlalchemy import Column, String, create_engine
+from sqlalchemy.orm import sessionmaker
 
 from cacheness import CacheConfig, cacheness
 from cacheness.custom_metadata import (
@@ -14,7 +17,13 @@ from cacheness.custom_metadata import (
     custom_metadata_model,
 )
 from cacheness.error_handling import CacheBlobLifecycleConflictError
+from cacheness.core import UnifiedCache
 from cacheness.metadata import Base, CachedMetadataBackend
+from cacheness.storage.backends.postgresql_backend import (
+    PgCacheStats,
+    PostgresBackend,
+    PostgresBase,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -38,6 +47,35 @@ def _cached_sqlite_cache(root: Path):
     return cache
 
 
+def _cached_postgresql_mapping() -> CachedMetadataBackend:
+    """Build PostgreSQL behavior parity over a SQLite SQLAlchemy mapping.
+
+    This is deliberately not a live PostgreSQL service qualification.  It
+    proves the same facade-to-wrapper backend protocol without external setup.
+    """
+    backend = PostgresBackend.__new__(PostgresBackend)
+    backend._lock = RLock()
+    backend.engine = create_engine("sqlite://")
+    backend.SessionLocal = sessionmaker(
+        autocommit=False, autoflush=False, bind=backend.engine
+    )
+    PostgresBase.metadata.create_all(backend.engine)
+    Base.metadata.create_all(backend.engine)
+    with backend.SessionLocal() as session:
+        session.add(PgCacheStats(id=1))
+        session.commit()
+    return CachedMetadataBackend(
+        backend,
+        SimpleNamespace(
+            enable_memory_cache=True,
+            memory_cache_type="lru",
+            memory_cache_maxsize=16,
+            memory_cache_ttl_seconds=60,
+            memory_cache_stats=False,
+        ),
+    )
+
+
 def test_cached_sqlite_facade_preserves_live_custom_metadata_across_replacement(
     tmp_path: Path,
 ) -> None:
@@ -50,15 +88,22 @@ def test_cached_sqlite_facade_preserves_live_custom_metadata_across_replacement(
         label = Column(String(100), nullable=False)
 
     cache = _cached_sqlite_cache(tmp_path / "cached-sqlite")
-    key = "0123456789abcdef"
     try:
-        cache.put({"generation": "m1"}, key=key, custom_metadata=CachedProjectionMetadata(label="m1"))
+        key = cache.put(
+            {"generation": "m1"},
+            key="projection-key",
+            custom_metadata=CachedProjectionMetadata(label="m1"),
+        )
         assert cache.get_custom_metadata_for_entry(cache_key=key)["cached_projection"].label == "m1"
         assert [item.label for item in cache.query_custom("cached_projection")] == ["m1"]
         with cache.query_custom_session("cached_projection") as query:
             assert [item.label for item in query.all()] == ["m1"]
 
-        cache.put({"generation": "m2"}, key=key, custom_metadata=CachedProjectionMetadata(label="m2"))
+        assert cache.put(
+            {"generation": "m2"},
+            key="projection-key",
+            custom_metadata=CachedProjectionMetadata(label="m2"),
+        ) == key
 
         assert cache.get_custom_metadata_for_entry(cache_key=key)["cached_projection"].label == "m2"
         assert [item.label for item in cache.query_custom("cached_projection")] == ["m2"]
@@ -74,3 +119,68 @@ def test_cached_sqlite_facade_preserves_live_custom_metadata_across_replacement(
         assert [item.label for item in cache.query_custom("cached_projection")] == ["m2"]
     finally:
         cache.close()
+
+
+def test_cached_postgresql_mapping_uses_the_same_public_custom_metadata_protocol() -> None:
+    """Cached PostgreSQL parity retains exact-current M1/M2 custom links."""
+
+    @custom_metadata_model("cached_postgresql_projection")
+    class CachedPostgresqlProjectionMetadata(Base, CustomMetadataBase):
+        __tablename__ = "custom_cached_postgresql_projection_metadata"
+
+        label = Column(String(100), nullable=False)
+
+    backend = _cached_postgresql_mapping()
+    cache = object.__new__(UnifiedCache)
+    cache.actual_backend = "postgresql"
+    cache._custom_metadata_enabled = True
+    cache.metadata_backend = backend
+    cache._live_authority_projection_keys = lambda: {"0123456789abcdef"}
+    cache._authority_snapshot_entry = lambda _key: (object(), object())
+    key = "0123456789abcdef"
+    try:
+        assert backend.conditional_projection_mutation(
+            key,
+            expected_locator=None,
+            replacement={
+                "data_type": "object",
+                "description": "m1",
+                "file_size": 1,
+                "metadata": {"actual_path": "/projection/m1"},
+            },
+        ).status == "applied"
+        cache._store_custom_metadata(
+            key,
+            CachedPostgresqlProjectionMetadata(label="m1"),
+            expected_locator="/projection/m1",
+        )
+        assert cache.get_custom_metadata_for_entry(cache_key=key)[
+            "cached_postgresql_projection"
+        ].label == "m1"
+
+        assert backend.conditional_projection_mutation(
+            key,
+            expected_locator="/projection/m1",
+            replacement={
+                "data_type": "object",
+                "description": "m2",
+                "file_size": 1,
+                "metadata": {"actual_path": "/projection/m2"},
+            },
+        ).status == "applied"
+        cache._store_custom_metadata(
+            key,
+            CachedPostgresqlProjectionMetadata(label="m2"),
+            expected_locator="/projection/m2",
+        )
+        assert [item.label for item in cache.query_custom("cached_postgresql_projection")] == [
+            "m2"
+        ]
+        with pytest.raises(CacheBlobLifecycleConflictError):
+            cache._store_custom_metadata(
+                key,
+                CachedPostgresqlProjectionMetadata(label="stale"),
+                expected_locator="/projection/m1",
+            )
+    finally:
+        backend.close()

@@ -292,11 +292,16 @@ class UnifiedCache:
 
     def _supports_custom_metadata(self) -> bool:
         """Check if custom metadata is supported (requires SQLite or PostgreSQL backend with SQLAlchemy)."""
-        return (
+        if not (
             self.actual_backend in ("sqlite", "postgresql")
-            and hasattr(self, "_custom_metadata_enabled")
-            and self._custom_metadata_enabled
-        )
+            and getattr(self, "_custom_metadata_enabled", False)
+        ):
+            return False
+        supports = getattr(self.metadata_backend, "supports_custom_metadata", None)
+        # Existing third-party adapters retain their characterized exact-current
+        # method surface. Built-in SQL adapters and their cached wrapper expose
+        # the explicit capability method above.
+        return not callable(supports) or supports()
 
     def _normalize_custom_metadata(self, custom_metadata):
         """
@@ -376,92 +381,20 @@ class UnifiedCache:
             return
 
         try:
-            from .custom_metadata import get_custom_metadata_model, CacheMetadataLink, get_schema_name_for_model, get_all_custom_metadata_models
-            from .metadata import Base
-
-            # Normalize custom_metadata to iterable of metadata objects
             metadata_objects = self._normalize_custom_metadata(custom_metadata)
             if not metadata_objects:
                 return
-
             conditional_store = getattr(
                 self.metadata_backend, "store_custom_metadata_if_current", None
             )
-            if expected_locator is not None and callable(conditional_store):
-                conditional_store(cache_key, expected_locator, metadata_objects)
+            if expected_locator is None or not callable(conditional_store):
+                logger.warning(
+                    "Custom metadata storage requires an exact-current backend protocol"
+                )
                 return
-
-            # Get SQLAlchemy session from the metadata backend
-            if hasattr(self.metadata_backend, "SessionLocal"):
-                with self.metadata_backend.SessionLocal() as session:
-                    # Create only custom metadata tables and link table
-                    # This avoids conflicts with cache_entries/cache_stats tables
-                    # which are managed by the metadata backend
-                    tables_to_create = [CacheMetadataLink.__table__]
-                    for model_class in get_all_custom_metadata_models().values():
-                        if hasattr(model_class, "__table__") and model_class.__table__ is not None:
-                            tables_to_create.append(model_class.__table__)
-                    Base.metadata.create_all(self.metadata_backend.engine, tables=tables_to_create)
-
-                    if expected_locator is not None:
-                        from sqlalchemy import update
-                        from .metadata import CacheEntry
-
-                        proved_current = session.execute(
-                            update(CacheEntry)
-                            .where(
-                                CacheEntry.cache_key == cache_key,
-                                CacheEntry.actual_path == expected_locator,
-                            )
-                            .values(accessed_at=CacheEntry.accessed_at)
-                        )
-                        if proved_current.rowcount != 1:
-                            session.rollback()
-                            raise CacheBlobLifecycleConflictError(
-                                "Compatibility projection changed before custom metadata linking",
-                                context={
-                                    "operation": "custom_metadata",
-                                    "key": cache_key,
-                                },
-                            )
-
-                    for metadata_instance in metadata_objects:
-                        # Get schema name from the metadata object's class
-                        schema_name = getattr(type(metadata_instance), '_schema_name', None)
-                        if not schema_name:
-                            logger.warning(
-                                f"Metadata object {type(metadata_instance).__name__} is not properly registered"
-                            )
-                            continue
-
-                        model_class = get_custom_metadata_model(schema_name)
-                        if not model_class:
-                            logger.warning(
-                                f"Unknown custom metadata schema: {schema_name}"
-                            )
-                            continue
-
-                        # Ensure metadata instance is of the correct type
-                        if not isinstance(metadata_instance, model_class):
-                            logger.warning(
-                                f"Invalid metadata type for schema {schema_name}"
-                            )
-                            continue
-
-                        # Save the metadata instance
-                        session.add(metadata_instance)
-                        session.flush()  # Get the ID
-
-                        # Create link table entry
-                        link = CacheMetadataLink(
-                            cache_key=cache_key,
-                            metadata_table=model_class.__tablename__,
-                            metadata_id=metadata_instance.id,
-                        )
-                        session.add(link)
-
-                    session.commit()
-                    logger.debug(f"Stored custom metadata for cache key {cache_key}")
+            conditional_store(cache_key, expected_locator, metadata_objects)
+            logger.debug("Stored custom metadata for cache key %s", cache_key)
+            return
         except CacheBlobLifecycleConflictError:
             raise
         except Exception as e:
@@ -473,43 +406,37 @@ class UnifiedCache:
             return {}
 
         try:
-            from .custom_metadata import get_custom_metadata_model, CacheMetadataLink
+            from .custom_metadata import CacheMetadataLink
+            from sqlalchemy import select
 
-            if hasattr(self.metadata_backend, "SessionLocal"):
-                with self.metadata_backend.SessionLocal() as session:
-                    # Get all links for this cache key
-                    from sqlalchemy import select
-
-                    links = (
-                        session.execute(
-                            select(CacheMetadataLink).where(
-                                CacheMetadataLink.cache_key == cache_key
-                            )
+            session_context = getattr(
+                self.metadata_backend, "custom_metadata_session", None
+            )
+            if not callable(session_context):
+                logger.warning("Custom metadata query protocol is not available")
+                return {}
+            with session_context() as session:
+                links = (
+                    session.execute(
+                        select(CacheMetadataLink).where(
+                            CacheMetadataLink.cache_key == cache_key
                         )
-                        .scalars()
-                        .all()
                     )
+                    .scalars()
+                    .all()
+                )
 
-                    result = {}
-                    for link in links:
-                        # Find the schema name for this table
-                        for (
-                            schema_name,
-                            model_class,
-                        ) in self._get_registered_schemas().items():
-                            if model_class.__tablename__ == link.metadata_table:
-                                # Retrieve the metadata instance
-                                metadata_instance = session.execute(
-                                    select(model_class).where(
-                                        model_class.id == link.metadata_id
-                                    )
-                                ).scalar_one_or_none()
-
-                                if metadata_instance:
-                                    result[schema_name] = metadata_instance
-                                break
-
-                    return result
+                result = {}
+                for link in links:
+                    for schema_name, model_class in self._get_registered_schemas().items():
+                        if model_class.__tablename__ == link.metadata_table:
+                            metadata_instance = session.execute(
+                                select(model_class).where(model_class.id == link.metadata_id)
+                            ).scalar_one_or_none()
+                            if metadata_instance:
+                                result[schema_name] = metadata_instance
+                            break
+                return result
         except Exception as e:
             logger.error(f"Failed to retrieve custom metadata: {e}")
             return {}
@@ -564,35 +491,37 @@ class UnifiedCache:
                 logger.warning(f"Unknown custom metadata schema: {schema_name}")
                 return []
 
-            if hasattr(self.metadata_backend, "SessionLocal"):
-                live_keys = self._live_authority_projection_keys()
-                if not live_keys:
-                    return []
-                # Use context manager to ensure proper session cleanup
-                with self.metadata_backend.SessionLocal() as session:
-                    query = (
-                        session.query(model_class)
-                        .join(
-                            CacheMetadataLink,
-                            (CacheMetadataLink.metadata_table == model_class.__tablename__)
-                            & (CacheMetadataLink.metadata_id == model_class.id),
-                        )
-                        .filter(CacheMetadataLink.cache_key.in_(live_keys))
-                        .distinct()
-                    )
-                    
-                    # Apply optional filters
-                    if filters:
-                        for field_name, value in filters.items():
-                            if hasattr(model_class, field_name):
-                                query = query.filter(getattr(model_class, field_name) == value)
-                            else:
-                                logger.warning(f"Unknown filter field '{field_name}' for schema '{schema_name}'")
-                    
-                    return query.all()
-            else:
-                logger.warning("SQLAlchemy session not available")
+            session_context = getattr(
+                self.metadata_backend, "custom_metadata_session", None
+            )
+            if not callable(session_context):
+                logger.warning("Custom metadata query protocol is not available")
                 return []
+            live_keys = self._live_authority_projection_keys()
+            if not live_keys:
+                return []
+            with session_context() as session:
+                query = (
+                    session.query(model_class)
+                    .join(
+                        CacheMetadataLink,
+                        (CacheMetadataLink.metadata_table == model_class.__tablename__)
+                        & (CacheMetadataLink.metadata_id == model_class.id),
+                    )
+                    .filter(CacheMetadataLink.cache_key.in_(live_keys))
+                    .distinct()
+                )
+                if filters:
+                    for field_name, value in filters.items():
+                        if hasattr(model_class, field_name):
+                            query = query.filter(getattr(model_class, field_name) == value)
+                        else:
+                            logger.warning(
+                                "Unknown filter field '%s' for schema '%s'",
+                                field_name,
+                                schema_name,
+                            )
+                return query.all()
         except Exception as e:
             logger.error(f"Failed to query schema {schema_name}: {e}")
             return []
@@ -634,11 +563,13 @@ class UnifiedCache:
             if not model_class:
                 raise ValueError(f"Unknown custom metadata schema: {schema_name}")
 
-            if not hasattr(self.metadata_backend, "SessionLocal"):
-                raise ValueError("SQLAlchemy session not available")
+            session_context = getattr(
+                self.metadata_backend, "custom_metadata_session", None
+            )
+            if not callable(session_context):
+                raise ValueError("Custom metadata query protocol is not available")
 
-            session = self.metadata_backend.SessionLocal()
-            try:
+            with session_context() as session:
                 live_keys = self._live_authority_projection_keys()
                 query = session.query(model_class)
                 if not live_keys:
@@ -653,8 +584,6 @@ class UnifiedCache:
                     .filter(CacheMetadataLink.cache_key.in_(live_keys))
                     .distinct()
                 )
-            finally:
-                session.close()
         
         return _session_context()
 

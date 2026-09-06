@@ -37,6 +37,7 @@ Requirements:
 
 import logging
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -477,6 +478,16 @@ class PostgresBackend(MetadataBackend):
             except Exception:
                 session.rollback()
                 raise
+
+    def supports_custom_metadata(self) -> bool:
+        """PostgreSQL owns the custom-metadata protocol."""
+        return True
+
+    @contextmanager
+    def custom_metadata_session(self):
+        """Yield a PostgreSQL session without exposing a factory to wrappers."""
+        with self.SessionLocal() as session:
+            yield session
     
     def _upsert_entry(self, session, cache_key: str, entry_data: Dict[str, Any]):
         """Insert or update an entry."""
