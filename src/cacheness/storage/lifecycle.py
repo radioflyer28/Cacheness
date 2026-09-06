@@ -235,6 +235,15 @@ class AuthorityLifecycleEngine:
                     },
                     user_metadata=dict(metadata or {}),
                 )
+                before_promotion = getattr(
+                    self.store, "_before_authority_promotion", None
+                )
+                if callable(before_promotion):
+                    manifest = before_promotion(manifest)
+                    if not isinstance(manifest, BlobManifestV1):
+                        raise CacheBlobLifecycleConflictError(
+                            "Lifecycle projection hook must return a BlobManifestV1"
+                        )
                 manifest = self._sign(
                     manifest, initialize_new_store=previous is None
                 )
@@ -249,8 +258,15 @@ class AuthorityLifecycleEngine:
                 )
                 self._reach("put.before_promotion", key=key)
                 promoted = self.authority.promote_mutation(prepared)
-            except Exception:
-                self._abort(prepared, candidate_persisted=candidate_persisted)
+            except BaseException as error:
+                try:
+                    self._abort(prepared, candidate_persisted=candidate_persisted)
+                except Exception as cleanup_error:
+                    # Preserve the pre-promotion failure as the direct cause.
+                    # The cleanup failure is the surfaced recoverable state,
+                    # but callers need the original serialization, signing, or
+                    # projection error to diagnose why the candidate existed.
+                    raise cleanup_error from error
                 raise
         self._reach("put.promoted", key=key)
         self._settle_debts(promoted.cleanup_debt)

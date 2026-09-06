@@ -15,6 +15,8 @@ import sys
 import uuid
 import warnings
 from contextlib import contextmanager
+from collections.abc import Mapping
+from dataclasses import replace
 from functools import wraps
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
@@ -22,6 +24,7 @@ from typing import Optional, Dict, Any, List, Callable, Tuple
 
 from .config import CacheConfig, _DEFAULT_TTL, create_cache_config
 from .error_handling import (
+    CacheBlobLifecycleConflictError,
     CacheIntegrityError,
     CacheLegacyFormatError,
     CacheQueryValidationError,
@@ -30,7 +33,9 @@ from .error_handling import (
     CacheUnsafePathError,
 )
 from .handlers import HandlerRegistry
+from .metadata import InMemoryBackend
 from .serialization import create_unified_cache_key
+from .storage.blob_store import BlobStore
 from .storage.guarded_handler_io import GuardedHandlerIO
 from .storage.path_security import encode_physical_name, resolve_managed_locator
 
@@ -135,6 +140,9 @@ class UnifiedCache:
 
         # Initialize entry signer for metadata integrity
         self._init_entry_signer()
+        self._cache_blob_store._before_authority_promotion = (
+            self._prepare_authority_projection
+        )
 
         # Clean up expired entries on initialization
         if self.config.storage.cleanup_on_init:
@@ -250,8 +258,18 @@ class UnifiedCache:
         self.actual_backend = actual_backend
 
     def _init_lifecycle_state(self) -> None:
-        """Initialize cache-local state without creating lifecycle controls."""
+        """Initialize BlobStore as the single payload lifecycle authority."""
         self._lifecycle_state = "ready"
+        self._cache_blob_store = BlobStore(
+            self.cache_dir / ".cacheness" / "unified-cache-v1",
+            # An object backend selects durable SQLite authority without trying
+            # to render handler diagnostics as an independent JSON authority.
+            backend=InMemoryBackend(),
+            config=self.config,
+        )
+        self._cache_blob_store.handlers = self.handlers
+        if self._cache_blob_store.guarded_handler_io is not None:
+            self.guarded_handler_io = self._cache_blob_store.guarded_handler_io
 
     def _supports_custom_metadata(self) -> bool:
         """Check if custom metadata is supported (requires SQLite or PostgreSQL backend with SQLAlchemy)."""
@@ -1016,7 +1034,24 @@ class UnifiedCache:
         )
 
     def _cleanup_expired(self):
-        """Remove expired cache entries."""
+        """Remove expired entries through their observed authority generation."""
+        authority_keys = self._cache_blob_store.list()
+        if authority_keys:
+            self._preflight_entries(
+                self.metadata_backend.list_entries(), operation="cleanup_expired"
+            )
+            removed_count = 0
+            for cache_key in authority_keys:
+                snapshot, entry = self._authority_snapshot_entry(cache_key)
+                if snapshot is None or entry is None:
+                    continue
+                if self._is_expired(cache_key, entry=entry):
+                    if self._retire_exact_authority_snapshot(cache_key, snapshot):
+                        removed_count += 1
+            if removed_count > 0:
+                logger.info("Cleaned up %s expired cache entries", removed_count)
+            return
+
         try:
             self._preflight_entries(
                 self.metadata_backend.list_entries(),
@@ -1036,6 +1071,27 @@ class UnifiedCache:
 
         if removed_count > 0:
             logger.info(f"Cleaned up {removed_count} expired cache entries")
+
+    def _authority_snapshot_entry(self, cache_key: str):
+        """Return a matching authority snapshot and compatibility projection.
+
+        The metadata backend is deliberately a projection for authority-backed
+        cache entries.  Refresh it before applying cache policy so a stale
+        projection can neither select nor retire a newer payload generation.
+        """
+        snapshot = self._cache_blob_store.lifecycle_authority.read_entry(cache_key)
+        if snapshot is None:
+            return None, None
+        entry = self.metadata_backend.get_entry(cache_key)
+        observed_generation = (
+            entry.get("metadata", {}).get("authority_generation")
+            if isinstance(entry, dict)
+            else None
+        )
+        if observed_generation != snapshot.generation:
+            self._sync_authority_projection(cache_key)
+            entry = self.metadata_backend.get_entry(cache_key)
+        return snapshot, entry
 
     def _recognized_legacy_backend(self):
         """Return only one of the exact metadata compatibility adapters."""
@@ -1078,8 +1134,154 @@ class UnifiedCache:
                 stacklevel=2,
             )
 
+    @staticmethod
+    def _plain_projection_value(value: Any) -> Any:
+        """Copy handler diagnostics out of immutable mapping wrappers."""
+        if isinstance(value, Mapping):
+            return {
+                str(name): UnifiedCache._plain_projection_value(item)
+                for name, item in value.items()
+            }
+        if isinstance(value, tuple):
+            return [UnifiedCache._plain_projection_value(item) for item in value]
+        if isinstance(value, list):
+            return [UnifiedCache._plain_projection_value(item) for item in value]
+        return value
+
+    def _prepare_authority_projection(self, manifest):
+        """Validate and publish compatibility metadata before authority promotion.
+
+        The projection is never read as lifecycle authority: if another process
+        wins the BlobStore CAS after this write, the failed caller immediately
+        re-renders it from the winning authority entry.  Keeping this hook
+        before promotion preserves the established integrity/signing failure
+        semantics without allowing metadata to select a payload generation.
+        """
+        payload_path = self._cache_blob_store.cache_dir / manifest.locator
+        metadata = self._plain_projection_value(
+            {**dict(manifest.handler_metadata), **dict(manifest.user_metadata)}
+        )
+        metadata["actual_path"] = str(payload_path)
+        file_hash = None
+        if self.config.metadata.verify_cache_integrity:
+            file_hash = self._calculate_file_hash(payload_path)
+            if not self._is_valid_file_hash(file_hash):
+                raise CacheIntegrityError(
+                    "Unable to calculate a complete payload integrity digest"
+                )
+        metadata["file_hash"] = file_hash
+        metadata["authority_generation"] = manifest.generation
+        entry_data = {
+            "data_type": manifest.handler_type,
+            "prefix": metadata.get("prefix", ""),
+            "description": metadata.get("description", ""),
+            "file_size": manifest.byte_size,
+            "created_at": manifest.created_at,
+            "metadata": metadata,
+        }
+        signing_required = (
+            self.config.security.enable_entry_signing
+            and not self.config.security.allow_unsigned_entries
+        )
+        if self.config.security.enable_entry_signing:
+            try:
+                if self.signer is None:
+                    raise RuntimeError("Entry signer is unavailable")
+                signature = self.signer.sign_entry(
+                    self._extract_signable_fields(
+                        cache_key=manifest.key,
+                        entry_data=entry_data,
+                        metadata=metadata,
+                        cache_key_params=metadata.get("cache_key_params"),
+                    )
+                )
+                if not isinstance(signature, str) or not signature:
+                    raise ValueError("Entry signer returned an empty signature")
+                metadata["entry_signature"] = signature
+            except Exception as exc:
+                if signing_required:
+                    raise CacheIntegrityError(
+                        "Unable to sign cache entry while unsigned entries are disabled"
+                    ) from exc
+        self.metadata_backend.put_entry(manifest.key, entry_data)
+        return replace(
+            manifest,
+            user_metadata={
+                **dict(manifest.user_metadata),
+                "file_hash": file_hash,
+                "authority_generation": manifest.generation,
+                **(
+                    {"entry_signature": metadata["entry_signature"]}
+                    if "entry_signature" in metadata
+                    else {}
+                ),
+            },
+        )
+
+    def _sync_authority_projection(self, cache_key: str) -> None:
+        """Repair a compatibility projection from a committed BlobStore entry."""
+        entry = self._cache_blob_store.get_metadata(cache_key)
+        if entry is None:
+            self.metadata_backend.remove_entry(cache_key)
+            return
+        metadata = self._plain_projection_value(dict(entry.get("metadata", {})))
+        metadata["actual_path"] = str(
+            self._cache_blob_store.cache_dir / metadata["actual_path"]
+        )
+        snapshot = self._cache_blob_store.lifecycle_authority.read_entry(cache_key)
+        if snapshot is not None:
+            metadata["authority_generation"] = snapshot.generation
+        self.metadata_backend.put_entry(
+            cache_key,
+            {
+                "data_type": entry["data_type"],
+                "prefix": metadata.get("prefix", ""),
+                "description": metadata.get("description", ""),
+                "file_size": entry["file_size"],
+                "created_at": entry["created_at"],
+                "metadata": metadata,
+            },
+        )
+
     @_clear_coordinated
     def put(
+        self,
+        data: Any,
+        prefix: str = "",
+        description: str = "",
+        custom_metadata=None,
+        **kwargs,
+    ):
+        """Store data through BlobStore and retain metadata as a projection."""
+        cache_key = self._create_cache_key(kwargs)
+        # Public callers may replace the compatibility handler registry after
+        # construction.  Keep the authority path on that same registry rather
+        # than selecting a second serializer policy.
+        self._cache_blob_store.handlers = self.handlers
+        try:
+            self._cache_blob_store.put(
+                data,
+                key=cache_key,
+                metadata={
+                    "prefix": prefix,
+                    "description": description,
+                    **(
+                        {"cache_key_params": kwargs}
+                        if self.config.metadata.store_cache_key_params
+                        else {}
+                    ),
+                },
+            )
+        except CacheBlobLifecycleConflictError:
+            self._sync_authority_projection(cache_key)
+            raise
+        self.guarded_handler_io = self._cache_blob_store.guarded_handler_io
+        if custom_metadata and self._supports_custom_metadata():
+            self._store_custom_metadata(cache_key, custom_metadata)
+        self._enforce_size_limit()
+        return cache_key
+
+    def _put_legacy(
         self,
         data: Any,
         prefix: str = "",
@@ -1334,11 +1536,29 @@ class UnifiedCache:
 
         return self.config.security.allow_unsigned_entries
 
-    def _reject_untrusted_entry(self, cache_key: str, *, reason: str) -> None:
+    def _retire_exact_authority_snapshot(self, cache_key: str, snapshot: Any) -> bool:
+        """Delete only a cache generation still equal to this read observation."""
+        if snapshot is None:
+            self.metadata_backend.remove_entry(cache_key)
+            return True
+        try:
+            deleted = self._cache_blob_store.delete(
+                cache_key, expected=snapshot.expectation
+            )
+        except CacheBlobLifecycleConflictError:
+            logger.info("Preserved replacement generation during stale cleanup: %s", cache_key)
+            self._sync_authority_projection(cache_key)
+            return False
+        self._sync_authority_projection(cache_key)
+        return deleted
+
+    def _reject_untrusted_entry(
+        self, cache_key: str, *, reason: str, snapshot: Any = None
+    ) -> None:
         """Record a safe miss and optionally remove verified-bad evidence."""
         logger.warning("Cache entry %s was rejected before deserialization: %s", cache_key, reason)
         if self.config.security.delete_invalid_signatures:
-            self.metadata_backend.remove_entry(cache_key)
+            self._retire_exact_authority_snapshot(cache_key, snapshot)
         self.metadata_backend.increment_misses()
 
     @_clear_read_coordinated
@@ -1353,8 +1573,21 @@ class UnifiedCache:
         """Retrieve a cached value only after guarded snapshot verification."""
         if cache_key is None:
             cache_key = self._create_cache_key(kwargs)
+        self._cache_blob_store.handlers = self.handlers
 
+        authority_snapshot = self._cache_blob_store.lifecycle_authority.read_entry(
+            cache_key
+        )
         entry = self.metadata_backend.get_entry(cache_key)
+        if authority_snapshot is not None:
+            observed_generation = (
+                entry.get("metadata", {}).get("authority_generation")
+                if isinstance(entry, dict)
+                else None
+            )
+            if observed_generation != authority_snapshot.generation:
+                self._sync_authority_projection(cache_key)
+                entry = self.metadata_backend.get_entry(cache_key)
         if not entry:
             if not _legacy_decorator_v0313:
                 self.metadata_backend.increment_misses()
@@ -1377,6 +1610,8 @@ class UnifiedCache:
             else self._is_expired(cache_key, ttl_hours)
         )
         if is_expired:
+            if authority_snapshot is not None:
+                self._retire_exact_authority_snapshot(cache_key, authority_snapshot)
             if not _legacy_decorator_v0313:
                 self.metadata_backend.increment_misses()
             return None
@@ -1400,6 +1635,7 @@ class UnifiedCache:
                         self._reject_untrusted_entry(
                             cache_key,
                             reason="missing or malformed payload integrity digest",
+                            snapshot=authority_snapshot,
                         )
                         return None
                     current_hash = self._calculate_file_hash(snapshot.path)
@@ -1407,6 +1643,7 @@ class UnifiedCache:
                         self._reject_untrusted_entry(
                             cache_key,
                             reason="payload integrity hash mismatch",
+                            snapshot=authority_snapshot,
                         )
                         return None
 
@@ -1419,22 +1656,27 @@ class UnifiedCache:
                     self._reject_untrusted_entry(
                         cache_key,
                         reason="missing or invalid entry signature",
+                        snapshot=authority_snapshot,
                     )
                     return None
 
-                data = handler.get(snapshot.path, snapshot.metadata)
+                data = (
+                    self._cache_blob_store.get(cache_key)
+                    if authority_snapshot is not None
+                    else handler.get(snapshot.path, snapshot.metadata)
+                )
 
         except CacheUnsafePathError:
             # No unsafe locator becomes a miss, cleanup, or evidence mutation.
             raise
         except FileNotFoundError as e:
             logger.warning(f"Cache file missing for {cache_key}: {e}")
-            self.metadata_backend.remove_entry(cache_key)
+            self._retire_exact_authority_snapshot(cache_key, authority_snapshot)
             self.metadata_backend.increment_misses()
             return None
         except (OSError, IOError) as e:
             logger.warning(f"I/O error loading cached {data_type} {cache_key}: {e}")
-            self.metadata_backend.remove_entry(cache_key)
+            self._retire_exact_authority_snapshot(cache_key, authority_snapshot)
             self.metadata_backend.increment_misses()
             return None
         except CacheLegacyFormatError:
@@ -1444,7 +1686,7 @@ class UnifiedCache:
             logger.warning(
                 f"Failed to load cached {data_type} {cache_key}: {type(e).__name__}: {e}"
             )
-            self.metadata_backend.remove_entry(cache_key)
+            self._retire_exact_authority_snapshot(cache_key, authority_snapshot)
             self.metadata_backend.increment_misses()
             return None
 
@@ -1454,7 +1696,46 @@ class UnifiedCache:
         return data
 
     def _enforce_size_limit(self):
-        """Enforce cache size limits using LRU eviction."""
+        """Enforce size limits without deleting a generation by key alone."""
+        authority_keys = self._cache_blob_store.list()
+        if authority_keys:
+            self._preflight_entries(
+                self.metadata_backend.list_entries(), operation="cleanup_by_size"
+            )
+            candidates = []
+            total_size_bytes = 0
+            for cache_key in authority_keys:
+                snapshot, entry = self._authority_snapshot_entry(cache_key)
+                if snapshot is None or entry is None:
+                    continue
+                file_size = entry.get("file_size", 0)
+                size = file_size if isinstance(file_size, int) and file_size > 0 else 0
+                total_size_bytes += size
+                candidates.append(
+                    (
+                        entry.get("created_at", ""),
+                        cache_key,
+                        snapshot,
+                        size,
+                    )
+                )
+
+            max_size_bytes = int(self.config.storage.max_cache_size_mb * 1024 * 1024)
+            if total_size_bytes <= max_size_bytes:
+                return
+
+            target_size_bytes = int(max_size_bytes * 0.8)
+            removed_count = 0
+            for _, cache_key, snapshot, size in sorted(candidates):
+                if total_size_bytes <= target_size_bytes:
+                    break
+                if self._retire_exact_authority_snapshot(cache_key, snapshot):
+                    total_size_bytes -= size
+                    removed_count += 1
+            if removed_count > 0:
+                logger.info("Cache size enforcement: removed %s entries", removed_count)
+            return
+
         self._preflight_entries(
             self.metadata_backend.list_entries(),
             operation="cleanup_by_size",
@@ -1488,6 +1769,18 @@ class UnifiedCache:
         if cache_key is None:
             cache_key = self._create_cache_key(kwargs)
 
+        authority_snapshot = self._cache_blob_store.lifecycle_authority.read_entry(
+            cache_key
+        )
+        if authority_snapshot is not None:
+            if not self._retire_exact_authority_snapshot(cache_key, authority_snapshot):
+                raise CacheBlobLifecycleConflictError(
+                    "Cache generation changed before invalidation could retire it",
+                    context={"operation": "invalidate", "key": cache_key},
+                )
+            logger.info("Invalidated authority-backed cache entry %s", cache_key)
+            return
+
         entry = self.metadata_backend.get_entry(cache_key)
         if entry is not None:
             self._entry_locator(entry, cache_key, operation="invalidate", prefix=prefix)
@@ -1499,6 +1792,19 @@ class UnifiedCache:
     @_clear_coordinated
     def clear_all(self):
         """Clear known cache entries without reviving a second authority."""
+        authority_keys = self._cache_blob_store.list()
+        if authority_keys:
+            # Compatibility metadata is not lifecycle authority, but malformed
+            # paths remain fail-closed evidence and must block a bulk mutation.
+            self._preflight_entries(
+                self.metadata_backend.list_entries(), operation="clear_all"
+            )
+            cleared = self._cache_blob_store.clear()
+            for cache_key in authority_keys:
+                self._sync_authority_projection(cache_key)
+            logger.info("Cleared %s authority-backed cache entries", cleared)
+            return cleared
+
         entries = self.metadata_backend.list_entries()
         self._preflight_entries(entries, operation="clear_all")
         for entry in entries:
@@ -1542,7 +1848,15 @@ class UnifiedCache:
 
     def close(self):
         """Close all resources (database connections, etc.)."""
-        if hasattr(self, "guarded_handler_io") and self.guarded_handler_io:
+        blob_store = getattr(self, "_cache_blob_store", None)
+        blob_io = getattr(blob_store, "guarded_handler_io", None)
+        if blob_store is not None:
+            blob_store.close()
+        if (
+            hasattr(self, "guarded_handler_io")
+            and self.guarded_handler_io
+            and self.guarded_handler_io is not blob_io
+        ):
             self.guarded_handler_io.close()
         if hasattr(self, 'metadata_backend') and self.metadata_backend:
             if hasattr(self.metadata_backend, 'close'):

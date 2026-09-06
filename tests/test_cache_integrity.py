@@ -526,16 +526,19 @@ def test_unified_cache_postcommit_cleanup_keeps_new_entry_authoritative(
         cache.put({"value": "committed"}, **cache_key_params)
         cache_key = cache._create_cache_key(cache_key_params)
         entry_before, payload_before, _, _ = _overwrite_evidence(cache, cache_key)
-        delete = cache.guarded_handler_io.file_ops.delete
+        delete_or_prove_absent = cache._cache_blob_store._delete_or_prove_absent
 
         def fail_prior_cleanup(locator):
-            if Path(locator) == payload_before:
-                return False
-            return delete(locator)
+            candidate = Path(locator)
+            if not candidate.is_absolute():
+                candidate = cache._cache_blob_store.cache_dir / candidate
+            if candidate == payload_before:
+                raise OSError("prior cleanup unavailable")
+            return delete_or_prove_absent(locator)
 
         monkeypatch.setattr(
-            cache.guarded_handler_io.file_ops,
-            "delete",
+            cache._cache_blob_store,
+            "_delete_or_prove_absent",
             fail_prior_cleanup,
         )
 

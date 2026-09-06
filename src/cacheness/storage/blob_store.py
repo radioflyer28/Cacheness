@@ -44,7 +44,7 @@ from .integrity import (
 )
 from .legacy_manifest import LegacyManifestIdentity, recognize_legacy_fixture_tree
 from .lifecycle import AuthorityLifecycleEngine
-from .lifecycle_authority import AuthorityCapabilities, LifecycleAuthority
+from .lifecycle_authority import AuthorityCapabilities, EntryExpectation, LifecycleAuthority
 from .manifest import (
     BlobManifestV1,
     canonical_signing_bytes_from_record,
@@ -337,10 +337,12 @@ class BlobStore:
         return updated
 
     @_ordinary_admitted
-    def delete(self, key: str) -> bool:
-        """Tombstone then durably delete a single authority-owned payload."""
+    def delete(
+        self, key: str, *, expected: EntryExpectation | None = None
+    ) -> bool:
+        """Tombstone one observed generation and delete its exact payload."""
         with self._key_coordinator.hold(self._storage_id_for_key(key)):
-            deleted = self.lifecycle.delete(key=key)
+            deleted = self.lifecycle.delete(key=key, expected=expected)
         if deleted:
             self._export_compatible_projection()
         return deleted
