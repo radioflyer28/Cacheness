@@ -25,7 +25,7 @@ import time
 from typing import Any, Callable
 from uuid import uuid4
 
-from cacheness.config import LifecycleLimits
+from cacheness.config import CacheConfig, LifecycleLimits
 from cacheness.error_handling import CacheBlobLifecycleTimeoutError
 from cacheness.storage.blob_store import BlobStore
 from cacheness.storage.lifecycle_authority import (
@@ -40,16 +40,21 @@ from cacheness.storage.sqlite_lifecycle_authority import (
 )
 
 
-BENCHMARK_SCHEMA_VERSION = 1
+LEGACY_BENCHMARK_SCHEMA_VERSION = 1
+BENCHMARK_SCHEMA_VERSION = 2
 REPETITIONS = 5
 WARMUPS = 1
 CLEAR_TARGET_COUNTS = (16, 64)
 RECONCILIATION_ITEMS = 16
 RECONCILIATION_MANIFEST_BYTES = 4096
+CONTENTION_WORKERS = 8
+CONTENTION_OPERATIONS_PER_WORKER = 1
+CONTENTION_MULTIPLIER = 2.0
 BENCHMARK_LIMITS = LifecycleLimits(
     authority_busy_timeout_seconds=0.075,
     operation_page_size=RECONCILIATION_ITEMS * 2,
 )
+CONTENTION_LIMITS = LifecycleLimits()
 
 # These margins preserve a release-envelope signal while avoiding an anecdotal
 # latency target.  Runtime limits are derived separately below.
@@ -353,6 +358,175 @@ def collect_measurements() -> dict[str, Any]:
     }
 
 
+_CONTENTION_STAGE_DEFINITIONS = {
+    "connection_preflight_seconds": "transaction entry through validated connection preflight",
+    "queue_service_seconds": "ticket enqueue through atomic FIFO eligibility",
+    "scheduler_dispatch_seconds": "FIFO eligibility through BEGIN IMMEDIATE attempt",
+    "sqlite_busy_handler_seconds": "BEGIN IMMEDIATE attempt through acquisition",
+    "writer_hold_seconds": "SQLite writer acquisition through transaction finish",
+    "payload_publication_seconds": "candidate publication boundary through completed native publish",
+    "post_promotion_cleanup_seconds": "promotion boundary through cleanup retirement",
+    "operation_seconds": "public BlobStore put entry through return",
+}
+
+
+def _measure_contention_once() -> dict[str, dict[str, Any]]:
+    """Measure one fixed-cardinality public contention schedule by stage."""
+    stage_samples: dict[str, list[float]] = {
+        name: [] for name in _CONTENTION_STAGE_DEFINITIONS
+    }
+    with tempfile.TemporaryDirectory(prefix="cacheness-lifecycle-contention-") as temp_dir:
+        root = Path(temp_dir)
+        store = BlobStore(
+            root,
+            backend="json",
+            config=CacheConfig(cache_dir=root, lifecycle_limits=CONTENTION_LIMITS),
+        )
+        authority = store.lifecycle_authority
+        if not isinstance(authority, SqliteLifecycleAuthority):
+            raise BenchmarkVerificationError("contention benchmark did not select SQLite authority")
+        store.put("warmup", key="warmup")
+
+        event_lock = threading.Lock()
+        authority_events: dict[int, list[tuple[str, float]]] = {}
+        lifecycle_events: dict[int, list[tuple[str, float]]] = {}
+        operation_samples: list[float] = []
+        errors: list[BaseException] = []
+        barrier = threading.Barrier(CONTENTION_WORKERS)
+
+        def observe_authority(event: str, timestamp: float) -> None:
+            with event_lock:
+                authority_events.setdefault(threading.get_ident(), []).append(
+                    (event, timestamp)
+                )
+
+        def observe_lifecycle(boundary: str) -> None:
+            with event_lock:
+                lifecycle_events.setdefault(threading.get_ident(), []).append(
+                    (boundary, time.monotonic())
+                )
+
+        authority.set_admission_observer_for_test(observe_authority)
+        store.lifecycle.test_hook = observe_lifecycle
+
+        def put(worker: int) -> None:
+            try:
+                barrier.wait(timeout=5)
+                for operation in range(CONTENTION_OPERATIONS_PER_WORKER):
+                    started = time.monotonic()
+                    store.put(
+                        f"contention-{worker}-{operation}",
+                        key=f"contention-{worker}-{operation}",
+                    )
+                    with event_lock:
+                        operation_samples.append(time.monotonic() - started)
+            except BaseException as error:  # pragma: no cover - re-raised below
+                with event_lock:
+                    errors.append(error)
+
+        threads = [
+            threading.Thread(target=put, args=(worker,))
+            for worker in range(CONTENTION_WORKERS)
+        ]
+        try:
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=10)
+            if any(thread.is_alive() for thread in threads):
+                raise BenchmarkVerificationError("contention benchmark did not complete")
+            if errors:
+                raise BenchmarkVerificationError(
+                    f"contention benchmark failed: {type(errors[0]).__name__}"
+                ) from errors[0]
+            for worker in range(CONTENTION_WORKERS):
+                for operation in range(CONTENTION_OPERATIONS_PER_WORKER):
+                    expected = f"contention-{worker}-{operation}"
+                    if store.get(expected) != expected:
+                        raise BenchmarkVerificationError("contention entry was not readable")
+        finally:
+            store.close()
+
+    for events in authority_events.values():
+        boundaries: dict[str, float] = {}
+        for event, timestamp in events:
+            if event == "sqlite.connection_preflight.started":
+                boundaries["preflight"] = timestamp
+            elif event == "sqlite.connection_preflight.finished":
+                stage_samples["connection_preflight_seconds"].append(
+                    timestamp - boundaries.pop("preflight")
+                )
+            elif event == "writer_admission.enqueued":
+                boundaries["enqueued"] = timestamp
+            elif event == "writer_admission.eligible":
+                stage_samples["queue_service_seconds"].append(
+                    timestamp - boundaries.pop("enqueued")
+                )
+                boundaries["eligible"] = timestamp
+            elif event == "sqlite.begin.attempt":
+                stage_samples["scheduler_dispatch_seconds"].append(
+                    timestamp - boundaries.pop("eligible")
+                )
+                boundaries["begin"] = timestamp
+            elif event == "sqlite.begin.acquired":
+                stage_samples["sqlite_busy_handler_seconds"].append(
+                    timestamp - boundaries.pop("begin")
+                )
+                boundaries["acquired"] = timestamp
+            elif event == "transaction.finished":
+                stage_samples["writer_hold_seconds"].append(
+                    timestamp - boundaries.pop("acquired")
+                )
+
+    for events in lifecycle_events.values():
+        boundaries: dict[str, float] = {}
+        for event, timestamp in events:
+            if event == "put.before_candidate_publish":
+                boundaries["publish"] = timestamp
+            elif event == "put.candidate_published":
+                stage_samples["payload_publication_seconds"].append(
+                    timestamp - boundaries.pop("publish")
+                )
+            elif event == "put.promoted":
+                boundaries["cleanup"] = timestamp
+            elif event == "put.cleanup_retired":
+                stage_samples["post_promotion_cleanup_seconds"].append(
+                    timestamp - boundaries.pop("cleanup")
+                )
+
+    stage_samples["operation_seconds"] = operation_samples
+    expected_operations = CONTENTION_WORKERS * CONTENTION_OPERATIONS_PER_WORKER
+    if any(len(samples) < expected_operations for samples in stage_samples.values()):
+        raise BenchmarkVerificationError("contention stage capture was incomplete")
+    if any(sample < 0 for samples in stage_samples.values() for sample in samples):
+        raise BenchmarkVerificationError("contention stage capture overlapped or regressed")
+    return {name: _distribution(samples) for name, samples in stage_samples.items()}
+
+
+def collect_contention_measurements() -> dict[str, dict[str, Any]]:
+    """Collect repeated fixed-cardinality writer-admission evidence."""
+    _warm(_measure_contention_once)
+    collected = [_measure_contention_once() for _ in range(REPETITIONS)]
+    return {
+        name: _distribution(
+            [value for sample in collected for value in sample[name]["samples"]]
+        )
+        for name in _CONTENTION_STAGE_DEFINITIONS
+    }
+
+
+def _contention_envelope_seconds(stages: dict[str, dict[str, Any]]) -> float:
+    """Derive the one benchmark-only admission envelope from measured p99 stages."""
+    admission_stages = (
+        "connection_preflight_seconds",
+        "queue_service_seconds",
+        "scheduler_dispatch_seconds",
+        "sqlite_busy_handler_seconds",
+        "writer_hold_seconds",
+    )
+    return sum(stages[name]["p99"] for name in admission_stages) * CONTENTION_MULTIPLIER
+
+
 def derive_configuration(
     metrics: dict[str, Any],
     multipliers: dict[str, float],
@@ -417,6 +591,49 @@ def _filesystem_provenance(path: Path) -> dict[str, int | str]:
     }
 
 
+def build_contention_section() -> dict[str, Any]:
+    """Capture only the additive public writer-contention evidence."""
+    with tempfile.TemporaryDirectory(prefix="cacheness-lifecycle-contention-provenance-") as temp_dir:
+        filesystem = _filesystem_provenance(Path(temp_dir))
+    stages = collect_contention_measurements()
+    envelope = _contention_envelope_seconds(stages)
+    deadline = LifecycleLimits().authority_busy_timeout_seconds
+    if envelope > deadline:
+        raise BenchmarkVerificationError(
+            "contention p99 envelope exceeds the configured authority deadline"
+        )
+    return {
+        "command": (
+            "uv run --isolated --python 3.11 --all-extras --group dev --frozen "
+            "python benchmarks/lifecycle_authority_benchmark.py "
+            "--extend-contention-baseline benchmarks/lifecycle_authority_baseline.json"
+        ),
+        "source_commit": _git_revision(),
+        "environment": {
+            "python": platform.python_version(),
+            "implementation": platform.python_implementation(),
+            "sqlite": sqlite3.sqlite_version,
+            "platform": platform.platform(),
+            "filesystem": filesystem,
+        },
+        "cardinality": {
+            "workers": CONTENTION_WORKERS,
+            "operations_per_worker": CONTENTION_OPERATIONS_PER_WORKER,
+        },
+        "repetitions": REPETITIONS,
+        "warmups": WARMUPS,
+        "stage_definitions": dict(_CONTENTION_STAGE_DEFINITIONS),
+        "stages": stages,
+        "multiplier": CONTENTION_MULTIPLIER,
+        "multiplier_rationale": (
+            "2x measured p99 of non-overlapping authority admission stages "
+            "leaves bounded scheduler variance while remaining below 0.187 seconds."
+        ),
+        "envelope_seconds": envelope,
+        "authority_busy_timeout_seconds": deadline,
+    }
+
+
 def build_baseline() -> dict[str, Any]:
     """Capture complete measurement evidence and all auditable derivations."""
     with tempfile.TemporaryDirectory(prefix="cacheness-lifecycle-provenance-") as temp_dir:
@@ -467,6 +684,7 @@ def build_baseline() -> dict[str, Any]:
             "configuration": derived_configuration,
             "release_envelopes": derive_release_envelopes(metrics, MULTIPLIERS),
         },
+        "contention": build_contention_section(),
     }
 
 
@@ -490,10 +708,54 @@ def _validate_distribution(value: object, path: str) -> None:
             raise BenchmarkVerificationError(f"baseline distribution {path}.{name} is inconsistent")
 
 
+def _validate_contention(contention: object) -> None:
+    """Validate additive writer-admission evidence without altering legacy bounds."""
+    section = _require_mapping(contention, "contention")
+    for name in (
+        "command",
+        "source_commit",
+        "environment",
+        "cardinality",
+        "stage_definitions",
+        "stages",
+        "multiplier_rationale",
+    ):
+        if not section.get(name):
+            raise BenchmarkVerificationError(f"baseline contention.{name} is required")
+    if section.get("cardinality") != {
+        "workers": CONTENTION_WORKERS,
+        "operations_per_worker": CONTENTION_OPERATIONS_PER_WORKER,
+    }:
+        raise BenchmarkVerificationError("contention benchmark cardinality is incompatible")
+    if section.get("repetitions") != REPETITIONS or section.get("warmups") != WARMUPS:
+        raise BenchmarkVerificationError("contention repetitions or warmups are incompatible")
+    if section.get("stage_definitions") != _CONTENTION_STAGE_DEFINITIONS:
+        raise BenchmarkVerificationError("contention stage definitions are incompatible")
+    if section.get("multiplier") != CONTENTION_MULTIPLIER:
+        raise BenchmarkVerificationError("contention multiplier is incompatible")
+    deadline = LifecycleLimits().authority_busy_timeout_seconds
+    if section.get("authority_busy_timeout_seconds") != deadline:
+        raise BenchmarkVerificationError("contention authority deadline changed")
+    stages = _require_mapping(section.get("stages"), "contention.stages")
+    if set(stages) != set(_CONTENTION_STAGE_DEFINITIONS):
+        raise BenchmarkVerificationError("contention stage distributions are incomplete")
+    for name, distribution in stages.items():
+        _validate_distribution(distribution, f"contention.stages.{name}")
+    envelope = _contention_envelope_seconds(stages)
+    if section.get("envelope_seconds") != envelope:
+        raise BenchmarkVerificationError("contention envelope derivation is inconsistent")
+    if envelope > deadline:
+        raise BenchmarkVerificationError("contention envelope exceeds authority deadline")
+
+
 def validate_baseline(baseline: object) -> dict[str, Any]:
     """Reject unauditable evidence before it influences release verification."""
     document = _require_mapping(baseline, "root")
-    if document.get("schema_version") != BENCHMARK_SCHEMA_VERSION:
+    schema_version = document.get("schema_version")
+    if schema_version not in {
+        LEGACY_BENCHMARK_SCHEMA_VERSION,
+        BENCHMARK_SCHEMA_VERSION,
+    }:
         raise BenchmarkVerificationError("baseline schema version is unsupported")
     benchmark = _require_mapping(document.get("benchmark"), "benchmark")
     for name in ("command", "harness", "source_commit", "environment", "cardinalities"):
@@ -544,6 +806,8 @@ def validate_baseline(baseline: object) -> dict[str, Any]:
     expected_envelopes = derive_release_envelopes(metrics, multipliers)
     if derived.get("release_envelopes") != expected_envelopes:
         raise BenchmarkVerificationError("baseline release envelope derivation is inconsistent")
+    if schema_version == BENCHMARK_SCHEMA_VERSION:
+        _validate_contention(document.get("contention"))
     return document
 
 
@@ -572,6 +836,47 @@ def verify_regression(baseline: dict[str, Any], current: dict[str, Any]) -> None
         < envelopes["distinct_key_overlap_min_ratio"]
     ):
         raise BenchmarkVerificationError("distinct-key overlap p05 fell below its release envelope")
+
+
+def verify_contention_regression(
+    baseline: dict[str, Any],
+    current: dict[str, dict[str, Any]],
+) -> None:
+    """Keep current writer-admission p99 inside its additive benchmark envelope."""
+    section = _require_mapping(baseline.get("contention"), "contention")
+    current_total = sum(
+        current[name]["p99"]
+        for name in (
+            "connection_preflight_seconds",
+            "queue_service_seconds",
+            "scheduler_dispatch_seconds",
+            "sqlite_busy_handler_seconds",
+            "writer_hold_seconds",
+        )
+    )
+    if current_total > section["envelope_seconds"]:
+        raise BenchmarkVerificationError("contention p99 exceeded its release envelope")
+
+
+def extend_contention_baseline(path: Path) -> None:
+    """Atomically add contention evidence to one validated legacy baseline."""
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            document = json.load(handle)
+    except OSError as error:
+        raise BenchmarkVerificationError(f"cannot read baseline {path}: {error}") from error
+    except json.JSONDecodeError as error:
+        raise BenchmarkVerificationError(f"baseline {path} is not valid JSON") from error
+
+    validate_baseline(document)
+    if document.get("schema_version") != LEGACY_BENCHMARK_SCHEMA_VERSION:
+        raise BenchmarkVerificationError("contention baseline extension requires schema version 1")
+    if "contention" in document:
+        raise BenchmarkVerificationError("contention baseline already exists and cannot be overwritten")
+    document["schema_version"] = BENCHMARK_SCHEMA_VERSION
+    document["contention"] = build_contention_section()
+    validate_baseline(document)
+    _atomic_write(path, document)
 
 
 def _atomic_write(path: Path, document: dict[str, Any]) -> None:
@@ -611,6 +916,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     mode.add_argument("--record-baseline", type=Path)
     mode.add_argument("--recalibrate-baseline", type=Path)
     mode.add_argument("--verify-baseline", type=Path)
+    mode.add_argument("--extend-contention-baseline", type=Path)
     return parser.parse_args(argv)
 
 
@@ -621,7 +927,14 @@ def main(argv: list[str] | None = None) -> int:
         baseline = _load(arguments.verify_baseline)
         current = collect_measurements()
         verify_regression(baseline, current)
+        if baseline.get("schema_version") == BENCHMARK_SCHEMA_VERSION:
+            verify_contention_regression(baseline, collect_contention_measurements())
         print(f"verified lifecycle authority baseline: {arguments.verify_baseline}")
+        return 0
+
+    if arguments.extend_contention_baseline is not None:
+        extend_contention_baseline(arguments.extend_contention_baseline)
+        print(f"extended lifecycle authority contention baseline: {arguments.extend_contention_baseline}")
         return 0
 
     destination = arguments.record_baseline or arguments.recalibrate_baseline
