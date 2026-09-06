@@ -1,8 +1,8 @@
 ---
 phase: 03-atomic-lifecycle-and-recovery-engine
-reviewed: 2026-09-06T08:34:02Z
+reviewed: 2026-09-06T10:36:07Z
 depth: deep
-files_reviewed: 18
+files_reviewed: 23
 files_reviewed_list:
   - benchmarks/lifecycle_authority_baseline.json
   - benchmarks/lifecycle_authority_benchmark.py
@@ -15,191 +15,156 @@ files_reviewed_list:
   - src/cacheness/storage/sqlite_lifecycle_authority.py
   - tests/test_blob_store_concurrency.py
   - tests/test_blob_store_read_contract.py
+  - tests/test_blob_store_reconciliation.py
   - tests/test_cache_integrity.py
   - tests/test_cached_custom_metadata.py
+  - tests/test_cached_query_meta.py
   - tests/test_phase3_gap_acceptance.py
+  - tests/test_phase3_postreview_concurrency.py
   - tests/test_projection_sql_atomicity.py
   - tests/test_sqlite_authority_admission.py
   - tests/test_sqlite_bootstrap_concurrency.py
+  - tests/test_sqlite_concurrency.py
+  - tests/test_sqlite_concurrency_temp.py
   - tests/test_unified_cache_adversarial_lifecycle.py
 findings:
-  critical: 3
-  warning: 1
+  critical: 2
+  warning: 0
   info: 0
-  total: 4
+  total: 2
 status: issues_found
 ---
 
 # Phase 3: Code Review Report
 
-**Reviewed:** 2026-09-06T08:34:02Z
+**Reviewed:** 2026-09-06T10:36:07Z
 **Depth:** deep
-**Files Reviewed:** 18
+**Files Reviewed:** 23
 **Status:** issues_found
 
 ## Summary
 
-This review covered the Phase 3 implementation delta from `f410621` through
-`6402707`, with an adversarial focus on Plans 03-15, 03-16, and 03-17. The
-implementation closes the previously reported CR-01 through CR-09 and WR-01
-through WR-02 defects in their original forms. In particular, publication is
-now admitted at the facade boundary, deferred cleanup follows promotion,
-projection writers serialize their compare-and-write transaction, cached
-custom metadata delegates its capability and session, PostgreSQL preserves
-nested signed key parameters, bootstrap conflicts are reclassified, and
-explicit backend close replaces destructor cleanup.
+This fresh review covers the Phase 3 implementation from `f410621` through
+current HEAD `74ee9fe`, with a full re-review of Plan 03-18 and the four findings
+recorded at `28755ab`. All four of those findings are closed in their original
+forms: failed pre-entry clear tickets retire exactly, SQLite reapplies a
+conservative remaining busy budget before `BEGIN IMMEDIATE`, child processes
+replace both the copied writer registry and its potentially locked global lock,
+and cached metadata queries delegate through an explicit capability.
 
-The phase is not ready to ship. Three newly demonstrated concurrency/deadline
-defects can strand the process or violate the lifecycle contract: an abandoned
-clear ticket permanently blocks later clears, SQLite lock acquisition can spend
-a fresh timeout after earlier stages have consumed the absolute budget, and a
-forked child inherits the parent's process-local admission registry. A separate
-public API compatibility defect makes `query_meta()` silently unusable through
-the supported cached metadata wrapper.
+The phase is still not ready to ship. The new constructor-owned metadata
+bootstrap is not atomic across concurrent constructors and reproducibly fails
+with a check-then-create schema race. The new query implementation also turns
+corrupt committed `cache_key_params` into an apparently valid empty mapping,
+contradicting the phase's fail-closed integrity and narrow-exception policy.
 
-Native Windows remains `UNAVAILABLE` / `NOT_QUALIFIED`. Live PostgreSQL behavior
-is not claimed by this review; the PostgreSQL assessment is limited to code,
-compiled SQL, and the checked fake-dialect tests. The checked benchmark baseline
-retains the legacy additive scenarios and records its source/harness provenance.
+The focused Plan 03-18 suites passed (40 tests). The reconciliation clock test
+now isolates its own two-call work deadline under normal authority setup. The
+revised stress modules keep ordinary schedules strict and limit typed timeout
+acceptance to the three named extreme schedules; no raw lock string or unrelated
+error is accepted. Benchmark data and envelopes were not changed by Plan 03-18.
+Native Windows remains `UNAVAILABLE` / `NOT_QUALIFIED`, and live PostgreSQL is
+not claimed.
 
 ## Narrative Findings (AI reviewer)
 
 ## Critical Issues
 
-### CR-01: A timed-out queued clear leaves a permanent FIFO tombstone
+### CR-01: Concurrent fresh SQLite metadata constructors race during schema creation
 
 **Classification:** BLOCKER
 
-**File:** `src/cacheness/storage/coordination.py:205-241`
+**File:** `src/cacheness/metadata.py:1703-1724`
 
-**Issue:** `clear_operation()` appends its ticket before waiting, but its
-`finally` block removes the ticket only when `entered` is true. If
-`_wait_for_gate()` raises `CacheBlobCloseTimeoutError` while this clear is
-queued behind another clear, the unentered ticket remains at the head of
-`_clear_tickets`. No live operation owns that ticket, so every subsequent clear
-queues behind it and times out as well. The registry also grows by one ticket
-per retry. A deterministic public-API reproduction paused one clear at its
-snapshot, let a second clear time out, released the first, and observed a third
-clear time out with the stale queue growing from one to two tickets. This
-violates FIFO progress, bounded bookkeeping, and repeatable clear convergence.
+**Issue:** `_bootstrap_database()` runs `Base.metadata.create_all(engine)` with
+no database transaction or other cross-constructor serialization. SQLAlchemy's
+`create_all()` checks whether a table exists and then issues `CREATE TABLE` as
+separate steps. Two fresh engines can both observe absence before either creates
+the table, after which one constructor fails with `sqlalchemy.exc.OperationalError:
+table cache_entries already exists`. This is not only theoretical: 64 concurrent
+fresh `SqliteBackend` constructors targeting one empty database produced 53
+successes and 11 `OperationalError` failures. The provisional-engine disposal
+prevents a pool leak, but does not make initialization idempotent. This violates
+Plan 03-18's explicit requirement that constructor-owned WAL/schema bootstrap
+be safe for concurrent fresh processes, and can prevent independent cache
+instances from opening the same new root.
 
-**Fix:** Remove the exact ticket on every exit path, including failure before
-entry, and notify all waiters after removal. For example, make the `finally`
-block acquire the condition and call the existing exact-ticket discard helper
-when `entered` is false; retain the current active-clear teardown when it is
-true. Add a deterministic regression test that queues a timed-out clear behind
-an active clear, releases the active clear, then proves a later clear succeeds
-and the queue/refcount state is empty.
+**Fix:** Serialize the schema check-and-create sequence with SQLite itself. Open
+one bootstrap connection, acquire a bounded writer transaction before schema
+inspection, and execute the `CREATE TABLE IF NOT EXISTS`/schema validation,
+stats-row initialization, and required bootstrap work through that same
+connection before commit. The solution must coordinate independent processes,
+not only threads in one Python process, and should translate exhausted SQLite
+busy waits into the domain metadata error while preserving the DBAPI cause.
+Add deterministic thread and process tests that release multiple constructors
+against one empty path simultaneously, require every constructor to succeed,
+verify one valid schema/stats row and WAL mode, and prove all provisional engines
+are disposed on a forced bootstrap failure.
 
-### CR-02: SQLite lock acquisition can exceed the single absolute deadline
-
-**Classification:** BLOCKER
-
-**File:** `src/cacheness/storage/sqlite_lifecycle_authority.py:1133-1142`
-
-**File:** `src/cacheness/storage/sqlite_lifecycle_authority.py:1235-1253`
-
-**Issue:** `_connection()` calculates the remaining budget once and uses it as
-the SQLite connection `timeout`. `_transaction()` then spends time in
-connection preflight, process-local FIFO admission, and observer dispatch before
-executing `BEGIN IMMEDIATE`, but the connection's busy timeout is never reduced
-to the budget remaining at that point. Consequently SQLite can wait for the
-original timeout after earlier stages have already consumed most of the same
-absolute deadline. A deterministic reproduction with a 0.187-second deadline,
-a 0.12-second admission-observer delay, and an external `BEGIN IMMEDIATE`
-writer raised `stage=sqlite_busy` after approximately 0.368 seconds. This breaks
-Plan 03-17's central promise that preflight, FIFO admission, dispatch, and
-SQLite lock acquisition share one bounded deadline.
-
-**Fix:** Immediately before `BEGIN IMMEDIATE`, derive SQLite's busy timeout from
-`_remaining_for_stage(absolute_deadline)` and apply that remaining duration to
-the connection (for example with `PRAGMA busy_timeout`, using a conservative
-millisecond conversion that cannot extend the absolute deadline). Preserve the
-underlying `sqlite3.OperationalError` when translating a genuine busy failure.
-Add a deterministic combined-delay regression: consume budget in dispatch while
-an external writer owns SQLite, then assert total monotonic elapsed time remains
-within one configured deadline plus a small scheduler tolerance. The existing
-tests exercise queued admission and SQLite busy independently, so they cannot
-detect this additive timeout.
-
-### CR-03: Forked children inherit stale process-local admission locks and tickets
+### CR-02: `query_meta()` silently converts corrupt committed parameters to `{}`
 
 **Classification:** BLOCKER
 
-**File:** `src/cacheness/storage/sqlite_lifecycle_authority.py:93-96`
+**File:** `src/cacheness/metadata.py:2257-2286`
 
-**File:** `src/cacheness/storage/sqlite_lifecycle_authority.py:631-640`
+**Issue:** The backend catches every exception from `json_loads()` and returns
+`cache_key_params: {}`. An empty-filter `query_meta()` does not invoke a SQLite
+JSON function, so malformed stored JSON reaches this handler and is presented
+as valid empty parameters. A deterministic reproduction changed one live row's
+`cache_key_params` to the invalid JSON string `"{"`; `query_meta()` returned the
+live entry with `cache_key_params: {}` instead of failing closed. Filtered
+queries can instead surface SQLite's `malformed JSON` as `DBAPIError`, which is
+translated to `CacheMetadataError` and then suppressed by the facade. Thus the
+same integrity defect is inconsistently falsified or hidden according to filter
+shape. This directly contradicts Plan 03-18's requirement that programmer and
+integrity failures propagate while only operational database failures retain
+the logged-`None` policy.
 
-**File:** `src/cacheness/storage/sqlite_lifecycle_authority.py:163-170`
-
-**Issue:** The writer-admission registry and its lock are module globals keyed
-only by canonical database path. The instance PID guard correctly rejects an
-authority object inherited across `fork()`, but it does not protect a fresh
-authority constructed in the child: that new object reuses the inherited gate.
-If the parent forked while another thread owned a ticket, the child waits behind
-a copied owner that can never release in the child's memory. If the vanished
-thread held the registry or condition lock at the instant of fork, the child can
-deadlock before reaching the bounded wait. A deterministic reproduction forked
-while a parent writer was paused at `writer_admission.eligible`; a fresh child
-authority for the same root timed out at `stage=writer_admission` instead of
-operating with fresh child coordination state. This contradicts the documented
-fork contract: inherited authorities fail closed, while a newly constructed
-child authority must work.
-
-**Fix:** Make admission state process-scoped and reinitialize it after fork.
-Keying gates by `(pid, canonical_path)` is necessary but not sufficient if the
-global registry lock itself was inherited while locked; register an
-`os.register_at_fork(after_in_child=...)` handler that replaces both the
-registry and its lock in the child. Add a regression that forks while a parent
-gate is actively owned, verifies the inherited authority is rejected, and
-verifies a fresh child authority completes without observing the parent's
-ticket/refcount state.
-
-## Warnings
-
-### WR-01: `query_meta()` silently fails through `CachedMetadataBackend`
-
-**Classification:** WARNING
-
-**File:** `src/cacheness/core.py:648-670`
-
-**File:** `src/cacheness/metadata.py:553-557`
-
-**Issue:** `UnifiedCache.query_meta()` directly requires and accesses
-`self.metadata_backend.SessionLocal`. `CachedMetadataBackend`, used by the
-supported `enable_memory_cache=True` configuration, deliberately exposes its
-custom metadata capability and session through delegation but does not expose
-`SessionLocal`. As a result, `query_meta()` logs that the backend does not
-support SQL queries and returns `None` even when the wrapped SQLite backend does
-support them. This is an API/capability mismatch adjacent to the Plan 03-16
-custom-metadata delegation fix: custom metadata now works through the wrapper,
-but the built-in metadata-query API still does not.
-
-**Fix:** Define a backend-neutral query/session capability for built-in entry
-metadata and delegate it through `CachedMetadataBackend`, then route
-`query_meta()` through that capability instead of inspecting a concrete
-`SessionLocal` attribute. Add tests for `store_cache_key_params=True` with
-memory caching enabled, covering both a matching query and an unsupported
-backend's explicit error/result policy.
+**Fix:** Never substitute `{}` for undecodable persisted parameters. Validate
+the JSON for every exact live `(cache_key, actual_path)` row before applying
+filters and raise a domain `CacheIntegrityError` containing the affected key
+when decoding fails or the decoded value is not the required mapping shape.
+Keep that integrity exception outside the facade's `CacheMetadataError`
+fallback. Distinguish operational lock/I/O `DBAPIError` from corruption-related
+SQLite errors rather than treating every DBAPI failure as an ordinary query
+miss. Add regressions for empty, string, and numeric filters over malformed live
+metadata, asserting the same fail-closed exception and zero pooled connections
+left checked out.
 
 ## Prior Finding Disposition
 
-| Prior finding | Disposition | Reviewed evidence |
+| Finding | Disposition | Reviewed evidence |
 |---|---|---|
-| CR-01 admitted publication gap | CLOSED | Public `put()` enters admission before authority publication and delegates nested work without reacquiring the facade gate. |
-| CR-02 destructive pre-promotion hook | CLOSED | Projection hooks prepare state; unlink/deferred cleanup happens only after promotion. |
-| CR-03 peer-token adoption | CLOSED | Publishers retain their own token and converge only after verifying the winner's exact promoted generation. |
-| CR-04 projection compare/write race | CLOSED | SQLite uses `BEGIN IMMEDIATE`; PostgreSQL obtains a transaction advisory lock before the row compare/write sequence. Live PostgreSQL remains unqualified. |
-| CR-05 fresh-root bootstrap race | CLOSED | Concurrent root/leaf creation conflicts are caught and reclassified through canonical bootstrap inspection. |
-| CR-06 cached custom metadata | CLOSED | The cache wrapper delegates support, storage, and scoped custom-metadata sessions. |
-| CR-07 empty-state inference | CLOSED | Canonical roots use authority state; only recognized legacy layouts use legacy inference. |
-| CR-08 hostile observed locator | CLOSED | Observed payload locators are normalized/contained before mutation or cleanup. |
-| CR-09 PostgreSQL signed key parameters | CLOSED | Nested `key_params` are preserved with the compatibility alias and malformed non-mappings fail closed. |
-| WR-01 destructor cleanup | CLOSED | Explicit idempotent close is the lifecycle mechanism; the backend destructor was removed. |
-| WR-02 deterministic interleavings | CLOSED AS ORIGINALLY FILED | The required publication/projection/bootstrap/admission interleavings were added, though the newly identified timeout-plus-busy and active-gate fork schedules need their own regressions. |
+| `28755ab` CR-01: failed clear FIFO tombstone | CLOSED | `clear_operation()` discards the exact unentered ticket in `finally`; timeout and close-cancellation coverage proves later FIFO progress and zero accounting. |
+| `28755ab` CR-02: additive SQLite busy budget | CLOSED | Remaining time is converted conservatively and installed immediately before `BEGIN IMMEDIATE`; combined observer-plus-writer coverage preserves `stage=sqlite_busy` and the SQLite cause within one deadline. |
+| `28755ab` CR-03: copied admission state after fork | CLOSED | The child at-fork hook replaces both global registry objects; tests cover an owned per-path gate and a globally locked registry while inherited instances still fail the PID guard. |
+| `28755ab` WR-01: cached `query_meta` capability loss | CLOSED | The facade uses `supports_entry_metadata_query()` and `query_entries_by_key_params()`; `CachedMetadataBackend` delegates both without exposing `SessionLocal`. |
+| Earlier CR-01 through CR-09 | CLOSED | Facade admission, post-promotion cleanup, generation convergence, SQL projection serialization, bootstrap reclassification, cached custom metadata, canonical empty-state handling, locator containment, and PostgreSQL nested signed parameters remain intact. |
+| Earlier WR-01/WR-02 | CLOSED | Explicit idempotent close remains in place and deterministic publication/projection/bootstrap/admission schedules remain covered. |
+
+## Additional Plan 03-18 Assessment
+
+- Exact `(cache_key, actual_path)` SQL filtering prevents a later same-key
+  projection from being substituted for an earlier authority observation; a
+  mismatch is omitted and no projection repair occurs on the query path.
+- Pool checkout now runs connection-local PRAGMAs only. WAL/schema/stats and
+  `PRAGMA optimize` moved to constructor bootstrap, and sessions return their
+  connections on both success and translated DBAPI failure.
+- The three extreme stress schedules preserve exact attempt accounting, at
+  least 75 percent aggregate success, per-worker progress, committed-value
+  checks, bounded child termination, and admission-registry retirement.
+  Query/get-only and ordinary write/mixed/file/stats/integrity tests retain
+  all-success behavior.
+- The reconciliation time-limit fixture now completes setup using the normal
+  authority budget before installing its finite reconciliation clock, and
+  asserts exactly the two monotonic observations used to return a resume token
+  without consuming an operation record.
+- PostgreSQL projection locking and signed key-parameter compatibility were not
+  changed by Plan 03-18. Static/fake-dialect evidence remains consistent, but no
+  live PostgreSQL qualification is inferred from it.
 
 ---
 
-_Reviewed: 2026-09-06T08:34:02Z_
+_Reviewed: 2026-09-06T10:36:07Z_
 _Reviewer: the agent (gsd-code-reviewer)_
 _Depth: deep_
