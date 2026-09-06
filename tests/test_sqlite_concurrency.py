@@ -90,6 +90,7 @@ def _execute_extreme_contention_child(
         worker_count = 8
         iteration_count = 5 if scenario == "high_concurrency_stress" else (8 if scenario == "concurrent_metadata_access" else 10)
         records_lock = threading.Lock()
+        first_use_barrier = threading.Barrier(worker_count)
 
         def record_call(worker_record, name, call, put_record=None):
             worker_record["attempted"] += 1
@@ -127,6 +128,7 @@ def _execute_extreme_contention_child(
                 "timed_out_puts": [],
                 "elapsed": 0.0,
             }
+            first_use_barrier.wait(timeout=2)
             started = time.monotonic()
             for item in range(iteration_count):
                 params = {"scenario": scenario, "worker": worker_id, "item": item}

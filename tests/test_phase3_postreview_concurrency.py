@@ -228,6 +228,86 @@ def test_sqlite_busy_budget_milliseconds_never_round_up() -> None:
     assert SqliteLifecycleAuthority._busy_timeout_milliseconds(0.0) == 0
 
 
+def test_first_use_fifo_admits_before_connection_preflight_and_publishes_ready(
+    tmp_path,
+) -> None:
+    """A first-use contender cannot open SQLite while the bootstrap owner holds EXCLUSIVE."""
+    root = tmp_path / "first-use-admission"
+    first = SqliteLifecycleAuthority.for_root(root)
+    second = SqliteLifecycleAuthority.for_root(root)
+    exclusive_acquired = Event()
+    release_first = Event()
+    second_enqueued = Event()
+    second_preflight = Event()
+    errors: list[BaseException] = []
+
+    def bootstrap_boundary(boundary: str) -> None:
+        if boundary == "authority.schema_initialize.exclusive_acquired":
+            assert first.path.exists()
+            assert first._schema_ready is False
+            exclusive_acquired.set()
+            assert release_first.wait(timeout=2)
+
+    def second_observer(event: str, _timestamp: float) -> None:
+        if event == "writer_admission.enqueued":
+            second_enqueued.set()
+        if event == "sqlite.connection_preflight.started":
+            second_preflight.set()
+
+    def run(authority: SqliteLifecycleAuthority) -> None:
+        try:
+            authority.begin_clear()
+        except BaseException as error:  # pragma: no cover - asserted after joins.
+            errors.append(error)
+
+    first.set_bootstrap_hook_for_test(bootstrap_boundary)
+    second.set_admission_observer_for_test(second_observer)
+    first_thread = Thread(target=run, args=(first,))
+    second_thread = Thread(target=run, args=(second,))
+    try:
+        first_thread.start()
+        assert exclusive_acquired.wait(timeout=2)
+        second_thread.start()
+        assert second_enqueued.wait(timeout=2)
+        assert not second_preflight.is_set()
+        release_first.set()
+        _join(first_thread)
+        _join(second_thread)
+    finally:
+        release_first.set()
+        first.close()
+        second.close()
+
+    assert errors == []
+    assert first._schema_ready is True
+    assert second._schema_ready is True
+    assert SqliteLifecycleAuthority.admission_registry_size_for_test() == 0
+
+
+def test_preflight_busy_timeout_has_precise_stage_and_sqlite_cause(tmp_path) -> None:
+    """External EXCLUSIVE contention cannot escape as lifecycle_authority_open."""
+    root = tmp_path / "preflight-timeout"
+    creator = SqliteLifecycleAuthority.for_root(root)
+    creator.begin_clear()
+    blocker = sqlite3.connect(creator.path, isolation_level=None)
+    contender = SqliteLifecycleAuthority.for_root(root)
+    try:
+        blocker.execute("BEGIN EXCLUSIVE")
+        with pytest.raises(CacheBlobLifecycleTimeoutError) as raised:
+            contender.begin_clear()
+    finally:
+        if blocker.in_transaction:
+            blocker.execute("ROLLBACK")
+        blocker.close()
+        creator.close()
+        contender.close()
+
+    assert raised.value.context["operation"] == "lifecycle_authority"
+    assert raised.value.context["stage"] == "connection_configure"
+    assert isinstance(raised.value.__cause__, sqlite3.OperationalError)
+    assert SqliteLifecycleAuthority.admission_registry_size_for_test() == 0
+
+
 def test_forked_child_rebinds_registry_while_parent_gate_is_owned(tmp_path) -> None:
     """A fresh child cannot inherit the parent's granted same-path ticket."""
     if not hasattr(os, "fork"):
