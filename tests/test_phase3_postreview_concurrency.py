@@ -221,8 +221,9 @@ def test_sqlite_begin_uses_only_the_remaining_absolute_busy_budget(tmp_path) -> 
 
 def test_sqlite_busy_budget_milliseconds_never_round_up() -> None:
     """Sub-millisecond budget is immediate instead of extending the deadline."""
-    assert SqliteLifecycleAuthority._busy_timeout_milliseconds(0.187) == 187
-    assert SqliteLifecycleAuthority._busy_timeout_milliseconds(0.001999) == 1
+    assert SqliteLifecycleAuthority._busy_timeout_milliseconds(0.187) == 182
+    assert SqliteLifecycleAuthority._busy_timeout_milliseconds(0.006999) == 1
+    assert SqliteLifecycleAuthority._busy_timeout_milliseconds(0.005999) == 0
     assert SqliteLifecycleAuthority._busy_timeout_milliseconds(0.000999) == 0
     assert SqliteLifecycleAuthority._busy_timeout_milliseconds(0.0) == 0
 

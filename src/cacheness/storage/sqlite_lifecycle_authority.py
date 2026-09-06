@@ -64,6 +64,7 @@ _BOOTSTRAP_ROOT_NAMES = frozenset(
 SQLITE_APPLICATION_ID = 0x43414348
 SCHEMA_VERSION = 1
 _MAX_STORE_IDENTITY_BYTES = 64
+_SQLITE_BUSY_TIMEOUT_SAFETY_MILLISECONDS = 5
 _T = TypeVar("_T")
 
 
@@ -269,8 +270,11 @@ class SqliteLifecycleAuthority:
 
     @staticmethod
     def _busy_timeout_milliseconds(remaining_seconds: float) -> int:
-        """Floor a remaining deadline budget without granting extra wait time."""
-        return max(0, int(remaining_seconds * 1000))
+        """Reserve scheduler overhead while never extending a caller deadline."""
+        return max(
+            0,
+            int(remaining_seconds * 1000) - _SQLITE_BUSY_TIMEOUT_SAFETY_MILLISECONDS,
+        )
 
     @staticmethod
     def _set_busy_timeout(
