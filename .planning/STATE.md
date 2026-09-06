@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 03
 current_phase_name: Atomic Lifecycle and Recovery Engine
 status: executing
-stopped_at: Planned 03-18-PLAN.md
-last_updated: "2026-09-06T08:39:10Z"
+stopped_at: Completed 03-18-PLAN.md
+last_updated: "2026-09-06T10:29:09.872Z"
 last_activity: 2026-09-06
 last_activity_desc: Plan 03-18 created from post-Plan-17 reliability review
-state_head: 28755ab6073989728070d7a0e1017025ea4d1e7d
+state_head: 174f3628b2b98c566585ab83ab446b9aaf7fc8a5
 progress:
   total_phases: 8
   completed_phases: 2
   total_plans: 40
-  completed_plans: 39
+  completed_plans: 40
 milestone_name: milestone
 ---
 
@@ -90,6 +90,7 @@ Phase 03 rows in this historical table belong to the superseded file-native atte
 | Phase 03 P14 | 1h 29min | 3 tasks | 8 files |
 | Phase 03 P15 | 31min | 3 tasks | 6 files |
 | Phase 03 P17 | 1h 13m | 3 tasks | 7 files |
+| Phase 03 P18 | 1h 31m | 5 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -212,6 +213,9 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 03]: Canonical empty state uses BlobStore authority operations; legacy cleanup requires explicit recognized composition.
 - [Phase 03]: SQLite same-process writer admission is FIFO per canonical authority path and retains SQLite/CAS as the cross-process correctness boundary.
 - [Phase 03]: The authority busy deadline remains 0.187 seconds; queue, scheduler dispatch, and SQLite acquisition consume one original absolute deadline.
+- [Phase 03]: SQLite WAL and maintenance bootstrap before pooled sessions are published; pool checkout stays read-safe.
+- [Phase 03]: Aggregate metadata queries omit mismatched projection rows and bind exact key/locator pairs instead of repairing or matching keys alone.
+- [Phase 03]: Only named extreme write-contention schedules classify exact lifecycle timeout reason/stages.
 
 ### Pending Todos
 
@@ -235,6 +239,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-09-06T08:25:35.232Z
-Stopped at: Planned 03-18-PLAN.md
+Last session: 2026-09-06T10:29:09.825Z
+Stopped at: Completed 03-18-PLAN.md
 Resume file: None
