@@ -106,6 +106,32 @@ def test_windows_blobstore_put_preflights_absent_root_before_payload_materializa
         store.close()
 
 
+@pytest.mark.parametrize("metadata_backend", ("json", "sqlite"))
+def test_windows_unified_cache_preflights_before_public_root_or_metadata_creation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    metadata_backend: str,
+) -> None:
+    """The public facade must not materialize an unprovisioned Windows root."""
+    import cacheness.storage.sqlite_lifecycle_authority as sqlite_authority
+    from cacheness.config import CacheConfig
+    from cacheness.core import UnifiedCache
+
+    root = tmp_path / f"missing-unified-{metadata_backend}-root"
+    monkeypatch.setattr(sqlite_authority, "_platform_name", lambda: "nt")
+
+    with pytest.raises(CacheBlobBackendError, match="offline before Cacheness starts"):
+        UnifiedCache(
+            CacheConfig(
+                cache_dir=str(root),
+                metadata_backend=metadata_backend,
+                cleanup_on_init=False,
+            )
+        )
+
+    assert not root.exists()
+
+
 def test_windows_contract_shape_keeps_sqlite_as_the_only_commit_authority() -> None:
     """The adapter validates deployment scope without adding a custom lock protocol."""
     import cacheness.storage.sqlite_lifecycle_authority as sqlite_authority

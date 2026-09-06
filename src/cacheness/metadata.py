@@ -1620,22 +1620,28 @@ class SqliteBackend(MetadataBackend):
             metadata.pop("prefix", None)  # Already stored in prefix column
             metadata.pop("data_type", None)  # Already stored in data_type column
             
-            # Only serialize cache_key_params if absolutely necessary (should be off by default)
+            # Authority-backed projections receive an already canonicalized
+            # cache-key diagnostic mapping from UnifiedCache. Preserve that
+            # historical representation verbatim instead of serializing
+            # strings a second time (``str:str:value``).
             serialized_params = None
             if cache_key_params is not None:
-                try:
-                    from .serialization import serialize_for_cache_key
-                    serializable_params = {
-                        key: serialize_for_cache_key(value) 
-                        for key, value in cache_key_params.items()
-                    }
-                    serialized_params = json_dumps(serializable_params)
-                except Exception:
+                if entry_data.get("_cache_key_params_serialized") is True:
+                    serialized_params = json_dumps(cache_key_params)
+                else:
                     try:
-                        serialized_params = json_dumps(cache_key_params)
+                        from .serialization import serialize_for_cache_key
+                        serializable_params = {
+                            key: serialize_for_cache_key(value)
+                            for key, value in cache_key_params.items()
+                        }
+                        serialized_params = json_dumps(serializable_params)
                     except Exception:
-                        # If serialization fails, skip cache_key_params entirely
-                        serialized_params = None
+                        try:
+                            serialized_params = json_dumps(cache_key_params)
+                        except Exception:
+                            # If serialization fails, skip cache_key_params entirely
+                            serialized_params = None
             
             # Handle timestamps with proper defaults
             created_at = entry_data.get("created_at")
