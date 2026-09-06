@@ -595,6 +595,11 @@ class SqliteLifecycleAuthority:
                     state = self._classify_for_open()
                     if state == "authority":
                         return False
+                    if state == "established" and (
+                        self._is_pristine_reserved_bootstrap()
+                        or self._has_only_new_authority_bootstrap_artifacts()
+                    ):
+                        state = "ready"
                     if state not in {"ready", "missing"}:
                         self._reject_non_authority_state(state)
             reserved = self.root / AUTHORITY_RELATIVE_PATH.parent
@@ -684,6 +689,14 @@ class SqliteLifecycleAuthority:
             raise CacheBlobLifecycleTimeoutError(
                 "Lifecycle authority busy deadline expired",
                 context={"operation": operation},
+            ) from error
+        if isinstance(error, sqlite3.DatabaseError):
+            # A regular leaf can still be hostile or corrupt rather than a
+            # lifecycle authority. Treat it as migration-required evidence;
+            # do not let connection configuration rewrite or adopt it.
+            raise CacheBlobMigrationRequiredError(
+                "Lifecycle authority database is incompatible",
+                context={"authority_path": str(self.path), "operation": operation},
             ) from error
         raise CacheBlobBackendError(
             "Lifecycle authority SQLite operation failed",
@@ -1586,6 +1599,14 @@ class SqliteLifecycleAuthority:
                 raise AssertionError("SQLite error translation must raise")
 
     def prepare_mutation(self, spec: MutationSpec) -> PreparedMutation:
+        # This observer is deliberately outside the mutation transaction: it
+        # is a test-only schedule seam, and production authorities never
+        # install it. Keeping it here lets independent fresh authorities
+        # rendezvous before FIFO admission without allowing preflight work to
+        # escape the admitted writer's deadline.
+        if self._bootstrap_hook is not None and self._classify_for_open() == "missing":
+            self._reach_bootstrap_boundary("authority.bootstrap.classified")
+
         def prepare(connection: sqlite3.Connection) -> PreparedMutation:
             existing = connection.execute(
                 "SELECT key, generation, locator, expected_lineage, expected_revision, "
