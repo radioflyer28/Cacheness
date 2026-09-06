@@ -262,6 +262,7 @@ def test_reconciliation_enforces_row_action_byte_and_time_bounds(
                 operation_page_size=2,
                 max_reconcile_actions=2,
                 max_operation_record_bytes=1024,
+                authority_busy_timeout_seconds=0.1,
             )
         ),
     )
