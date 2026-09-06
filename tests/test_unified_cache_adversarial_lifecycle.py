@@ -6,10 +6,25 @@ from pathlib import Path
 from threading import Event, Thread
 
 import pytest
+from sqlalchemy import Column, String
 
 from cacheness import CacheConfig, cacheness
-from cacheness.error_handling import CacheBlobStoreClosedError
+from cacheness.custom_metadata import CustomMetadataBase, custom_metadata_model
+from cacheness.error_handling import (
+    CacheBlobLifecycleConflictError,
+    CacheBlobStoreClosedError,
+)
+from cacheness.metadata import Base
 from cacheness.storage import BlobStore
+
+
+@custom_metadata_model("plan15_linked_metadata")
+class Plan15LinkedMetadata(Base, CustomMetadataBase):
+    """One custom-metadata model used to prove M1 link ownership."""
+
+    __tablename__ = "plan15_linked_metadata"
+
+    label = Column(String(100), nullable=False)
 
 
 def _cache(root: Path):
@@ -21,6 +36,12 @@ def _cache(root: Path):
             cleanup_on_init=False,
         )
     )
+
+
+def _sqlite_cache(root: Path):
+    """Construct a facade whose custom-link table uses exact SQL tokens."""
+    custom_metadata_model("plan15_linked_metadata")(Plan15LinkedMetadata)
+    return _cache(root)
 
 
 def _join(thread: Thread) -> None:
@@ -173,3 +194,129 @@ def test_clear_clear_queued_clear_reopens_after_snapshot_but_cannot_overtake_clo
         _join(unrelated)
         _join(closer)
         store.close()
+
+
+def test_linked_m1_survives_a_pre_promotion_verification_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M2 must not retire M1 links until its own authority promotion wins."""
+    cache = _sqlite_cache(tmp_path / "linked-m1-verification-failure")
+    try:
+        key = cache.put(
+            {"generation": "m1"},
+            custom_metadata=Plan15LinkedMetadata(label="m1"),
+            race_key="linked-m1",
+        )
+        before = cache.metadata_backend.get_entry(key)
+        assert before is not None
+        original_record = cache._cache_blob_store.lifecycle_authority.record_verification
+
+        def fail_verification(*_args, **_kwargs) -> None:
+            raise OSError("forced verification failure")
+
+        monkeypatch.setattr(
+            cache._cache_blob_store.lifecycle_authority,
+            "record_verification",
+            fail_verification,
+        )
+        with pytest.raises(OSError, match="forced verification failure"):
+            cache.put(
+                {"generation": "m2"},
+                custom_metadata=Plan15LinkedMetadata(label="m2"),
+                race_key="linked-m1",
+            )
+        monkeypatch.setattr(
+            cache._cache_blob_store.lifecycle_authority,
+            "record_verification",
+            original_record,
+        )
+
+        after = cache.metadata_backend.get_entry(key)
+        assert after is not None
+        assert after["metadata"]["actual_path"] == before["metadata"]["actual_path"]
+        assert cache.get(race_key="linked-m1") == {"generation": "m1"}
+        assert cache.get_custom_metadata_for_entry(cache_key=key)[
+            "plan15_linked_metadata"
+        ].label == "m1"
+    finally:
+        cache.close()
+
+
+def test_two_pending_candidates_preserve_m1_links_until_one_promotes(
+    tmp_path: Path,
+) -> None:
+    """Peer candidates cannot publish or adopt each other's projection token."""
+    first = _sqlite_cache(tmp_path / "two-pending-candidates")
+    second = _sqlite_cache(tmp_path / "two-pending-candidates")
+    first_entered = Event()
+    second_entered = Event()
+    release = Event()
+    results: list[str] = []
+    errors: list[BaseException] = []
+    try:
+        key = first.put(
+            {"generation": "m1"},
+            custom_metadata=Plan15LinkedMetadata(label="m1"),
+            race_key="two-pending",
+        )
+        before = first.metadata_backend.get_entry(key)
+        assert before is not None
+
+        def pause_first(boundary: str) -> None:
+            if boundary == "put.before_promotion":
+                first_entered.set()
+                assert release.wait(timeout=5)
+
+        def pause_second(boundary: str) -> None:
+            if boundary == "put.before_promotion":
+                second_entered.set()
+                assert release.wait(timeout=5)
+
+        def put(cache, label: str) -> None:
+            try:
+                results.append(
+                    cache.put(
+                        {"generation": label},
+                        custom_metadata=Plan15LinkedMetadata(label=label),
+                        race_key="two-pending",
+                    )
+                )
+            except BaseException as error:  # pragma: no cover - asserted below.
+                errors.append(error)
+
+        first._cache_blob_store.lifecycle.test_hook = pause_first
+        second._cache_blob_store.lifecycle.test_hook = pause_second
+        writer_a = Thread(target=put, args=(first, "a"))
+        writer_b = Thread(target=put, args=(second, "b"))
+        writer_a.start()
+        writer_b.start()
+        assert first_entered.wait(timeout=5)
+        assert second_entered.wait(timeout=5)
+
+        pending = first.metadata_backend.get_entry(key)
+        assert pending is not None
+        assert pending["metadata"]["actual_path"] == before["metadata"]["actual_path"]
+        assert first.get_custom_metadata_for_entry(cache_key=key)[
+            "plan15_linked_metadata"
+        ].label == "m1"
+
+        release.set()
+        _join(writer_a)
+        _join(writer_b)
+        assert results == [key]
+        assert len(errors) == 1
+        assert isinstance(errors[0], CacheBlobLifecycleConflictError)
+        assert first.get(race_key="two-pending") in (
+            {"generation": "a"},
+            {"generation": "b"},
+        )
+        assert first.get_custom_metadata_for_entry(cache_key=key)[
+            "plan15_linked_metadata"
+        ].label in {"a", "b"}
+    finally:
+        release.set()
+        _join(writer_a)
+        _join(writer_b)
+        second.close()
+        first.close()

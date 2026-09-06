@@ -1501,14 +1501,13 @@ class UnifiedCache:
         )
         return snapshot, manifest
 
-    def _prepare_authority_projection(self, manifest, put_result):
-        """Validate and publish compatibility metadata before authority promotion.
+    def _prepare_authority_projection(self, manifest, _put_result):
+        """Build signing metadata without publishing compatibility state.
 
-        The projection is never read as lifecycle authority: if another process
-        wins the BlobStore CAS after this write, the failed caller immediately
-        re-renders it from the winning authority entry.  Keeping this hook
-        before promotion preserves the established integrity/signing failure
-        semantics without allowing metadata to select a payload generation.
+        The lifecycle engine invokes this hook before it has made a candidate
+        visible through authority.  It may calculate integrity/signing fields
+        for the immutable manifest, but it must not mutate a projection or
+        retire custom-metadata links that still belong to M1.
         """
         payload_path = self._authority_payload_locator(manifest.locator)
         metadata = self._plain_projection_value(
@@ -1560,38 +1559,6 @@ class UnifiedCache:
                     raise CacheIntegrityError(
                         "Unable to sign cache entry while unsigned entries are disabled"
                     ) from exc
-        expected_locator = put_result.expected_projection_locator
-        for attempt in range(2):
-            outcome = self._conditional_projection_mutation(
-                manifest.key,
-                expected_locator=expected_locator,
-                replacement=entry_data,
-            )
-            if outcome.status != "mismatch":
-                break
-            # The projection is derived state. An aggregate reader can repair
-            # an old committed row while this mutation is staging its own
-            # candidate, so retry against the row it actually observed only
-            # while the canonical authority still has this put's exact prior
-            # token. A peer authority promotion remains a real lifecycle
-            # conflict and never receives this retry.
-            if (
-                self._cache_blob_store.lifecycle_authority.read_expectation(
-                    manifest.key
-                )
-                != put_result.expected
-            ):
-                break
-            expected_locator = self._projection_locator_from_entry(
-                self.metadata_backend.get_entry(manifest.key)
-            )
-        else:
-            outcome = ProjectionMutationResult("mismatch")
-        if outcome.status == "mismatch":
-            raise CacheBlobLifecycleConflictError(
-                "Compatibility projection changed before authority promotion",
-                context={"operation": "projection_prepare", "key": manifest.key},
-            )
         return replace(
             manifest,
             user_metadata={
@@ -1605,6 +1572,43 @@ class UnifiedCache:
                 ),
             },
         )
+
+    def _publish_promoted_authority_projection(self, put_result) -> str:
+        """Replace M1's projection only when this exact M2 remains authority.
+
+        The pre-operation locator belongs to the caller and is never refreshed
+        from an observed projection.  In particular, a racing candidate cannot
+        lend its token to a losing operation.  SQL backends retire M1 links in
+        the same successful exact-token transaction as this replacement.
+        """
+        promoted = put_result.promoted
+        if promoted is None:
+            raise CacheBlobLifecycleConflictError(
+                "Authority put did not return a promoted generation",
+                context={"operation": "projection_publish", "key": put_result.key},
+            )
+        snapshot, manifest = self._authority_snapshot_manifest(put_result.key)
+        if (
+            snapshot != promoted
+            or manifest is None
+            or manifest.state != "committed"
+            or manifest.locator != promoted.locator
+        ):
+            raise CacheBlobLifecycleConflictError(
+                "Authority advanced before compatibility projection publication",
+                context={"operation": "projection_publish", "key": put_result.key},
+            )
+        outcome = self._conditional_projection_mutation(
+            put_result.key,
+            expected_locator=put_result.expected_projection_locator,
+            replacement=self._projection_entry_from_manifest(manifest, snapshot),
+        )
+        if outcome.status == "mismatch":
+            raise CacheBlobLifecycleConflictError(
+                "Compatibility projection changed before promoted publication",
+                context={"operation": "projection_publish", "key": put_result.key},
+            )
+        return str(self._authority_payload_locator(promoted.locator))
 
     @staticmethod
     def _projection_locator_from_entry(entry: Any) -> Optional[str]:
@@ -1751,12 +1755,13 @@ class UnifiedCache:
                     },
                     projection_context=expected_projection_locator,
                 )
+                promoted_locator = self._publish_promoted_authority_projection(
+                    put_result
+                )
             except BaseException:
-                # The compatibility projection is installed before authority
-                # promotion so that signing/integrity failures preserve the public
-                # cache contract. Every failed lifecycle outcome must therefore
-                # re-render it from the current committed authority (or remove it
-                # when no generation exists) before the original failure escapes.
+                # Pre-promotion failures leave M1 untouched. A failure after
+                # promotion may leave a derived row stale, so reconciliation is
+                # authority-derived and never reconstructs/destructs a candidate.
                 try:
                     self._repair_projection_after_failed_put(cache_key)
                 except Exception:
@@ -1770,9 +1775,7 @@ class UnifiedCache:
                 self._store_custom_metadata(
                     cache_key,
                     custom_metadata,
-                    expected_locator=str(
-                        self._authority_payload_locator(put_result.promoted.locator)
-                    ),
+                    expected_locator=promoted_locator,
                 )
             self._enforce_size_limit()
             return cache_key
