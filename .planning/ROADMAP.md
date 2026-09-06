@@ -114,7 +114,7 @@ Plans:
   4. Operators can dry-run and resume reconciliation to repair, quarantine, or report inconsistent entries without guessing their provenance.
   5. Forced same-key write, delete, and read races have deterministic outcomes without globally serializing operations on distinct keys.
 
-**Plans**: 18/18 plans executed
+**Plans**: 18/19 plans executed
 
 Plans:
 **Wave 1**
@@ -188,6 +188,10 @@ Plans:
 **Wave 18** *(blocked on Wave 17 completion)*
 
 - [x] 03-18-PLAN.md — Retire failed coordination state, enforce fork/deadline safety, and restore cached query-meta capability
+
+**Wave 19** *(blocked on Wave 18 completion)*
+
+- [ ] 03-19-PLAN.md — Make fresh SQLite metadata bootstrap atomic and reject corrupt query metadata consistently
 
 ### Phase 4: Metadata Composition and Topology Contracts
 
