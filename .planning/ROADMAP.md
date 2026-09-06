@@ -114,7 +114,7 @@ Plans:
   4. Operators can dry-run and resume reconciliation to repair, quarantine, or report inconsistent entries without guessing their provenance.
   5. Forced same-key write, delete, and read races have deterministic outcomes without globally serializing operations on distinct keys.
 
-**Plans**: 11/12 plans executed
+**Plans**: 11/13 plans executed
 
 Plans:
 
@@ -130,6 +130,7 @@ Plans:
 - [x] 03-12-PLAN.md — Add a digest-bound contract distinguishing repository-runtime evidence from Python 3.11 native-qualification attestation
 - [x] 03-11-PLAN.md — Capture and attest the current host's UNAVAILABLE/NOT_QUALIFIED Windows evidence after the additive command contract closes
 - [ ] 03-10-PLAN.md — Measure lifecycle budgets and close final Phase 3 acceptance after 03-11
+- [ ] 03-13-PLAN.md — Isolate the complete repository suite, remove nested environment mutation, and close Plan 03-10 only on green evidence
 
 ### Phase 4: Metadata Composition and Topology Contracts
 
