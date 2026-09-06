@@ -21,6 +21,43 @@ def _two_caches(root: Path):
     return cacheness(configuration), cacheness(configuration)
 
 
+def _two_sqlite_caches(root: Path):
+    """Open independent facades sharing SQLite compatibility projections."""
+    configuration = CacheConfig(
+        cache_dir=str(root), metadata_backend="sqlite", cleanup_on_init=False
+    )
+    return cacheness(configuration), cacheness(configuration)
+
+
+def test_stale_projection_removal_is_a_noop_after_a_peer_replaces_its_token(
+    tmp_path: Path,
+) -> None:
+    """A stale facade must not delete a peer's newer projection by cache key alone."""
+    first, second = _two_sqlite_caches(tmp_path / "stale-projection-removal")
+    try:
+        key = first.put({"generation": "old"}, race_key="stale-removal")
+        old_projection = first.metadata_backend.get_entry(key)
+        assert old_projection is not None
+        old_locator = old_projection["metadata"]["actual_path"]
+
+        assert second.put({"generation": "new"}, race_key="stale-removal") == key
+
+        outcome = first.metadata_backend.conditional_projection_mutation(
+            key,
+            expected_locator=old_locator,
+            replacement=None,
+        )
+
+        assert outcome.status == "mismatch"
+        assert second.get(race_key="stale-removal") == {"generation": "new"}
+        current = second.metadata_backend.get_entry(key)
+        assert current is not None
+        assert current["metadata"]["actual_path"] != old_locator
+    finally:
+        second.close()
+        first.close()
+
+
 def test_clear_all_preserves_a_generation_published_after_its_snapshot(
     tmp_path: Path,
 ) -> None:
