@@ -40,6 +40,8 @@ import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from cacheness.error_handling import CacheBlobLifecycleConflictError
+
 logger = logging.getLogger(__name__)
 
 # Check SQLAlchemy availability
@@ -315,6 +317,145 @@ class PostgresBackend(MetadataBackend):
                     session.rollback()
                     logger.error(f"Failed to put entry {cache_key}: {e}")
                     raise
+
+    def _cleanup_projection_links(self, session, cache_key: str) -> None:
+        """Remove links only when this transaction replaces their row token."""
+        try:
+            from cacheness.custom_metadata import CacheMetadataLink
+
+            if inspect(self.engine).has_table(CacheMetadataLink.__tablename__):
+                session.execute(
+                    delete(CacheMetadataLink).where(
+                        CacheMetadataLink.cache_key == cache_key
+                    )
+                )
+        except ImportError:
+            return
+
+    def conditional_projection_mutation(
+        self,
+        cache_key: str,
+        *,
+        expected_locator: Optional[str],
+        replacement: Optional[Dict[str, Any]],
+    ):
+        """Commit one exact locator transition in a PostgreSQL transaction.
+
+        The projection is derived state, but its cache row and custom-metadata
+        links still share one ownership boundary.  ``FOR UPDATE`` prevents a
+        peer from changing the compared row before this short transaction
+        commits; callers whose exact token is gone receive a no-op mismatch.
+        """
+        from cacheness.metadata import ProjectionMutationResult
+
+        with self._lock, self.SessionLocal() as session:
+            try:
+                current = session.execute(
+                    select(PgCacheEntry)
+                    .where(PgCacheEntry.cache_key == cache_key)
+                    .with_for_update()
+                ).scalar_one_or_none()
+                current_locator = current.actual_path if current is not None else None
+                matches = (
+                    current is None
+                    if expected_locator is None
+                    else current is not None and current_locator == expected_locator
+                )
+                if not matches:
+                    session.rollback()
+                    return ProjectionMutationResult("mismatch")
+
+                if replacement is None:
+                    if current is None:
+                        session.rollback()
+                        return ProjectionMutationResult("converged")
+                    self._cleanup_projection_links(session, cache_key)
+                    session.delete(current)
+                    session.commit()
+                    return ProjectionMutationResult("applied")
+
+                replacement_locator = replacement.get("metadata", {}).get(
+                    "actual_path"
+                )
+                if not isinstance(replacement_locator, str) or not replacement_locator:
+                    raise ValueError(
+                        "Conditional projection replacement requires an actual_path"
+                    )
+                if current is not None and current_locator != replacement_locator:
+                    self._cleanup_projection_links(session, cache_key)
+                self._upsert_entry(session, cache_key, replacement)
+                session.commit()
+                status = (
+                    "converged"
+                    if current is not None and current_locator == replacement_locator
+                    else "applied"
+                )
+                return ProjectionMutationResult(status)
+            except Exception:
+                session.rollback()
+                raise
+
+    def store_custom_metadata_if_current(
+        self,
+        cache_key: str,
+        expected_projection_token: str,
+        metadata_objects: list[Any],
+    ) -> None:
+        """Insert custom metadata only while one promoted locator remains current.
+
+        The token comparison, ORM inserts, and cache-link inserts share one
+        transaction.  A delayed writer therefore rolls back its own objects as
+        well as links instead of attaching A's metadata to B's replacement.
+        """
+        from cacheness.custom_metadata import (
+            CacheMetadataLink,
+            get_all_custom_metadata_models,
+            get_custom_metadata_model,
+        )
+        from cacheness.metadata import Base
+
+        tables = [CacheMetadataLink.__table__]
+        tables.extend(
+            model.__table__
+            for model in get_all_custom_metadata_models().values()
+            if getattr(model, "__table__", None) is not None
+        )
+        Base.metadata.create_all(self.engine, tables=tables)
+        with self._lock, self.SessionLocal() as session:
+            try:
+                current = session.execute(
+                    select(PgCacheEntry)
+                    .where(
+                        PgCacheEntry.cache_key == cache_key,
+                        PgCacheEntry.actual_path == expected_projection_token,
+                    )
+                    .with_for_update()
+                ).scalar_one_or_none()
+                if current is None:
+                    raise CacheBlobLifecycleConflictError(
+                        "Compatibility projection changed before custom metadata linking",
+                        context={"operation": "custom_metadata", "key": cache_key},
+                    )
+                for metadata_instance in metadata_objects:
+                    schema_name = getattr(type(metadata_instance), "_schema_name", None)
+                    model_class = get_custom_metadata_model(schema_name)
+                    if model_class is None or not isinstance(
+                        metadata_instance, model_class
+                    ):
+                        continue
+                    session.add(metadata_instance)
+                    session.flush()
+                    session.add(
+                        CacheMetadataLink(
+                            cache_key=cache_key,
+                            metadata_table=model_class.__tablename__,
+                            metadata_id=metadata_instance.id,
+                        )
+                    )
+                session.commit()
+            except Exception:
+                session.rollback()
+                raise
     
     def _upsert_entry(self, session, cache_key: str, entry_data: Dict[str, Any]):
         """Insert or update an entry."""

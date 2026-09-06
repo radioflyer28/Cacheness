@@ -99,6 +99,10 @@ class SqliteLifecycleAuthority:
             raise TypeError("lifecycle_topology must be a LifecycleAuthorityTopology instance")
         self._owner_pid = os.getpid()
         self._state_lock = Lock()
+        self._bootstrap_lock = Lock()
+        self._schema_lock = Lock()
+        self._bootstrap_started = False
+        self._schema_ready = False
         self._closed = False
         self.open_write_transactions = 0
         self._transaction_hook: Callable[[str], None] | None = None
@@ -388,6 +392,21 @@ class SqliteLifecycleAuthority:
     def _materialize_database_file(self, deadline: float) -> bool:
         """Create only the contained database leaf and report whether this won."""
         self._validate_mutation_topology()
+        if self._classify_for_open() == "authority":
+            return False
+        # Several same-process keys may reach their first authority mutation
+        # together. Coordinate only the root-to-leaf bootstrap interval; once
+        # the SQLite leaf exists, independent lifecycle transactions continue
+        # through SQLite without a process-wide operation lock.
+        with self._bootstrap_lock:
+            state = self._classify_for_open()
+            if state != "authority" and not self._bootstrap_started:
+                if state in {"missing", "ready"}:
+                    self._bootstrap_started = True
+            return self._materialize_database_file_after_bootstrap_lock(deadline)
+
+    def _materialize_database_file_after_bootstrap_lock(self, deadline: float) -> bool:
+        """Materialize a new leaf after same-process bootstrap admission."""
         state = self._classify_for_open()
         rejected_states = {
             "wrong_root",
@@ -798,7 +817,19 @@ class SqliteLifecycleAuthority:
             created_new = self._materialize_database_file(deadline)
         else:
             state = self._classify_for_open()
-            if state == "established" and self._is_pristine_reserved_bootstrap():
+            if state == "established" and self._bootstrap_started:
+                self._await_inflight_authority_leaf(deadline)
+                state = self._classify_for_open()
+            if state == "established" and (
+                self._is_pristine_reserved_bootstrap()
+                or self._may_be_inflight_authority_bootstrap()
+            ):
+                # A concurrent first writer may have made the reserved
+                # namespace (and other bounded bootstrap artifacts) visible
+                # before it wins the SQLite O_EXCL leaf. Treat that exact
+                # state as absent for a read rather than rejecting it as
+                # legacy evidence; no payload becomes readable until a later
+                # authority-backed observation succeeds.
                 state = "ready"
             if state in {"missing", "ready"}:
                 yield None
@@ -826,9 +857,21 @@ class SqliteLifecycleAuthority:
                 )
             self._configure_connection(connection, initialize=created_new)
             if created_new:
-                self._initialize_schema(connection)
+                with self._schema_lock:
+                    self._initialize_schema(connection)
+                    self._schema_ready = True
             elif mutation:
-                self._migrate_schema_layout(connection)
+                # Schema reconciliation is a first-use concern for an
+                # authority instance. Repeating an EXCLUSIVE migration
+                # transaction before every short state transition turns
+                # independent-key writers into a queue and can exhaust the
+                # measured SQLite admission bound. The lock covers only this
+                # bounded one-time compatibility check, never payload work or
+                # ordinary lifecycle transactions.
+                with self._schema_lock:
+                    if not self._schema_ready:
+                        self._migrate_schema_layout(connection)
+                        self._schema_ready = True
             application_id = connection.execute("PRAGMA application_id").fetchone()[0]
             table_rows = connection.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table'"

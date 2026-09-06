@@ -34,6 +34,7 @@ import threading
 import uuid
 import warnings
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
@@ -1290,6 +1291,32 @@ class JsonBackend(MetadataBackend):
             self._save_to_disk(candidate)
             self._metadata = candidate
 
+    @contextmanager
+    def _projection_commit_guard(self):
+        """Serialize one document refresh/compare/replace across JSON facades.
+
+        This sibling descriptor lock protects only the rebuildable compatibility
+        projection.  It is deliberately not lifecycle authority and is held
+        solely while this method reloads and atomically replaces the metadata
+        document.
+        """
+        lock_path = self.metadata_file.with_name(
+            f".{self.metadata_file.name}.projection-commit.lock"
+        )
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(lock_path, "a+b")
+        # Import lazily: package initialization re-exports metadata adapters,
+        # while this guard is reached only after the adapter is constructed.
+        from .storage.integrity import _locked_key_handle
+
+        with _locked_key_handle(
+            handle,
+            exclusive=True,
+            operation="json_projection_commit",
+            close_handle=True,
+        ):
+            yield
+
     def conditional_projection_mutation(
         self,
         cache_key: str,
@@ -1298,9 +1325,13 @@ class JsonBackend(MetadataBackend):
         replacement: Optional[Dict[str, Any]],
     ) -> ProjectionMutationResult:
         """Apply a local JSON projection CAS; durable cross-instance locking follows."""
-        with self._lock:
-            # A second facade owns a separate in-memory document. Refresh from
-            # the durable projection before comparing its expected token.
+        hook = getattr(self, "_projection_commit_hook", None)
+        if callable(hook):
+            hook("projection_commit.before_descriptor_lock")
+        with self._lock, self._projection_commit_guard():
+            # A second facade owns a separate in-memory document. Reload while
+            # admitted by the sibling lock so compare-and-replace is one short
+            # document mutation rather than a lost-update race.
             self._metadata = self._load_from_disk()
             current = self._metadata.get("entries", {}).get(cache_key)
             current_locator = (

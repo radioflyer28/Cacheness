@@ -36,6 +36,10 @@ def _two_caches(root: Path):
 
 def _two_sqlite_caches(root: Path):
     """Open independent facades sharing SQLite compatibility projections."""
+    # Other test modules deliberately reset the global custom-schema registry.
+    # Re-register this module's model at fixture construction so deterministic
+    # authority/link regressions do not depend on collection order.
+    custom_metadata_model("projection_race")(ProjectionRaceMetadata)
     configuration = CacheConfig(
         cache_dir=str(root),
         metadata_backend="sqlite",
