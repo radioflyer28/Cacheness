@@ -192,7 +192,7 @@ Plans:
 **Wave 19** *(blocked on Wave 18 completion)*
 
 - 03-19-PLAN.md — **Superseded by ADR 0001**; retained as interrupted implementation history and excluded from canonical counts
-- [ ] 03-20-PLAN.md — Preserve real Plan 03-19 integrity fixes, cover partial exclusive-publication crashes, remove deadline-driven authority complexity, then qualify committed topology-specific recovery/bounded outcomes from a detached worktree
+- [x] 03-20-PLAN.md — Preserve real Plan 03-19 integrity fixes, cover partial exclusive-publication crashes, remove deadline-driven authority complexity, then qualify committed topology-specific recovery/bounded outcomes from a detached worktree
 
 ### Phase 4: Metadata Composition and Topology Contracts
 
@@ -272,7 +272,7 @@ Plans:
 |-------|----------------|--------|-----------|
 | 1. Compatibility and Security Baseline | 15/15 | Complete | 2026-08-30 |
 | 2. Canonical Storage and Integrity Contract | 7/7 | Complete    | 2026-08-30 |
-| 3. Atomic Lifecycle and Recovery Engine | 18/18 | In Progress|  |
+| 3. Atomic Lifecycle and Recovery Engine | 19/19 | In Progress|  |
 | 4. Metadata Composition and Topology Contracts | 0/TBD | Not started | - |
 | 5. Payload Backends and Full Matrix Parity | 0/TBD | Not started | - |
 | 6. UnifiedCache Policy Composition | 0/TBD | Not started | - |

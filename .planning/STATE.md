@@ -3,17 +3,17 @@ gsd_state_version: 1.0
 milestone: v1.0
 current_phase: 03
 current_phase_name: Atomic Lifecycle and Recovery Engine
-status: planned
-stopped_at: Plan 03-20 ready; Plan 03-19 superseded by ADR 0001
-last_updated: "2026-09-06T16:15:59Z"
+status: executing
+stopped_at: Completed 03-20-PLAN.md
+last_updated: "2026-09-06T17:28:14.832Z"
 last_activity: 2026-09-06
-last_activity_desc: Revised Plan 03-20 with partial-publication crash coverage and post-Task-3 detached-worktree qualification
-state_head: 781d86c4f8fe6b24276e031fe206a351d8059364
+last_activity_desc: Completed Plan 03-20; fresh Phase 03 verification remains pending
+state_head: ea40043aebfbdd6381b9b8347a0704ce2e23b053
 progress:
   total_phases: 8
   completed_phases: 2
   total_plans: 41
-  completed_plans: 40
+  completed_plans: 41
 milestone_name: milestone
 ---
 
@@ -28,10 +28,10 @@ See: .planning/PROJECT.md (updated 2026-08-29)
 
 ## Current Position
 
-Phase: 03 (Atomic Lifecycle and Recovery Engine) — PLANNED
+Phase: 03 (Atomic Lifecycle and Recovery Engine) — EXECUTING
 Plan: 20 of 20 (19 canonical; 03-19 is superseded)
-Status: Plan 03-20 ready for execution
-Last activity: 2026-09-06 — Revised Plan 03-20 so partial-stream/file-to-directory-fsync crashes are explicit and clean qualification runs only after Tasks 1-3 commit
+Status: Plan 03-20 complete; fresh phase verification pending
+Last activity: 2026-09-06 — Completed Plan 03-20 with detached-worktree qualification; 03-VERIFICATION.md remains stale pending a fresh verifier
 
 Progress: [██░░░░░░░░] 2 of 8 phases complete
 
@@ -91,6 +91,7 @@ Phase 03 rows in this historical table include superseded attempts and do not de
 | Phase 03 P15 | 31min | 3 tasks | 6 files |
 | Phase 03 P17 | 1h 13m | 3 tasks | 7 files |
 | Phase 03 P18 | 1h 31m | 5 tasks | 9 files |
+| Phase 03 P20 | 1920 | 4 tasks | 12 files |
 
 ## Accumulated Context
 
@@ -219,6 +220,8 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 03]: SQLite WAL and maintenance bootstrap before pooled sessions are published; pool checkout stays read-safe.
 - [Phase 03]: Aggregate metadata queries omit mismatched projection rows and bind exact key/locator pairs instead of repairing or matching keys alone.
 - [Phase 03 superseded by ADR 0001]: Named stress-schedule timeout-stage allowlists are historical evidence; Plan 03-20 replaces them with success/conflict/typed-retryable-timeout progress accounting plus independent safety assertions.
+- [Phase 03]: SQLite contention is a bounded typed outcome: success, exact conflict, or retryable timeout.
+- [Phase 03]: The 5.0-second authority default is caller policy; 0.187-second evidence remains benchmark-only.
 
 ### Pending Todos
 
@@ -242,6 +245,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-09-06T16:15:59Z
-Stopped at: Plan 03-20 ready; Plan 03-19 superseded by ADR 0001
+Last session: 2026-09-06T17:28:14.782Z
+Stopped at: Completed 03-20-PLAN.md
 Resume file: None
