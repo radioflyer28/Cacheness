@@ -61,6 +61,7 @@ class CacheReason(str, Enum):
     BLOB_CLOSE_TIMEOUT = "blob_close_timeout"
     BLOB_LIFECYCLE_TIMEOUT = "blob_lifecycle_timeout"
     BLOB_LOCK_RELEASE_FAILURE = "blob_lock_release_failure"
+    METADATA_CORRUPT = "metadata_corrupt"
 
 
 class CacheError(Exception):

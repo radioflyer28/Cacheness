@@ -32,6 +32,7 @@ import os
 import sqlite3
 import sys
 import threading
+import time
 import uuid
 import warnings
 from abc import ABC, abstractmethod
@@ -47,6 +48,7 @@ import logging
 from .json_utils import dumps as json_dumps, loads as json_loads
 from .error_handling import (
     CacheBlobLifecycleConflictError,
+    CacheIntegrityError,
     CacheLegacyFormatError,
     CacheMetadataError,
     CacheReason,
@@ -1627,6 +1629,37 @@ class JsonBackend(MetadataBackend):
 class SqliteBackend(MetadataBackend):
     """SQLite database-based metadata backend using SQLAlchemy ORM."""
 
+    _BOOTSTRAP_TIMEOUT_SECONDS = 30.0
+    _ENTRY_COLUMNS = (
+        ("cache_key", "VARCHAR(16)", 1, 1),
+        ("description", "VARCHAR(500)", 1, 0),
+        ("data_type", "VARCHAR(20)", 1, 0),
+        ("prefix", "VARCHAR(100)", 1, 0),
+        ("created_at", "DATETIME", 1, 0),
+        ("accessed_at", "DATETIME", 1, 0),
+        ("file_size", "INTEGER", 1, 0),
+        ("file_hash", "VARCHAR(16)", 0, 0),
+        ("entry_signature", "VARCHAR(64)", 0, 0),
+        ("object_type", "VARCHAR(100)", 0, 0),
+        ("storage_format", "VARCHAR(20)", 0, 0),
+        ("serializer", "VARCHAR(20)", 0, 0),
+        ("compression_codec", "VARCHAR(20)", 0, 0),
+        ("actual_path", "VARCHAR(500)", 0, 0),
+        ("cache_key_params", "TEXT", 0, 0),
+    )
+    _STATS_COLUMNS = (
+        ("id", "INTEGER", 1, 1),
+        ("cache_hits", "INTEGER", 1, 0),
+        ("cache_misses", "INTEGER", 1, 0),
+        ("last_updated", "DATETIME", 1, 0),
+    )
+    _ENTRY_INDEXES = {
+        "idx_list_entries": (("created_at", 1),),
+        "idx_cleanup": (("created_at", 0),),
+        "idx_size_mgmt": (("file_size", 0), ("created_at", 0)),
+        "idx_data_type": (("data_type", 0),),
+    }
+
     def __init__(self, db_file: str = "cache_metadata.db", echo: bool = False):
         """
         Initialize SQLite metadata backend.
@@ -1643,7 +1676,8 @@ class SqliteBackend(MetadataBackend):
         self.legacy_compat_access_times: Dict[str, str] = {}
         self.engine = None
         self.SessionLocal = None
-        self._legacy_layout = self._detect_legacy_layout()
+        deadline = time.monotonic() + self._BOOTSTRAP_TIMEOUT_SECONDS
+        self._legacy_layout = self._detect_legacy_layout(deadline)
         if self._legacy_layout is not None:
             warnings.warn(
                 "Reading legacy metadata_json SQLite metadata is deprecated and read-only.",
@@ -1656,6 +1690,10 @@ class SqliteBackend(MetadataBackend):
             raise ImportError(
                 "SQLAlchemy is required for SQLite backend. Install with: pip install sqlalchemy"
             )
+
+        if self.db_file != ":memory:":
+            self._materialize_database_leaf()
+            self._establish_wal_mode(deadline)
         
         # Keep this engine provisional until its file/schema bootstrap completes.
         engine = create_engine(
@@ -1673,7 +1711,7 @@ class SqliteBackend(MetadataBackend):
         from sqlalchemy import event
         event.listen(engine, "connect", self._configure_read_connection)
         try:
-            self._bootstrap_database(engine)
+            self._bootstrap_database(engine, deadline)
             self.engine = engine
             self.SessionLocal = sessionmaker(
                 autocommit=False, autoflush=False, bind=engine
@@ -1689,29 +1727,272 @@ class SqliteBackend(MetadataBackend):
         """Apply only connection-local settings when QueuePool opens a reader."""
         cursor = dbapi_connection.cursor()
         try:
+            # This must be first: concurrent constructors can otherwise run a
+            # tuning pragma while another constructor transitions to WAL.
+            cursor.execute("PRAGMA busy_timeout=30000")
             cursor.execute("PRAGMA synchronous=NORMAL")
             cursor.execute("PRAGMA cache_size=20000")
             cursor.execute("PRAGMA temp_store=MEMORY")
             cursor.execute("PRAGMA mmap_size=536870912")
             cursor.execute("PRAGMA analysis_limit=1000")
-            cursor.execute("PRAGMA busy_timeout=30000")
             cursor.execute("PRAGMA wal_autocheckpoint=1000")
             cursor.execute("PRAGMA foreign_keys=ON")
         finally:
             cursor.close()
 
-    def _bootstrap_database(self, engine) -> None:
-        """Establish durable SQLite state once per constructor, never checkout."""
-        if self.db_file != ":memory:":
-            with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
-                mode = connection.exec_driver_sql("PRAGMA journal_mode=WAL").scalar_one()
-                if str(mode).lower() != "wal":
-                    raise CacheMetadataError(
-                        "SQLite metadata database could not enable WAL",
-                        context={"backend": "sqlite", "operation": "bootstrap_wal"},
+    @staticmethod
+    def _sqlite_primary_error_code(error: BaseException) -> Optional[int]:
+        """Return one SQLite primary result code without inspecting messages."""
+        original = getattr(error, "orig", error)
+        code = getattr(original, "sqlite_errorcode", None)
+        if not isinstance(code, int):
+            return None
+        return code & 0xFF
+
+    def _remaining_bootstrap_milliseconds(
+        self,
+        deadline: float,
+        *,
+        stage: str,
+        cause: Optional[BaseException] = None,
+    ) -> int:
+        """Return the remaining constructor-owned SQLite busy budget."""
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            return max(1, int(remaining * 1000))
+        error = CacheMetadataError(
+            "SQLite metadata bootstrap timed out",
+            context={
+                "backend": "sqlite",
+                "operation": "metadata_bootstrap",
+                "stage": stage,
+                "path": self.db_file,
+                "budget_seconds": self._BOOTSTRAP_TIMEOUT_SECONDS,
+                "elapsed_seconds": self._BOOTSTRAP_TIMEOUT_SECONDS - remaining,
+                "remaining_seconds": remaining,
+            },
+        )
+        if cause is not None:
+            raise error from cause
+        raise error
+
+    def _raise_bootstrap_busy(
+        self,
+        error: BaseException,
+        *,
+        deadline: float,
+        stage: str,
+    ) -> None:
+        """Translate only database-native busy/locked bootstrap failures."""
+        if self._sqlite_primary_error_code(error) not in {
+            sqlite3.SQLITE_BUSY,
+            sqlite3.SQLITE_LOCKED,
+        }:
+            raise error
+        remaining = deadline - time.monotonic()
+        raise CacheMetadataError(
+            "SQLite metadata bootstrap could not acquire its database lock",
+            context={
+                "backend": "sqlite",
+                "operation": "metadata_bootstrap",
+                "stage": stage,
+                "path": self.db_file,
+                "budget_seconds": self._BOOTSTRAP_TIMEOUT_SECONDS,
+                "elapsed_seconds": self._BOOTSTRAP_TIMEOUT_SECONDS - remaining,
+                "remaining_seconds": remaining,
+            },
+        ) from error
+
+    def _metadata_corrupt(self, *, stage: str) -> CacheIntegrityError:
+        """Build the fail-closed result for incompatible metadata evidence."""
+        return CacheIntegrityError(
+            "SQLite metadata database schema is incompatible",
+            context={
+                "reason": CacheReason.METADATA_CORRUPT.value,
+                "backend": "sqlite",
+                "operation": "metadata_bootstrap",
+                "stage": stage,
+                "path": self.db_file,
+            },
+        )
+
+    @staticmethod
+    def _schema_execute(connection, statement: str):
+        """Execute fixed SQLite introspection SQL for DBAPI or SQLAlchemy callers."""
+        execute_driver_sql = getattr(connection, "exec_driver_sql", None)
+        if callable(execute_driver_sql):
+            return execute_driver_sql(statement)
+        return connection.execute(statement)
+
+    @staticmethod
+    def _schema_objects(connection) -> dict[str, tuple[str, str]]:
+        """Return only durable user schema objects keyed by their exact names."""
+        rows = SqliteBackend._schema_execute(
+            connection,
+            "SELECT type, name, tbl_name FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+        return {str(name): (str(kind), str(table)) for kind, name, table in rows}
+
+    @staticmethod
+    def _raw_table_columns(connection, table: str) -> tuple[tuple[str, str, int, int], ...]:
+        """Read an exact fixed-table column contract without ORM materialization."""
+        return tuple(
+            (str(row[1]), str(row[2]).upper(), int(row[3]), int(row[5]))
+            for row in SqliteBackend._schema_execute(
+                connection, f"PRAGMA table_xinfo({table})"
+            ).fetchall()
+        )
+
+    def _is_exact_current_schema(self, connection) -> bool:
+        """Validate every required table, index, and singleton stats invariant."""
+        objects = self._schema_objects(connection)
+        if objects.get("cache_entries") != ("table", "cache_entries"):
+            return False
+        if objects.get("cache_stats") != ("table", "cache_stats"):
+            return False
+        if self._raw_table_columns(connection, "cache_entries") != self._ENTRY_COLUMNS:
+            return False
+        if self._raw_table_columns(connection, "cache_stats") != self._STATS_COLUMNS:
+            return False
+        index_rows = {
+            str(row[1]): (int(row[2]), int(row[4]))
+            for row in self._schema_execute(
+                connection, "PRAGMA index_list(cache_entries)"
+            ).fetchall()
+        }
+        for name, expected_columns in self._ENTRY_INDEXES.items():
+            if index_rows.get(name) != (0, 0):
+                return False
+            columns = tuple(
+                (str(row[2]), int(row[3]))
+                for row in self._schema_execute(
+                    connection, f"PRAGMA index_xinfo({name})"
+                ).fetchall()
+                if int(row[5]) == 1
+            )
+            if columns != expected_columns:
+                return False
+        stats_rows = self._schema_execute(
+            connection, "SELECT id FROM cache_stats"
+        ).fetchall()
+        return not stats_rows or [row[0] for row in stats_rows] == [1]
+
+    def _classify_metadata_schema(self, connection) -> str:
+        """Classify a read snapshot without normalizing any existing evidence."""
+        objects = self._schema_objects(connection)
+        entries = objects.get("cache_entries")
+        stats = objects.get("cache_stats")
+        if entries is None and stats is None:
+            return "empty" if not objects else "incompatible"
+        if entries == ("table", "cache_entries"):
+            entry_columns = tuple(
+                row[0] for row in self._raw_table_columns(connection, "cache_entries")
+            )
+            if entry_columns == _LEGACY_SQLITE_COLUMNS:
+                return "legacy"
+            if entry_columns != _CURRENT_SQLITE_COLUMNS:
+                raise _legacy_layout_error(CacheReason.UNSUPPORTED_LEGACY_LAYOUT)
+        if self._is_exact_current_schema(connection):
+            return "current"
+        return "incompatible"
+
+    def _preflight_metadata_database(self, deadline: float) -> str:
+        """Inspect existing SQLite/WAL state through a query-only read snapshot."""
+        if self.db_file == ":memory:" or not Path(self.db_file).exists():
+            return "empty"
+        uri = f"{Path(self.db_file).resolve().as_uri()}?mode=ro"
+        try:
+            timeout = self._remaining_bootstrap_milliseconds(
+                deadline, stage="preflight"
+            )
+            with sqlite3.connect(uri, uri=True, timeout=timeout / 1000) as connection:
+                connection.execute("PRAGMA query_only=ON")
+                state = self._classify_metadata_schema(connection)
+        except sqlite3.Error as error:
+            self._raise_bootstrap_busy(error, deadline=deadline, stage="preflight")
+            raise self._metadata_corrupt(stage="preflight") from error
+        if state == "incompatible":
+            raise self._metadata_corrupt(stage="preflight")
+        return state
+
+    def _establish_wal_mode(self, deadline: float) -> None:
+        """Transition an admissible file-backed database to WAL before pooling."""
+        try:
+            timeout = self._remaining_bootstrap_milliseconds(
+                deadline, stage="wal_mode"
+            )
+            with sqlite3.connect(
+                self.db_file,
+                timeout=timeout / 1000,
+                isolation_level=None,
+            ) as connection:
+                connection.execute(f"PRAGMA busy_timeout={timeout}")
+                try:
+                    mode = connection.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+                except sqlite3.Error as error:
+                    if self._sqlite_primary_error_code(error) not in {
+                        sqlite3.SQLITE_BUSY,
+                        sqlite3.SQLITE_LOCKED,
+                    }:
+                        raise
+                    # SQLite can reject a simultaneous journal-mode transition
+                    # before applying its busy handler.  Re-acquire its own
+                    # writer lock once and observe the winner; this never
+                    # repeats the transition or treats an error as success.
+                    timeout = self._remaining_bootstrap_milliseconds(
+                        deadline, stage="wal_mode", cause=error
                     )
-        Base.metadata.create_all(engine)
-        with engine.begin() as connection:
+                    connection.execute(f"PRAGMA busy_timeout={timeout}")
+                    connection.execute("BEGIN IMMEDIATE")
+                    try:
+                        mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+                    finally:
+                        connection.rollback()
+        except sqlite3.Error as error:
+            self._raise_bootstrap_busy(error, deadline=deadline, stage="wal_mode")
+            raise self._metadata_corrupt(stage="preflight") from error
+        if str(mode).lower() != "wal":
+            raise CacheMetadataError(
+                "SQLite metadata database could not enable WAL",
+                context={
+                    "backend": "sqlite",
+                    "operation": "metadata_bootstrap",
+                    "stage": "wal_mode",
+                    "path": self.db_file,
+                },
+            )
+
+    def _materialize_database_leaf(self) -> None:
+        """Create an empty SQLite leaf once so SQLite can own schema admission."""
+        try:
+            descriptor = os.open(
+                self.db_file,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+        except FileExistsError:
+            return
+        else:
+            os.close(descriptor)
+
+    def _bootstrap_database(self, engine, deadline: float) -> None:
+        """Create or validate one metadata schema inside SQLite's writer lock."""
+        connection = engine.connect()
+        try:
+            timeout = self._remaining_bootstrap_milliseconds(
+                deadline, stage="schema_lock"
+            )
+            connection.exec_driver_sql(f"PRAGMA busy_timeout={timeout}")
+            try:
+                connection.exec_driver_sql("BEGIN IMMEDIATE")
+            except DBAPIError as error:
+                self._raise_bootstrap_busy(error, deadline=deadline, stage="schema_lock")
+            if self._classify_metadata_schema(connection) == "incompatible":
+                raise self._metadata_corrupt(stage="schema_validation")
+            Base.metadata.create_all(connection)
+            if not self._is_exact_current_schema(connection):
+                raise self._metadata_corrupt(stage="schema_validation")
             connection.execute(
                 CacheStats.__table__.insert().prefix_with("OR IGNORE"),
                 {
@@ -1722,35 +2003,29 @@ class SqliteBackend(MetadataBackend):
                 },
             )
             connection.exec_driver_sql("PRAGMA optimize")
+            if not self._is_exact_current_schema(connection):
+                raise self._metadata_corrupt(stage="schema_validation")
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
 
     def _legacy_database_uri(self) -> Optional[str]:
-        """Return an immutable read-only URI only for a pre-existing database."""
+        """Return a WAL-aware read-only URI only for a pre-existing database."""
         if self.db_file == ":memory:":
             return None
         database = Path(self.db_file)
         if not database.exists():
             return None
-        return f"{database.resolve().as_uri()}?mode=ro&immutable=1"
+        return f"{database.resolve().as_uri()}?mode=ro"
 
-    def _detect_legacy_layout(self) -> Optional[str]:
+    def _detect_legacy_layout(self, deadline: float) -> Optional[str]:
         """Inspect a pre-existing schema before any ORM engine can mutate it."""
-        uri = self._legacy_database_uri()
-        if uri is None:
-            return None
-        with sqlite3.connect(uri, uri=True) as connection:
-            exists = connection.execute(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'cache_entries'"
-            ).fetchone()
-            if exists is None:
-                return None
-            columns = tuple(
-                row[1]
-                for row in connection.execute("PRAGMA table_info(cache_entries)").fetchall()
-            )
-        if columns == _LEGACY_SQLITE_COLUMNS:
+        state = self._preflight_metadata_database(deadline)
+        if state == "legacy":
             return "sqlite_metadata_json_v039"
-        if columns != _CURRENT_SQLITE_COLUMNS:
-            raise _legacy_layout_error(CacheReason.UNSUPPORTED_LEGACY_LAYOUT)
         return None
 
     def _ensure_writable(self) -> None:
