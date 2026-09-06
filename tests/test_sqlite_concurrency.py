@@ -18,17 +18,275 @@ Note: These tests focus on realistic concurrency patterns where different
 threads work with different data, which is the common use case.
 """
 
-import pytest
 import tempfile
 import threading
 import time
 import random
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from multiprocessing import get_context
 import sqlite3
 
-from cacheness.core import UnifiedCache
+import pytest
+
 from cacheness.config import CacheConfig
+from cacheness.core import UnifiedCache
+from cacheness.error_handling import CacheBlobLifecycleTimeoutError, CacheReason
+from cacheness.storage.sqlite_lifecycle_authority import SqliteLifecycleAuthority
+
+
+_EXPECTED_CONTENTION_STAGES = frozenset(
+    {"writer_admission", "scheduler_dispatch", "sqlite_busy"}
+)
+_EXTREME_WORKLOAD_TIMEOUT_SECONDS = 15.0
+
+
+def _is_expected_contention_timeout(error: BaseException) -> bool:
+    """Accept only the authority's explicit bounded-contention result."""
+    if not isinstance(error, CacheBlobLifecycleTimeoutError):
+        return False
+    context = error.context
+    return (
+        context.get("reason") == CacheReason.BLOB_LIFECYCLE_TIMEOUT.value
+        and context.get("operation") == "lifecycle_authority"
+        and context.get("stage") in _EXPECTED_CONTENTION_STAGES
+    )
+
+
+def _extreme_operation_count(scenario: str) -> int:
+    """Return the fixed number of public calls each workload worker attempts."""
+    if scenario == "high_concurrency_stress":
+        return 7
+    if scenario == "concurrent_metadata_access":
+        return 15
+    if scenario == "deadlock_prevention":
+        return 30
+    raise AssertionError(f"Unknown extreme contention scenario: {scenario}")
+
+
+def _execute_extreme_contention_child(
+    cache_dir: str,
+    scenario: str,
+    send_connection,
+) -> None:
+    """Execute one finite stress schedule and return evidence to its parent."""
+    cache = None
+    report = {
+        "workers": [],
+        "hard_failures": [],
+        "read_failures": [],
+        "worker_alive": [],
+        "registry_empty": False,
+        "live_keys_match": False,
+    }
+    try:
+        cache = UnifiedCache(
+            config=CacheConfig(
+                cache_dir=cache_dir,
+                metadata_backend="sqlite",
+                store_cache_key_params=True,
+            )
+        )
+        worker_count = 8
+        iteration_count = 5 if scenario == "high_concurrency_stress" else (8 if scenario == "concurrent_metadata_access" else 10)
+        records_lock = threading.Lock()
+
+        def record_call(worker_record, name, call, put_record=None):
+            worker_record["attempted"] += 1
+            try:
+                value = call()
+                if name in {"query", "list"} and not isinstance(value, list):
+                    raise AssertionError(f"{name} returned {type(value).__name__}, not list")
+                worker_record["successful"] += 1
+                if put_record is not None:
+                    put_record["cache_key"] = value
+                    worker_record["successful_puts"].append(put_record)
+            except BaseException as error:
+                if _is_expected_contention_timeout(error):
+                    worker_record["allowed_timeouts"] += 1
+                    if put_record is not None:
+                        worker_record["timed_out_puts"].append(put_record)
+                else:
+                    worker_record["hard_failures"].append(
+                        {
+                            "operation": name,
+                            "type": type(error).__name__,
+                            "message": str(error),
+                            "context": getattr(error, "context", None),
+                        }
+                    )
+
+        def worker(worker_id):
+            worker_record = {
+                "worker_id": worker_id,
+                "attempted": 0,
+                "successful": 0,
+                "allowed_timeouts": 0,
+                "hard_failures": [],
+                "successful_puts": [],
+                "timed_out_puts": [],
+                "elapsed": 0.0,
+            }
+            started = time.monotonic()
+            for item in range(iteration_count):
+                params = {"scenario": scenario, "worker": worker_id, "item": item}
+                expected = f"{scenario}-{worker_id}-{item}"
+                put_record = {"params": params, "expected": expected}
+                record_call(
+                    worker_record,
+                    "put",
+                    lambda: cache.put(expected, **params),
+                    put_record,
+                )
+                if scenario == "high_concurrency_stress" and item % 3 == 0:
+                    record_call(
+                        worker_record,
+                        "query",
+                        lambda: cache.query_meta(worker=f"int:{worker_id}"),
+                    )
+                elif scenario == "concurrent_metadata_access":
+                    if item % 2 == 0:
+                        record_call(worker_record, "list", cache.list_entries)
+                    if item % 3 == 0:
+                        record_call(
+                            worker_record,
+                            "query",
+                            lambda: cache.query_meta(worker=f"int:{worker_id}"),
+                        )
+                elif scenario == "deadlock_prevention":
+                    record_call(
+                        worker_record,
+                        "query",
+                        lambda: cache.query_meta(worker=f"int:{worker_id}"),
+                    )
+                    record_call(worker_record, "list", cache.list_entries)
+            worker_record["elapsed"] = time.monotonic() - started
+            with records_lock:
+                report["workers"].append(worker_record)
+
+        deadline = time.monotonic() + _EXTREME_WORKLOAD_TIMEOUT_SECONDS
+        threads = [
+            threading.Thread(target=worker, args=(worker_id,), daemon=True)
+            for worker_id in range(worker_count)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                thread.join(timeout=remaining)
+        report["worker_alive"] = [index for index, thread in enumerate(threads) if thread.is_alive()]
+
+        if not report["worker_alive"]:
+            successful_puts = [
+                record
+                for worker_record in report["workers"]
+                for record in worker_record["successful_puts"]
+            ]
+            timed_out_puts = [
+                record
+                for worker_record in report["workers"]
+                for record in worker_record["timed_out_puts"]
+            ]
+            for record in successful_puts:
+                try:
+                    actual = cache.get(**record["params"])
+                    if actual != record["expected"]:
+                        raise AssertionError(
+                            f"wrong value: expected {record['expected']!r}, got {actual!r}"
+                        )
+                except BaseException as error:
+                    report["read_failures"].append(
+                        {"kind": "successful_put", "type": type(error).__name__, "message": str(error)}
+                    )
+            for record in timed_out_puts:
+                try:
+                    actual = cache.get(**record["params"])
+                    if actual is not None:
+                        raise AssertionError(f"timed-out put became live: {actual!r}")
+                except BaseException as error:
+                    report["read_failures"].append(
+                        {"kind": "timed_out_put", "type": type(error).__name__, "message": str(error)}
+                    )
+            try:
+                entries = cache.list_entries()
+                entry_keys = {entry["cache_key"] for entry in entries}
+                successful_keys = {record["cache_key"] for record in successful_puts}
+                report["live_keys_match"] = entry_keys == successful_keys
+            except BaseException as error:
+                report["read_failures"].append(
+                    {"kind": "list_entries", "type": type(error).__name__, "message": str(error)}
+                )
+        report["hard_failures"] = [
+            failure
+            for worker_record in report["workers"]
+            for failure in worker_record["hard_failures"]
+        ]
+    except BaseException as error:
+        report["fatal"] = {
+            "type": type(error).__name__,
+            "message": str(error),
+            "context": getattr(error, "context", None),
+        }
+    finally:
+        if cache is not None and not report["worker_alive"]:
+            try:
+                cache.close()
+            except BaseException as error:
+                report["close_failure"] = f"{type(error).__name__}: {error}"
+        report["registry_empty"] = SqliteLifecycleAuthority.admission_registry_size_for_test() == 0
+        send_connection.send(report)
+        send_connection.close()
+
+
+def _run_extreme_contention(tmp_path: Path, scenario: str) -> dict:
+    """Bound a historical contention schedule in a disposable POSIX child."""
+    try:
+        context = get_context("fork")
+    except ValueError:
+        pytest.skip("fork process context is unavailable on this platform")
+    receive_connection, send_connection = context.Pipe(duplex=False)
+    child = context.Process(
+        target=_execute_extreme_contention_child,
+        args=(str(tmp_path / scenario), scenario, send_connection),
+    )
+    started = time.monotonic()
+    child.start()
+    send_connection.close()
+    child.join(timeout=_EXTREME_WORKLOAD_TIMEOUT_SECONDS)
+    exceeded_deadline = child.is_alive()
+    if exceeded_deadline:
+        child.terminate()
+        child.join(timeout=2)
+    report = receive_connection.recv() if receive_connection.poll() else None
+    receive_connection.close()
+    assert not exceeded_deadline, "contention child exceeded its bounded completion deadline"
+    assert child.exitcode == 0
+    assert report is not None
+    report["parent_elapsed"] = time.monotonic() - started
+    return report
+
+
+def _assert_extreme_contention(report: dict, scenario: str) -> None:
+    """Assert progress, accounting, integrity, and cleanup from a child schedule."""
+    assert "fatal" not in report, report.get("fatal")
+    assert "close_failure" not in report, report.get("close_failure")
+    assert report["worker_alive"] == []
+    assert len(report["workers"]) == 8
+    expected_attempts = 8 * _extreme_operation_count(scenario)
+    attempted = sum(worker["attempted"] for worker in report["workers"])
+    successful = sum(worker["successful"] for worker in report["workers"])
+    timed_out = sum(worker["allowed_timeouts"] for worker in report["workers"])
+    hard_failures = sum(len(worker["hard_failures"]) for worker in report["workers"])
+    assert attempted == expected_attempts
+    assert successful + timed_out + hard_failures == attempted
+    assert report["hard_failures"] == []
+    assert successful >= expected_attempts * 0.75
+    assert all(worker["successful"] >= 1 for worker in report["workers"])
+    assert all(worker["elapsed"] < _EXTREME_WORKLOAD_TIMEOUT_SECONDS for worker in report["workers"])
+    assert report["read_failures"] == []
+    assert report["live_keys_match"]
+    assert report["registry_empty"]
 
 
 @pytest.fixture
@@ -183,47 +441,12 @@ class TestSQLiteConcurrency:
             
             cache.close()
 
-    def test_high_concurrency_stress(self):
-        """Stress test with high thread concurrency."""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            config = CacheConfig(
-                cache_dir=temp_dir,
-                metadata_backend="sqlite",
-                store_cache_key_params=True
-            )
-            cache = UnifiedCache(config=config)
-            
-            def stress_worker(worker_id):
-                try:
-                    for i in range(5):  # Reduced from 10 to 5
-                        # Rapid put operations with unique keys per worker
-                        cache.put(f"stress_{worker_id}_{i}", f"value_{worker_id}_{i}", worker=worker_id, item=i)
-                        
-                        # Occasional queries
-                        if i % 3 == 0:  # More frequent queries to maintain test coverage
-                            cache.query_meta(worker=f"int:{worker_id}")
-                    
-                    return True
-                except Exception as e:
-                    return str(e)
-            
-            # High concurrency test
-            num_workers = 8  # Reduced from 12 to 8
-            with ThreadPoolExecutor(max_workers=num_workers) as executor:
-                futures = [executor.submit(stress_worker, i) for i in range(num_workers)]
-                results = [f.result() for f in futures]
-            
-            # Check results
-            successful = sum(1 for r in results if r is True)
-            errors = [r for r in results if r is not True]
-            
-            assert successful == num_workers, f"Only {successful}/{num_workers} workers succeeded. Errors: {errors}"
-            
-            # Verify final state
-            entries = cache.list_entries()
-            assert len(entries) == num_workers * 5  # Updated to match new workload
-            
-            cache.close()
+    def test_high_concurrency_stress(self, tmp_path):
+        """Bounded write contention retains progress and committed-value integrity."""
+        _assert_extreme_contention(
+            _run_extreme_contention(tmp_path, "high_concurrency_stress"),
+            "high_concurrency_stress",
+        )
 
     def test_concurrent_query_operations(self):
         """Test concurrent query_meta operations for thread safety."""
@@ -256,16 +479,16 @@ class TestSQLiteConcurrency:
                         else:
                             results = cache.query_meta()  # Get all
                         
-                        if results:
-                            local_results.append(len(results))
+                        assert isinstance(results, list)
+                        assert results
+                        local_results.append(len(results))
                         time.sleep(0.001)
                     
                     with results_lock:
                         query_results.extend(local_results)
                         
                 except Exception as e:
-                    if "database is locked" not in str(e):  # Allow some lock contention
-                        query_errors.append(f"Query worker {worker_id}: {e}")
+                    query_errors.append(f"Query worker {worker_id}: {e}")
             
             # Execute concurrent queries
             num_workers = 6
@@ -276,63 +499,22 @@ class TestSQLiteConcurrency:
                 t.start()
             
             for t in threads:
-                t.join()
+                t.join(timeout=5)
+                assert not t.is_alive()
             
             # Verify results
             assert len(query_errors) == 0, f"Query errors: {query_errors}"
-            assert len(query_results) > 0, "Should have query results"
+            assert len(query_results) == num_workers * 8
             assert all(count > 0 for count in query_results), "All queries should return results"
             
             cache.close()
 
-    def test_concurrent_metadata_access(self):
-        """Test concurrent access to cache metadata operations."""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            config = CacheConfig(
-                cache_dir=temp_dir,
-                metadata_backend="sqlite",
-                store_cache_key_params=True
-            )
-            cache = UnifiedCache(config=config)
-            
-            def metadata_worker(worker_id):
-                try:
-                    operations = 0
-                    for i in range(8):  # Reduced from 15 to 8
-                        # Store some data
-                        cache.put(f"meta_{worker_id}_{i}", f"value_{i}", worker=worker_id)
-                        operations += 1
-                        
-                        # Access metadata operations
-                        if i % 2 == 0:  # More frequent operations to maintain test coverage
-                            cache.list_entries()
-                            operations += 1
-                        
-                        if i % 3 == 0:
-                            cache.query_meta(worker=f"int:{worker_id}")
-                            operations += 1
-                    
-                    return operations
-                except Exception as e:
-                    if "database is locked" not in str(e):
-                        return f"Worker {worker_id} error: {e}"
-                    return 0  # Allow some lock contention
-            
-            # High metadata concurrency
-            num_workers = 8
-            with ThreadPoolExecutor(max_workers=num_workers) as executor:
-                futures = [executor.submit(metadata_worker, i) for i in range(num_workers)]
-                results = [f.result() for f in futures]
-            
-            # Verify no serious errors occurred
-            serious_errors = [r for r in results if isinstance(r, str) and "error" in r]
-            assert len(serious_errors) == 0, f"Metadata access errors: {serious_errors}"
-            
-            # Verify operations completed
-            successful_ops = sum(r for r in results if isinstance(r, int))
-            assert successful_ops > 0, "Should have successful metadata operations"
-            
-            cache.close()
+    def test_concurrent_metadata_access(self, tmp_path):
+        """Metadata contention accounts for each bounded public operation."""
+        _assert_extreme_contention(
+            _run_extreme_contention(tmp_path, "concurrent_metadata_access"),
+            "concurrent_metadata_access",
+        )
 
     def test_thread_safety_with_file_operations(self):
         """Test thread safety when cache files are being written/read."""
@@ -375,65 +557,12 @@ class TestSQLiteConcurrency:
             
             cache.close()
 
-    def test_deadlock_prevention(self):
-        """Test that the implementation prevents deadlocks under heavy contention."""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            config = CacheConfig(
-                cache_dir=temp_dir,
-                metadata_backend="sqlite",
-                store_cache_key_params=True
-            )
-            cache = UnifiedCache(config=config)
-            
-            completed_operations = []
-            completion_lock = threading.Lock()
-            
-            def deadlock_test_worker(worker_id):
-                try:
-                    start_time = time.time()
-                    operations = 0
-                    
-                    # Perform operations that could potentially deadlock
-                    for i in range(10):  # Reduced from 20 to 10
-                        # Mix of operations that access different parts of the system
-                        cache.put(f"deadlock_{worker_id}_{i}", f"value_{worker_id}_{i}", worker=worker_id, item=i)
-                        cache.query_meta(worker=f"int:{worker_id}")
-                        cache.list_entries()
-                        operations += 3
-                        
-                        # No delays - maximum contention
-                    
-                    elapsed = time.time() - start_time
-                    with completion_lock:
-                        completed_operations.append({
-                            'worker_id': worker_id,
-                            'operations': operations,
-                            'elapsed': elapsed
-                        })
-                    
-                    return True
-                except Exception as e:
-                    if "database is locked" in str(e):
-                        return True  # Expected under extreme contention
-                    return f"Worker {worker_id} error: {e}"
-            
-            # High contention scenario
-            num_workers = 8
-            with ThreadPoolExecutor(max_workers=num_workers) as executor:
-                futures = [executor.submit(deadlock_test_worker, i) for i in range(num_workers)]
-                results = [f.result() for f in futures]
-            
-            # Verify no deadlocks occurred
-            serious_errors = [r for r in results if isinstance(r, str) and "error" in r]
-            assert len(serious_errors) == 0, f"Potential deadlocks or serious errors: {serious_errors}"
-            assert len(completed_operations) > 0, "Some workers should complete"
-            
-            # Verify reasonable performance (no excessive blocking)
-            if completed_operations:
-                avg_time = sum(op['elapsed'] for op in completed_operations) / len(completed_operations)
-                assert avg_time < 15.0, f"Average operation time too high: {avg_time}s (possible contention issues)"
-            
-            cache.close()
+    def test_deadlock_prevention(self, tmp_path):
+        """A bounded child detects hangs while preserving per-call accounting."""
+        _assert_extreme_contention(
+            _run_extreme_contention(tmp_path, "deadlock_prevention"),
+            "deadlock_prevention",
+        )
 
     def test_concurrent_get_operations(self):
         """Test multiple threads performing get operations concurrently."""
@@ -464,8 +593,8 @@ class TestSQLiteConcurrency:
                         item_id = i + thread_id * 4  # Each thread reads different items
                         if item_id < 12:  # Make sure we don't go out of bounds (updated from 20)
                             value = cache.get(item_id=item_id)
-                            if value is not None:
-                                local_reads += 1
+                            assert value == f"value_{item_id}"
+                            local_reads += 1
                             time.sleep(0.002)  # Slightly longer delay
                     return local_reads
                 except Exception as e:
@@ -475,15 +604,12 @@ class TestSQLiteConcurrency:
             # Execute concurrent reads
             with ThreadPoolExecutor(max_workers=num_threads) as executor:
                 futures = [executor.submit(reader_thread, i) for i in range(num_threads)]
-                results = [f.result() for f in futures]
+                results = [f.result(timeout=5) for f in futures]
                 successful_reads = sum(results)
             
-            # Verify results - some database locks are expected under high concurrency
-            serious_errors = [e for e in errors if "database is locked" not in e]
-            assert len(serious_errors) == 0, f"Serious read errors occurred: {serious_errors}"
+            assert errors == [], f"Read errors occurred: {errors}"
             
-            # We should have some successful reads
-            assert successful_reads > 0, f"Should have some successful reads, got {successful_reads} from {num_threads} threads"
+            assert successful_reads == 12
             
             cache.close()
 

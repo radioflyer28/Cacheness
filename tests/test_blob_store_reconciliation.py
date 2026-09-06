@@ -262,7 +262,6 @@ def test_reconciliation_enforces_row_action_byte_and_time_bounds(
                 operation_page_size=2,
                 max_reconcile_actions=2,
                 max_operation_record_bytes=1024,
-                authority_busy_timeout_seconds=0.001,
             )
         ),
     )
@@ -272,8 +271,11 @@ def test_reconciliation_enforces_row_action_byte_and_time_bounds(
         times = iter((0.0, 1.0))
 
         class ExpiredClock:
+            calls = 0
+
             @staticmethod
             def monotonic() -> float:
+                ExpiredClock.calls += 1
                 return next(times)
 
         monkeypatch.setattr(
@@ -283,5 +285,6 @@ def test_reconciliation_enforces_row_action_byte_and_time_bounds(
         report = time_limited.reconcile()
         assert report.operation_records_seen == 0
         assert report.resume_token is not None
+        assert ExpiredClock.calls == 2
     finally:
         time_limited.close()
