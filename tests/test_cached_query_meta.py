@@ -69,6 +69,7 @@ def test_cached_sqlite_query_meta_delegates_matching_and_live_keys(
                 "nested": {"region": "str:north"},
             }
         )
+        matching_pair = (matching_key, matching.actual_path)
         session.commit()
 
     cache._cache_blob_store.delete(tombstoned_key)
@@ -85,7 +86,7 @@ def test_cached_sqlite_query_meta_delegates_matching_and_live_keys(
     wrapped.backend.put_entry("stale-projection", stale_entry)
 
     direct = wrapped.backend.query_entries_by_key_params(
-        {"experiment": "wrapped"}, live_keys={matching_key}
+        {"experiment": "wrapped"}, live_pairs={matching_pair}
     )
     assert cache.query_meta(experiment="wrapped") == direct
     assert [entry["cache_key"] for entry in direct] == [matching_key]
@@ -196,7 +197,7 @@ def test_sqlite_query_capability_revalidates_direct_filters(tmp_path) -> None:
     try:
         with pytest.raises(CacheQueryValidationError):
             backend.query_entries_by_key_params(
-                {"unsafe[0]": "blocked"}, live_keys=set()
+                {"unsafe[0]": "blocked"}, live_pairs=set()
             )
     finally:
         backend.close()

@@ -28,6 +28,7 @@ from .error_handling import (
     CacheBlobLifecycleConflictError,
     CacheIntegrityError,
     CacheLegacyFormatError,
+    CacheMetadataError,
     CacheQueryValidationError,
     CacheReason,
     CacheStorageError,
@@ -655,17 +656,17 @@ class UnifiedCache:
                 )
                 return None
 
-            live_keys = self._live_authority_projection_keys()
-            if not live_keys:
+            live_pairs = self._live_authority_projection_pairs()
+            if not live_pairs:
                 return []
             return self.metadata_backend.query_entries_by_key_params(
                 filters,
-                live_keys=live_keys,
+                live_pairs=live_pairs,
             )
 
         except CacheQueryValidationError:
             raise
-        except Exception as e:
+        except CacheMetadataError as e:
             logger.error(f"Failed to query metadata: {e}")
             return None
 
@@ -1111,31 +1112,15 @@ class UnifiedCache:
             return False
         return True
 
-    def _live_authority_projection_keys(self) -> list[str]:
-        """Return only keys whose compatibility rows match live authority state.
-
-        Custom metadata has its own table and link rows, so querying it must
-        not bypass the lifecycle authority that makes tombstones and abandoned
-        candidates invisible everywhere else.  Visiting each key also repairs
-        the stale projection with its observed exact locator; that conditional
-        operation cannot remove a peer's replacement generation.
-        """
-        live_keys: list[str] = []
+    def _live_authority_projection_pairs(self) -> tuple[tuple[str, str], ...]:
+        """Observe exact committed projection tokens without repairing them."""
+        live_pairs: list[tuple[str, str]] = []
         projections = {
             entry["cache_key"]: entry
             for entry in self.metadata_backend.list_entries()
         }
-        pending_locators = self._pending_authority_projection_locators()
         for authority_entry in self._cache_blob_store.lifecycle_authority.list_entries():
             observed_entry = projections.get(authority_entry.key)
-            if self._is_pending_authority_projection(
-                authority_entry.key, observed_entry, pending_locators
-            ):
-                # SQL metadata filtering operates on the stored row rather
-                # than the authority-derived direct-read fallback above. Omit
-                # the key until the candidate promotes so query filters cannot
-                # expose an uncommitted generation.
-                continue
             if self._projection_matches_authority_snapshot(
                 observed_entry, authority_entry
             ):
@@ -1143,22 +1128,14 @@ class UnifiedCache:
                     authority_entry, allow_tombstone=True
                 )
                 if manifest.state == "committed":
-                    live_keys.append(authority_entry.key)
-                continue
-            try:
-                snapshot, projection = self._authority_snapshot_entry(authority_entry.key)
-            except CacheBlobLifecycleConflictError:
-                # Aggregate query surfaces cannot safely include a key whose
-                # pair changed twice during their bounded observation. Omit it
-                # for this snapshot rather than leaking a mixed generation.
-                logger.debug(
-                    "Omitted unstable authority projection from aggregate query: %s",
-                    authority_entry.key,
-                )
-                continue
-            if snapshot is not None and projection is not None:
-                live_keys.append(authority_entry.key)
-        return live_keys
+                    locator = self._projection_locator_from_entry(observed_entry)
+                    if locator is not None:
+                        live_pairs.append((authority_entry.key, locator))
+        return tuple(live_pairs)
+
+    def _live_authority_projection_keys(self) -> list[str]:
+        """Retain key-only observations for existing custom metadata queries."""
+        return [cache_key for cache_key, _locator in self._live_authority_projection_pairs()]
 
     @staticmethod
     def _list_projection_timestamp(value: Any) -> Any:

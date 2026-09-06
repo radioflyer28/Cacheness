@@ -48,6 +48,7 @@ from .json_utils import dumps as json_dumps, loads as json_loads
 from .error_handling import (
     CacheBlobLifecycleConflictError,
     CacheLegacyFormatError,
+    CacheMetadataError,
     CacheReason,
     CacheStorageError,
 )
@@ -164,7 +165,9 @@ try:
         delete,
         desc,
         func,
+        tuple_,
     )
+    from sqlalchemy.exc import DBAPIError
     from sqlalchemy.orm import sessionmaker, declarative_base
 
     SQLALCHEMY_AVAILABLE = True
@@ -352,7 +355,7 @@ class MetadataBackend(ABC):
         self,
         filters: Dict[str, Any],
         *,
-        live_keys: Any,
+        live_pairs: Any,
     ) -> List[Dict[str, Any]]:
         """Query built-in metadata only when this backend advertises support."""
         raise NotImplementedError("built-in metadata querying is unsupported")
@@ -547,12 +550,12 @@ class CachedMetadataBackend(MetadataBackend):
         self,
         filters: Dict[str, Any],
         *,
-        live_keys: Any,
+        live_pairs: Any,
     ) -> List[Dict[str, Any]]:
         """Delegate built-in metadata querying without leaking SQL ownership."""
         return self.backend.query_entries_by_key_params(
             filters,
-            live_keys=live_keys,
+            live_pairs=live_pairs,
         )
 
     def _refresh_cached_entry(self, cache_key: str) -> None:
@@ -1654,9 +1657,8 @@ class SqliteBackend(MetadataBackend):
                 "SQLAlchemy is required for SQLite backend. Install with: pip install sqlalchemy"
             )
         
-        # Configure SQLite engine with appropriate optimizations
-        # Note: SQLite uses SingletonThreadPool which doesn't support pool_size/max_overflow
-        self.engine = create_engine(
+        # Keep this engine provisional until its file/schema bootstrap completes.
+        engine = create_engine(
             f"sqlite:///{db_file}", 
             echo=echo,
             pool_pre_ping=True,
@@ -1667,47 +1669,59 @@ class SqliteBackend(MetadataBackend):
             }
         )
         
-        # Enable SQLite optimizations via events
+        # Only connection-local, read-safe PRAGMAs may run during pool checkout.
         from sqlalchemy import event
-        
-        @event.listens_for(self.engine, "connect")
-        def set_sqlite_pragma(dbapi_connection, connection_record):
-            """Set SQLite pragmas for maximum performance."""
-            cursor = dbapi_connection.cursor()
-            
-            # WAL mode for better concurrency (most important)
-            cursor.execute("PRAGMA journal_mode=WAL")
-            
-            # Aggressive performance optimizations
-            cursor.execute("PRAGMA synchronous=NORMAL")    # Good balance of safety/speed
-            cursor.execute("PRAGMA cache_size=20000")      # 20MB cache (increased from 10MB)
-            cursor.execute("PRAGMA temp_store=MEMORY")     # Temp tables in memory
-            cursor.execute("PRAGMA mmap_size=536870912")   # 512MB memory mapped I/O (doubled)
-            cursor.execute("PRAGMA page_size=32768")       # Larger page size for better I/O
-            
-            # Query optimization pragmas
-            cursor.execute("PRAGMA optimize")              # Enable query planner optimizations
-            cursor.execute("PRAGMA analysis_limit=1000")  # Better statistics
-            
-            # Concurrent access optimizations
-            cursor.execute("PRAGMA busy_timeout=30000")    # 30s busy timeout
-            cursor.execute("PRAGMA wal_autocheckpoint=1000") # WAL checkpoint every 1000 pages
-            
-            # Enable foreign key constraints
-            cursor.execute("PRAGMA foreign_keys=ON")
-            
-            cursor.close()
-        
-        self.SessionLocal = sessionmaker(
-            autocommit=False, autoflush=False, bind=self.engine
-        )
-        # Create tables
-        Base.metadata.create_all(self.engine)
-
-        # Initialize stats if not exists
-        self._init_stats()
+        event.listen(engine, "connect", self._configure_read_connection)
+        try:
+            self._bootstrap_database(engine)
+            self.engine = engine
+            self.SessionLocal = sessionmaker(
+                autocommit=False, autoflush=False, bind=engine
+            )
+        except BaseException:
+            engine.dispose()
+            raise
 
         logger.info(f"✅ SQLAlchemy metadata backend initialized: {db_file}")
+
+    @staticmethod
+    def _configure_read_connection(dbapi_connection, _connection_record) -> None:
+        """Apply only connection-local settings when QueuePool opens a reader."""
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.execute("PRAGMA cache_size=20000")
+            cursor.execute("PRAGMA temp_store=MEMORY")
+            cursor.execute("PRAGMA mmap_size=536870912")
+            cursor.execute("PRAGMA analysis_limit=1000")
+            cursor.execute("PRAGMA busy_timeout=30000")
+            cursor.execute("PRAGMA wal_autocheckpoint=1000")
+            cursor.execute("PRAGMA foreign_keys=ON")
+        finally:
+            cursor.close()
+
+    def _bootstrap_database(self, engine) -> None:
+        """Establish durable SQLite state once per constructor, never checkout."""
+        if self.db_file != ":memory:":
+            with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+                mode = connection.exec_driver_sql("PRAGMA journal_mode=WAL").scalar_one()
+                if str(mode).lower() != "wal":
+                    raise CacheMetadataError(
+                        "SQLite metadata database could not enable WAL",
+                        context={"backend": "sqlite", "operation": "bootstrap_wal"},
+                    )
+        Base.metadata.create_all(engine)
+        with engine.begin() as connection:
+            connection.execute(
+                CacheStats.__table__.insert().prefix_with("OR IGNORE"),
+                {
+                    "id": 1,
+                    "cache_hits": 0,
+                    "cache_misses": 0,
+                    "last_updated": datetime.now(timezone.utc),
+                },
+            )
+            connection.exec_driver_sql("PRAGMA optimize")
 
     def _legacy_database_uri(self) -> Optional[str]:
         """Return an immutable read-only URI only for a pre-existing database."""
@@ -2128,14 +2142,14 @@ class SqliteBackend(MetadataBackend):
         return (
             self._legacy_layout is None
             and self.db_file != ":memory:"
-            and self.SessionLocal is not None
+            and getattr(self, "SessionLocal", None) is not None
         )
 
     def query_entries_by_key_params(
         self,
         filters: Dict[str, Any],
         *,
-        live_keys: Any,
+        live_pairs: Any,
     ) -> List[Dict[str, Any]]:
         """Query validated parameter filters through this backend's SQL session."""
         if not self.supports_entry_metadata_query():
@@ -2153,116 +2167,123 @@ class SqliteBackend(MetadataBackend):
         validated_fields = validate_query_fields(filters)
         validate_query_numeric_filters(filters)
         sqlite_paths = tuple(to_sqlite_json_path(field) for field in validated_fields)
-        live_key_values = tuple(live_keys)
-        if not live_key_values:
+        live_pair_values = tuple(live_pairs)
+        if not live_pair_values:
             return []
-
-        with self.SessionLocal() as session:
-            query = (
-                select(
-                    CacheEntry.cache_key,
-                    CacheEntry.description,
-                    CacheEntry.data_type,
-                    CacheEntry.created_at,
-                    CacheEntry.accessed_at,
-                    CacheEntry.file_size,
-                    CacheEntry.cache_key_params,
-                )
-                .where(CacheEntry.cache_key_params.is_not(None))
-                .where(CacheEntry.cache_key.in_(live_key_values))
-                .order_by(CacheEntry.created_at.desc())
-            )
-
-            for index, ((_, value), sqlite_path) in enumerate(
-                zip(filters.items(), sqlite_paths)
-            ):
-                path_parameter = bindparam(
-                    f"query_meta_path_{index}", value=sqlite_path
-                )
-                json_value = func.json_extract(CacheEntry.cache_key_params, path_parameter)
-                value_parameter = f"query_meta_value_{index}"
-
-                if isinstance(value, bool):
-                    query = query.where(
-                        json_value
-                        == bindparam(
-                            value_parameter,
-                            value=serialize_for_cache_key(value),
+        try:
+            with self.SessionLocal() as session:
+                query = (
+                    select(
+                        CacheEntry.cache_key,
+                        CacheEntry.description,
+                        CacheEntry.data_type,
+                        CacheEntry.created_at,
+                        CacheEntry.accessed_at,
+                        CacheEntry.file_size,
+                        CacheEntry.cache_key_params,
+                    )
+                    .where(CacheEntry.cache_key_params.is_not(None))
+                    .where(
+                        tuple_(CacheEntry.cache_key, CacheEntry.actual_path).in_(
+                            live_pair_values
                         )
                     )
-                elif isinstance(value, (int, float)):
-                    numeric_type = or_(
-                        func.substr(json_value, 1, 4)
-                        == bindparam(f"query_meta_int_prefix_{index}", value="int:"),
-                        func.substr(json_value, 1, 6)
-                        == bindparam(f"query_meta_float_prefix_{index}", value="float:"),
+                    .order_by(CacheEntry.created_at.desc())
+                )
+                for index, ((_, value), sqlite_path) in enumerate(
+                    zip(filters.items(), sqlite_paths)
+                ):
+                    path_parameter = bindparam(
+                        f"query_meta_path_{index}", value=sqlite_path
                     )
-                    numeric_value = func.substr(
-                        json_value,
-                        func.instr(json_value, ":") + 1,
+                    json_value = func.json_extract(
+                        CacheEntry.cache_key_params, path_parameter
                     )
-                    is_valid_json_number = func.json_type(
-                        case(
-                            (
-                                func.json_valid(numeric_value)
-                                == bindparam(f"query_meta_json_valid_{index}", value=1),
-                                numeric_value,
-                            ),
-                            else_=bindparam(
-                                f"query_meta_invalid_json_{index}", value="null"
-                            ),
+                    value_parameter = f"query_meta_value_{index}"
+                    if isinstance(value, bool):
+                        query = query.where(
+                            json_value
+                            == bindparam(
+                                value_parameter,
+                                value=serialize_for_cache_key(value),
+                            )
                         )
-                    ).in_(("integer", "real"))
-                    finite_numeric_value = and_(
-                        is_valid_json_number,
-                        func.abs(cast(numeric_value, Float))
-                        <= bindparam(
-                            f"query_meta_max_finite_{index}",
-                            value=sys.float_info.max,
+                    elif isinstance(value, (int, float)):
+                        numeric_type = or_(
+                            func.substr(json_value, 1, 4)
+                            == bindparam(f"query_meta_int_prefix_{index}", value="int:"),
+                            func.substr(json_value, 1, 6)
+                            == bindparam(f"query_meta_float_prefix_{index}", value="float:"),
+                        )
+                        numeric_value = func.substr(
+                            json_value, func.instr(json_value, ":") + 1
+                        )
+                        is_valid_json_number = func.json_type(
+                            case(
+                                (
+                                    func.json_valid(numeric_value)
+                                    == bindparam(
+                                        f"query_meta_json_valid_{index}", value=1
+                                    ),
+                                    numeric_value,
+                                ),
+                                else_=bindparam(
+                                    f"query_meta_invalid_json_{index}", value="null"
+                                ),
+                            )
+                        ).in_(("integer", "real"))
+                        query = query.where(
+                            numeric_type,
+                            is_valid_json_number,
+                            func.abs(cast(numeric_value, Float))
+                            <= bindparam(
+                                f"query_meta_max_finite_{index}",
+                                value=sys.float_info.max,
+                            ),
+                            cast(numeric_value, Float)
+                            >= bindparam(value_parameter, value=value),
+                        )
+                    else:
+                        serialized_value = None if value is None else value
+                        if value is not None and not (
+                            isinstance(value, str)
+                            and value.startswith(("str:", "int:", "float:", "bool:"))
+                        ):
+                            serialized_value = serialize_for_cache_key(value)
+                        query = query.where(
+                            json_value
+                            == bindparam(value_parameter, value=serialized_value)
+                        )
+                entries = []
+                for row in session.execute(query):
+                    entry = {
+                        "cache_key": row.cache_key,
+                        "description": row.description,
+                        "data_type": row.data_type,
+                        "created_at": (
+                            row.created_at.isoformat()
+                            if hasattr(row.created_at, "isoformat")
+                            else str(row.created_at)
                         ),
-                    )
-                    query = query.where(
-                        numeric_type,
-                        finite_numeric_value,
-                        cast(numeric_value, Float)
-                        >= bindparam(value_parameter, value=value),
-                    )
-                else:
-                    serialized_value = None if value is None else value
-                    if value is not None and not (
-                        isinstance(value, str)
-                        and value.startswith(("str:", "int:", "float:", "bool:"))
-                    ):
-                        serialized_value = serialize_for_cache_key(value)
-                    query = query.where(
-                        json_value == bindparam(value_parameter, value=serialized_value)
-                    )
-
-            entries = []
-            for row in session.execute(query):
-                entry = {
-                    "cache_key": row.cache_key,
-                    "description": row.description,
-                    "data_type": row.data_type,
-                    "created_at": (
-                        row.created_at.isoformat()
-                        if hasattr(row.created_at, "isoformat")
-                        else str(row.created_at)
-                    ),
-                    "accessed_at": (
-                        row.accessed_at.isoformat()
-                        if hasattr(row.accessed_at, "isoformat")
-                        else str(row.accessed_at)
-                    ),
-                    "file_size": row.file_size,
-                }
-                if row.cache_key_params:
-                    try:
-                        entry["cache_key_params"] = json_loads(row.cache_key_params)
-                    except Exception:
-                        entry["cache_key_params"] = {}
-                entries.append(entry)
-            return entries
+                        "accessed_at": (
+                            row.accessed_at.isoformat()
+                            if hasattr(row.accessed_at, "isoformat")
+                            else str(row.accessed_at)
+                        ),
+                        "file_size": row.file_size,
+                    }
+                    if row.cache_key_params:
+                        try:
+                            entry["cache_key_params"] = json_loads(row.cache_key_params)
+                        except Exception:
+                            entry["cache_key_params"] = {}
+                    entries.append(entry)
+                return entries
+        except DBAPIError as error:
+            raise CacheMetadataError(
+                "SQLite metadata query failed",
+                context={"backend": "sqlite", "operation": "query_entries_by_key_params"},
+            ) from error
 
     def _ensure_custom_metadata_tables(self) -> None:
         """Create registered custom tables through this backend's engine only."""
