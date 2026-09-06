@@ -3,17 +3,17 @@ gsd_state_version: 1.0
 milestone: v1.0
 current_phase: 03
 current_phase_name: Atomic Lifecycle and Recovery Engine
-status: planning
-stopped_at: Created 03-14-PLAN.md for checker review
-last_updated: "2026-09-06T03:03:53.001Z"
+status: verifying
+stopped_at: Completed 03-14-PLAN.md; awaiting Phase 03 verification
+last_updated: "2026-09-06T04:39:31.622Z"
 last_activity: 2026-09-06
-last_activity_desc: Phase 03 Plan 14 projection-race gap closure planned
-state_head: 8c3556b1ad4cf809c0a551c945281c6a9d2e3dfb
+last_activity_desc: Plan 03-14 complete; awaiting Phase 03 verification
+state_head: e1494bf0ceeb0c2317ec0d18e4aec26350db991d
 progress:
   total_phases: 8
   completed_phases: 2
   total_plans: 36
-  completed_plans: 35
+  completed_plans: 36
 milestone_name: milestone
 ---
 
@@ -28,10 +28,10 @@ See: .planning/PROJECT.md (updated 2026-08-29)
 
 ## Current Position
 
-Phase: 03 (Atomic Lifecycle and Recovery Engine) — READY TO EXECUTE
-Plan: 13 of 14 completed; Plan 03-14 ready for checker review
-Status: Gap-closure plan created for three UnifiedCache projection races
-Last activity: 2026-09-06 — Created Plan 03-14 conditional projection and coherence closure
+Phase: 03 (Atomic Lifecycle and Recovery Engine) — EXECUTING
+Plan: 14 of 14
+Status: Plan 03-14 complete — awaiting Phase 03 verification
+Last activity: 2026-09-06 — Plan 03-14 complete; awaiting Phase 03 verification
 
 Progress: [██░░░░░░░░] 2 of 8 phases complete
 
@@ -87,6 +87,7 @@ Phase 03 rows in this historical table belong to the superseded file-native atte
 | Phase 03 P12 | 4min | 2 tasks | 2 files |
 | Phase 03 P11 | 13m | 2 tasks | 4 files |
 | Phase 03 P13 | 8m | 2 tasks | 5 files |
+| Phase 03 P14 | 1h 29min | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -202,6 +203,8 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 03]: D-32 qualification captures only fixed-command UNAVAILABLE evidence; Phase 999.1 retains native PASS/exit 0 release qualification.
 - [Phase 03]: Phase 3 final acceptance requires a fresh frozen isolated all-extras/dev suite; nested uv tooling must not mutate the pytest environment.
 - [Phase 03]: Darwin remains UNAVAILABLE/NOT_QUALIFIED with native_evidence false; Phase 999.1 requires native Windows PASS/exit 0.
+- [Phase 03]: Projection metadata is derived compatibility state; only authenticated committed authority manifests can make facade rows live. — Prevents stale or tombstoned projections from participating in cache policy or recovery.
+- [Phase 03]: Projection mutation and custom-link binding require exact generation-specific locator tokens; mismatches change no row or link. — Preserves a concurrently promoted generation while allowing idempotent same-token repair.
 
 ### Pending Todos
 
@@ -225,6 +228,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-09-06T02:28:37.471Z
-Stopped at: Session resumed, proceeding to Phase 03 gap planning
-Resume file: .planning/phases/03-atomic-lifecycle-and-recovery-engine/.continue-here.md
+Last session: 2026-09-06T04:39:31.574Z
+Stopped at: Completed 03-14-PLAN.md; awaiting Phase 03 verification
+Resume file: None
