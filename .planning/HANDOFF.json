@@ -1,0 +1,38 @@
+{
+  "version": "1.0",
+  "timestamp": "2026-09-06T02:28:37.471Z",
+  "phase": "03",
+  "phase_name": "Atomic Lifecycle and Recovery Engine",
+  "phase_dir": ".planning/phases/03-atomic-lifecycle-and-recovery-engine",
+  "plan": 13,
+  "task": 0,
+  "total_tasks": 26,
+  "status": "paused",
+  "completed_tasks": [
+    {"id": 1, "name": "Plans 03-01 through 03-13 execution", "status": "done", "commit": "fe2171c"},
+    {"id": 2, "name": "Initial review fixes: Windows preflight and Win32 mapper", "status": "done", "commit": "8642823"},
+    {"id": 3, "name": "UnifiedCache authority facade and compatibility repairs", "status": "done", "commit": "9088df7"}
+  ],
+  "remaining_tasks": [
+    {"id": 4, "name": "Repair stale UnifiedCache projection deletion, live tombstone projection, and mixed-generation projection return", "status": "not_started"},
+    {"id": 5, "name": "Add deterministic adversarial regressions for those three findings", "status": "not_started"},
+    {"id": 6, "name": "Repeat final review, re-verification, and isolated full-suite gate", "status": "not_started"}
+  ],
+  "blockers": [
+    {"description": "03-FINAL-REVIEW.md and 03-VERIFICATION.md agree that stale projection cleanup can remove a concurrent replacement and cascade SQLite custom-metadata links; tombstones can be rendered as live cache projections; snapshot/projection repair can return mixed generations.", "type": "technical", "workaround": "Use exact authority snapshot/manifest lineage or CAS/conditional projection retirement; never remove a projection solely because a stale snapshot reports absence."}
+  ],
+  "async_jobs": [],
+  "human_actions_pending": [],
+  "decisions": [
+    {"decision": "Native Windows qualification remains deferred", "rationale": "Darwin evidence is deliberately UNAVAILABLE/NOT_QUALIFIED; Phase 999.1 requires native Python 3.11 PASS/exit 0.", "phase": "03"},
+    {"decision": "UnifiedCache must be a cache-policy facade over BlobStore/LifecycleAuthority", "rationale": "Process-local locks cannot prevent cross-instance stale generation removal.", "phase": "03"}
+  ],
+  "uncommitted_files": [
+    ".planning/phases/03-atomic-lifecycle-and-recovery-engine/03-REVIEW.md",
+    ".planning/phases/03-atomic-lifecycle-and-recovery-engine/03-POSTFIX-REVIEW.md",
+    ".planning/phases/03-atomic-lifecycle-and-recovery-engine/03-FINAL-REVIEW.md",
+    ".planning/phases/03-atomic-lifecycle-and-recovery-engine/03-VERIFICATION.md"
+  ],
+  "next_action": "Read the final review and verification reports, demonstrate understanding of the three projection-race findings, then create a narrow Plan 03-14 repair before editing source.",
+  "context_notes": "The isolated full suite is green at 9088df7, but it is not sufficient for phase closure: adversarial source review and verifier inspection found real untested races in the newly added UnifiedCache projection facade."
+}
