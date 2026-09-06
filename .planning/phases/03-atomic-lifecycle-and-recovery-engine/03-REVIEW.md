@@ -1,149 +1,205 @@
 ---
 phase: 03-atomic-lifecycle-and-recovery-engine
-reviewed: 2026-09-06T04:50:34Z
+reviewed: 2026-09-06T08:34:02Z
 depth: deep
-files_reviewed: 12
+files_reviewed: 18
 files_reviewed_list:
+  - benchmarks/lifecycle_authority_baseline.json
+  - benchmarks/lifecycle_authority_benchmark.py
   - src/cacheness/core.py
   - src/cacheness/metadata.py
   - src/cacheness/storage/backends/postgresql_backend.py
   - src/cacheness/storage/blob_store.py
+  - src/cacheness/storage/coordination.py
   - src/cacheness/storage/lifecycle.py
-  - src/cacheness/storage/lifecycle_authority.py
-  - src/cacheness/storage/memory_lifecycle_authority.py
   - src/cacheness/storage/sqlite_lifecycle_authority.py
-  - tests/fixtures/phase3_ruff_baseline.json
-  - tests/test_projection_mutation_contract.py
-  - tests/test_unified_cache_lifecycle_authority.py
-  - tools/verify_phase3_ruff_delta.py
+  - tests/test_blob_store_concurrency.py
+  - tests/test_blob_store_read_contract.py
+  - tests/test_cache_integrity.py
+  - tests/test_cached_custom_metadata.py
+  - tests/test_phase3_gap_acceptance.py
+  - tests/test_projection_sql_atomicity.py
+  - tests/test_sqlite_authority_admission.py
+  - tests/test_sqlite_bootstrap_concurrency.py
+  - tests/test_unified_cache_adversarial_lifecycle.py
 findings:
-  critical: 9
-  warning: 2
+  critical: 3
+  warning: 1
   info: 0
-  total: 11
+  total: 4
 status: issues_found
 ---
 
-# Phase 03: Code Review Report
+# Phase 3: Code Review Report
 
-**Reviewed:** 2026-09-06T04:50:34Z
+**Reviewed:** 2026-09-06T08:34:02Z
 **Depth:** deep
-**Files Reviewed:** 12
+**Files Reviewed:** 18
 **Status:** issues_found
 
 ## Summary
 
-The Plan 03-14 implementation closes several previously reported visibility gaps, and the two focused test modules pass under Python 3.11 (25 tests). However, deep call-chain review found nine ship-blocking correctness, integrity, concurrency, compatibility, and fail-closed defects. The most consequential problems are that `UnifiedCache.put()` bypasses `BlobStore` admission, projection/link state is destructively changed before authority promotion, the retry path can overwrite another operation's pending projection, and SQL projection compare-and-mutate is not atomic across independent adapters. The deterministic tests do not exercise those interleavings.
+This review covered the Phase 3 implementation delta from `f410621` through
+`6402707`, with an adversarial focus on Plans 03-15, 03-16, and 03-17. The
+implementation closes the previously reported CR-01 through CR-09 and WR-01
+through WR-02 defects in their original forms. In particular, publication is
+now admitted at the facade boundary, deferred cleanup follows promotion,
+projection writers serialize their compare-and-write transaction, cached
+custom metadata delegates its capability and session, PostgreSQL preserves
+nested signed key parameters, bootstrap conflicts are reclassified, and
+explicit backend close replaces destructor cleanup.
+
+The phase is not ready to ship. Three newly demonstrated concurrency/deadline
+defects can strand the process or violate the lifecycle contract: an abandoned
+clear ticket permanently blocks later clears, SQLite lock acquisition can spend
+a fresh timeout after earlier stages have consumed the absolute budget, and a
+forked child inherits the parent's process-local admission registry. A separate
+public API compatibility defect makes `query_meta()` silently unusable through
+the supported cached metadata wrapper.
+
+Native Windows remains `UNAVAILABLE` / `NOT_QUALIFIED`. Live PostgreSQL behavior
+is not claimed by this review; the PostgreSQL assessment is limited to code,
+compiled SQL, and the checked fake-dialect tests. The checked benchmark baseline
+retains the legacy additive scenarios and records its source/harness provenance.
 
 ## Narrative Findings (AI reviewer)
 
 ## Critical Issues
 
-### CR-01: UnifiedCache mutation bypasses BlobStore operation admission [BLOCKER]
+### CR-01: A timed-out queued clear leaves a permanent FIFO tombstone
 
-**File:** `src/cacheness/storage/blob_store.py:96-103,309-335`; `src/cacheness/core.py:1730-1747`
+**Classification:** BLOCKER
 
-**Issue:** Public `BlobStore.put()` is protected by `_ordinary_admitted`, which checks the canonical store and enters `InstanceAdmission.operation()`. The new result-returning `_put_with_result()` seam has no equivalent admission, and `UnifiedCache.put()` calls that private method directly. A facade put is therefore invisible to the admission counter. `BlobStore.close()` can observe zero in-flight operations and close the authority/guarded I/O while the facade put is still running, and `BlobStore.clear()` does not exclude that mutation. This reintroduces lifecycle races at the exact composition seam Plan 03-14 added.
+**File:** `src/cacheness/storage/coordination.py:205-241`
 
-**Fix:** Put admission around the result-returning entry point and separate the already-admitted implementation to avoid double admission. For example:
+**Issue:** `clear_operation()` appends its ticket before waiting, but its
+`finally` block removes the ticket only when `entered` is true. If
+`_wait_for_gate()` raises `CacheBlobCloseTimeoutError` while this clear is
+queued behind another clear, the unentered ticket remains at the head of
+`_clear_tickets`. No live operation owns that ticket, so every subsequent clear
+queues behind it and times out as well. The registry also grows by one ticket
+per retry. A deterministic public-API reproduction paused one clear at its
+snapshot, let a second clear time out, released the first, and observed a third
+clear time out with the stale queue growing from one to two tickets. This
+violates FIFO progress, bounded bookkeeping, and repeatable clear convergence.
 
-```python
-def _put_with_result(self, *args, **kwargs):
-    self._require_canonical_store()
-    with self._instance_admission.operation():
-        return self._put_with_result_admitted(*args, **kwargs)
+**Fix:** Remove the exact ticket on every exit path, including failure before
+entry, and notify all waiters after removal. For example, make the `finally`
+block acquire the condition and call the existing exact-ticket discard helper
+when `entered` is false; retain the current active-clear teardown when it is
+true. Add a deterministic regression test that queues a timed-out clear behind
+an active clear, releases the active clear, then proves a later clear succeeds
+and the queue/refcount state is empty.
 
-@_ordinary_admitted
-def put(self, *args, **kwargs):
-    return self._put_with_result_admitted(*args, **kwargs).locator
-```
+### CR-02: SQLite lock acquisition can exceed the single absolute deadline
 
-Add a barrier test that pauses a facade put after admission and proves `close()`/`clear()` cannot pass it.
+**Classification:** BLOCKER
 
-### CR-02: A failed overwrite permanently deletes the previous generation's custom-metadata links [BLOCKER]
+**File:** `src/cacheness/storage/sqlite_lifecycle_authority.py:1133-1142`
 
-**File:** `src/cacheness/core.py:1563-1594,1690-1708`; `src/cacheness/storage/lifecycle.py:258-289`; `src/cacheness/metadata.py:1941-1950,2001-2005`; `src/cacheness/storage/backends/postgresql_backend.py:321-333,384-387`
+**File:** `src/cacheness/storage/sqlite_lifecycle_authority.py:1235-1253`
 
-**Issue:** The lifecycle hook publishes the candidate projection before signing/verification and authority promotion. Both SQL adapters delete all custom-metadata links when the projected locator changes, and commit that deletion with the candidate projection. If signing, verification, or promotion then fails, `_repair_projection_after_failed_put()` can restore the M1 projection but cannot reconstruct the deleted M1 link rows. The failed M2 operation thus destroys user-visible custom metadata belonging to the still-authoritative M1 generation. Current failure coverage starts from an absent key and never proves link preservation on failed replacement.
+**Issue:** `_connection()` calculates the remaining budget once and uses it as
+the SQLite connection `timeout`. `_transaction()` then spends time in
+connection preflight, process-local FIFO admission, and observer dispatch before
+executing `BEGIN IMMEDIATE`, but the connection's busy timeout is never reduced
+to the budget remaining at that point. Consequently SQLite can wait for the
+original timeout after earlier stages have already consumed most of the same
+absolute deadline. A deterministic reproduction with a 0.187-second deadline,
+a 0.12-second admission-observer delay, and an external `BEGIN IMMEDIATE`
+writer raised `stage=sqlite_busy` after approximately 0.368 seconds. This breaks
+Plan 03-17's central promise that preflight, FIFO admission, dispatch, and
+SQLite lock acquisition share one bounded deadline.
 
-**Fix:** Do not perform destructive link ownership transition before authority promotion. Stage the candidate projection without retiring old links, or compute/sign the projection first and publish projection plus link transition only after exact promotion succeeds. The post-promotion transaction must condition deletion/insertion on the promoted locator/token. Add a failed-overwrite regression beginning with an M1 entry that has custom metadata and assert its links survive every pre-promotion failure hook.
+**Fix:** Immediately before `BEGIN IMMEDIATE`, derive SQLite's busy timeout from
+`_remaining_for_stage(absolute_deadline)` and apply that remaining duration to
+the connection (for example with `PRAGMA busy_timeout`, using a conservative
+millisecond conversion that cannot extend the absolute deadline). Preserve the
+underlying `sqlite3.OperationalError` when translating a genuine busy failure.
+Add a deterministic combined-delay regression: consume budget in dispatch while
+an external writer owns SQLite, then assert total monotonic elapsed time remains
+within one configured deadline plus a small scheduler tolerance. The existing
+tests exercise queued admission and SQLite busy independently, so they cannot
+detect this additive timeout.
 
-### CR-03: Projection retry can steal another operation's pending candidate token [BLOCKER]
+### CR-03: Forked children inherit stale process-local admission locks and tickets
 
-**File:** `src/cacheness/core.py:1563-1587`
+**Classification:** BLOCKER
 
-**Issue:** When the initial projection compare-and-mutate mismatches, `_prepare_authority_projection()` checks that the authority expectation is still current and then replaces its expected projection token with whatever row is now visible. That row can be a competing operation's pre-promotion candidate, not a committed projection. In a forced schedule, B installs its candidate projection and pauses before promotion; A observes B's candidate, adopts B's locator as its expectation, and overwrites the row. B can then win authority promotion but fail its post-promotion custom-link write because A replaced its projection. A later loses promotion and repairs. A successful canonical B mutation is reported as failed and its custom metadata is lost.
+**File:** `src/cacheness/storage/sqlite_lifecycle_authority.py:93-96`
 
-**Fix:** An operation must never substitute an observed peer token for its captured projection token. A mismatch must remain a typed conflict/no-op. If a repair/retry is required, prove that the observed row corresponds to the same committed authority snapshot and is not a pending candidate, preferably by persisting an operation token/state in the projection. Add a barrier test with two overlapping pre-promotion candidates; the existing replacement test lets the peer complete promotion before the hook and does not cover this case.
+**File:** `src/cacheness/storage/sqlite_lifecycle_authority.py:631-640`
 
-### CR-04: SQL projection compare-and-mutate is not atomic across independent adapters [BLOCKER]
+**File:** `src/cacheness/storage/sqlite_lifecycle_authority.py:163-170`
 
-**File:** `src/cacheness/metadata.py:1967-2007`; `src/cacheness/storage/backends/postgresql_backend.py:351-387`
+**Issue:** The writer-admission registry and its lock are module globals keyed
+only by canonical database path. The instance PID guard correctly rejects an
+authority object inherited across `fork()`, but it does not protect a fresh
+authority constructed in the child: that new object reuses the inherited gate.
+If the parent forked while another thread owned a ticket, the child waits behind
+a copied owner that can never release in the child's memory. If the vanished
+thread held the registry or condition lock at the instant of fork, the child can
+deadlock before reaching the bounded wait. A deterministic reproduction forked
+while a parent writer was paused at `writer_admission.eligible`; a fresh child
+authority for the same root timed out at `stage=writer_admission` instead of
+operating with fresh child coordination state. This contradicts the documented
+fork contract: inherited authorities fail closed, while a newly constructed
+child authority must work.
 
-**Issue:** SQLite protects a SELECT-then-ORM-mutate sequence only with a per-instance Python lock. Independent `SqliteBackend` objects and processes do not share that lock, so two writers can both observe the same locator/absence and then race. The loser may receive `database is locked`/a unique-key error, or an ORM update keyed only by primary key can replace a newer row; it is not guaranteed to receive the contract's mismatch/no-op result. PostgreSQL uses `FOR UPDATE` for existing rows, but expected absence locks no row: two creators can both observe absence and one receives `IntegrityError` instead of an exact conflict result. The tests are sequential for both SQL adapters and therefore cannot establish the claimed CAS contract.
-
-**Fix:** For SQLite, acquire `BEGIN IMMEDIATE` before the comparison or use one conditional SQL mutation whose affected-row count defines success. For PostgreSQL, serialize each cache key with an advisory lock, or use `INSERT ... ON CONFLICT` plus a conditional update and deterministic result classification. Convert expected contention into the typed lifecycle conflict/no-op result. Add deterministic tests using independent SQLite connections and real PostgreSQL dialect semantics for both absent and existing rows.
-
-### CR-05: Fresh-root SQLite bootstrap still races across authority instances and processes [BLOCKER]
-
-**File:** `src/cacheness/storage/sqlite_lifecycle_authority.py:80-82,400-406,433-434`
-
-**Issue:** `_bootstrap_lock` is owned by one authority instance. Two separately constructed authorities/processes can both classify a root as missing. The winner creates the directory; the loser executes `mkdir(..., exist_ok=False)` and raises `FileExistsError` without reclassifying/joining the winner. This affects independently constructed facades performing their first mutations, including distinct keys. Existing process tests seed the authority first, and the same-facade test shares one authority and lock, so neither covers this bootstrap race.
-
-**Fix:** Catch `FileExistsError` at root creation and immediately repeat the exact safe classification. Reject wrong-object/symlink states and join only a bounded recognized bootstrap state before continuing the O_EXCL leaf protocol. Add fresh-root tests with two authority instances and two processes, without pre-seeding the database.
-
-### CR-06: Cached SQL metadata wrappers silently disable custom-metadata APIs [BLOCKER]
-
-**File:** `src/cacheness/metadata.py:477-498,2505-2512`; `src/cacheness/core.py:387-464,567-595,637-638`
-
-**Issue:** When memory caching is enabled, `create_metadata_backend()` wraps SQLite/PostgreSQL in `CachedMetadataBackend`. The wrapper delegates projection mutation but exposes neither `store_custom_metadata_if_current` nor the wrapped backend's `SessionLocal`/`engine`. Core therefore reports the underlying SQL backend as custom-metadata-capable, but `put(..., custom_metadata=...)` silently inserts no link, `query_custom()` cannot query it, and `query_custom_session()` rejects the backend. This is a supported configuration and a public API compatibility failure.
-
-**Fix:** Give `CachedMetadataBackend` explicit custom-metadata delegation methods (including exact-current checks and cache invalidation) and a safe query/session abstraction, rather than relying on attribute sniffing. Add SQLite and PostgreSQL parity tests with `enable_memory_cache=True` covering put, get, query, stale-link rejection, and replacement ownership.
-
-### CR-07: Empty committed-key snapshots make clear/invalidate delete an in-flight canonical generation as “legacy” [BLOCKER]
-
-**File:** `src/cacheness/core.py:2027-2031,2273-2289,2294-2318`
-
-**Issue:** `clear_all()` treats an empty `BlobStore.list()` result as permission to run compatibility cleanup directly against every projection row. A first put can already have installed its candidate projection while authority still has no committed key. `clear_all()` then deletes that candidate payload and row as “legacy”; the put can subsequently promote the already-verified manifest and return success, leaving authority committed to a missing payload. The analogous absent-snapshot/key-only fallback in `invalidate()` and `_retire_exact_authority_snapshot()` can also delete a newer projection. The Plan 03-14 facade mutation is not admitted (CR-01), but the momentary-empty heuristic is unsafe across separate facades even after admission is fixed.
-
-**Fix:** Enter legacy cleanup only when the store was explicitly classified as a recognized legacy backend, never because the committed key list happens to be empty. Canonical stores must invoke authority clear semantics even for an empty snapshot. Projection teardown must always use an exact locator/token compare-and-mutate. Add an empty-store `clear_all()` versus first-put barrier schedule and the corresponding invalidation schedule.
-
-### CR-08: Same-key put overwrites an unsafe persisted locator without fail-closed containment validation [BLOCKER]
-
-**File:** `src/cacheness/core.py:1563-1569,1725-1728`
-
-**Issue:** `UnifiedCache.put()` reads the current projection's locator and passes it directly as the CAS expectation. It does not run `_entry_locator()` containment validation before payload/projection mutation. A tampered same-key projection whose `actual_path` points outside the managed root is therefore silently replaced (and its links can be deleted) instead of blocking the mutation at the integrity boundary. The code does not need to open the external path for this to violate the project's fail-closed rule: it destroys evidence and accepts malformed persisted state as a valid mutation token.
-
-**Fix:** Validate every observed projection locator, including nested metadata forms, with `_entry_locator(..., operation="put")` before writing a payload or mutating projection state. On failure, raise the domain integrity/path exception without modifying authority, projection, links, or payloads. Add same-key hostile top-level and nested-locator tests; unrelated-entry size preflight does not cover this path.
-
-### CR-09: PostgreSQL returns cache-key parameters at the wrong nesting and invalidates correctly signed entries [BLOCKER]
-
-**File:** `src/cacheness/storage/backends/postgresql_backend.py:576-581`; `src/cacheness/core.py:1547-1553,2010-2017`
-
-**Issue:** Projection signing reads `metadata["cache_key_params"]`. PostgreSQL persists that value, but `_entry_to_dict()` restores parsed parameters at the result's top level instead of inside `metadata`, unlike the other backends. Signature authorization later reads only the nested metadata value, omits the parameters, and rejects a valid signature whenever `store_cache_key_params=True`. With the default invalid-signature policy, a read can retire the valid canonical entry.
-
-**Fix:** Restore parsed `cache_key_params` into the nested metadata mapping used at signing, consistently with SQLite/JSON/in-memory. Preserve any compatibility top-level field only as an alias. Add an end-to-end PostgreSQL parity test with signing and stored cache-key parameters enabled, verifying get/list/stats do not retire the entry.
+**Fix:** Make admission state process-scoped and reinitialize it after fork.
+Keying gates by `(pid, canonical_path)` is necessary but not sufficient if the
+global registry lock itself was inherited while locked; register an
+`os.register_at_fork(after_in_child=...)` handler that replaces both the
+registry and its lock in the child. Add a regression that forks while a parent
+gate is actively owned, verifies the inherited authority is rejected, and
+verifies a fresh child authority completes without observing the parent's
+ticket/refcount state.
 
 ## Warnings
 
-### WR-01: SqliteBackend destructor can raise during interpreter shutdown [WARNING]
+### WR-01: `query_meta()` silently fails through `CachedMetadataBackend`
 
-**File:** `src/cacheness/metadata.py:2397-2409`
+**Classification:** WARNING
 
-**Issue:** `__del__()` calls `close()` directly, while `close()` performs a late `import gc`, collection, and logging. During interpreter finalization, imports and module globals may already be unavailable, producing the observed `Exception ignored in: SqliteBackend.__del__` after an otherwise-green suite. Destructors must not surface exceptions, and noisy finalization can hide real test/process failures.
+**File:** `src/cacheness/core.py:648-670`
 
-**Fix:** Prefer explicit/context-managed close and remove the destructor. If compatibility requires it, make it a minimal best-effort guard that catches `BaseException`, does not import or log during finalization, and nulls/disposes the engine idempotently.
+**File:** `src/cacheness/metadata.py:553-557`
 
-### WR-02: Deterministic regression coverage does not exercise the critical cross-operation schedules [WARNING]
+**Issue:** `UnifiedCache.query_meta()` directly requires and accesses
+`self.metadata_backend.SessionLocal`. `CachedMetadataBackend`, used by the
+supported `enable_memory_cache=True` configuration, deliberately exposes its
+custom metadata capability and session through delegation but does not expose
+`SessionLocal`. As a result, `query_meta()` logs that the backend does not
+support SQL queries and returns `None` even when the wrapped SQLite backend does
+support them. This is an API/capability mismatch adjacent to the Plan 03-16
+custom-metadata delegation fix: custom metadata now works through the wrapper,
+but the built-in metadata-query API still does not.
 
-**File:** `tests/test_projection_mutation_contract.py:1-275`; `tests/test_unified_cache_lifecycle_authority.py:1-634`
+**Fix:** Define a backend-neutral query/session capability for built-in entry
+metadata and delegate it through `CachedMetadataBackend`, then route
+`query_meta()` through that capability instead of inspecting a concrete
+`SessionLocal` attribute. Add tests for `store_cache_key_params=True` with
+memory caching enabled, covering both a matching query and an unsupported
+backend's explicit error/result policy.
 
-**Issue:** SQL projection contract tests are sequential; only JSON gets a cross-instance race. The “PostgreSQL” helper runs on SQLite and tests `_store_custom_metadata()` directly, while the core dispatch test only proves a method call, not real `UnifiedCache.put(..., custom_metadata=...)` transaction behavior. Failure coverage starts from an absent key rather than an M1 generation with links; replacement-before-projection lets the peer finish promotion before the hook; and distinct-key coverage uses one facade/authority. The suite therefore passes without forcing CR-01 through CR-07.
+## Prior Finding Disposition
 
-**Fix:** Add hook/barrier tests for admitted close/clear, two pending candidate projections, failed overwrite with old links, empty-store clear versus first promotion, independent SQLite adapters/fresh authorities, and cached-wrapper custom metadata. Exercise PostgreSQL-specific SQL/result classification with a real service where available; the required deterministic core-to-adapter path should not be replaced by direct private-method calls.
+| Prior finding | Disposition | Reviewed evidence |
+|---|---|---|
+| CR-01 admitted publication gap | CLOSED | Public `put()` enters admission before authority publication and delegates nested work without reacquiring the facade gate. |
+| CR-02 destructive pre-promotion hook | CLOSED | Projection hooks prepare state; unlink/deferred cleanup happens only after promotion. |
+| CR-03 peer-token adoption | CLOSED | Publishers retain their own token and converge only after verifying the winner's exact promoted generation. |
+| CR-04 projection compare/write race | CLOSED | SQLite uses `BEGIN IMMEDIATE`; PostgreSQL obtains a transaction advisory lock before the row compare/write sequence. Live PostgreSQL remains unqualified. |
+| CR-05 fresh-root bootstrap race | CLOSED | Concurrent root/leaf creation conflicts are caught and reclassified through canonical bootstrap inspection. |
+| CR-06 cached custom metadata | CLOSED | The cache wrapper delegates support, storage, and scoped custom-metadata sessions. |
+| CR-07 empty-state inference | CLOSED | Canonical roots use authority state; only recognized legacy layouts use legacy inference. |
+| CR-08 hostile observed locator | CLOSED | Observed payload locators are normalized/contained before mutation or cleanup. |
+| CR-09 PostgreSQL signed key parameters | CLOSED | Nested `key_params` are preserved with the compatibility alias and malformed non-mappings fail closed. |
+| WR-01 destructor cleanup | CLOSED | Explicit idempotent close is the lifecycle mechanism; the backend destructor was removed. |
+| WR-02 deterministic interleavings | CLOSED AS ORIGINALLY FILED | The required publication/projection/bootstrap/admission interleavings were added, though the newly identified timeout-plus-busy and active-gate fork schedules need their own regressions. |
 
 ---
 
-_Reviewed: 2026-09-06T04:50:34Z_
+_Reviewed: 2026-09-06T08:34:02Z_
 _Reviewer: the agent (gsd-code-reviewer)_
 _Depth: deep_
