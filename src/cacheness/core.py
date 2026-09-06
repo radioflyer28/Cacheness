@@ -1124,7 +1124,7 @@ class UnifiedCache:
     def _cleanup_expired(self):
         """Remove expired entries through their observed authority generation."""
         authority_keys = self._cache_blob_store.list()
-        if authority_keys:
+        if self._recognized_legacy_backend() is None:
             self._preflight_entries(
                 self.metadata_backend.list_entries(), operation="cleanup_expired"
             )
@@ -1163,13 +1163,10 @@ class UnifiedCache:
     def _pending_authority_projection_locators(self) -> dict[str, frozenset[str]]:
         """Return exact published candidate locators that are not yet committed.
 
-        The compatibility projection is deliberately installed before the
-        authority promotion so signing failures can roll it back safely. A
-        reader that observes that short interval must neither publish the
-        candidate nor rewrite it to the previous generation: either action can
-        race the in-flight promotion. Prepared mutations are lifecycle evidence
-        rather than normal-read authority, but their opaque locator is enough
-        to recognize this one visibility boundary.
+        Prepared mutations are lifecycle evidence rather than normal-read
+        authority. Candidates no longer publish projections; the locator set
+        remains a defensive classification seam for historical residue during
+        authority-derived repair.
         """
         locators: dict[str, set[str]] = {}
         for prepared in self._cache_blob_store.lifecycle_authority.pending_mutations():
@@ -1727,6 +1724,13 @@ class UnifiedCache:
         # than selecting a second serializer policy.
         self._cache_blob_store.handlers = self.handlers
         pre_operation_projection = self.metadata_backend.get_entry(cache_key)
+        if pre_operation_projection is not None:
+            self._entry_locator(
+                pre_operation_projection,
+                cache_key,
+                operation="put",
+                prefix=prefix,
+            )
         expected_projection_locator = self._projection_locator_from_entry(
             pre_operation_projection
         )
@@ -2038,8 +2042,27 @@ class UnifiedCache:
     def _retire_exact_authority_snapshot(self, cache_key: str, snapshot: Any) -> bool:
         """Delete only a cache generation still equal to this read observation."""
         if snapshot is None:
-            self.metadata_backend.remove_entry(cache_key)
-            return True
+            if self._recognized_legacy_backend() is not None:
+                entry = self.metadata_backend.get_entry(cache_key)
+                if entry is None:
+                    return False
+                self._entry_locator(entry, cache_key, operation="retire_legacy")
+                self.metadata_backend.remove_entry(cache_key)
+                return True
+            expected = self._cache_blob_store.lifecycle_authority.read_expectation(
+                cache_key
+            )
+            try:
+                deleted = self._cache_blob_store.delete(cache_key, expected=expected)
+            except CacheBlobLifecycleConflictError:
+                logger.info("Preserved replacement generation during stale cleanup: %s", cache_key)
+                self._sync_authority_projection(cache_key)
+                return False
+            entry = self.metadata_backend.get_entry(cache_key)
+            if entry is not None:
+                self._entry_locator(entry, cache_key, operation="retire_authority")
+            self._sync_authority_projection(cache_key, observed_entry=entry)
+            return deleted
         try:
             deleted = self._cache_blob_store.delete(
                 cache_key, expected=snapshot.expectation
@@ -2185,11 +2208,13 @@ class UnifiedCache:
     def _enforce_size_limit(self):
         """Enforce size limits without deleting a generation by key alone."""
         authority_keys = self._cache_blob_store.list()
-        if authority_keys:
-            max_size_mb = self.config.storage.max_cache_size_mb
+        if self._recognized_legacy_backend() is None:
             self._preflight_entries(
                 self.metadata_backend.list_entries(), operation="cleanup_by_size"
             )
+            if not authority_keys:
+                return
+            max_size_mb = self.config.storage.max_cache_size_mb
             projected_size_mb = self.metadata_backend.get_stats().get(
                 "total_size_mb", 0
             )
@@ -2293,6 +2318,14 @@ class UnifiedCache:
             logger.info("Invalidated authority-backed cache entry %s", cache_key)
             return
 
+        if self._recognized_legacy_backend() is None:
+            # A canonical absence is still an authority decision. A concurrent
+            # first promotion changes this expected-absence delete into a
+            # conflict rather than authorizing key-only metadata cleanup.
+            self._retire_exact_authority_snapshot(cache_key, None)
+            logger.debug("Canonical cache entry %s was absent for invalidation", cache_key)
+            return
+
         entry = self.metadata_backend.get_entry(cache_key)
         if entry is not None:
             self._entry_locator(entry, cache_key, operation="invalidate", prefix=prefix)
@@ -2304,16 +2337,16 @@ class UnifiedCache:
     @_clear_coordinated
     def clear_all(self):
         """Clear known cache entries without reviving a second authority."""
-        authority_keys = self._cache_blob_store.list()
-        if authority_keys:
+        if self._recognized_legacy_backend() is None:
             # Compatibility metadata is not lifecycle authority, but malformed
             # paths remain fail-closed evidence and must block a bulk mutation.
-            self._preflight_entries(
-                self.metadata_backend.list_entries(), operation="clear_all"
-            )
+            entries = self.metadata_backend.list_entries()
+            self._preflight_entries(entries, operation="clear_all")
             cleared = self._cache_blob_store.clear()
-            for cache_key in authority_keys:
-                self._sync_authority_projection(cache_key)
+            for entry in entries:
+                self._sync_authority_projection(
+                    entry["cache_key"], observed_entry=entry
+                )
             logger.info("Cleared %s authority-backed cache entries", cleared)
             return cleared
 

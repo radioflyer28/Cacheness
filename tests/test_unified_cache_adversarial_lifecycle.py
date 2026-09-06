@@ -6,15 +6,20 @@ from pathlib import Path
 from threading import Event, Thread
 
 import pytest
-from sqlalchemy import Column, String
+from sqlalchemy import Column, String, select
 
 from cacheness import CacheConfig, cacheness
-from cacheness.custom_metadata import CustomMetadataBase, custom_metadata_model
+from cacheness.custom_metadata import (
+    CacheMetadataLink,
+    CustomMetadataBase,
+    custom_metadata_model,
+)
 from cacheness.error_handling import (
     CacheBlobLifecycleConflictError,
     CacheBlobStoreClosedError,
+    CacheUnsafePathError,
 )
-from cacheness.metadata import Base
+from cacheness.metadata import Base, CacheEntry
 from cacheness.storage import BlobStore
 
 
@@ -320,3 +325,217 @@ def test_two_pending_candidates_preserve_m1_links_until_one_promotes(
         _join(writer_b)
         second.close()
         first.close()
+
+
+def test_hostile_locator_rejects_same_key_put_without_mutating_m1(
+    tmp_path: Path,
+) -> None:
+    """A persisted outside-root projection is not a replacement CAS token."""
+    cache = _sqlite_cache(tmp_path / "hostile-put-locator")
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"outside")
+    try:
+        key = cache.put(
+            {"generation": "m1"},
+            custom_metadata=Plan15LinkedMetadata(label="m1"),
+            race_key="hostile-put",
+        )
+        authority_before = cache._cache_blob_store.lifecycle_authority.read_entry(key)
+        assert authority_before is not None
+        # Persist the hostile locator without calling the compatibility
+        # projection transition.  A raw row mutation models a corrupted or
+        # externally altered metadata store while preserving M1's custom link.
+        with cache.metadata_backend.SessionLocal() as session:
+            row = session.get(CacheEntry, key)
+            assert row is not None
+            row.actual_path = str(outside)
+            session.commit()
+
+        with pytest.raises(CacheUnsafePathError):
+            cache.put(
+                {"generation": "m2"},
+                custom_metadata=Plan15LinkedMetadata(label="m2"),
+                race_key="hostile-put",
+            )
+
+        assert cache._cache_blob_store.lifecycle_authority.read_entry(key) == authority_before
+        unchanged = cache.metadata_backend.get_entry(key)
+        assert unchanged is not None
+        assert unchanged["metadata"]["actual_path"] == str(outside)
+        with cache.metadata_backend.SessionLocal() as session:
+            link = session.scalar(
+                select(CacheMetadataLink).where(CacheMetadataLink.cache_key == key)
+            )
+            assert link is not None
+            linked_metadata = session.get(Plan15LinkedMetadata, link.metadata_id)
+            assert linked_metadata is not None
+            assert linked_metadata.label == "m1"
+        assert outside.read_bytes() == b"outside"
+    finally:
+        cache.close()
+
+
+def test_empty_authority_clear_preserves_a_peer_first_put_after_durable_intent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A canonical empty clear does not use metadata fallback against a pending put."""
+    first = _cache(tmp_path / "empty-authority-clear")
+    second = _cache(tmp_path / "empty-authority-clear")
+    intent_prepared = Event()
+    release = Event()
+    errors: list[BaseException] = []
+    clear_calls: list[None] = []
+    original_clear = second._cache_blob_store.clear
+
+    def clear_canonical_authority() -> int:
+        clear_calls.append(None)
+        return original_clear()
+
+    def pause_after_durable_intent(boundary: str) -> None:
+        if boundary == "put.intent_prepared":
+            intent_prepared.set()
+            assert release.wait(timeout=5)
+
+    def put_first_generation() -> None:
+        try:
+            first.put({"generation": "m1"}, race_key="empty-authority-clear")
+        except BaseException as error:  # pragma: no cover - asserted below.
+            errors.append(error)
+
+    first._cache_blob_store.lifecycle.test_hook = pause_after_durable_intent
+    monkeypatch.setattr(second._cache_blob_store, "clear", clear_canonical_authority)
+    writer = Thread(target=put_first_generation)
+    try:
+        writer.start()
+        assert intent_prepared.wait(timeout=5)
+        assert second.clear_all() == 0
+        assert clear_calls == [None]
+
+        release.set()
+        _join(writer)
+        assert errors == []
+        assert second.get(race_key="empty-authority-clear") == {"generation": "m1"}
+    finally:
+        release.set()
+        _join(writer)
+        second.close()
+        first.close()
+
+
+def test_empty_authority_invalidate_preserves_a_peer_first_put_after_durable_intent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A canonical absent invalidate cannot authorize key-only metadata removal."""
+    first = _cache(tmp_path / "empty-authority-invalidate")
+    second = _cache(tmp_path / "empty-authority-invalidate")
+    intent_prepared = Event()
+    release = Event()
+    errors: list[BaseException] = []
+    delete_calls: list[str] = []
+    key = first._create_cache_key({"race_key": "empty-authority-invalidate"})
+    original_delete = second._cache_blob_store.delete
+
+    def delete_through_canonical_authority(
+        delete_key: str, *, expected=None
+    ) -> bool:
+        delete_calls.append(delete_key)
+        return original_delete(delete_key, expected=expected)
+
+    def pause_after_durable_intent(boundary: str) -> None:
+        if boundary == "put.intent_prepared":
+            intent_prepared.set()
+            assert release.wait(timeout=5)
+
+    def put_first_generation() -> None:
+        try:
+            assert first.put(
+                {"generation": "m1"}, race_key="empty-authority-invalidate"
+            ) == key
+        except BaseException as error:  # pragma: no cover - asserted below.
+            errors.append(error)
+
+    first._cache_blob_store.lifecycle.test_hook = pause_after_durable_intent
+    monkeypatch.setattr(
+        second._cache_blob_store, "delete", delete_through_canonical_authority
+    )
+    writer = Thread(target=put_first_generation)
+    try:
+        writer.start()
+        assert intent_prepared.wait(timeout=5)
+        second.invalidate(cache_key=key)
+        assert delete_calls == [key]
+
+        release.set()
+        _join(writer)
+        assert errors == []
+        assert second.get(race_key="empty-authority-invalidate") == {
+            "generation": "m1"
+        }
+    finally:
+        release.set()
+        _join(writer)
+        second.close()
+        first.close()
+
+
+def test_explicit_legacy_empty_clear_uses_fallback_only_when_recognized(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy cleanup remains an opt-in branch, never an empty canonical heuristic."""
+    cache = _cache(tmp_path / "recognized-legacy-clear")
+    try:
+        monkeypatch.setattr(cache, "_recognized_legacy_backend", lambda: object())
+        monkeypatch.setattr(
+            cache._cache_blob_store,
+            "clear",
+            lambda: pytest.fail("canonical clear must not run for explicit legacy"),
+        )
+        assert cache.clear_all() == 0
+    finally:
+        cache.close()
+
+
+def test_nested_hostile_locator_rejects_same_key_put_without_authority_mutation(
+    tmp_path: Path,
+) -> None:
+    """A JSON projection's nested locator is preflighted before an overwrite."""
+    cache = cacheness(
+        CacheConfig(
+            cache_dir=str(tmp_path / "nested-hostile-put-locator"),
+            metadata_backend="json",
+            cleanup_on_init=False,
+        )
+    )
+    outside = tmp_path / "nested-outside.bin"
+    outside.write_bytes(b"outside")
+    try:
+        key = cache.put({"generation": "m1"}, race_key="nested-hostile-put")
+        authority_before = cache._cache_blob_store.lifecycle_authority.read_entry(key)
+        assert authority_before is not None
+        projection = cache.metadata_backend.get_entry(key)
+        assert projection is not None
+        projection["metadata"]["actual_path"] = str(outside)
+        cache.metadata_backend.put_entry(key, projection)
+        files_before = {
+            path.relative_to(cache.cache_dir): path.read_bytes()
+            for path in cache.cache_dir.rglob("*")
+            if path.is_file()
+        }
+
+        with pytest.raises(CacheUnsafePathError):
+            cache.put({"generation": "m2"}, race_key="nested-hostile-put")
+
+        assert cache._cache_blob_store.lifecycle_authority.read_entry(key) == authority_before
+        assert cache.metadata_backend.get_entry(key) == projection
+        files_after = {
+            path.relative_to(cache.cache_dir): path.read_bytes()
+            for path in cache.cache_dir.rglob("*")
+            if path.is_file()
+        }
+        assert files_after == files_before
+        assert outside.read_bytes() == b"outside"
+    finally:
+        cache.close()
