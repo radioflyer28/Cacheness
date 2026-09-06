@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 03
 current_phase_name: Atomic Lifecycle and Recovery Engine
 status: executing
-stopped_at: Completed 03-15-PLAN.md
-last_updated: "2026-09-06T05:57:42.449Z"
+stopped_at: Completed 03-17-PLAN.md
+last_updated: "2026-09-06T08:25:35.282Z"
 last_activity: 2026-09-06
 last_activity_desc: Plan 03-15 complete; ready for Plan 03-16
-state_head: bea8565655417aa03a21d2b6518fb727735e3150
+state_head: 5977dadae68794c94d70aad8044727414dfa6c9f
 progress:
   total_phases: 8
   completed_phases: 2
   total_plans: 39
-  completed_plans: 37
+  completed_plans: 39
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-08-29)
 ## Current Position
 
 Phase: 03 (Atomic Lifecycle and Recovery Engine) — EXECUTING
-Plan: 15 of 17
+Plan: 17 of 17
 Status: Plan 03-15 complete — ready for Plan 03-16
 Last activity: 2026-09-06 — Plan 03-15 complete; ready for Plan 03-16
 
@@ -89,6 +89,7 @@ Phase 03 rows in this historical table belong to the superseded file-native atte
 | Phase 03 P13 | 8m | 2 tasks | 5 files |
 | Phase 03 P14 | 1h 29min | 3 tasks | 8 files |
 | Phase 03 P15 | 31min | 3 tasks | 6 files |
+| Phase 03 P17 | 1h 13m | 3 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -209,6 +210,8 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 03]: Clear active ownership spans full cleanup while the snapshot admission gate lasts only through begin_clear.
 - [Phase 03]: Projection and custom-link replacement require the operation's exact promoted authority lineage and captured M1 locator.
 - [Phase 03]: Canonical empty state uses BlobStore authority operations; legacy cleanup requires explicit recognized composition.
+- [Phase 03]: SQLite same-process writer admission is FIFO per canonical authority path and retains SQLite/CAS as the cross-process correctness boundary.
+- [Phase 03]: The authority busy deadline remains 0.187 seconds; queue, scheduler dispatch, and SQLite acquisition consume one original absolute deadline.
 
 ### Pending Todos
 
@@ -232,6 +235,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-09-06T05:57:42.402Z
-Stopped at: Completed 03-15-PLAN.md
+Last session: 2026-09-06T08:25:35.232Z
+Stopped at: Completed 03-17-PLAN.md
 Resume file: None
