@@ -3,12 +3,12 @@ gsd_state_version: 1.0
 milestone: v1.0
 current_phase: 03
 current_phase_name: Atomic Lifecycle and Recovery Engine
-status: executing
-stopped_at: Plan 03-19 Tasks 1-3 committed; Task 4 planned for exhaustive authority timeout translation
-last_updated: "2026-09-06T13:06:16Z"
+status: planned
+stopped_at: Plan 03-20 ready; Plan 03-19 superseded by ADR 0001
+last_updated: "2026-09-06T14:30:00Z"
 last_activity: 2026-09-06
-last_activity_desc: Plan 03-19 preserved seven completed commits and added Task 4 for staged authority read-timeout closure before clean qualification
-state_head: 00ab9afc8f6e64cb169e51092f36f5766c5b8d79
+last_activity_desc: Replanned the Phase 3 tail around topology-specific integrity, recovery, typed contention outcomes, and benchmark/runtime separation
+state_head: 781d86c4f8fe6b24276e031fe206a351d8059364
 progress:
   total_phases: 8
   completed_phases: 2
@@ -28,10 +28,10 @@ See: .planning/PROJECT.md (updated 2026-08-29)
 
 ## Current Position
 
-Phase: 03 (Atomic Lifecycle and Recovery Engine) — EXECUTING
-Plan: 19 of 19
-Status: Tasks 1-3 committed; Task 4 planned — ready for execution
-Last activity: 2026-09-06 — Plan 03-19 preserved seven completed commits and added Task 4 for staged authority read-timeout closure before clean qualification
+Phase: 03 (Atomic Lifecycle and Recovery Engine) — PLANNED
+Plan: 20 of 20 (19 canonical; 03-19 is superseded)
+Status: Plan 03-20 ready for execution
+Last activity: 2026-09-06 — Replanned the unfinished tail from ADR 0001; preserve integrity/recovery repairs and remove deadline-driven coordination complexity
 
 Progress: [██░░░░░░░░] 2 of 8 phases complete
 
@@ -40,7 +40,7 @@ Progress: [██░░░░░░░░] 2 of 8 phases complete
 *Updated after each plan completion*
 **Per-Plan Metrics:**
 
-Phase 03 rows in this historical table include the superseded file-native attempt and do not define current completion; authoritative milestone progress is 40 of 41 plans after adding Plan 03-19.
+Phase 03 rows in this historical table include superseded attempts and do not define current completion; authoritative milestone progress is 40 of 41 canonical plans because 03-19 is excluded and 03-20 is the sole pending replacement.
 
 | Plan | Duration | Tasks | Files |
 |------|----------|-------|-------|
@@ -211,11 +211,14 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 03]: Clear active ownership spans full cleanup while the snapshot admission gate lasts only through begin_clear.
 - [Phase 03]: Projection and custom-link replacement require the operation's exact promoted authority lineage and captured M1 locator.
 - [Phase 03]: Canonical empty state uses BlobStore authority operations; legacy cleanup requires explicit recognized composition.
-- [Phase 03]: SQLite same-process writer admission is FIFO per canonical authority path and retains SQLite/CAS as the cross-process correctness boundary.
-- [Phase 03]: The authority busy deadline remains 0.187 seconds; queue, scheduler dispatch, and SQLite acquisition consume one original absolute deadline.
+- [Phase 03 superseded by ADR 0001]: Authority-path FIFO admission and the fixed 0.187-second universal-success target were implementation experiments, not supported correctness guarantees.
+- [Phase 03 ADR 0001 replan]: The supported durable topology is SQLite LifecycleAuthority plus local filesystem blobs on one host with multiple processes; memory is same-process-only, and PostgreSQL/multihost or broad topology composition remains later-phase work.
+- [Phase 03 ADR 0001 replan]: SQLite is the sole transactional lifecycle authority; immutable filesystem payload effects are coordinated through durable intent, exact promotion, cleanup debt, and deterministic reconciliation rather than cross-resource ACID.
+- [Phase 03 ADR 0001 replan]: Supported contention may return a stable typed retryable timeout. Runtime timeout is configurable operational policy; 0.187-derived thresholds remain benchmark/regression evidence only.
+- [Phase 03 ADR 0001 replan]: Do not add another lock, FIFO queue, sidecar, lifecycle truth, or timeout-stage patch to force universal success; SQLite/CAS remains the correctness boundary, and only optional demonstrably justified process-local optimization may remain.
 - [Phase 03]: SQLite WAL and maintenance bootstrap before pooled sessions are published; pool checkout stays read-safe.
 - [Phase 03]: Aggregate metadata queries omit mismatched projection rows and bind exact key/locator pairs instead of repairing or matching keys alone.
-- [Phase 03]: Only named extreme write-contention schedules classify exact lifecycle timeout reason/stages.
+- [Phase 03 superseded by ADR 0001]: Named stress-schedule timeout-stage allowlists are historical evidence; Plan 03-20 replaces them with success/conflict/typed-retryable-timeout progress accounting plus independent safety assertions.
 
 ### Pending Todos
 
@@ -239,6 +242,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-09-06T13:06:16Z
-Stopped at: Plan 03-19 Tasks 1-3 committed; Task 4 planned for exhaustive authority timeout translation
+Last session: 2026-09-06T14:30:00Z
+Stopped at: Plan 03-20 ready; Plan 03-19 superseded by ADR 0001
 Resume file: None

@@ -5,6 +5,8 @@ status: gaps_found
 score: 3/8 must-haves verified
 behavior_unverified: 0
 overrides_applied: 0
+replanned_by: 03-20-PLAN.md
+replan_basis: docs/adr/0001-topology-specific-storage-guarantees.md
 re_verification:
   previous_status: gaps_found
   previous_score: 3/8
@@ -122,6 +124,17 @@ decision_coverage:
 ---
 
 # Phase 3: Atomic Lifecycle and Recovery Engine Verification Report
+
+> **ADR 0001 replan notice (2026-09-06):** This report remains historical
+> `gaps_found` evidence and is not converted to a pass. Plans 03-15 through
+> 03-18 subsequently closed CR-01 through CR-04, CR-06 through CR-09, and
+> WR-01 under their focused regressions. CR-05 remains a bootstrap recovery
+> concern. WR-02 and the later Plan 03-19 `deadlock_prevention` miss are now
+> classified as progress/performance evidence: a stable typed retryable SQLite
+> contention timeout is a valid bounded outcome and every contender need not
+> succeed within 0.187 seconds. Plan 03-20 owns fresh verification against the
+> SQLite-authority/local-filesystem topology; native Windows remains
+> UNAVAILABLE/NOT_QUALIFIED and non-blocking for this phase.
 
 **Phase Goal:** Object lifecycle operations preserve an old or new complete generation and leave every incomplete outcome recoverable.
 **Verified:** 2026-09-06T04:58:51Z
