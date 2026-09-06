@@ -1545,6 +1545,7 @@ class SqliteBackend(MetadataBackend):
         """
         self.db_file = str(db_file)
         self._lock = threading.Lock()
+        self._projection_transaction_hook_for_test = None
         self._legacy_layout: Optional[str] = None
         self.legacy_compat_hits = 0
         self.legacy_compat_access_times: Dict[str, str] = {}
@@ -1945,7 +1946,10 @@ class SqliteBackend(MetadataBackend):
             from sqlalchemy import inspect
             from .custom_metadata import CacheMetadataLink
 
-            if inspect(session.bind).has_table(CacheMetadataLink.__tablename__):
+            # Use the mutation connection itself.  Opening an inspector-owned
+            # second SQLite connection while BEGIN IMMEDIATE is active can
+            # contend with the writer and leak a raw lock error.
+            if inspect(session.connection()).has_table(CacheMetadataLink.__tablename__):
                 CacheMetadataLink.cleanup_for_cache_key(session, cache_key)
         except ImportError:
             return
@@ -1964,47 +1968,67 @@ class SqliteBackend(MetadataBackend):
         row before changing the row.  Any comparison mismatch changes neither.
         """
         self._ensure_writable()
+        hook = self._projection_transaction_hook_for_test
+        if hook is not None:
+            hook("projection.transaction.before_writer", cache_key)
         with self._lock, self.SessionLocal() as session:
-            current = session.execute(
-                select(CacheEntry).where(CacheEntry.cache_key == cache_key)
-            ).scalar_one_or_none()
-            current_locator = self._projection_locator(current)
-            matches = (
-                current is None
-                if expected_locator is None
-                else current is not None and current_locator == expected_locator
-            )
-            if not matches:
-                return ProjectionMutationResult("mismatch")
-
-            if replacement is None:
-                if current is None:
-                    return ProjectionMutationResult("converged")
-                self._cleanup_projection_links(session, cache_key)
-                session.delete(current)
-                session.commit()
-                return ProjectionMutationResult("applied")
-
-            values = self._projection_entry_values(replacement)
-            replacement_locator = values.get("actual_path")
-            if not isinstance(replacement_locator, str) or not replacement_locator:
-                raise CacheStorageError(
-                    "Conditional projection replacement requires an actual_path",
-                    context={"cache_key": cache_key},
+            try:
+                # SQLite has no row lock for an absent projection.  Acquire its
+                # database-native writer transaction before the comparison so
+                # every absent and existing-row decision shares one boundary
+                # across independent adapters and processes.
+                # Go through the DB-API transaction boundary rather than a
+                # SQLAlchemy statement that would first autobegin a deferred
+                # transaction.  SQLite rejects a second BEGIN otherwise.
+                session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+                current = session.execute(
+                    select(CacheEntry).where(CacheEntry.cache_key == cache_key)
+                ).scalar_one_or_none()
+                current_locator = self._projection_locator(current)
+                matches = (
+                    current is None
+                    if expected_locator is None
+                    else current is not None and current_locator == expected_locator
                 )
-            if current is None:
-                current = CacheEntry(cache_key=cache_key, **values)
-                session.add(current)
-                session.commit()
-                return ProjectionMutationResult("applied")
+                if not matches:
+                    session.rollback()
+                    return ProjectionMutationResult("mismatch")
 
-            if current_locator != replacement_locator:
-                self._cleanup_projection_links(session, cache_key)
-            for name, value in values.items():
-                setattr(current, name, value)
-            session.commit()
-            status = "converged" if current_locator == replacement_locator else "applied"
-            return ProjectionMutationResult(status)
+                if replacement is None:
+                    if current is None:
+                        session.rollback()
+                        return ProjectionMutationResult("converged")
+                    self._cleanup_projection_links(session, cache_key)
+                    session.delete(current)
+                    session.commit()
+                    return ProjectionMutationResult("applied")
+
+                values = self._projection_entry_values(replacement)
+                replacement_locator = values.get("actual_path")
+                if not isinstance(replacement_locator, str) or not replacement_locator:
+                    raise CacheStorageError(
+                        "Conditional projection replacement requires an actual_path",
+                        context={"cache_key": cache_key},
+                    )
+                if current is None:
+                    session.add(CacheEntry(cache_key=cache_key, **values))
+                    session.commit()
+                    return ProjectionMutationResult("applied")
+
+                if current_locator != replacement_locator:
+                    self._cleanup_projection_links(session, cache_key)
+                for name, value in values.items():
+                    setattr(current, name, value)
+                session.commit()
+                status = "converged" if current_locator == replacement_locator else "applied"
+                return ProjectionMutationResult(status)
+            except Exception:
+                session.rollback()
+                raise
+
+    def set_projection_transaction_hook_for_test(self, hook) -> None:
+        """Install a deterministic test-only boundary before SQLite admission."""
+        self._projection_transaction_hook_for_test = hook
 
     def remove_entry(self, cache_key: str):
         """Remove cache entry metadata and associated custom metadata links."""

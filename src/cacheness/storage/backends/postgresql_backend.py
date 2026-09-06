@@ -323,7 +323,7 @@ class PostgresBackend(MetadataBackend):
         try:
             from cacheness.custom_metadata import CacheMetadataLink
 
-            if inspect(self.engine).has_table(CacheMetadataLink.__tablename__):
+            if inspect(session.connection()).has_table(CacheMetadataLink.__tablename__):
                 session.execute(
                     delete(CacheMetadataLink).where(
                         CacheMetadataLink.cache_key == cache_key
@@ -331,6 +331,26 @@ class PostgresBackend(MetadataBackend):
                 )
         except ImportError:
             return
+
+    @staticmethod
+    def _acquire_projection_transaction_guard(session, cache_key: str) -> None:
+        """Serialize absent and present PostgreSQL projection transitions per key.
+
+        ``FOR UPDATE`` cannot protect a row that does not exist.  PostgreSQL's
+        transaction-scoped advisory lock supplies that missing identity while
+        leaving unrelated keys concurrent.  SQLite-backed parity tests do not
+        emulate PostgreSQL advisory functions; they exercise the same short
+        transaction ordering without claiming live service qualification.
+        """
+        if session.bind.dialect.name != "postgresql":
+            return
+        session.execute(
+            text(
+                "SELECT pg_advisory_xact_lock("
+                "hashtextextended(CAST(:cache_key AS text), :seed))"
+            ),
+            {"cache_key": cache_key, "seed": 424242},
+        )
 
     def conditional_projection_mutation(
         self,
@@ -350,6 +370,7 @@ class PostgresBackend(MetadataBackend):
 
         with self._lock, self.SessionLocal() as session:
             try:
+                self._acquire_projection_transaction_guard(session, cache_key)
                 current = session.execute(
                     select(PgCacheEntry)
                     .where(PgCacheEntry.cache_key == cache_key)
