@@ -30,6 +30,7 @@ Usage:
 
 import os
 import sqlite3
+import sys
 import threading
 import uuid
 import warnings
@@ -343,6 +344,19 @@ class MetadataBackend(ABC):
         """Whether this backend owns the SQL custom-metadata protocol."""
         return False
 
+    def supports_entry_metadata_query(self) -> bool:
+        """Whether this backend owns the built-in metadata-query protocol."""
+        return False
+
+    def query_entries_by_key_params(
+        self,
+        filters: Dict[str, Any],
+        *,
+        live_keys: Any,
+    ) -> List[Dict[str, Any]]:
+        """Query built-in metadata only when this backend advertises support."""
+        raise NotImplementedError("built-in metadata querying is unsupported")
+
     def store_custom_metadata_if_current(
         self,
         cache_key: str,
@@ -524,6 +538,22 @@ class CachedMetadataBackend(MetadataBackend):
     def supports_custom_metadata(self) -> bool:
         """Expose only the wrapped backend's explicit custom-metadata support."""
         return self.backend.supports_custom_metadata()
+
+    def supports_entry_metadata_query(self) -> bool:
+        """Expose the wrapped backend's explicit built-in query capability."""
+        return self.backend.supports_entry_metadata_query()
+
+    def query_entries_by_key_params(
+        self,
+        filters: Dict[str, Any],
+        *,
+        live_keys: Any,
+    ) -> List[Dict[str, Any]]:
+        """Delegate built-in metadata querying without leaking SQL ownership."""
+        return self.backend.query_entries_by_key_params(
+            filters,
+            live_keys=live_keys,
+        )
 
     def _refresh_cached_entry(self, cache_key: str) -> None:
         """Invalidate and repopulate a wrapped entry after a delegated mutation."""
@@ -2092,6 +2122,147 @@ class SqliteBackend(MetadataBackend):
     def supports_custom_metadata(self) -> bool:
         """SQLite owns custom-metadata storage when it is not a legacy reader."""
         return self._legacy_layout is None and self.SessionLocal is not None
+
+    def supports_entry_metadata_query(self) -> bool:
+        """Advertise JSON1 query support only for persistent SQLite metadata."""
+        return (
+            self._legacy_layout is None
+            and self.db_file != ":memory:"
+            and self.SessionLocal is not None
+        )
+
+    def query_entries_by_key_params(
+        self,
+        filters: Dict[str, Any],
+        *,
+        live_keys: Any,
+    ) -> List[Dict[str, Any]]:
+        """Query validated parameter filters through this backend's SQL session."""
+        if not self.supports_entry_metadata_query():
+            raise NotImplementedError("built-in metadata querying is unsupported")
+
+        from sqlalchemy import Float, and_, bindparam, case, cast, func, or_, select
+
+        from .query_validation import (
+            to_sqlite_json_path,
+            validate_query_fields,
+            validate_query_numeric_filters,
+        )
+        from .serialization import serialize_for_cache_key
+
+        validated_fields = validate_query_fields(filters)
+        validate_query_numeric_filters(filters)
+        sqlite_paths = tuple(to_sqlite_json_path(field) for field in validated_fields)
+        live_key_values = tuple(live_keys)
+        if not live_key_values:
+            return []
+
+        with self.SessionLocal() as session:
+            query = (
+                select(
+                    CacheEntry.cache_key,
+                    CacheEntry.description,
+                    CacheEntry.data_type,
+                    CacheEntry.created_at,
+                    CacheEntry.accessed_at,
+                    CacheEntry.file_size,
+                    CacheEntry.cache_key_params,
+                )
+                .where(CacheEntry.cache_key_params.is_not(None))
+                .where(CacheEntry.cache_key.in_(live_key_values))
+                .order_by(CacheEntry.created_at.desc())
+            )
+
+            for index, ((_, value), sqlite_path) in enumerate(
+                zip(filters.items(), sqlite_paths)
+            ):
+                path_parameter = bindparam(
+                    f"query_meta_path_{index}", value=sqlite_path
+                )
+                json_value = func.json_extract(CacheEntry.cache_key_params, path_parameter)
+                value_parameter = f"query_meta_value_{index}"
+
+                if isinstance(value, bool):
+                    query = query.where(
+                        json_value
+                        == bindparam(
+                            value_parameter,
+                            value=serialize_for_cache_key(value),
+                        )
+                    )
+                elif isinstance(value, (int, float)):
+                    numeric_type = or_(
+                        func.substr(json_value, 1, 4)
+                        == bindparam(f"query_meta_int_prefix_{index}", value="int:"),
+                        func.substr(json_value, 1, 6)
+                        == bindparam(f"query_meta_float_prefix_{index}", value="float:"),
+                    )
+                    numeric_value = func.substr(
+                        json_value,
+                        func.instr(json_value, ":") + 1,
+                    )
+                    is_valid_json_number = func.json_type(
+                        case(
+                            (
+                                func.json_valid(numeric_value)
+                                == bindparam(f"query_meta_json_valid_{index}", value=1),
+                                numeric_value,
+                            ),
+                            else_=bindparam(
+                                f"query_meta_invalid_json_{index}", value="null"
+                            ),
+                        )
+                    ).in_(("integer", "real"))
+                    finite_numeric_value = and_(
+                        is_valid_json_number,
+                        func.abs(cast(numeric_value, Float))
+                        <= bindparam(
+                            f"query_meta_max_finite_{index}",
+                            value=sys.float_info.max,
+                        ),
+                    )
+                    query = query.where(
+                        numeric_type,
+                        finite_numeric_value,
+                        cast(numeric_value, Float)
+                        >= bindparam(value_parameter, value=value),
+                    )
+                else:
+                    serialized_value = None if value is None else value
+                    if value is not None and not (
+                        isinstance(value, str)
+                        and value.startswith(("str:", "int:", "float:", "bool:"))
+                    ):
+                        serialized_value = serialize_for_cache_key(value)
+                    query = query.where(
+                        json_value == bindparam(value_parameter, value=serialized_value)
+                    )
+
+            entries = []
+            for row in session.execute(query):
+                entry = {
+                    "cache_key": row.cache_key,
+                    "description": row.description,
+                    "data_type": row.data_type,
+                    "created_at": (
+                        row.created_at.isoformat()
+                        if hasattr(row.created_at, "isoformat")
+                        else str(row.created_at)
+                    ),
+                    "accessed_at": (
+                        row.accessed_at.isoformat()
+                        if hasattr(row.accessed_at, "isoformat")
+                        else str(row.accessed_at)
+                    ),
+                    "file_size": row.file_size,
+                }
+                if row.cache_key_params:
+                    try:
+                        entry["cache_key_params"] = json_loads(row.cache_key_params)
+                    except Exception:
+                        entry["cache_key_params"] = {}
+                entries.append(entry)
+            return entries
 
     def _ensure_custom_metadata_tables(self) -> None:
         """Create registered custom tables through this backend's engine only."""
