@@ -2155,7 +2155,7 @@ class SqliteBackend(MetadataBackend):
         if not self.supports_entry_metadata_query():
             raise NotImplementedError("built-in metadata querying is unsupported")
 
-        from sqlalchemy import Float, and_, bindparam, case, cast, func, or_, select
+        from sqlalchemy import Float, bindparam, case, cast, func, or_, select
 
         from .query_validation import (
             to_sqlite_json_path,

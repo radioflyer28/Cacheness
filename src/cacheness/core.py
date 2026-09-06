@@ -11,7 +11,6 @@ import xxhash
 import inspect
 import threading
 import logging
-import sys
 import uuid
 import warnings
 from contextlib import contextmanager, nullcontext
