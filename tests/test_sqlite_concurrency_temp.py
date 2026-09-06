@@ -22,6 +22,7 @@ import tempfile
 import threading
 import time
 import random
+import math
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from multiprocessing import get_context
@@ -35,21 +36,88 @@ from cacheness.error_handling import CacheBlobLifecycleTimeoutError, CacheReason
 from cacheness.storage.sqlite_lifecycle_authority import SqliteLifecycleAuthority
 
 
-_EXPECTED_CONTENTION_STAGES = frozenset(
-    {"writer_admission", "scheduler_dispatch", "sqlite_busy"}
-)
+_EXPECTED_CONTENTION_STAGES = {
+    ("high_concurrency_stress", "put"): frozenset(
+        {
+            "writer_admission",
+            "scheduler_dispatch",
+            "sqlite_busy",
+            "connection_open",
+            "connection_configure",
+            "schema_initialize",
+            "schema_validate",
+            "transaction_body",
+        }
+    ),
+    ("concurrent_metadata_access", "put"): frozenset(
+        {
+            "writer_admission",
+            "scheduler_dispatch",
+            "sqlite_busy",
+            "connection_open",
+            "connection_configure",
+            "schema_initialize",
+            "schema_validate",
+            "transaction_body",
+        }
+    ),
+    ("deadlock_prevention", "put"): frozenset(
+        {
+            "writer_admission",
+            "scheduler_dispatch",
+            "sqlite_busy",
+            "connection_open",
+            "connection_configure",
+            "schema_initialize",
+            "schema_validate",
+            "transaction_body",
+        }
+    ),
+}
+_NON_SQLITE_TIMEOUT_STAGES = frozenset({"writer_admission", "scheduler_dispatch"})
 _EXTREME_WORKLOAD_TIMEOUT_SECONDS = 15.0
 
 
-def _is_expected_contention_timeout(error: BaseException) -> bool:
+def _is_expected_contention_timeout(
+    error: BaseException,
+    scenario: str,
+    operation: str,
+) -> bool:
     """Accept only the authority's explicit bounded-contention result."""
     if not isinstance(error, CacheBlobLifecycleTimeoutError):
         return False
     context = error.context
-    return (
+    stage = context.get("stage")
+    expected_stages = _EXPECTED_CONTENTION_STAGES.get((scenario, operation), frozenset())
+    numeric_fields = (
+        "elapsed_seconds",
+        "remaining_seconds",
+        "authority_busy_timeout_seconds",
+    )
+    if not (
         context.get("reason") == CacheReason.BLOB_LIFECYCLE_TIMEOUT.value
         and context.get("operation") == "lifecycle_authority"
-        and context.get("stage") in _EXPECTED_CONTENTION_STAGES
+        and stage in expected_stages
+        and isinstance(context.get("authority_path"), str)
+        and bool(context["authority_path"])
+        and all(
+            isinstance(context.get(field), (int, float))
+            and not isinstance(context.get(field), bool)
+            and math.isfinite(context[field])
+            and context[field] >= 0
+            for field in numeric_fields
+        )
+        and context.get("authority_busy_timeout_seconds") == 0.187
+    ):
+        return False
+    if stage in _NON_SQLITE_TIMEOUT_STAGES:
+        return error.__cause__ is None
+    cause = error.__cause__
+    code = getattr(cause, "sqlite_errorcode", None)
+    return (
+        isinstance(cause, sqlite3.OperationalError)
+        and type(code) is int
+        and (code & 0xFF) in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
     )
 
 
@@ -103,7 +171,7 @@ def _execute_extreme_contention_child(
                     put_record["cache_key"] = value
                     worker_record["successful_puts"].append(put_record)
             except BaseException as error:
-                if _is_expected_contention_timeout(error):
+                if _is_expected_contention_timeout(error, scenario, name):
                     worker_record["allowed_timeouts"] += 1
                     if put_record is not None:
                         worker_record["timed_out_puts"].append(put_record)
@@ -114,6 +182,14 @@ def _execute_extreme_contention_child(
                             "type": type(error).__name__,
                             "message": str(error),
                             "context": getattr(error, "context", None),
+                            "cause_type": type(error.__cause__).__name__
+                            if error.__cause__ is not None
+                            else None,
+                            "sqlite_primary_code": (
+                                getattr(error.__cause__, "sqlite_errorcode", None) & 0xFF
+                                if type(getattr(error.__cause__, "sqlite_errorcode", None)) is int
+                                else None
+                            ),
                         }
                     )
 

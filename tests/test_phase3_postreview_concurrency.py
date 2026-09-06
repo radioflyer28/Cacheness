@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 from multiprocessing import get_context
 import os
@@ -391,3 +392,76 @@ def test_forked_child_never_acquires_an_inherited_registry_lock(tmp_path) -> Non
         "registry_after": 0,
     }
     assert SqliteLifecycleAuthority.admission_registry_size_for_test() == 0
+
+
+def test_authority_timeout_source_contract_has_one_canonical_context() -> None:
+    """Every SQLite translation and backup boundary carries the caller's budget."""
+    source = sqlite_authority_module.__file__
+    assert source is not None
+    tree = ast.parse(open(source, encoding="utf-8").read())
+    translations = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "_translate_sqlite_error"
+    ]
+    assert translations
+    required = {"operation", "stage", "deadline", "started_at"}
+    for call in translations:
+        keywords = {keyword.arg for keyword in call.keywords}
+        assert required <= keywords
+        operation = next(keyword.value for keyword in call.keywords if keyword.arg == "operation")
+        assert isinstance(operation, ast.Constant)
+        assert operation.value == "lifecycle_authority"
+
+    backup_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "backup"
+    ]
+    assert backup_calls
+    assert all(
+        any(
+            keyword.arg == "sleep"
+            and isinstance(keyword.value, ast.Constant)
+            and keyword.value.value == 0
+            for keyword in call.keywords
+        )
+        for call in backup_calls
+    )
+    assert "lifecycle_authority_read" not in open(source, encoding="utf-8").read()
+    assert "lifecycle_authority_expectation" not in open(source, encoding="utf-8").read()
+    assert "lifecycle_projection_backup" not in open(source, encoding="utf-8").read()
+    assert "lifecycle_authority_diagnostics" not in open(source, encoding="utf-8").read()
+
+
+def test_public_read_entry_busy_has_canonical_stage_and_sqlite_cause(tmp_path) -> None:
+    """A public authority read identifies its SQL boundary after preflight succeeds."""
+    authority = SqliteLifecycleAuthority.for_root(tmp_path / "entry-read-boundary")
+    _warm_authority(authority)
+    blocker: sqlite3.Connection | None = None
+
+    def block_entry_read(stage: str, _statement: str) -> None:
+        nonlocal blocker
+        if stage == "entry_read":
+            blocker = sqlite3.connect(authority.path, isolation_level=None)
+            blocker.execute("BEGIN EXCLUSIVE")
+
+    authority.set_sql_boundary_observer_for_test(block_entry_read)
+    try:
+        with pytest.raises(CacheBlobLifecycleTimeoutError) as raised:
+            authority.read_entry("missing")
+    finally:
+        if blocker is not None:
+            if blocker.in_transaction:
+                blocker.execute("ROLLBACK")
+            blocker.close()
+        authority.close()
+
+    assert raised.value.context["operation"] == "lifecycle_authority"
+    assert raised.value.context["stage"] == "entry_read"
+    assert raised.value.context["authority_busy_timeout_seconds"] == 0.187
+    assert isinstance(raised.value.__cause__, sqlite3.OperationalError)
