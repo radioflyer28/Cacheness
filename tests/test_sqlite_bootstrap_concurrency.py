@@ -248,6 +248,43 @@ def test_late_regular_leaf_reclassifies_instead_of_rejecting_valid_bootstrap(
         authority.close()
 
 
+def test_awaited_bootstrap_reclassifies_a_leaf_that_appears_during_namespace_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bounded join rechecks a valid leaf before rejecting established state."""
+    root = tmp_path / "awaited-authority-leaf"
+    reserved = root / AUTHORITY_RELATIVE_PATH.parent
+    database = root / AUTHORITY_RELATIVE_PATH
+    root.mkdir()
+    reserved.mkdir()
+    temporary = reserved / "inflight-observation"
+    temporary.write_bytes(b"temporary observer state")
+
+    authority = SqliteLifecycleAuthority.for_root(root)
+    original_classify = authority._classify_for_open
+    classifications = 0
+
+    def classify_with_leaf_during_namespace_scan() -> str:
+        nonlocal classifications
+        state = original_classify()
+        classifications += 1
+        if classifications == 6:
+            assert state == "established"
+            temporary.unlink()
+            descriptor = os.open(database, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            os.close(descriptor)
+        return state
+
+    monkeypatch.setattr(authority, "_classify_for_open", classify_with_leaf_during_namespace_scan)
+    try:
+        prepared = authority.prepare_mutation(_bootstrap_spec("awaited-leaf"))
+        assert database.is_file()
+        authority.abort_mutation(prepared, candidate_persisted=False)
+    finally:
+        authority.close()
+
+
 @pytest.mark.parametrize(
     "substitution",
     ("root-file", "reserved-file", "database-file", "root-symlink", "reserved-symlink", "database-symlink"),

@@ -219,6 +219,13 @@ class SqliteLifecycleAuthority:
             if self._classify_for_open() == "authority":
                 return False
             if not self._may_be_inflight_authority_bootstrap():
+                # ``_classify_for_open`` may observe the leaf just before a
+                # peer wins O_EXCL, while the namespace scan that follows
+                # observes that new regular leaf. Reclassify once before
+                # rejecting so a valid in-flight winner is joined, not
+                # mistaken for established legacy evidence.
+                if self._classify_for_open() == "authority":
+                    return False
                 self._reject_non_authority_state("established")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
