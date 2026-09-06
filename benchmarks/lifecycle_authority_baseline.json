@@ -31,7 +31,8 @@
     "warmups": 1
   },
   "contention": {
-    "authority_busy_timeout_seconds": 0.187,
+    "classification": "performance evidence; not runtime timeout policy",
+    "historical_runtime_budget_capture_seconds": 0.187,
     "cardinality": {
       "operations_per_worker": 1,
       "workers": 8
@@ -51,7 +52,7 @@
       "sqlite": "3.53.4"
     },
     "multiplier": 2.0,
-    "multiplier_rationale": "2x measured p99 of non-overlapping authority admission stages leaves bounded scheduler variance while remaining below 0.187 seconds.",
+    "multiplier_rationale": "2x measured p99 of the historical workload stages preserves a performance envelope without defining runtime policy.",
     "repetitions": 5,
     "source_commit": "7d7464d90134795cacf92198edb423af9e7ea07e",
     "stage_definitions": {
@@ -939,7 +940,6 @@
   },
   "derived": {
     "configuration": {
-      "authority_busy_timeout_seconds": 0.187,
       "max_operation_record_bytes": 131072,
       "max_reconcile_actions": 32,
       "operation_page_size": 32
@@ -1087,13 +1087,13 @@
   },
   "multiplier_rationale": {
     "authority_transition_latency": "4x p99 is a benchmark-only release envelope.",
-    "busy_deadline": "2x p99 leaves bounded scheduler and filesystem jitter margin.",
+    "busy_deadline": "2x p99 retains a benchmark-only busy-wait envelope.",
     "clear_snapshot_latency": "4x p99 is a benchmark-only clear-snapshot envelope.",
     "distinct_key_overlap": "80% of p05 is a benchmark-only minimum overlap envelope.",
     "reconciliation_actions": "2x p99 preserves page-action headroom.",
     "reconciliation_bytes": "2x p99 leaves headroom for real canonical records.",
     "reconciliation_rows": "2x p99 preserves a whole measured indexed page margin.",
-    "reconciliation_time": "2x p99 bounds page execution within the authority deadline."
+    "reconciliation_time": "2x p99 retains a benchmark-only page-time envelope."
   },
   "multipliers": {
     "authority_transition_latency": 4.0,
@@ -1105,5 +1105,5 @@
     "reconciliation_rows": 2.0,
     "reconciliation_time": 2.0
   },
-  "schema_version": 2
+  "schema_version": 3
 }

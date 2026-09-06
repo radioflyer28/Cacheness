@@ -12,14 +12,9 @@ from pathlib import Path
 # Import configuration classes and functions
 from cacheness.config import (
     CacheConfig,
-    CacheStorageConfig,
     CacheMetadataConfig,
     CacheBlobConfig,
-    CompressionConfig,
-    SerializationConfig,
-    HandlerConfig,
     LifecycleLimits,
-    SecurityConfig,
     ConfigValidationError,
     validate_config,
     validate_config_strict,
@@ -31,19 +26,6 @@ from cacheness.config import (
 
 # Import module-level API
 import cacheness
-
-
-LIFECYCLE_BASELINE_PATH = (
-    Path(__file__).resolve().parents[1]
-    / "benchmarks"
-    / "lifecycle_authority_baseline.json"
-)
-
-
-def _derived_lifecycle_limits() -> dict[str, int | float]:
-    """Load the checked-in measured configuration contract for defaults."""
-    with LIFECYCLE_BASELINE_PATH.open(encoding="utf-8") as handle:
-        return json.load(handle)["derived"]["configuration"]
 
 
 # =============================================================================
@@ -188,16 +170,12 @@ class TestLifecycleLimits:
     def test_defaults_exports_and_blobstore_identity(self, temp_dir):
         """One config-owned limits instance reaches the direct storage facade unchanged."""
         limits = LifecycleLimits()
-        measured = _derived_lifecycle_limits()
-        assert limits.max_operation_record_bytes == measured["max_operation_record_bytes"]
+        assert limits.max_operation_record_bytes == 131_072
         assert limits.max_operation_field_bytes == 8_192
         assert limits.manifest_page_size == 256
-        assert limits.operation_page_size == measured["operation_page_size"]
-        assert limits.max_reconcile_actions == measured["max_reconcile_actions"]
-        assert (
-            limits.authority_busy_timeout_seconds
-            == measured["authority_busy_timeout_seconds"]
-        )
+        assert limits.operation_page_size == 32
+        assert limits.max_reconcile_actions == 32
+        assert limits.authority_busy_timeout_seconds == 5.0
         assert limits.orphan_grace_seconds == 300.0
         assert limits.close_wait_seconds == 30.0
         assert cacheness.LifecycleLimits is LifecycleLimits
@@ -214,6 +192,12 @@ class TestLifecycleLimits:
         finally:
             store.close()
 
+    def test_authority_busy_timeout_policy_accepts_explicit_shorter_override(self):
+        """The runtime busy bound is caller-owned and independent of benchmark JSON."""
+        limits = LifecycleLimits(authority_busy_timeout_seconds=0.04)
+
+        assert limits.authority_busy_timeout_seconds == 0.04
+
     @pytest.mark.parametrize(
         ("field", "value"),
         (
@@ -224,6 +208,8 @@ class TestLifecycleLimits:
             ("max_reconcile_actions", 0),
             ("orphan_grace_seconds", float("nan")),
             ("close_wait_seconds", float("inf")),
+            ("authority_busy_timeout_seconds", False),
+            ("authority_busy_timeout_seconds", 0),
         ),
     )
     def test_invalid_lifecycle_limit_values_are_rejected(self, field, value):
@@ -702,7 +688,7 @@ class TestYamlConfig:
         """Check if PyYAML is available."""
         try:
             import yaml
-            return True
+            return yaml is not None
         except ImportError:
             pytest.skip("PyYAML not installed")
     
