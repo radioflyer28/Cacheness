@@ -5,7 +5,9 @@ from __future__ import annotations
 import ast
 import inspect
 import logging
+import sqlite3
 import textwrap
+from threading import Barrier, Thread
 
 import pytest
 
@@ -98,6 +100,51 @@ def test_cached_sqlite_query_meta_delegates_matching_and_live_keys(
     ] == [matching_key]
 
 
+def test_public_query_meta_uses_fresh_read_only_pool_connections_under_writer(
+    cached_sqlite_cache,
+) -> None:
+    """New pooled readers retain committed query visibility during a writer lock."""
+    cache = cached_sqlite_cache
+    cache.put("stable", cohort="read-wave", ordinal=1)
+    expected = cache.query_meta(cohort="read-wave")
+    assert isinstance(expected, list)
+    assert expected
+
+    backend = cache.metadata_backend.backend
+    backend.engine.dispose()
+    writer = sqlite3.connect(backend.db_file, isolation_level=None)
+    writer.execute("BEGIN IMMEDIATE")
+    barrier = Barrier(7)
+    results: list[list[dict]] = []
+    errors: list[BaseException] = []
+
+    def reader() -> None:
+        try:
+            barrier.wait(timeout=5)
+            for _ in range(8):
+                result = cache.query_meta(cohort="read-wave")
+                assert result == expected
+                results.append(result)
+        except BaseException as error:  # pragma: no cover - asserted after joins.
+            errors.append(error)
+
+    threads = [Thread(target=reader) for _ in range(6)]
+    try:
+        for thread in threads:
+            thread.start()
+        barrier.wait(timeout=5)
+        for thread in threads:
+            thread.join(timeout=5)
+            assert not thread.is_alive()
+    finally:
+        writer.execute("ROLLBACK")
+        writer.close()
+
+    assert errors == []
+    assert len(results) == 48
+    assert backend.engine.pool.checkedout() == 0
+
+
 @pytest.mark.parametrize("backend", ("json", "memory", "sqlite_memory"))
 def test_query_meta_keeps_unsupported_backend_warning_policy(
     tmp_path,
@@ -162,4 +209,3 @@ def test_query_meta_body_has_no_concrete_sql_session_dependency() -> None:
     names = {node.id for node in ast.walk(function) if isinstance(node, ast.Name)}
 
     assert {"SessionLocal", "engine", "CacheEntry", "SQLAlchemy"}.isdisjoint(names)
-
