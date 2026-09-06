@@ -3,17 +3,17 @@ gsd_state_version: 1.0
 milestone: v1.0
 current_phase: 03
 current_phase_name: Atomic Lifecycle and Recovery Engine
-status: ready_to_execute
-stopped_at: Inline gap planning complete; next 03-21-PLAN.md
-last_updated: "2026-09-06T19:25:46.168Z"
+status: phase_complete
+stopped_at: Phase 3 direct implementation qualified; next Phase 4 design
+last_updated: "2026-09-06T21:12:18Z"
 last_activity: 2026-09-06
-last_activity_desc: Audit-grounded gap plans 03-21 through 03-25 authored and reviewed inline; implementation pending
-state_head: f5d406ac7cec0af4fb403df607b7c967aa9f5319
+last_activity_desc: Direct primary-agent implementation and exact-commit qualification complete; GSD execute/review deliberately bypassed
+state_head: 5282dcabc7157037d95144527a220f51e51c9803
 progress:
   total_phases: 8
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 46
-  completed_plans: 41
+  completed_plans: 46
 milestone_name: milestone
 ---
 
@@ -28,19 +28,25 @@ See: .planning/PROJECT.md (updated 2026-09-06)
 
 ## Current Position
 
-Phase: 03 (Atomic Lifecycle and Recovery Engine) — READY TO EXECUTE
-Plan: 19 of 24 canonical complete; next 03-21 (03-19 superseded)
-Status: Ready to execute gap plans 03-21 through 03-25; verification remains gaps_found
-Last activity: 2026-09-06 — Completed audit-grounded inline planning and self-review; startup and derived-state compatibility checkpoints remain unapproved until execution
+Phase: 03 (Atomic Lifecycle and Recovery Engine) — DIRECTLY QUALIFIED
+Plan: 24 of 24 canonical complete (03-19 superseded); next Phase 4 design
+Status: Completed 03-21 through 03-25 directly, with user-approved initialization and derived-state failure contracts
+Last activity: 2026-09-06 — Qualified 5282dca; production code is c37f418. Full Python 3.11 suite, named gates, Python 3.13 focused suite, Ruff and benchmark pass. See docs/phase3-direct-implementation-2026-09-06.md and 03-25-SUMMARY.md.
 
-Progress: [██░░░░░░░░] 2 of 8 phases complete
+The user explicitly bypassed GSD execute/review/checker. The older
+03-VERIFICATION.md remains historical gaps_found evidence, not the current
+disposition or an instruction to re-execute closed plans. This completion is
+direct primary-agent qualification, not an independent GSD verifier verdict.
+Windows remains UNAVAILABLE/NOT_QUALIFIED; Phase 999.1 is unchanged.
+
+Progress: [████░░░░░░] 3 of 8 phases complete
 
 ## Performance Metrics
 
 *Updated after each plan completion*
 **Per-Plan Metrics:**
 
-Phase 03 rows in this historical table include superseded attempts and do not define current completion. Authoritative milestone progress is 41 of 46 canonical plans: Phase 1 has 15, Phase 2 has 7, and Phase 3 has 19 completed plus 5 pending. Plan 03-19 is excluded. Raw filesystem plan counts may include that superseded plan and must not overwrite canonical progress.
+Phase 03 rows in this historical table include superseded attempts and do not define current completion. Authoritative milestone progress is 46 of 46 currently planned canonical plans: Phase 1 has 15, Phase 2 has 7, and Phase 3 has 24 complete. The last five were implemented directly in one bounded pass. Later phases remain unplanned. Plan 03-19 is excluded.
 
 | Plan | Duration | Tasks | Files |
 |------|----------|-------|-------|
@@ -225,9 +231,9 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ### Pending Todos
 
-- Execute 03-21, then the dependent 03-22 through 03-25 gap plans; do not execute the replaced private-bootstrap draft or superseded 03-19.
-- Obtain the explicit initialization and derived-state failure-behavior approvals at 03-22/24 before those compatibility changes.
-- Keep Phase 3 gaps_found until exact-commit qualification and fresh verification; no automatic repeated race-fix loop.
+- Begin Phase 4 catalog customization and narrow the transactional adapter interface before backend expansion.
+- Apply ADR 0001 and the direct implementation guide; the user approved both 03-22/24 compatibility checkpoints with “proceed.”
+- Do not restart closed 03-21 through 03-25 gaps or an automated race-fix loop from historical review/verification artifacts.
 
 ### Blockers/Concerns
 
@@ -248,5 +254,5 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 ## Session Continuity
 
 Last session: 2026-09-06
-Stopped at: Inline gap planning complete; next 03-21-PLAN.md
+Stopped at: Phase 3 directly qualified; next Phase 4 design
 Resume file: None

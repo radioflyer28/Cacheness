@@ -8,7 +8,7 @@ Cacheness will move from overlapping cache and storage paths to one storage engi
 
 - [x] **Phase 1: Compatibility and Security Baseline** - Freeze supported behavior and close the currently exposed path, parser, query, and trust-boundary gaps.
 - [x] **Phase 2: Canonical Storage and Integrity Contract** - Give direct `BlobStore` callers one versioned manifest, committed-read model, and fail-closed integrity contract. (completed 2026-08-30)
-- [ ] **Phase 3: Atomic Lifecycle and Recovery Engine** - Make writes, replacements, deletions, races, and crash residue converge without corrupting the last valid generation.
+- [x] **Phase 3: Atomic Lifecycle and Recovery Engine** - Make writes, replacements, deletions, races, and crash residue converge without corrupting the last valid generation.
 - [ ] **Phase 4: Metadata Composition and Topology Contracts** - Unify all metadata backends behind one injectable CAS contract with honest capability validation.
 - [ ] **Phase 5: Payload Backends and Full Matrix Parity** - Put filesystem, memory, and AWS S3 payloads through the complete lifecycle across every supported metadata pairing.
 - [ ] **Phase 6: UnifiedCache Policy Composition** - Route cache behavior through `BlobStore` while preserving public APIs, cache semantics, and the `SqlCache` boundary.
@@ -116,7 +116,7 @@ Plans:
   6. Direct application metadata round-trips through BlobStore, and a separate cache instance uses its supported same-generation read/write interface for a local put/get/TTL slice. Corrupt or unavailable derived projections cannot revoke valid blobs.
   7. Startup and post-commit compatibility changes have recorded approval; incomplete initialization fails closed unchanged, with no concurrent-first-create availability promise or new filesystem publication protocol.
 
-**Plans**: 19/24 canonical plans executed; 03-21 through 03-25 pending (03-19 superseded). Verification remains gaps_found; new plans were authored and reviewed inline, not independently checked.
+**Plans**: 24/24 canonical plans complete (03-19 superseded). Plans 03-21 through 03-25 were implemented and qualified directly by the primary agent at the user's request, bypassing GSD execute/review/checker. The exact qualified tree is `5282dca`; see `03-25-SUMMARY.md` and `docs/phase3-direct-implementation-2026-09-06.md`. The older GSD verification report is historical, not a fresh independent verdict or a reason to repeat closed gaps.
 
 Plans:
 **Wave 1**
@@ -198,23 +198,23 @@ Plans:
 
 **Wave 20** *(blocked on Wave 19 completion)*
 
-- [ ] 03-21-PLAN.md — Close bounded memory abort/debt and strict projection-parser gaps; replaces the unexecuted private-bootstrap draft
+- [x] 03-21-PLAN.md — Close bounded memory abort/debt and strict projection-parser gaps; replaces the unexecuted private-bootstrap draft
 
 **Wave 21** *(blocked on Wave 20 completion)*
 
-- [ ] 03-22-PLAN.md — Approve and implement initialization before shared-worker use; classify SQLite operational failures precisely
+- [x] 03-22-PLAN.md — Approve and implement initialization before shared-worker use; classify SQLite operational failures precisely
 
 **Wave 22** *(blocked on Wave 21 completion)*
 
-- [ ] 03-23-PLAN.md — Expose supported same-generation BlobStore entry snapshots and committed receipts with engine-owned cleanup
+- [x] 03-23-PLAN.md — Expose supported same-generation BlobStore entry snapshots and committed receipts with engine-owned cleanup
 
 **Wave 23** *(blocked on Wave 22 completion)*
 
-- [ ] 03-24-PLAN.md — Approve derived-state failure semantics, route canonical cache policy through BlobStore, and remove duplicate facade sequencing
+- [x] 03-24-PLAN.md — Approve derived-state failure semantics, route canonical cache policy through BlobStore, and remove duplicate facade sequencing
 
 **Wave 24** *(blocked on Wave 23 completion)*
 
-- [ ] 03-25-PLAN.md — Qualify finite public workflows and named failure classes at an exact committed tree; no automatic repair loop
+- [x] 03-25-PLAN.md — Qualify finite public workflows and named failure classes at an exact committed tree; no automatic repair loop
 
 Cross-cutting constraints: one authoritative catalog; immutable native payloads outside transactions; exact-generation deletion; optional projections never revoke valid data; initialization and failure-contract checkpoints; integrity/recovery separate from progress/performance; original dirty fixture evidence preserved; Windows remains UNAVAILABLE/NOT_QUALIFIED.
 
@@ -301,7 +301,7 @@ The current gap design is `03-GAP-REPLAN.md`. The broader adapter protocol is tr
 |-------|----------------|--------|-----------|
 | 1. Compatibility and Security Baseline | 15/15 | Complete | 2026-08-30 |
 | 2. Canonical Storage and Integrity Contract | 7/7 | Complete    | 2026-08-30 |
-| 3. Atomic Lifecycle and Recovery Engine | 19/24 | Gap plans ready; verification gaps_found |  |
+| 3. Atomic Lifecycle and Recovery Engine | 24/24 | Complete — direct qualification | 2026-09-06 |
 | 4. Metadata Composition and Topology Contracts | 0/TBD | Not started | - |
 | 5. Payload Backends and Full Matrix Parity | 0/TBD | Not started | - |
 | 6. UnifiedCache Policy Composition | 0/TBD | Not started | - |
