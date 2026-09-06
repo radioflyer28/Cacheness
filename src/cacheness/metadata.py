@@ -28,6 +28,7 @@ Usage:
     cache = UnifiedCache(metadata_backend=backend)
 """
 
+import json
 import os
 import sqlite3
 import sys
@@ -1817,6 +1818,159 @@ class SqliteBackend(MetadataBackend):
         )
 
     @staticmethod
+    def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        """Decode JSON objects without allowing later duplicate keys to win."""
+        decoded: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in decoded:
+                raise ValueError("duplicate JSON object key")
+            decoded[key] = value
+        return decoded
+
+    @staticmethod
+    def _metadata_query_error(
+        cache_key: Optional[str] = None,
+        **details: Any,
+    ) -> CacheIntegrityError:
+        """Build a key-attributed integrity result without persisting evidence."""
+        context: Dict[str, Any] = {
+            "reason": CacheReason.METADATA_CORRUPT.value,
+            "backend": "sqlite",
+            "operation": "query_entries_by_key_params",
+        }
+        if cache_key is not None:
+            context["cache_key"] = cache_key
+        context.update(details)
+        return CacheIntegrityError("SQLite metadata query evidence is corrupt", context=context)
+
+    def _decode_cache_key_params(
+        self,
+        cache_key: str,
+        sqlite_type: Any,
+        raw_value: Any,
+    ) -> dict[str, Any]:
+        """Decode one persisted query mapping under the canonical manifest bounds."""
+        # Import lazily: cacheness.storage imports BlobStore, which imports this
+        # module during package initialization.
+        from .storage.manifest import (
+            MAX_COLLECTION_ITEMS,
+            MAX_MANIFEST_BYTES,
+            MAX_NESTING_DEPTH,
+            MAX_STRING_UTF8_BYTES,
+            MAX_TOTAL_NODES,
+        )
+
+        if isinstance(raw_value, memoryview):
+            raw_value = raw_value.tobytes()
+        if not isinstance(raw_value, bytes):
+            raw_value = b""
+        observed_type = str(sqlite_type).lower()
+        common = {
+            "field": "cache_key_params",
+            "sqlite_type": observed_type,
+            "byte_size": len(raw_value),
+        }
+        if observed_type != "text":
+            raise self._metadata_query_error(cache_key, **common)
+        if len(raw_value) > MAX_MANIFEST_BYTES:
+            raise self._metadata_query_error(
+                cache_key,
+                **common,
+                bound="MAX_MANIFEST_BYTES",
+                limit=MAX_MANIFEST_BYTES,
+            )
+        try:
+            decoded = json.loads(
+                raw_value.decode("utf-8"),
+                object_pairs_hook=self._reject_duplicate_json_keys,
+            )
+        except (UnicodeDecodeError, ValueError, TypeError) as error:
+            raise self._metadata_query_error(cache_key, **common) from error
+        if type(decoded) is not dict:
+            raise self._metadata_query_error(cache_key, **common)
+
+        nodes = 0
+
+        def validate(value: Any, depth: int) -> None:
+            nonlocal nodes
+            nodes += 1
+            if nodes > MAX_TOTAL_NODES:
+                raise self._metadata_query_error(
+                    cache_key,
+                    **common,
+                    bound="MAX_TOTAL_NODES",
+                    limit=MAX_TOTAL_NODES,
+                )
+            if depth > MAX_NESTING_DEPTH:
+                raise self._metadata_query_error(
+                    cache_key,
+                    **common,
+                    bound="MAX_NESTING_DEPTH",
+                    limit=MAX_NESTING_DEPTH,
+                )
+            if isinstance(value, str):
+                if len(value.encode("utf-8")) > MAX_STRING_UTF8_BYTES:
+                    raise self._metadata_query_error(
+                        cache_key,
+                        **common,
+                        bound="MAX_STRING_UTF8_BYTES",
+                        limit=MAX_STRING_UTF8_BYTES,
+                    )
+                return
+            if type(value) is dict:
+                if len(value) > MAX_COLLECTION_ITEMS:
+                    raise self._metadata_query_error(
+                        cache_key,
+                        **common,
+                        bound="MAX_COLLECTION_ITEMS",
+                        limit=MAX_COLLECTION_ITEMS,
+                    )
+                for name, item in value.items():
+                    if type(name) is not str:
+                        raise self._metadata_query_error(cache_key, **common)
+                    validate(name, depth + 1)
+                    validate(item, depth + 1)
+                return
+            if type(value) is list:
+                if len(value) > MAX_COLLECTION_ITEMS:
+                    raise self._metadata_query_error(
+                        cache_key,
+                        **common,
+                        bound="MAX_COLLECTION_ITEMS",
+                        limit=MAX_COLLECTION_ITEMS,
+                    )
+                for item in value:
+                    validate(item, depth + 1)
+
+        validate(decoded, 1)
+        return decoded
+
+    def _translate_sqlite_query_dbapi_error(
+        self,
+        error: BaseException,
+        *,
+        operation: str,
+    ) -> None:
+        """Preserve only the documented SQLite availability compatibility path."""
+        primary = self._sqlite_primary_error_code(error)
+        if primary in {
+            sqlite3.SQLITE_BUSY,
+            sqlite3.SQLITE_LOCKED,
+            sqlite3.SQLITE_IOERR,
+            sqlite3.SQLITE_CANTOPEN,
+            sqlite3.SQLITE_FULL,
+            sqlite3.SQLITE_READONLY,
+            sqlite3.SQLITE_PROTOCOL,
+        }:
+            raise CacheMetadataError(
+                "SQLite metadata query failed",
+                context={"backend": "sqlite", "operation": operation},
+            ) from error
+        if primary in {sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB}:
+            raise self._metadata_query_error(operation=operation) from error
+        raise error
+
+    @staticmethod
     def _schema_execute(connection, statement: str):
         """Execute fixed SQLite introspection SQL for DBAPI or SQLAlchemy callers."""
         execute_driver_sql = getattr(connection, "exec_driver_sql", None)
@@ -2430,7 +2584,17 @@ class SqliteBackend(MetadataBackend):
         if not self.supports_entry_metadata_query():
             raise NotImplementedError("built-in metadata querying is unsupported")
 
-        from sqlalchemy import Float, bindparam, case, cast, func, or_, select
+        from sqlalchemy import (
+            Float,
+            LargeBinary,
+            bindparam,
+            case,
+            cast,
+            func,
+            or_,
+            select,
+            text,
+        )
 
         from .query_validation import (
             to_sqlite_json_path,
@@ -2445,120 +2609,153 @@ class SqliteBackend(MetadataBackend):
         live_pair_values = tuple(live_pairs)
         if not live_pair_values:
             return []
+        session_context = self.SessionLocal()
+        session = session_context.__enter__()
         try:
-            with self.SessionLocal() as session:
-                query = (
-                    select(
-                        CacheEntry.cache_key,
-                        CacheEntry.description,
-                        CacheEntry.data_type,
-                        CacheEntry.created_at,
-                        CacheEntry.accessed_at,
-                        CacheEntry.file_size,
-                        CacheEntry.cache_key_params,
+            connection_factory = getattr(session, "connection", None)
+            if callable(connection_factory):
+                connection_factory().exec_driver_sql("BEGIN")
+            else:
+                # Compatibility test adapters intentionally expose only the
+                # public execute protocol; their context owns the real session.
+                session.execute(text("BEGIN"))
+            raw_parameters = session.execute(
+                select(
+                    CacheEntry.cache_key,
+                    CacheEntry.actual_path,
+                    func.typeof(CacheEntry.cache_key_params).label("sqlite_type"),
+                    cast(CacheEntry.cache_key_params, LargeBinary).label("raw_value"),
+                ).where(
+                    tuple_(CacheEntry.cache_key, CacheEntry.actual_path).in_(
+                        live_pair_values
                     )
-                    .where(CacheEntry.cache_key_params.is_not(None))
-                    .where(
-                        tuple_(CacheEntry.cache_key, CacheEntry.actual_path).in_(
-                            live_pair_values
-                        )
-                    )
-                    .order_by(CacheEntry.created_at.desc())
                 )
-                for index, ((_, value), sqlite_path) in enumerate(
-                    zip(filters.items(), sqlite_paths)
-                ):
-                    path_parameter = bindparam(
-                        f"query_meta_path_{index}", value=sqlite_path
+            ).all()
+            decoded_parameters = {
+                (row.cache_key, row.actual_path): self._decode_cache_key_params(
+                    row.cache_key, row.sqlite_type, row.raw_value
+                )
+                for row in raw_parameters
+            }
+            safe_params = case(
+                (
+                    func.json_valid(CacheEntry.cache_key_params)
+                    == bindparam("query_meta_params_json_valid", value=1),
+                    CacheEntry.cache_key_params,
+                ),
+                else_=bindparam("query_meta_invalid_params", value="{}"),
+            )
+            query = (
+                select(
+                    CacheEntry.cache_key,
+                    CacheEntry.actual_path,
+                    CacheEntry.description,
+                    CacheEntry.data_type,
+                    CacheEntry.created_at,
+                    CacheEntry.accessed_at,
+                    CacheEntry.file_size,
+                )
+                .where(
+                    tuple_(CacheEntry.cache_key, CacheEntry.actual_path).in_(
+                        live_pair_values
                     )
-                    json_value = func.json_extract(
-                        CacheEntry.cache_key_params, path_parameter
+                )
+                .order_by(CacheEntry.created_at.desc())
+            )
+            for index, ((_, value), sqlite_path) in enumerate(
+                zip(filters.items(), sqlite_paths)
+            ):
+                path_parameter = bindparam(f"query_meta_path_{index}", value=sqlite_path)
+                json_value = func.json_extract(safe_params, path_parameter)
+                value_parameter = f"query_meta_value_{index}"
+                if isinstance(value, bool):
+                    query = query.where(
+                        json_value
+                        == bindparam(
+                            value_parameter,
+                            value=serialize_for_cache_key(value),
+                        )
                     )
-                    value_parameter = f"query_meta_value_{index}"
-                    if isinstance(value, bool):
-                        query = query.where(
-                            json_value
-                            == bindparam(
-                                value_parameter,
-                                value=serialize_for_cache_key(value),
-                            )
-                        )
-                    elif isinstance(value, (int, float)):
-                        numeric_type = or_(
-                            func.substr(json_value, 1, 4)
-                            == bindparam(f"query_meta_int_prefix_{index}", value="int:"),
-                            func.substr(json_value, 1, 6)
-                            == bindparam(f"query_meta_float_prefix_{index}", value="float:"),
-                        )
-                        numeric_value = func.substr(
-                            json_value, func.instr(json_value, ":") + 1
-                        )
-                        is_valid_json_number = func.json_type(
-                            case(
-                                (
-                                    func.json_valid(numeric_value)
-                                    == bindparam(
-                                        f"query_meta_json_valid_{index}", value=1
-                                    ),
-                                    numeric_value,
-                                ),
-                                else_=bindparam(
-                                    f"query_meta_invalid_json_{index}", value="null"
-                                ),
-                            )
-                        ).in_(("integer", "real"))
-                        query = query.where(
-                            numeric_type,
-                            is_valid_json_number,
-                            func.abs(cast(numeric_value, Float))
-                            <= bindparam(
-                                f"query_meta_max_finite_{index}",
-                                value=sys.float_info.max,
+                elif isinstance(value, (int, float)):
+                    numeric_type = or_(
+                        func.substr(json_value, 1, 4)
+                        == bindparam(f"query_meta_int_prefix_{index}", value="int:"),
+                        func.substr(json_value, 1, 6)
+                        == bindparam(f"query_meta_float_prefix_{index}", value="float:"),
+                    )
+                    numeric_value = func.substr(json_value, func.instr(json_value, ":") + 1)
+                    is_valid_json_number = func.json_type(
+                        case(
+                            (
+                                func.json_valid(numeric_value)
+                                == bindparam(f"query_meta_json_valid_{index}", value=1),
+                                numeric_value,
                             ),
-                            cast(numeric_value, Float)
-                            >= bindparam(value_parameter, value=value),
+                            else_=bindparam(f"query_meta_invalid_json_{index}", value="null"),
                         )
-                    else:
-                        serialized_value = None if value is None else value
-                        if value is not None and not (
-                            isinstance(value, str)
-                            and value.startswith(("str:", "int:", "float:", "bool:"))
-                        ):
-                            serialized_value = serialize_for_cache_key(value)
-                        query = query.where(
-                            json_value
-                            == bindparam(value_parameter, value=serialized_value)
-                        )
-                entries = []
-                for row in session.execute(query):
-                    entry = {
-                        "cache_key": row.cache_key,
-                        "description": row.description,
-                        "data_type": row.data_type,
-                        "created_at": (
-                            row.created_at.isoformat()
-                            if hasattr(row.created_at, "isoformat")
-                            else str(row.created_at)
+                    ).in_(("integer", "real"))
+                    query = query.where(
+                        numeric_type,
+                        is_valid_json_number,
+                        func.abs(cast(numeric_value, Float))
+                        <= bindparam(
+                            f"query_meta_max_finite_{index}",
+                            value=sys.float_info.max,
                         ),
-                        "accessed_at": (
-                            row.accessed_at.isoformat()
-                            if hasattr(row.accessed_at, "isoformat")
-                            else str(row.accessed_at)
-                        ),
-                        "file_size": row.file_size,
-                    }
-                    if row.cache_key_params:
-                        try:
-                            entry["cache_key_params"] = json_loads(row.cache_key_params)
-                        except Exception:
-                            entry["cache_key_params"] = {}
-                    entries.append(entry)
-                return entries
+                        cast(numeric_value, Float)
+                        >= bindparam(value_parameter, value=value),
+                    )
+                else:
+                    serialized_value = None if value is None else value
+                    if value is not None and not (
+                        isinstance(value, str)
+                        and value.startswith(("str:", "int:", "float:", "bool:"))
+                    ):
+                        serialized_value = serialize_for_cache_key(value)
+                    query = query.where(
+                        json_value == bindparam(value_parameter, value=serialized_value)
+                    )
+            entries = []
+            for row in session.execute(query).all():
+                entry = {
+                    "cache_key": row.cache_key,
+                    "description": row.description,
+                    "data_type": row.data_type,
+                    "created_at": (
+                        row.created_at.isoformat()
+                        if hasattr(row.created_at, "isoformat")
+                        else str(row.created_at)
+                    ),
+                    "accessed_at": (
+                        row.accessed_at.isoformat()
+                        if hasattr(row.accessed_at, "isoformat")
+                        else str(row.accessed_at)
+                    ),
+                    "file_size": row.file_size,
+                    "cache_key_params": decoded_parameters[
+                        (row.cache_key, row.actual_path)
+                    ],
+                }
+                entries.append(entry)
+            commit = getattr(session, "commit", None)
+            if callable(commit):
+                commit()
+            return entries
         except DBAPIError as error:
-            raise CacheMetadataError(
-                "SQLite metadata query failed",
-                context={"backend": "sqlite", "operation": "query_entries_by_key_params"},
-            ) from error
+            rollback = getattr(session, "rollback", None)
+            if callable(rollback):
+                rollback()
+            self._translate_sqlite_query_dbapi_error(
+                error, operation="query_entries_by_key_params"
+            )
+            raise AssertionError("SQLite error classifier must raise")
+        except (CacheIntegrityError, CacheMetadataError):
+            rollback = getattr(session, "rollback", None)
+            if callable(rollback):
+                rollback()
+            raise
+        finally:
+            session_context.__exit__(*sys.exc_info())
 
     def _ensure_custom_metadata_tables(self) -> None:
         """Create registered custom tables through this backend's engine only."""
@@ -2666,10 +2863,8 @@ class SqliteBackend(MetadataBackend):
         try:
             return self._list_entries()
         except DBAPIError as error:
-            raise CacheMetadataError(
-                "SQLite metadata listing failed",
-                context={"backend": "sqlite", "operation": "list_entries"},
-            ) from error
+            self._translate_sqlite_query_dbapi_error(error, operation="list_entries")
+            raise AssertionError("SQLite error classifier must raise")
 
     def _list_entries(self) -> List[Dict[str, Any]]:
         """List all cache entries using columns directly - zero JSON parsing overhead for backend data."""
@@ -2701,15 +2896,31 @@ class SqliteBackend(MetadataBackend):
                     }
                 )
             return result
+        from sqlalchemy import LargeBinary, cast
+
         with self.SessionLocal() as session:
-            # Use a single optimized query to get all data at once
-            entries = (
-                session.execute(
-                    select(CacheEntry).order_by(desc(CacheEntry.created_at))
-                )
-                .scalars()
-                .all()
-            )
+            # Read the persisted JSON through a BLOB-safe projection.  Listing
+            # is deliberately permissive because authority selection decides
+            # which exact rows become live and undergo strict decoding later.
+            entries = session.execute(
+                select(
+                    CacheEntry.cache_key,
+                    CacheEntry.data_type,
+                    CacheEntry.description,
+                    CacheEntry.object_type,
+                    CacheEntry.storage_format,
+                    CacheEntry.serializer,
+                    CacheEntry.compression_codec,
+                    CacheEntry.actual_path,
+                    CacheEntry.file_hash,
+                    CacheEntry.entry_signature,
+                    CacheEntry.created_at,
+                    CacheEntry.accessed_at,
+                    CacheEntry.file_size,
+                    func.typeof(CacheEntry.cache_key_params).label("sqlite_type"),
+                    cast(CacheEntry.cache_key_params, LargeBinary).label("raw_params"),
+                ).order_by(desc(CacheEntry.created_at))
+            ).all()
 
             result = []
             for entry in entries:
@@ -2735,10 +2946,12 @@ class SqliteBackend(MetadataBackend):
                     entry_metadata["entry_signature"] = entry.entry_signature
                 
                 # Only parse cache_key_params JSON if it exists (should be disabled by default)
-                if entry.cache_key_params is not None:
+                if entry.sqlite_type == "text" and isinstance(entry.raw_params, bytes):
                     try:
-                        entry_metadata["cache_key_params"] = json_loads(entry.cache_key_params)
-                    except (ValueError, TypeError):
+                        params = json_loads(entry.raw_params.decode("utf-8"))
+                        if type(params) is dict:
+                            entry_metadata["cache_key_params"] = params
+                    except (UnicodeDecodeError, ValueError, TypeError):
                         pass  # Skip malformed cache_key_params
                         
                 result.append(

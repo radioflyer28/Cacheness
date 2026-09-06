@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import json
 import logging
 import sqlite3
 import textwrap
@@ -20,6 +21,11 @@ from cacheness.error_handling import (
 )
 from cacheness.json_utils import dumps as json_dumps
 from cacheness.metadata import CacheEntry, CachedMetadataBackend, SqliteBackend
+from cacheness.storage.manifest import (
+    MAX_MANIFEST_BYTES,
+    MAX_NESTING_DEPTH,
+    MAX_STRING_UTF8_BYTES,
+)
 
 
 @pytest.fixture
@@ -274,6 +280,186 @@ def test_public_query_meta_rejects_malformed_live_parameter_evidence(
                 "SELECT cache_key_params FROM cache_entries WHERE cache_key = ?",
                 (cache_key,),
             ).fetchone() == ("{",)
+        assert backend.engine.pool.checkedout() == 0
+    finally:
+        cache.close()
+
+
+@pytest.mark.parametrize(
+    ("expression", "parameters", "expected_type"),
+    (
+        ("NULL", (), "null"),
+        # SQLite's declared TEXT affinity converts direct integer/real updates
+        # to TEXT; their malformed textual representation is still rejected.
+        ("1", (), "text"),
+        ("1.5", (), "text"),
+        ("CAST(? AS BLOB)", (b'{"experiment":"str:typed"}',), "blob"),
+        ("CAST(X'FF' AS TEXT)", (), "text"),
+        ("?", ("[",), "text"),
+        ("?", ("[]",), "text"),
+    ),
+)
+def test_public_query_meta_rejects_every_corrupt_live_storage_shape(
+    tmp_path,
+    expression: str,
+    parameters: tuple[object, ...],
+    expected_type: str,
+) -> None:
+    """Persisted parameter storage is exact SQLite TEXT containing one mapping."""
+    cache = UnifiedCache(
+        CacheConfig(
+            cache_dir=str(tmp_path / "typed-corruption"),
+            metadata_backend="sqlite",
+            store_cache_key_params=True,
+        )
+    )
+    try:
+        cache_key = cache.put("value", experiment="typed")
+        backend = cache.metadata_backend
+        assert isinstance(backend, SqliteBackend)
+        with sqlite3.connect(backend.db_file) as connection:
+            connection.execute(
+                f"UPDATE cache_entries SET cache_key_params = {expression} "
+                "WHERE cache_key = ?",
+                (*parameters, cache_key),
+            )
+            connection.commit()
+            original = connection.execute(
+                "SELECT typeof(cache_key_params), hex(cache_key_params) "
+                "FROM cache_entries WHERE cache_key = ?",
+                (cache_key,),
+            ).fetchone()
+
+        with pytest.raises(CacheIntegrityError) as error:
+            cache.query_meta(experiment="typed")
+
+        assert error.value.context["reason"] == CacheReason.METADATA_CORRUPT.value
+        assert error.value.context["cache_key"] == cache_key
+        assert error.value.context["sqlite_type"] == expected_type
+        with sqlite3.connect(backend.db_file) as connection:
+            assert connection.execute(
+                "SELECT typeof(cache_key_params), hex(cache_key_params) "
+                "FROM cache_entries WHERE cache_key = ?",
+                (cache_key,),
+            ).fetchone() == original
+        assert backend.engine.pool.checkedout() == 0
+    finally:
+        cache.close()
+
+
+@pytest.mark.parametrize(
+    ("payload", "bound"),
+    (
+        (
+            json.dumps(
+                {"x": "a" * (MAX_STRING_UTF8_BYTES + 1)}, separators=(",", ":")
+            ),
+            "MAX_STRING_UTF8_BYTES",
+        ),
+        (
+            '{"a":' * (MAX_NESTING_DEPTH + 1) + "0" + "}" * (MAX_NESTING_DEPTH + 1),
+            "MAX_NESTING_DEPTH",
+        ),
+    ),
+)
+def test_public_query_meta_reports_canonical_parameter_bounds(
+    tmp_path, payload: str, bound: str
+) -> None:
+    """Strict decoding reports the canonical bound without replacing evidence."""
+    cache = UnifiedCache(
+        CacheConfig(
+            cache_dir=str(tmp_path / "bound-corruption"),
+            metadata_backend="sqlite",
+            store_cache_key_params=True,
+        )
+    )
+    try:
+        cache_key = cache.put("value", experiment="bound")
+        backend = cache.metadata_backend
+        assert isinstance(backend, SqliteBackend)
+        with sqlite3.connect(backend.db_file) as connection:
+            connection.execute(
+                "UPDATE cache_entries SET cache_key_params = ? WHERE cache_key = ?",
+                (payload, cache_key),
+            )
+            connection.commit()
+
+        with pytest.raises(CacheIntegrityError) as error:
+            cache.query_meta()
+
+        assert error.value.context["bound"] == bound
+        assert error.value.context["cache_key"] == cache_key
+    finally:
+        cache.close()
+
+
+def test_public_query_meta_rejects_values_larger_than_manifest_byte_bound(tmp_path) -> None:
+    """Byte size is checked before JSON parsing or an expensive structural walk."""
+    cache = UnifiedCache(
+        CacheConfig(
+            cache_dir=str(tmp_path / "byte-bound"),
+            metadata_backend="sqlite",
+            store_cache_key_params=True,
+        )
+    )
+    try:
+        cache_key = cache.put("value", experiment="byte-bound")
+        backend = cache.metadata_backend
+        assert isinstance(backend, SqliteBackend)
+        payload = "{" + '"x":"' + "a" * MAX_MANIFEST_BYTES + '"}'
+        with sqlite3.connect(backend.db_file) as connection:
+            connection.execute(
+                "UPDATE cache_entries SET cache_key_params = ? WHERE cache_key = ?",
+                (payload, cache_key),
+            )
+            connection.commit()
+
+        with pytest.raises(CacheIntegrityError) as error:
+            cache.query_meta()
+
+        assert error.value.context["bound"] == "MAX_MANIFEST_BYTES"
+        assert error.value.context["byte_size"] == len(payload.encode("utf-8"))
+    finally:
+        cache.close()
+
+
+def test_stale_corrupt_projection_does_not_mask_an_exact_live_query(tmp_path) -> None:
+    """Permissive observation hides stale corrupt JSON until authority selects rows."""
+    cache = UnifiedCache(
+        CacheConfig(
+            cache_dir=str(tmp_path / "stale-corrupt"),
+            metadata_backend="sqlite",
+            store_cache_key_params=True,
+        )
+    )
+    try:
+        live_key = cache.put("live", experiment="live")
+        backend = cache.metadata_backend
+        assert isinstance(backend, SqliteBackend)
+        backend.put_entry(
+            "stale-key",
+            {
+                "data_type": "object",
+                "metadata": {
+                    "actual_path": str(tmp_path / "stale.native"),
+                    "cache_key_params": {"experiment": "stale"},
+                },
+            },
+        )
+        with sqlite3.connect(backend.db_file) as connection:
+            connection.execute(
+                "UPDATE cache_entries SET cache_key_params = CAST(X'FF' AS TEXT) "
+                "WHERE cache_key = 'stale-key'"
+            )
+            connection.commit()
+
+        assert [entry["cache_key"] for entry in cache.query_meta(experiment="live")] == [
+            live_key
+        ]
+        stale = next(
+            entry for entry in backend.list_entries() if entry["cache_key"] == "stale-key"
+        )
+        assert "cache_key_params" not in stale["metadata"]
         assert backend.engine.pool.checkedout() == 0
     finally:
         cache.close()
