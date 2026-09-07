@@ -4,15 +4,15 @@ milestone: v1.0
 current_phase: 03
 current_phase_name: Atomic Lifecycle and Recovery Engine
 status: phase_complete
-stopped_at: Phase 3 direct implementation qualified; next Phase 4 design
-last_updated: "2026-09-06T21:12:18Z"
-last_activity: 2026-09-06
-last_activity_desc: Direct primary-agent implementation and exact-commit qualification complete; GSD execute/review deliberately bypassed
-state_head: 5282dcabc7157037d95144527a220f51e51c9803
+stopped_at: Phase 4 context gathered
+last_updated: "2026-09-07T21:12:59.386Z"
+last_activity: 2026-09-07
+last_activity_desc: Phase 4 metadata composition and topology contracts discussed; context ready for planning
+state_head: 25d98a0f4180b17853e1c351a54d10c0a46c2b23
 progress:
   total_phases: 8
-  completed_phases: 3
-  total_plans: 46
+  completed_phases: 2
+  total_plans: 47
   completed_plans: 46
 milestone_name: milestone
 ---
@@ -40,6 +40,25 @@ direct primary-agent qualification, not an independent GSD verifier verdict.
 Windows remains UNAVAILABLE/NOT_QUALIFIED; Phase 999.1 is unchanged.
 
 Progress: [████░░░░░░] 3 of 8 phases complete
+
+## Roadmap Evolution
+
+2026-09-06 — User-approved downstream alignment after Phase 3 direct qualification:
+
+- Phase 4 edited: starting point and success criteria require reuse of the entry interface, catalog customization and narrower transactional adapters; schema choices remain open for discussion.
+- Phase 5 edited: title, goal and success criteria now specify Supported Topology Qualification, not full Cartesian/availability parity; no advertised backend family was dropped.
+- Phase 6 edited: carried-forward scope and criteria separate delivered local integration from remaining policy/decorator/statistics work and preserve derived-state partial outcomes.
+- Phase 7 edited: goal and criteria require stopped-worker, explicit offline migration/cutover; no online writer coordination is implied.
+- Phase 8 edited: criteria retain finite integrity/recovery cases, initialized-worker fixtures, separate performance distributions and honest platform/service qualification.
+- PROJECT.md now describes the delivered baseline; REQUIREMENTS.md records STOR-03 through STOR-07 as complete only in the qualified local scope, leaving full BACK/CACH/MIGR/QUAL acceptance pending. CONTEXT.md distinguishes catalog attributes from derived metadata outcomes.
+
+Phase numbering, order, dependencies, requirement ownership, and milestone scope
+are unchanged. This was a documentation alignment, not another implementation or
+qualification run. Phase 4 context was subsequently created on 2026-09-07; Phases
+4–8 still have no plans, and Phases 5–8 still have no phase directories.
+GSD's raw disk count still includes superseded 03-19 and may call Phase 3 partial;
+the canonical 24/24 disposition and direct qualification ledger remain controlling.
+Do not fabricate a 03-19 completion or reopen the closed gaps to repair that count.
 
 ## Performance Metrics
 
@@ -253,6 +272,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-06
-Stopped at: Phase 3 directly qualified; next Phase 4 design
-Resume file: None
+Last session: 2026-09-07T21:12:59.275Z
+Stopped at: Phase 4 context gathered
+Resume file: .planning/phases/04-metadata-composition-and-topology-contracts/04-CONTEXT.md
