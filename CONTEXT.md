@@ -15,6 +15,12 @@ _Avoid_: Projection when referring to authoritative metadata.
 A rebuildable view or index derived from the catalog. Its absence, staleness, or corruption does not revoke a valid stored blob.
 _Avoid_: Second catalog authority.
 
+**Catalog attributes**:
+Application-defined metadata belonging to the authoritative blob description. They are distinct from external links or indexes derived from that description.
+
+**Derived metadata outcome**:
+The outcome of updating an external link or index after a blob commits. Failure of that update is not failure or rollback of the blob commit.
+
 **Payload generation**:
 One immutable version of a stored object's serialized bytes. Native format handlers determine the bytes' format.
 

@@ -7,7 +7,7 @@ status: phase_complete
 stopped_at: Phase 4 context gathered
 last_updated: "2026-09-07T21:12:59.386Z"
 last_activity: 2026-09-07
-last_activity_desc: Phase 4 metadata composition and topology contracts discussed; context ready for planning
+last_activity_desc: Phase 4 planning reset to remove pre-production compatibility paths while retaining future migration tooling
 state_head: 25d98a0f4180b17853e1c351a54d10c0a46c2b23
 progress:
   total_phases: 8
@@ -59,6 +59,14 @@ qualification run. Phase 4 context was subsequently created on 2026-09-07; Phase
 GSD's raw disk count still includes superseded 03-19 and may call Phase 3 partial;
 the canonical 24/24 disposition and direct qualification ledger remain controlling.
 Do not fabricate a 03-19 completion or reopen the closed gaps to repair that count.
+
+2026-09-07 — During Phase 4 planning the user approved a pre-production
+compatibility reset. Cacheness is not deployed in production, so overlapping
+legacy constructors, selectors, aliases, metadata factories, and development-only
+catalog layouts may be removed rather than supported through runtime adapters.
+This does not weaken lifecycle safety or remove migration infrastructure: formats
+remain versioned, unsupported layouts fail without mutation, and Phase 7 still
+delivers explicit offline migration/rebuild tooling for future released versions.
 
 ## Performance Metrics
 
@@ -126,7 +134,7 @@ Decisions are logged in PROJECT.md Key Decisions table.
 Recent decisions affecting current work:
 
 - `BlobStore` is the canonical payload-plus-metadata lifecycle owner; `UnifiedCache` owns cache policy only.
-- `SqlCache` remains a separate subsystem, and supported public APIs stay available through compatibility adapters.
+- `SqlCache` remains a separate subsystem. Pre-production public APIs may be replaced by one coherent BlobStore/cache surface rather than retained through compatibility adapters.
 - V1 supports same-backend migration plus an explicit rebuild for incompatible or cross-backend data.
 - Direct `BlobStore` integrity failures are typed exceptions; `UnifiedCache` may translate them into separately recorded misses.
 - AWS S3 semantics are authoritative; compatible services are supported only where explicitly verified.
@@ -256,7 +264,7 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ### Blockers/Concerns
 
-- Phase 1 planning must determine the supported legacy read window from released fixtures.
+- Historical Phase 1 compatibility fixtures remain evidence but do not define a supported runtime read window after the pre-production reset; Phase 7 will define the source-version window for future released formats.
 - Phase 3 planning must derive tombstone retention and orphan grace defaults from fault/crash testing.
 - Phase 8 performance and coverage thresholds must be finalized from measured baselines rather than estimates.
 

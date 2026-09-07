@@ -218,3 +218,25 @@
 - Full PostgreSQL/S3 topology qualification in Phase 5.
 - Complete UnifiedCache policy composition in Phase 6.
 - Stored-format/schema migration execution in Phase 7.
+
+---
+
+## Post-Discussion Planning Override
+
+During planning, the user clarified that Cacheness is not yet used in production and
+approved dropping backward compatibility to reduce Phase 4 complexity. This supersedes
+the discussion's runtime-compatibility assumptions, including compatibility adapters for
+old constructors/selectors and automatic readability of pre-Phase-4 development layouts.
+
+The following remains required:
+
+- one clean typed composition and catalog API;
+- explicit schema/format version identification;
+- typed migration/rebuild-required failure for unsupported layouts, without mutation;
+- Phase 7 migration and rebuild tooling for future released versions.
+
+The following may be removed instead of adapted:
+
+- overlapping pre-production constructors, aliases, factories, and backend selectors;
+- runtime shims for development-only catalog layouts;
+- historical tests whose sole purpose is preserving a removed pre-production API.
