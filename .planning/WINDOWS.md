@@ -2,9 +2,9 @@
 schema_version: 1
 open_count: 2
 waived_count: 0
-fixed_count: 34
-total_count: 36
-last_updated: 2026-09-08T12:35:52.483Z
+fixed_count: 35
+total_count: 37
+last_updated: 2026-09-08T13:31:07.163Z
 ---
 
 # Broken Windows Ledger
@@ -51,6 +51,7 @@ last_updated: 2026-09-08T12:35:52.483Z
 | 34 | 04 | deviation | tools/verify_phase4_ruff_delta.py |  | Phase-wide Ruff-delta helper fails because its frozen authorized scope drifted outside Plan 04-11; scoped checks pass. | fixed |  | 2026-09-08T06:56:40.340Z | 2026-09-08T07:38:06.108Z |
 | 35 | 05 | deviation | src/cacheness/storage/backends/postgresql_lifecycle_authority.py |  | Fresh lineage sentinel remapping preserves initial absent create CAS | fixed |  | 2026-09-08T12:33:24.402Z | 2026-09-08T12:33:47.339Z |
 | 36 | 05 | deviation | src/cacheness/storage/backends/postgresql_lifecycle_authority.py |  | Partial PostgreSQL authority layouts fail before initialization DDL | fixed |  | 2026-09-08T12:35:45.234Z | 2026-09-08T12:35:52.483Z |
+| 37 | 05 | deviation | src/cacheness/storage/backends/postgresql_lifecycle_authority.py |  | Caller-owned PostgreSQL pool leases receive transition failure on release | fixed |  | 2026-09-08T13:30:59.584Z | 2026-09-08T13:31:07.163Z |
 
 ````json
 [
@@ -485,6 +486,18 @@ last_updated: 2026-09-08T12:35:52.483Z
     "reason": "",
     "recorded_at": "2026-09-08T12:35:45.234Z",
     "resolved_at": "2026-09-08T12:35:52.483Z"
+  },
+  {
+    "id": 37,
+    "kind": "deviation",
+    "phase": "05",
+    "file": "src/cacheness/storage/backends/postgresql_lifecycle_authority.py",
+    "line": null,
+    "description": "Caller-owned PostgreSQL pool leases receive transition failure on release",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-09-08T13:30:59.584Z",
+    "resolved_at": "2026-09-08T13:31:07.163Z"
   }
 ]
 ````

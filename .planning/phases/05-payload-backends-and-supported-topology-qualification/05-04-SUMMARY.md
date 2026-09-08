@@ -14,9 +14,9 @@ provides:
   - "Driver-boundary regression contracts for unsafe initialization and uncertain commit recovery"
 affects: [05-05, 05-06, 05-07, 05-08, 05-10, phase-07-migration]
 actuals:
-  tokens: 13232
+  tokens: 13592
   tasks: 2
-  commits: 4
+  commits: 5
 tech-stack:
   added: []
   patterns:
@@ -53,7 +53,7 @@ coverage:
         ref: "tests/contracts/test_postgresql_lifecycle_authority.py; tests/test_lifecycle_authority_contract.py"
         status: pass
     human_judgment: false
-duration: 13min
+duration: 1h 8min
 completed: 2026-09-08
 status: complete
 ---
@@ -64,9 +64,9 @@ status: complete
 
 ## Performance
 
-- **Duration:** 13 min
+- **Duration:** 1h 8min
 - **Started:** 2026-09-08T12:22:49Z
-- **Completed:** 2026-09-08T12:35:19Z
+- **Completed:** 2026-09-08T13:31:07Z
 - **Tasks:** 2
 - **Files modified:** 2
 
@@ -78,7 +78,7 @@ status: complete
 
 ## Task Commits
 
-1. **Task 1: Explicitly initialize and reopen one versioned PostgreSQL authority** - `6dd878f` (test RED), `49b0611` (feat GREEN), `4f63634` (layout-validation fix)
+1. **Task 1: Explicitly initialize and reopen one versioned PostgreSQL authority** - `6dd878f` (test RED), `49b0611` (feat GREEN), `4f63634` (layout-validation fix), `97c51b1` (pool-lease rollback fix)
 2. **Task 2: Implement exact prepare-verify-promote-abort transitions in PostgreSQL** - `026d741` (feat)
 
 ## Files Created/Modified
@@ -112,9 +112,17 @@ status: complete
 - **Verification:** Focused driver contract plus shared lifecycle authority contract passed.
 - **Committed in:** `4f63634`
 
+**3. [Rule 1 - Bug] Propagated transition failures to caller-owned pool leases**
+- **Found during:** Task 1 post-implementation verification
+- **Issue:** A context-managed connection lease always received a successful `__exit__` signal, even if the lifecycle transition rolled back. A pool could therefore apply its success handling to a failed semantic action.
+- **Fix:** Passed the active exception information to the injected lease's `__exit__`, while retaining no shared authority connection state.
+- **Files modified:** `src/cacheness/storage/backends/postgresql_lifecycle_authority.py`, `tests/contracts/test_postgresql_lifecycle_authority.py`
+- **Verification:** Focused driver contract plus shared lifecycle authority contract passed.
+- **Committed in:** `97c51b1`
+
 ---
 
-**Total deviations:** 2 auto-fixed (Rule 1)
+**Total deviations:** 3 auto-fixed (Rule 1)
 **Impact on plan:** Required exact-CAS correctness only; it introduced no coordination mechanism or scope expansion.
 
 ## Issues Encountered
@@ -133,7 +141,7 @@ None - no live service configuration is required for this driver-boundary plan. 
 ## Self-Check: PASSED
 
 - Found `src/cacheness/storage/backends/postgresql_lifecycle_authority.py` and `tests/contracts/test_postgresql_lifecycle_authority.py`.
-- Found task commits `6dd878f`, `49b0611`, `026d741`, and `4f63634` in Git history.
+- Found task commits `6dd878f`, `49b0611`, `026d741`, `4f63634`, and `97c51b1` in Git history.
 
 ---
 *Phase: 05-payload-backends-and-supported-topology-qualification*
