@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
+from typing import Protocol, runtime_checkable
 
 from .backends.blob_backends import FilesystemBlobBackend, InMemoryBlobBackend
 from .lifecycle_authority import LifecycleAuthority
@@ -33,6 +34,34 @@ class BackendRole(str, Enum):
     PAYLOAD = "payload"
     AUTHORITY = "authority"
     PROJECTION = "projection"
+
+
+# ``BackendRole.PROJECTION`` is intentionally the one vocabulary for every
+# derived consumer. A projection may copy committed catalog state, but it
+# cannot become a second lifecycle authority by choosing a different role.
+ProjectionRole = BackendRole.PROJECTION
+
+
+@runtime_checkable
+class ProjectionSink(Protocol):
+    """A derived-only destination for bounded committed catalog batches.
+
+    Projection sinks own their own checkpoints and idempotent apply behavior.
+    They never receive lifecycle mutation primitives, payload locators for
+    cleanup, or authority credentials. The controller accepts the legacy
+    method spellings while this protocol names the clean Phase 4 surface.
+    """
+
+    projection_name: str
+
+    def apply_projection_batch(self, batch: object) -> None:
+        """Apply one idempotently identified derived batch."""
+
+    def save_projection_checkpoint(self, checkpoint: object) -> None:
+        """Persist progress only after a successful batch apply."""
+
+    def load_projection_checkpoint(self) -> object | None:
+        """Return the last committed derived checkpoint, if any."""
 
 
 class Ownership(str, Enum):
@@ -733,6 +762,8 @@ __all__ = [
     "MetadataRole",
     "Ownership",
     "ParticipantCapabilities",
+    "ProjectionRole",
+    "ProjectionSink",
     "ResolvedTopology",
     "RoleRegistration",
     "RoleRegistry",
