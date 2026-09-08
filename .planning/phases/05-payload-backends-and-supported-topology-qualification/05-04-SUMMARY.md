@@ -14,9 +14,9 @@ provides:
   - "Driver-boundary regression contracts for unsafe initialization and uncertain commit recovery"
 affects: [05-05, 05-06, 05-07, 05-08, 05-10, phase-07-migration]
 actuals:
-  tokens: 12917
+  tokens: 13232
   tasks: 2
-  commits: 3
+  commits: 4
 tech-stack:
   added: []
   patterns:
@@ -53,7 +53,7 @@ coverage:
         ref: "tests/contracts/test_postgresql_lifecycle_authority.py; tests/test_lifecycle_authority_contract.py"
         status: pass
     human_judgment: false
-duration: 10min
+duration: 13min
 completed: 2026-09-08
 status: complete
 ---
@@ -64,9 +64,9 @@ status: complete
 
 ## Performance
 
-- **Duration:** 10 min
+- **Duration:** 13 min
 - **Started:** 2026-09-08T12:22:49Z
-- **Completed:** 2026-09-08T12:32:18Z
+- **Completed:** 2026-09-08T12:35:19Z
 - **Tasks:** 2
 - **Files modified:** 2
 
@@ -78,7 +78,7 @@ status: complete
 
 ## Task Commits
 
-1. **Task 1: Explicitly initialize and reopen one versioned PostgreSQL authority** - `6dd878f` (test RED), `49b0611` (feat GREEN)
+1. **Task 1: Explicitly initialize and reopen one versioned PostgreSQL authority** - `6dd878f` (test RED), `49b0611` (feat GREEN), `4f63634` (layout-validation fix)
 2. **Task 2: Implement exact prepare-verify-promote-abort transitions in PostgreSQL** - `026d741` (feat)
 
 ## Files Created/Modified
@@ -104,9 +104,17 @@ status: complete
 - **Verification:** Focused driver contract plus shared lifecycle authority contract passed.
 - **Committed in:** `026d741`
 
+**2. [Rule 1 - Bug] Rejected recognized partial authority layouts before initialization DDL**
+- **Found during:** Task 1 post-implementation verification
+- **Issue:** `CREATE TABLE IF NOT EXISTS` could otherwise complete a pre-existing partial authority layout before schema validation, violating the explicit migration/rebuild boundary.
+- **Fix:** Inspected recognized table names first and performed read-only exact-layout validation before emitting any DDL.
+- **Files modified:** `src/cacheness/storage/backends/postgresql_lifecycle_authority.py`, `tests/contracts/test_postgresql_lifecycle_authority.py`
+- **Verification:** Focused driver contract plus shared lifecycle authority contract passed.
+- **Committed in:** `4f63634`
+
 ---
 
-**Total deviations:** 1 auto-fixed (Rule 1)
+**Total deviations:** 2 auto-fixed (Rule 1)
 **Impact on plan:** Required exact-CAS correctness only; it introduced no coordination mechanism or scope expansion.
 
 ## Issues Encountered
@@ -125,7 +133,7 @@ None - no live service configuration is required for this driver-boundary plan. 
 ## Self-Check: PASSED
 
 - Found `src/cacheness/storage/backends/postgresql_lifecycle_authority.py` and `tests/contracts/test_postgresql_lifecycle_authority.py`.
-- Found task commits `6dd878f`, `49b0611`, and `026d741` in Git history.
+- Found task commits `6dd878f`, `49b0611`, `026d741`, and `4f63634` in Git history.
 
 ---
 *Phase: 05-payload-backends-and-supported-topology-qualification*
