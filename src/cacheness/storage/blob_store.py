@@ -343,8 +343,14 @@ class BlobStore:
         if callable(initializer):
             initializer()
         self._materialize_authority_store()
-        empty = not self.lifecycle_authority.list_entries()
-        self._authority_manifest_key(initialize_new_store=empty)
+        if self.topology.qualified_profile.requirements.coordination_scope == "multiple_hosts":
+            # A remote authority must not materialize its catalog merely to
+            # decide whether an application-owned shared key exists. The
+            # injected provider is already an explicit topology prerequisite.
+            self._authority_manifest_key()
+        else:
+            empty = not self.lifecycle_authority.list_entries()
+            self._authority_manifest_key(initialize_new_store=empty)
         self._initialized = True
 
     @contextmanager
@@ -535,8 +541,37 @@ class BlobStore:
 
     @_ordinary_admitted
     def list(self, prefix: Optional[str] = None) -> List[str]:
-        """List committed authority entries by key prefix only."""
+        """List local authority entries by key prefix only.
+
+        The remote reference topology cannot return a complete catalog in one
+        value. Call :meth:`list_page` there and follow its authenticated
+        continuation cursor instead.
+        """
         return self.lifecycle.list(prefix)
+
+    @_ordinary_admitted
+    def list_page(
+        self,
+        *,
+        schema: CatalogSchema,
+        cursor: str | None = None,
+        limit: int = DEFAULT_PAGE_SIZE,
+        work_cap: int | None = None,
+    ) -> CatalogPage:
+        """Return one bounded committed catalog page for remote enumeration.
+
+        ``CatalogPage`` carries the authority-authenticated continuation cursor,
+        so callers cannot accidentally turn a remote catalog into a silently
+        truncated list. It remains authority membership, never S3 inventory.
+        """
+        query = CatalogQuery(page_size=limit, cursor=cursor)
+        return self.query_catalog(
+            query,
+            schema=schema,
+            cursor=cursor,
+            limit=limit,
+            work_cap=work_cap,
+        )
 
     @_ordinary_admitted
     def query_catalog(

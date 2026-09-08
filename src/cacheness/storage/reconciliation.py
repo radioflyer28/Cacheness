@@ -120,6 +120,7 @@ class ReconciliationReport:
     applied: bool
     manifest_records_seen: int
     operation_records_seen: int
+    inventory_cursor: str | None = None
 
     @property
     def human_summary(self) -> str:
@@ -146,6 +147,7 @@ class ReconciliationReport:
             "manifest_records_seen": self.manifest_records_seen,
             "operation_records_seen": self.operation_records_seen,
             "resume_token": self.resume_token,
+            "inventory_cursor": self.inventory_cursor,
             "human_summary": self.human_summary,
         }
 
@@ -182,7 +184,7 @@ class _AuthorityReconciler:
             raise TypeError("apply must be a boolean")
         if now is not None and now.tzinfo is None:
             raise ValueError("reconciliation requires a timezone-aware clock")
-        run_token, snapshot, mutation_cursor, debt_cursor = self._resume_state(
+        run_token, snapshot, mutation_cursor, debt_cursor, inventory_cursor = self._resume_state(
             apply=apply, resume_token=resume_token
         )
         deadline = time.monotonic() + self.lifecycle_limits.authority_busy_timeout_seconds
@@ -193,6 +195,7 @@ class _AuthorityReconciler:
         applied_actions = 0
         inspected_bytes = 0
         findings: list[ReconciliationFinding] = []
+        attributed_locators: set[str] = set()
 
         while (
             inspected_rows < row_budget
@@ -236,6 +239,10 @@ class _AuthorityReconciler:
                             state="completed" if completed else "blocked",
                         )
                 findings.append(finding)
+                if work.mutation is not None:
+                    attributed_locators.add(work.mutation.spec.candidate_locator)
+                elif work.debt is not None:
+                    attributed_locators.add(work.debt.locator)
                 if work.source == "mutation":
                     mutation_cursor = work.row_id
                 else:
@@ -248,9 +255,14 @@ class _AuthorityReconciler:
                 continue
             break
 
+        inventory_findings, next_inventory_cursor = self._inventory_findings(
+            inventory_cursor, snapshot, attributed_locators
+        )
+        findings.extend(inventory_findings)
         complete = (
             mutation_cursor >= snapshot.mutation_high_water
             and debt_cursor >= snapshot.debt_high_water
+            and next_inventory_cursor is None
         )
         if apply and complete and run_token is not None:
             self.authority.checkpoint_reconciliation(run_token)
@@ -259,16 +271,21 @@ class _AuthorityReconciler:
             resume_token=None
             if complete
             else self._encode_resume_token(
-                run_token, snapshot, mutation_cursor, debt_cursor
+                run_token,
+                snapshot,
+                mutation_cursor,
+                debt_cursor,
+                inventory_cursor=next_inventory_cursor,
             ),
             applied=apply,
             manifest_records_seen=0,
             operation_records_seen=inspected_rows,
+            inventory_cursor=next_inventory_cursor,
         )
 
     def _resume_state(
         self, *, apply: bool, resume_token: str | None
-    ) -> tuple[Any | None, ReconciliationSnapshot, int, int]:
+    ) -> tuple[Any | None, ReconciliationSnapshot, int, int, str | None]:
         if resume_token is not None:
             payload = self._decode_resume_token(resume_token)
             run_id = payload.get("run_id")
@@ -282,11 +299,86 @@ class _AuthorityReconciler:
                     payload["debt_high_water"],
                 )
             )
-            return run_token, snapshot, payload["mutation_cursor"], payload["debt_cursor"]
+            return (
+                run_token,
+                snapshot,
+                payload["mutation_cursor"],
+                payload["debt_cursor"],
+                payload.get("inventory_cursor"),
+            )
         if apply:
             run_token = self.authority.begin_reconciliation()
-            return run_token, self.authority.reconciliation_snapshot(run_token), 0, 0
-        return None, self.authority.reconciliation_snapshot(), 0, 0
+            return (
+                run_token,
+                self.authority.reconciliation_snapshot(run_token),
+                0,
+                0,
+                None,
+            )
+        return None, self.authority.reconciliation_snapshot(), 0, 0, None
+
+    def _inventory_findings(
+        self,
+        continuation_token: str | None,
+        snapshot: ReconciliationSnapshot,
+        attributed_locators: set[str],
+    ) -> tuple[tuple[ReconciliationFinding, ...], str | None]:
+        """Report one S3 evidence page without deriving lifecycle authority from it."""
+        profile = self.store.topology.qualified_profile
+        if profile.payload_identity != "s3":
+            return (), None
+        inventory_page = getattr(
+            self.store._materialize_authority_store(), "inventory_page", None
+        )
+        if not callable(inventory_page):
+            raise CacheStorageError(
+                "S3 topology payload does not expose bounded inventory evidence"
+            )
+        page = inventory_page(continuation_token)
+        objects = getattr(page, "objects", None)
+        next_token = self._bounded_inventory_cursor(getattr(page, "next_token", None))
+        if not isinstance(objects, tuple):
+            raise CacheStorageError("S3 inventory evidence page is malformed")
+
+        findings: list[ReconciliationFinding] = []
+        for item in objects:
+            locator = getattr(item, "locator", None)
+            if not isinstance(locator, str) or not locator:
+                raise CacheStorageError("S3 inventory evidence object is malformed")
+            if locator in attributed_locators:
+                continue
+            locator_fingerprint = _fingerprint(locator)
+            findings.append(
+                ReconciliationFinding(
+                    status=ReconciliationStatus.BLOCKED,
+                    action=ReconciliationAction.REPORT_ONLY,
+                    reason="unattributed_payload_inventory",
+                    evidence_id=locator_fingerprint,
+                    locator_fingerprint=locator_fingerprint,
+                    finding_id=_fingerprint(
+                        f"inventory:{snapshot.authority_revision}:{locator_fingerprint}"
+                    ),
+                    authority_revision=snapshot.authority_revision,
+                    run_revision=snapshot.authority_revision,
+                    residue_type="payload_inventory",
+                    residue_role="unattributed",
+                )
+            )
+        return tuple(findings), next_token
+
+    @staticmethod
+    def _bounded_inventory_cursor(value: object) -> str | None:
+        """Retain only a bounded opaque S3 continuation token in signed evidence."""
+        if value is None:
+            return None
+        if (
+            not isinstance(value, str)
+            or not value
+            or len(value.encode("utf-8")) > 512
+            or any(character.isspace() for character in value)
+        ):
+            raise ValueError("S3 inventory continuation token is malformed")
+        return value
 
     @staticmethod
     def _page_token(value: str):
@@ -478,6 +570,8 @@ class _AuthorityReconciler:
         snapshot: ReconciliationSnapshot,
         mutation_cursor: int,
         debt_cursor: int,
+        *,
+        inventory_cursor: str | None,
     ) -> str:
         payload = {
             "authority_revision": snapshot.authority_revision,
@@ -485,6 +579,7 @@ class _AuthorityReconciler:
             "debt_high_water": snapshot.debt_high_water,
             "mutation_cursor": mutation_cursor,
             "mutation_high_water": snapshot.mutation_high_water,
+            "inventory_cursor": self._bounded_inventory_cursor(inventory_cursor),
             "run_id": None if run_token is None else run_token.value,
             "version": 1,
         }
@@ -531,4 +626,5 @@ class _AuthorityReconciler:
             and (not isinstance(payload["run_id"], str) or not payload["run_id"])
         ):
             raise ValueError("Reconciliation resume token is malformed")
+        self._bounded_inventory_cursor(payload.get("inventory_cursor"))
         return payload

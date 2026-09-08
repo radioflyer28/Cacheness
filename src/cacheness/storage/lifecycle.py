@@ -16,6 +16,7 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from cacheness.error_handling import (
+    CacheBlobBackendError,
     CacheBlobLifecycleConflictError,
     CacheBlobManifestMalformedError,
     CacheBlobManifestUnauthenticatedError,
@@ -689,6 +690,14 @@ class AuthorityLifecycleEngine:
         return None if manifest.state == "tombstoned" else self.store._manifest_entry_data(manifest)
 
     def list(self, prefix: str | None = None) -> list[str]:
+        if (
+            self.store.topology.qualified_profile.requirements.coordination_scope
+            == "multiple_hosts"
+        ):
+            raise CacheBlobBackendError(
+                "Remote BlobStore listing requires list_page with an authority cursor",
+                context={"operation": "list", "stage": "catalog_page"},
+            )
         keys: list[str] = []
         for entry in self.authority.list_entries():
             manifest = self._entry_manifest(entry, allow_tombstone=True)

@@ -37,6 +37,10 @@ class _InventoryGenerationIO:
         self._delegate = delegate
         self.inventory_calls: list[str | None] = []
 
+    @property
+    def root(self):
+        return self._delegate.root
+
     def stage(self, *args: object, **kwargs: object):
         return self._delegate.stage(*args, **kwargs)
 
