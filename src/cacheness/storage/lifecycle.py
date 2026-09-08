@@ -79,8 +79,25 @@ class AuthorityLifecycleEngine:
         self.test_hook: Callable[[str], None] | None = None
         self.fault_hook: Callable[[str], None] | None = None
 
-    def _reach(self, boundary: str, *, key: str | None = None) -> None:
-        for hook in (self.test_hook, self.fault_hook):
+    def _reach(
+        self,
+        boundary: str,
+        *,
+        key: str | None = None,
+        include_timing_hook: bool = True,
+    ) -> None:
+        """Reach one deterministic test boundary without changing lifecycle state.
+
+        Stage boundaries are fault-only so existing timing observers retain
+        their stable public sequence.  They are intentionally a test seam,
+        not a lifecycle coordination mechanism or a second visibility point.
+        """
+        hooks = (
+            (self.test_hook, self.fault_hook)
+            if include_timing_hook
+            else (None, self.fault_hook)
+        )
+        for hook in hooks:
             if hook is None:
                 continue
             try:
@@ -212,7 +229,9 @@ class AuthorityLifecycleEngine:
             else self.authority.read_expectation(key)
         )
         guarded_io = self.store._materialize_authority_store()
+        self._reach("put.before_stage", key=key, include_timing_hook=False)
         with guarded_io.stage(handler, data, self.store.config) as staged:
+            self._reach("put.after_stage", key=key, include_timing_hook=False)
             generation = uuid4().hex
             locator = self._candidate_locator(key, generation, staged.suffix)
             raw_result = staged.raw_result
