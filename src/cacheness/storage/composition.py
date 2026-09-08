@@ -674,10 +674,19 @@ class StoreTopology:
     def __post_init__(self) -> None:
         object.__setattr__(self, "payload", _as_ref(self.payload))
         object.__setattr__(self, "authority", _as_ref(self.authority))
+        projections = tuple(_as_ref(projection) for projection in self.projections)
+        projection_identities: set[tuple[str, object]] = set()
+        for projection in projections:
+            identity = _projection_reference_identity(projection)
+            if identity in projection_identities:
+                raise CompositionValidationError(
+                    "Duplicate projection declaration is not allowed"
+                )
+            projection_identities.add(identity)
         object.__setattr__(
             self,
             "projections",
-            tuple(_as_ref(projection) for projection in self.projections),
+            projections,
         )
         if not isinstance(self.role_registry, RoleRegistry):
             raise CompositionValidationError("role_registry must be a RoleRegistry")
@@ -799,6 +808,14 @@ def _reference_qualification_identity(role: str, reference: BackendRef) -> str:
             "qualification_identity"
         )
     return identity
+
+
+def _projection_reference_identity(reference: BackendRef) -> tuple[str, object]:
+    """Return a local duplicate detector without constructing projections."""
+    if reference.name is not None:
+        return ("name", reference.name)
+    assert reference.instance is not None
+    return ("instance", id(reference.instance))
 
 
 def _resolve_ref(

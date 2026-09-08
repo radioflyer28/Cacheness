@@ -160,6 +160,8 @@ def test_incomplete_or_duplicate_topology_declarations_fail_without_factories() 
     with pytest.raises(CompositionValidationError):
         StoreTopology(payload=None, authority=BackendRef(name="memory"))
     with pytest.raises(CompositionValidationError):
+        StoreTopology(payload=BackendRef(name="memory"), authority=None)
+    with pytest.raises(CompositionValidationError):
         BackendRef(name="")
     with pytest.raises(CompositionValidationError, match="qualification_identity"):
         StoreTopology(
