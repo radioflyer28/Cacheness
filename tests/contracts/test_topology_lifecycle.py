@@ -140,6 +140,34 @@ def _remote_store(tmp_path: Path) -> BlobStore:
     )
 
 
+@pytest.mark.parametrize("profile", ("memory", "sqlite-filesystem"))
+def test_local_reference_profiles_share_the_same_engine(
+    tmp_path: Path, profile: str
+) -> None:
+    """Each exact local pairing reaches the same promotion/deletion sequence."""
+    if profile == "memory":
+        topology = StoreTopology(
+            payload=BackendRef(name="memory"), authority=BackendRef(name="memory")
+        )
+    else:
+        root = tmp_path / "sqlite-filesystem"
+        topology = StoreTopology(
+            payload=BackendRef(name="filesystem", options={"base_dir": root}),
+            authority=BackendRef(name="sqlite", options={"root": root}),
+        )
+    store = BlobStore(topology, cache_dir=tmp_path / profile)
+    try:
+        assert type(store.lifecycle) is AuthorityLifecycleEngine
+        assert store.put({"generation": "one"}, key="profile-key") == "profile-key"
+        assert store.get("profile-key") == {"generation": "one"}
+        assert store.put({"generation": "two"}, key="profile-key") == "profile-key"
+        assert store.get("profile-key") == {"generation": "two"}
+        assert store.delete("profile-key") is True
+        assert store.get("profile-key") is None
+    finally:
+        store.close()
+
+
 def test_remote_profile_uses_one_engine_and_bounded_authority_pages(tmp_path: Path) -> None:
     """Remote public workflows never materialize a legacy authority catalog."""
     schema = CatalogSchema((CatalogField("tenant", "string", queryable=True),))
