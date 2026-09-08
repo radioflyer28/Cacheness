@@ -13,6 +13,7 @@ from dataclasses import dataclass
 import hashlib
 import os
 import re
+import sys
 from typing import Any, Callable, Iterator, TypeVar
 import uuid
 
@@ -171,6 +172,9 @@ class PostgresqlLifecycleAuthority:
         resource = self._connection_factory()
         connection: Any | None = None
         entered = False
+        exit_type: type[BaseException] | None = None
+        exit_value: BaseException | None = None
+        exit_traceback: Any = None
         try:
             if hasattr(resource, "__enter__") and hasattr(resource, "__exit__"):
                 connection = resource.__enter__()
@@ -180,9 +184,12 @@ class PostgresqlLifecycleAuthority:
             if connection is None or not hasattr(connection, "cursor"):
                 raise TypeError("connection_factory must return a psycopg connection or lease")
             yield connection
+        except BaseException:
+            exit_type, exit_value, exit_traceback = sys.exc_info()
+            raise
         finally:
             if entered:
-                resource.__exit__(None, None, None)
+                resource.__exit__(exit_type, exit_value, exit_traceback)
             elif connection is not None:
                 close = getattr(connection, "close", None)
                 if callable(close):

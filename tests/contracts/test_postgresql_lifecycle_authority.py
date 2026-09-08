@@ -108,6 +108,27 @@ class _Factory:
         return connection
 
 
+@dataclass
+class _Lease:
+    """Pool-like connection lease that records the exception passed to release."""
+
+    connection: _Connection
+    exit_type: type[BaseException] | None = None
+
+    def __enter__(self) -> _Connection:
+        return self.connection
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: object,
+    ) -> bool:
+        self.exit_type = exc_type
+        self.connection.close()
+        return False
+
+
 def _query_text(query: object) -> str:
     """Normalize recording-driver query objects without a live connection."""
     return str(query).lower()
@@ -271,6 +292,22 @@ def test_prepare_rejects_a_stale_expectation_without_creating_intent() -> None:
     statements = [_query_text(query) for query, _ in factory.connections[0].executions]
     assert not any("insert into" in statement and "mutations" in statement for statement in statements)
     assert factory.connections[0].rollback_count == 1
+
+
+def test_pool_lease_receives_transition_failure_for_rollback() -> None:
+    """Caller-owned pool leases observe failures instead of an unconditional success exit."""
+    from cacheness.storage.backends.postgresql_lifecycle_authority import (
+        PostgresqlLifecycleAuthority,
+    )
+
+    connection = _Connection(responses=[None, (3, 7, "old-generation", "a" * 64)])
+    lease = _Lease(connection)
+    authority = PostgresqlLifecycleAuthority(lambda: lease, schema="phase5_authority")
+
+    with pytest.raises(CacheBlobLifecycleConflictError):
+        authority.prepare_mutation(_spec())
+
+    assert lease.exit_type is CacheBlobLifecycleConflictError
 
 
 def test_promotion_marks_fresh_lineage_before_matching_absence() -> None:
