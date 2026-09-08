@@ -9,7 +9,7 @@ Cacheness will move from overlapping cache and storage paths to one storage engi
 - [x] **Phase 1: Compatibility and Security Baseline** - Freeze supported behavior and close the currently exposed path, parser, query, and trust-boundary gaps.
 - [x] **Phase 2: Canonical Storage and Integrity Contract** - Give direct `BlobStore` callers one versioned manifest, committed-read model, and fail-closed integrity contract. (completed 2026-08-30)
 - [x] **Phase 3: Atomic Lifecycle and Recovery Engine** - Make writes, replacements, deletions, races, and crash residue converge without corrupting the last valid generation.
-- [ ] **Phase 4: Metadata Composition and Topology Contracts** - Unify all metadata backends behind one injectable CAS contract with honest capability validation.
+- [x] **Phase 4: Metadata Composition and Topology Contracts** - Unify all metadata backends behind one injectable CAS contract with honest capability validation. (completed 2026-09-08)
 - [ ] **Phase 5: Payload Backends and Supported Topology Qualification** - Qualify explicitly supported filesystem, memory, and AWS S3 pairings at their declared capability tiers.
 - [ ] **Phase 6: UnifiedCache Policy Composition** - Route cache behavior through `BlobStore` while preserving public APIs, cache semantics, and the `SqlCache` boundary.
 - [ ] **Phase 7: Explicit Migration and Rebuild Cutover** - Give existing stores an inspectable, resumable same-backend migration or confirmed rebuild path.
@@ -237,7 +237,8 @@ For Phases 4–8, every lifecycle change must name its supported topology, trans
   5. Direct BlobStore users can define application metadata, validate/query supported fields, update attributes and reopen current-layout stores without implementing a lifecycle backend. Authoritative attributes commit with the descriptor; external ORM links/indexes are explicitly derived. Pre-Phase-4 development layouts need not reopen through runtime shims and instead fail with explicit migration/rebuild-required evidence; no unchosen schema framework is implied.
   6. Catalog and derived-index APIs state their consistency and failure behavior. Preserve committed receipts, exact expectations, non-destructive corruption handling and explicit partial outcomes; any index reconstruction is an explicit derived operation, not a prerequisite for canonical reads or cleanup.
 
-**Plans**: 13/14 plans executed; 1 final gap-closure plan ready
+**Plans**: 14/14 plans complete; final code review, 18/18 goal verification,
+Nyquist validation, and security verification passed on 2026-09-08
 
 Plans:
 **Wave 0**
@@ -294,7 +295,7 @@ Plans:
 
 **Wave 13** *(final gap closure; blocked on Wave 12 completion)*
 
-- [ ] 04-14-PLAN.md — Make advertised projections constructible, harden the retired-API audit, and remove the accidental root draft.
+- [x] 04-14-PLAN.md — Make advertised projections constructible, harden the retired-API audit, and remove the accidental root draft.
 
 ### Phase 5: Payload Backends and Supported Topology Qualification
 
@@ -367,7 +368,7 @@ Plans:
 | 1. Compatibility and Security Baseline | 15/15 | Complete | 2026-08-30 |
 | 2. Canonical Storage and Integrity Contract | 7/7 | Complete    | 2026-08-30 |
 | 3. Atomic Lifecycle and Recovery Engine | 24/24 | Complete — direct qualification | 2026-09-06 |
-| 4. Metadata Composition and Topology Contracts | 13/13 | In Progress|  |
+| 4. Metadata Composition and Topology Contracts | 14/14 | Complete    | 2026-09-08 |
 | 5. Payload Backends and Supported Topology Qualification | 0/TBD | Not started | - |
 | 6. UnifiedCache Policy Composition | 0/TBD | Not started | - |
 | 7. Explicit Migration and Rebuild Cutover | 0/TBD | Not started | - |
