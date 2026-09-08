@@ -13,9 +13,12 @@ from cacheness.error_handling import (
     CacheBlobMigrationRequiredError,
 )
 from cacheness.storage.lifecycle_authority import (
+    CleanupDebt,
     EntryExpectation,
+    PageToken,
     MutationSpec,
     PreparedMutation,
+    ProjectionRevision,
     VerificationProof,
 )
 
@@ -481,3 +484,82 @@ def test_uncertain_promotion_reopens_a_fresh_lease_for_exact_operation_state() -
 
     assert result.entry.generation == spec.generation
     assert factory.calls == 2
+
+
+def test_complete_authority_protocol_has_no_placeholder_transitions() -> None:
+    """The remote authority supplies every engine primitive without a second coordinator."""
+    from cacheness.storage.backends.postgresql_lifecycle_authority import (
+        PostgresqlLifecycleAuthority,
+    )
+    from cacheness.storage.lifecycle_authority import LifecycleAuthority
+
+    authority = PostgresqlLifecycleAuthority(_Factory(), schema="phase5_authority")
+
+    assert isinstance(authority, LifecycleAuthority)
+    for method_name in (
+        "list_entries",
+        "catalog_page",
+        "pending_cleanup_debts",
+        "pending_mutations",
+        "retire_cleanup_debt",
+        "delete_entry",
+        "retire_tombstone",
+        "begin_clear",
+        "page_clear",
+        "checkpoint_clear",
+        "begin_reconciliation",
+        "reconciliation_snapshot",
+        "page_reconciliation_work",
+        "page_reconciliation",
+        "checkpoint_reconciliation",
+        "compare_and_mark_projection",
+        "projection_backup",
+    ):
+        assert callable(getattr(authority, method_name))
+
+
+def test_complete_workflow_calls_stay_at_the_authority_boundary() -> None:
+    """Cleanup, clear, and projection actions remain SQL-only bounded primitives."""
+    from cacheness.storage.backends.postgresql_lifecycle_authority import (
+        PostgresqlLifecycleAuthority,
+    )
+
+    debt = CleanupDebt(
+        "operation-1",
+        "generations/generation-1.native",
+        "authority-key",
+        "generation-1",
+        "candidate",
+        1,
+    )
+    factory = _Factory(
+        scripts=[
+            [[(1, debt.operation_id, debt.locator, debt.key, debt.generation, debt.role)]],
+            [None],
+            [None, (7,), None],
+            [("active", ""), []],
+            [("active",), None],
+            [None, (0,), (0,), (7,), None],
+            [(7, 0, 0)],
+            [None, (7, True), (7,)],
+        ]
+    )
+    authority = PostgresqlLifecycleAuthority(factory, schema="phase5_authority")
+
+    assert authority.pending_cleanup_debts() == (debt,)
+    authority.retire_cleanup_debt(debt)
+    clear = authority.begin_clear()
+    assert isinstance(clear, PageToken)
+    assert authority.page_clear(clear) == ()
+    authority.checkpoint_clear(clear)
+    reconciliation = authority.begin_reconciliation()
+    assert authority.reconciliation_snapshot(reconciliation).authority_revision == 7
+    authority.compare_and_mark_projection(ProjectionRevision(7))
+
+    statements = [
+        _query_text(query)
+        for connection in factory.connections
+        for query, _ in connection.executions
+    ]
+    assert not any("advisory" in statement or "listen" in statement for statement in statements)
+    assert not any("s3" in statement or "boto" in statement for statement in statements)
