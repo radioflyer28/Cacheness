@@ -157,6 +157,93 @@ def test_constructor_is_non_materializing_and_initialize_is_explicit() -> None:
     assert factory.connections[0].closed is True
 
 
+def test_blob_store_public_initialize_provisions_a_fresh_postgresql_authority(
+    tmp_path,
+) -> None:
+    """The public remote boundary creates before it performs read-only validation."""
+    from cacheness.storage import BlobStore
+    from cacheness.storage.backends.blob_backends import InMemoryBlobBackend
+    from cacheness.storage.backends.postgresql_lifecycle_authority import (
+        POSTGRESQL_AUTHORITY_CAPABILITY,
+        POSTGRESQL_AUTHORITY_SCHEMA_VERSION,
+        PostgresqlLifecycleAuthority,
+    )
+    from cacheness.storage.composition import BackendRef, StoreTopology
+
+    class StaticManifestKey:
+        def get_key(self) -> bytes:
+            return b"r" * 32
+
+    class RemotePayload(InMemoryBlobBackend):
+        qualification_identity = "s3"
+        topology_capabilities = {
+            "durable": True,
+            "process_scope": "multi_host",
+            "host_scope": "multi_host",
+            "immutable_generations": True,
+            "streaming": True,
+            "listing": True,
+        }
+
+    required_tables = [
+        ("authority_meta",),
+        ("entry_lineage",),
+        ("entries",),
+        ("mutations",),
+        ("cleanup_debt",),
+        ("clear_runs",),
+        ("clear_targets",),
+        ("reconciliation_runs",),
+        ("reconciliation_actions",),
+    ]
+    required_constraints = [
+        ("authority_meta_singleton_check",),
+        ("mutations_operation_id_key",),
+        ("mutations_mutation_id_key",),
+        ("cleanup_debt_operation_locator_role_key",),
+        ("clear_targets_run_id_key_key",),
+        ("reconciliation_actions_run_id_source_action_id_key",),
+    ]
+    factory = _Factory(
+        scripts=[
+            [],
+            [
+                (
+                    POSTGRESQL_AUTHORITY_SCHEMA_VERSION,
+                    "fresh-store",
+                    POSTGRESQL_AUTHORITY_CAPABILITY,
+                ),
+                required_tables,
+                required_constraints,
+            ],
+        ]
+    )
+    authority = PostgresqlLifecycleAuthority(
+        factory, schema="phase5_authority", store_identity="fresh-store"
+    )
+    authority.qualification_identity = "postgresql"
+    payload = RemotePayload()
+    store = BlobStore(
+        StoreTopology(
+            payload=BackendRef(instance=payload),
+            authority=BackendRef(instance=authority),
+        ),
+        cache_dir=tmp_path / "remote-store",
+        manifest_key_provider=StaticManifestKey(),
+    )
+    try:
+        store.initialize()
+        assert factory.calls == 2
+        first = [_query_text(query) for query, _ in factory.connections[0].executions]
+        second = [_query_text(query) for query, _ in factory.connections[1].executions]
+        assert any("create schema" in statement for statement in first)
+        assert not any("create " in statement for statement in second)
+    finally:
+        store.close()
+        authority.close()
+        payload.close()
+
+
 def test_reopen_rejects_wrong_version_without_ddl_or_mutation() -> None:
     """A foreign or future layout is a Phase 7 migration/rebuild boundary."""
     from cacheness.storage.backends.postgresql_lifecycle_authority import (

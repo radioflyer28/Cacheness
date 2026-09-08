@@ -215,11 +215,10 @@ class AuthorityLifecycleEngine:
         """Prepare, publish, verify, promote, then reclaim exact old debt."""
         handler = self.store.handlers.get_handler(data)
         # A Windows authority root is a deployment-provisioned security
-        # boundary. Validate it before read_entry can bootstrap SQLite or
-        # guarded handler I/O can create the managed payload root.
-        self.authority.preflight_mutation()
-        # The same explicit startup path serves single-process convenience.
-        # Existing catalogs validate only; they are never implicitly migrated.
+        # boundary. The same explicit startup path validates it before
+        # read_entry can bootstrap SQLite or guarded handler I/O can create
+        # the managed payload root. Existing catalogs validate only; they are
+        # never implicitly migrated.
         self.store.initialize()
         previous = self.authority.read_entry(key)
         if previous is not None:

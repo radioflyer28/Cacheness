@@ -336,12 +336,17 @@ class BlobStore:
         Ordinary single-process first writes call this same path. Concurrent
         first initialization is not a supported availability guarantee.
         """
-        self.lifecycle_authority.preflight_mutation()
         if self._initialized:
+            self.lifecycle_authority.preflight_mutation()
             return
         initializer = getattr(self.lifecycle_authority, "initialize", None)
         if callable(initializer):
             initializer()
+        # The explicit authority initializer creates only a fresh, current
+        # layout.  Validate it afterwards so a new PostgreSQL authority is
+        # provisioned through this public boundary, while existing layouts
+        # remain read-only validation failures rather than implicit upgrades.
+        self.lifecycle_authority.preflight_mutation()
         self._materialize_authority_store()
         if self.topology.qualified_profile.requirements.coordination_scope == "multiple_hosts":
             # A remote authority must not materialize its catalog merely to
