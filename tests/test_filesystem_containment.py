@@ -910,7 +910,9 @@ def test_blob_store_clear_keeps_tombstone_authority_when_reclamation_fails(
 
         assert error.value.context["operation"] == "clear"
         assert isinstance(error.value.__cause__, CacheBlobRecoverableCleanupError)
-        assert isinstance(error.value.__cause__.__cause__, CacheStorageError)
+        cleanup_cause = error.value.__cause__.__cause__
+        assert isinstance(cleanup_cause, OSError)
+        assert str(cleanup_cause) == "Could not prove managed payload cleanup"
         failed_key = keys[failing_payload_delete - 1]
         entry = store.lifecycle_authority.read_entry(failed_key)
         assert entry is not None

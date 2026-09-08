@@ -31,12 +31,21 @@ from cacheness.error_handling import (
     CacheStorageError,
 )
 from cacheness.storage.lifecycle_authority import EntryExpectation
+from cacheness.storage import BackendRef, BlobStore, StoreTopology
 from cacheness.storage.reconciliation import (
     ReconciliationAction,
     ReconciliationFinding,
     ReconciliationReport,
     ReconciliationStatus,
 )
+
+
+def _local_topology(root: Path) -> StoreTopology:
+    """Create the current filesystem/SQLite composition for public store tests."""
+    return StoreTopology(
+        payload=BackendRef(name="filesystem", options={"base_dir": root}),
+        authority=BackendRef(name="sqlite", options={"root": root}),
+    )
 
 
 def test_lifecycle_reason_values_and_typed_error_bases_are_frozen() -> None:
@@ -271,36 +280,36 @@ def test_sqlite_authority_rejects_aba_stale_absence_preparation(tmp_path: Path) 
 
 
 def test_authority_empty_inspection_is_lazy_and_zero_mutation(tmp_path: Path) -> None:
-    """Absent compatible roots stay absent through read-only lifecycle calls."""
-    from cacheness.storage import BlobStore
-    from cacheness.storage.sqlite_lifecycle_authority import SqliteLifecycleAuthority
-
+    """Read-only calls add no authority evidence after topology construction."""
     root = tmp_path / "missing-parent" / "empty-store"
     before = authority_root_snapshot(root)
-    store = BlobStore(root, lifecycle_authority=SqliteLifecycleAuthority.for_root(root))
+    store = BlobStore(_local_topology(root), cache_dir=root)
+    constructed = authority_root_snapshot(root)
+    assert constructed != before
+    assert [state.relative_path for state in constructed] == ["."]
     assert store.get("missing") is None
     assert store.get_metadata("missing") is None
     assert store.exists("missing") is False
     store.close()
-    assert authority_root_snapshot(root) == before
+    assert authority_root_snapshot(root) == constructed
 
-    reopened = BlobStore(root, lifecycle_authority=SqliteLifecycleAuthority.for_root(root))
+    reopened = BlobStore(_local_topology(root), cache_dir=root)
+    reopened_constructed = authority_root_snapshot(root)
+    assert reopened_constructed == constructed
     assert reopened.get("missing") is None
     reopened.close()
-    assert authority_root_snapshot(root) == before
+    assert authority_root_snapshot(root) == constructed
 
 
 def test_established_missing_authority_fails_unchanged(tmp_path: Path) -> None:
     """Payload evidence without authority is never silently interpreted as empty."""
-    from cacheness.storage import BlobStore
-    from cacheness.storage.sqlite_lifecycle_authority import SqliteLifecycleAuthority
     from cacheness.error_handling import CacheBlobMigrationRequiredError
 
     root = tmp_path / "established-store"
     root.mkdir()
     (root / "payload.bin").write_bytes(b"existing payload")
     before = authority_root_snapshot(root)
-    store = BlobStore(root, lifecycle_authority=SqliteLifecycleAuthority.for_root(root))
+    store = BlobStore(_local_topology(root), cache_dir=root)
     with pytest.raises(CacheBlobMigrationRequiredError):
         store.get("missing")
     store.close()
