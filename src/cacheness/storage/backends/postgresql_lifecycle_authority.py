@@ -1695,12 +1695,30 @@ class PostgresqlLifecycleAuthority:
                 (mutation_cursor, snapshot.mutation_high_water, page_size),
             )
             mutation_rows = cursor.fetchall()
+            # Keep the normal recovery page strictly pending-only, but surface
+            # the earliest unexpected durable state before a later pending row
+            # can advance the independent keyset cursor past it.
             cursor.execute(
                 sql.SQL(
                     "SELECT debt_id, operation_id, locator, key, generation, role, state FROM {} "
-                    "WHERE debt_id > %s AND debt_id <= %s ORDER BY debt_id LIMIT %s"
+                    "WHERE debt_id > %s AND debt_id <= %s AND state <> 'pending' "
+                    "ORDER BY debt_id LIMIT 1"
                 ).format(self._table("cleanup_debt")),
-                (debt_cursor, snapshot.debt_high_water, page_size),
+                (debt_cursor, snapshot.debt_high_water),
+            )
+            invalid_debt_row = cursor.fetchone()
+            pending_debt_high_water = (
+                snapshot.debt_high_water
+                if invalid_debt_row is None
+                else invalid_debt_row[0] - 1
+            )
+            cursor.execute(
+                sql.SQL(
+                    "SELECT debt_id, operation_id, locator, key, generation, role, state FROM {} "
+                    "WHERE debt_id > %s AND debt_id <= %s AND state = 'pending' "
+                    "ORDER BY debt_id LIMIT %s"
+                ).format(self._table("cleanup_debt")),
+                (debt_cursor, pending_debt_high_water, page_size),
             )
             debt_rows = cursor.fetchall()
             works: list[ReconciliationWork] = []
@@ -1741,10 +1759,28 @@ class PostgresqlLifecycleAuthority:
                 )
                 bytes_seen += len(manifest)
                 next_mutation = row[0]
-            next_debt = snapshot.debt_high_water if not debt_rows else debt_cursor
+            next_debt = (
+                snapshot.debt_high_water
+                if not debt_rows and invalid_debt_row is None
+                else debt_cursor
+            )
             for row in debt_rows:
                 if len(works) >= self.lifecycle_limits.operation_page_size:
                     break
+                works.append(
+                    ReconciliationWork(
+                        "debt",
+                        row[0],
+                        row[6],
+                        debt=CleanupDebt(row[1], row[2], row[3], row[4], row[5], row[0]),
+                    )
+                )
+                next_debt = row[0]
+            if (
+                invalid_debt_row is not None
+                and len(works) < self.lifecycle_limits.operation_page_size
+            ):
+                row = invalid_debt_row
                 works.append(
                     ReconciliationWork(
                         "debt",

@@ -711,7 +711,7 @@ def test_reconciliation_cursor_does_not_skip_unemitted_debt_rows() -> None:
         "candidate",
         "pending",
     )
-    factory = _Factory(scripts=[[[mutation], [debt]], [[], [debt]]])
+    factory = _Factory(scripts=[[[mutation], None, [debt]], [[], None, [debt]]])
     authority = PostgresqlLifecycleAuthority(
         factory,
         schema="phase5_authority",
@@ -732,6 +732,38 @@ def test_reconciliation_cursor_does_not_skip_unemitted_debt_rows() -> None:
     assert first_page.debt_cursor == 0
     assert tuple(work.source for work in resumed_page.works) == ("debt",)
     assert resumed_page.debt_cursor == 1
+
+
+def test_reconciliation_surfaces_an_unsupported_debt_state_before_pending_work() -> None:
+    """An invalid durable debt state cannot be skipped by pending-only paging."""
+    from cacheness.storage.backends.postgresql_lifecycle_authority import (
+        PostgresqlLifecycleAuthority,
+    )
+    from cacheness.storage.lifecycle_authority import ReconciliationSnapshot
+
+    invalid_debt = (
+        1,
+        "invalid-operation",
+        "generations/invalid.native",
+        "invalid-key",
+        "invalid-generation",
+        "candidate",
+        "corrupt",
+    )
+    factory = _Factory(scripts=[[[], invalid_debt, []]])
+    authority = PostgresqlLifecycleAuthority(factory, schema="phase5_authority")
+
+    page = authority.page_reconciliation_work(
+        ReconciliationSnapshot(0, 0, 1), mutation_cursor=0, debt_cursor=0
+    )
+
+    assert len(page.works) == 1
+    assert page.works[0].source == "debt"
+    assert page.works[0].state == "corrupt"
+    assert page.debt_cursor == 1
+    statements = [_query_text(query) for query, _ in factory.connections[0].executions]
+    assert any("state = 'pending'" in statement for statement in statements)
+    assert any("state <> 'pending'" in statement for statement in statements)
 
 
 def test_complete_authority_protocol_has_no_placeholder_transitions() -> None:

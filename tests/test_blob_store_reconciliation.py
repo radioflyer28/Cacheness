@@ -12,7 +12,15 @@ from cacheness.error_handling import (
 )
 from cacheness.storage import BlobStore
 from cacheness.storage.composition import BackendRef, StoreTopology
-from cacheness.storage.lifecycle_authority import EntryExpectation, MutationSpec
+from cacheness.storage.lifecycle_authority import (
+    CleanupDebt,
+    EntryExpectation,
+    MutationSpec,
+    ReconciliationPage,
+    ReconciliationSnapshot,
+    ReconciliationWork,
+)
+from cacheness.storage.reconciliation import ReconciliationAction, ReconciliationStatus
 
 
 def _prepared_spec(operation_id: str, *, manifest: bytes = b"record") -> MutationSpec:
@@ -194,6 +202,50 @@ def test_authority_reconciliation_apply_resumes_bounded_cleanup_debt(
         assert store.lifecycle_authority.pending_cleanup_debts() == ()
         assert store.get("a") == {"generation": "new-a"}
         assert store.get("b") == {"generation": "new-b"}
+    finally:
+        store.close()
+
+
+def test_reconciliation_blocks_unsupported_cleanup_debt_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Malformed debt evidence is report-only and cannot be checkpointed as applied."""
+    store = _store(tmp_path / "invalid-debt-state")
+    try:
+        debt = CleanupDebt(
+            "invalid-operation",
+            ".cacheness/generations/invalid.payload",
+            "invalid-key",
+            "invalid-generation",
+            "candidate",
+            1,
+        )
+        snapshot = ReconciliationSnapshot(0, 0, 1)
+        work = ReconciliationWork("debt", 1, "corrupt", debt=debt)
+        monkeypatch.setattr(
+            store.lifecycle_authority,
+            "reconciliation_snapshot",
+            lambda _token=None: snapshot,
+        )
+        monkeypatch.setattr(
+            store.lifecycle_authority,
+            "page_reconciliation_work",
+            lambda _snapshot, **cursors: (
+                ReconciliationPage((work,), 0, 1)
+                if cursors["debt_cursor"] == 0
+                else ReconciliationPage((), 0, 1)
+            ),
+        )
+
+        report = store.reconcile(apply=True)
+
+        assert len(report.findings) == 1
+        finding = report.findings[0]
+        assert finding.status is ReconciliationStatus.BLOCKED
+        assert finding.action is ReconciliationAction.REPORT_ONLY
+        assert finding.reason == "cleanup_debt_not_pending"
+        assert finding.applied_state == "not_applied"
+        assert finding.checkpoint_state == "pending"
     finally:
         store.close()
 

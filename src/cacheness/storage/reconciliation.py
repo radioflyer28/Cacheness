@@ -441,6 +441,23 @@ class _AuthorityReconciler:
     ) -> tuple[ReconciliationFinding, int]:
         debt = work.debt
         assert debt is not None
+        if work.state != "pending":
+            return (
+                self._finding(
+                    work,
+                    snapshot,
+                    status=ReconciliationStatus.BLOCKED,
+                    action=ReconciliationAction.REPORT_ONLY,
+                    reason="cleanup_debt_not_pending",
+                    key=debt.key,
+                    expected_generation=debt.generation,
+                    authoritative_generation=None,
+                    residue_type="cleanup_debt",
+                    residue_role=debt.role,
+                    operation_id=debt.operation_id,
+                ),
+                len(debt.locator.encode("utf-8")),
+            )
         current = self.authority.read_entry(debt.key)
         authoritative_generation = None
         try:
@@ -571,6 +588,8 @@ class _AuthorityReconciler:
             if work.source == "debt":
                 debt = work.debt
                 assert debt is not None
+                if work.state != "pending":
+                    return False
                 current = self.authority.pending_cleanup_debts(
                     operation_id=debt.operation_id
                 )
