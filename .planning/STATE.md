@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 04
 current_phase_name: metadata-composition-and-topology-contracts
 status: planned
-stopped_at: Gap-closure plans 04-09 through 04-13 ready to execute
-last_updated: "2026-09-08T05:58:33.594Z"
-last_activity: 2026-09-07
+stopped_at: Completed 04-10-PLAN.md
+last_updated: "2026-09-08T06:41:43.206Z"
+last_activity: 2026-09-08
 last_activity_desc: Phase 04 execution started
-state_head: b18af8dd15afd0cf76e5be7d2c34cf4cb2907b04
+state_head: e81d0f6d48ebc5a0b04196c3f92a1cfc9da0d560
 progress:
   total_phases: 8
   completed_phases: 3
   total_plans: 60
-  completed_plans: 54
+  completed_plans: 56
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-09-06)
 ## Current Position
 
 Phase: 04 (metadata-composition-and-topology-contracts) — READY TO EXECUTE
-Plan: 8 of 13
+Plan: 10 of 13
 Status: Ready to execute
 Last activity: 2026-09-08 — Phase 04 gap-closure plans verified
 
@@ -136,6 +136,7 @@ Phase 03 rows in this historical table include superseded attempts and do not de
 | Phase 04-metadata-composition-and-topology-contracts P06 | 1575s | 2 tasks | 13 files |
 | Phase 04 P07 | 22min | 2 tasks | 13 files |
 | Phase 04 P08 | 5m | 2 tasks | 17 files |
+| Phase 04 P10 | 13m 10s | 2 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -288,6 +289,8 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 04]: BlobStore is the sole payload/catalog lifecycle authority; UnifiedCache remains a narrow policy facade.
 - [Phase 04]: Pre-production metadata authority compatibility surfaces are deleted rather than shimmed.
 - [Phase 04]: Python 3.11/3.13 full-suite collection evidence is recorded as a release gap, without reopening retired APIs.
+- [Phase 04]: StoreTopology owns exactly one RoleRegistry; BlobStore resolves only that composition root.
+- [Phase 04]: Structural protocol checks and a local identity ledger replace concrete cross-role checks and duplicated close paths.
 
 ### Pending Todos
 
@@ -313,6 +316,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-08T05:58:33.594Z
-Stopped at: Gap-closure plans 04-09 through 04-13 ready to execute
+Last session: 2026-09-08T06:41:43.148Z
+Stopped at: Completed 04-10-PLAN.md
 Resume file: None
