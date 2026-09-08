@@ -11,6 +11,7 @@ from __future__ import annotations
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 import re
+import subprocess
 
 import pytest
 
@@ -322,3 +323,41 @@ def test_local_verifier_inventory_and_evidence_boundary_are_fixed(tmp_path: Path
     unavailable.write_text('{"status": "UNAVAILABLE"}', encoding="utf-8")
     assert verifier.read_live_evidence_status(unavailable) == "invalid"
     assert unavailable.read_text(encoding="utf-8") == '{"status": "UNAVAILABLE"}'
+
+
+def test_local_pytest_subprocess_has_a_fixed_timeout(monkeypatch) -> None:
+    """The verification gate cannot wait forever on a stuck child process."""
+    verifier = _load_verifier()
+    observed: dict[str, object] = {}
+
+    def run(command, **kwargs):
+        observed["command"] = command
+        observed.update(kwargs)
+        return subprocess.CompletedProcess(command, 0, stdout="1 passed")
+
+    monkeypatch.setattr(verifier.subprocess, "run", run)
+
+    ok, diagnostic = verifier._run_pytest(("tests/example.py",), label="fixed suite")
+
+    assert ok is True
+    assert diagnostic == "fixed suite:\n1 passed"
+    assert observed["timeout"] == verifier.PYTEST_TIMEOUT_SECONDS == 300
+
+
+def test_local_pytest_timeout_fails_closed_with_diagnostic(monkeypatch) -> None:
+    """A stuck child becomes a bounded failed result, not an uncaught exception."""
+    verifier = _load_verifier()
+
+    def run(command, **kwargs):
+        raise subprocess.TimeoutExpired(
+            command,
+            kwargs["timeout"],
+            output="partial output",
+        )
+
+    monkeypatch.setattr(verifier.subprocess, "run", run)
+
+    ok, diagnostic = verifier._run_pytest(("tests/example.py",), label="fixed suite")
+
+    assert ok is False
+    assert diagnostic == "fixed suite: timed out after 300 seconds\npartial output"

@@ -30,6 +30,7 @@ CATALOG_PATH = REPOSITORY_ROOT / "docs/CATALOG_AND_TOPOLOGY.md"
 INITIALIZATION_PATH = REPOSITORY_ROOT / "docs/STORAGE_INITIALIZATION.md"
 COVERAGE_PATH = PHASE_DIRECTORY / "05-COVERAGE.md"
 DEFAULT_EVIDENCE_PATH = PHASE_DIRECTORY / "05-LIVE-QUALIFICATION.json"
+PYTEST_TIMEOUT_SECONDS = 300
 
 TOPOLOGY_START = "<!-- phase5-topology-matrix:start -->"
 TOPOLOGY_END = "<!-- phase5-topology-matrix:end -->"
@@ -396,14 +397,26 @@ def read_live_evidence_status(path: Path) -> str:
 
 def _run_pytest(arguments: Sequence[str], *, label: str) -> tuple[bool, str]:
     """Run one fixed local test command and return a compact diagnostic."""
-    completed = subprocess.run(
-        [sys.executable, "-m", "pytest", *arguments],
-        cwd=REPOSITORY_ROOT,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        check=False,
-    )
+    command = [sys.executable, "-m", "pytest", *arguments]
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=REPOSITORY_ROOT,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+            timeout=PYTEST_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as error:
+        output = error.stdout or ""
+        summary = "\n".join(output.splitlines()[-12:])
+        diagnostic = (
+            f"{label}: timed out after {PYTEST_TIMEOUT_SECONDS} seconds"
+        )
+        if summary:
+            diagnostic = f"{diagnostic}\n{summary}"
+        return False, diagnostic
     summary = "\n".join(completed.stdout.splitlines()[-12:])
     return completed.returncode == 0, f"{label}:\n{summary}"
 
