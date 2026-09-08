@@ -52,8 +52,10 @@ error go away: its ownership or interruption history may be unknown.
 Use separate roots for a non-expiring object store and a cache. Cache instances
 still use BlobStore internally; they add TTL and eviction policy. A root need not
 serve both roles simultaneously. Application mapping metadata is stored in the
-authenticated catalog and supports `get_metadata`, `list(metadata_filter=...)`,
-and `update_metadata`. Richer catalog schema customization is Phase 4 work.
+authenticated catalog and supports `get_metadata` and `update_metadata`.
+`BlobStore.list()` accepts a key prefix only; portable metadata queries use the
+declared catalog schema and `query_catalog`, never an unbounded dictionary
+filter. Richer catalog schema customization is a Phase 4 contract.
 
 For policy that needs metadata and payload from one generation:
 
@@ -67,12 +69,13 @@ with BlobStore(local_sqlite_topology("./objects"), cache_dir="./objects") as sto
     store.delete("optional", expected=receipt.expectation)
 ```
 
-`BlobEntryInfo` is an immutable authenticated receipt. `get_entry_info` retrieves
-metadata without opening/deserializing the payload. `open_entry` verifies the
-manifest, generation, payload digest, and size before yielding; its snapshot and
-reader are valid only inside the context. No database transaction is held across
-that context. Treat `expectation` as opaque: a later replacement makes an old
-conditional deletion conflict rather than deleting the replacement.
+`BlobReceipt` is the immutable result of a committed generation. `BlobEntry` is
+an authenticated snapshot: `get_entry_info` inspects its metadata without a
+payload reader, while `open_entry` verifies the manifest, generation, payload
+digest, and size before yielding a reader valid only inside its context. No
+database transaction is held across that context. Treat `expectation` as opaque:
+a later replacement makes an old conditional deletion conflict rather than
+deleting the replacement.
 
 ## Commit and derived data are distinct
 
@@ -86,8 +89,7 @@ transaction. Interrupted cleanup remains recorded as debt for reconciliation.
 | Exact lifecycle conflict or retryable contention timeout | The requested conditional operation could not complete as requested; inspect the typed context and retry deliberately. |
 | Operational SQLite error | A typed backend failure with the original cause, not an automatic demand to migrate. |
 | Recoverable post-commit cleanup error | The new generation committed; the error includes key, generation, expectation, and `committed=True`. Reconcile recorded debt; do not assume rollback. |
-| Optional cache projection/export failure | Storage remains committed; `put` returns its key and logs a structured warning. Canonical reads do not need that derived row. |
-| Explicitly requested ORM custom-metadata failure | `CacheMetadataError` reports `committed=True`, key, generation, and the original cause. The blob remains committed; the separate link transaction was not acknowledged. |
+| Derived projection refresh failure | Storage remains committed; the receipt records a dirty projection outcome, while an explicit refresh reports committed-partial work. Canonical reads do not need a derived row. |
 
 Concurrent cache close after the engine operation completes can cause the same
 derived-data outcomes. BlobStore still drains its own admitted operations and
@@ -97,16 +99,12 @@ to guarantee optional export completion.
 Canonical cache reads use authenticated catalog metadata, not mutable compatibility
 rows. A damaged projection cannot revoke a valid blob. Direct projection point,
 list, and query observations still reject malformed structured fields with typed
-corruption errors; SQL filtering may exclude unrelated stale rows before decoding.
-Exact-generation queries can omit stale/missing derived rows. Reads do not silently
-repair them. Canonical integrity failures preserve evidence and return a cache miss
-without automatic deletion; unsafe authoritative paths remain typed errors.
-`delete_invalid_signatures` does not authorize canonical evidence deletion; legacy
-compatibility handling remains separate. Disabling the legacy cache hash option
-does not disable the engine's canonical SHA-256 verification.
+corruption errors. Exact-generation queries can omit stale or missing derived
+rows. Reads do not silently repair them. Canonical integrity failures preserve
+evidence and return a cache miss without automatic deletion; unsafe authoritative
+paths remain typed errors. BlobStore manifest authentication and payload digest
+verification are independent of cache policy.
 
-There is no new durable queue for failed cache exports and no automatic index
-repair protocol in this change. Canonical metadata remains available for a future
-explicit index rebuild. Applications needing a guaranteed external custom-link
-commit must handle the reported partial outcome rather than retrying the entire
-blob write blindly. A custom link is not part of the blob transaction.
+There is no durable queue for failed projections and no automatic index-repair
+protocol in this change. Canonical metadata remains available for a future explicit
+projection rebuild. A projection is not part of the blob transaction.
