@@ -50,10 +50,20 @@ class TestPublicExports:
             "InMemoryBlobBackend",
         }
 
+        import cacheness.storage as storage
+
         assert retired.isdisjoint(cacheness.__all__)
-        assert {"RoleRegistry", "StoreTopology"}.issubset(cacheness.__all__)
-        assert cacheness.RoleRegistry is not None
-        assert cacheness.StoreTopology is not None
+        assert all(not hasattr(cacheness, name) for name in retired)
+        assert {
+            "RoleRegistry",
+            "BackendRole",
+            "BackendRef",
+            "StoreTopology",
+        }.issubset(storage.__all__)
+        assert cacheness.RoleRegistry is storage.RoleRegistry
+        assert cacheness.StoreTopology is storage.StoreTopology
+        assert storage.BackendRole.PAYLOAD.value == "payload"
+        assert storage.BackendRef(name="memory").name == "memory"
 
     def test_documented_constructor_decorator_and_registry_signatures(self):
         assert "cache_dir" in inspect.signature(cacheness.CacheConfig).parameters

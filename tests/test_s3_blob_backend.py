@@ -9,7 +9,6 @@ from io import BytesIO
 
 # Check for moto availability
 try:
-    import moto
     from moto import mock_aws
     MOTO_AVAILABLE = True
 except ImportError:
@@ -507,36 +506,39 @@ class TestS3MinIOCompatibility:
 # =============================================================================
 
 class TestS3BackendRegistration:
-    """Test S3 backend registration with the blob backend registry."""
+    """Test local S3 payload-factory registration without topology claims."""
     
-    def test_register_s3_backend(self, aws_credentials, s3_bucket):
-        """Test registering S3 backend."""
+    def test_construct_s3_through_local_payload_role_registry(
+        self, aws_credentials, s3_bucket
+    ):
+        """A role registration forwards options, but does not qualify S3 topology."""
         from cacheness.storage.backends.s3_backend import S3BlobBackend
-        from cacheness.storage.backends.blob_backends import (
-            register_blob_backend,
-            unregister_blob_backend,
-            get_blob_backend,
-            list_blob_backends,
-        )
+        from cacheness.storage.composition import BackendRole, RoleRegistry
         
         with mock_aws():
             client = boto3.client("s3", region_name="us-east-1")
             client.create_bucket(Bucket=s3_bucket)
             
-            # Register
-            register_blob_backend("s3", S3BlobBackend, force=True)
-            
-            # Verify it's listed
-            backends = list_blob_backends()
-            backend_names = [b["name"] for b in backends]
-            assert "s3" in backend_names
-            
-            # Get backend instance
-            backend = get_blob_backend("s3", bucket=s3_bucket)
+            registry = RoleRegistry()
+            registry.register(BackendRole.PAYLOAD, "s3", S3BlobBackend)
+
+            registration = registry.resolve(BackendRole.PAYLOAD, "s3")
+            backend = registration.construct(
+                {
+                    "bucket": s3_bucket,
+                    "endpoint_url": "http://localhost:9000",
+                    "region": "us-east-1",
+                    "use_ssl": False,
+                    "shard_chars": 3,
+                }
+            )
+
             assert isinstance(backend, S3BlobBackend)
-            
-            # Clean up
-            unregister_blob_backend("s3")
+            assert backend.bucket == s3_bucket
+            assert backend.endpoint_url == "http://localhost:9000"
+            assert backend.region == "us-east-1"
+            assert backend.use_ssl is False
+            assert backend.shard_chars == 3
 
 
 # =============================================================================

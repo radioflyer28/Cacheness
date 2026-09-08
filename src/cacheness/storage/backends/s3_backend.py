@@ -12,31 +12,22 @@ Requirements:
 
 Usage:
     from cacheness.storage.backends.s3_backend import S3BlobBackend
-    from cacheness import register_blob_backend
-    
-    # Register S3 backend
-    register_blob_backend("s3", S3BlobBackend)
-    
-    # Use with Amazon S3
-    backend = get_blob_backend(
-        "s3",
-        bucket="my-cache-bucket",
-        region="us-east-1",
-    )
-    
-    # Use with MinIO
-    backend = get_blob_backend(
-        "s3",
-        bucket="local-cache",
-        endpoint_url="http://minio.internal:9000",
-        access_key="minioadmin",
-        secret_key="minioadmin",
-        use_ssl=False,
-    )
+    from cacheness.storage import BackendRole, RoleRegistry
+
+    # Register S3 for one application's payload role.
+    registry = RoleRegistry()
+    registry.register(BackendRole.PAYLOAD, "s3", S3BlobBackend)
+    backend = registry.construct(BackendRole.PAYLOAD, "s3", {
+        "bucket": "my-cache-bucket",
+        "region": "us-east-1",
+    })
+
+``S3BlobBackend`` may be locally registered and constructed in Phase 4. It is
+not thereby qualified as a ``BlobStore`` topology or immutable-generation
+lifecycle participant; that service/topology qualification belongs to Phase 5.
 """
 
 import logging
-from io import BytesIO
 from typing import BinaryIO, Dict, List, Optional, Any
 
 from .blob_backends import BlobBackend
