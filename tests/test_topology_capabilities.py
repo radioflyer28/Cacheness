@@ -34,6 +34,10 @@ class _Payload:
     def stage(self) -> None:
         self.stage_calls += 1
 
+    def materialize_handler_io(self) -> object:
+        """Satisfy the structural payload-role check for capability tests."""
+        return object()
+
 
 class _Authority:
     capabilities = {
@@ -143,3 +147,10 @@ def test_sqlite_local_scope_allows_conflict_or_retryable_timeout_not_universal_s
     outcomes = composition.allowed_progress_outcomes(authority_kind="sqlite-local")
 
     assert outcomes == {"success", "conflict", "retryable_timeout"}
+
+
+def test_payload_without_generation_io_provider_is_rejected_during_composition() -> None:
+    composition = _composition()
+
+    with pytest.raises(composition.CompositionValidationError):
+        composition.StoreTopology(payload=object(), authority=_Authority()).resolve()

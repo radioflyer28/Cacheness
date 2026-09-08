@@ -33,6 +33,10 @@ class _ClosableParticipant:
 class _Payload(_ClosableParticipant):
     capabilities = {"immutable_generations": True, "streaming": True, "listing": True}
 
+    def materialize_handler_io(self) -> object:
+        """Satisfy the structural payload role in pure composition tests."""
+        return object()
+
 
 class _Authority(_ClosableParticipant):
     capabilities = {"transactional": True, "compare_and_swap": True, "portable_query": True}
@@ -253,3 +257,47 @@ def test_sqlite_tracer_reopens_one_signed_canonical_descriptor(tmp_path: Path) -
         assert observed.key == receipt.key
         assert observed.generation == receipt.generation
         assert observed.metadata["metadata"]["label"] == "answer"
+
+
+def test_selected_filesystem_participant_supplies_generation_io_at_its_own_root(
+    tmp_path: Path,
+) -> None:
+    """An injected filesystem participant, not BlobStore.cache_dir, owns bytes."""
+    from cacheness.storage.backends.blob_backends import FilesystemBlobBackend
+    from cacheness.storage.blob_store import BlobStore
+    from cacheness.storage.catalog import CatalogField, CatalogSchema
+    from cacheness.storage.composition import BackendRef, StoreTopology
+
+    root_a = tmp_path / "selected-payload"
+    root_b = tmp_path / "unselected-cache-dir"
+    payload = FilesystemBlobBackend(root_a)
+    schema = CatalogSchema(
+        fields=(CatalogField("rank", "integer", default=0, queryable=True),),
+        schema_id="participant-root",
+    )
+    topology = StoreTopology(
+        payload=BackendRef(instance=payload),
+        authority=BackendRef(name="sqlite", options={"root": root_a}),
+    )
+    store = BlobStore(topology, cache_dir=root_b)
+    try:
+        receipt = store.put_entry(
+            {"payload": "selected"},
+            key="selected-root",
+            catalog_schema=schema,
+            catalog_values={},
+        )
+        updated = store.update_catalog(
+            receipt.key,
+            catalog_schema=schema,
+            catalog_values={"rank": 2},
+            expected=receipt.expectation,
+        )
+        assert updated is not None
+        assert store.guarded_handler_io.root == payload.base_dir
+        assert any((root_a / "generations").rglob("*"))
+        assert not (root_b / "generations").exists()
+        assert store.get(receipt.key) == {"payload": "selected"}
+    finally:
+        store.close()
+        payload.close()
