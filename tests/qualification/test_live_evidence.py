@@ -213,10 +213,10 @@ def test_dirty_qualification_source_prevents_live_subprocess_execution(
     assert evidence["cleanup_status"] == "NOT_ATTEMPTED"
 
 
-def test_source_revision_rejects_a_dirty_qualification_path(
+def test_source_revision_rejects_a_dirty_imported_production_module(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A dirty relevant path cannot be represented by the current HEAD revision."""
+    """Every imported production module is part of the qualified revision."""
     runner = _load_runner()
     revision = "a" * 40
 
@@ -225,8 +225,12 @@ def test_source_revision_rejects_a_dirty_qualification_path(
         if command[:3] == ["git", "rev-parse", "HEAD"]:
             return subprocess.CompletedProcess(command, 0, f"{revision}\n", "")
         assert command[:3] == ["git", "status", "--porcelain"]
+        assert "src/cacheness" in command
+        assert "tests" in command
+        assert "src/cacheness/storage" not in command
+        assert "tests/integration" not in command
         return subprocess.CompletedProcess(
-            command, 0, " M tools/run_phase5_qualification.py\n", ""
+            command, 0, " M src/cacheness/config.py\n", ""
         )
 
     monkeypatch.setattr(runner.subprocess, "run", git_with_dirty_runner_path)

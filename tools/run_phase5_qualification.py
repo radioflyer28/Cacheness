@@ -47,9 +47,8 @@ QUALIFICATION_SOURCE_PATHS = (
     "pyproject.toml",
     "docs/CATALOG_AND_TOPOLOGY.md",
     "docs/STORAGE_INITIALIZATION.md",
-    "src/cacheness/storage",
-    "tests/integration",
-    "tests/qualification",
+    "src/cacheness",
+    "tests",
     "tools/run_phase5_qualification.py",
     "tools/verify_phase5_contracts.py",
 )
