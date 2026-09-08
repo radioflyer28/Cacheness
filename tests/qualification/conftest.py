@@ -242,6 +242,11 @@ def _bounded_delete_prefix(
                 return False
             if type(size) is not int or size < 0:
                 return False
+            # The marker is the only authorization for this exact run.  Keep
+            # it out of bulk deletion so any interrupted later page remains
+            # safely retryable through this same guarded cleanup path.
+            if key == namespace.s3_owner_marker_key:
+                continue
             objects_seen += 1
             bytes_seen += size
             if (
@@ -267,6 +272,110 @@ def _bounded_delete_prefix(
         if not isinstance(next_token, str) or not next_token or len(next_token) > 1_024:
             return False
         continuation = next_token
+
+
+def _s3_prefix_contains_only_owner_marker(
+    client: Any,
+    bucket: str,
+    namespace: QualificationNamespace,
+    expected_bucket_owner: str | None,
+) -> bool:
+    """Prove bounded S3 cleanup reached only its exact authorization marker."""
+    continuation: str | None = None
+    pages = 0
+    objects_seen = 0
+    bytes_seen = 0
+    marker_seen = False
+    while True:
+        if pages >= _MAX_CLEANUP_PAGES:
+            return False
+        request: dict[str, object] = {
+            **_s3_owner_request(bucket, expected_bucket_owner),
+            "Prefix": namespace.prefix,
+            "MaxKeys": _MAX_DELETE_BATCH,
+        }
+        if continuation is not None:
+            request["ContinuationToken"] = continuation
+        try:
+            response = client.list_objects_v2(**request)
+        except Exception:
+            return False
+        pages += 1
+        contents = response.get("Contents", [])
+        if not isinstance(contents, list):
+            return False
+        for item in contents:
+            if not isinstance(item, Mapping):
+                return False
+            key = item.get("Key")
+            size = item.get("Size")
+            if not isinstance(key, str) or not key.startswith(namespace.prefix):
+                return False
+            if type(size) is not int or size < 0:
+                return False
+            objects_seen += 1
+            bytes_seen += size
+            if (
+                objects_seen > _MAX_CLEANUP_OBJECTS
+                or bytes_seen > _MAX_CLEANUP_BYTES
+                or key != namespace.s3_owner_marker_key
+            ):
+                return False
+            marker_seen = True
+        if response.get("IsTruncated", False) is not True:
+            break
+        next_token = response.get("NextContinuationToken")
+        if not isinstance(next_token, str) or not next_token or len(next_token) > 1_024:
+            return False
+        continuation = next_token
+
+    key_marker: str | None = None
+    upload_id_marker: str | None = None
+    upload_pages = 0
+    while True:
+        if upload_pages >= _MAX_CLEANUP_PAGES:
+            return False
+        request = {
+            **_s3_owner_request(bucket, expected_bucket_owner),
+            "Prefix": namespace.prefix,
+            "MaxUploads": _MAX_DELETE_BATCH,
+        }
+        if key_marker is not None:
+            request["KeyMarker"] = key_marker
+        if upload_id_marker is not None:
+            request["UploadIdMarker"] = upload_id_marker
+        try:
+            response = client.list_multipart_uploads(**request)
+        except Exception:
+            return False
+        upload_pages += 1
+        uploads = response.get("Uploads", [])
+        if not isinstance(uploads, list) or uploads:
+            return False
+        if response.get("IsTruncated", False) is not True:
+            return marker_seen
+        next_key = response.get("NextKeyMarker")
+        next_upload = response.get("NextUploadIdMarker")
+        if not isinstance(next_key, str) or not isinstance(next_upload, str):
+            return False
+        key_marker, upload_id_marker = next_key, next_upload
+
+
+def _delete_s3_owner_marker(
+    client: Any,
+    bucket: str,
+    namespace: QualificationNamespace,
+    expected_bucket_owner: str | None,
+) -> bool:
+    """Delete the exact marker only after bounded cleanup proved it is alone."""
+    try:
+        client.delete_object(
+            **_s3_owner_request(bucket, expected_bucket_owner),
+            Key=namespace.s3_owner_marker_key,
+        )
+    except Exception:
+        return False
+    return True
 
 
 def _bounded_abort_multipart_uploads(
@@ -355,6 +464,12 @@ def cleanup_s3_run(
     ):
         return "RESIDUE"
     if not _bounded_delete_prefix(client, bucket, namespace, expected_bucket_owner):
+        return "RESIDUE"
+    if not _s3_prefix_contains_only_owner_marker(
+        client, bucket, namespace, expected_bucket_owner
+    ):
+        return "RESIDUE"
+    if not _delete_s3_owner_marker(client, bucket, namespace, expected_bucket_owner):
         return "RESIDUE"
     return (
         "CLEAN"

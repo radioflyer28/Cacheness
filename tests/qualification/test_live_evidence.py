@@ -250,3 +250,89 @@ def test_bounded_cleanup_refuses_unowned_or_prefix_escaping_s3_objects() -> None
     client = FakeS3()
     assert fixtures.cleanup_s3_run(client, "bucket", namespace) == "RESIDUE"
     assert client.deleted is False
+
+
+def test_bounded_cleanup_keeps_its_marker_until_all_later_pages_finish() -> None:
+    """A failed later delete batch leaves the owned prefix safely retryable."""
+    fixtures = _load_fixtures()
+    namespace = fixtures.qualification_namespace("phase5-" + "d" * 32)
+
+    class _Body:
+        def __init__(self, value: bytes) -> None:
+            self._value = value
+
+        def read(self, _size: int) -> bytes:
+            return self._value
+
+        def close(self) -> None:
+            return None
+
+    class FakeS3:
+        def __init__(self) -> None:
+            self.objects = {
+                namespace.s3_owner_marker_key: fixtures._owner_marker_payload(namespace),
+                f"{namespace.prefix}payload/first": b"one",
+                f"{namespace.prefix}payload/second": b"two",
+            }
+            self.fail_later_batch = True
+            self.delete_batches = 0
+            self.marker_deletions: list[str] = []
+
+        def get_object(self, *, Key: str, **_kwargs: object) -> dict[str, object]:
+            return {"Body": _Body(self.objects[Key])}
+
+        def list_objects_v2(self, **kwargs: object) -> dict[str, object]:
+            keys = sorted(self.objects)
+            continuation = kwargs.get("ContinuationToken")
+            if continuation is None and len(keys) > 2:
+                page_keys = keys[:2]
+                return {
+                    "Contents": [
+                        {"Key": key, "Size": len(self.objects[key])}
+                        for key in page_keys
+                    ],
+                    "IsTruncated": True,
+                    "NextContinuationToken": "later-page",
+                }
+            if continuation == "later-page":
+                page_keys = [
+                    key for key in keys if key == f"{namespace.prefix}payload/second"
+                ]
+            else:
+                page_keys = keys
+            return {
+                "Contents": [
+                    {"Key": key, "Size": len(self.objects[key])}
+                    for key in page_keys
+                ],
+                "IsTruncated": False,
+            }
+
+        def delete_objects(self, *, Delete: dict[str, object], **_kwargs: object) -> dict[str, object]:
+            self.delete_batches += 1
+            if self.fail_later_batch and self.delete_batches == 2:
+                raise RuntimeError("simulated later page failure")
+            for item in Delete["Objects"]:
+                self.objects.pop(item["Key"])
+            return {}
+
+        def list_multipart_uploads(self, **_kwargs: object) -> dict[str, object]:
+            return {"Uploads": [], "IsTruncated": False}
+
+        def abort_multipart_upload(self, **_kwargs: object) -> None:
+            raise AssertionError("no uploads should be aborted")
+
+        def delete_object(self, *, Key: str, **_kwargs: object) -> None:
+            self.marker_deletions.append(Key)
+            self.objects.pop(Key)
+
+    client = FakeS3()
+
+    assert fixtures.cleanup_s3_run(client, "bucket", namespace) == "RESIDUE"
+    assert namespace.s3_owner_marker_key in client.objects
+    assert client.marker_deletions == []
+
+    client.fail_later_batch = False
+    assert fixtures.cleanup_s3_run(client, "bucket", namespace) == "CLEAN"
+    assert client.objects == {}
+    assert client.marker_deletions == [namespace.s3_owner_marker_key]
