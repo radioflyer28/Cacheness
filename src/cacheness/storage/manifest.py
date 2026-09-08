@@ -8,14 +8,23 @@ from __future__ import annotations
 
 import json
 import re
+import hmac
 from dataclasses import dataclass, replace
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
 
 from cacheness.error_handling import (
     CacheManifestIntegrityError,
     CacheManifestUnsupportedVersionError,
+    CacheMigrationOrRebuildRequiredError,
     CacheReason,
+)
+
+from .catalog import (
+    MAX_SIGNED_64 as CATALOG_MAX_SIGNED_64,
+    STORE_FORMAT_VERSION,
+    validate_catalog_mapping,
 )
 
 
@@ -55,6 +64,394 @@ _CANONICAL_FIELDS = frozenset(
 
 ManifestDecodeError = CacheManifestIntegrityError
 UnsupportedManifestVersionError = CacheManifestUnsupportedVersionError
+MigrationOrRebuildRequired = CacheMigrationOrRebuildRequiredError
+
+
+# The development V1 names below remain implementation evidence until the
+# phase-wide cutover rewires the lifecycle. They are not the current public
+# format contract. These dimensions intentionally vary independently.
+CURRENT_MANIFEST_SCHEMA_VERSION = 3
+CURRENT_SQLITE_USER_VERSION = 7
+CURRENT_STORE_EPOCH = 1
+_CURRENT_MANIFEST_FIELDS = frozenset(
+    {
+        "byte_size",
+        "catalog_presence",
+        "catalog_schema_fingerprint",
+        "catalog_schema_id",
+        "catalog_schema_revision",
+        "catalog_values",
+        "created_at",
+        "digest",
+        "digest_algorithm",
+        "generation",
+        "handler_metadata",
+        "handler_type",
+        "key",
+        "locator",
+        "manifest_schema_version",
+        "payload_format",
+        "payload_format_version",
+        "signature",
+        "signature_algorithm",
+        "sqlite_user_version",
+        "state",
+        "store_epoch",
+        "store_format_version",
+        "user_metadata",
+    }
+)
+
+
+def _require_current_key(signing_key: bytes) -> None:
+    """Keep current manifest authentication on the fixed HMAC key contract."""
+    if not isinstance(signing_key, bytes) or len(signing_key) != 32:
+        raise CacheManifestIntegrityError("Manifest signing key must be exactly 32 bytes")
+
+
+def _validate_current_string(name: str, value: Any) -> str:
+    if not isinstance(value, str) or not value:
+        raise CacheManifestIntegrityError(f"Current manifest {name} must be a non-empty string")
+    if len(value.encode("utf-8")) > MAX_STRING_UTF8_BYTES:
+        raise CacheManifestIntegrityError("Manifest string byte limit exceeded")
+    return value
+
+
+@dataclass(frozen=True)
+class StoreVersionDimensions:
+    """Independent identifiers for a format-2 store and one payload contract."""
+
+    store_epoch: int = CURRENT_STORE_EPOCH
+    manifest_schema_version: int = CURRENT_MANIFEST_SCHEMA_VERSION
+    sqlite_user_version: int = CURRENT_SQLITE_USER_VERSION
+    payload_format_version: int = PAYLOAD_FORMAT_VERSION
+    store_format_version: int = STORE_FORMAT_VERSION
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("store_epoch", self.store_epoch),
+            ("manifest_schema_version", self.manifest_schema_version),
+            ("sqlite_user_version", self.sqlite_user_version),
+            ("payload_format_version", self.payload_format_version),
+            ("store_format_version", self.store_format_version),
+        ):
+            if (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or not 1 <= value <= CATALOG_MAX_SIGNED_64
+            ):
+                raise CacheManifestIntegrityError(
+                    f"Current manifest {name} must be a positive signed-64 integer"
+                )
+        if self.store_format_version != STORE_FORMAT_VERSION:
+            raise MigrationOrRebuildRequired(
+                "Unsupported store format requires offline migration or rebuild",
+                context={"store_format_version": self.store_format_version},
+            )
+        if self.manifest_schema_version != CURRENT_MANIFEST_SCHEMA_VERSION:
+            raise MigrationOrRebuildRequired(
+                "Unsupported manifest schema requires offline migration or rebuild",
+                context={"manifest_schema_version": self.manifest_schema_version},
+            )
+        if self.sqlite_user_version != CURRENT_SQLITE_USER_VERSION:
+            raise MigrationOrRebuildRequired(
+                "Unsupported SQLite catalog schema requires offline migration or rebuild",
+                context={"sqlite_user_version": self.sqlite_user_version},
+            )
+
+    def to_mapping(self) -> dict[str, int]:
+        """Return explicit independent dimensions for canonical serialization."""
+        return {
+            "manifest_schema_version": self.manifest_schema_version,
+            "payload_format_version": self.payload_format_version,
+            "sqlite_user_version": self.sqlite_user_version,
+            "store_epoch": self.store_epoch,
+            "store_format_version": self.store_format_version,
+        }
+
+
+@dataclass(frozen=True)
+class BlobManifest:
+    """The sole format-2 descriptor for one authenticated BlobStore generation."""
+
+    versions: StoreVersionDimensions
+    key: str
+    generation: str
+    locator: str
+    handler_type: str
+    payload_format: str
+    digest: str
+    byte_size: int
+    created_at: str
+    catalog_schema_id: str
+    catalog_schema_revision: int
+    catalog_schema_fingerprint: str
+    catalog_values: Mapping[str, Any]
+    catalog_presence: tuple[str, ...]
+    user_metadata: Mapping[str, Any]
+    handler_metadata: Mapping[str, Any]
+    state: str = "committed"
+    digest_algorithm: str = PAYLOAD_DIGEST_ALGORITHM
+    signature_algorithm: str = MANIFEST_SIGNATURE_ALGORITHM
+    signature: str = ""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.versions, StoreVersionDimensions):
+            raise CacheManifestIntegrityError("Current manifest requires version dimensions")
+        for name, value in (
+            ("key", self.key),
+            ("generation", self.generation),
+            ("locator", self.locator),
+            ("handler_type", self.handler_type),
+            ("payload_format", self.payload_format),
+            ("created_at", self.created_at),
+            ("catalog_schema_id", self.catalog_schema_id),
+        ):
+            _validate_current_string(name, value)
+        if self.state not in {"committed", "tombstoned"}:
+            raise CacheManifestIntegrityError("Current manifest lifecycle state is invalid")
+        if self.digest_algorithm != PAYLOAD_DIGEST_ALGORITHM:
+            raise CacheManifestIntegrityError("Current manifest digest algorithm is invalid")
+        if self.signature_algorithm != MANIFEST_SIGNATURE_ALGORITHM:
+            raise CacheManifestIntegrityError("Current manifest signature algorithm is invalid")
+        if not _HEX_SHA256.fullmatch(self.digest):
+            raise CacheManifestIntegrityError("Current manifest digest is invalid")
+        if self.signature and not _HEX_SHA256.fullmatch(self.signature):
+            raise CacheManifestIntegrityError("Current manifest signature is invalid")
+        if (
+            not isinstance(self.byte_size, int)
+            or isinstance(self.byte_size, bool)
+            or not 0 <= self.byte_size <= CATALOG_MAX_SIGNED_64
+        ):
+            raise CacheManifestIntegrityError("Current manifest byte size is invalid")
+        if (
+            not isinstance(self.catalog_schema_revision, int)
+            or isinstance(self.catalog_schema_revision, bool)
+            or not 1 <= self.catalog_schema_revision <= CATALOG_MAX_SIGNED_64
+        ):
+            raise CacheManifestIntegrityError("Current manifest catalog schema revision is invalid")
+        if not _HEX_SHA256.fullmatch(self.catalog_schema_fingerprint):
+            raise CacheManifestIntegrityError("Current manifest catalog fingerprint is invalid")
+        if not isinstance(self.catalog_presence, tuple) or (
+            tuple(sorted(set(self.catalog_presence))) != self.catalog_presence
+        ):
+            raise CacheManifestIntegrityError("Current manifest catalog presence is invalid")
+        if any(not isinstance(item, str) or not item for item in self.catalog_presence):
+            raise CacheManifestIntegrityError("Current manifest catalog presence is invalid")
+        catalog_values = validate_catalog_mapping(self.catalog_values, schema=None)
+        if set(catalog_values) != set(self.catalog_presence):
+            raise CacheManifestIntegrityError(
+                "Current manifest catalog values and stored presence disagree"
+            )
+        user_metadata = validate_catalog_mapping(self.user_metadata, schema=None)
+        handler_metadata = validate_catalog_mapping(self.handler_metadata, schema=None)
+        object.__setattr__(self, "catalog_values", _freeze_json_value(catalog_values))
+        object.__setattr__(self, "user_metadata", _freeze_json_value(user_metadata))
+        object.__setattr__(self, "handler_metadata", _freeze_json_value(handler_metadata))
+
+    @property
+    def store_format_version(self) -> int:
+        """Expose the format identity without conflating the other dimensions."""
+        return self.versions.store_format_version
+
+    @property
+    def payload_format_version(self) -> int:
+        """Expose the handler-owned payload format independently from the store."""
+        return self.versions.payload_format_version
+
+    def to_mapping(self, *, include_signature: bool = True) -> dict[str, Any]:
+        """Build the explicit wire record without serializing the dataclass shape."""
+        record: dict[str, Any] = {
+            "byte_size": self.byte_size,
+            "catalog_presence": list(self.catalog_presence),
+            "catalog_schema_fingerprint": self.catalog_schema_fingerprint,
+            "catalog_schema_id": self.catalog_schema_id,
+            "catalog_schema_revision": self.catalog_schema_revision,
+            "catalog_values": _thaw_json_value(self.catalog_values),
+            "created_at": self.created_at,
+            "digest": self.digest,
+            "digest_algorithm": self.digest_algorithm,
+            "generation": self.generation,
+            "handler_metadata": _thaw_json_value(self.handler_metadata),
+            "handler_type": self.handler_type,
+            "key": self.key,
+            "locator": self.locator,
+            "payload_format": self.payload_format,
+            "signature_algorithm": self.signature_algorithm,
+            "state": self.state,
+            "user_metadata": _thaw_json_value(self.user_metadata),
+            **self.versions.to_mapping(),
+        }
+        if include_signature:
+            record["signature"] = self.signature
+        return record
+
+    def canonical_bytes(self, *, include_signature: bool = True) -> bytes:
+        """Encode one format-2 record deterministically with explicit fields."""
+        return _canonical_encode(self.to_mapping(include_signature=include_signature))
+
+    def signing_bytes(self) -> bytes:
+        """Return the complete authenticated projection, excluding signature only."""
+        return self.canonical_bytes(include_signature=False)
+
+    def with_signature(self, signature: str) -> "BlobManifest":
+        """Return a distinct immutable descriptor with an HMAC authentication tag."""
+        if not isinstance(signature, str) or not _HEX_SHA256.fullmatch(signature):
+            raise CacheManifestIntegrityError("Current manifest signature is invalid")
+        return replace(self, signature=signature)
+
+    @classmethod
+    def from_mapping(cls, record: Mapping[str, Any]) -> "BlobManifest":
+        """Decode only the exact format-2 wire shape; no legacy reader exists."""
+        if set(record) != _CURRENT_MANIFEST_FIELDS:
+            raise MigrationOrRebuildRequired(
+                "Incomplete, mixed, or foreign manifest requires offline migration or rebuild"
+            )
+        versions = StoreVersionDimensions(
+            store_epoch=record["store_epoch"],
+            manifest_schema_version=record["manifest_schema_version"],
+            sqlite_user_version=record["sqlite_user_version"],
+            payload_format_version=record["payload_format_version"],
+            store_format_version=record["store_format_version"],
+        )
+        values = dict(record)
+        for name in versions.to_mapping():
+            del values[name]
+        values["catalog_presence"] = tuple(values["catalog_presence"])
+        return cls(versions=versions, **values)
+
+    @classmethod
+    def from_canonical_bytes(cls, raw: bytes) -> "BlobManifest":
+        """Decode a current manifest after bounded JSON framing validation."""
+        return cls.from_mapping(decode_current_manifest_record(raw))
+
+
+def sign_current_manifest(manifest: BlobManifest, signing_key: bytes) -> BlobManifest:
+    """Authenticate the exact current descriptor with the repository HMAC contract."""
+    _require_current_key(signing_key)
+    if not isinstance(manifest, BlobManifest):
+        raise CacheManifestIntegrityError("Only a current manifest can be signed")
+    signature = hmac.new(signing_key, manifest.signing_bytes(), "sha256").hexdigest()
+    return manifest.with_signature(signature)
+
+
+def verify_current_manifest(manifest: BlobManifest, signing_key: bytes) -> None:
+    """Fail closed unless the current descriptor authenticates exactly."""
+    _require_current_key(signing_key)
+    if not isinstance(manifest, BlobManifest) or not manifest.signature:
+        raise CacheManifestIntegrityError("Current manifest signature is missing")
+    expected = hmac.new(signing_key, manifest.signing_bytes(), "sha256").hexdigest()
+    if not hmac.compare_digest(manifest.signature, expected):
+        raise CacheManifestIntegrityError("Current manifest authentication failed")
+
+
+def decode_current_manifest_record(raw: bytes) -> dict[str, Any]:
+    """Read bounded format dispatch data without interpreting a legacy descriptor."""
+    if not isinstance(raw, bytes) or not raw or len(raw) > MAX_MANIFEST_BYTES:
+        raise CacheManifestIntegrityError("Current manifest bytes are invalid")
+    try:
+        record = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_int=_parse_canonical_int,
+            parse_float=_reject_float,
+            parse_constant=_reject_constant,
+        )
+    except (UnicodeDecodeError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        if isinstance(exc, CacheManifestIntegrityError):
+            raise
+        raise CacheManifestIntegrityError("Current manifest is not valid canonical JSON") from exc
+    if not isinstance(record, dict):
+        raise CacheManifestIntegrityError("Current manifest must be a JSON object")
+    _validate_canonical_value(record, depth=1, nodes=[0])
+    return record
+
+
+@dataclass(frozen=True)
+class StoreLayout:
+    """Read-only result for an empty or already-current store root."""
+
+    state: str
+    versions: StoreVersionDimensions | None = None
+
+
+def _layout_error(root: Path, layout: str) -> None:
+    raise MigrationOrRebuildRequired(
+        "Unsupported store layout requires explicit offline migration or rebuild",
+        context={"root": str(root), "layout": layout},
+    )
+
+
+def _load_layout_marker(marker: Path, root: Path) -> StoreVersionDimensions:
+    try:
+        raw = marker.read_bytes()
+    except OSError as exc:
+        raise CacheManifestIntegrityError("Store format marker cannot be read") from exc
+    if not raw or len(raw) > 4096:
+        _layout_error(root, "invalid-format-marker")
+    try:
+        record = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_int=_parse_canonical_int,
+            parse_float=_reject_float,
+            parse_constant=_reject_constant,
+        )
+    except (UnicodeDecodeError, TypeError, ValueError, json.JSONDecodeError):
+        _layout_error(root, "invalid-format-marker")
+    if not isinstance(record, dict):
+        _layout_error(root, "invalid-format-marker")
+    required = {
+        "store_format_version",
+        "store_epoch",
+        "manifest_schema_version",
+        "sqlite_user_version",
+    }
+    if set(record) != required:
+        _layout_error(root, "incomplete-or-mixed-format-marker")
+    try:
+        return StoreVersionDimensions(
+            store_epoch=record["store_epoch"],
+            manifest_schema_version=record["manifest_schema_version"],
+            sqlite_user_version=record["sqlite_user_version"],
+            payload_format_version=PAYLOAD_FORMAT_VERSION,
+            store_format_version=record["store_format_version"],
+        )
+    except MigrationOrRebuildRequired:
+        raise
+    except CacheManifestIntegrityError:
+        _layout_error(root, "foreign-format-marker")
+
+
+def inspect_store_layout(root: str | Path) -> StoreLayout:
+    """Classify a root using reads only, before initialization or staging occurs."""
+    candidate = Path(root)
+    if not candidate.exists():
+        return StoreLayout("empty")
+    if not candidate.is_dir():
+        _layout_error(candidate, "not-a-directory")
+    current_marker = candidate / ".cacheness" / "store-format.json"
+    root_marker = candidate / "store-format.json"
+    marker_paths = [path for path in (current_marker, root_marker) if path.is_file()]
+    if len(marker_paths) > 1:
+        _layout_error(candidate, "mixed-format-markers")
+    legacy_paths = (
+        candidate / "manifest.json",
+        candidate / "metadata.json",
+        candidate / "metadata.sqlite3",
+        candidate / ".cacheness" / "lifecycle-authority-v1.sqlite3",
+    )
+    if any(path.exists() for path in legacy_paths):
+        _layout_error(candidate, "development-format-1")
+    if marker_paths:
+        return StoreLayout("current", _load_layout_marker(marker_paths[0], candidate))
+    try:
+        has_artifacts = any(candidate.iterdir())
+    except OSError as exc:
+        raise CacheManifestIntegrityError("Store layout cannot be inspected") from exc
+    if has_artifacts:
+        _layout_error(candidate, "foreign-or-incomplete")
+    return StoreLayout("empty")
 
 
 def _freeze_json_value(value: Any) -> Any:
@@ -396,6 +793,20 @@ class BlobManifestV1:
 
 
 __all__ = [
+    "BlobManifest",
+    "CURRENT_MANIFEST_SCHEMA_VERSION",
+    "CURRENT_SQLITE_USER_VERSION",
+    "CURRENT_STORE_EPOCH",
+    "MigrationOrRebuildRequired",
+    "STORE_FORMAT_VERSION",
+    "StoreLayout",
+    "StoreVersionDimensions",
+    "decode_current_manifest_record",
+    "inspect_store_layout",
+    "sign_current_manifest",
+    "verify_current_manifest",
+    # Historical implementation evidence remains internal until the planned
+    # phase-wide API cutover rewires every lifecycle consumer.
     "BlobManifestV1",
     "MANIFEST_SCHEMA_VERSION",
     "MANIFEST_SIGNATURE_ALGORITHM",

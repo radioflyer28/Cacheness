@@ -75,8 +75,8 @@ from .catalog import (
     validate_catalog_mapping,
     validate_catalog_query,
 )
-from .read_contract import BlobEntry, BlobEntryInfo
-from .manifest import BlobManifestV1
+from .read_contract import BlobEntry, BlobReceipt
+from .manifest import BlobManifest
 from .reconciliation import (
     ReconciliationAction,
     ReconciliationFinding,
@@ -116,6 +116,8 @@ except ImportError:
 __all__ = [
     # Main API
     "BlobStore",
+    "BlobManifest",
+    "BlobReceipt",
     "CatalogCursor",
     "CatalogCursorError",
     "CatalogEntry",
@@ -133,8 +135,6 @@ __all__ = [
     "validate_catalog_mapping",
     "validate_catalog_query",
     "BlobEntry",
-    "BlobEntryInfo",
-    "BlobManifestV1",
     "CacheBlobManifestMalformedError",
     "CacheBlobManifestUnauthenticatedError",
     "CacheBlobPayloadMissingError",

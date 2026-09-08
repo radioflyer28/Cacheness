@@ -5,6 +5,7 @@ from __future__ import annotations
 from importlib import import_module
 from importlib.util import find_spec
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 
@@ -162,3 +163,62 @@ def test_future_and_foreign_layouts_require_migration_or_rebuild_without_mutatio
         catalog.inspect_store_layout(root)
 
     assert marker.read_text(encoding="utf-8") == '{"store_format_version":99}'
+
+
+def test_current_manifest_keeps_version_dimensions_independent_and_authenticated() -> None:
+    manifest = import_module("cacheness.storage.manifest")
+    versions = manifest.StoreVersionDimensions(
+        store_epoch=11,
+        manifest_schema_version=3,
+        sqlite_user_version=7,
+        payload_format_version=19,
+        store_format_version=2,
+    )
+    current = manifest.BlobManifest(
+        versions=versions,
+        key="key",
+        generation="generation",
+        locator="generations/key/generation",
+        handler_type="object",
+        payload_format="pickle",
+        digest="a" * 64,
+        byte_size=12,
+        created_at="2026-09-08T00:00:00+00:00",
+        catalog_schema_id="example",
+        catalog_schema_revision=5,
+        catalog_schema_fingerprint="b" * 64,
+        catalog_values={"count": 0},
+        catalog_presence=("count",),
+        user_metadata={"opaque": {"kept": True}},
+        handler_metadata={"codec": "native"},
+    )
+
+    signed = manifest.sign_current_manifest(current, b"x" * 32)
+    restored = manifest.BlobManifest.from_canonical_bytes(signed.canonical_bytes())
+    manifest.verify_current_manifest(restored, b"x" * 32)
+
+    assert restored.versions.store_epoch == 11
+    assert restored.versions.manifest_schema_version == 3
+    assert restored.versions.sqlite_user_version == 7
+    assert restored.payload_format_version == 19
+    assert isinstance(restored.catalog_values, MappingProxyType)
+
+
+def test_blob_receipt_is_frozen_and_not_the_legacy_entry_info_alias() -> None:
+    storage = import_module("cacheness.storage")
+    from cacheness.storage.lifecycle_authority import EntryExpectation
+
+    receipt = storage.BlobReceipt(
+        operation_id="operation",
+        key="key",
+        generation="generation",
+        locator="generations/key/generation",
+        expectation=EntryExpectation.absent(),
+        catalog_revision=4,
+        projections={"json": {"state": "pending"}},
+    )
+
+    assert receipt.generation == "generation"
+    assert "BlobEntryInfo" not in storage.__all__
+    with pytest.raises((AttributeError, TypeError)):
+        receipt.projections["json"] = {"state": "complete"}

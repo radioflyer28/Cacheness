@@ -28,6 +28,42 @@ def _freeze_metadata(value: Any) -> Any:
 
 
 @dataclass(frozen=True)
+class BlobReceipt:
+    """The immutable semantic result for a committed BlobStore generation.
+
+    A receipt captures the exact generation, conditional expectation, catalog
+    revision, and any derived projection outcomes. It neither authorizes a
+    lifecycle transition nor aliases the development-era entry-info shape.
+    """
+
+    operation_id: str
+    key: str
+    generation: str
+    locator: str
+    expectation: EntryExpectation
+    catalog_revision: int
+    projections: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        if any(
+            not isinstance(value, str) or not value
+            for value in (self.operation_id, self.key, self.generation, self.locator)
+        ):
+            raise ValueError("BlobReceipt identity fields must be non-empty strings")
+        if (
+            not isinstance(self.catalog_revision, int)
+            or isinstance(self.catalog_revision, bool)
+            or self.catalog_revision < 0
+        ):
+            raise ValueError("BlobReceipt catalog revision must be a non-negative integer")
+        if not isinstance(self.projections, Mapping):
+            raise ValueError("BlobReceipt projection outcomes must be a mapping")
+        if any(not isinstance(name, str) or not name for name in self.projections):
+            raise ValueError("BlobReceipt projection names must be non-empty strings")
+        object.__setattr__(self, "projections", _freeze_metadata(self.projections))
+
+
+@dataclass(frozen=True)
 class BlobEntryInfo:
     """Authenticated metadata and an opaque conditional-delete expectation."""
 
