@@ -237,7 +237,7 @@ For Phases 4–8, every lifecycle change must name its supported topology, trans
   5. Direct BlobStore users can define application metadata, validate/query supported fields, update attributes and reopen current-layout stores without implementing a lifecycle backend. Authoritative attributes commit with the descriptor; external ORM links/indexes are explicitly derived. Pre-Phase-4 development layouts need not reopen through runtime shims and instead fail with explicit migration/rebuild-required evidence; no unchosen schema framework is implied.
   6. Catalog and derived-index APIs state their consistency and failure behavior. Preserve committed receipts, exact expectations, non-destructive corruption handling and explicit partial outcomes; any index reconstruction is an explicit derived operation, not a prerequisite for canonical reads or cleanup.
 
-**Plans**: 11/13 plans executed; 5 gap-closure plans ready
+**Plans**: 12/13 plans executed; 5 gap-closure plans ready
 
 Plans:
 **Wave 0**
@@ -286,7 +286,7 @@ Plans:
 
 **Wave 11** *(blocked on Wave 10 completion)*
 
-- [ ] 04-12-PLAN.md — Rewrite remaining registry, lifecycle, integrity, initialization, and cache consumers against the final public seams.
+- [x] 04-12-PLAN.md — Rewrite remaining registry, lifecycle, integrity, initialization, and cache consumers against the final public seams.
 
 **Wave 12** *(blocked on Wave 11 completion)*
 
@@ -363,7 +363,7 @@ Plans:
 | 1. Compatibility and Security Baseline | 15/15 | Complete | 2026-08-30 |
 | 2. Canonical Storage and Integrity Contract | 7/7 | Complete    | 2026-08-30 |
 | 3. Atomic Lifecycle and Recovery Engine | 24/24 | Complete — direct qualification | 2026-09-06 |
-| 4. Metadata Composition and Topology Contracts | 11/13 | In Progress|  |
+| 4. Metadata Composition and Topology Contracts | 12/13 | In Progress|  |
 | 5. Payload Backends and Supported Topology Qualification | 0/TBD | Not started | - |
 | 6. UnifiedCache Policy Composition | 0/TBD | Not started | - |
 | 7. Explicit Migration and Rebuild Cutover | 0/TBD | Not started | - |
