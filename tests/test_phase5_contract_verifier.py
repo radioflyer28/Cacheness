@@ -8,6 +8,7 @@ live status may appear.
 
 from __future__ import annotations
 
+from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 import re
 
@@ -97,6 +98,16 @@ EXPECTED_COVERAGE_CAPABILITIES = frozenset(
         "Cross-resource foreign-data wrapper or filesystem authority",
     }
 )
+
+
+def _load_verifier():
+    """Load the standalone verifier without making ``tools`` a package."""
+    verifier_path = REPOSITORY_ROOT / "tools" / "verify_phase5_contracts.py"
+    spec = spec_from_file_location("phase5_contract_verifier", verifier_path)
+    assert spec is not None and spec.loader is not None
+    module = module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _marker_text(path: Path, start: str, end: str) -> str:
@@ -208,3 +219,99 @@ def test_api_coverage_is_complete_and_every_opt_out_is_reasoned() -> None:
 def test_contract_markers_are_unique(path: Path, start: str, end: str) -> None:
     """One fixed source region makes documentation drift deterministic."""
     _marker_text(path, start, end)
+
+
+@pytest.mark.parametrize(
+    ("source", "filename", "expected"),
+    [
+        (
+            "class AnotherLifecycleEngine:\n    pass\n",
+            "src/cacheness/storage/parallel.py",
+            ("second lifecycle engine: AnotherLifecycleEngine",),
+        ),
+        (
+            "class MutationCoordinator:\n    pass\n",
+            "src/cacheness/storage/coordinator.py",
+            ("second lifecycle coordinator: MutationCoordinator",),
+        ),
+        (
+            "def publish(authority):\n    authority.promote_mutation(None)\n",
+            "src/cacheness/storage/backends/s3_backend.py",
+            ("payload adapter invokes authority transition: promote_mutation",),
+        ),
+        (
+            "def visible(client):\n    if client.head_object(Bucket='x', Key='y'):\n        return True\n",
+            "src/cacheness/storage/backends/s3_backend.py",
+            ("S3 observation used as visibility authority",),
+        ),
+        (
+            "cursor.execute('SELECT pg_advisory_lock(1)')\n",
+            "src/cacheness/storage/backends/postgresql_lifecycle_authority.py",
+            ("PostgreSQL advisory lock call",),
+        ),
+        (
+            "client.list_objects_v2(Bucket='bucket', Prefix='prefix')\n",
+            "src/cacheness/storage/backends/s3_backend.py",
+            ("unbounded S3 listing: list_objects_v2",),
+        ),
+        (
+            "if response['ETag'] == manifest.digest:\n    return True\n",
+            "src/cacheness/storage/backends/s3_backend.py",
+            ("ETag used as integrity authority",),
+        ),
+        (
+            "MANIFEST_SECRET = 'do-not-commit'\n",
+            "src/cacheness/storage/backends/s3_backend.py",
+            ("inline secret assignment: MANIFEST_SECRET",),
+        ),
+    ],
+)
+def test_architecture_audit_rejects_prohibited_executable_forms(
+    source: str, filename: str, expected: tuple[str, ...]
+) -> None:
+    """AST rules catch executable architecture drift, not just documentation text."""
+    verifier = _load_verifier()
+    assert verifier.audit_source(source, filename) == expected
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "# class AnotherLifecycleEngine: pass\n",
+        "text = 'pg_advisory_lock and list_objects_v2 without MaxKeys'\n",
+        "doc = 'ETag used as integrity authority'\n",
+        "client.list_objects_v2(Bucket='bucket', Prefix='prefix', MaxKeys=1)\n",
+        "def publish():\n    return client.head_object(Bucket='x', Key='y')\n",
+    ],
+)
+def test_architecture_audit_ignores_comments_strings_and_bounded_nonvisibility_code(
+    source: str,
+) -> None:
+    """Source rules must not replace semantic checks with broad text greps."""
+    verifier = _load_verifier()
+    assert verifier.audit_source(source, "fixture.py") == ()
+
+
+def test_local_verifier_inventory_and_evidence_boundary_are_fixed(tmp_path: Path) -> None:
+    """Local verification reports evidence but cannot write or upgrade it."""
+    verifier = _load_verifier()
+
+    assert set(verifier.CONTRACT_TEST_MODULES) >= {
+        "tests/test_supported_topologies.py",
+        "tests/contracts/test_payload_generation_io.py",
+        "tests/contracts/test_lifecycle_authority.py",
+        "tests/test_payload_faults.py",
+        "tests/contracts/test_topology_lifecycle.py",
+        "tests/qualification/test_live_evidence.py",
+    }
+    assert set(verifier.LIVE_COLLECTION_MODULES) == {
+        "tests/integration/test_postgresql_authority.py",
+        "tests/integration/test_s3_generation.py",
+        "tests/integration/test_remote_topology.py",
+    }
+    assert verifier.read_live_evidence_status(tmp_path / "missing.json") == "absent"
+
+    unavailable = tmp_path / "evidence.json"
+    unavailable.write_text('{"status": "UNAVAILABLE"}', encoding="utf-8")
+    assert verifier.read_live_evidence_status(unavailable) == "invalid"
+    assert unavailable.read_text(encoding="utf-8") == '{"status": "UNAVAILABLE"}'
