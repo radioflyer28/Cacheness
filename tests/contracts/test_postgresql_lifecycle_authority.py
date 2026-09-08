@@ -454,6 +454,19 @@ def test_promotion_marks_fresh_lineage_before_matching_absence() -> None:
     statements = [_query_text(query) for query, _ in factory.connections[0].executions]
     lineage_insert = next(statement for statement in statements if "entry_lineage" in statement)
     assert "returning key" in lineage_insert
+    promotion_update = next(
+        statement
+        for statement in statements
+        if "update" in statement and "promoted_lineage" in statement
+    )
+    assert "promoted_revision" in promotion_update
+    replay_query = next(
+        statement
+        for statement in statements
+        if "select key, generation, locator, manifest, verified_digest" in statement
+        and "state = 'promoted'" in statement
+    )
+    assert "join" not in replay_query
 
 
 def test_prepare_and_verification_use_exact_bound_values() -> None:
@@ -554,15 +567,15 @@ def test_uncertain_promotion_reopens_a_fresh_lease_for_exact_operation_state() -
         spec.manifest, digest, len(spec.manifest), "prepared",
     )
     promoted_row = prepared_row[:-1] + ("promoted",)
-    entry_row = (
+    promotion_receipt_row = (
         spec.key, spec.generation, spec.candidate_locator, spec.manifest, digest, 1, 1,
     )
     factory = _Factory(
         scripts=[[
             prepared_row, (spec.key,), (0, None, None, None), None, (0,), (1,),
             (spec.generation, spec.candidate_locator), (spec.operation_id,), (1,),
-            entry_row, [],
-        ], [promoted_row, entry_row, []]],
+            promotion_receipt_row, [],
+        ], [promoted_row, promotion_receipt_row, []]],
         commit_errors=[RuntimeError("connection closed during commit"), None],
     )
 

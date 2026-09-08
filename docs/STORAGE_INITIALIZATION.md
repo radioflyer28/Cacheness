@@ -18,6 +18,9 @@ the exact profiles published in the catalog/topology guide.
   Phase 7 migration or rebuild, never an implicit open-time upgrade. Supply a
   real PostgreSQL service, a real Amazon S3 bucket with a test-owned or
   application-owned managed prefix, and a shared external manifest signing key.
+  The PostgreSQL authority schema/capability marker includes the operation-owned
+  promotion receipt layout; a prior marker fails explicitly until that offline
+  maintenance boundary is used.
 
 The remote profile is a PostgreSQL authority plus an immutable Amazon S3
 participant. PostgreSQL promotion controls visibility, while S3 create/delete

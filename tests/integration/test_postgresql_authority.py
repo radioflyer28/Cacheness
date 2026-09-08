@@ -138,6 +138,11 @@ def test_live_authority_uses_exact_cas_and_retains_cleanup_debt_atomically(
         with pytest.raises(CacheBlobLifecycleConflictError):
             reader.promote_mutation(stale)
         assert reader.read_entry(key) == replacement_result.entry
+        # An idempotent replay belongs to its original mutation, not the
+        # mutable current entry selected by the later replacement.
+        replayed_first = writer.promote_mutation(first)
+        assert replayed_first.entry == first_result.entry
+        assert replayed_first.entry != replacement_result.entry
         assert len(replacement_result.cleanup_debt) == 1
         debt = replacement_result.cleanup_debt[0]
         assert debt.locator == first_result.entry.locator

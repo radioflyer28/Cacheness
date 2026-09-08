@@ -59,10 +59,10 @@ except ImportError:  # pragma: no cover - exercised by optional-dependency users
     sql = None
 
 
-POSTGRESQL_AUTHORITY_SCHEMA_VERSION = 2
+POSTGRESQL_AUTHORITY_SCHEMA_VERSION = 3
 """Current PostgreSQL authority layout version; Phase 7 migration input."""
 
-POSTGRESQL_AUTHORITY_CAPABILITY = "postgresql-lifecycle-authority-v2"
+POSTGRESQL_AUTHORITY_CAPABILITY = "postgresql-lifecycle-authority-v3"
 """Persisted authority capability marker, independent of payload formats."""
 
 SCHEMA_VERSION = POSTGRESQL_AUTHORITY_SCHEMA_VERSION
@@ -471,6 +471,7 @@ class PostgresqlLifecycleAuthority:
                 "locator TEXT NOT NULL, expected_lineage BIGINT, expected_revision BIGINT, "
                 "expected_generation TEXT, expected_manifest_digest TEXT, manifest BYTEA NOT NULL, "
                 "verified_digest TEXT, verified_size BIGINT, state TEXT NOT NULL, "
+                "promoted_lineage BIGINT, promoted_revision BIGINT, "
                 "CONSTRAINT mutations_operation_id_key UNIQUE (operation_id))"
             ).format(self._table("mutations"))
         )
@@ -741,21 +742,31 @@ class PostgresqlLifecycleAuthority:
             ) from error
 
     def _promoted_result(self, cursor: Any, operation_id: str) -> PromotionResult:
+        """Reconstruct an idempotent receipt from immutable operation evidence."""
         cursor.execute(
             sql.SQL(
-                "SELECT m.key, e.generation, e.locator, e.manifest, e.manifest_digest, "
-                "e.lineage, e.revision FROM {} AS m JOIN {} AS e ON e.key = m.key "
-                "WHERE m.operation_id = %s AND m.state = 'promoted'"
-            ).format(self._table("mutations"), self._table("entries")),
+                "SELECT key, generation, locator, manifest, verified_digest, "
+                "promoted_lineage, promoted_revision FROM {} "
+                "WHERE operation_id = %s AND state = 'promoted'"
+            ).format(self._table("mutations")),
             (operation_id,),
         )
         row = cursor.fetchone()
         if row is None:
             raise CacheBlobLifecycleConflictError("Mutation is not promoted")
-        entry = self._entry_from_row(
-            (row[0], row[1], row[2], row[3], row[4], row[5], row[6]),
-            stage="promote_mutation",
-        )
+        try:
+            entry = self._entry_from_row(
+                (row[0], row[1], row[2], row[3], row[4], row[5], row[6]),
+                stage="promote_mutation",
+            )
+        except (TypeError, ValueError) as error:
+            raise CacheBlobBackendError(
+                "PostgreSQL promoted mutation receipt is malformed",
+                context={
+                    "operation": "postgresql_lifecycle_authority",
+                    "stage": "promote_mutation",
+                },
+            ) from error
         cursor.execute(
             sql.SQL(
                 "SELECT debt_id, operation_id, locator, key, generation, role FROM {} "
@@ -874,10 +885,16 @@ class PostgresqlLifecycleAuthority:
             raise CacheBlobLifecycleConflictError("Entry compare-and-swap failed during promotion")
         cursor.execute(
             sql.SQL(
-                "UPDATE {} SET state = 'promoted' WHERE operation_id = %s AND state = 'prepared' "
+                "UPDATE {} SET state = 'promoted', promoted_lineage = %s, "
+                "promoted_revision = %s WHERE operation_id = %s AND state = 'prepared' "
                 "AND verified_digest = %s RETURNING operation_id"
             ).format(self._table("mutations")),
-            (prepared.operation_id, mutation.verified_digest),
+            (
+                next_lineage,
+                next_revision,
+                prepared.operation_id,
+                mutation.verified_digest,
+            ),
         )
         if cursor.fetchone() is None:
             raise CacheBlobLifecycleConflictError("Prepared mutation cannot be promoted")
