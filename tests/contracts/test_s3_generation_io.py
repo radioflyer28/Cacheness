@@ -73,6 +73,21 @@ class _TrackedClient:
         return response
 
 
+class _MultipartResponseLossClient(_TrackedClient):
+    """Model an S3 response loss after the service accepted multipart completion."""
+
+    def __init__(self, client: object) -> None:
+        super().__init__(client)
+        self.complete_requests: list[dict[str, object]] = []
+
+    def complete_multipart_upload(self, **kwargs: object) -> dict[str, object]:
+        from botocore.exceptions import EndpointConnectionError
+
+        self.complete_requests.append(dict(kwargs))
+        self._client.complete_multipart_upload(**kwargs)
+        raise EndpointConnectionError(endpoint_url="https://s3.amazonaws.com")
+
+
 @pytest.fixture
 def s3_generation_backend(tmp_path: Path):
     """Build a contract-only Amazon S3 participant with an injected client."""
@@ -117,3 +132,40 @@ def test_integrity_small_generation_is_conditionally_published_and_snapshotted(
         with pytest.raises(Exception):
             guarded_io.publish_generation(staged, locator)
 
+
+def test_recovery_multipart_response_loss_is_verified_by_exact_digest_and_size(
+    tmp_path: Path,
+) -> None:
+    """Response loss is success only after exact-object snapshot verification.
+
+    This is Moto/fake contract coverage, not real-AWS qualification evidence.
+    """
+    from cacheness.storage.backends.s3_backend import S3BlobBackend
+
+    payload = b"x" * (5 * 1024 * 1024 + 31)
+    with mock_aws():
+        moto_client = boto3.client("s3", region_name="us-east-1")
+        moto_client.create_bucket(Bucket="cacheness-multipart-contract")
+        client = _MultipartResponseLossClient(moto_client)
+        backend = S3BlobBackend(
+            bucket="cacheness-multipart-contract",
+            prefix="contract/run",
+            client=client,
+            staging_root=tmp_path / "private-stage",
+            multipart_threshold=5 * 1024 * 1024,
+            part_size=5 * 1024 * 1024,
+            max_upload_bytes=len(payload) + 1,
+        )
+        try:
+            guarded_io = backend.materialize_handler_io()
+            locator = Path("generations") / "multipart" / "payload.native"
+            with guarded_io.stage(_NativeHandler(), payload, object()) as staged:
+                published = guarded_io.publish_generation(staged, locator)
+
+            assert published["file_size"] == len(payload)
+            assert len(client.complete_requests) == 1
+            assert client.complete_requests[0]["IfNoneMatch"] == "*"
+            with guarded_io.open_snapshot(locator, dict(published["metadata"])) as snapshot:
+                assert snapshot.path.read_bytes() == payload
+        finally:
+            backend.close()
