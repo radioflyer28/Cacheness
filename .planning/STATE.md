@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 04
 current_phase_name: Metadata Composition and Topology Contracts
 status: executing
-stopped_at: Completed 04-04-PLAN.md
-last_updated: "2026-09-08T02:30:44.846Z"
+stopped_at: Completed 04-05-PLAN.md
+last_updated: "2026-09-08T02:51:58.082Z"
 last_activity: 2026-09-07
 last_activity_desc: Phase 04 execution started
-state_head: 34ad48a308a3e7ccdaf1a5f4bba708121817d08b
+state_head: 0fe5eb5aba59f874d9fd3bea0065144053d51ed9
 progress:
   total_phases: 8
   completed_phases: 2
   total_plans: 55
-  completed_plans: 50
+  completed_plans: 51
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-09-06)
 ## Current Position
 
 Phase: 04 (Metadata Composition and Topology Contracts) — EXECUTING
-Plan: 5 of 8
+Plan: 6 of 8
 Status: Ready to execute
 Last activity: 2026-09-07 — Phase 04 execution started
 
@@ -130,6 +130,7 @@ Phase 03 rows in this historical table include superseded attempts and do not de
 | Phase 04-metadata-composition-and-topology-contracts P02 | 16m 10s | 2 tasks | 6 files |
 | Phase 04-metadata-composition-and-topology-contracts P03 | 12m 43s | 2 tasks | 7 files |
 | Phase 04 P04 | 16m 51s | 3 tasks | 12 files |
+| Phase 04 P05 | 13m 52s | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -270,6 +271,10 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 04]: Capability minima are checked before named factory construction or participant I/O.
 - [Phase 04]: SQLite format-2 schema version remains independent from store format; repeat initialization is validation-only.
 - [Phase 04]: Canonical signed descriptors are the only catalog state; authenticated scans use revision-bound HMAC cursors without acceleration indexes.
+- [Phase 04]: Projection sinks are derived-only and cannot authorize lifecycle or canonical query completeness.
+- [Phase 04]: Projection checkpoints bind source, epoch, schema, query, revision, and cursor; apply precedes checkpoint.
+- [Phase 04]: Projection failure preserves the committed BlobReceipt; explicit refresh reports typed committed partial.
+- [Phase 04]: SQLite projection rebuild requires explicit stopped-worker offline maintenance.
 
 ### Pending Todos
 
@@ -295,6 +300,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-08T02:30:44.794Z
-Stopped at: Completed 04-04-PLAN.md
+Last session: 2026-09-08T02:51:58.028Z
+Stopped at: Completed 04-05-PLAN.md
 Resume file: None
