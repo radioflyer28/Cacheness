@@ -82,6 +82,94 @@ def test_registered_names_and_builtins_use_the_same_role_registry_path() -> None
     assert isinstance(resolved.authority, _Authority)
 
 
+def test_blob_store_resolves_application_roles_from_its_topology_registry() -> None:
+    """Named application roles use the same topology path as built-ins."""
+    from cacheness.storage.backends.blob_backends import InMemoryBlobBackend
+    from cacheness.storage.blob_store import BlobStore
+    from cacheness.storage.catalog import CatalogField, CatalogQuery, CatalogSchema
+    from cacheness.storage.memory_lifecycle_authority import InMemoryLifecycleAuthority
+
+    composition = _composition()
+    constructed: dict[str, object] = {}
+    schema = CatalogSchema(
+        (CatalogField("rank", "integer", queryable=True),),
+        schema_id="application-roles",
+    )
+
+    class RecordingPayload(InMemoryBlobBackend):
+        def __init__(self, *, label: str) -> None:
+            super().__init__()
+            self.label = label
+
+    class RecordingAuthority(InMemoryLifecycleAuthority):
+        def __init__(self, *, label: str) -> None:
+            super().__init__()
+            self.label = label
+
+    class RecordingProjection:
+        projection_name = "application-projection"
+        projection_schema = schema
+        projection_query = CatalogQuery()
+
+        def __init__(self, *, label: str) -> None:
+            self.label = label
+            self.batches: list[object] = []
+            self.checkpoints: list[object] = []
+
+        def apply_projection_batch(self, batch: object) -> None:
+            self.batches.append(batch)
+
+        def save_projection_checkpoint(self, checkpoint: object) -> None:
+            self.checkpoints.append(checkpoint)
+
+        def load_projection_checkpoint(self) -> None:
+            return None
+
+    def construct_payload(*, label: str) -> RecordingPayload:
+        payload = RecordingPayload(label=label)
+        constructed["payload"] = payload
+        return payload
+
+    def construct_authority(*, label: str) -> RecordingAuthority:
+        authority = RecordingAuthority(label=label)
+        constructed["authority"] = authority
+        return authority
+
+    def construct_projection(*, label: str) -> RecordingProjection:
+        projection = RecordingProjection(label=label)
+        constructed["projection"] = projection
+        return projection
+
+    registry = composition.RoleRegistry()
+    registry.register("payload", "application", construct_payload)
+    registry.register("authority", "application", construct_authority)
+    registry.register("projection", "application", construct_projection)
+    topology = composition.StoreTopology(
+        payload=composition.BackendRef(name="application", options={"label": "p"}),
+        authority=composition.BackendRef(name="application", options={"label": "a"}),
+        projections=(
+            composition.BackendRef(name="application", options={"label": "q"}),
+        ),
+        role_registry=registry,
+    )
+
+    with BlobStore(topology) as store:
+        receipt = store.put_entry(
+            {"answer": 42},
+            key="application-role-entry",
+            catalog_schema=schema,
+            catalog_values={"rank": 3},
+        )
+        page = store.query_catalog(CatalogQuery(), schema=schema)
+
+        assert store.payload_backend is constructed["payload"]
+        assert store.lifecycle_authority is constructed["authority"]
+        assert store.projections == (constructed["projection"],)
+        assert receipt.key == "application-role-entry"
+        assert [entry.key for entry in page.entries] == [receipt.key]
+        assert constructed["projection"].batches
+
+
 def test_named_options_are_isolated_per_construction() -> None:
     composition = _composition()
     first = composition.BackendRef(name="memory", options={"namespace": "one"})
