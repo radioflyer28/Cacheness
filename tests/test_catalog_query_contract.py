@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
+import json
 from importlib import import_module
 from importlib.util import find_spec
 from pathlib import Path
@@ -31,6 +35,41 @@ def _queryable_schema():
             catalog.CatalogField("private", "string", queryable=False),
         )
     )
+
+
+def _cursor_record(catalog, *, field_bytes: int) -> dict[str, object]:
+    value = "\x00" * field_bytes
+    return {
+        "format_version": catalog.STORE_FORMAT_VERSION,
+        "last_identity": [value, value],
+        "query_fingerprint": value,
+        "revision": catalog.MAX_SIGNED_64,
+        "schema_fingerprint": value,
+        "schema_id": value,
+        "store_epoch": catalog.MAX_SIGNED_64,
+        "store_id": value,
+    }
+
+
+def _signed_cursor(record: dict[str, object], signing_key: bytes = b"x" * 32) -> str:
+    unsigned = json.dumps(
+        record,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    signed = dict(record)
+    signed["signature"] = hmac.new(signing_key, unsigned, hashlib.sha256).hexdigest()
+    return base64.urlsafe_b64encode(
+        json.dumps(
+            signed,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).decode("ascii").rstrip("=")
 
 
 class _AccessSpy:
@@ -190,6 +229,137 @@ def test_stale_revision_is_retryable_not_a_partial_success() -> None:
         catalog.require_current_revision(cursor_revision=2, authority_revision=3)
 
     assert raised.value.retryable is True
+
+
+def test_cursor_encoded_and_decoded_limits_accept_the_closed_record_boundary() -> None:
+    catalog = _catalog()
+    cursor = _signed_cursor(
+        _cursor_record(catalog, field_bytes=catalog.MAX_CURSOR_FIELD_BYTES)
+    )
+    raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
+
+    assert len(cursor.encode("utf-8")) == catalog.MAX_CURSOR_ENCODED_BYTES
+    assert len(raw) == catalog.MAX_CURSOR_DECODED_BYTES
+    assert catalog.CatalogCursor.inspect(cursor, signing_key=b"x" * 32)["store_id"] == (
+        "\x00" * catalog.MAX_CURSOR_FIELD_BYTES
+    )
+
+
+def test_oversized_cursor_is_rejected_before_base64_or_json_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    catalog = _catalog()
+    calls: list[str] = []
+
+    def reached(*_args: object, **_kwargs: object) -> object:
+        calls.append("decode")
+        raise AssertionError("oversized cursor reached decoder")
+
+    monkeypatch.setattr(catalog.base64, "b64decode", reached)
+    oversized = "A" * (catalog.MAX_CURSOR_ENCODED_BYTES + 1)
+
+    with pytest.raises(catalog.CatalogCursorError):
+        catalog.CatalogCursor.inspect(oversized, signing_key=b"x" * 32)
+
+    assert calls == []
+
+
+def test_oversized_decoded_cursor_is_rejected_before_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    catalog = _catalog()
+    calls: list[str] = []
+
+    def reached(*_args: object, **_kwargs: object) -> object:
+        calls.append("json")
+        raise AssertionError("oversized decoded cursor reached JSON")
+
+    monkeypatch.setattr(catalog.json, "loads", reached)
+    cursor = base64.urlsafe_b64encode(
+        b"x" * (catalog.MAX_CURSOR_DECODED_BYTES + 1)
+    ).decode("ascii").rstrip("=")
+
+    with pytest.raises(catalog.CatalogCursorError):
+        catalog.CatalogCursor.inspect(cursor, signing_key=b"x" * 32)
+
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "store_id",
+        "schema_id",
+        "schema_fingerprint",
+        "query_fingerprint",
+        "last_identity_key",
+        "last_identity_generation",
+    ),
+)
+def test_cursor_fields_are_bounded_before_hmac_comparison(
+    field: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog = _catalog()
+    record = _cursor_record(catalog, field_bytes=1)
+    oversized = "x" * (catalog.MAX_CURSOR_FIELD_BYTES + 1)
+    if field == "last_identity_key":
+        record["last_identity"] = [oversized, "x"]
+    elif field == "last_identity_generation":
+        record["last_identity"] = ["x", oversized]
+    else:
+        record[field] = oversized
+    cursor = _signed_cursor(record)
+
+    def hmac_reached(*_args: object, **_kwargs: object) -> bool:
+        raise AssertionError("oversized cursor field reached HMAC comparison")
+
+    monkeypatch.setattr(catalog.hmac, "compare_digest", hmac_reached)
+    with pytest.raises(catalog.CatalogCursorError):
+        catalog.CatalogCursor.inspect(cursor, signing_key=b"x" * 32)
+
+
+@pytest.mark.parametrize("cursor", ("!!!!", base64.urlsafe_b64encode(b"\xff").decode("ascii"), ""))
+def test_malformed_cursor_syntax_is_rejected_before_hmac(cursor: str) -> None:
+    catalog = _catalog()
+
+    with pytest.raises(catalog.CatalogCursorError):
+        catalog.CatalogCursor.inspect(cursor, signing_key=b"x" * 32)
+
+
+def test_rejected_cursor_never_reaches_authority_or_manifest_loading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from cacheness.storage.blob_store import BlobStore
+    from cacheness.storage.composition import BackendRef, StoreTopology
+
+    catalog = _catalog()
+    store = BlobStore(
+        StoreTopology(
+            payload=BackendRef(name="memory"), authority=BackendRef(name="memory")
+        ),
+        cache_dir=tmp_path,
+    )
+    calls: list[str] = []
+
+    def reached(name: str):
+        def fail(*_args: object, **_kwargs: object) -> None:
+            calls.append(name)
+            raise AssertionError(f"rejected cursor reached {name}")
+
+        return fail
+
+    monkeypatch.setattr(store.lifecycle_authority, "catalog_page", reached("authority"))
+    monkeypatch.setattr(store, "_authenticated_authority_manifest", reached("manifest"))
+    try:
+        with pytest.raises(catalog.CatalogCursorError):
+            store.query_catalog(
+                catalog.CatalogQuery(),
+                schema=_queryable_schema(),
+                cursor="A" * (catalog.MAX_CURSOR_ENCODED_BYTES + 1),
+            )
+        assert calls == []
+    finally:
+        store.close()
 
 
 def test_sparse_work_capped_scan_advances_to_last_examined_identity_without_match() -> None:
