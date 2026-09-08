@@ -1593,6 +1593,13 @@ class PostgresqlLifecycleAuthority:
             debt_rows = cursor.fetchall()
             works: list[ReconciliationWork] = []
             bytes_seen = 0
+            # A cursor advances only after the corresponding durable row is
+            # emitted.  Fetching ahead is allowed for bounded SQL pages, but
+            # never authorizes reconciliation to skip evidence omitted by the
+            # shared byte/action work limits.
+            next_mutation = (
+                snapshot.mutation_high_water if not mutation_rows else mutation_cursor
+            )
             for row in mutation_rows:
                 manifest = bytes(row[9])
                 if len(manifest) > self.lifecycle_limits.max_operation_record_bytes:
@@ -1621,6 +1628,8 @@ class PostgresqlLifecycleAuthority:
                     )
                 )
                 bytes_seen += len(manifest)
+                next_mutation = row[0]
+            next_debt = snapshot.debt_high_water if not debt_rows else debt_cursor
             for row in debt_rows:
                 if len(works) >= self.lifecycle_limits.operation_page_size:
                     break
@@ -1632,8 +1641,7 @@ class PostgresqlLifecycleAuthority:
                         debt=CleanupDebt(row[1], row[2], row[3], row[4], row[5], row[0]),
                     )
                 )
-            next_mutation = mutation_rows[-1][0] if mutation_rows else snapshot.mutation_high_water
-            next_debt = debt_rows[-1][0] if debt_rows else snapshot.debt_high_water
+                next_debt = row[0]
             return ReconciliationPage(tuple(works), next_mutation, next_debt)
 
         return self._read_only("page_reconciliation_work", page)

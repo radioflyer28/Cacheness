@@ -587,6 +587,120 @@ def test_uncertain_promotion_reopens_a_fresh_lease_for_exact_operation_state() -
     assert factory.calls == 2
 
 
+def test_reconciliation_cursor_advances_only_to_emitted_byte_bounded_mutations() -> None:
+    """Resumed pages retain prepared evidence that did not fit the prior byte bound."""
+    from cacheness.config import LifecycleLimits
+    from cacheness.storage.backends.postgresql_lifecycle_authority import (
+        PostgresqlLifecycleAuthority,
+    )
+    from cacheness.storage.lifecycle_authority import ReconciliationSnapshot
+
+    def mutation_row(identifier: int) -> tuple[object, ...]:
+        return (
+            identifier,
+            f"operation-{identifier}",
+            f"key-{identifier}",
+            f"generation-{identifier}",
+            f"generations/{identifier}.native",
+            None,
+            None,
+            None,
+            None,
+            b"abcdef",
+            "prepared",
+        )
+
+    first, second, third = (mutation_row(identifier) for identifier in (1, 2, 3))
+    factory = _Factory(
+        scripts=[
+            [[first, second, third], []],
+            [[second, third], []],
+            [[third], []],
+        ]
+    )
+    authority = PostgresqlLifecycleAuthority(
+        factory,
+        schema="phase5_authority",
+        lifecycle_limits=LifecycleLimits(
+            operation_page_size=6,
+            max_operation_record_bytes=11,
+        ),
+    )
+    snapshot = ReconciliationSnapshot(0, 3, 0)
+
+    page_one = authority.page_reconciliation_work(
+        snapshot, mutation_cursor=0, debt_cursor=0
+    )
+    page_two = authority.page_reconciliation_work(
+        snapshot, mutation_cursor=page_one.mutation_cursor, debt_cursor=0
+    )
+    page_three = authority.page_reconciliation_work(
+        snapshot, mutation_cursor=page_two.mutation_cursor, debt_cursor=0
+    )
+
+    assert tuple(work.row_id for work in page_one.works) == (1,)
+    assert tuple(work.row_id for work in page_two.works) == (2,)
+    assert tuple(work.row_id for work in page_three.works) == (3,)
+    assert (
+        page_one.mutation_cursor,
+        page_two.mutation_cursor,
+        page_three.mutation_cursor,
+    ) == (1, 2, 3)
+
+
+def test_reconciliation_cursor_does_not_skip_unemitted_debt_rows() -> None:
+    """Debt rows fetched beside a full mutation page resume from their old cursor."""
+    from cacheness.config import LifecycleLimits
+    from cacheness.storage.backends.postgresql_lifecycle_authority import (
+        PostgresqlLifecycleAuthority,
+    )
+    from cacheness.storage.lifecycle_authority import ReconciliationSnapshot
+
+    mutation = (
+        1,
+        "operation-1",
+        "key-1",
+        "generation-1",
+        "generations/1.native",
+        None,
+        None,
+        None,
+        None,
+        b"a",
+        "prepared",
+    )
+    debt = (
+        1,
+        "debt-operation",
+        "generations/debt.native",
+        "debt-key",
+        "debt-generation",
+        "candidate",
+        "pending",
+    )
+    factory = _Factory(scripts=[[[mutation], [debt]], [[], [debt]]])
+    authority = PostgresqlLifecycleAuthority(
+        factory,
+        schema="phase5_authority",
+        lifecycle_limits=LifecycleLimits(operation_page_size=1),
+    )
+    snapshot = ReconciliationSnapshot(0, 1, 1)
+
+    first_page = authority.page_reconciliation_work(
+        snapshot, mutation_cursor=0, debt_cursor=0
+    )
+    resumed_page = authority.page_reconciliation_work(
+        snapshot,
+        mutation_cursor=first_page.mutation_cursor,
+        debt_cursor=first_page.debt_cursor,
+    )
+
+    assert tuple(work.source for work in first_page.works) == ("mutation",)
+    assert first_page.debt_cursor == 0
+    assert tuple(work.source for work in resumed_page.works) == ("debt",)
+    assert resumed_page.debt_cursor == 1
+
+
 def test_complete_authority_protocol_has_no_placeholder_transitions() -> None:
     """The remote authority supplies every engine primitive without a second coordinator."""
     from cacheness.storage.backends.postgresql_lifecycle_authority import (
