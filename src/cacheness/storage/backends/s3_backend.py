@@ -64,6 +64,24 @@ class S3InventoryPage:
     next_token: str | None
 
 
+@dataclass(frozen=True)
+class S3MultipartUploadEvidence:
+    """One incomplete multipart upload observed below the managed prefix."""
+
+    locator: str
+    upload_id: str
+    initiated_at: object
+
+
+@dataclass(frozen=True)
+class S3MultipartUploadPage:
+    """A bounded multipart-upload evidence page with exact service cursors."""
+
+    uploads: tuple[S3MultipartUploadEvidence, ...]
+    next_key_marker: str | None
+    next_upload_id_marker: str | None
+
+
 def _positive_int(name: str, value: int, *, minimum: int = 1) -> int:
     """Validate a configuration work bound without coercing surprising values."""
     if type(value) is not int or value < minimum:
@@ -120,6 +138,9 @@ class S3BlobBackend:
         chunk_size: int = _DEFAULT_CHUNK_SIZE,
         max_multipart_parts: int = 10_000,
         max_upload_attempts: int = 2,
+        max_inventory_objects: int = 1000,
+        max_inventory_bytes: int = _DEFAULT_DOWNLOAD_LIMIT,
+        max_inventory_work: int = 1,
     ) -> None:
         """Configure one exact Amazon S3 bucket/prefix participant.
 
@@ -155,6 +176,17 @@ class S3BlobBackend:
         )
         if self.max_upload_attempts > 2:
             raise CacheConfigurationError("max_upload_attempts cannot exceed two")
+        self.max_inventory_objects = _positive_int(
+            "max_inventory_objects", max_inventory_objects
+        )
+        if self.max_inventory_objects > 1000:
+            raise CacheConfigurationError("max_inventory_objects cannot exceed 1000")
+        self.max_inventory_bytes = _positive_int(
+            "max_inventory_bytes", max_inventory_bytes
+        )
+        self.max_inventory_work = _positive_int(
+            "max_inventory_work", max_inventory_work
+        )
         if self.multipart_threshold > self.max_upload_bytes:
             raise CacheConfigurationError("multipart_threshold exceeds max_upload_bytes")
 
@@ -630,7 +662,7 @@ class _S3GenerationIO:
             yield GuardedReadSnapshot(snapshot_path, snapshot_metadata)
 
     def delete_or_prove_absent(self, locator: Path | str) -> None:
-        """Delete one exact generation; final absence proof is added with inventory work."""
+        """Delete one exact generation and prove its absence with one exact HEAD."""
         self._require_open()
         key = self._backend._object_key(locator)
         try:
@@ -642,6 +674,239 @@ class _S3GenerationIO:
                 "S3 generation deletion was not confirmed",
                 context={"operation": "s3.delete", "stage": "delete"},
             ) from error
+        try:
+            self._backend._client.head_object(
+                **self._backend._request_kwargs(Bucket=self._backend.bucket, Key=key)
+            )
+        except ClientError as error:
+            if _is_absence(error):
+                return
+            raise CacheBlobBackendError(
+                "S3 generation deletion absence proof failed",
+                context={"operation": "s3.delete", "stage": "head"},
+            ) from error
+        except BotoCoreError as error:
+            raise CacheBlobBackendError(
+                "S3 generation deletion absence proof was not confirmed",
+                context={"operation": "s3.delete", "stage": "head"},
+            ) from error
+        raise CacheBlobBackendError(
+            "S3 generation remains present after deletion acknowledgement",
+            context={"operation": "s3.delete", "stage": "head"},
+        )
+
+    @staticmethod
+    def _validate_continuation_token(token: str | None) -> str | None:
+        """Validate an opaque bounded service cursor without interpreting its content."""
+        if token is None:
+            return None
+        if (
+            not isinstance(token, str)
+            or not token
+            or len(token) > _MAX_LOCATOR_LENGTH
+            or any(character.isspace() for character in token)
+        ):
+            raise CacheBlobBackendError(
+                "S3 inventory continuation token is malformed",
+                context={"operation": "s3.inventory", "stage": "cursor"},
+            )
+        return token
+
+    def _object_evidence(self, item: object) -> S3ObjectEvidence:
+        """Validate one remote listing record before treating it as bounded evidence."""
+        if not isinstance(item, Mapping):
+            raise CacheBlobBackendError(
+                "S3 inventory response contains a malformed object record",
+                context={"operation": "s3.inventory", "stage": "response"},
+            )
+        key = item.get("Key")
+        size = item.get("Size")
+        if not isinstance(key, str) or not key.startswith(self._backend.prefix):
+            raise CacheBlobBackendError(
+                "S3 inventory response escapes the managed prefix",
+                context={"operation": "s3.inventory", "stage": "response"},
+            )
+        try:
+            locator = self._backend._locator_text(key[len(self._backend.prefix) :])
+        except CacheUnsafePathError as error:
+            raise CacheBlobBackendError(
+                "S3 inventory response contains an unsafe generation locator",
+                context={"operation": "s3.inventory", "stage": "response"},
+            ) from error
+        if type(size) is not int or size < 0:
+            raise CacheBlobBackendError(
+                "S3 inventory response contains an invalid object size",
+                context={"operation": "s3.inventory", "stage": "response"},
+            )
+        return S3ObjectEvidence(locator=locator, byte_size=size)
+
+    def inventory_page(self, continuation_token: str | None = None) -> S3InventoryPage:
+        """Return one bounded managed-prefix ListObjectsV2 evidence page.
+
+        Listing is intentionally neither a read nor a visibility decision. It
+        merely supplies bounded evidence to future reconciliation policy.
+        """
+        self._require_open()
+        if self._backend.max_inventory_work < 1:
+            raise CacheBlobBackendError(
+                "S3 inventory has no configured request-work budget",
+                context={"operation": "s3.inventory", "stage": "budget"},
+            )
+        token = self._validate_continuation_token(continuation_token)
+        request = self._backend._request_kwargs(
+            Bucket=self._backend.bucket,
+            Prefix=self._backend.prefix,
+            MaxKeys=self._backend.max_inventory_objects,
+        )
+        if token is not None:
+            request["ContinuationToken"] = token
+        try:
+            response = self._backend._client.list_objects_v2(**request)
+        except (ClientError, BotoCoreError) as error:
+            raise CacheBlobBackendError(
+                "S3 inventory request failed",
+                context={"operation": "s3.inventory", "stage": "list"},
+            ) from error
+        if not isinstance(response, Mapping):
+            raise CacheBlobBackendError(
+                "S3 inventory response is malformed",
+                context={"operation": "s3.inventory", "stage": "response"},
+            )
+        raw_contents = response.get("Contents", ())
+        if not isinstance(raw_contents, (list, tuple)):
+            raise CacheBlobBackendError(
+                "S3 inventory contents are malformed",
+                context={"operation": "s3.inventory", "stage": "response"},
+            )
+        if len(raw_contents) > self._backend.max_inventory_objects:
+            raise CacheBlobBackendError(
+                "S3 inventory response exceeds configured object bound",
+                context={"operation": "s3.inventory", "stage": "response"},
+            )
+        evidence = tuple(self._object_evidence(item) for item in raw_contents)
+        if sum(item.byte_size for item in evidence) > self._backend.max_inventory_bytes:
+            raise CacheBlobBackendError(
+                "S3 inventory response exceeds configured byte bound",
+                context={"operation": "s3.inventory", "stage": "response"},
+            )
+        next_token = response.get("NextContinuationToken")
+        if next_token is not None:
+            next_token = self._validate_continuation_token(next_token)
+        if response.get("IsTruncated") is True and next_token is None:
+            raise CacheBlobBackendError(
+                "S3 inventory response omits its required continuation token",
+                context={"operation": "s3.inventory", "stage": "response"},
+            )
+        return S3InventoryPage(objects=evidence, next_token=next_token)
+
+    def multipart_upload_page(
+        self,
+        *,
+        key_marker: str | None = None,
+        upload_id_marker: str | None = None,
+    ) -> S3MultipartUploadPage:
+        """Return one bounded managed-prefix incomplete-upload evidence page.
+
+        This method does not abort any upload discovered by listing. Only an
+        exact upload ID observed during this process's own pre-completion
+        failure is aborted automatically; later reconciliation needs durable
+        authority attribution before taking destructive action.
+        """
+        self._require_open()
+        if self._backend.max_inventory_work < 1:
+            raise CacheBlobBackendError(
+                "S3 multipart inventory has no configured request-work budget",
+                context={"operation": "s3.multipart_inventory", "stage": "budget"},
+            )
+        marker = self._validate_continuation_token(key_marker)
+        upload_marker = self._validate_continuation_token(upload_id_marker)
+        request = self._backend._request_kwargs(
+            Bucket=self._backend.bucket,
+            Prefix=self._backend.prefix,
+            MaxUploads=self._backend.max_inventory_objects,
+        )
+        if marker is not None:
+            request["KeyMarker"] = marker
+        if upload_marker is not None:
+            request["UploadIdMarker"] = upload_marker
+        try:
+            response = self._backend._client.list_multipart_uploads(**request)
+        except (ClientError, BotoCoreError) as error:
+            raise CacheBlobBackendError(
+                "S3 multipart inventory request failed",
+                context={"operation": "s3.multipart_inventory", "stage": "list"},
+            ) from error
+        if not isinstance(response, Mapping):
+            raise CacheBlobBackendError(
+                "S3 multipart inventory response is malformed",
+                context={"operation": "s3.multipart_inventory", "stage": "response"},
+            )
+        raw_uploads = response.get("Uploads", ())
+        if not isinstance(raw_uploads, (list, tuple)):
+            raise CacheBlobBackendError(
+                "S3 multipart inventory uploads are malformed",
+                context={"operation": "s3.multipart_inventory", "stage": "response"},
+            )
+        if len(raw_uploads) > self._backend.max_inventory_objects:
+            raise CacheBlobBackendError(
+                "S3 multipart inventory exceeds configured object bound",
+                context={"operation": "s3.multipart_inventory", "stage": "response"},
+            )
+        uploads: list[S3MultipartUploadEvidence] = []
+        represented_bytes = 0
+        for upload in raw_uploads:
+            if not isinstance(upload, Mapping):
+                raise CacheBlobBackendError(
+                    "S3 multipart inventory contains a malformed upload record",
+                    context={"operation": "s3.multipart_inventory", "stage": "response"},
+                )
+            key = upload.get("Key")
+            upload_id = upload.get("UploadId")
+            initiated = upload.get("Initiated")
+            if not isinstance(key, str) or not key.startswith(self._backend.prefix):
+                raise CacheBlobBackendError(
+                    "S3 multipart inventory escapes the managed prefix",
+                    context={"operation": "s3.multipart_inventory", "stage": "response"},
+                )
+            if not isinstance(upload_id, str) or not upload_id or initiated is None:
+                raise CacheBlobBackendError(
+                    "S3 multipart inventory contains invalid upload evidence",
+                    context={"operation": "s3.multipart_inventory", "stage": "response"},
+                )
+            try:
+                locator = self._backend._locator_text(key[len(self._backend.prefix) :])
+            except CacheUnsafePathError as error:
+                raise CacheBlobBackendError(
+                    "S3 multipart inventory contains an unsafe generation locator",
+                    context={"operation": "s3.multipart_inventory", "stage": "response"},
+                ) from error
+            represented_bytes += len(key.encode("utf-8")) + len(upload_id.encode("utf-8"))
+            if represented_bytes > self._backend.max_inventory_bytes:
+                raise CacheBlobBackendError(
+                    "S3 multipart inventory exceeds configured byte bound",
+                    context={"operation": "s3.multipart_inventory", "stage": "response"},
+                )
+            uploads.append(
+                S3MultipartUploadEvidence(
+                    locator=locator, upload_id=upload_id, initiated_at=initiated
+                )
+            )
+        next_key_marker = response.get("NextKeyMarker")
+        next_upload_id_marker = response.get("NextUploadIdMarker")
+        if next_key_marker is not None:
+            next_key_marker = self._validate_continuation_token(next_key_marker)
+        if next_upload_id_marker is not None:
+            next_upload_id_marker = self._validate_continuation_token(next_upload_id_marker)
+        if response.get("IsTruncated") is True and next_key_marker is None:
+            raise CacheBlobBackendError(
+                "S3 multipart inventory omits its required key marker",
+                context={"operation": "s3.multipart_inventory", "stage": "response"},
+            )
+        return S3MultipartUploadPage(
+            uploads=tuple(uploads),
+            next_key_marker=next_key_marker,
+            next_upload_id_marker=next_upload_id_marker,
+        )
 
     def close(self) -> None:
         """Release only local guarded staging resources."""
@@ -654,5 +919,7 @@ __all__ = [
     "BOTO3_AVAILABLE",
     "S3BlobBackend",
     "S3InventoryPage",
+    "S3MultipartUploadEvidence",
+    "S3MultipartUploadPage",
     "S3ObjectEvidence",
 ]

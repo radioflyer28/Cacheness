@@ -61,7 +61,7 @@ def s3_participant(tmp_path: Path):
             client=client,
             staging_root=tmp_path / "private-stage",
             max_inventory_objects=2,
-            max_inventory_bytes=32,
+            max_inventory_bytes=1024,
             max_inventory_work=1,
         )
         try:
@@ -141,3 +141,57 @@ def test_inventory_service_error_is_typed_not_an_empty_result(s3_participant, mo
     monkeypatch.setattr(client, "list_objects_v2", fail_list)
     with pytest.raises(CacheBlobBackendError, match="inventory"):
         guarded_io.inventory_page()
+
+
+def test_inventory_rejects_malformed_cursor_and_outside_response_key(
+    s3_participant, monkeypatch
+) -> None:
+    """Opaque cursors and service records are validated before they become evidence."""
+    from cacheness.error_handling import CacheBlobBackendError
+
+    backend, client, _bucket = s3_participant
+    guarded_io = backend.materialize_handler_io()
+    with pytest.raises(CacheBlobBackendError, match="continuation token"):
+        guarded_io.inventory_page("cursor with whitespace")
+
+    monkeypatch.setattr(
+        client,
+        "list_objects_v2",
+        lambda **_kwargs: {"Contents": [{"Key": "outside/key", "Size": 1}]},
+    )
+    with pytest.raises(CacheBlobBackendError, match="managed prefix"):
+        guarded_io.inventory_page()
+
+
+def test_delete_reports_a_still_present_object_as_cleanup_failure(
+    s3_participant, monkeypatch
+) -> None:
+    """A successful DeleteObject response alone never satisfies cleanup debt."""
+    from cacheness.error_handling import CacheBlobBackendError
+
+    backend, client, bucket = s3_participant
+    guarded_io = backend.materialize_handler_io()
+    key = "managed/run/generations/cleanup/still-present"
+    client.put_object(Bucket=bucket, Key=key, Body=b"owned")
+    monkeypatch.setattr(client, "head_object", lambda **_kwargs: {"ContentLength": 5})
+
+    with pytest.raises(CacheBlobBackendError, match="remains present"):
+        guarded_io.delete_or_prove_absent("generations/cleanup/still-present")
+    assert client.delete_requests == [{"Bucket": bucket, "Key": key}]
+    assert client.head_requests == []
+
+
+def test_multipart_inventory_reports_only_bounded_unknown_upload_evidence(
+    s3_participant,
+) -> None:
+    """Unknown incomplete uploads are reported, not automatically deleted."""
+    backend, client, bucket = s3_participant
+    guarded_io = backend.materialize_handler_io()
+    response = client.create_multipart_upload(
+        Bucket=bucket, Key="managed/run/generations/incomplete/payload.native"
+    )
+
+    page = guarded_io.multipart_upload_page()
+    assert len(page.uploads) == 1
+    assert page.uploads[0].locator == "generations/incomplete/payload.native"
+    assert page.uploads[0].upload_id == response["UploadId"]
