@@ -237,7 +237,7 @@ For Phases 4–8, every lifecycle change must name its supported topology, trans
   5. Direct BlobStore users can define application metadata, validate/query supported fields, update attributes and reopen current-layout stores without implementing a lifecycle backend. Authoritative attributes commit with the descriptor; external ORM links/indexes are explicitly derived. Pre-Phase-4 development layouts need not reopen through runtime shims and instead fail with explicit migration/rebuild-required evidence; no unchosen schema framework is implied.
   6. Catalog and derived-index APIs state their consistency and failure behavior. Preserve committed receipts, exact expectations, non-destructive corruption handling and explicit partial outcomes; any index reconstruction is an explicit derived operation, not a prerequisite for canonical reads or cleanup.
 
-**Plans**: 13/13 plans executed; 5 gap-closure plans ready
+**Plans**: 13/14 plans executed; 1 final gap-closure plan ready
 
 Plans:
 **Wave 0**
@@ -291,6 +291,10 @@ Plans:
 **Wave 12** *(blocked on Wave 11 completion)*
 
 - [x] 04-13-PLAN.md — Finish consumer cutover and produce honest, reproducible Python 3.11/3.13 release evidence.
+
+**Wave 13** *(final gap closure; blocked on Wave 12 completion)*
+
+- [ ] 04-14-PLAN.md — Make advertised projections constructible, harden the retired-API audit, and remove the accidental root draft.
 
 ### Phase 5: Payload Backends and Supported Topology Qualification
 
