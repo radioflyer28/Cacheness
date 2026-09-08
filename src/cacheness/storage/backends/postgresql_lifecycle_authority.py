@@ -70,7 +70,13 @@ SCHEMA_VERSION = POSTGRESQL_AUTHORITY_SCHEMA_VERSION
 
 _SCHEMA_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,62}\Z")
 _MAX_STORE_IDENTITY_BYTES = 64
-_RETRYABLE_SQLSTATES = frozenset({"40001", "40P01", "55P03", "57014"})
+_PROGRESS_SQLSTATE_OUTCOMES = {
+    "40001": "serialization",
+    "40P01": "deadlock",
+    "55P03": "lock_timeout",
+    "57014": "statement_timeout",
+}
+_RETRYABLE_SQLSTATES = frozenset(_PROGRESS_SQLSTATE_OUTCOMES)
 _REQUIRED_TABLES = frozenset(
     {
         "authority_meta",
@@ -123,6 +129,17 @@ class PostgresqlLifecycleAuthority:
     """
 
     capabilities = AuthorityCapabilities(durable=True, multiprocess=True)
+    allowed_progress_outcomes = frozenset(
+        {
+            "success",
+            "conflict",
+            "retryable_serialization",
+            "retryable_deadlock",
+            "retryable_lock_timeout",
+            "retryable_statement_timeout",
+            "retryable_connection_timeout",
+        }
+    )
     topology_capabilities = {
         "durable": True,
         "process_scope": "multi_host",
@@ -228,12 +245,19 @@ class PostgresqlLifecycleAuthority:
         value = getattr(error, "sqlstate", None)
         return value if isinstance(value, str) else None
 
+    @staticmethod
+    def progress_outcome_for_sqlstate(sqlstate: str) -> str | None:
+        """Return the documented bounded-progress class for one SQLSTATE."""
+        return _PROGRESS_SQLSTATE_OUTCOMES.get(sqlstate)
+
     def _raise_driver_error(self, error: BaseException, *, stage: str) -> None:
         """Map only bounded, non-secret driver context into public exceptions."""
         sqlstate = self._sqlstate(error)
         context = {"operation": "postgresql_lifecycle_authority", "stage": stage}
-        if sqlstate in _RETRYABLE_SQLSTATES:
+        progress_outcome = self.progress_outcome_for_sqlstate(sqlstate or "")
+        if progress_outcome is not None:
             context["sqlstate"] = sqlstate
+            context["progress_outcome"] = progress_outcome
             raise CacheBlobLifecycleTimeoutError(
                 "PostgreSQL lifecycle authority made no bounded progress", context=context
             ) from error
@@ -246,6 +270,13 @@ class PostgresqlLifecycleAuthority:
                 errors.QueryCanceled,
             ),
         ):
+            class_outcomes = {
+                "SerializationFailure": "serialization",
+                "DeadlockDetected": "deadlock",
+                "LockNotAvailable": "lock_timeout",
+                "QueryCanceled": "statement_timeout",
+            }
+            context["progress_outcome"] = class_outcomes[error.__class__.__name__]
             raise CacheBlobLifecycleTimeoutError(
                 "PostgreSQL lifecycle authority made no bounded progress", context=context
             ) from error
@@ -255,6 +286,7 @@ class PostgresqlLifecycleAuthority:
             "ConnectionException",
             "ConnectionTimeout",
         }:
+            context["progress_outcome"] = "connection_timeout"
             raise CacheBlobLifecycleTimeoutError(
                 "PostgreSQL lifecycle authority made no bounded progress", context=context
             ) from error

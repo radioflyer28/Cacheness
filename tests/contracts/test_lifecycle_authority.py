@@ -91,6 +91,10 @@ class _SqlstateError(RuntimeError):
         self.sqlstate = sqlstate
 
 
+class OperationalError(RuntimeError):
+    """Named like the narrow psycopg connection boundary used by the adapter."""
+
+
 def _spec() -> MutationSpec:
     return MutationSpec.create(
         operation_id="progress-operation",
@@ -135,6 +139,30 @@ def test_local_tiers_share_safety_without_claiming_equal_progress(
     authority.close()
 
 
+def test_tier_progress_sets_are_explicit_and_not_parity_claims() -> None:
+    """The common contract names only the progress outcomes each topology supports."""
+    from cacheness.storage.backends.postgresql_lifecycle_authority import (
+        PostgresqlLifecycleAuthority,
+    )
+    from cacheness.storage.composition import allowed_progress_outcomes
+
+    assert allowed_progress_outcomes("memory") == {"success", "conflict"}
+    assert allowed_progress_outcomes("sqlite-local") == {
+        "success",
+        "conflict",
+        "retryable_timeout",
+    }
+    assert PostgresqlLifecycleAuthority.allowed_progress_outcomes == {
+        "success",
+        "conflict",
+        "retryable_serialization",
+        "retryable_deadlock",
+        "retryable_lock_timeout",
+        "retryable_statement_timeout",
+        "retryable_connection_timeout",
+    }
+
+
 @pytest.mark.parametrize(
     ("sqlstate", "outcome"),
     [
@@ -162,12 +190,31 @@ def test_postgresql_sqlstate_progress_is_typed_bounded_and_causal(
         authority.prepare_mutation(_spec())
 
     assert captured.value.__cause__ is cause
-    assert captured.value.context == {
+    assert {
         "operation": "postgresql_lifecycle_authority",
         "stage": "prepare_mutation",
         "sqlstate": sqlstate,
         "progress_outcome": outcome,
-    }
+    }.items() <= captured.value.context.items()
+
+
+def test_postgresql_connection_failure_is_a_typed_retryable_progress_outcome() -> None:
+    """A bounded connection failure remains actionable without exposing a DSN."""
+    from cacheness.storage.backends.postgresql_lifecycle_authority import (
+        PostgresqlLifecycleAuthority,
+    )
+
+    cause = OperationalError("connection reset")
+    authority = PostgresqlLifecycleAuthority(
+        lambda: _Connection([None, cause]), schema="phase5_authority"
+    )
+
+    with pytest.raises(CacheBlobLifecycleTimeoutError) as captured:
+        authority.prepare_mutation(_spec())
+
+    assert captured.value.__cause__ is cause
+    assert captured.value.context["progress_outcome"] == "connection_timeout"
+    assert "sqlstate" not in captured.value.context
 
 
 def test_postgresql_exact_conflict_and_fatal_driver_failure_stay_distinct() -> None:
