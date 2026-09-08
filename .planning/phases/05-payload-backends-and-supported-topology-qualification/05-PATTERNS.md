@@ -27,7 +27,7 @@ can perform stopped-worker migration or rebuild.
 | `tests/integration/test_remote_topology.py` | live integration test | multi-client lifecycle | `tests/test_blob_store_concurrency.py` plus authority contracts | role-match |
 | `tests/qualification/conftest.py` | fixture/provider | external service setup/cleanup | `tests/test_s3_blob_backend.py` fixtures and `tests/conftest.py` | role-match |
 | `tests/qualification/test_live_evidence.py` | qualification/evidence test | batch/report transform | `tests/test_phase3_release_evidence.py` | role-match |
-| `tests/qualification/run_remote_qualification.py` | runner/utility | batch/event-driven | `tests/_lifecycle_test_support.py` subprocess helpers | partial analog |
+| `tools/run_phase5_qualification.py` | runner/utility | batch/evidence transform | `tools/capture_phase3_windows_qualification.py` plus `tests/test_phase3_release_evidence.py` | strong evidence-runner analog |
 | `pyproject.toml` | config | test discovery | existing `[tool.pytest.ini_options]` markers | exact extension point |
 | `docs/CATALOG_AND_TOPOLOGY.md` | documentation | transform/report | existing role and projection matrix text | exact documentation seam |
 | `docs/STORAGE_INITIALIZATION.md` | documentation | request-response guidance | existing SQLite initialization and failure table | exact documentation seam |
@@ -270,7 +270,9 @@ operations. Do not test a participant's importability as support evidence.
 ### Live integration and qualification files (integration/fixture/runner)
 
 **Analogs:** `tests/test_s3_blob_backend.py:7-101` for optional dependency
-fixtures and `tests/test_phase3_release_evidence.py` for sanitized evidence.
+fixtures; `tools/capture_phase3_windows_qualification.py` for a fixed
+non-passing unavailable/failed qualification command; and
+`tests/test_phase3_release_evidence.py` for sanitized evidence validation.
 
 `tests/integration/test_postgresql_authority.py` should use a real PostgreSQL
 server, distinct test-owned schema/table namespace, external credentials, and
@@ -288,6 +290,13 @@ manifest digest/size verification. Moto remains a contract/fault test only.
 clients over the same PostgreSQL/S3 namespace and externally supplied shared
 manifest signer, then test cross-client read, exact CAS conflict, recovery,
 and cleanup debt.
+
+`tools/run_phase5_qualification.py` is the canonical runner path. Follow the
+Phase 3 evidence-runner split: the tool owns deterministic status/exit-code and
+artifact emission, while its test module proves redaction, schema, unavailable,
+failure, and successful-result contracts. Phase 5 strengthens that analog by
+rejecting skipped/deselected live tests and binding evidence to the clean tested
+implementation revision; it must not add a runtime readiness registry.
 
 Fixtures and runner should record only sanitized version/region/service/result
 metadata. On missing endpoint or credentials, the qualification command must

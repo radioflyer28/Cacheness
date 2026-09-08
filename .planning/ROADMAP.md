@@ -91,21 +91,9 @@ Plans:
   4. Signatures bind the critical locator, handler/type, format, digest, size, and lifecycle-generation fields rather than an incomplete metadata subset.
   5. Unknown future metadata or payload versions fail explicitly, while `UnifiedCache` has a defined seam for translating typed integrity failures into separately recorded cache misses later.
 
-**Plans**: 10 plans
+**Plans**: 7/7 plans complete
 
 Plans:
-
-- [ ] 05-01-PLAN.md — Freeze the exact three-profile support boundary and reject every unqualified/edge pairing before I/O.
-- [ ] 05-02-PLAN.md — Establish reusable local payload and deterministic lifecycle-fault contracts.
-- [ ] 05-03-PLAN.md — Replace direct S3 CRUD with bounded immutable-generation I/O for the shared engine.
-- [ ] 05-04-PLAN.md — Implement explicit versioned PostgreSQL initialization and core exact-CAS transitions.
-- [ ] 05-05-PLAN.md — Complete bounded PostgreSQL authority workflows and typed progress contracts.
-- [ ] 05-06-PLAN.md — Compose all three profiles through the one lifecycle engine and bounded reconciliation evidence.
-- [ ] 05-07-PLAN.md — Build the sanitized, non-skippable real-service qualification harness.
-- [ ] 05-08-PLAN.md — Define real PostgreSQL, real AWS S3, and independent-client integration suites.
-- [ ] 05-09-PLAN.md — Publish exact API/topology coverage and a reproducible local architecture gate.
-- [ ] 05-10-PLAN.md — Run the non-substitutable real-service qualification and record final support evidence.
-
 - [x] 02-01-PLAN.md
 - [x] 02-02-PLAN.md
 - [x] 02-03-PLAN.md
@@ -323,7 +311,20 @@ Plans:
   4. AWS S3 is the authoritative remote-object test target for conditional operations, checksums, streaming, pagination, retries, and cleanup; compatible services are claimed only where explicitly verified.
   5. Shared-store tests initialize before workers and account for success, exact conflict and declared typed retryable outcomes separately from integrity failures. PostgreSQL transactions do not encompass S3/filesystem effects; partial external effects remain attributable recovery work, not a reason for another coordinator.
 
-**Plans**: TBD
+**Plans**: 10 plans
+
+Plans:
+
+- [ ] 05-01-PLAN.md — Freeze the exact three-profile support boundary and reject every unqualified/edge pairing before I/O.
+- [ ] 05-02-PLAN.md — Establish reusable local payload and deterministic lifecycle-fault contracts.
+- [ ] 05-03-PLAN.md — Replace direct S3 CRUD with bounded immutable-generation I/O for the shared engine.
+- [ ] 05-04-PLAN.md — Implement explicit versioned PostgreSQL initialization and core exact-CAS transitions.
+- [ ] 05-05-PLAN.md — Complete bounded PostgreSQL authority workflows and typed progress contracts.
+- [ ] 05-06-PLAN.md — Compose all three profiles through the one lifecycle engine and bounded reconciliation evidence.
+- [ ] 05-07-PLAN.md — Build the sanitized, non-skippable real-service qualification harness.
+- [ ] 05-08-PLAN.md — Define real PostgreSQL, real AWS S3, and independent-client integration suites.
+- [ ] 05-09-PLAN.md — Publish exact API/topology coverage and a reproducible local architecture gate.
+- [ ] 05-10-PLAN.md — Run the non-substitutable real-service qualification and record final support evidence.
 
 ### Phase 6: UnifiedCache Policy Composition
 
@@ -382,7 +383,7 @@ Plans:
 | 2. Canonical Storage and Integrity Contract | 7/7 | Complete    | 2026-08-30 |
 | 3. Atomic Lifecycle and Recovery Engine | 24/24 | Complete — direct qualification | 2026-09-06 |
 | 4. Metadata Composition and Topology Contracts | 14/14 | Complete    | 2026-09-08 |
-| 5. Payload Backends and Supported Topology Qualification | 0/TBD | Not started | - |
+| 5. Payload Backends and Supported Topology Qualification | 0/10 | Planned | - |
 | 6. UnifiedCache Policy Composition | 0/TBD | Not started | - |
 | 7. Explicit Migration and Rebuild Cutover | 0/TBD | Not started | - |
 | 8. Production Gates and Performance Stabilization | 0/TBD | Not started | - |

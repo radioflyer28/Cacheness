@@ -360,7 +360,7 @@ The S3 participant should be configured with an existing boto3 client/session or
 
 Locator parsing must accept only normalized relative generation locators from the engine and map them below the configured prefix. A locator naming a different bucket, escaping the prefix, containing traversal-like components, or exceeding configured text bounds must fail closed; the current warning-and-accept behavior is not suitable for a security boundary. [VERIFIED: current S3 path parser inspected this session; VERIFIED: AGENTS.md security constraint]
 
-Deletion must distinguish “confirmed absent,” “deleted,” “retryable/ambiguous backend failure,” and permission/configuration failure. `DeleteObject` success alone is not proof of absence when access/versioning semantics differ; for V1’s unversioned/general-purpose contract, follow with exact-key HEAD only where needed by `delete_or_prove_absent`, bounded by configured time/work. Never turn `ClientError` into `False` or an empty list. [VERIFIED: existing guarded-I/O semantic method name at `src/cacheness/storage/blob_store.py:694-700`; ASSUMED]
+Deletion must distinguish “confirmed absent,” “deleted and then confirmed absent,” “retryable/ambiguous backend failure,” and permission/configuration failure. The V1 `delete_or_prove_absent` policy issues `DeleteObject` for the exact immutable key and always follows an accepted response with exactly one bounded `HeadObject`: only `404`/`NoSuchKey` proves absence; a still-present object is cleanup failure; and `403`, timeout, transport, or `5xx` outcomes remain typed permission or retryable failures. Repeating this sequence is the idempotent absence path. The check concerns the current exact immutable key; bucket versioning is neither required nor used to infer lifecycle state. Never turn `ClientError` into `False` or an empty list. [VERIFIED: existing guarded-I/O semantic method name at `src/cacheness/storage/blob_store.py:694-700`; RESOLVED: Phase 5 planning]
 
 ## Don't Hand-Roll
 
@@ -500,26 +500,22 @@ The production primitive must additionally enforce represented-byte and total-wo
 | Constructible pair implies possible use | Explicit qualified profile distinct from registration | Unsupported Cartesian combinations fail before I/O. [VERIFIED: D-02/D-03] |
 | Runtime compatibility adapters | Clean pre-production cutover with exact version rejection | Reduces phase complexity while retaining future migration/rebuild seams. [VERIFIED: `.planning/REQUIREMENTS.md:90-96`] |
 
-## Assumptions Log
+## Resolution Log
 
-| # | Claim | Section | Risk if Wrong |
-|---|-------|---------|---------------|
-| A1 | A post-delete HEAD is necessary for every successful `DeleteObject` in the V1 `delete_or_prove_absent` implementation. | S3 Payload Design | Adds a request and latency; decide from exact absence contract and AWS bucket/versioning policy during planning. |
-| A2 | A Docker-hosted real PostgreSQL instance is acceptable for the database half of BACK-05, while still not proving multi-host deployment behavior. | Runtime State Inventory | If qualification requires an externally managed PostgreSQL service, the database gate also remains unavailable. |
+| # | Resolved decision | Section | Consequence |
+|---|-------------------|---------|-------------|
+| R1 | Every accepted `DeleteObject` is followed by exactly one bounded exact-key HEAD; only `404`/`NoSuchKey` proves absence. A present object is cleanup failure, while permission, timeout, transport, and `5xx` responses remain typed failures. | S3 Payload Design | The extra request is part of the exact absence-proof contract and never supplies visibility or catalog authority. |
+| R2 | A Docker-hosted actual PostgreSQL server may satisfy the PostgreSQL service-behavior half of BACK-05. It does not prove deployment topology, replace AWS S3, or qualify the combined remote profile without the complete two-client live run. | Runtime State Inventory | The database test target need not be externally managed, but Plan 10 remains open until all required real-service evidence passes. |
 
-## Open Questions
+## Resolved Decisions
 
-1. **Where will the shared manifest signing key come from for live multi-host qualification?**
-   - What we know: the current persistent default is a local file and cannot qualify cross-host reads. [VERIFIED: `src/cacheness/storage/blob_store.py:220-227`]
-   - Recommendation: require an injected provider in the PostgreSQL/S3 profile; the live harness supplies it externally and never stores the key in evidence.
+1. **Shared manifest signer input:** the PostgreSQL/Amazon-S3 profile requires externally supplied signing-key bytes. The qualification harness reads `CACHENESS_TEST_MANIFEST_KEY_B64`, validates and decodes it in memory, then constructs a separate in-memory `ManifestSigningKeyProvider` for each independent client from the same bytes. The key is never written to disk, runtime profile state, evidence, logs, or exception context. The local persistent signing-file default is rejected for this profile. [VERIFIED: `src/cacheness/storage/blob_store.py:220-227`; RESOLVED: Phase 5 planning]
 
-2. **Are real AWS and PostgreSQL endpoints available to the executor?**
-   - What we know: no relevant environment variable names or repository harness were found; no values were inspected. [VERIFIED: name-only environment scan]
-   - Recommendation: plan the implementation and contract suites, but make final support registration/acceptance conditional on a recorded real-service pass. Do not mark Phase 5 complete if evidence is `UNAVAILABLE`/`NOT_QUALIFIED`.
+2. **Unavailable live services:** Plans 01-09 implement and locally verify the immutable qualification requirements and real-service harness. Plan 10 is the only observation/closure step. Missing configuration writes sanitized `UNAVAILABLE` evidence and exits 2; a failed, skipped, partial, identity-invalid, or cleanup-leaking run writes `NOT_QUALIFIED` and exits 1. Either result leaves Plan 10 and Phase 5 open. Runtime profiles and documentation are not mutated to mirror the latest run. [VERIFIED: D-05/D-06; RESOLVED: Phase 5 planning]
 
-3. **How should incomplete multipart sessions be reclaimed after process death?**
-   - What we know: the engine intent contains the candidate object locator but not an upload ID; AWS exposes bounded multipart listing and recommends an abort-incomplete lifecycle rule. [VERIFIED: lifecycle authority/source inspection; CITED: https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html]
-   - Recommendation: the adapter aborts known IDs immediately; reconciliation pages multipart uploads under the exact managed prefix and uses age/run attribution. Require the bucket lifecycle rule as cost hygiene, not correctness.
+3. **Attributable multipart cleanup:** the uploader immediately aborts a known upload ID after an observed pre-completion failure. After process death, the payload participant exposes only a bounded continuation page of multipart `(key, upload_id, initiated_at)` evidence under the exact managed prefix. `AuthorityLifecycleEngine` may abort an aged upload only when its exact key matches a durable PostgreSQL pending mutation or cleanup-debt locator; unknown uploads are report-only. The live harness may additionally abort uploads beneath its cryptographically unique, ownership-validated run prefix. A bucket abort-incomplete lifecycle rule is optional cost hygiene, not correctness evidence. [VERIFIED: D-12/D-13/D-18; RESOLVED: Phase 5 planning]
+
+4. **Post-delete absence proof:** `delete_or_prove_absent` performs one bounded exact-key HEAD after every accepted delete and treats only `404`/`NoSuchKey` as proof. A present object is cleanup failure; authorization, timeout, transport, or service errors remain typed and attributable. No list response, ETag, or version-history observation proves deletion. [VERIFIED: D-09/D-13; RESOLVED: Phase 5 planning]
 
 ## Environment Availability
 
