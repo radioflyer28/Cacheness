@@ -3,17 +3,17 @@ gsd_state_version: 1.0
 milestone: v1.0
 current_phase: 04
 current_phase_name: Metadata Composition and Topology Contracts
-status: planned
-stopped_at: Phase 4 planned and checker-approved
-last_updated: "2026-09-08T00:44:14.089Z"
+status: executing
+stopped_at: Completed 04-01-PLAN.md
+last_updated: "2026-09-08T01:10:09.795Z"
 last_activity: 2026-09-07
-last_activity_desc: Phase 4 plan checker passed 8 plans and 17 tasks after the pre-production compatibility reset
-state_head: 25d98a0f4180b17853e1c351a54d10c0a46c2b23
+last_activity_desc: Phase 04 execution started
+state_head: acd5fa897e10e9b4ebbfe516796c0cae16f7e9ec
 progress:
   total_phases: 8
-  completed_phases: 3
-  total_plans: 54
-  completed_plans: 46
+  completed_phases: 2
+  total_plans: 55
+  completed_plans: 47
 milestone_name: milestone
 ---
 
@@ -28,10 +28,10 @@ See: .planning/PROJECT.md (updated 2026-09-06)
 
 ## Current Position
 
-Phase: 04 (Metadata Composition and Topology Contracts) — PLANNED
-Plan: 0 of 8 complete; Waves 0–7 checker-approved
-Status: Ready to execute the clean pre-production cutover plan
-Last activity: 2026-09-07 — Phase 4 planning passed after reducing the design from 24 draft tasks to 17 focused tasks, removing runtime compatibility adapters, Phase 6 cache-policy work, normalized catalog mirrors, and premature physical indexes while retaining version detection and future migration tooling.
+Phase: 04 (Metadata Composition and Topology Contracts) — EXECUTING
+Plan: 2 of 8
+Status: Ready to execute
+Last activity: 2026-09-07 — Phase 04 execution started
 
 The user explicitly bypassed GSD execute/review/checker. The older
 03-VERIFICATION.md remains historical gaps_found evidence, not the current
@@ -126,6 +126,7 @@ Phase 03 rows in this historical table include superseded attempts and do not de
 | Phase 03 P17 | 1h 13m | 3 tasks | 7 files |
 | Phase 03 P18 | 1h 31m | 5 tasks | 9 files |
 | Phase 03 P20 | 1920 | 4 tasks | 12 files |
+| Phase 04 P01 | 5m 13s | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -256,6 +257,8 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 03 superseded by ADR 0001]: Named stress-schedule timeout-stage allowlists are historical evidence; Plan 03-20 replaces them with success/conflict/typed-retryable-timeout progress accounting plus independent safety assertions.
 - [Phase 03]: SQLite contention is a bounded typed outcome: success, exact conflict, or retryable timeout.
 - [Phase 03]: The 5.0-second authority default is caller policy; 0.187-second evidence remains benchmark-only.
+- [Phase 04]: Phase 4 Ruff debt is frozen from the declared plan inventory; scope drift, changed findings, and dirty new Python files fail the gate.
+- [Phase 04]: Wave 0 contracts use assertion-level import gates so absent clean APIs fail red without collection errors.
 
 ### Pending Todos
 
@@ -281,6 +284,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-08T00:44:14.089Z
-Stopped at: Phase 4 planned and checker-approved
-Resume file: .planning/phases/04-metadata-composition-and-topology-contracts/04-CONTEXT.md
+Last session: 2026-09-08T01:10:09.744Z
+Stopped at: Completed 04-01-PLAN.md
+Resume file: None

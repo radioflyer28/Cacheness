@@ -21,12 +21,12 @@ Phase 3 completion below is scoped to the qualified initialized local SQLite/fil
 ### Backend Unification
 
 - [ ] **BACK-01**: Filesystem, memory, and S3 payload adapters supply storage operations to the shared BlobStore engine and satisfy applicable immutable-generation and recovery contracts at their declared capability tier; they do not duplicate lifecycle sequencing.
-- [ ] **BACK-02**: JSON, memory, SQLite, and PostgreSQL metadata implementations have explicit authority/projection roles through one composition contract. Narrow transactional catalog adapters before expansion; a derived JSON view does not become an independent lifecycle authority.
-- [ ] **BACK-03**: Caller-injected and registered backend implementations remain selected rather than being silently replaced by configuration defaults.
+- [x] **BACK-02**: JSON, memory, SQLite, and PostgreSQL metadata implementations have explicit authority/projection roles through one composition contract. Narrow transactional catalog adapters before expansion; a derived JSON view does not become an independent lifecycle authority.
+- [x] **BACK-03**: Caller-injected and registered backend implementations remain selected rather than being silently replaced by configuration defaults.
 - [ ] **BACK-04**: Every explicitly supported pairing of advertised payload and metadata backends passes the lifecycle contract at its declared capability tier; unsupported Cartesian combinations are documented and rejected rather than silently downgraded.
 - [ ] **BACK-05**: PostgreSQL and AWS S3 behavior is verified with real-service integration coverage; compatible S3 services are supported only where explicitly verified.
-- [ ] **BACK-06**: Backends expose durability, process/host sharing, compare-and-swap, streaming, and listing capabilities, and configurations cannot claim guarantees their topology cannot provide.
-- [ ] **BACK-07**: Direct `BlobStore` users can store, validate, query, and update application-defined catalog metadata without implementing a lifecycle backend; supported fields/operators and transactional limits are explicit. Extend the existing mapping/entry interface rather than replacing the engine. Authoritative metadata commits with the blob descriptor; external indexes or ORM links are explicitly derived unless they join that same transaction, with consistency and partial-failure behavior stated.
+- [x] **BACK-06**: Backends expose durability, process/host sharing, compare-and-swap, streaming, and listing capabilities, and configurations cannot claim guarantees their topology cannot provide.
+- [x] **BACK-07**: Direct `BlobStore` users can store, validate, query, and update application-defined catalog metadata without implementing a lifecycle backend; supported fields/operators and transactional limits are explicit. Extend the existing mapping/entry interface rather than replacing the engine. Authoritative metadata commits with the blob descriptor; external indexes or ORM links are explicitly derived unless they join that same transaction, with consistency and partial-failure behavior stated.
 
 ### Cache Composition
 
@@ -106,12 +106,12 @@ Phase 3 delivered an early local composition proof for CACH-01/02/03/06 and exis
 | STOR-07 | Phase 3 | Complete — qualified local scope |
 | STOR-08 | Phase 2 | Complete |
 | BACK-01 | Phase 5 | Pending |
-| BACK-02 | Phase 4 | Pending |
-| BACK-03 | Phase 4 | Pending |
+| BACK-02 | Phase 4 | Complete |
+| BACK-03 | Phase 4 | Complete |
 | BACK-04 | Phase 5 | Pending |
 | BACK-05 | Phase 5 | Pending |
-| BACK-06 | Phase 4 | Pending |
-| BACK-07 | Phase 4 | Pending |
+| BACK-06 | Phase 4 | Complete |
+| BACK-07 | Phase 4 | Complete |
 | CACH-01 | Phase 6 | Pending |
 | CACH-02 | Phase 6 | Pending |
 | CACH-03 | Phase 6 | Pending |
