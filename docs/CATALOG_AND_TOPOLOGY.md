@@ -35,6 +35,55 @@ checkpoint, so an interruption can safely replay the same page. Projection
 state is derived work: it is not consulted for BlobStore reads, cleanup, or
 lifecycle recovery.
 
+## Declared catalog values
+
+`BlobStore` stores application catalog values in the authenticated descriptor.
+Applications may keep opaque catalog values without a schema, but only fields
+declared by `CatalogSchema` have portable query semantics. A declared write
+validates before handler selection, authority preflight, payload staging, or
+projection delivery; declared defaults are materialized into a new descriptor.
+
+```python
+from cacheness.storage.catalog import CatalogField, CatalogQuery, CatalogPredicate, CatalogSchema
+
+schema = CatalogSchema(
+    fields=(
+        CatalogField("rank", "integer", default=0, queryable=True),
+        CatalogField("note", "string", nullable=True),
+    ),
+    schema_id="application-objects",
+)
+receipt = store.put_entry(
+    payload,
+    key="object-1",
+    catalog_schema=schema,
+    catalog_values={"note": None, "vendor": {"source": "import"}},
+)
+updated = store.update_catalog(
+    receipt.key,
+    catalog_schema=schema,
+    catalog_values={"rank": 3},
+    expected=receipt.expectation,
+)
+page = store.query_catalog(
+    CatalogQuery((CatalogPredicate("rank", "eq", 3),)),
+    schema=schema,
+)
+```
+
+`update_catalog()` is an exact-record catalog patch: it keeps the committed
+payload generation and integrity fields, promotes a new authenticated catalog
+revision through the existing authority transaction, and returns a new
+`BlobReceipt`. A stale `expected` receipt raises the typed lifecycle conflict.
+Stored absence, an explicit `None`, and a materialized default remain distinct.
+Use `replace=True` only when the supplied mapping is the complete new stored
+mapping; ordinary calls patch existing stored fields.
+
+Schema identity and revision are part of the signed descriptor. Normal opens
+and writes never migrate schemas or historical layouts. An unsupported schema
+or store format fails with migration/rebuild-required evidence; offline
+migration or confirmed rebuild remains the explicit future-release path.
+
 ## Failure and maintenance boundaries
 
 Authority commit precedes any projection attempt. A projection failure leaves

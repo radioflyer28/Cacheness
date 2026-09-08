@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from cacheness.error_handling import CacheBlobLifecycleConflictError
+
 
 CATALOG_MODULE = "cacheness.storage.catalog"
 
@@ -289,7 +291,7 @@ def test_public_catalog_put_update_query_and_reopen(
             ("public-entry", 3)
         ]
 
-        with pytest.raises(Exception):
+        with pytest.raises(CacheBlobLifecycleConflictError):
             store.update_catalog(
                 receipt.key,
                 catalog_schema=schema,
@@ -310,3 +312,77 @@ def test_public_catalog_put_update_query_and_reopen(
     finally:
         for resource in resources:
             resource.close()
+
+
+def test_invalid_public_catalog_values_do_not_reach_handler_or_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Schema rejection is a pre-staging boundary, not a failed lifecycle write."""
+    from cacheness.storage.blob_store import BlobStore
+    from cacheness.storage.composition import BackendRef, StoreTopology
+
+    catalog = _catalog()
+    schema = catalog.CatalogSchema(
+        fields=(catalog.CatalogField("rank", "integer", required=True),),
+        schema_id="validated-before-io",
+    )
+    store = BlobStore(
+        StoreTopology(
+            payload=BackendRef(name="memory"), authority=BackendRef(name="memory")
+        ),
+        cache_dir=tmp_path,
+    )
+    calls: list[str] = []
+
+    def reached(name: str):
+        def fail(*_args: object, **_kwargs: object) -> None:
+            calls.append(name)
+            raise AssertionError(f"invalid catalog values reached {name}")
+
+        return fail
+
+    monkeypatch.setattr(store.handlers, "get_handler", reached("handler"))
+    monkeypatch.setattr(
+        store.lifecycle_authority, "preflight_mutation", reached("preflight")
+    )
+    monkeypatch.setattr(
+        store, "_materialize_authority_store", reached("payload staging")
+    )
+
+    try:
+        with pytest.raises(catalog.CatalogValidationError):
+            store.put_entry(
+                {"payload": "ignored"},
+                key="invalid-catalog",
+                catalog_schema=schema,
+                catalog_values={"rank": True},
+            )
+        assert calls == []
+    finally:
+        store.close()
+
+
+def test_public_opaque_catalog_values_round_trip_without_schema(tmp_path: Path) -> None:
+    """Schema-free values remain authenticated storage metadata, not query fields."""
+    from cacheness.storage.blob_store import BlobStore
+    from cacheness.storage.composition import BackendRef, StoreTopology
+
+    store = BlobStore(
+        StoreTopology(
+            payload=BackendRef(name="memory"), authority=BackendRef(name="memory")
+        ),
+        cache_dir=tmp_path,
+    )
+    try:
+        receipt = store.put_entry(
+            {"payload": "opaque"},
+            key="opaque-catalog",
+            catalog_values={"vendor": {"source": "import"}},
+        )
+        entry = store.get_entry_info(receipt.key)
+        assert entry is not None
+        assert entry.metadata["catalog"]["values"] == {
+            "vendor": {"source": "import"}
+        }
+    finally:
+        store.close()

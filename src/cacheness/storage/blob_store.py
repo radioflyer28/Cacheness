@@ -39,6 +39,7 @@ from .catalog import (
     CatalogQuery,
     CatalogSchema,
     DEFAULT_PAGE_SIZE,
+    validate_catalog_mapping,
     validate_catalog_page_request,
 )
 from .composition import StoreTopology
@@ -51,7 +52,12 @@ from .integrity import (
     ManifestSigningKeyProvider,
 )
 from .legacy_manifest import LegacyManifestIdentity, recognize_legacy_fixture_tree
-from .lifecycle import AuthorityLifecycleEngine
+from .lifecycle import (
+    AuthorityLifecycleEngine,
+    _DEFAULT_CATALOG_SCHEMA_FINGERPRINT,
+    _DEFAULT_CATALOG_SCHEMA_ID,
+    _DEFAULT_CATALOG_SCHEMA_REVISION,
+)
 from .lifecycle_authority import EntryExpectation
 from .manifest import (
     BlobManifest,
@@ -350,15 +356,43 @@ class BlobStore:
         return self.lifecycle.get_entry_info(key)
 
     @_ordinary_admitted
-    def put_entry(self, data: Any, key=None, metadata=None) -> BlobReceipt:
+    def put_entry(
+        self,
+        data: Any,
+        key=None,
+        metadata=None,
+        *,
+        catalog_schema: CatalogSchema | None = None,
+        catalog_values: Dict[str, Any] | None = None,
+    ) -> BlobReceipt:
         """Commit an entry and own its cleanup, returning the exact receipt."""
-        result = self._put_with_result_admitted(data, key=key, metadata=metadata)
+        result = self._put_with_result_admitted(
+            data,
+            key=key,
+            metadata=metadata,
+            catalog_schema=catalog_schema,
+            catalog_values=catalog_values,
+        )
         return self._run_post_commit_projections(self._receipt_for_result(result))
 
     @_ordinary_admitted
-    def put(self, data: Any, key: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> str:
+    def put(
+        self,
+        data: Any,
+        key: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        *,
+        catalog_schema: CatalogSchema | None = None,
+        catalog_values: Dict[str, Any] | None = None,
+    ) -> str:
         """Store one native handler payload through the selected authority."""
-        result = self._put_with_result_admitted(data, key=key, metadata=metadata)
+        result = self._put_with_result_admitted(
+            data,
+            key=key,
+            metadata=metadata,
+            catalog_schema=catalog_schema,
+            catalog_values=catalog_values,
+        )
         self._run_post_commit_projections(self._receipt_for_result(result))
         return result.key
 
@@ -368,13 +402,50 @@ class BlobStore:
         data: Any,
         key: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        *,
+        catalog_schema: CatalogSchema | None = None,
+        catalog_values: Dict[str, Any] | None = None,
     ):
-        """Store one payload after exactly one public or facade admission."""
+        """Store one payload after validation and exactly one public admission."""
+        catalog = self._prepare_catalog_write(catalog_schema, catalog_values)
         blob_key = (
             self._compute_content_hash(data) if self.content_addressable
             else key if key is not None else self._generate_unique_key()
         )
-        return self.lifecycle.put(data, key=blob_key, metadata=metadata)
+        return self.lifecycle.put(
+            data,
+            key=blob_key,
+            metadata=metadata,
+            catalog_schema_id=catalog[0],
+            catalog_schema_revision=catalog[1],
+            catalog_schema_fingerprint=catalog[2],
+            catalog_values=catalog[3],
+        )
+
+    @staticmethod
+    def _prepare_catalog_write(
+        catalog_schema: CatalogSchema | None,
+        catalog_values: Dict[str, Any] | None,
+    ) -> tuple[str, int, str, dict[str, Any]]:
+        """Freeze catalog inputs before handlers, authority, or payload I/O run."""
+        supplied = {} if catalog_values is None else catalog_values
+        if catalog_schema is None:
+            values = validate_catalog_mapping(supplied, schema=None)
+            return (
+                _DEFAULT_CATALOG_SCHEMA_ID,
+                _DEFAULT_CATALOG_SCHEMA_REVISION,
+                _DEFAULT_CATALOG_SCHEMA_FINGERPRINT,
+                values,
+            )
+        if not isinstance(catalog_schema, CatalogSchema):
+            raise TypeError("catalog_schema must be a CatalogSchema or None")
+        values = catalog_schema.validate_mapping(supplied, materialize_defaults=True)
+        return (
+            catalog_schema.schema_id,
+            catalog_schema.revision,
+            catalog_schema.fingerprint,
+            values,
+        )
 
 
     @_ordinary_admitted
@@ -391,6 +462,58 @@ class BlobStore:
     def update_metadata(self, key: str, metadata: Dict[str, Any]) -> bool:
         """Promote an authority-owned metadata revision."""
         return self.lifecycle.update_metadata(key, metadata)
+
+    @_ordinary_admitted
+    def update_catalog(
+        self,
+        key: str,
+        *,
+        catalog_schema: CatalogSchema,
+        catalog_values: Dict[str, Any],
+        expected: EntryExpectation | None = None,
+        replace: bool = False,
+    ) -> BlobReceipt | None:
+        """Patch or replace authenticated catalog values without rewriting bytes.
+
+        Catalog patches preserve the selected payload generation and use the
+        exact observed authority record as their compare-and-swap precondition.
+        ``replace=True`` records only the supplied stored fields; the default
+        patches the currently stored mapping.
+        """
+        if not isinstance(catalog_schema, CatalogSchema):
+            raise TypeError("catalog_schema must be a CatalogSchema")
+        if type(replace) is not bool:
+            raise TypeError("replace must be a bool")
+        patch = self._prepare_catalog_patch(
+            catalog_schema, catalog_values, replace=replace
+        )
+        result = self.lifecycle.update_catalog(
+            key,
+            catalog_schema=catalog_schema,
+            catalog_values=patch,
+            expected=expected,
+            replace_values=replace,
+        )
+        if result is None:
+            return None
+        return self._run_post_commit_projections(self._receipt_for_result(result))
+
+    @staticmethod
+    def _prepare_catalog_patch(
+        catalog_schema: CatalogSchema,
+        catalog_values: Dict[str, Any],
+        *,
+        replace: bool,
+    ) -> dict[str, Any]:
+        """Validate a bounded replacement or patch before authority access."""
+        patch = validate_catalog_mapping(catalog_values, schema=None)
+        if replace:
+            return catalog_schema.validate_mapping(patch, materialize_defaults=False)
+        for name, value in patch.items():
+            declared = catalog_schema.field_map.get(name)
+            if declared is not None:
+                declared.validate(value)
+        return patch
 
     @_ordinary_admitted
     def delete(

@@ -26,6 +26,7 @@ from cacheness.error_handling import (
 )
 
 from .integrity import sha256_and_size
+from .catalog import CatalogSchema
 from .lifecycle_authority import (
     CleanupDebt,
     EntryExpectation,
@@ -188,6 +189,10 @@ class AuthorityLifecycleEngine:
         *,
         key: str,
         metadata: dict[str, Any] | None,
+        catalog_schema_id: str,
+        catalog_schema_revision: int,
+        catalog_schema_fingerprint: str,
+        catalog_values: dict[str, Any],
     ) -> LifecyclePutResult:
         """Prepare, publish, verify, promote, then reclaim exact old debt."""
         handler = self.store.handlers.get_handler(data)
@@ -249,11 +254,11 @@ class AuthorityLifecycleEngine:
                 digest=digest,
                 byte_size=byte_size,
                 created_at=datetime.now(timezone.utc).isoformat(),
-                catalog_schema_id=_DEFAULT_CATALOG_SCHEMA_ID,
-                catalog_schema_revision=_DEFAULT_CATALOG_SCHEMA_REVISION,
-                catalog_schema_fingerprint=_DEFAULT_CATALOG_SCHEMA_FINGERPRINT,
-                catalog_values={},
-                catalog_presence=(),
+                catalog_schema_id=catalog_schema_id,
+                catalog_schema_revision=catalog_schema_revision,
+                catalog_schema_fingerprint=catalog_schema_fingerprint,
+                catalog_values=catalog_values,
+                catalog_presence=tuple(sorted(catalog_values)),
                 user_metadata=dict(metadata or {}),
                 handler_metadata={
                     **handler_metadata,
@@ -352,6 +357,90 @@ class AuthorityLifecycleEngine:
             expected=expected,
             promoted=promoted.entry,
             previous=previous,
+            cleanup_debt=tuple(promoted.cleanup_debt),
+        )
+
+    def update_catalog(
+        self,
+        key: str,
+        *,
+        catalog_schema: CatalogSchema,
+        catalog_values: dict[str, Any],
+        expected: EntryExpectation | None,
+        replace_values: bool,
+    ) -> LifecyclePutResult | None:
+        """Promote catalog attributes against the exact current record only."""
+        entry = self.authority.read_entry(key)
+        if entry is None:
+            return None
+        if expected is not None and expected != entry.expectation:
+            raise CacheBlobLifecycleConflictError(
+                "Catalog update expectation no longer matches authority"
+            )
+        manifest = self._entry_manifest(entry)
+        if (
+            manifest.catalog_schema_id != catalog_schema.schema_id
+            or manifest.catalog_schema_revision != catalog_schema.revision
+            or manifest.catalog_schema_fingerprint != catalog_schema.fingerprint
+        ):
+            raise CacheBlobLifecycleConflictError(
+                "Catalog update schema does not match the committed descriptor"
+            )
+        candidate_values = (
+            dict(catalog_values)
+            if replace_values
+            else {**dict(manifest.catalog_values), **catalog_values}
+        )
+        validated_values = catalog_schema.validate_mapping(
+            candidate_values, materialize_defaults=False
+        )
+        updated = self._sign(
+            replace(
+                manifest,
+                catalog_values=validated_values,
+                catalog_presence=tuple(sorted(validated_values)),
+                signature="",
+            )
+        )
+        prepared = self.authority.prepare_mutation(
+            MutationSpec.create(
+                operation_id=uuid4().hex,
+                key=key,
+                generation=manifest.generation,
+                candidate_locator=manifest.locator,
+                expected=entry.expectation,
+                manifest=updated.canonical_bytes(),
+            )
+        )
+        try:
+            self._reach("catalog.intent_prepared", key=key)
+            with self.store._materialize_authority_store().open_snapshot(
+                manifest.locator, self.store._handler_metadata(manifest)
+            ) as snapshot:
+                digest, byte_size = sha256_and_size(snapshot.path)
+            if digest != manifest.digest or byte_size != manifest.byte_size:
+                raise CacheBlobPayloadTamperedError(
+                    "Authority lifecycle payload verification failed"
+                )
+            self.authority.record_verification(
+                prepared,
+                VerificationProof(
+                    digest=updated.digest,
+                    byte_size=updated.byte_size,
+                    manifest=updated.canonical_bytes(),
+                ),
+            )
+            self._reach("catalog.before_promotion", key=key)
+            promoted = self.authority.promote_mutation(prepared)
+        except Exception:
+            self._abort(prepared, candidate_persisted=False)
+            raise
+        return LifecyclePutResult(
+            operation_id=prepared.operation_id,
+            key=key,
+            expected=entry.expectation,
+            promoted=promoted.entry,
+            previous=entry,
             cleanup_debt=tuple(promoted.cleanup_debt),
         )
 
