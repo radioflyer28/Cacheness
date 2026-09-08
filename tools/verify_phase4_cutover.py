@@ -206,52 +206,77 @@ class _RetiredConsumerVisitor(ast.NodeVisitor):
         self.errors: list[str] = []
         self.retired_aliases: set[str] = set()
         self.module_aliases: dict[str, str] = {}
+        self._reported: set[tuple[int, int, str]] = set()
+
+    def _report(self, node: ast.AST, category: str, detail: str) -> None:
+        """Record one deterministic finding per source location and category."""
+        location = (
+            getattr(node, "lineno", -1),
+            getattr(node, "col_offset", -1),
+            category,
+        )
+        if location not in self._reported:
+            self._reported.add(location)
+            self.errors.append(f"{category} {detail}")
 
     def _retire_import(self, alias: ast.alias, module: str, symbol: str) -> None:
         local_name = alias.asname or alias.name
         self.retired_aliases.add(local_name)
-        self.errors.append(f"retired import {module}.{symbol} as {local_name}")
+        self._report(
+            alias,
+            "retired import",
+            f"{module}.{symbol} as {local_name}",
+        )
+
+    def _retire_star_import(self, node: ast.ImportFrom, module: str) -> None:
+        self._report(node, "retired star import", module)
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:  # noqa: N802
         module = node.module or ""
-        if module == "cacheness.metadata":
+        if module == "cacheness":
             for alias in node.names:
-                if alias.name == "*" or alias.name in RETIRED_METADATA_SYMBOLS:
+                if alias.name in RETIRED_BLOB_SELECTOR_SYMBOLS:
                     self._retire_import(alias, module, alias.name)
-        elif module in {
-            "cacheness.storage.backends",
-            "cacheness.storage.backends.blob_backends",
-        }:
-            for alias in node.names:
-                if alias.name == "*" or alias.name in RETIRED_BLOB_SELECTOR_SYMBOLS:
-                    self._retire_import(alias, module, alias.name)
-        elif module == "cacheness":
-            for alias in node.names:
-                if alias.name == "metadata":
+                elif alias.name == "metadata":
                     self.module_aliases[alias.asname or alias.name] = "cacheness.metadata"
-        elif module == "cacheness.storage.backends" and any(
-            alias.name == "blob_backends" for alias in node.names
-        ):
+        elif module == "cacheness.metadata":
             for alias in node.names:
-                if alias.name == "blob_backends":
+                if alias.name == "*":
+                    self._retire_star_import(node, module)
+                elif alias.name in RETIRED_METADATA_SYMBOLS:
+                    self._retire_import(alias, module, alias.name)
+        elif module == "cacheness.storage.backends":
+            for alias in node.names:
+                if alias.name == "*":
+                    self._retire_star_import(node, module)
+                elif alias.name == "blob_backends":
                     self.module_aliases[alias.asname or alias.name] = (
                         "cacheness.storage.backends.blob_backends"
                     )
+                elif alias.name in RETIRED_BLOB_SELECTOR_SYMBOLS:
+                    self._retire_import(alias, module, alias.name)
+        elif module == "cacheness.storage.backends.blob_backends":
+            for alias in node.names:
+                if alias.name == "*":
+                    self._retire_star_import(node, module)
+                elif alias.name in RETIRED_BLOB_SELECTOR_SYMBOLS:
+                    self._retire_import(alias, module, alias.name)
         self.generic_visit(node)
 
     def visit_Import(self, node: ast.Import) -> None:  # noqa: N802
         for alias in node.names:
             if alias.name in {
+                "cacheness",
                 "cacheness.metadata",
                 "cacheness.storage.backends",
                 "cacheness.storage.backends.blob_backends",
-            }:
-                self.module_aliases[alias.asname or alias.name.split(".")[0]] = alias.name
+            } and alias.asname:
+                self.module_aliases[alias.asname] = alias.name
         self.generic_visit(node)
 
     def visit_Name(self, node: ast.Name) -> None:  # noqa: N802
         if isinstance(node.ctx, ast.Load) and node.id in self.retired_aliases:
-            self.errors.append(f"retired bound alias use: {node.id}")
+            self._report(node, "retired bound alias use:", node.id)
         self.generic_visit(node)
 
     def visit_Attribute(self, node: ast.Attribute) -> None:  # noqa: N802
@@ -264,12 +289,24 @@ class _RetiredConsumerVisitor(ast.NodeVisitor):
             if dotted.startswith("cacheness.metadata."):
                 symbol = dotted.rsplit(".", 1)[1]
                 if symbol in RETIRED_METADATA_SYMBOLS:
-                    self.errors.append(f"retired package attribute: {dotted}")
+                    self._report(node, "retired package attribute:", dotted)
+            if dotted.startswith("cacheness."):
+                symbol = dotted.rsplit(".", 1)[1]
+                if symbol in RETIRED_BLOB_SELECTOR_SYMBOLS:
+                    self._report(node, "retired package attribute:", dotted)
             if dotted.startswith("cacheness.storage.backends"):
                 symbol = dotted.rsplit(".", 1)[1]
                 if symbol in RETIRED_BLOB_SELECTOR_SYMBOLS:
-                    self.errors.append(f"retired package attribute: {dotted}")
+                    self._report(node, "retired package attribute:", dotted)
         self.generic_visit(node)
+
+
+def audit_source(source: str, filename: str) -> tuple[str, ...]:
+    """Audit one source string with the exact visitor used for the repository tree."""
+    tree = ast.parse(source, filename=filename)
+    visitor = _RetiredConsumerVisitor()
+    visitor.visit(tree)
+    return tuple(visitor.errors)
 
 
 def _tracked_python_consumers() -> Iterable[Path]:
@@ -298,13 +335,12 @@ def run_consumer_audit() -> int:
     for path in _tracked_python_consumers():
         relative = path.relative_to(REPOSITORY_ROOT).as_posix()
         try:
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=relative)
+            findings.extend(
+                f"{relative}: {item}"
+                for item in audit_source(path.read_text(encoding="utf-8"), relative)
+            )
         except (OSError, SyntaxError, UnicodeDecodeError) as error:
             findings.append(f"{relative}: cannot parse executable consumer: {error}")
-            continue
-        visitor = _RetiredConsumerVisitor()
-        visitor.visit(tree)
-        findings.extend(f"{relative}: {item}" for item in visitor.errors)
     if findings:
         print("Phase 4 consumer audit failed:", file=sys.stderr)
         print("\n".join(f"- {item}" for item in findings), file=sys.stderr)
