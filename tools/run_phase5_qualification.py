@@ -244,6 +244,17 @@ def _validate_safe_text(value: str) -> None:
         raise ValueError("evidence contains a secret, credential, or URL-like value")
 
 
+def _is_standard_amazon_s3_identity(aws: object) -> bool:
+    """Recognize the one non-secret service identity eligible for qualification."""
+    return (
+        isinstance(aws, Mapping)
+        and aws.get("provider") == "standard"
+        and aws.get("service") == "amazon-s3"
+        and isinstance(aws.get("region"), str)
+        and bool(aws["region"])
+    )
+
+
 def validate_evidence(evidence: Mapping[str, object]) -> None:
     """Fail closed unless evidence has the exact public release-evidence shape."""
     if set(evidence) != _ALLOWED_EVIDENCE_KEYS:
@@ -302,6 +313,24 @@ def validate_evidence(evidence: Mapping[str, object]) -> None:
     if isinstance(aws, Mapping):
         for value in aws.values():
             _validate_safe_text(str(value))
+
+    status = evidence["status"]
+    result = evidence["result"]
+    cleanup_status = evidence["cleanup_status"]
+    complete_qualified_evidence = (
+        result == "passed"
+        and cleanup_status == "CLEAN"
+        and not missing
+        and _is_standard_amazon_s3_identity(aws)
+    )
+    if status == "QUALIFIED":
+        if not complete_qualified_evidence:
+            raise ValueError("qualified evidence contradicts its required service proof")
+    elif status == "UNAVAILABLE":
+        if result != "not_run" or cleanup_status != "NOT_ATTEMPTED":
+            raise ValueError("unavailable evidence contradicts its terminal state")
+    elif complete_qualified_evidence:
+        raise ValueError("complete qualification evidence must be marked qualified")
 
 
 def write_evidence(

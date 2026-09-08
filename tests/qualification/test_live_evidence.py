@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -13,6 +14,7 @@ import pytest
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 RUNNER_PATH = REPOSITORY_ROOT / "tools" / "run_phase5_qualification.py"
 FIXTURES_PATH = REPOSITORY_ROOT / "tests" / "qualification" / "conftest.py"
+VERIFIER_PATH = REPOSITORY_ROOT / "tools" / "verify_phase5_contracts.py"
 
 
 def _load_runner():
@@ -29,6 +31,17 @@ def _load_runner():
 def _load_fixtures():
     """Load qualification fixtures directly for non-live ownership contracts."""
     spec = importlib.util.spec_from_file_location("phase5_qualification_fixtures", FIXTURES_PATH)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_verifier():
+    """Load the read-only evidence verifier without importing ``tools`` as a package."""
+    spec = importlib.util.spec_from_file_location("phase5_contract_verifier", VERIFIER_PATH)
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -196,6 +209,70 @@ def test_evidence_serializer_rejects_secret_fragments_and_non_allowlisted_fields
             {**evidence, "dsn": "postgresql://test:password@db"},
             forbidden_fragments=(),
         )
+
+
+@pytest.mark.parametrize(
+    ("case", "mutate"),
+    [
+        (
+            "qualified result failed",
+            lambda evidence: evidence.update(result="failed"),
+        ),
+        (
+            "qualified cleanup has residue",
+            lambda evidence: evidence.update(cleanup_status="RESIDUE"),
+        ),
+        (
+            "qualified has missing configuration",
+            lambda evidence: evidence.update(
+                missing_configuration=["CACHENESS_TEST_S3_BUCKET"]
+            ),
+        ),
+        (
+            "qualified lacks AWS identity",
+            lambda evidence: evidence["services"].update(aws=None),
+        ),
+        (
+            "qualified has nonstandard AWS identity",
+            lambda evidence: evidence["services"].update(
+                aws={"provider": "emulated", "region": "us-east-1", "service": "amazon-s3"}
+            ),
+        ),
+        (
+            "unavailable claims a completed run",
+            lambda evidence: evidence.update(
+                status="UNAVAILABLE", result="passed", cleanup_status="NOT_ATTEMPTED"
+            ),
+        ),
+        (
+            "unavailable claims cleanup completed",
+            lambda evidence: evidence.update(
+                status="UNAVAILABLE", result="not_run", cleanup_status="CLEAN"
+            ),
+        ),
+    ],
+)
+def test_forged_contradictory_evidence_is_invalid_to_runner_and_verifier(
+    tmp_path: Path, case: str, mutate
+) -> None:
+    """Shape-valid fields cannot be combined into an unsupported release claim."""
+    runner = _load_runner()
+    verifier = _load_verifier()
+    evidence = runner.make_evidence(
+        status="QUALIFIED",
+        missing_configuration=[],
+        run_namespace="phase5-forged-evidence",
+        aws_identity=runner.AwsServiceIdentity(region="us-east-1", provider="standard"),
+        result="passed",
+        cleanup_status="CLEAN",
+    )
+    mutate(evidence)
+    artifact = tmp_path / f"{case.replace(' ', '-')}.json"
+    artifact.write_text(json.dumps(evidence), encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        runner.validate_evidence(evidence)
+    assert verifier.read_live_evidence_status(artifact) == "invalid"
 
 
 def test_fixture_configuration_uses_one_bounded_owned_namespace_and_two_signers() -> None:
