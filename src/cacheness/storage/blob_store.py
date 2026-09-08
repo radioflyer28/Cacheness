@@ -32,7 +32,6 @@ from cacheness.error_handling import (
     CacheReason,
     CacheStorageError,
 )
-from .backends import JsonBackend
 from .backends.blob_backends import InMemoryBlobBackend, InMemoryHandlerIO
 from .catalog import (
     CatalogCursor,
@@ -43,7 +42,7 @@ from .catalog import (
     validate_catalog_page_request,
 )
 from .composition import StoreTopology
-from .coordination import InstanceAdmission, KeyCoordinatorRegistry
+from .coordination import InstanceAdmission
 from .guarded_handler_io import GuardedHandlerIO
 from .handlers import HandlerRegistry
 from .integrity import (
@@ -58,17 +57,15 @@ from .manifest import (
     BlobManifest,
     verify_current_manifest,
 )
-from .manifest_repository import JsonProjectionExporter
 from .memory_lifecycle_authority import InMemoryLifecycleAuthority
 from .path_security import encode_physical_name
 from .projections import (
     ProjectionCapabilityError,
     ProjectionController,
     ProjectionOutcome,
-    ProjectionStatus,
 )
 from .reconciliation import ReconciliationReport, _AuthorityReconciler
-from .read_contract import BlobEntryInfo, BlobReceipt
+from .read_contract import BlobEntry, BlobReceipt
 from .sqlite_lifecycle_authority import SqliteLifecycleAuthority
 
 
@@ -213,7 +210,6 @@ class BlobStore:
         )
         self.lifecycle_limits = self.config.lifecycle_limits
         self._instance_admission = InstanceAdmission(self.lifecycle_limits)
-        self._key_coordinator = KeyCoordinatorRegistry()
         self._immutable_metadata_patch_fields = _IMMUTABLE_METADATA_PATCH_FIELDS
         self.handlers = HandlerRegistry()
         self._manifest_key_provider = manifest_key_provider or (
@@ -225,33 +221,13 @@ class BlobStore:
             )
         )
         self.capabilities = self.topology.capabilities
-        self._projection_exporter = (
-            JsonProjectionExporter(
-                self.lifecycle_authority,
-                projection.metadata_file,
-                page_size=self.lifecycle_limits.manifest_page_size,
-            )
-            if (
-                (projection := next(
-                    (
-                        item
-                        for item in self.projections
-                        if type(item) is JsonBackend
-                    ),
-                    None,
-                ))
-                is not None
-            )
-            else None
-        )
         self.lifecycle = AuthorityLifecycleEngine(self, self.lifecycle_authority)
         # Kept as a direct engine alias for private timing seams only. It is
         # never selected conditionally and cannot represent another authority.
         self._authority_lifecycle = self.lifecycle
 
-        # Only explicitly configured ProjectionSink participants are driven by
-        # the generic controller. Existing JSON export compatibility remains a
-        # derived projection and never participates in lifecycle authority.
+        # Only explicit ProjectionSink participants are driven by the generic
+        # controller. A projection never participates in lifecycle authority.
         self._projection_controllers = self._create_projection_controllers()
 
     def _create_projection_controllers(self) -> tuple[ProjectionController, ...]:
@@ -283,25 +259,6 @@ class BlobStore:
             controllers.append(controller)
         return tuple(controllers)
 
-    def _export_compatible_projection(self) -> ProjectionOutcome | None:
-        """Refresh the legacy JSON view as derived post-commit work only."""
-        if self._projection_exporter is None:
-            return None
-        try:
-            self._projection_exporter.export()
-            return ProjectionOutcome("json", ProjectionStatus.CURRENT)
-        except (
-            CacheBlobBackendError,
-            CacheBlobLifecycleConflictError,
-            OSError,
-            TypeError,
-            ValueError,
-        ) as error:
-            logger.warning("BlobStore JSON projection remains dirty after authority commit: %s", error)
-            return ProjectionOutcome(
-                "json", ProjectionStatus.DIRTY, error_type=type(error).__name__
-            )
-
     def _receipt_for_result(self, result: Any) -> BlobReceipt:
         """Freeze the canonical authority result before any derived attempt."""
         if result.promoted is None:
@@ -323,9 +280,6 @@ class BlobStore:
             attempt = controller.best_effort(receipt)
             if attempt.outcome is not None:
                 outcomes[controller.projection_name] = attempt.outcome
-        json_outcome = self._export_compatible_projection()
-        if json_outcome is not None:
-            outcomes[json_outcome.name] = json_outcome
         return receipt.with_projection_outcomes(outcomes)
 
     def _close_failed_initialization_resources(self) -> None:
@@ -391,7 +345,7 @@ class BlobStore:
                 yield entry
 
     @_ordinary_admitted
-    def get_entry_info(self, key: str) -> BlobEntryInfo | None:
+    def get_entry_info(self, key: str) -> BlobEntry | None:
         """Inspect authenticated metadata without reading/deserializing payloads."""
         return self.lifecycle.get_entry_info(key)
 
@@ -420,13 +374,7 @@ class BlobStore:
             self._compute_content_hash(data) if self.content_addressable
             else key if key is not None else self._generate_unique_key()
         )
-        with self._key_coordinator.hold(self._storage_id_for_key(blob_key)):
-            result = self.lifecycle.put(
-                data,
-                key=blob_key,
-                metadata=metadata,
-            )
-        return result
+        return self.lifecycle.put(data, key=blob_key, metadata=metadata)
 
 
     @_ordinary_admitted
@@ -442,20 +390,14 @@ class BlobStore:
     @_ordinary_admitted
     def update_metadata(self, key: str, metadata: Dict[str, Any]) -> bool:
         """Promote an authority-owned metadata revision."""
-        updated = self.lifecycle.update_metadata(key, metadata)
-        if updated:
-            self._export_compatible_projection()
-        return updated
+        return self.lifecycle.update_metadata(key, metadata)
 
     @_ordinary_admitted
     def delete(
         self, key: str, *, expected: EntryExpectation | None = None
     ) -> bool:
         """Tombstone one observed generation and delete its exact payload."""
-        with self._key_coordinator.hold(self._storage_id_for_key(key)):
-            deleted = self.lifecycle.delete(key=key, expected=expected)
-        if deleted:
-            self._export_compatible_projection()
+        deleted = self.lifecycle.delete(key=key, expected=expected)
         return deleted
 
     @_ordinary_admitted
@@ -464,11 +406,9 @@ class BlobStore:
         return self.lifecycle.exists(key)
 
     @_ordinary_admitted
-    def list(
-        self, prefix: Optional[str] = None, metadata_filter: Optional[Dict[str, Any]] = None
-    ) -> List[str]:
-        """List committed authority entries, optionally filtering signed metadata."""
-        return self.lifecycle.list(prefix, metadata_filter)
+    def list(self, prefix: Optional[str] = None) -> List[str]:
+        """List committed authority entries by key prefix only."""
+        return self.lifecycle.list(prefix)
 
     @_ordinary_admitted
     def query_catalog(
@@ -575,7 +515,6 @@ class BlobStore:
                     "BlobStore clear lifecycle could not complete",
                     context={"operation": "clear"},
                 ) from exc
-        self._export_compatible_projection()
         return cleared
 
     def reconcile(
@@ -587,8 +526,6 @@ class BlobStore:
             report = _AuthorityReconciler(self, lifecycle_limits=self.lifecycle_limits).reconcile(
                 apply=apply, resume_token=resume_token, now=now
             )
-        if apply:
-            self._export_compatible_projection()
         return report
 
     def close(self) -> None:
@@ -669,10 +606,6 @@ class BlobStore:
                 reason=CacheReason.MANIFEST_SIGNING_KEY_INVALID,
             )
         return key
-
-    def _manifest_key(self, *, initialize_new_store: bool = False) -> bytes:
-        """Compatibility spelling for direct trust-root inspection callers."""
-        return self._authority_manifest_key(initialize_new_store=initialize_new_store)
 
     def _authenticated_authority_manifest(
         self, raw: bytes, *, allow_tombstone: bool = False

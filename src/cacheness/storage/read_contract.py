@@ -84,39 +84,29 @@ class BlobReceipt:
         return replace(self, projections=merged)
 
 
-@dataclass(frozen=True)
-class BlobEntryInfo:
-    """Authenticated metadata and an opaque conditional-delete expectation."""
-
-    key: str
-    generation: str
-    locator: str
-    expectation: EntryExpectation
-    metadata: Mapping[str, Any]
-    previous_locator: str | None = None
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "metadata", _freeze_metadata(self.metadata))
-
-
 class BlobEntry:
-    """A verified private snapshot, usable only inside ``open_entry``.
+    """An authenticated entry snapshot, usable only inside ``open_entry``.
 
-    A present entry whose ``read()`` returns None is distinct from absence.
-    The owning BlobStore releases resources when its context exits.
+    A present entry whose ``read()`` returns ``None`` is distinct from absence.
+    The reader is installed only for a live ``open_entry`` context; inspection
+    calls return the same current contract without a payload reader.
     """
 
-    def __init__(self, info: BlobEntryInfo, reader: Callable[[], Any]) -> None:
-        self.info = info
-        self._reader: Callable[[], Any] | None = reader
-
-    @property
-    def metadata(self) -> Mapping[str, Any]:
-        return self.info.metadata
-
-    @property
-    def expectation(self) -> EntryExpectation:
-        return self.info.expectation
+    def __init__(
+        self,
+        key: str,
+        generation: str,
+        locator: str,
+        expectation: EntryExpectation,
+        metadata: Mapping[str, Any],
+        reader: Callable[[], Any] | None = None,
+    ) -> None:
+        self.key = key
+        self.generation = generation
+        self.locator = locator
+        self.expectation = expectation
+        self.metadata = _freeze_metadata(metadata)
+        self._reader = reader
 
     def read(self) -> Any:
         if self._reader is None:

@@ -38,7 +38,7 @@ from .lifecycle_authority import (
 )
 from .manifest import BlobManifest, StoreVersionDimensions, sign_current_manifest
 from .path_security import resolve_managed_locator
-from .read_contract import BlobEntry, BlobEntryInfo
+from .read_contract import BlobEntry
 
 
 _TOMBSTONE_OPERATION_ID_FIELD = "_cacheness_tombstone_operation_id"
@@ -475,19 +475,22 @@ class AuthorityLifecycleEngine:
         self.authority.retire_tombstone(key, expected=promoted.entry.expectation)
         return True
 
-    def entry_info(self, entry: EntrySnapshot) -> BlobEntryInfo:
+    def entry_info(self, entry: EntrySnapshot) -> BlobEntry:
         """Render metadata from this exact authenticated authority observation."""
         manifest = self._entry_manifest(entry, allow_tombstone=True)
         return self._entry_info(entry, manifest)
 
-    def _entry_info(self, entry: EntrySnapshot, manifest: BlobManifest) -> BlobEntryInfo:
+    def _entry_info(self, entry: EntrySnapshot, manifest: BlobManifest) -> BlobEntry:
         """Render an already authenticated manifest without another observation."""
-        return BlobEntryInfo(
-            entry.key, entry.generation, entry.locator, entry.expectation,
+        return BlobEntry(
+            entry.key,
+            entry.generation,
+            entry.locator,
+            entry.expectation,
             self.store._manifest_entry_data(manifest),
         )
 
-    def get_entry_info(self, key: str) -> BlobEntryInfo | None:
+    def get_entry_info(self, key: str) -> BlobEntry | None:
         entry = self.authority.read_entry(key)
         if entry is None:
             return None
@@ -543,7 +546,11 @@ class AuthorityLifecycleEngine:
                         "Canonical BlobStore payload integrity check failed"
                     )
                 result = BlobEntry(
-                    self._entry_info(entry, manifest),
+                    entry.key,
+                    entry.generation,
+                    entry.locator,
+                    entry.expectation,
+                    self.store._manifest_entry_data(manifest),
                     lambda: handler.get(snapshot.path, snapshot.metadata),
                 )
                 try:
@@ -573,16 +580,11 @@ class AuthorityLifecycleEngine:
         manifest = self._entry_manifest(entry, allow_tombstone=True)
         return None if manifest.state == "tombstoned" else self.store._manifest_entry_data(manifest)
 
-    def list(self, prefix: str | None, metadata_filter: dict[str, Any] | None) -> list[str]:
+    def list(self, prefix: str | None = None) -> list[str]:
         keys: list[str] = []
         for entry in self.authority.list_entries():
             manifest = self._entry_manifest(entry, allow_tombstone=True)
             if manifest.state != "committed" or (prefix and not manifest.key.startswith(prefix)):
-                continue
-            if metadata_filter and any(
-                manifest.user_metadata.get(name) != value
-                for name, value in metadata_filter.items()
-            ):
                 continue
             keys.append(manifest.key)
         return keys

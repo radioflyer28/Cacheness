@@ -32,7 +32,6 @@ Quick Start:
 from .core import CacheConfig, UnifiedCache as cacheness, get_cache
 from .decorators import cached
 from .handlers import ArrayHandler, HandlerRegistry, ObjectHandler
-from .metadata import JsonBackend, create_metadata_backend
 from .interfaces import CacheHandler  # Export interface for custom handlers
 from .error_handling import (
     CacheError,
@@ -51,7 +50,6 @@ from .error_handling import (
 # Import config validation and file loading (Phase 2.4)
 from .config import (
     CacheBlobConfig,
-    CacheMetadataConfig,
     CacheStorageConfig,
     CompressionConfig,
     SerializationConfig,
@@ -73,17 +71,6 @@ try:
     _has_yaml_config = True
 except ImportError:
     _has_yaml_config = False
-
-# Import optional components if available
-try:
-    from .metadata import SqliteBackend
-    # Backward compatibility aliases
-    JsonMetadataBackend = JsonBackend
-    SQLiteMetadataBackend = SqliteBackend
-    
-    _has_metadata_backends = True
-except ImportError:
-    _has_metadata_backends = False
 
 # Import SQL cache if SQLAlchemy is available
 try:
@@ -182,24 +169,6 @@ def list_handlers() -> list:
 
 
 # =============================================================================
-# Module-Level Metadata Backend Registration API (Phase 2.2)
-# =============================================================================
-
-# Import backend registry functions
-try:
-    from .storage.backends import (
-        register_metadata_backend,
-        unregister_metadata_backend,
-        get_metadata_backend,
-        list_metadata_backends,
-        MetadataBackend,  # Base class for custom backends
-    )
-    _has_backend_registry = True
-except ImportError:
-    _has_backend_registry = False
-
-
-# =============================================================================
 # Module-Level Blob Backend Registration API (Phase 2.3)
 # =============================================================================
 
@@ -226,7 +195,6 @@ __all__ = [
     "get_cache",
     # Sub-configuration classes (Phase 2.4)
     "CacheBlobConfig",
-    "CacheMetadataConfig", 
     "CacheStorageConfig",
     "CompressionConfig",
     "SerializationConfig",
@@ -250,9 +218,6 @@ __all__ = [
     "register_handler",
     "unregister_handler",
     "list_handlers",
-    # Metadata backends
-    "JsonBackend",
-    "create_metadata_backend",
     # Decorators
     "cached",
     # Error contracts
@@ -278,16 +243,6 @@ if _has_yaml_config:
         "save_config_to_yaml",
     ])
 
-# Add backend registry functions if available (Phase 2.2)
-if _has_backend_registry:
-    __all__.extend([
-        "register_metadata_backend",
-        "unregister_metadata_backend", 
-        "get_metadata_backend",
-        "list_metadata_backends",
-        "MetadataBackend",  # Base class for custom backends
-    ])
-
 # Add blob backend registry functions if available (Phase 2.3)
 if _has_blob_backend_registry:
     __all__.extend([
@@ -303,13 +258,6 @@ if _has_blob_backend_registry:
 # Add BlobStore if available (new storage layer API)
 if _has_blob_store:
     __all__.append("BlobStore")
-
-# Add metadata backends to exports if available
-if _has_metadata_backends:
-    __all__.extend([
-        "SqliteBackend",  # New simple name
-        "JsonMetadataBackend", "SQLiteMetadataBackend"  # Backward compatibility
-    ])
 
 # Add SQL cache to exports if available
 if _has_sql_cache:

@@ -59,11 +59,8 @@ class CacheStorageConfig:
 
 @dataclass
 class CacheMetadataConfig:
-    """Configuration for cache metadata backend."""
+    """Cache-policy settings stored alongside canonical BlobStore entries."""
 
-    metadata_backend: str = "auto"  # "auto", "json", "sqlite", or custom registered backend name
-    metadata_backend_options: Optional[dict] = None  # Backend-specific options (e.g., connection_url for postgresql)
-    sqlite_db_file: str = "cache_metadata.db"
     enable_metadata: bool = True
     default_ttl_hours: float = 24
     verify_cache_integrity: bool = True
@@ -81,17 +78,11 @@ class CacheMetadataConfig:
     memory_cache_stats: bool = False  # Enable cache hit/miss statistics for memory cache layer
 
     def __post_init__(self):
-        """Validate metadata backend configuration."""
-        # Custom backends are validated when get_metadata_backend() is called.
+        """Validate cache-policy configuration."""
         
         if self.default_ttl_hours is not None and self.default_ttl_hours <= 0:
             raise ValueError("default_ttl_hours must be positive")
         
-        # Validate metadata_backend_options is a dict if provided
-        if self.metadata_backend_options is not None:
-            if not isinstance(self.metadata_backend_options, dict):
-                raise ValueError("metadata_backend_options must be a dictionary")
-            
         # Validate memory cache layer configuration
         if self.memory_cache_type not in ["lru", "lfu", "fifo", "rr"]:
             raise ValueError(f"Invalid memory_cache_type: {self.memory_cache_type}")
@@ -102,14 +93,9 @@ class CacheMetadataConfig:
         if self.memory_cache_ttl_seconds <= 0:
             raise ValueError("memory_cache_ttl_seconds must be positive")
 
-        logger.debug(f"Metadata backend configured: {self.metadata_backend}")
         logger.debug(f"Store cache_key_params: {self.store_cache_key_params}")
-        if self.metadata_backend_options:
-            logger.debug(f"Metadata backend options: {list(self.metadata_backend_options.keys())}")
         if self.memory_cache_type and self.enable_memory_cache:
             logger.debug(f"Memory cache layer: {self.memory_cache_type} (maxsize={self.memory_cache_maxsize}, ttl={self.memory_cache_ttl_seconds}s)")
-        if self.metadata_backend in ["auto", "sqlite", "sqlite_memory"]:
-            logger.debug(f"SQLite database file: {self.sqlite_db_file}")
 
 
 @dataclass
@@ -481,8 +467,6 @@ class CacheConfig:
         enable_basic_types: Optional[bool] = None,
         max_tuple_recursive_length: Optional[int] = None,
         max_collection_depth: Optional[int] = None,
-        metadata_backend: Optional[str] = None,
-        metadata_backend_options: Optional[dict] = None,
         enable_metadata: Optional[bool] = None,
         max_cache_size_mb: Optional[int] = None,
         cleanup_on_init: Optional[bool] = None,
@@ -562,10 +546,6 @@ class CacheConfig:
             self.serialization.max_tuple_recursive_length = max_tuple_recursive_length
         if max_collection_depth is not None:
             self.serialization.max_collection_depth = max_collection_depth
-        if metadata_backend is not None:
-            self.metadata.metadata_backend = metadata_backend
-        if metadata_backend_options is not None:
-            self.metadata.metadata_backend_options = metadata_backend_options
         if enable_metadata is not None:
             self.metadata.enable_metadata = enable_metadata
         if max_cache_size_mb is not None:
@@ -676,48 +656,10 @@ class CacheConfig:
 
     def __post_init__(self):
         """Validate overall configuration consistency."""
-        # Validate backend compatibility
-        self._validate_backend_compatibility()
         self._validate_trusted_object_array_configuration()
         
         logger.info("Cache configuration initialized with focused sub-configurations")
     
-    def _validate_backend_compatibility(self):
-        """
-        Validate that metadata and blob backend combinations are compatible.
-        
-        Rules:
-        - Local metadata (sqlite, json) should not be combined with remote blobs (s3)
-        - Memory metadata should not be combined with persistent remote blobs
-        - This prevents inconsistent state where metadata is lost but blobs remain
-        
-        Raises:
-            ValueError: If backend combination is incompatible
-        """
-        metadata_backend = self.metadata.metadata_backend
-        blob_backend = self.blob.blob_backend
-        
-        # Define backend categories
-        local_metadata_backends = {"sqlite", "sqlite_memory", "json", "auto"}
-        remote_blob_backends = {"s3", "azure", "gcs"}  # S3 and future cloud backends
-        ephemeral_metadata_backends = {"memory"}
-        
-        # Check for incompatible combinations
-        if metadata_backend in local_metadata_backends and blob_backend in remote_blob_backends:
-            raise ValueError(
-                f"Incompatible backend combination: local metadata backend '{metadata_backend}' "
-                f"cannot be used with remote blob backend '{blob_backend}'. "
-                f"Use 'postgresql' metadata backend for remote blob storage to ensure "
-                f"distributed consistency."
-            )
-        
-        if metadata_backend in ephemeral_metadata_backends and blob_backend in remote_blob_backends:
-            raise ValueError(
-                f"Incompatible backend combination: ephemeral metadata backend '{metadata_backend}' "
-                f"should not be used with remote blob backend '{blob_backend}'. "
-                f"Memory metadata would be lost on restart while blobs persist in '{blob_backend}'."
-            )
-
     def _validate_trusted_object_array_configuration(self) -> None:
         """Require complete authenticity policy before enabling object arrays.
 
@@ -785,11 +727,6 @@ class CacheConfig:
     def blob_backend_options(self) -> Optional[dict]:
         """Get the blob storage backend options."""
         return self.blob.blob_backend_options
-
-    @property
-    def metadata_backend_options(self) -> Optional[dict]:
-        """Get the metadata backend options."""
-        return self.metadata.metadata_backend_options
 
     @classmethod
     def create_performance_optimized(cls) -> "CacheConfig":
@@ -914,7 +851,7 @@ def validate_config(config: CacheConfig) -> List["ConfigValidationError"]:
     This function performs comprehensive validation including:
     - Type checking for all configuration values
     - Range validation for numeric values
-    - Backend availability checking
+    - Topology and optional-feature availability checking
     - Cross-field consistency validation
     
     Args:
@@ -924,7 +861,7 @@ def validate_config(config: CacheConfig) -> List["ConfigValidationError"]:
         List of ConfigValidationError objects. Empty list means valid configuration.
         
     Example:
-        >>> config = CacheConfig(metadata_backend="postgresql")
+        >>> config = CacheConfig(blob_backend="filesystem")
         >>> errors = validate_config(config)
         >>> if errors:
         ...     for error in errors:
@@ -951,13 +888,7 @@ def validate_config(config: CacheConfig) -> List["ConfigValidationError"]:
                 config.storage.max_cache_size_mb
             ))
     
-    # Validate metadata configuration
-    if not isinstance(config.metadata.metadata_backend, str):
-        errors.append(ConfigValidationError(
-            "metadata.metadata_backend", "must be a string",
-            config.metadata.metadata_backend
-        ))
-    
+    # Validate cache-policy configuration
     if config.metadata.default_ttl_hours is not None:
         if not isinstance(config.metadata.default_ttl_hours, (int, float)):
             errors.append(ConfigValidationError(
@@ -968,13 +899,6 @@ def validate_config(config: CacheConfig) -> List["ConfigValidationError"]:
             errors.append(ConfigValidationError(
                 "metadata.default_ttl_hours", "must be positive",
                 config.metadata.default_ttl_hours
-            ))
-    
-    if config.metadata.metadata_backend_options is not None:
-        if not isinstance(config.metadata.metadata_backend_options, dict):
-            errors.append(ConfigValidationError(
-                "metadata.metadata_backend_options", "must be a dictionary",
-                type(config.metadata.metadata_backend_options).__name__
             ))
     
     # Validate blob configuration
@@ -1130,14 +1054,12 @@ def load_config_from_dict(data: dict) -> CacheConfig:
         >>> # Flat format (backwards compatible)
         >>> config = load_config_from_dict({
         ...     "cache_dir": "./my_cache",
-        ...     "metadata_backend": "sqlite",
         ...     "blob_backend": "filesystem"
         ... })
         >>> 
         >>> # Nested format
         >>> config = load_config_from_dict({
         ...     "storage": {"cache_dir": "./my_cache"},
-        ...     "metadata": {"metadata_backend": "sqlite"},
         ...     "blob": {"blob_backend": "filesystem"}
         ... })
     """
@@ -1209,7 +1131,6 @@ def load_config_from_json(path: Union[str, Path]) -> CacheConfig:
         >>> # cache_config.json:
         >>> # {
         >>> #   "storage": {"cache_dir": "./my_cache"},
-        >>> #   "metadata": {"metadata_backend": "sqlite"},
         >>> #   "blob": {"blob_backend": "filesystem"}
         >>> # }
         >>> config = load_config_from_json("cache_config.json")
@@ -1244,8 +1165,6 @@ def load_config_from_yaml(path: Union[str, Path]) -> CacheConfig:
         >>> # cache_config.yaml:
         >>> # storage:
         >>> #   cache_dir: ./my_cache
-        >>> # metadata:
-        >>> #   metadata_backend: sqlite
         >>> # blob:
         >>> #   blob_backend: filesystem
         >>> config = load_config_from_yaml("cache_config.yaml")

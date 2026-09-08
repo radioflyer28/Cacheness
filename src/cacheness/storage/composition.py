@@ -482,9 +482,9 @@ def _construct_sqlite_authority(*, root: str | Path, **options: object) -> objec
 
 def _construct_json_projection(*, metadata_file: str | Path, **options: object) -> object:
     """Build the JSON carrier only as a derived projection participant."""
-    from cacheness.metadata import JsonBackend
+    from cacheness.metadata import JsonProjection
 
-    return JsonBackend(Path(metadata_file), **options)
+    return JsonProjection(Path(metadata_file), **options)
 
 
 def _construct_postgresql_projection(**options: object) -> object:

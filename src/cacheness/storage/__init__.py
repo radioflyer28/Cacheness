@@ -2,11 +2,9 @@
 Storage Layer
 =============
 
-Low-level blob storage infrastructure providing:
-- Pluggable metadata backends (JSON, SQLite, In-Memory)
-- Type-aware serialization handlers (DataFrames, arrays, objects)
-- Compression support (blosc2, lz4, zstd, gzip)
-- Security features (HMAC signing, integrity verification)
+Direct object storage is composed from one ``StoreTopology`` and owned by
+``BlobStore``.  Catalog authority is not selected independently from the
+payload lifecycle.
 
 This layer is designed to be reusable beyond caching use cases, such as:
 - ML model versioning
@@ -17,24 +15,15 @@ Usage:
     # Direct storage layer access
     from cacheness.storage import BlobStore
     
-    store = BlobStore(backend="sqlite", compression="lz4")
+    store = BlobStore(topology, compression="lz4")
     blob_id = store.put(data, metadata={"type": "model", "version": "1.0"})
     data = store.get(blob_id)
-    
-    # Access backends directly
-    from cacheness.storage.backends import SqliteBackend, JsonBackend, MemoryBackend
     
     # Access handlers directly  
     from cacheness.storage.handlers import HandlerRegistry, ArrayHandler, ObjectHandler
 """
 
 # Import from backends subpackage
-from .backends import (
-    MetadataBackend,
-    JsonBackend,
-    create_metadata_backend,
-)
-
 # Import from handlers subpackage
 from .handlers import (
     CacheHandler,
@@ -104,18 +93,14 @@ from cacheness.error_handling import (
     CacheBlobStoreClosedError,
 )
 
-# Conditionally import SqliteBackend
-try:
-    from .backends import SqliteBackend as _SqliteBackend
-
-    SqliteBackend = _SqliteBackend
-    _HAS_SQLITE = True
-except ImportError:
-    _HAS_SQLITE = False
+from .composition import BackendRef, BackendRole, StoreTopology
 
 __all__ = [
     # Main API
     "BlobStore",
+    "BackendRef",
+    "BackendRole",
+    "StoreTopology",
     "BlobManifest",
     "BlobReceipt",
     "CatalogCursor",
@@ -157,10 +142,6 @@ __all__ = [
     "ReconciliationAction",
     "ReconciliationFinding",
     "ReconciliationReport",
-    # Backends
-    "MetadataBackend",
-    "JsonBackend", 
-    "create_metadata_backend",
     # Handlers
     "CacheHandler",
     "HandlerRegistry",
@@ -175,6 +156,3 @@ __all__ = [
     # Security
     "CacheEntrySigner",
 ]
-
-if _HAS_SQLITE:
-    __all__.append("SqliteBackend")

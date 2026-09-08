@@ -9,12 +9,10 @@ using the UnifiedCache system with automatic key generation.
 import atexit
 import functools
 import weakref
-import warnings
-import xxhash
 from typing import Any, Callable, Optional, Union, Dict, Tuple, cast
 
 from .core import UnifiedCache, CacheConfig, _normalize_function_args
-from .serialization import create_unified_cache_key, serialize_for_cache_key
+from .serialization import create_unified_cache_key
 
 # Track decorator-created cache instances for cleanup
 _decorator_cache_instances: list[weakref.ref[UnifiedCache]] = []
@@ -76,26 +74,6 @@ def _generate_cache_key(
     
     # Use the same unified cache key generation as UnifiedCache
     return create_unified_cache_key(enhanced_params, config)
-
-
-def _legacy_v0313_cache_key(
-    func: Callable,
-    args: Tuple,
-    kwargs: Dict[str, Any],
-    key_prefix: Optional[str] = None,
-    config: Optional[CacheConfig] = None,
-) -> str:
-    """Reproduce the single documented pre-unified decorator-key candidate."""
-    func_name = getattr(func, "__qualname__", getattr(func, "__name__", "unknown"))
-    func_module = getattr(func, "__module__", "unknown")
-    func_id = f"{func_module}.{func_name}"
-    args_text = serialize_for_cache_key(args, config)
-    kwargs_text = serialize_for_cache_key(kwargs, config)
-    if key_prefix:
-        payload = f"{key_prefix}:{func_id}:args:{args_text}:kwargs:{kwargs_text}"
-    else:
-        payload = f"{func_id}:args:{args_text}:kwargs:{kwargs_text}"
-    return xxhash.xxh3_64(payload.encode("utf-8")).hexdigest()
 
 
 class cached:
@@ -184,39 +162,19 @@ class cached:
                 else:
                     raise RuntimeError(f"Cache key generation failed: {e}") from e
 
-            # Try to get from cache using a synthetic parameter containing the cache key
+            # Use a synthetic policy identity; BlobStore remains the storage
+            # lifecycle authority behind this cache facade.
             try:
                 cache_instance = cast(UnifiedCache, self.cache_instance)
                 current_storage_key = cache_instance._create_cache_key(
                     {"__decorator_cache_key": cache_key}
                 )
-                if cache_instance.metadata_backend.get_entry(current_storage_key):
-                    cached_result = cache_instance.get(
-                        cache_key=current_storage_key,
-                        ttl_hours=self.ttl_hours,
-                    )
-                    if cached_result is not None:
-                        return cached_result
-
-                if not self.key_func:
-                    legacy_cache_key = _legacy_v0313_cache_key(
-                        func, args, kwargs, self.key_prefix, cache_instance.config
-                    )
-                    legacy_storage_key = cache_instance._create_cache_key(
-                        {"__decorator_cache_key": legacy_cache_key}
-                    )
-                    cached_result = cache_instance.get(
-                        cache_key=legacy_storage_key,
-                        ttl_hours=self.ttl_hours,
-                        _legacy_decorator_v0313=True,
-                    )
-                    if cached_result is not None:
-                        warnings.warn(
-                            "Reading a legacy 0.3.13 decorator cache entry is deprecated.",
-                            DeprecationWarning,
-                            stacklevel=2,
-                        )
-                        return cached_result
+                cached_result = cache_instance.get(
+                    cache_key=current_storage_key,
+                    ttl_hours=self.ttl_hours,
+                )
+                if cached_result is not None:
+                    return cached_result
             except Exception as e:
                 if not self.ignore_errors:
                     raise RuntimeError(f"Cache retrieval failed: {e}") from e
