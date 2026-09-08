@@ -27,6 +27,7 @@ from cacheness.error_handling import (
 )
 from cacheness.interfaces import GuardedReadSnapshot, GuardedWriteResult
 from cacheness.storage.guarded_handler_io import GuardedHandlerIO, GuardedStagedArtifact
+from cacheness.storage.integrity import sha256_and_size
 
 
 try:  # Keep the base package importable without the optional S3 dependency.
@@ -117,6 +118,8 @@ class S3BlobBackend:
         max_download_bytes: int = _DEFAULT_DOWNLOAD_LIMIT,
         max_download_work: int = _DEFAULT_DOWNLOAD_WORK_LIMIT,
         chunk_size: int = _DEFAULT_CHUNK_SIZE,
+        max_multipart_parts: int = 10_000,
+        max_upload_attempts: int = 2,
     ) -> None:
         """Configure one exact Amazon S3 bucket/prefix participant.
 
@@ -144,6 +147,14 @@ class S3BlobBackend:
         self.max_download_bytes = _positive_int("max_download_bytes", max_download_bytes)
         self.max_download_work = _positive_int("max_download_work", max_download_work)
         self.chunk_size = _positive_int("chunk_size", chunk_size)
+        self.max_multipart_parts = _positive_int(
+            "max_multipart_parts", max_multipart_parts
+        )
+        self.max_upload_attempts = _positive_int(
+            "max_upload_attempts", max_upload_attempts
+        )
+        if self.max_upload_attempts > 2:
+            raise CacheConfigurationError("max_upload_attempts cannot exceed two")
         if self.multipart_threshold > self.max_upload_bytes:
             raise CacheConfigurationError("multipart_threshold exceeds max_upload_bytes")
 
@@ -290,12 +301,7 @@ class _S3GenerationIO:
     def publish_generation(
         self, staged: GuardedStagedArtifact, locator: Path | str
     ) -> GuardedWriteResult:
-        """Conditionally create one immutable small S3 generation.
-
-        Multipart publication belongs to the same primitive but is added in the
-        next implementation step; this tracer intentionally establishes the
-        single-request immutable path first.
-        """
+        """Conditionally create one immutable S3 generation under explicit bounds."""
         self._require_open()
         locator_text = self._backend._locator_text(locator)
         key = self._backend._object_key(locator_text)
@@ -305,38 +311,194 @@ class _S3GenerationIO:
                     "S3 staged payload exceeds configured upload bound",
                     context={"operation": "s3.publish", "stage": "validate"},
                 )
+            digest = self._stage_digest(source, file_size)
             if file_size > self._backend.multipart_threshold:
-                raise CacheBlobBackendError(
-                    "S3 multipart publication is not yet available",
-                    context={"operation": "s3.publish", "stage": "select"},
+                self._publish_multipart(source, key, locator_text, file_size, digest)
+            else:
+                self._publish_single(source, key, locator_text, file_size, digest)
+        return staged.result_for(Path(locator_text), file_size)
+
+    def _publish_single(
+        self,
+        source: Any,
+        key: str,
+        locator: str,
+        file_size: int,
+        digest: str,
+    ) -> None:
+        """Create one small generation with an S3 conditional write."""
+        try:
+            self._backend._client.put_object(
+                **self._backend._request_kwargs(
+                    Bucket=self._backend.bucket,
+                    Key=key,
+                    Body=source,
+                    ContentLength=file_size,
+                    IfNoneMatch="*",
                 )
-            self._stage_digest(source, file_size)
+            )
+        except ClientError as error:
+            if _client_error_code(error) in {"409", "412", "ConditionalRequestConflict", "PreconditionFailed"}:
+                self._resolve_ambiguous_publication(locator, digest, file_size, error)
+                return
+            raise CacheBlobBackendError(
+                "S3 conditional generation publication failed",
+                context={"operation": "s3.publish", "stage": "conditional_put"},
+            ) from error
+        except BotoCoreError as error:
+            self._resolve_ambiguous_publication(locator, digest, file_size, error)
+
+    def _publish_multipart(
+        self,
+        source: Any,
+        key: str,
+        locator: str,
+        file_size: int,
+        digest: str,
+    ) -> None:
+        """Publish bounded parts and conditionally complete one immutable generation."""
+        part_count = (file_size + self._backend.part_size - 1) // self._backend.part_size
+        if part_count > self._backend.max_multipart_parts:
+            raise CacheBlobBackendError(
+                "S3 staged payload exceeds configured multipart part bound",
+                context={"operation": "s3.publish", "stage": "validate"},
+            )
+        for attempt in range(self._backend.max_upload_attempts):
+            upload_id = self._create_multipart_upload(key)
             try:
-                self._backend._client.put_object(
+                parts = self._upload_parts(source, key, upload_id, file_size, part_count)
+            except (ClientError, BotoCoreError, OSError, TypeError, ValueError) as error:
+                self._abort_known_upload(key, upload_id, error)
+                raise CacheBlobBackendError(
+                    "S3 multipart generation publication failed before completion",
+                    context={"operation": "s3.publish", "stage": "upload_part"},
+                ) from error
+            try:
+                self._backend._client.complete_multipart_upload(
                     **self._backend._request_kwargs(
                         Bucket=self._backend.bucket,
                         Key=key,
-                        Body=source,
-                        ContentLength=file_size,
+                        UploadId=upload_id,
+                        MultipartUpload={"Parts": parts},
                         IfNoneMatch="*",
                     )
                 )
+                return
             except ClientError as error:
-                if _client_error_code(error) in {"412", "PreconditionFailed"}:
-                    raise CacheBlobLifecycleConflictError(
-                        "S3 immutable generation already exists",
-                        context={"operation": "s3.publish", "stage": "conditional_put"},
+                code = _client_error_code(error)
+                if code in {"409", "ConditionalRequestConflict"}:
+                    self._abort_known_upload(key, upload_id, error)
+                    if attempt + 1 < self._backend.max_upload_attempts:
+                        continue
+                    raise CacheBlobBackendError(
+                        "S3 multipart conditional completion remained conflicted",
+                        context={"operation": "s3.publish", "stage": "complete"},
                     ) from error
-                raise CacheBlobBackendError(
-                    "S3 conditional generation publication failed",
-                    context={"operation": "s3.publish", "stage": "conditional_put"},
-                ) from error
+                if code in {"412", "PreconditionFailed"}:
+                    self._abort_known_upload(key, upload_id, error)
+                self._resolve_ambiguous_publication(locator, digest, file_size, error)
+                return
             except BotoCoreError as error:
-                raise CacheBlobBackendError(
-                    "S3 conditional generation publication was not confirmed",
-                    context={"operation": "s3.publish", "stage": "conditional_put"},
-                ) from error
-        return staged.result_for(Path(locator_text), file_size)
+                self._resolve_ambiguous_publication(locator, digest, file_size, error)
+                return
+        raise CacheBlobBackendError(
+            "S3 multipart upload exhausted its bounded attempts",
+            context={"operation": "s3.publish", "stage": "complete"},
+        )
+
+    def _create_multipart_upload(self, key: str) -> str:
+        """Create one exact, bounded multipart session without lifecycle state."""
+        try:
+            response = self._backend._client.create_multipart_upload(
+                **self._backend._request_kwargs(Bucket=self._backend.bucket, Key=key)
+            )
+        except (ClientError, BotoCoreError) as error:
+            raise CacheBlobBackendError(
+                "S3 multipart creation failed",
+                context={"operation": "s3.publish", "stage": "create_multipart"},
+            ) from error
+        upload_id = response.get("UploadId") if isinstance(response, Mapping) else None
+        if not isinstance(upload_id, str) or not upload_id:
+            raise CacheBlobBackendError(
+                "S3 multipart creation returned no upload identity",
+                context={"operation": "s3.publish", "stage": "create_multipart"},
+            )
+        return upload_id
+
+    def _upload_parts(
+        self,
+        source: Any,
+        key: str,
+        upload_id: str,
+        file_size: int,
+        part_count: int,
+    ) -> list[dict[str, Any]]:
+        """Upload exactly the validated staged bytes in bounded parts."""
+        source.seek(0)
+        remaining = file_size
+        parts: list[dict[str, Any]] = []
+        for number in range(1, part_count + 1):
+            chunk = source.read(min(self._backend.part_size, remaining))
+            if not isinstance(chunk, bytes) or not chunk:
+                raise OSError("S3 staged payload ended before multipart upload completed")
+            remaining -= len(chunk)
+            response = self._backend._client.upload_part(
+                **self._backend._request_kwargs(
+                    Bucket=self._backend.bucket,
+                    Key=key,
+                    UploadId=upload_id,
+                    PartNumber=number,
+                    Body=chunk,
+                )
+            )
+            etag = response.get("ETag") if isinstance(response, Mapping) else None
+            if not isinstance(etag, str) or not etag:
+                raise OSError("S3 multipart part response lacks its protocol ETag")
+            parts.append({"PartNumber": number, "ETag": etag})
+        if remaining != 0 or source.read(1):
+            raise OSError("S3 staged payload changed during multipart upload")
+        return parts
+
+    def _abort_known_upload(
+        self, key: str, upload_id: str, prior_error: BaseException
+    ) -> None:
+        """Abort one known pre-completion upload; never list to discover a target."""
+        try:
+            self._backend._client.abort_multipart_upload(
+                **self._backend._request_kwargs(
+                    Bucket=self._backend.bucket,
+                    Key=key,
+                    UploadId=upload_id,
+                )
+            )
+        except (ClientError, BotoCoreError) as cleanup_error:
+            raise CacheBlobBackendError(
+                "S3 multipart failure left an upload requiring explicit reconciliation",
+                context={"operation": "s3.publish", "stage": "abort_multipart"},
+            ) from cleanup_error
+
+    def _resolve_ambiguous_publication(
+        self,
+        locator: str,
+        digest: str,
+        byte_size: int,
+        cause: BaseException,
+    ) -> None:
+        """Classify a lost/conditional response from the exact key and manifest proof."""
+        try:
+            with self.open_snapshot(locator, {}) as snapshot:
+                actual_digest, actual_size = sha256_and_size(snapshot.path)
+        except FileNotFoundError:
+            raise CacheBlobBackendError(
+                "S3 publication response was ambiguous and exact key is absent",
+                context={"operation": "s3.publish", "stage": "classify"},
+            ) from cause
+        if actual_digest == digest and actual_size == byte_size:
+            return
+        raise CacheBlobLifecycleConflictError(
+            "S3 immutable generation conflicts with staged manifest bytes",
+            context={"operation": "s3.publish", "stage": "classify"},
+        ) from cause
 
     @contextmanager
     def open_snapshot(

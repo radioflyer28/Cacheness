@@ -88,6 +88,49 @@ class _MultipartResponseLossClient(_TrackedClient):
         raise EndpointConnectionError(endpoint_url="https://s3.amazonaws.com")
 
 
+class _MultipartConflictOnceClient(_TrackedClient):
+    """Inject one documented conditional-completion conflict before success."""
+
+    def __init__(self, client: object) -> None:
+        super().__init__(client)
+        self.create_count = 0
+        self.abort_requests: list[dict[str, object]] = []
+        self._conflicted = False
+
+    def create_multipart_upload(self, **kwargs: object) -> dict[str, object]:
+        self.create_count += 1
+        return self._client.create_multipart_upload(**kwargs)
+
+    def abort_multipart_upload(self, **kwargs: object) -> dict[str, object]:
+        self.abort_requests.append(dict(kwargs))
+        return self._client.abort_multipart_upload(**kwargs)
+
+    def complete_multipart_upload(self, **kwargs: object) -> dict[str, object]:
+        from botocore.exceptions import ClientError
+
+        if not self._conflicted:
+            self._conflicted = True
+            raise ClientError({"Error": {"Code": "409"}}, "CompleteMultipartUpload")
+        return self._client.complete_multipart_upload(**kwargs)
+
+
+class _MultipartPartFailureClient(_TrackedClient):
+    """Inject an observed pre-completion part failure with an exact abort target."""
+
+    def __init__(self, client: object) -> None:
+        super().__init__(client)
+        self.abort_requests: list[dict[str, object]] = []
+
+    def upload_part(self, **kwargs: object) -> dict[str, object]:
+        from botocore.exceptions import ClientError
+
+        raise ClientError({"Error": {"Code": "InternalError"}}, "UploadPart")
+
+    def abort_multipart_upload(self, **kwargs: object) -> dict[str, object]:
+        self.abort_requests.append(dict(kwargs))
+        return self._client.abort_multipart_upload(**kwargs)
+
+
 @pytest.fixture
 def s3_generation_backend(tmp_path: Path):
     """Build a contract-only Amazon S3 participant with an injected client."""
@@ -113,6 +156,8 @@ def test_integrity_small_generation_is_conditionally_published_and_snapshotted(
     s3_generation_backend: tuple[object, _TrackedClient],
 ) -> None:
     """A native file reaches a private, closed-body snapshot without overwrite."""
+    from cacheness.error_handling import CacheBlobLifecycleConflictError
+
     backend, client = s3_generation_backend
     guarded_io = backend.materialize_handler_io()
     locator = Path("generations") / "one" / "payload.native"
@@ -129,7 +174,7 @@ def test_integrity_small_generation_is_conditionally_published_and_snapshotted(
         assert client.last_body.closed is True
 
     with guarded_io.stage(_NativeHandler(), b"replacement", object()) as staged:
-        with pytest.raises(Exception):
+        with pytest.raises(CacheBlobLifecycleConflictError):
             guarded_io.publish_generation(staged, locator)
 
 
@@ -167,5 +212,68 @@ def test_recovery_multipart_response_loss_is_verified_by_exact_digest_and_size(
             assert client.complete_requests[0]["IfNoneMatch"] == "*"
             with guarded_io.open_snapshot(locator, dict(published["metadata"])) as snapshot:
                 assert snapshot.path.read_bytes() == payload
+        finally:
+            backend.close()
+
+
+def test_progress_multipart_409_restarts_one_new_bounded_upload(tmp_path: Path) -> None:
+    """One 409 creates exactly one new upload rather than an unbounded retry loop."""
+    from cacheness.storage.backends.s3_backend import S3BlobBackend
+
+    payload = b"y" * (5 * 1024 * 1024 + 31)
+    with mock_aws():
+        moto_client = boto3.client("s3", region_name="us-east-1")
+        moto_client.create_bucket(Bucket="cacheness-retry-contract")
+        client = _MultipartConflictOnceClient(moto_client)
+        backend = S3BlobBackend(
+            bucket="cacheness-retry-contract",
+            prefix="contract/run",
+            client=client,
+            staging_root=tmp_path / "private-stage",
+            multipart_threshold=5 * 1024 * 1024,
+            part_size=5 * 1024 * 1024,
+            max_upload_bytes=len(payload) + 1,
+            max_upload_attempts=2,
+        )
+        try:
+            guarded_io = backend.materialize_handler_io()
+            with guarded_io.stage(_NativeHandler(), payload, object()) as staged:
+                guarded_io.publish_generation(
+                    staged, Path("generations") / "retry" / "payload.native"
+                )
+            assert client.create_count == 2
+            assert len(client.abort_requests) == 1
+        finally:
+            backend.close()
+
+
+def test_recovery_part_failure_aborts_only_the_known_upload(tmp_path: Path) -> None:
+    """An observed pre-completion failure has one exact abort obligation."""
+    from cacheness.error_handling import CacheBlobBackendError
+    from cacheness.storage.backends.s3_backend import S3BlobBackend
+
+    payload = b"z" * (5 * 1024 * 1024 + 31)
+    with mock_aws():
+        moto_client = boto3.client("s3", region_name="us-east-1")
+        moto_client.create_bucket(Bucket="cacheness-abort-contract")
+        client = _MultipartPartFailureClient(moto_client)
+        backend = S3BlobBackend(
+            bucket="cacheness-abort-contract",
+            prefix="contract/run",
+            client=client,
+            staging_root=tmp_path / "private-stage",
+            multipart_threshold=5 * 1024 * 1024,
+            part_size=5 * 1024 * 1024,
+            max_upload_bytes=len(payload) + 1,
+        )
+        try:
+            guarded_io = backend.materialize_handler_io()
+            with guarded_io.stage(_NativeHandler(), payload, object()) as staged:
+                with pytest.raises(CacheBlobBackendError, match="before completion"):
+                    guarded_io.publish_generation(
+                        staged, Path("generations") / "abort" / "payload.native"
+                    )
+            assert len(client.abort_requests) == 1
+            assert client.abort_requests[0]["Key"] == "contract/run/generations/abort/payload.native"
         finally:
             backend.close()
