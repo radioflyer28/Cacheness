@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 4
+open_count: 5
 waived_count: 0
 fixed_count: 29
-total_count: 33
-last_updated: 2026-09-08T06:19:37.981Z
+total_count: 34
+last_updated: 2026-09-08T06:56:40.340Z
 ---
 
 # Broken Windows Ledger
@@ -48,6 +48,7 @@ last_updated: 2026-09-08T06:19:37.981Z
 | 31 | 04 | deviation | src/cacheness/storage/blob_store.py |  | Temporary memory handler snapshots apply private permissions to the filesystem path rather than the buffered writer. | fixed |  | 2026-09-08T02:01:57.547Z | 2026-09-08T02:04:10.125Z |
 | 32 | 04 | unmet-truth | .planning/phases/04-metadata-composition-and-topology-contracts/04-VALIDATION.md |  | Unexcluded Python 3.11 and 3.13 suites stop during retired metadata-authority and missing-pandas test collection; see release evidence. | open |  | 2026-09-08T04:19:10.179Z |  |
 | 33 | 04 | unrun-verify | tools/verify_phase4_ruff_delta.py |  | Phase 4 Ruff delta gate fails because its frozen scope omits existing S3 source and test paths. | open |  | 2026-09-08T06:19:37.981Z |  |
+| 34 | 04 | deviation | tools/verify_phase4_ruff_delta.py |  | Phase-wide Ruff-delta helper fails because its frozen authorized scope drifted outside Plan 04-11; scoped checks pass. | open |  | 2026-09-08T06:56:40.340Z |  |
 
 ````json
 [
@@ -445,6 +446,18 @@ last_updated: 2026-09-08T06:19:37.981Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-09-08T06:19:37.981Z",
+    "resolved_at": null
+  },
+  {
+    "id": 34,
+    "kind": "deviation",
+    "phase": "04",
+    "file": "tools/verify_phase4_ruff_delta.py",
+    "line": null,
+    "description": "Phase-wide Ruff-delta helper fails because its frozen authorized scope drifted outside Plan 04-11; scoped checks pass.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-08T06:56:40.340Z",
     "resolved_at": null
   }
 ]

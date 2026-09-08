@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 04
 current_phase_name: metadata-composition-and-topology-contracts
 status: planned
-stopped_at: Completed 04-10-PLAN.md
-last_updated: "2026-09-08T06:41:43.206Z"
+stopped_at: Completed 04-11-PLAN.md
+last_updated: "2026-09-08T06:56:41.367Z"
 last_activity: 2026-09-08
 last_activity_desc: Phase 04 execution started
-state_head: e81d0f6d48ebc5a0b04196c3f92a1cfc9da0d560
+state_head: a3902e1023f378e0a1cdca0b0914a62c26e9c10a
 progress:
   total_phases: 8
   completed_phases: 3
   total_plans: 60
-  completed_plans: 56
+  completed_plans: 57
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-09-06)
 ## Current Position
 
 Phase: 04 (metadata-composition-and-topology-contracts) — READY TO EXECUTE
-Plan: 10 of 13
+Plan: 11 of 13
 Status: Ready to execute
 Last activity: 2026-09-08 — Phase 04 gap-closure plans verified
 
@@ -137,6 +137,7 @@ Phase 03 rows in this historical table include superseded attempts and do not de
 | Phase 04 P07 | 22min | 2 tasks | 13 files |
 | Phase 04 P08 | 5m | 2 tasks | 17 files |
 | Phase 04 P10 | 13m 10s | 2 tasks | 9 files |
+| Phase 04 P11 | 22m | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -291,6 +292,8 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 04]: Python 3.11/3.13 full-suite collection evidence is recorded as a release gap, without reopening retired APIs.
 - [Phase 04]: StoreTopology owns exactly one RoleRegistry; BlobStore resolves only that composition root.
 - [Phase 04]: Structural protocol checks and a local identity ledger replace concrete cross-role checks and duplicated close paths.
+- [Phase 04]: Projection boundaries translate ordinary external exceptions into receipt-preserving derived outcomes; BaseException remains visible.
+- [Phase 04]: Catalog cursors enforce closed-envelope byte and field limits before decode, JSON, HMAC, manifest loading, or authority dispatch.
 
 ### Pending Todos
 
@@ -316,6 +319,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-08T06:41:43.148Z
-Stopped at: Completed 04-10-PLAN.md
-Resume file: None
+Last session: 2026-09-08T06:56:41.310Z
+Stopped at: Completed 04-11-PLAN.md
+Resume file: 04-12-PLAN.md
