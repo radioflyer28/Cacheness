@@ -1,10 +1,33 @@
 # Local storage: initialization and failure boundaries
 
 This guide implements [ADR 0001](adr/0001-topology-specific-storage-guarantees.md).
-The currently supported target is SQLite lifecycle authority plus local filesystem
-payloads on one host. Memory authority is single-process and not crash-durable.
-PostgreSQL/S3 lifecycle composition and native Windows qualification remain later
-work; an existing backend name does not imply that those combinations are ready.
+An existing backend name does not imply a topology guarantee: use only one of
+the exact profiles published in the catalog/topology guide.
+
+<!-- phase5-initialization-contract:start -->
+## Topology-specific initialization contract
+
+- `memory` authority with `memory` payload is a one-process ephemeral store.
+  It needs no external service and has no crash durability.
+- `sqlite` authority with `filesystem` payload is a durable local store. Run
+  explicit initialization before shared workers, then let ordinary workers
+  reopen the validated root without schema changes.
+- `postgresql` authority with `s3` payload is the multi-host profile. Complete
+  explicit PostgreSQL initialization before shared workers. Ordinary opens do
+  read-only version validation; incompatible layouts require stopped-worker
+  Phase 7 migration or rebuild, never an implicit open-time upgrade. Supply a
+  real PostgreSQL service, a real Amazon S3 bucket with a test-owned or
+  application-owned managed prefix, and a shared external manifest signing key.
+
+The remote profile is a PostgreSQL authority plus an immutable Amazon S3
+participant. PostgreSQL promotion controls visibility, while S3 create/delete
+effects remain outside its transaction and reconcile through durable intent
+and cleanup debt. An S3-compatible endpoint, a process-local authority, an
+unscoped prefix, a per-host key file, a bucket listing, or an object presence
+check cannot replace these requirements. The sanitized release-evidence
+artifact is the sole record of a service-run observation; local tests do not
+alter the profile contract.
+<!-- phase5-initialization-contract:end -->
 
 ## Initialize before sharing
 

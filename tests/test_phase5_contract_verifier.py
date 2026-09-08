@@ -168,7 +168,7 @@ def test_documentation_declares_requirements_not_an_observed_remote_status() -> 
     """Docs cannot mirror mutable live evidence or turn local green into BACK-05."""
     for path in (CATALOG_PATH, INITIALIZATION_PATH, COVERAGE_PATH):
         text = path.read_text(encoding="utf-8")
-        assert not re.search(r"\\b(?:QUALIFIED|UNAVAILABLE|NOT_QUALIFIED)\\b", text)
+        assert not re.search(r"\b(?:QUALIFIED|UNAVAILABLE|NOT_QUALIFIED)\b", text)
         assert "latest observed status" not in text.lower()
 
     initialization = _marker_text(
@@ -176,7 +176,7 @@ def test_documentation_declares_requirements_not_an_observed_remote_status() -> 
     )
     assert "explicit PostgreSQL initialization before shared workers" in initialization
     assert "read-only version validation" in initialization
-    assert "stopped-worker Phase 7 migration" in initialization
+    assert re.search(r"stopped-worker\s+Phase 7 migration", initialization)
     assert "Amazon S3" in initialization
     assert "shared external manifest signing key" in initialization
 
