@@ -32,9 +32,8 @@ from cacheness.error_handling import (
     CacheReason,
     CacheStorageError,
 )
-from cacheness.metadata import InMemoryBackend, SqliteBackend
-
-from .backends import JsonBackend, MetadataBackend
+from .backends import JsonBackend
+from .composition import StoreTopology
 from .coordination import InstanceAdmission, KeyCoordinatorRegistry
 from .guarded_handler_io import GuardedHandlerIO
 from .handlers import HandlerRegistry
@@ -46,18 +45,16 @@ from .integrity import (
 )
 from .legacy_manifest import LegacyManifestIdentity, recognize_legacy_fixture_tree
 from .lifecycle import AuthorityLifecycleEngine
-from .lifecycle_authority import AuthorityCapabilities, EntryExpectation, LifecycleAuthority
+from .lifecycle_authority import EntryExpectation
 from .manifest import (
     BlobManifestV1,
     canonical_signing_bytes_from_record,
     decode_canonical_manifest_record,
 )
 from .manifest_repository import JsonProjectionExporter
-from .memory_lifecycle_authority import InMemoryLifecycleAuthority
 from .path_security import encode_physical_name
 from .reconciliation import ReconciliationReport, _AuthorityReconciler
 from .read_contract import BlobEntryInfo
-from .sqlite_lifecycle_authority import SqliteLifecycleAuthority
 
 
 logger = logging.getLogger(__name__)
@@ -116,38 +113,40 @@ class BlobStore:
 
     def __init__(
         self,
+        topology: StoreTopology,
+        *,
         cache_dir: Union[str, Path] = ".blobstore",
-        backend: Optional[Union[str, MetadataBackend]] = None,
         compression: str = "lz4",
         compression_level: int = 3,
         content_addressable: bool = False,
-        *,
         config: CacheConfig | None = None,
         manifest_key_provider: ManifestSigningKeyProvider | None = None,
-        lifecycle_authority: LifecycleAuthority | None = None,
     ) -> None:
+        """Create a direct store from one explicit, validated topology."""
+        if not isinstance(topology, StoreTopology):
+            raise TypeError("topology must be a StoreTopology")
         configured_path = (
             config.storage.cache_dir
             if config is not None and cache_dir == ".blobstore"
             else cache_dir
         )
         self.cache_dir = Path(configured_path)
-        self._owns_lifecycle_authority = lifecycle_authority is None
-        self.lifecycle_authority = lifecycle_authority
+        self.topology = topology.resolve()
+        self.payload_backend = self.topology.payload
+        self.lifecycle_authority = self.topology.authority
+        self.projections = self.topology.projections
         self.guarded_handler_io = (
             GuardedHandlerIO(self.cache_dir) if self.cache_dir.is_dir() else None
         )
-        self._owns_backend = False
         self._initialized = False
-        self._released_resources = {
-            "authority": False,
-            "guarded_handler_io": False,
-            "backend": False,
-        }
+        self._guarded_handler_io_released = False
         try:
             self._initialize(
-                backend, compression, compression_level, content_addressable, config,
-                manifest_key_provider, lifecycle_authority,
+                compression,
+                compression_level,
+                content_addressable,
+                config,
+                manifest_key_provider,
             )
         except BaseException:
             self._close_failed_initialization_resources()
@@ -156,13 +155,11 @@ class BlobStore:
 
     def _initialize(
         self,
-        backend: Optional[Union[str, MetadataBackend]],
         compression: str,
         compression_level: int,
         content_addressable: bool,
         config: CacheConfig | None,
         manifest_key_provider: ManifestSigningKeyProvider | None,
-        lifecycle_authority: LifecycleAuthority | None,
     ) -> None:
         retired_control = _retired_scheduler_control(self.cache_dir)
         if retired_control is not None:
@@ -189,10 +186,6 @@ class BlobStore:
         self._instance_admission = InstanceAdmission(self.lifecycle_limits)
         self._key_coordinator = KeyCoordinatorRegistry()
         self._immutable_metadata_patch_fields = _IMMUTABLE_METADATA_PATCH_FIELDS
-        self.backend = self._select_projection_backend(backend)
-        selected = lifecycle_authority or self._create_lifecycle_authority(backend)
-        self._validate_authority_capabilities(getattr(selected, "capabilities", None))
-        self.lifecycle_authority = selected
         self.handlers = HandlerRegistry()
         self._manifest_key_provider = manifest_key_provider or ManifestKeyProvider(
             self.cache_dir / "blob_manifest_hmac_key.bin",
@@ -200,80 +193,27 @@ class BlobStore:
         )
         self._projection_exporter = (
             JsonProjectionExporter(
-                selected,
-                self.backend.metadata_file,
+                self.lifecycle_authority,
+                projection.metadata_file,
                 page_size=self.lifecycle_limits.manifest_page_size,
             )
-            if type(self.backend) is JsonBackend
+            if (
+                (projection := next(
+                    (
+                        item
+                        for item in self.projections
+                        if type(item) is JsonBackend
+                    ),
+                    None,
+                ))
+                is not None
+            )
             else None
         )
-        self.lifecycle = AuthorityLifecycleEngine(self, selected)
+        self.lifecycle = AuthorityLifecycleEngine(self, self.lifecycle_authority)
         # Kept as a direct engine alias for private timing seams only. It is
         # never selected conditionally and cannot represent another authority.
         self._authority_lifecycle = self.lifecycle
-
-    def _select_projection_backend(
-        self, backend: Optional[Union[str, MetadataBackend]]
-    ) -> MetadataBackend:
-        """Construct compatible projection output without making it canonical."""
-        if type(backend) in {InMemoryBackend, JsonBackend, SqliteBackend}:
-            return backend
-        if backend == "json":
-            self._owns_backend = True
-            return JsonBackend(self.cache_dir / "cache_metadata.json")
-        if backend == "memory" or backend is None or backend == "sqlite":
-            self._owns_backend = True
-            return InMemoryBackend()
-        raise CacheBlobBackendError(
-            "BlobStore metadata backend is unsupported by the authority lifecycle",
-            context={"backend_type": type(backend).__name__},
-        )
-
-    def _create_lifecycle_authority(
-        self, backend: Optional[Union[str, MetadataBackend]]
-    ) -> LifecycleAuthority:
-        """Select the one canonical authority before any operation can run."""
-        if backend == "memory":
-            self._validate_authority_capabilities(InMemoryLifecycleAuthority.capabilities)
-            return InMemoryLifecycleAuthority(lifecycle_limits=self.lifecycle_limits)
-        self._validate_authority_capabilities(SqliteLifecycleAuthority.capabilities)
-        return SqliteLifecycleAuthority.for_root(
-            self.cache_dir,
-            lifecycle_limits=self.lifecycle_limits,
-            lifecycle_topology=getattr(self.config, "lifecycle_topology", None),
-        )
-
-    def _validate_authority_capabilities(
-        self, capabilities: AuthorityCapabilities | object | None
-    ) -> None:
-        if not isinstance(capabilities, AuthorityCapabilities):
-            raise CacheBlobBackendError(
-                "Lifecycle authority does not declare semantic capabilities",
-                context={"operation": "select_lifecycle_authority"},
-                reason=CacheReason.BLOB_BACKEND_CAPABILITY_UNSUPPORTED,
-            )
-        topology = self.config.lifecycle_topology
-        required = {
-            "durable": topology.durable,
-            "multiprocess": topology.multiprocess,
-            "exact_cas": topology.exact_cas,
-            "indexed_paging": topology.indexed_paging,
-            "projection": topology.projection,
-            "transactional": True,
-        }
-        unavailable = [
-            name for name, requested in required.items()
-            if requested and not getattr(capabilities, name)
-        ]
-        if unavailable:
-            raise CacheBlobBackendError(
-                "Lifecycle authority cannot satisfy requested topology capabilities",
-                context={
-                    "operation": "select_lifecycle_authority",
-                    "unsupported_capabilities": unavailable,
-                },
-                reason=CacheReason.BLOB_BACKEND_CAPABILITY_UNSUPPORTED,
-            )
 
     def _export_compatible_projection(self) -> None:
         if self._projection_exporter is None:
@@ -284,16 +224,10 @@ class BlobStore:
             logger.warning("BlobStore JSON projection remains dirty after authority commit: %s", error)
 
     def _close_failed_initialization_resources(self) -> None:
-        if self._owns_lifecycle_authority and self.lifecycle_authority is not None:
-            try:
-                self.lifecycle_authority.close()
-            except Exception:
-                logger.exception("Failed to close internally created lifecycle authority")
-        if self._owns_backend and hasattr(self, "backend"):
-            try:
-                self.backend.close()
-            except Exception:
-                logger.exception("Failed to close internally created BlobStore backend")
+        try:
+            self.topology.close()
+        except Exception:
+            logger.exception("Failed to close owned topology participants")
         if self.guarded_handler_io is not None:
             try:
                 self.guarded_handler_io.close()
@@ -473,15 +407,10 @@ class BlobStore:
             self._instance_admission.finish_close(closed=closed)
 
     def _release_owned_resources(self) -> None:
-        if self._owns_lifecycle_authority and not self._released_resources["authority"]:
-            self.lifecycle_authority.close()
-            self._released_resources["authority"] = True
-        if self.guarded_handler_io is not None and not self._released_resources["guarded_handler_io"]:
+        if self.guarded_handler_io is not None and not self._guarded_handler_io_released:
             self.guarded_handler_io.close()
-            self._released_resources["guarded_handler_io"] = True
-        if self._owns_backend and not self._released_resources["backend"]:
-            self.backend.close()
-            self._released_resources["backend"] = True
+            self._guarded_handler_io_released = True
+        self.topology.close()
 
     def __enter__(self):
         self._instance_admission.require_open()

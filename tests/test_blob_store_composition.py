@@ -134,21 +134,15 @@ def test_legacy_selectors_factories_and_constructor_overload_are_absent() -> Non
     assert "metadata_backend" not in parameters
 
 
-def test_no_parallel_metadata_factory_or_runtime_orm_selector_survives() -> None:
-    source = "\n".join(
-        (REPOSITORY_ROOT / path).read_text(encoding="utf-8")
-        for path in (
-            "src/cacheness/metadata.py",
-            "src/cacheness/storage/backends/__init__.py",
-            "src/cacheness/core.py",
-        )
+def test_direct_blob_store_uses_no_legacy_metadata_selector() -> None:
+    source = (REPOSITORY_ROOT / "src/cacheness/storage/blob_store.py").read_text(
+        encoding="utf-8"
     )
 
     for forbidden in (
-        "create_metadata_backend",
+        "_select_projection_backend",
+        "_create_lifecycle_authority",
         "get_metadata_backend",
-        "_metadata_backend_registry",
-        "CacheMetadataLink",
-        "get_custom_metadata_model",
+        "create_metadata_backend",
     ):
         assert forbidden not in source

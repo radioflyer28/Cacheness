@@ -60,9 +60,17 @@ Usage:
 """
 
 import logging
-from typing import Type, Dict, Any, Optional
+from typing import Type, Dict
 
 from .base import MetadataBackend
+from ..composition import (
+    BackendRef,
+    BackendRole,
+    CompositionValidationError,
+    RoleRegistry,
+    StoreTopology,
+    resolve_metadata_role,
+)
 
 # Import implementations - these re-export from the cacheness.metadata module
 # to maintain backward compatibility during the migration
@@ -280,7 +288,6 @@ from .blob_backends import (
     get_blob_backend,
     list_blob_backends,
 )
-
 # Conditionally import S3BlobBackend
 try:
     from .s3_backend import S3BlobBackend, BOTO3_AVAILABLE
@@ -311,6 +318,13 @@ __all__ = [
     "unregister_blob_backend",
     "get_blob_backend",
     "list_blob_backends",
+    # Direct BlobStore composition API
+    "BackendRef",
+    "BackendRole",
+    "CompositionValidationError",
+    "RoleRegistry",
+    "StoreTopology",
+    "resolve_metadata_role",
 ]
 
 if _HAS_SQLITE:
