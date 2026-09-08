@@ -42,6 +42,7 @@ LIVE_TEST_MODULES = (
     "tests/integration/test_remote_topology.py",
 )
 LIVE_MARKER_EXPRESSION = "live_postgresql or live_aws_s3 or live_remote"
+QUALIFICATION_FIXTURE_PLUGIN = "tests.qualification.conftest"
 DEFAULT_TIMEOUT_SECONDS = 900
 MIN_TIMEOUT_SECONDS = 60
 MAX_TIMEOUT_SECONDS = 3600
@@ -363,6 +364,8 @@ def _qualification_arguments() -> list[str]:
         sys.executable,
         "-m",
         "pytest",
+        "-p",
+        QUALIFICATION_FIXTURE_PLUGIN,
         "-q",
         "-ra",
         "-o",

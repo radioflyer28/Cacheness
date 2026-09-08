@@ -424,6 +424,8 @@ def run_local_contract_suite() -> tuple[bool, str]:
         (
             "--collect-only",
             "-q",
+            "-p",
+            "tests.qualification.conftest",
             *LIVE_COLLECTION_MODULES,
             "-m",
             "live_postgresql or live_aws_s3 or live_remote",

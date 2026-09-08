@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -149,6 +150,30 @@ def test_runner_passes_only_the_exact_run_identifier_to_its_live_subprocess(
     assert observed_environment["CACHENESS_PHASE5_QUALIFICATION_RUN_ID"] == (
         "phase5-" + "c" * 32
     )
+
+
+def test_frozen_live_suite_loads_the_qualification_fixture_plugin() -> None:
+    """The fixed subprocess resolves fixtures before missing services stop it."""
+    runner = _load_runner()
+    environment = {
+        name: value
+        for name, value in os.environ.items()
+        if not name.startswith(("AWS_", "CACHENESS_TEST_", "CACHENESS_PHASE5_"))
+    }
+
+    completed = subprocess.run(
+        runner._qualification_arguments(),
+        cwd=REPOSITORY_ROOT,
+        capture_output=True,
+        check=False,
+        env=environment,
+        text=True,
+    )
+    output = f"{completed.stdout}\n{completed.stderr}"
+
+    assert completed.returncode != 0
+    assert "required external configuration is absent" in output
+    assert "fixture 'live_qualification_resources' not found" not in output
 
 
 def test_endpoint_override_is_not_a_live_amazon_s3_configuration(tmp_path: Path) -> None:
