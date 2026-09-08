@@ -303,16 +303,17 @@ Plans:
 
 **Goal**: Each advertised payload backend works through the shared engine in explicitly supported payload/catalog pairings, with verified topology-specific guarantees rather than Cartesian or identical-availability parity.
 **Depends on**: Phase 4
-**Requirements**: BACK-01, BACK-04, BACK-05
+**Requirements**: BACK-01, BACK-04
 **Success Criteria** (what must be TRUE):
 
-  1. Filesystem, memory, and S3 payload adapters reuse the engine and pass the applicable immutable-generation, verified-read, delete, list, integrity, resource-cleanup and reconciliation cases at their declared durability tier. Each advertised family has an explicit supported pairing; memory is not assigned crash-durability claims.
-  2. Every explicitly supported advertised payload/catalog pairing completes the common workflows at its declared durability/sharing/progress tier. Publish unsupported combinations and reject impossible claims; backend-neutral calls do not hide topology-specific outcomes.
-  3. PostgreSQL concurrency and transaction behavior is verified against a real PostgreSQL service, including conflicts and cleanup after partial failure.
-  4. AWS S3 is the authoritative remote-object test target for conditional operations, checksums, streaming, pagination, retries, and cleanup; compatible services are claimed only where explicitly verified.
+  1. Filesystem, memory, and S3 payload adapters reuse the engine and pass the applicable deterministic immutable-generation, verified-read, delete, list, integrity, resource-cleanup and reconciliation contracts at their declared durability tier. Memory is not assigned crash-durability claims.
+  2. Memory/memory and SQLite/filesystem complete their qualified workflows. PostgreSQL/Amazon-S3 composes through the same engine and passes deterministic participant/topology contracts, but remains explicitly unqualified for release until Phase 8 closes BACK-05 with real-service evidence.
+  3. The frozen real PostgreSQL, real Amazon S3, and independent-client suites plus their sanitized runner are executable and fail closed: missing services produce non-passing UNAVAILABLE evidence rather than a skip, emulator substitution, or support claim.
+  4. Publish unsupported combinations and reject impossible claims before I/O; backend-neutral calls do not hide topology-specific outcomes. Compatible S3 services remain unclaimed without their own evidence.
   5. Shared-store tests initialize before workers and account for success, exact conflict and declared typed retryable outcomes separately from integrity failures. PostgreSQL transactions do not encompass S3/filesystem effects; partial external effects remain attributable recovery work, not a reason for another coordinator.
 
-**Plans**: 9/10 plans executed
+**Plans**: 9/9 canonical plans complete; 05-10 superseded by the Phase 8
+BACK-05 real-service qualification plan
 
 Plans:
 **Wave 1**
@@ -344,7 +345,7 @@ Plans:
 
 **Wave 7** *(blocked on Wave 6 completion)*
 
-- [ ] 05-10-PLAN.md — Run the non-substitutable real-service qualification and record final support evidence.
+- [~] 05-10-PLAN.md — Superseded: non-substitutable real-service qualification moved intact to Phase 8; current UNAVAILABLE evidence is not a pass.
 
 ### Phase 6: UnifiedCache Policy Composition
 
@@ -383,15 +384,15 @@ Plans:
 
 **Goal**: Users can rely on reproducible release evidence across supported installations, Python versions, backends, failures, and operational scale.
 **Depends on**: Phase 7
-**Requirements**: QUAL-01, QUAL-02, QUAL-03, QUAL-04, QUAL-05, QUAL-06, QUAL-07
+**Requirements**: BACK-05, QUAL-01, QUAL-02, QUAL-03, QUAL-04, QUAL-05, QUAL-06, QUAL-07
 **Success Criteria** (what must be TRUE):
 
   1. A clean minimal wheel imports every guaranteed public symbol and completes a memory-backed round trip, while each advertised extra installs and imports independently.
-  2. Required CI passes across supported Python versions, backend contracts, lint and coverage policy, packaging, PostgreSQL, and authoritative AWS S3 integration.
+  2. Required CI passes across supported Python versions, backend contracts, lint and coverage policy, packaging, real PostgreSQL, and authoritative real AWS S3 integration. The frozen Phase 5 runner must produce sanitized QUALIFIED evidence with exact cleanup before PostgreSQL/Amazon-S3 becomes a supported release topology (BACK-05).
   3. Carry forward Phase 3's finite integrity/recovery regressions and add named cases for new supported topologies and commit boundaries; lifecycle/cache-policy modules meet the project's statement and branch coverage gates. Shared-worker fixtures initialize first and distinguish valid typed contention outcomes from corruption. This is not a proof of every interleaving or an automatic repeated race-repair loop.
   4. Checked-in benchmarks establish reviewed latency and throughput budgets for named workloads/environments after lifecycle behavior stabilizes, recording distributions separately from correctness gates. A regression cannot silently strengthen runtime deadlines or public failure semantics.
   5. Inventory, reconciliation, statistics, clear, and aggregate operations demonstrate bounded memory and backend-call behavior without accidental N+1 access patterns.
-  6. Qualify exact commits in isolated environments and retain failed-run evidence plus migration fixtures for deliberately supported source versions. Historical compatibility tests may remain as evidence but are not release blockers for removed pre-production APIs/layouts. Do not count unavailable services/platforms as passes; Windows remains UNAVAILABLE/NOT_QUALIFIED until Phase 999.1 supplies native evidence. Optimization must preserve one authority and may not introduce a projection-repair prerequisite for canonical operations.
+  6. Qualify exact commits in isolated environments and retain failed-run evidence plus migration fixtures for deliberately supported source versions. Phase 5's PostgreSQL/Amazon-S3 candidate remains unqualified until its non-substitutable real-service gate passes here; unavailable services never count as passes. Historical compatibility tests may remain as evidence but are not release blockers for removed pre-production APIs/layouts. Windows remains UNAVAILABLE/NOT_QUALIFIED until Phase 999.1 supplies native evidence. Optimization must preserve one authority and may not introduce a projection-repair prerequisite for canonical operations.
 
 **Plans**: TBD
 
@@ -403,7 +404,7 @@ Plans:
 | 2. Canonical Storage and Integrity Contract | 7/7 | Complete    | 2026-08-30 |
 | 3. Atomic Lifecycle and Recovery Engine | 24/24 | Complete — direct qualification | 2026-09-06 |
 | 4. Metadata Composition and Topology Contracts | 14/14 | Complete    | 2026-09-08 |
-| 5. Payload Backends and Supported Topology Qualification | 9/10 | In Progress|  |
+| 5. Payload Backends and Supported Topology Qualification | 9/9 | Verifying |  |
 | 6. UnifiedCache Policy Composition | 0/TBD | Not started | - |
 | 7. Explicit Migration and Rebuild Cutover | 0/TBD | Not started | - |
 | 8. Production Gates and Performance Stabilization | 0/TBD | Not started | - |

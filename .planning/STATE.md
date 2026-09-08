@@ -3,16 +3,16 @@ gsd_state_version: 1.0
 milestone: v1.0
 current_phase: 05
 current_phase_name: Payload Backends and Supported Topology Qualification
-status: executing
-stopped_at: Phase 5 Plan 05-10 blocking-human gate; real PostgreSQL/AWS S3 configuration unavailable
-last_updated: "2026-09-08T16:30:11Z"
+status: verifying
+stopped_at: Phase 5 post-execution verification after approved BACK-05 transfer to Phase 8
+last_updated: "2026-09-08T19:46:10.110Z"
 last_activity: 2026-09-08
-last_activity_desc: Phase 05 deterministic review clean; Plan 05-10 still awaits real PostgreSQL/Amazon S3 qualification inputs
-state_head: 4f0bfe7c401fe2d90775001d3fc33165f27ed91f
+last_activity_desc: Phase 05 canonical plans complete; BACK-05 real-service release gate transferred intact to Phase 8
+state_head: fc636701cea4997de9be0aeaff697b12ce18902a
 progress:
   total_phases: 8
   completed_phases: 4
-  total_plans: 70
+  total_plans: 69
   completed_plans: 69
 milestone_name: milestone
 ---
@@ -28,16 +28,16 @@ See: .planning/PROJECT.md (updated 2026-09-06)
 
 ## Current Position
 
-Phase: 05 (Payload Backends and Supported Topology Qualification) — EXECUTING
-Plan: 10 of 10 — blocking-human qualification gate
-Status: 9/10 plans complete; BACK-05 awaiting real PostgreSQL and Amazon S3
-Last activity: 2026-09-08 — Phase 05 review converged clean after 12 fixes;
-Plan 05-10 refreshed sanitized UNAVAILABLE evidence at `4f0bfe7`
+Phase: 05 (Payload Backends and Supported Topology Qualification) — VERIFYING
+Plan: 9 of 9 canonical plans complete; 05-10 superseded
+Status: post-execution gates in progress; BACK-05 moved intact to Phase 8
+Last activity: 2026-09-08 — user approved the Phase 8 transfer; Phase 05
+retains truthful sanitized UNAVAILABLE evidence without a release support claim
 
 Phase 04 closed with 14/14 plans summarized, a clean final code review,
 18/18 verified must-haves, 29/29 Nyquist-covered tasks, and 64/64 plan-time
 security threats resolved or explicitly accepted (`threats_open: 0`). The
-canonical milestone count excludes superseded Plan 03-19, whose
+canonical milestone count excludes superseded Plans 03-19 and 05-10, whose
 `status: superseded` frontmatter is the machine-readable retirement record.
 
 The user explicitly bypassed GSD execute/review/checker. The older
@@ -319,6 +319,10 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - Historical Phase 1 compatibility fixtures remain evidence but do not define a supported runtime read window after the pre-production reset; Phase 7 will define the source-version window for future released formats.
 - Phase 3 planning must derive tombstone retention and orphan grace defaults from fault/crash testing.
 - Phase 8 performance and coverage thresholds must be finalized from measured baselines rather than estimates.
+
+### Roadmap Evolution
+
+- Phase 5 edited: Moved BACK-05 non-substitutable PostgreSQL/Amazon-S3 real-service qualification gate intact to Phase 8; Phase 5 retains the candidate implementation, deterministic contracts, frozen live suites, fail-closed runner, and truthful UNAVAILABLE evidence without a release support claim.
 
 ## Deferred Items
 

@@ -20,13 +20,15 @@ used. An injected participant retains its identity and is caller-owned unless
 ownership is explicitly transferred. A projection has no promote, cleanup,
 delete, reconciliation, or canonical-query-completeness permission.
 
-## Supported topology profiles
+## Declared topology profiles and qualification
 
 Construction or registration of a participant proves only that it can be
-constructed. Support is the narrower contract in the matrix below: exactly one
-authority/payload pair must match one row before `BlobStore` performs payload
-or authority I/O. JSON is available only as a derived projection in every
-profile; it cannot become authority or a fallback authority.
+constructed. Eligibility is the narrower contract in the matrix below: exactly
+one authority/payload pair must match one row before `BlobStore` performs
+payload or authority I/O. A row is an immutable contract declaration, not a
+mutable observation that its external evidence has passed. JSON is available
+only as a derived projection in every profile; it cannot become authority or a
+fallback authority.
 
 <!-- phase5-topology-matrix:start -->
 | profile | authority | payload | coordination | durability / atomicity boundary | progress outcomes | required service configuration | derived JSON projection | evidence requirement ID | evidence schema ID |
@@ -36,13 +38,16 @@ profile; it cannot become authority or a fallback authority.
 | configured remote deployment | postgresql | s3 | multiple_hosts | PostgreSQL transaction is authoritative; immutable Amazon S3 objects reconcile outside cross-resource ACID | conflict, retryable_connection_timeout, retryable_deadlock, retryable_lock_timeout, retryable_serialization, retryable_statement_timeout, success | explicit PostgreSQL initialization before shared workers; real PostgreSQL service; real Amazon S3 bucket and test-owned prefix; shared external manifest signing key | true | live-postgresql-amazon-s3 | phase5-live-service-evidence-v1 |
 <!-- phase5-topology-matrix:end -->
 
-The remote profile's `live-postgresql-amazon-s3` requirement is immutable. Its
-sanitized release-evidence artifact is the exclusive record of a service run;
-the runtime catalog and this guide deliberately contain requirements rather
-than an observation. Local tests, fakes, mocks, and compatible endpoints prove
-adapter contracts only. They do not substitute for the exact real PostgreSQL
-and Amazon S3 evidence requirement. Amazon S3-compatible services need their
-own named qualification before they can be added as a profile.
+The memory/memory and SQLite/filesystem rows are Phase 5-qualified. The remote
+row is a declared, constructible candidate and is **not release-qualified**
+until Phase 8 satisfies its immutable `live-postgresql-amazon-s3` requirement.
+The sanitized release-evidence artifact is the exclusive record of a service
+run; the runtime catalog and this guide deliberately contain requirements
+rather than a mutable observation. Local tests, fakes, mocks, and compatible
+endpoints prove adapter contracts only. They do not substitute for the exact
+real PostgreSQL and Amazon S3 evidence requirement. Amazon S3-compatible
+services need their own named qualification before they can be added as a
+release-supported profile.
 
 Every pair outside the matrix is rejected before staging, including
 memory/filesystem, memory/S3, SQLite/memory, SQLite/S3, PostgreSQL/memory, and

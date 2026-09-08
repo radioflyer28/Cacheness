@@ -95,6 +95,14 @@ Deferred to future releases and not included in the current roadmap.
 
 Phase 3 delivered an early local composition proof for CACH-01/02/03/06 and existing mapping metadata for BACK-07 at qualified commit `5282dca`; see [the direct implementation ledger](../docs/phase3-direct-implementation-2026-09-06.md). It does not mark those full requirements complete: Phase 4 owns catalog customization and Phase 6 owns the coherent cache-policy API. Cache instances must use BlobStore as their engine; sharing a live namespace with non-cache stores is not required. On 2026-09-07 the user approved a pre-production compatibility reset: historical characterization remains evidence, but current development-only APIs/layouts need not retain runtime adapters. Explicit schema/format identification and future migration/rebuild tooling remain required. Phase 3 completion is direct primary-agent qualification under the user's process override, not a fresh independent GSD verifier verdict.
 
+On 2026-09-08 the user approved moving `BACK-05`'s non-substitutable real
+PostgreSQL/Amazon-S3 qualification gate from Phase 5 to Phase 8. Phase 5 retains
+the candidate implementation, deterministic contracts, frozen real-service
+suites, fail-closed runner, and truthful `UNAVAILABLE` evidence, but does not
+claim release qualification. Phase 8 must run the gate unchanged before marking
+`BACK-05` complete or advertising PostgreSQL/Amazon-S3 as a supported release
+topology.
+
 | Requirement | Phase | Status |
 |-------------|-------|--------|
 | STOR-01 | Phase 2 | Complete |
@@ -109,7 +117,7 @@ Phase 3 delivered an early local composition proof for CACH-01/02/03/06 and exis
 | BACK-02 | Phase 4 | Complete |
 | BACK-03 | Phase 4 | Complete |
 | BACK-04 | Phase 5 | Pending |
-| BACK-05 | Phase 5 | Pending |
+| BACK-05 | Phase 8 | Pending — real-service gate moved intact |
 | BACK-06 | Phase 4 | Complete |
 | BACK-07 | Phase 4 | Complete |
 | CACH-01 | Phase 6 | Pending |
@@ -150,4 +158,4 @@ Phase 3 delivered an early local composition proof for CACH-01/02/03/06 and exis
 
 ---
 *Requirements defined: 2026-08-29*
-*Last updated: 2026-09-06 after downstream alignment; Phase 3 statuses synchronized to existing direct qualification, with later-phase acceptance still pending*
+*Last updated: 2026-09-08 after moving BACK-05 real-service release qualification to Phase 8*

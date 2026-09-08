@@ -12,8 +12,10 @@ the exact profiles published in the catalog/topology guide.
 - `sqlite` authority with `filesystem` payload is a durable local store. Run
   explicit initialization before shared workers, then let ordinary workers
   reopen the validated root without schema changes.
-- `postgresql` authority with `s3` payload is the multi-host profile. Complete
-  explicit PostgreSQL initialization before shared workers. Ordinary opens do
+- `postgresql` authority with `s3` payload is the multi-host candidate profile;
+  it remains unqualified for release until Phase 8 records passing real-service
+  evidence. Complete explicit PostgreSQL initialization before shared workers.
+  Ordinary opens do
   read-only version validation; incompatible layouts require stopped-worker
   Phase 7 migration or rebuild, never an implicit open-time upgrade. Supply a
   real PostgreSQL service, a real Amazon S3 bucket with a test-owned or

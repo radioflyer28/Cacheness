@@ -24,6 +24,19 @@ integrity, recovery, progress, performance, and ACID boundaries remain binding.
 <decisions>
 ## Implementation Decisions
 
+### Approved Phase-Boundary Adjustment
+
+- **D-23 (supersedes D-01, D-03, D-05, D-06, and D-22 only as to the timing of
+  the remote support claim):** Phase 5 completes the PostgreSQL/Amazon-S3
+  candidate implementation, deterministic contracts, real-service suites, and
+  fail-closed qualification harness. Memory/memory and SQLite/filesystem are
+  qualified here. PostgreSQL/Amazon-S3 remains explicitly unqualified until
+  Phase 8 runs the non-substitutable real-service gate for `BACK-05`. An
+  unavailable environment is honest evidence, not a Phase 5 failure and not a
+  support claim. Plan 05-10 is superseded by the future Phase 8 qualification
+  plan; its requirements and strict acceptance rules move intact. — **Approved
+  by user:** 2026-09-08.
+
 ### Supported Topology Inventory
 
 - **D-01:** V1 qualifies three reference topologies: memory authority with
@@ -160,8 +173,9 @@ integrity, recovery, progress, performance, and ACID boundaries remain binding.
   integrity, recovery, progress, ACID, and race-loop stop conditions.
 - `.planning/PROJECT.md` — Defines the BlobStore-first product, advertised
   backend scope, compatibility reset, and milestone constraints.
-- `.planning/ROADMAP.md` § Phase 5 — Defines BACK-01/BACK-04/BACK-05 acceptance
-  and the supported-topology qualification boundary.
+- `.planning/ROADMAP.md` §§ Phase 5 and Phase 8 — Phase 5 defines
+  BACK-01/BACK-04 implementation and deterministic contract acceptance; Phase 8
+  owns BACK-05 real-service release qualification.
 - `.planning/REQUIREMENTS.md` — Authoritative Phase 5 requirements and explicit
   exclusions from universal Cartesian parity.
 - `CONTEXT.md` — Canonical vocabulary for lifecycle authority, payload store,
