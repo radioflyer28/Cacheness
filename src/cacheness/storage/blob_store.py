@@ -61,8 +61,15 @@ from .manifest import (
 from .manifest_repository import JsonProjectionExporter
 from .memory_lifecycle_authority import InMemoryLifecycleAuthority
 from .path_security import encode_physical_name
+from .projections import (
+    ProjectionCapabilityError,
+    ProjectionController,
+    ProjectionOutcome,
+    ProjectionStatus,
+)
 from .reconciliation import ReconciliationReport, _AuthorityReconciler
 from .read_contract import BlobEntryInfo, BlobReceipt
+from .sqlite_lifecycle_authority import SqliteLifecycleAuthority
 
 
 logger = logging.getLogger(__name__)
@@ -242,13 +249,84 @@ class BlobStore:
         # never selected conditionally and cannot represent another authority.
         self._authority_lifecycle = self.lifecycle
 
-    def _export_compatible_projection(self) -> None:
+        # Only explicitly configured ProjectionSink participants are driven by
+        # the generic controller. Existing JSON export compatibility remains a
+        # derived projection and never participates in lifecycle authority.
+        self._projection_controllers = self._create_projection_controllers()
+
+    def _create_projection_controllers(self) -> tuple[ProjectionController, ...]:
+        """Build only explicit derived controllers from topology projections."""
+        controllers: list[ProjectionController] = []
+        names: set[str] = set()
+        for projection in self.projections:
+            query = getattr(projection, "projection_query", None)
+            schema = getattr(projection, "projection_schema", None)
+            if query is None and schema is None:
+                continue
+            if query is None or schema is None:
+                raise TypeError(
+                    "ProjectionSink must declare projection_query and projection_schema together"
+                )
+            controller = ProjectionController(
+                self,
+                projection,
+                page_size=getattr(projection, "projection_page_size", DEFAULT_PAGE_SIZE),
+                work_cap=getattr(projection, "projection_work_cap", None),
+                query=query,
+                schema=schema,
+                source_store_id=getattr(projection, "source_store_id", None),
+                capabilities=self.capabilities,
+            )
+            if controller.projection_name in names:
+                raise TypeError("ProjectionSink names must be unique within one BlobStore")
+            names.add(controller.projection_name)
+            controllers.append(controller)
+        return tuple(controllers)
+
+    def _export_compatible_projection(self) -> ProjectionOutcome | None:
+        """Refresh the legacy JSON view as derived post-commit work only."""
         if self._projection_exporter is None:
-            return
+            return None
         try:
             self._projection_exporter.export()
-        except (CacheBlobBackendError, CacheBlobLifecycleConflictError) as error:
+            return ProjectionOutcome("json", ProjectionStatus.CURRENT)
+        except (
+            CacheBlobBackendError,
+            CacheBlobLifecycleConflictError,
+            OSError,
+            TypeError,
+            ValueError,
+        ) as error:
             logger.warning("BlobStore JSON projection remains dirty after authority commit: %s", error)
+            return ProjectionOutcome(
+                "json", ProjectionStatus.DIRTY, error_type=type(error).__name__
+            )
+
+    def _receipt_for_result(self, result: Any) -> BlobReceipt:
+        """Freeze the canonical authority result before any derived attempt."""
+        if result.promoted is None:
+            raise CacheBlobLifecycleConflictError("Committed put lacks an authority entry")
+        return BlobReceipt(
+            operation_id=result.operation_id,
+            key=result.promoted.key,
+            generation=result.promoted.generation,
+            locator=result.promoted.locator,
+            expectation=result.promoted.expectation,
+            catalog_revision=result.promoted.expectation.revision or 0,
+            projections={},
+        )
+
+    def _run_post_commit_projections(self, receipt: BlobReceipt) -> BlobReceipt:
+        """Attempt derived work after authority commit without any rollback path."""
+        outcomes: dict[str, ProjectionOutcome] = {}
+        for controller in self._projection_controllers:
+            attempt = controller.best_effort(receipt)
+            if attempt.outcome is not None:
+                outcomes[controller.projection_name] = attempt.outcome
+        json_outcome = self._export_compatible_projection()
+        if json_outcome is not None:
+            outcomes[json_outcome.name] = json_outcome
+        return receipt.with_projection_outcomes(outcomes)
 
     def _close_failed_initialization_resources(self) -> None:
         try:
@@ -265,6 +343,21 @@ class BlobStore:
     def legacy_identity(self) -> LegacyManifestIdentity | None:
         """Expose exact legacy evidence without ever using it as storage truth."""
         return self._legacy_identity
+
+    @property
+    def projection_store_id(self) -> str:
+        """Return a stable non-path checkpoint identity for this store topology.
+
+        Continuation cursors remain authenticated by the authority's manifest
+        key. This value binds a projection checkpoint before a terminal page
+        has a cursor to carry the authority's opaque store identity.
+        """
+        source = (
+            f"{type(self.lifecycle_authority).__module__}."
+            f"{type(self.lifecycle_authority).__qualname__}:"
+            f"{self.cache_dir.absolute()}"
+        )
+        return hashlib.sha256(source.encode("utf-8")).hexdigest()
 
     @staticmethod
     def inspect_legacy_fixture_tree(root: str | Path) -> LegacyManifestIdentity:
@@ -306,22 +399,14 @@ class BlobStore:
     def put_entry(self, data: Any, key=None, metadata=None) -> BlobReceipt:
         """Commit an entry and own its cleanup, returning the exact receipt."""
         result = self._put_with_result_admitted(data, key=key, metadata=metadata)
-        if result.promoted is None:
-            raise CacheBlobLifecycleConflictError("Committed put lacks an authority entry")
-        return BlobReceipt(
-            operation_id=result.operation_id,
-            key=result.promoted.key,
-            generation=result.promoted.generation,
-            locator=result.promoted.locator,
-            expectation=result.promoted.expectation,
-            catalog_revision=result.promoted.expectation.revision or 0,
-            projections={},
-        )
+        return self._run_post_commit_projections(self._receipt_for_result(result))
 
     @_ordinary_admitted
     def put(self, data: Any, key: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> str:
         """Store one native handler payload through the selected authority."""
-        return self._put_with_result_admitted(data, key=key, metadata=metadata).key
+        result = self._put_with_result_admitted(data, key=key, metadata=metadata)
+        self._run_post_commit_projections(self._receipt_for_result(result))
+        return result.key
 
 
     def _put_with_result_admitted(
@@ -341,7 +426,6 @@ class BlobStore:
                 key=blob_key,
                 metadata=metadata,
             )
-        self._export_compatible_projection()
         return result
 
 
@@ -437,6 +521,42 @@ class BlobStore:
             signing_key=signing_key,
             manifest_loader=self._authenticated_authority_manifest,
         )
+
+    @_ordinary_admitted
+    def refresh_projection(self, name: str, receipt: BlobReceipt):
+        """Run one caller-requested bounded derived refresh.
+
+        A projection failure raises a committed-partial error that carries this
+        exact receipt. No authority row, payload generation, or cleanup debt is
+        changed by the refresh attempt.
+        """
+        return self._projection_controller(name).refresh(receipt)
+
+    @_ordinary_admitted
+    def rebuild_projection(
+        self,
+        name: str,
+        *,
+        requested: str = "offline",
+        workers_stopped: bool = False,
+    ):
+        """Explicitly rebuild one derived projection into an isolated destination."""
+        if isinstance(self.lifecycle_authority, SqliteLifecycleAuthority) and (
+            requested != "offline" or workers_stopped is not True
+        ):
+            raise ProjectionCapabilityError(
+                "SQLite projection rebuild requires explicit offline maintenance "
+                "with workers stopped"
+            )
+        return self._projection_controller(name).rebuild(requested=requested)
+
+    def _projection_controller(self, name: str) -> ProjectionController:
+        if not isinstance(name, str) or not name:
+            raise ValueError("Projection name must be a non-empty string")
+        for controller in self._projection_controllers:
+            if controller.projection_name == name:
+                return controller
+        raise KeyError(f"No configured projection named {name!r}")
 
     def clear(self) -> int:
         """Clear one authority-owned membership snapshot."""

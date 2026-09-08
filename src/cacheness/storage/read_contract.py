@@ -2,7 +2,7 @@
 
 from enum import Enum
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Any, Callable
 
@@ -61,6 +61,27 @@ class BlobReceipt:
         if any(not isinstance(name, str) or not name for name in self.projections):
             raise ValueError("BlobReceipt projection names must be non-empty strings")
         object.__setattr__(self, "projections", _freeze_metadata(self.projections))
+
+    @property
+    def projection_outcomes(self) -> Mapping[str, Any]:
+        """Expose immutable named derived outcomes without changing authority state."""
+        return self.projections
+
+    def with_projection_outcome(self, name: str, outcome: Any) -> "BlobReceipt":
+        """Return a new receipt that attributes one post-commit derived outcome."""
+        if not isinstance(name, str) or not name:
+            raise ValueError("BlobReceipt projection name must be a non-empty string")
+        outcomes = dict(self.projections)
+        outcomes[name] = outcome
+        return replace(self, projections=outcomes)
+
+    def with_projection_outcomes(self, outcomes: Mapping[str, Any]) -> "BlobReceipt":
+        """Return a new receipt with the supplied named derived outcomes."""
+        if not isinstance(outcomes, Mapping):
+            raise ValueError("BlobReceipt projection outcomes must be a mapping")
+        merged = dict(self.projections)
+        merged.update(outcomes)
+        return replace(self, projections=merged)
 
 
 @dataclass(frozen=True)

@@ -54,6 +54,7 @@ class CacheReason(str, Enum):
     BLOB_BACKEND_CAPABILITY_UNSUPPORTED = "blob_backend_capability_unsupported"
     BLOB_MIGRATION_REQUIRED = "blob_migration_required"
     BLOB_RECOVERABLE_CLEANUP = "blob_recoverable_cleanup"
+    BLOB_COMMITTED_PARTIAL = "blob_committed_partial"
     BLOB_RECONCILIATION_BLOCKED = "blob_reconciliation_blocked"
     BLOB_RECONCILIATION_CONFLICT = "blob_reconciliation_conflict"
     BLOB_RECONCILIATION_CHECKPOINT_INVALID = "blob_reconciliation_checkpoint_invalid"
@@ -444,6 +445,43 @@ class CacheBlobRecoverableCleanupError(CacheStorageError):
         reason: CacheReason = CacheReason.BLOB_RECOVERABLE_CLEANUP,
     ):
         super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheBlobCommittedPartialError(CacheStorageError):
+    """Raised when requested derived work fails after an authority commit.
+
+    The receipt remains the exact committed BlobStore result. The exception
+    carries it unchanged so callers can distinguish derived recovery work from
+    a failed or revoked canonical generation.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        receipt: object,
+        remaining_cursor: str | None,
+        projection_name: str,
+        context: Optional[Dict[str, Any]] = None,
+        reason: CacheReason = CacheReason.BLOB_COMMITTED_PARTIAL,
+    ):
+        if not isinstance(projection_name, str) or not projection_name:
+            raise ValueError("projection_name must be a non-empty string")
+        if remaining_cursor is not None and (
+            not isinstance(remaining_cursor, str) or not remaining_cursor
+        ):
+            raise ValueError("remaining_cursor must be a non-empty string or None")
+        error_context = dict(context or {})
+        error_context.update(
+            {
+                "projection_name": projection_name,
+                "remaining_cursor": remaining_cursor,
+            }
+        )
+        self.receipt = receipt
+        self.remaining_cursor = remaining_cursor
+        self.projection_name = projection_name
+        super().__init__(message, _context_with_reason(error_context, reason))
 
 
 class CacheBlobReconciliationError(CacheStorageError):

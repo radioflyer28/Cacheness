@@ -143,3 +143,69 @@ def test_checkpoint_binds_the_complete_canonical_snapshot_identity() -> None:
             query_fingerprint="query-fingerprint",
             revision=5,
         )
+
+
+def test_post_commit_projection_failure_preserves_the_authority_receipt() -> None:
+    from cacheness.storage.backends.blob_backends import InMemoryBlobBackend
+    from cacheness.storage.blob_store import BlobStore
+    from cacheness.storage.catalog import CatalogField, CatalogQuery, CatalogSchema
+    from cacheness.storage.composition import StoreTopology
+    from cacheness.storage.memory_lifecycle_authority import InMemoryLifecycleAuthority
+
+    class FailingSink:
+        projection_name = "external-index"
+        projection_query = CatalogQuery()
+        projection_schema = CatalogSchema(
+            (CatalogField("kind", "string"),), schema_id="external-index"
+        )
+
+        def apply_projection_batch(self, batch: object) -> None:
+            raise OSError("projection unavailable")
+
+        def save_projection_checkpoint(self, checkpoint: object) -> None:
+            raise AssertionError("failed apply must not advance a checkpoint")
+
+        def load_projection_checkpoint(self) -> None:
+            return None
+
+    store = BlobStore(
+        StoreTopology(
+            InMemoryBlobBackend(),
+            InMemoryLifecycleAuthority(),
+            (FailingSink(),),
+        )
+    )
+    store.initialize()
+
+    receipt = store.put_entry({"value": 1}, key="committed-key")
+
+    assert receipt.projection_outcomes["external-index"].status.value == "dirty"
+    assert store.get_entry_info("committed-key") is not None
+
+
+def test_receipt_outcomes_are_named_and_immutable() -> None:
+    from cacheness.storage.lifecycle_authority import EntryExpectation
+    from cacheness.storage.read_contract import BlobReceipt
+
+    receipt = BlobReceipt(
+        operation_id="operation",
+        key="key",
+        generation="generation",
+        locator="locator",
+        expectation=EntryExpectation(
+            lineage=1,
+            revision=2,
+            generation="generation",
+            manifest_digest="0" * 64,
+        ),
+        catalog_revision=2,
+        projections={},
+    )
+    outcome = object()
+
+    attributed = receipt.with_projection_outcome("external-index", outcome)
+
+    assert dict(receipt.projection_outcomes) == {}
+    assert attributed.projection_outcomes["external-index"] is outcome
+    with pytest.raises(TypeError):
+        attributed.projection_outcomes["other"] = object()

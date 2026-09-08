@@ -15,6 +15,8 @@ import hashlib
 import json
 from typing import Any
 
+from cacheness.error_handling import CacheBlobCommittedPartialError, CacheError
+
 from .catalog import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, MAX_WORK_CAP, STORE_EPOCH
 from .composition import (
     BackendRole,
@@ -44,6 +46,15 @@ class ProjectionStatus(str, Enum):
     PARTIAL = "partial"
 
 
+_PROJECTION_OPERATION_ERRORS = (
+    CacheError,
+    OSError,
+    RuntimeError,
+    TypeError,
+    ValueError,
+)
+
+
 @dataclass(frozen=True)
 class ProjectionCheckpoint:
     """A bounded resumption token bound to one canonical catalog snapshot."""
@@ -55,6 +66,7 @@ class ProjectionCheckpoint:
     query_fingerprint: str
     revision: int
     cursor: str | None
+    complete: bool = False
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -80,6 +92,12 @@ class ProjectionCheckpoint:
             or len(self.cursor.encode("utf-8")) > 16 * 1024
         ):
             raise ProjectionCheckpointError("Projection checkpoint cursor is invalid")
+        if type(self.complete) is not bool:
+            raise ProjectionCheckpointError("Projection checkpoint completion flag is invalid")
+        if self.complete and self.cursor is not None:
+            raise ProjectionCheckpointError(
+                "Completed projection checkpoints cannot retain a cursor"
+            )
 
     def assert_matches(
         self,
@@ -265,11 +283,17 @@ class ProjectionController:
         batches = 0
         while True:
             page = self._fetch_page(None if active is None else active.cursor)
+            if active is not None and active.complete:
+                if _page_revision(page) == active.revision:
+                    return ProjectionResult(True, active, batches)
+                active = None
             current = self._checkpoint_for_page(page, active)
             self._last_page_cursor = _page_cursor(page)
             batch = self._batch_for_page(page, current)
             self._apply_batch(batch)
-            active = replace(current, cursor=batch.next_cursor)
+            active = replace(
+                current, cursor=batch.next_cursor, complete=batch.exhausted
+            )
             self._save_checkpoint(active)
             self._active_checkpoint = active
             batches += 1
@@ -282,7 +306,9 @@ class ProjectionController:
         self._last_page_cursor = _page_cursor(page)
         batch = self._batch_for_page(page, current)
         self._apply_batch(batch)
-        next_checkpoint = replace(current, cursor=batch.next_cursor)
+        next_checkpoint = replace(
+            current, cursor=batch.next_cursor, complete=batch.exhausted
+        )
         self._save_checkpoint(next_checkpoint)
         self._active_checkpoint = next_checkpoint
         return ProjectionResult(batch.exhausted, next_checkpoint, 1)
@@ -291,7 +317,7 @@ class ProjectionController:
         """Attempt derived work without changing the already committed receipt."""
         try:
             result = self.pull()
-        except Exception as error:
+        except _PROJECTION_OPERATION_ERRORS as error:
             outcome = ProjectionOutcome(
                 self.projection_name,
                 ProjectionStatus.DIRTY,
@@ -321,15 +347,12 @@ class ProjectionController:
     def refresh(self, receipt: object) -> ProjectionResult:
         """Run requested derived work or report a committed-partial outcome.
 
-        The typed error itself is defined at the public storage-error boundary
-        in Task 2. Deferring its import keeps the projection controller free of
-        a lifecycle-error dependency during ordinary best-effort work.
+        The public error carries the immutable receipt unchanged. It documents
+        derived recovery work rather than changing any authority state.
         """
         try:
             return self.pull()
-        except Exception as error:
-            from cacheness.error_handling import CacheBlobCommittedPartialError
-
+        except _PROJECTION_OPERATION_ERRORS as error:
             remaining_cursor = self._last_page_cursor
             if remaining_cursor is None and self._active_checkpoint is not None:
                 remaining_cursor = self._active_checkpoint.cursor
@@ -379,7 +402,7 @@ class ProjectionController:
                 raise ProjectionRebuildError("Projection rebuild did not reach completion")
             publish(candidate, result.checkpoint)
             return result
-        except Exception as error:
+        except _PROJECTION_OPERATION_ERRORS as error:
             if callable(discard):
                 discard(candidate)
             if isinstance(error, ProjectionRebuildError):
@@ -469,7 +492,7 @@ class ProjectionController:
 
 
 CatalogProjection = ProjectionController
-CommittedPartialProjectionError = None
+CommittedPartialProjectionError = CacheBlobCommittedPartialError
 
 
 def _source_store_id(source: object) -> str:
