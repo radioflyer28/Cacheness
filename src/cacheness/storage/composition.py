@@ -451,10 +451,13 @@ class RoleRegistry:
         name: str,
         options: Mapping[str, object],
     ) -> object:
-        """Construct a named participant through the same role registry path."""
-        participant = self.resolve(role, name).construct(options)
-        _validate_participant_role(_normalize_role(role), participant)
-        return participant
+        """Construct a named participant for the topology that owns it.
+
+        ``StoreTopology`` records a store-owned result before it validates the
+        structural role. Keeping that sequence here would leave an invalid
+        factory result outside the only close ledger.
+        """
+        return self.resolve(role, name).construct(options)
 
     def capabilities(self, role: str | BackendRole, name: str) -> ParticipantCapabilities:
         """Return a static declaration suitable for capability preflight."""
@@ -483,10 +486,7 @@ class ResolvedTopology:
         if self._closed:
             return
         self._closed = True
-        for participant in reversed(self._owned_in_creation_order):
-            close = getattr(participant, "close", None)
-            if callable(close):
-                close()
+        _close_owned_participants(self._owned_in_creation_order)
 
 
 def _construct_sqlite_authority(*, root: str | Path, **options: object) -> object:
@@ -538,16 +538,13 @@ class StoreTopology:
     def resolve(self) -> ResolvedTopology:
         """Resolve each role once and unwind only owned participants on failure."""
         active_registry = self.role_registry
-        if self.minimum_capabilities.requirements:
-            try:
+        owned: list[object] = []
+        try:
+            _record_and_validate_injected_participants(self, owned)
+            if self.minimum_capabilities.requirements:
                 self.minimum_capabilities.require(
                     _capabilities_from_references(self, active_registry)
                 )
-            except BaseException:
-                self._close_transferred_injections()
-                raise
-        owned: list[object] = []
-        try:
             payload = _resolve_ref(
                 BackendRole.PAYLOAD.value,
                 self.payload,
@@ -579,23 +576,8 @@ class StoreTopology:
                 tuple(owned),
             )
         except BaseException:
-            for participant in reversed(owned):
-                close = getattr(participant, "close", None)
-                if callable(close):
-                    close()
+            _close_owned_participants(owned, suppress_errors=True)
             raise
-
-    def _close_transferred_injections(self) -> None:
-        """Release transfer-owned injections if preflight aborts construction."""
-        references = (self.payload, self.authority, *self.projections)
-        for reference in reversed(references):
-            if (
-                reference.instance is not None
-                and reference.ownership is Ownership.STORE
-            ):
-                close = getattr(reference.instance, "close", None)
-                if callable(close):
-                    close()
 
     def capability_report(self) -> TopologyCapabilities:
         """Return the resolved topology's capability report without retaining it."""
@@ -641,34 +623,97 @@ def _resolve_ref(
 ) -> object:
     if reference.instance is not None:
         participant = reference.instance
-        _validate_participant_role(role, participant)
         if reference.ownership is Ownership.STORE:
-            owned.append(participant)
+            _record_owned_participant(owned, participant)
+        _validate_participant_role(role, participant)
         return participant
 
     assert reference.name is not None
     participant = registry.construct(role, reference.name, reference.options)
     if reference.ownership is Ownership.STORE:
-        owned.append(participant)
+        _record_owned_participant(owned, participant)
+    _validate_participant_role(role, participant)
     return participant
 
 
 def _validate_participant_role(role: str, participant: object) -> None:
-    """Reject known cross-role participants before any store I/O occurs."""
-    is_authority = isinstance(participant, LifecycleAuthority)
-    is_payload = isinstance(participant, (FilesystemBlobBackend, InMemoryBlobBackend))
-    if role == BackendRole.AUTHORITY.value and is_payload:
-        raise CompositionValidationError("A payload participant cannot be an authority")
-    if role == BackendRole.PAYLOAD.value and is_authority:
-        raise CompositionValidationError("A lifecycle authority cannot be a payload")
-    if role == BackendRole.PAYLOAD.value and not isinstance(
-        participant, PayloadGenerationIOProvider
-    ):
-        raise CompositionValidationError(
-            "A payload participant must provide guarded generation I/O"
-        )
-    if role != BackendRole.PROJECTION.value and participant is None:
+    """Require one narrow role protocol before any store I/O can begin."""
+    if participant is None:
         raise CompositionValidationError(f"{role} participant cannot be None")
+
+    is_authority = isinstance(participant, LifecycleAuthority)
+    is_payload = isinstance(participant, PayloadGenerationIOProvider)
+    is_projection = isinstance(participant, ProjectionSink)
+
+    if role == BackendRole.PAYLOAD.value:
+        if is_authority or is_projection:
+            raise CompositionValidationError("A payload participant cannot fill another role")
+        if not is_payload:
+            raise CompositionValidationError(
+                "A payload participant must provide guarded generation I/O"
+            )
+        return
+
+    if role == BackendRole.AUTHORITY.value:
+        if is_payload or is_projection:
+            raise CompositionValidationError("An authority participant cannot fill another role")
+        if not is_authority:
+            raise CompositionValidationError(
+                "An authority participant must satisfy LifecycleAuthority"
+            )
+        return
+
+    if role == BackendRole.PROJECTION.value:
+        if is_authority or is_payload:
+            raise CompositionValidationError("A projection participant cannot fill another role")
+        if not is_projection:
+            raise CompositionValidationError(
+                "A projection participant must satisfy ProjectionSink"
+            )
+        return
+
+    raise CompositionValidationError(f"Unsupported participant role: {role!r}")
+
+
+def _record_and_validate_injected_participants(
+    topology: StoreTopology, owned: list[object]
+) -> None:
+    """Capture every transferred injection before its role validation can fail."""
+    references = (
+        (BackendRole.PAYLOAD.value, topology.payload),
+        (BackendRole.AUTHORITY.value, topology.authority),
+        *((BackendRole.PROJECTION.value, projection) for projection in topology.projections),
+    )
+    for _role, reference in references:
+        if reference.instance is not None and reference.ownership is Ownership.STORE:
+            _record_owned_participant(owned, reference.instance)
+    for role, reference in references:
+        if reference.instance is not None:
+            _validate_participant_role(role, reference.instance)
+
+
+def _record_owned_participant(owned: list[object], participant: object) -> None:
+    """Record an owned object once by identity in first-acquisition order."""
+    if not any(existing is participant for existing in owned):
+        owned.append(participant)
+
+
+def _close_owned_participants(
+    participants: tuple[object, ...] | list[object], *, suppress_errors: bool = False
+) -> None:
+    """Close one local ledger in reverse acquisition order without sharing state."""
+    first_error: Exception | None = None
+    for participant in reversed(participants):
+        close = getattr(participant, "close", None)
+        if not callable(close):
+            continue
+        try:
+            close()
+        except Exception as error:
+            if first_error is None:
+                first_error = error
+    if first_error is not None and not suppress_errors:
+        raise first_error
 
 
 def _capability_bool(value: object, field_name: str) -> bool:

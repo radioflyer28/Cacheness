@@ -7,6 +7,8 @@ from importlib.util import find_spec
 
 import pytest
 
+from cacheness.storage.memory_lifecycle_authority import InMemoryLifecycleAuthority
+
 
 COMPOSITION_MODULE = "cacheness.storage.composition"
 
@@ -39,15 +41,8 @@ class _Payload:
         return object()
 
 
-class _Authority:
-    capabilities = {
-        "durable": False,
-        "process_scope": "process",
-        "host_scope": "process",
-        "compare_and_swap": True,
-        "transactional": True,
-        "portable_query": True,
-    }
+class _Authority(InMemoryLifecycleAuthority):
+    """Concrete lifecycle authority used by structural topology tests."""
 
 
 class _Projection:

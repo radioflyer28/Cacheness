@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import hashlib
 from threading import RLock
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 from uuid import uuid4
 
 from cacheness.config import LifecycleLimits
@@ -19,6 +20,7 @@ from .lifecycle_authority import (
     MutationSpec,
     PageToken,
     PreparedMutation,
+    ProjectionBackup,
     ProjectionRevision,
     PromotionResult,
     ReconciliationPage,
@@ -579,6 +581,21 @@ class InMemoryLifecycleAuthority:
             return ProjectionRevision(self._revision)
 
         return self._transition(mark)
+
+    @contextmanager
+    def projection_backup(self) -> Iterator[ProjectionBackup]:
+        """Reject projection exports for this explicitly non-projecting authority.
+
+        The in-memory authority fulfills the lifecycle interface so composition
+        can validate it structurally, while its false projection capability
+        continues to prevent callers from inferring an isolated export
+        guarantee that this same-process implementation cannot provide.
+        """
+        self._require_open()
+        raise CacheBlobLifecycleConflictError(
+            "In-memory lifecycle authority does not support projection backups"
+        )
+        yield  # pragma: no cover - required for the context-manager type.
 
     def close(self) -> None:
         with self._lock:

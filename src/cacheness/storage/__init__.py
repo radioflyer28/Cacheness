@@ -93,13 +93,14 @@ from cacheness.error_handling import (
     CacheBlobStoreClosedError,
 )
 
-from .composition import BackendRef, BackendRole, StoreTopology
+from .composition import BackendRef, BackendRole, RoleRegistry, StoreTopology
 
 __all__ = [
     # Main API
     "BlobStore",
     "BackendRef",
     "BackendRole",
+    "RoleRegistry",
     "StoreTopology",
     "BlobManifest",
     "BlobReceipt",

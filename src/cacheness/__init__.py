@@ -67,7 +67,10 @@ from .config import (
 
 # YAML loading requires PyYAML - make it optional
 try:
-    from .config import load_config_from_yaml, save_config_to_yaml
+    from .config import (
+        load_config_from_yaml as load_config_from_yaml,
+        save_config_to_yaml as save_config_to_yaml,
+    )
     _has_yaml_config = True
 except ImportError:
     _has_yaml_config = False
@@ -90,7 +93,11 @@ __email__ = "akgithub.2drwc@aleeas.com"
 # Import storage layer components for convenience
 # These are also available via `from cacheness.storage import ...`
 try:
-    from .storage import BlobStore
+    from .storage import (
+        BlobStore as BlobStore,
+        RoleRegistry as RoleRegistry,
+        StoreTopology as StoreTopology,
+    )
     _has_blob_store = True
 except ImportError:
     _has_blob_store = False
@@ -168,26 +175,6 @@ def list_handlers() -> list:
     return _get_default_registry().list_handlers()
 
 
-# =============================================================================
-# Module-Level Blob Backend Registration API (Phase 2.3)
-# =============================================================================
-
-# Import blob backend registry functions
-try:
-    from .storage.backends import (
-        register_blob_backend,
-        unregister_blob_backend,
-        get_blob_backend,
-        list_blob_backends,
-        BlobBackend,  # Base class for custom blob backends
-        FilesystemBlobBackend,
-        InMemoryBlobBackend,
-    )
-    _has_blob_backend_registry = True
-except ImportError:
-    _has_blob_backend_registry = False
-
-
 __all__ = [
     # Core classes
     "cacheness",
@@ -243,21 +230,9 @@ if _has_yaml_config:
         "save_config_to_yaml",
     ])
 
-# Add blob backend registry functions if available (Phase 2.3)
-if _has_blob_backend_registry:
-    __all__.extend([
-        "register_blob_backend",
-        "unregister_blob_backend",
-        "get_blob_backend",
-        "list_blob_backends",
-        "BlobBackend",  # Base class for custom blob backends
-        "FilesystemBlobBackend",
-        "InMemoryBlobBackend",
-    ])
-
 # Add BlobStore if available (new storage layer API)
 if _has_blob_store:
-    __all__.append("BlobStore")
+    __all__.extend(["BlobStore", "RoleRegistry", "StoreTopology"])
 
 # Add SQL cache to exports if available
 if _has_sql_cache:
