@@ -200,9 +200,10 @@ def test_open_validates_exact_layout_without_emitting_ddl() -> None:
     required_constraints = [
         ("authority_meta_singleton_check",),
         ("mutations_operation_id_key",),
+        ("mutations_mutation_id_key",),
         ("cleanup_debt_operation_locator_role_key",),
         ("clear_targets_run_id_key_key",),
-        ("reconciliation_actions_run_id_action_id_key",),
+        ("reconciliation_actions_run_id_source_action_id_key",),
     ]
     factory = _Factory(
         scripts=[[
@@ -537,11 +538,11 @@ def test_complete_workflow_calls_stay_at_the_authority_boundary() -> None:
             [[(1, debt.operation_id, debt.locator, debt.key, debt.generation, debt.role)]],
             [None],
             [None, (7,), None],
-            [("active", ""), []],
-            [("active",), None],
+            [(7, "", True), ("active", ""), []],
+            [("active", True), None],
             [None, (0,), (0,), (7,), None],
             [(7, 0, 0)],
-            [None, (7, True), (7,)],
+            [(7, True), (7,)],
         ]
     )
     authority = PostgresqlLifecycleAuthority(factory, schema="phase5_authority")
