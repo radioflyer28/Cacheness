@@ -13,13 +13,21 @@ from cacheness.error_handling import (
     CacheBlobCloseTimeoutError,
     CacheBlobStoreClosedError,
 )
-from cacheness.storage import BlobStore
+from cacheness.storage import BlobReceipt, BlobStore
+from cacheness.storage.composition import BackendRef, StoreTopology
 
 
 def _configured_store(root: Path, *, close_wait_seconds: float = 0.02) -> BlobStore:
     """Create a store with an explicit, finite close policy."""
     limits = LifecycleLimits(close_wait_seconds=close_wait_seconds)
-    return BlobStore(root, backend="json", config=CacheConfig(lifecycle_limits=limits))
+    return BlobStore(
+        StoreTopology(
+            payload=BackendRef(name="filesystem", options={"base_dir": root}),
+            authority=BackendRef(name="sqlite", options={"root": root}),
+        ),
+        cache_dir=root,
+        config=CacheConfig(lifecycle_limits=limits),
+    )
 
 
 def _join(thread: Thread) -> None:
@@ -101,7 +109,9 @@ def test_owned_authority_close_preserves_data_for_reopen(tmp_path: Path) -> None
     root = tmp_path / "owned-authority"
     store = _configured_store(root)
     try:
-        assert store.put({"value": "persist"}, key="persisted") == "persisted"
+        receipt = store.put_entry({"value": "persist"}, key="persisted")
+        assert isinstance(receipt, BlobReceipt)
+        assert receipt.key == "persisted"
     finally:
         store.close()
 

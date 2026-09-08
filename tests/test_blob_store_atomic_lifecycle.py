@@ -7,18 +7,60 @@ from multiprocessing import get_context
 import os
 from pathlib import Path
 import stat
+import textwrap
 from typing import Any
 
 import pytest
 
 from cacheness.error_handling import CacheBlobRecoverableCleanupError
-from cacheness.storage import BlobStore
+from cacheness.storage import BlobReceipt, BlobStore
+from cacheness.storage.composition import BackendRef, StoreTopology
 from cacheness.storage import path_security
+from cacheness.storage.sqlite_lifecycle_authority import AUTHORITY_RELATIVE_PATH
 from _lifecycle_test_support import (
     CRASH_BOUNDARY_EXIT,
     authority_whole_state,
-    crash_public_put,
+    run_python_subprocess,
 )
+
+
+def _store(root: Path) -> BlobStore:
+    """Create the qualified local topology for lifecycle fault injection."""
+    return BlobStore(
+        StoreTopology(
+            payload=BackendRef(name="filesystem", options={"base_dir": root}),
+            authority=BackendRef(name="sqlite", options={"root": root}),
+        ),
+        cache_dir=root,
+    )
+
+
+def _crash_public_put(
+    root: Path, *, boundary: str, key: str, value: str
+):
+    """Terminate a current-topology write at one deterministic lifecycle seam."""
+    script = textwrap.dedent(
+        """
+        import os
+        import sys
+
+        from cacheness.storage import BlobStore
+        from cacheness.storage.composition import BackendRef, StoreTopology
+
+        root, boundary, key, value = sys.argv[1:]
+        topology = StoreTopology(
+            payload=BackendRef(name="filesystem", options={"base_dir": root}),
+            authority=BackendRef(name="sqlite", options={"root": root}),
+        )
+        store = BlobStore(topology, cache_dir=root)
+        store.lifecycle.test_hook = lambda reached: os._exit(86) if reached == boundary else None
+        try:
+            store.put(value, key=key)
+        finally:
+            store.close()
+        """
+    )
+    return run_python_subprocess("-c", script, str(root), boundary, key, value)
 
 
 class _NativeJsonHandler:
@@ -90,7 +132,7 @@ _EXCLUSIVE_STREAM_CRASH_EXIT = 91
 
 def _crash_during_live_exclusive_stream(root: str, boundary: str) -> None:
     """Crash in a child after durable intent and inside real native publication."""
-    store = BlobStore(root, backend="json")
+    store = _store(root)
     guarded_io = store._materialize_authority_store()
     file_ops = guarded_io.file_ops
     if boundary == "stream_copy":
@@ -127,7 +169,7 @@ def test_crash_harness_terminates_a_public_put_at_a_named_boundary(
     tmp_path: Path,
 ) -> None:
     """A subprocess can stop a public put without timing-based coordination."""
-    result = crash_public_put(
+    result = _crash_public_put(
         tmp_path / "crash-harness",
         boundary="put.intent_prepared",
         key="crash-key",
@@ -144,7 +186,7 @@ def test_live_exclusive_stream_crash_preserves_prior_generation_and_exact_debt(
 ) -> None:
     """Partial native publication stays indexed to its prepared mutation only."""
     root = tmp_path / boundary
-    seeded = BlobStore(root, backend="json")
+    seeded = _store(root)
     try:
         seeded.put({"generation": "old"}, key="crash-key")
         previous = seeded.lifecycle_authority.read_entry("crash-key")
@@ -164,7 +206,7 @@ def test_live_exclusive_stream_crash_preserves_prior_generation_and_exact_debt(
     assert not child.is_alive()
     assert child.exitcode == _EXCLUSIVE_STREAM_CRASH_EXIT
 
-    reopened = BlobStore(root, backend="json")
+    reopened = _store(root)
     try:
         current = reopened.lifecycle_authority.read_entry("crash-key")
         pending = reopened.lifecycle_authority.pending_mutations()
@@ -214,7 +256,7 @@ def test_subprocess_crash_reopens_to_one_authoritative_generation_with_indexed_e
 ) -> None:
     """Every public put crash preserves old-or-new authority plus exact residue."""
     root = tmp_path / boundary.replace(".", "-")
-    seeded = BlobStore(root, backend="json")
+    seeded = _store(root)
     try:
         seeded.put("old", key="crash-key")
         previous = seeded.lifecycle_authority.read_entry("crash-key")
@@ -223,7 +265,7 @@ def test_subprocess_crash_reopens_to_one_authoritative_generation_with_indexed_e
     finally:
         seeded.close()
 
-    result = crash_public_put(
+    result = _crash_public_put(
         root,
         boundary=boundary,
         key="crash-key",
@@ -231,7 +273,7 @@ def test_subprocess_crash_reopens_to_one_authoritative_generation_with_indexed_e
     )
     assert result.returncode == CRASH_BOUNDARY_EXIT
 
-    reopened = BlobStore(root, backend="json")
+    reopened = _store(root)
     try:
         after = authority_whole_state(reopened.lifecycle_authority)
         current = reopened.lifecycle_authority.read_entry("crash-key")
@@ -285,17 +327,21 @@ def test_put_promotes_immutable_generation_through_lifecycle_authority(
 ) -> None:
     """Writes replace a generation through the one durable authority."""
     events: list[str] = []
-    store = BlobStore(tmp_path / "store", backend="json")
+    store = _store(tmp_path / "store")
     store.handlers = _SingleHandlerRegistry(_NativeJsonHandler(events))
     lifecycle_events: list[str] = []
     store.lifecycle.test_hook = lifecycle_events.append
     try:
-        key = store.put({"generation": 1}, key="authority-key")
+        first_receipt = store.put_entry({"generation": 1}, key="authority-key")
+        assert isinstance(first_receipt, BlobReceipt)
+        key = first_receipt.key
         first = store.get_metadata(key)
         assert first is not None
         first_locator = store.cache_dir / first["metadata"]["actual_path"]
 
-        assert store.put({"generation": 2}, key=key) == key
+        second_receipt = store.put_entry({"generation": 2}, key=key)
+        assert second_receipt.key == key
+        assert second_receipt.generation != first_receipt.generation
         second = store.get_metadata(key)
         assert second is not None
         second_locator = store.cache_dir / second["metadata"]["actual_path"]
@@ -303,7 +349,7 @@ def test_put_promotes_immutable_generation_through_lifecycle_authority(
         assert second_locator.parent.parent.name == "generations"
         assert not first_locator.exists()
         assert store.get(key) == {"generation": 2}
-        assert (store.cache_dir / ".cacheness" / "lifecycle-authority-v1.sqlite3").is_file()
+        assert (store.cache_dir / AUTHORITY_RELATIVE_PATH).is_file()
         assert not (store.cache_dir / "operations").exists()
         assert lifecycle_events[:6] == [
             "put.intent_prepared",
@@ -320,7 +366,7 @@ def test_put_promotes_immutable_generation_through_lifecycle_authority(
 
 def test_clear_preserves_post_snapshot_writes(tmp_path: Path) -> None:
     """Clear removes only exact generations captured by the authority snapshot."""
-    store = BlobStore(tmp_path / "clear-snapshot", backend="json")
+    store = _store(tmp_path / "clear-snapshot")
     try:
         store.put({"generation": "old"}, key="existing")
 
@@ -341,7 +387,7 @@ def test_clear_resumes_after_payload_delete_before_progress_checkpoint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """LifecycleAuthority proves an already-deleted clear target on restart."""
-    store = BlobStore(tmp_path / "clear-resume", backend="json")
+    store = _store(tmp_path / "clear-resume")
     deletions: list[Path] = []
     original_delete = store._delete_or_prove_absent
 
@@ -374,7 +420,7 @@ def test_failed_serialization_leaves_no_authority_entry_or_candidate(tmp_path: P
     """A handler failure cannot create a committed authority entry."""
     events: list[str] = []
     root = tmp_path / "serialization-failure"
-    store = BlobStore(root, backend="json")
+    store = _store(root)
     store.handlers = _SingleHandlerRegistry(_FailingSerializationHandler(events))
     try:
         with pytest.raises(RuntimeError, match="native serialization failed"):
@@ -392,7 +438,7 @@ def test_reconciliation_reclaims_only_old_cleanup_debt_after_new_winner(
 ) -> None:
     """Reconciliation cannot let old cleanup debt revoke a newer generation."""
     root = tmp_path / "new-winner"
-    store = BlobStore(root, backend="json")
+    store = _store(root)
     try:
         key = store.put({"generation": "old"}, key="winner-key")
         metadata = store.get_metadata(key)

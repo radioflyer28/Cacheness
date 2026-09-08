@@ -11,6 +11,7 @@ from cacheness.error_handling import (
     CacheBlobRecoverableCleanupError,
 )
 from cacheness.storage import BlobStore
+from cacheness.storage.composition import BackendRef, StoreTopology
 from cacheness.storage.lifecycle_authority import EntryExpectation, MutationSpec
 
 
@@ -26,6 +27,18 @@ def _prepared_spec(operation_id: str, *, manifest: bytes = b"record") -> Mutatio
     )
 
 
+def _store(root: Path, *, config: CacheConfig | None = None) -> BlobStore:
+    """Build the qualified local topology without a legacy backend selector."""
+    return BlobStore(
+        StoreTopology(
+            payload=BackendRef(name="filesystem", options={"base_dir": root}),
+            authority=BackendRef(name="sqlite", options={"root": root}),
+        ),
+        cache_dir=root,
+        config=config,
+    )
+
+
 def test_retired_control_requires_rebuild_without_mutation(
     tmp_path: Path,
 ) -> None:
@@ -33,7 +46,7 @@ def test_retired_control_requires_rebuild_without_mutation(
     root = tmp_path / "retired-evidence"
     key = "authority-key"
     evidence_path = root / "operations" / ("a" * 32 + ".json")
-    store = BlobStore(root, backend="json")
+    store = _store(root)
     try:
         assert store.put({"state": "committed"}, key=key) == key
         entry = store.lifecycle_authority.read_entry(key)
@@ -47,7 +60,7 @@ def test_retired_control_requires_rebuild_without_mutation(
         store.close()
 
     with pytest.raises(CacheBlobMigrationRequiredError):
-        BlobStore(root, backend="json")
+        _store(root)
 
     assert evidence_path.read_bytes() == evidence
     assert payload_path.read_bytes() == payload_before
@@ -59,7 +72,7 @@ def test_apply_reconciliation_reclaims_exact_debt_without_revoking_winner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Only exact authenticated cleanup debt is replayed after a promotion."""
-    store = BlobStore(tmp_path / "exact-debt", backend="json")
+    store = _store(tmp_path / "exact-debt")
     try:
         key = store.put({"generation": "old"}, key="debt-key")
         previous = store.lifecycle_authority.read_entry(key)
@@ -91,7 +104,7 @@ def test_authority_reconciliation_exposes_stable_v2_machine_view_without_mutatio
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Dry-run reports one redacted authority finding without changing state."""
-    store = BlobStore(tmp_path / "v2-authority-report", backend="json")
+    store = _store(tmp_path / "v2-authority-report")
     try:
         key = store.put({"generation": "old"}, key="report-key")
         monkeypatch.setattr(
@@ -152,7 +165,7 @@ def test_authority_reconciliation_apply_resumes_bounded_cleanup_debt(
             max_reconcile_actions=1,
         )
     )
-    store = BlobStore(tmp_path / "resumable-authority-report", backend="json", config=config)
+    store = _store(tmp_path / "resumable-authority-report", config=config)
     try:
         store.put({"generation": "old-a"}, key="a")
         store.put({"generation": "old-b"}, key="b")
@@ -190,9 +203,8 @@ def test_reconciliation_enforces_row_action_byte_and_time_bounds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Each configured reconciliation budget stops before a second residue."""
-    row_limited = BlobStore(
+    row_limited = _store(
         tmp_path / "row-limited",
-        backend="json",
         config=CacheConfig(
             lifecycle_limits=LifecycleLimits(
                 operation_page_size=1,
@@ -211,9 +223,8 @@ def test_reconciliation_enforces_row_action_byte_and_time_bounds(
     finally:
         row_limited.close()
 
-    action_limited = BlobStore(
+    action_limited = _store(
         tmp_path / "action-limited",
-        backend="json",
         config=CacheConfig(
             lifecycle_limits=LifecycleLimits(
                 operation_page_size=2,
@@ -232,9 +243,8 @@ def test_reconciliation_enforces_row_action_byte_and_time_bounds(
     finally:
         action_limited.close()
 
-    byte_limited = BlobStore(
+    byte_limited = _store(
         tmp_path / "byte-limited",
-        backend="json",
         config=CacheConfig(
             lifecycle_limits=LifecycleLimits(
                 operation_page_size=2,
@@ -254,9 +264,8 @@ def test_reconciliation_enforces_row_action_byte_and_time_bounds(
     finally:
         byte_limited.close()
 
-    time_limited = BlobStore(
+    time_limited = _store(
         tmp_path / "time-limited",
-        backend="json",
         config=CacheConfig(
             lifecycle_limits=LifecycleLimits(
                 operation_page_size=2,

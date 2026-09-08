@@ -5,12 +5,24 @@ from pathlib import Path
 import pytest
 
 from cacheness.error_handling import CacheBlobMigrationRequiredError, CacheReason
-from cacheness.storage.blob_store import BlobStore
+from cacheness.storage import BlobStore
+from cacheness.storage.composition import BackendRef, StoreTopology
+
+
+def _store(root: Path) -> BlobStore:
+    """Create the qualified local filesystem/SQLite topology used by this suite."""
+    return BlobStore(
+        StoreTopology(
+            payload=BackendRef(name="filesystem", options={"base_dir": root}),
+            authority=BackendRef(name="sqlite", options={"root": root}),
+        ),
+        cache_dir=root,
+    )
 
 
 def test_authority_clear_removes_only_committed_entries(tmp_path):
     """Clear revokes every committed authority entry and its payload."""
-    store = BlobStore(tmp_path / "authority-clear", backend="json")
+    store = _store(tmp_path / "authority-clear")
     try:
         first = store.put("first", key="first")
         second = store.put("second", key="second")
@@ -44,7 +56,7 @@ def test_retired_control_requires_rebuild_without_authority_mutation(
     before = control_path.read_bytes()
 
     with pytest.raises(CacheBlobMigrationRequiredError) as raised:
-        BlobStore(root, backend="json")
+        _store(root)
 
     assert raised.value.context["reason"] == CacheReason.BLOB_MIGRATION_REQUIRED.value
     assert control_path.read_bytes() == before
