@@ -53,6 +53,23 @@ class _ProjectionSink:
         self.checkpoints.append(cursor)
 
 
+class _CustomProjectionFailure(Exception):
+    """Application sink failure not represented by Cacheness exception types."""
+
+
+class _ProjectionAbort(BaseException):
+    """Control-flow failure that projection boundaries must not translate."""
+
+
+class _ExceptionalProjectionSink(_ProjectionSink):
+    def __init__(self, failure: BaseException) -> None:
+        super().__init__()
+        self.failure = failure
+
+    def apply(self, entries: tuple[tuple[str, str], ...]) -> None:
+        raise self.failure
+
+
 def test_pull_is_bounded_idempotent_and_checkpoints_after_apply() -> None:
     projections = _projections()
     authority = _Authority((_Page(4, (("a", "1"),), "cursor-a", False), _Page(4, (), None, True)))
@@ -98,6 +115,42 @@ def test_best_effort_projection_failure_never_revokes_a_committed_blob() -> None
 
     assert result.receipt is receipt
     assert result.projection_status == "dirty"
+
+
+def test_every_ordinary_projection_exception_preserves_the_exact_receipt() -> None:
+    projections = _projections()
+    receipt = object()
+    authority = _Authority((_Page(4, (("a", "1"),), "cursor-a", False),))
+
+    best_effort = projections.CatalogProjection(
+        authority, _ExceptionalProjectionSink(_CustomProjectionFailure("sink failed"))
+    ).best_effort(receipt)
+
+    assert best_effort.receipt is receipt
+    assert best_effort.projection_status == "dirty"
+    assert best_effort.outcome is not None
+    assert best_effort.outcome.error_type == "_CustomProjectionFailure"
+
+    with pytest.raises(projections.CommittedPartialProjectionError) as raised:
+        projections.CatalogProjection(
+            _Authority((_Page(4, (("a", "1"),), "cursor-a", False),)),
+            _ExceptionalProjectionSink(_CustomProjectionFailure("sink failed")),
+        ).refresh(receipt)
+
+    assert raised.value.receipt is receipt
+    assert raised.value.projection_name == "_ExceptionalProjectionSink"
+    assert raised.value.remaining_cursor == "cursor-a"
+
+
+def test_projection_boundary_never_translates_base_exception_control_flow() -> None:
+    projections = _projections()
+    receipt = object()
+
+    with pytest.raises(_ProjectionAbort):
+        projections.CatalogProjection(
+            _Authority((_Page(4, (("a", "1"),), "cursor-a", False),)),
+            _ExceptionalProjectionSink(_ProjectionAbort()),
+        ).best_effort(receipt)
 
 
 def test_interrupted_rebuild_never_replaces_prior_published_projection() -> None:
