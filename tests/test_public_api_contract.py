@@ -25,6 +25,20 @@ class TestPublicExports:
         ]
         assert namespace["SQLAlchemyPullThroughCache"] is namespace["SqlCache"]
 
+    def test_retired_metadata_authority_selectors_are_not_public_exports(self):
+        """The package facade exposes composition, not a legacy metadata API."""
+        retired = {
+            "CacheMetadataConfig",
+            "create_metadata_backend",
+            "register_metadata_backend",
+            "unregister_metadata_backend",
+            "MetadataBackend",
+            "JsonMetadataBackend",
+            "SQLiteMetadataBackend",
+        }
+
+        assert retired.isdisjoint(cacheness.__all__)
+
     def test_documented_constructor_decorator_and_registry_signatures(self):
         assert "cache_dir" in inspect.signature(cacheness.CacheConfig).parameters
         assert "handler" in inspect.signature(cacheness.register_handler).parameters
@@ -69,6 +83,7 @@ class TestPublicExports:
             "blob_backend_capability_unsupported",
             "blob_migration_required",
             "blob_recoverable_cleanup",
+            "blob_committed_partial",
             "blob_reconciliation_blocked",
             "blob_reconciliation_conflict",
             "blob_reconciliation_checkpoint_invalid",
@@ -77,6 +92,11 @@ class TestPublicExports:
             "blob_close_timeout",
             "blob_lifecycle_timeout",
             "metadata_corrupt",
+            "catalog_validation_failed",
+            "catalog_query_invalid",
+            "catalog_cursor_invalid",
+            "catalog_cursor_stale",
+            "migration_or_rebuild_required",
         }
 
         assert {reason.value for reason in error_handling.CacheReason} == expected_reasons
