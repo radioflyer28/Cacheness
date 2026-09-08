@@ -5,6 +5,7 @@ from __future__ import annotations
 from importlib import import_module
 from importlib.util import find_spec
 from pathlib import Path
+import sqlite3
 from types import MappingProxyType
 
 import pytest
@@ -163,6 +164,37 @@ def test_future_and_foreign_layouts_require_migration_or_rebuild_without_mutatio
         catalog.inspect_store_layout(root)
 
     assert marker.read_text(encoding="utf-8") == '{"store_format_version":99}'
+
+
+def test_sqlite_format_two_initialization_is_explicit_and_idempotent(tmp_path: Path) -> None:
+    """Current authority identity is created once without a payload write."""
+    from cacheness.storage.sqlite_lifecycle_authority import (
+        AUTHORITY_RELATIVE_PATH,
+        SQLITE_APPLICATION_ID,
+        SQLITE_USER_VERSION,
+        SqliteLifecycleAuthority,
+    )
+
+    authority = SqliteLifecycleAuthority.for_root(tmp_path)
+    try:
+        authority.initialize()
+        database = tmp_path / AUTHORITY_RELATIVE_PATH
+        assert database.is_file()
+        with sqlite3.connect(database) as connection:
+            before_version = connection.execute("PRAGMA data_version").fetchone()[0]
+            assert connection.execute("PRAGMA application_id").fetchone()[0] == SQLITE_APPLICATION_ID
+            assert connection.execute("PRAGMA user_version").fetchone()[0] == SQLITE_USER_VERSION
+            assert connection.execute("SELECT count(*) FROM entries").fetchone()[0] == 0
+        before = database.read_bytes()
+
+        authority.initialize()
+
+        with sqlite3.connect(database) as connection:
+            after_version = connection.execute("PRAGMA data_version").fetchone()[0]
+        assert database.read_bytes() == before
+        assert after_version == before_version
+    finally:
+        authority.close()
 
 
 def test_current_manifest_keeps_version_dimensions_independent_and_authenticated() -> None:

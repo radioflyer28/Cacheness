@@ -19,6 +19,7 @@ from cacheness.error_handling import (
     CacheBlobMigrationRequiredError,
 )
 from cacheness.storage.blob_store import BlobStore
+from cacheness.storage.composition import BackendRef, StoreTopology
 from cacheness.storage.lifecycle_authority import EntryExpectation, MutationSpec
 from cacheness.storage.sqlite_lifecycle_authority import (
     AUTHORITY_RELATIVE_PATH,
@@ -28,6 +29,20 @@ from cacheness.storage.sqlite_lifecycle_authority import (
 
 _CLASSIFIED = "authority.bootstrap.classified"
 _BEFORE_PROMOTION = "put.before_promotion"
+
+
+def _sqlite_topology(
+    root: str | Path, authority: SqliteLifecycleAuthority | None = None
+) -> StoreTopology:
+    """Build the one supported local filesystem-plus-SQLite composition."""
+    return StoreTopology(
+        payload=BackendRef(name="filesystem", options={"base_dir": root}),
+        authority=(
+            BackendRef(instance=authority)
+            if authority is not None
+            else BackendRef(name="sqlite", options={"root": root})
+        ),
+    )
 
 
 def _bootstrap_spec(key: str) -> MutationSpec:
@@ -61,7 +76,7 @@ def _bootstrap_then_put(
         authority.set_bootstrap_hook_for_test(pause_after_missing_classification)
         prepared = authority.prepare_mutation(_bootstrap_spec(key))
         authority.abort_mutation(prepared, candidate_persisted=False)
-        store = BlobStore(root, backend="json", lifecycle_authority=authority)
+        store = BlobStore(_sqlite_topology(root, authority), cache_dir=root)
         if promotion_barrier is not None:
             def pause_before_promotion(boundary: str) -> None:
                 if boundary == _BEFORE_PROMOTION:
@@ -108,7 +123,7 @@ def test_independent_authority_instances_join_one_fresh_root_then_commit_distinc
 ) -> None:
     """Two first mutators reclassify a valid winner instead of leaking mkdir races."""
     root = tmp_path / "threaded-fresh-root"
-    with BlobStore(root, backend="json") as initializer:
+    with BlobStore(_sqlite_topology(root), cache_dir=root) as initializer:
         initializer.initialize()
     bootstrap_barrier = threading.Barrier(2)
     outcomes: multiprocessing.Queue = multiprocessing.Queue()
@@ -128,7 +143,7 @@ def test_independent_authority_instances_join_one_fresh_root_then_commit_distinc
         ("ok", "thread-left", "left"),
         ("ok", "thread-right", "right"),
     ]
-    reopened = BlobStore(root, backend="json")
+    reopened = BlobStore(_sqlite_topology(root), cache_dir=root)
     try:
         assert reopened.get("thread-left") == "left"
         assert reopened.get("thread-right") == "right"
@@ -141,7 +156,7 @@ def test_spawned_fresh_authorities_join_one_root_and_commit_distinct_keys(
 ) -> None:
     """Separate spawned interpreters prove bootstrap is not an instance-lock race."""
     root = tmp_path / "spawned-distinct-root"
-    with BlobStore(root, backend="json") as initializer:
+    with BlobStore(_sqlite_topology(root), cache_dir=root) as initializer:
         initializer.initialize()
     context = multiprocessing.get_context("spawn")
     bootstrap_barrier = context.Barrier(2)
@@ -169,7 +184,7 @@ def test_spawned_fresh_authorities_join_one_root_and_commit_distinct_keys(
         ("ok", "process-left", "left"),
         ("ok", "process-right", "right"),
     ]
-    reopened = BlobStore(root, backend="json")
+    reopened = BlobStore(_sqlite_topology(root), cache_dir=root)
     try:
         assert reopened.get("process-left") == "left"
         assert reopened.get("process-right") == "right"
@@ -182,7 +197,7 @@ def test_spawned_fresh_authorities_keep_same_key_cas_deterministic(
 ) -> None:
     """A fresh-root bootstrap join does not weaken expected-generation CAS."""
     root = tmp_path / "spawned-same-key-root"
-    with BlobStore(root, backend="json") as initializer:
+    with BlobStore(_sqlite_topology(root), cache_dir=root) as initializer:
         initializer.initialize()
     context = multiprocessing.get_context("spawn")
     bootstrap_barrier = context.Barrier(2)
@@ -210,7 +225,7 @@ def test_spawned_fresh_authorities_keep_same_key_cas_deterministic(
 
     result = sorted(outcomes.get(timeout=5) for _ in workers)
     assert [outcome[0] for outcome in result] == ["conflict", "ok"]
-    reopened = BlobStore(root, backend="json")
+    reopened = BlobStore(_sqlite_topology(root), cache_dir=root)
     try:
         assert reopened.get("same-key") in {"left", "right"}
     finally:

@@ -9,14 +9,21 @@ work; an existing backend name does not imply that those combinations are ready.
 ## Initialize before sharing
 
 ```python
-from cacheness.storage import BlobStore
+from cacheness.storage import BackendRef, BlobStore, StoreTopology
+
+
+def local_sqlite_topology(root: str) -> StoreTopology:
+    return StoreTopology(
+        payload=BackendRef(name="filesystem", options={"base_dir": root}),
+        authority=BackendRef(name="sqlite", options={"root": root}),
+    )
 
 # Run once, before threads or independent worker processes start.
-with BlobStore("./objects") as store:
+with BlobStore(local_sqlite_topology("./objects"), cache_dir="./objects") as store:
     store.initialize()
 
 # Each worker opens the same initialized root using an ordinary constructor.
-with BlobStore("./objects") as store:
+with BlobStore(local_sqlite_topology("./objects"), cache_dir="./objects") as store:
     store.put({"answer": 42}, key="result", metadata={"experiment": "alpha"})
 ```
 
@@ -24,7 +31,11 @@ with BlobStore("./objects") as store:
 instances before sharing them too. Single-process first-write convenience is
 retained, but concurrent first creation is not a supported availability guarantee.
 Inspection of an absent store does not initialize it. Repeated initialization of
-a valid current store is safe; it is not an online schema migration operation.
+a valid current format-2 store is validation-only; it is not an online schema
+migration operation. The current authority file is
+`.cacheness/lifecycle-authority-v2.sqlite3` with application ID `0x43414348`
+and SQLite `user_version = 7`. This database version is intentionally separate
+from the public store-format and payload-format versions.
 
 An incomplete, foreign, or obsolete catalog fails closed with
 `CacheBlobMigrationRequiredError`; it is not adopted, overwritten, or upgraded
@@ -47,7 +58,7 @@ and `update_metadata`. Richer catalog schema customization is Phase 4 work.
 For policy that needs metadata and payload from one generation:
 
 ```python
-with BlobStore("./objects") as store:
+with BlobStore(local_sqlite_topology("./objects"), cache_dir="./objects") as store:
     receipt = store.put_entry(None, key="optional", metadata={"label": "example"})
     with store.open_entry("optional") as entry:
         assert entry is not None       # Presence, even when the value is None.

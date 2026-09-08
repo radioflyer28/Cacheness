@@ -50,7 +50,7 @@ from .lifecycle_authority import (
 )
 
 
-AUTHORITY_RELATIVE_PATH = Path(".cacheness") / "lifecycle-authority-v1.sqlite3"
+AUTHORITY_RELATIVE_PATH = Path(".cacheness") / "lifecycle-authority-v2.sqlite3"
 _BOOTSTRAP_ROOT_NAMES = frozenset(
     {
         ".cacheness",
@@ -61,7 +61,13 @@ _BOOTSTRAP_ROOT_NAMES = frozenset(
     }
 )
 SQLITE_APPLICATION_ID = 0x43414348
-SCHEMA_VERSION = 1
+# SQLite's user_version is a database-schema identifier, not the public store
+# format version. Keep it independent so descriptor and payload formats can
+# evolve without implying an implicit SQLite migration.
+SQLITE_USER_VERSION = 7
+# Retained as an import-compatible name for authority diagnostics. It denotes
+# the current SQLite schema only; it is deliberately not STORE_FORMAT_VERSION.
+SCHEMA_VERSION = SQLITE_USER_VERSION
 _MAX_STORE_IDENTITY_BYTES = 64
 _SQLITE_BUSY_TIMEOUT_SAFETY_MILLISECONDS = 5
 _T = TypeVar("_T")
@@ -499,6 +505,14 @@ class SqliteLifecycleAuthority:
         with self._bootstrap_lock:
             state = self._classify_for_open()
             if state == "authority":
+                # Validate an existing database through a read-only handle
+                # before a mutation-capable connection can configure SQLite.
+                # Unsupported, foreign, or incomplete files therefore stay
+                # byte-for-byte untouched, including journal sidecars.
+                self._validate_existing_authority_readonly(
+                    deadline=deadline,
+                    started_at=started_at,
+                )
                 return False
             if state in {
                 "wrong_root",
@@ -706,7 +720,7 @@ class SqliteLifecycleAuthority:
         deadline: float,
         started_at: float,
     ) -> None:
-        """Create the complete version-one normalized authority schema once."""
+        """Create the current format-2 authority schema exactly once."""
         self._apply_stage_busy_timeout(
             connection,
             deadline=deadline,
@@ -789,8 +803,8 @@ class SqliteLifecycleAuthority:
                 "INSERT OR IGNORE INTO authority_state(singleton, revision, projection_dirty) "
                 "VALUES (1, 0, 0)"
             )
-            connection.execute("PRAGMA application_id = 1128350536")
-            connection.execute("PRAGMA user_version = 1")
+            connection.execute(f"PRAGMA application_id = {SQLITE_APPLICATION_ID}")
+            connection.execute(f"PRAGMA user_version = {SQLITE_USER_VERSION}")
             connection.execute("COMMIT")
             self._reach_bootstrap_boundary("authority.schema_initialize.committed")
         except BaseException:
@@ -825,11 +839,11 @@ class SqliteLifecycleAuthority:
             raise CacheBlobMigrationRequiredError(
                 "Lifecycle authority application ID is incompatible"
             )
-        if version > SCHEMA_VERSION:
+        if version > SQLITE_USER_VERSION:
             raise CacheBlobMigrationRequiredError(
                 "Lifecycle authority schema version is unsupported"
             )
-        if version != SCHEMA_VERSION:
+        if version != SQLITE_USER_VERSION:
             raise CacheBlobMigrationRequiredError(
                 "Lifecycle authority schema version is incompatible"
             )
@@ -869,6 +883,44 @@ class SqliteLifecycleAuthority:
             raise CacheBlobMigrationRequiredError(
                 "Lifecycle authority store identity is incompatible"
             )
+
+    def _validate_existing_authority_readonly(
+        self,
+        *,
+        deadline: float,
+        started_at: float,
+    ) -> None:
+        """Reject an established non-current layout without writable SQLite I/O."""
+        try:
+            connection = sqlite3.connect(
+                f"{self.path.as_uri()}?mode=ro",
+                uri=True,
+                isolation_level=None,
+                timeout=self._remaining_for_stage(
+                    deadline,
+                    stage="schema_validate",
+                    started_at=started_at,
+                ),
+                check_same_thread=True,
+            )
+        except sqlite3.Error as error:
+            raise CacheBlobMigrationRequiredError(
+                "Lifecycle authority layout requires explicit offline migration or rebuild"
+            ) from error
+        try:
+            self._validate_schema(
+                connection,
+                deadline=deadline,
+                started_at=started_at,
+            )
+        except CacheBlobMigrationRequiredError:
+            raise
+        except sqlite3.Error as error:
+            raise CacheBlobMigrationRequiredError(
+                "Lifecycle authority layout requires explicit offline migration or rebuild"
+            ) from error
+        finally:
+            connection.close()
 
     @contextmanager
     def _connection(
@@ -1972,5 +2024,6 @@ __all__ = [
     "AUTHORITY_RELATIVE_PATH",
     "SCHEMA_VERSION",
     "SQLITE_APPLICATION_ID",
+    "SQLITE_USER_VERSION",
     "SqliteLifecycleAuthority",
 ]

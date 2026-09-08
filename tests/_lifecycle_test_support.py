@@ -97,10 +97,14 @@ def crash_public_put(
 import os
 import sys
 
-from cacheness.storage import BlobStore
+from cacheness.storage import BackendRef, BlobStore, StoreTopology
 
 root, boundary, key, value = sys.argv[1:]
-store = BlobStore(root, backend="json")
+topology = StoreTopology(
+    payload=BackendRef(name="filesystem", options={"base_dir": root}),
+    authority=BackendRef(name="sqlite", options={"root": root}),
+)
+store = BlobStore(topology, cache_dir=root)
 
 def crash_at(reached):
     if reached == boundary:
