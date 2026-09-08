@@ -1,594 +1,143 @@
-"""
-Tests for Phase 2.10: S3 Blob Backend
+"""Contract-only tests for S3 bounded evidence and exact cleanup primitives.
 
-Tests the S3 blob storage backend using moto for AWS mocking.
+These Moto/fake tests verify adapter mechanics only. They neither exercise an
+authority lifecycle transition nor qualify Amazon S3 for the remote topology.
 """
+
+from __future__ import annotations
+
+from pathlib import Path
 
 import pytest
-from io import BytesIO
 
-# Check for moto availability
-try:
-    from moto import mock_aws
-    MOTO_AVAILABLE = True
-except ImportError:
-    MOTO_AVAILABLE = False
-    mock_aws = None
 
-# Check for boto3 availability
 try:
     import boto3
-    BOTO3_AVAILABLE = True
-except ImportError:
-    BOTO3_AVAILABLE = False
-
-# Skip all tests if dependencies not available
-pytestmark = [
-    pytest.mark.skipif(not MOTO_AVAILABLE, reason="moto not installed"),
-    pytest.mark.skipif(not BOTO3_AVAILABLE, reason="boto3 not installed"),
-]
+    from moto import mock_aws
+except ImportError:  # pragma: no cover - optional dependency boundary
+    boto3 = None
+    mock_aws = None
 
 
-# =============================================================================
-# Test Fixtures
-# =============================================================================
-
-@pytest.fixture
-def aws_credentials():
-    """Mocked AWS credentials for moto."""
-    import os
-    os.environ["AWS_ACCESS_KEY_ID"] = "testing"
-    os.environ["AWS_SECRET_ACCESS_KEY"] = "testing"
-    os.environ["AWS_SECURITY_TOKEN"] = "testing"
-    os.environ["AWS_SESSION_TOKEN"] = "testing"
-    os.environ["AWS_DEFAULT_REGION"] = "us-east-1"
+pytestmark = pytest.mark.skipif(
+    boto3 is None or mock_aws is None,
+    reason="S3 participant contracts require boto3 and moto",
+)
 
 
-@pytest.fixture
-def s3_client(aws_credentials):
-    """Create an S3 client with mocked AWS."""
-    with mock_aws():
-        client = boto3.client("s3", region_name="us-east-1")
-        yield client
+class _ObservedClient:
+    """Capture exact cleanup requests without changing Moto's behavior."""
+
+    def __init__(self, client: object) -> None:
+        self._client = client
+        self.delete_requests: list[dict[str, object]] = []
+        self.head_requests: list[dict[str, object]] = []
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._client, name)
+
+    def delete_object(self, **kwargs: object) -> dict[str, object]:
+        self.delete_requests.append(dict(kwargs))
+        return self._client.delete_object(**kwargs)
+
+    def head_object(self, **kwargs: object) -> dict[str, object]:
+        self.head_requests.append(dict(kwargs))
+        return self._client.head_object(**kwargs)
 
 
 @pytest.fixture
-def s3_bucket(s3_client):
-    """Create a test bucket."""
-    bucket_name = "test-cache-bucket"
-    s3_client.create_bucket(Bucket=bucket_name)
-    return bucket_name
-
-
-@pytest.fixture
-def s3_backend(aws_credentials, s3_bucket):
-    """Create an S3BlobBackend with mocked AWS."""
+def s3_participant(tmp_path: Path):
+    """Build one isolated managed-prefix participant for Moto contract checks."""
     from cacheness.storage.backends.s3_backend import S3BlobBackend
-    
+
     with mock_aws():
-        # Create the bucket first
-        client = boto3.client("s3", region_name="us-east-1")
-        try:
-            client.create_bucket(Bucket=s3_bucket)
-        except client.exceptions.BucketAlreadyOwnedByYou:
-            pass
-        
-        # Create backend
+        moto_client = boto3.client("s3", region_name="us-east-1")
+        bucket = "cacheness-evidence-contract"
+        moto_client.create_bucket(Bucket=bucket)
+        client = _ObservedClient(moto_client)
         backend = S3BlobBackend(
-            bucket=s3_bucket,
-            region="us-east-1",
+            bucket=bucket,
+            prefix="managed/run",
+            client=client,
+            staging_root=tmp_path / "private-stage",
+            max_inventory_objects=2,
+            max_inventory_bytes=32,
+            max_inventory_work=1,
         )
-        yield backend
+        try:
+            yield backend, client, bucket
+        finally:
+            backend.close()
 
 
-@pytest.fixture
-def s3_backend_with_prefix(aws_credentials, s3_bucket):
-    """Create an S3BlobBackend with prefix."""
+def test_inventory_returns_only_one_bounded_continuation_page(s3_participant) -> None:
+    """Inventory never accumulates the bucket and validates the managed prefix."""
+    backend, client, bucket = s3_participant
+    guarded_io = backend.materialize_handler_io()
+    client.put_object(Bucket=bucket, Key="managed/run/generations/a", Body=b"a")
+    client.put_object(Bucket=bucket, Key="managed/run/generations/b", Body=b"bb")
+    client.put_object(Bucket=bucket, Key="managed/run/generations/c", Body=b"ccc")
+    client.put_object(Bucket=bucket, Key="outside/never-list", Body=b"not-owned")
+
+    first = guarded_io.inventory_page()
+    assert tuple(item.locator for item in first.objects) == (
+        "generations/a",
+        "generations/b",
+    )
+    assert first.next_token is not None
+
+    second = guarded_io.inventory_page(first.next_token)
+    assert tuple(item.locator for item in second.objects) == ("generations/c",)
+    assert second.next_token is None
+
+
+def test_recovery_delete_proves_exact_absence_with_one_followup_head(
+    s3_participant,
+) -> None:
+    """Delete success is never inferred from an S3 acknowledgement alone."""
+    backend, client, bucket = s3_participant
+    guarded_io = backend.materialize_handler_io()
+    locator = Path("generations") / "cleanup" / "one"
+    key = "managed/run/generations/cleanup/one"
+    client.put_object(Bucket=bucket, Key=key, Body=b"owned")
+
+    guarded_io.delete_or_prove_absent(locator)
+    assert client.delete_requests == [{"Bucket": bucket, "Key": key}]
+    assert client.head_requests == [{"Bucket": bucket, "Key": key}]
+
+    guarded_io.delete_or_prove_absent(locator)
+    assert len(client.delete_requests) == 2
+    assert len(client.head_requests) == 2
+
+
+def test_configuration_rejects_legacy_endpoint_and_unmanaged_prefix(tmp_path: Path) -> None:
+    """Pre-production cutover keeps only Amazon-S3 managed-prefix construction."""
+    from cacheness.error_handling import CacheConfigurationError
     from cacheness.storage.backends.s3_backend import S3BlobBackend
-    
-    with mock_aws():
-        client = boto3.client("s3", region_name="us-east-1")
-        try:
-            client.create_bucket(Bucket=s3_bucket)
-        except client.exceptions.BucketAlreadyOwnedByYou:
-            pass
-        
-        backend = S3BlobBackend(
-            bucket=s3_bucket,
-            prefix="cache/v1",
-            region="us-east-1",
+
+    with pytest.raises(CacheConfigurationError):
+        S3BlobBackend(bucket="bucket", prefix="")
+    with pytest.raises(TypeError):
+        S3BlobBackend(
+            bucket="bucket",
+            prefix="managed",
+            endpoint_url="http://legacy-compatible-endpoint",
         )
-        yield backend
+    assert not hasattr(S3BlobBackend, "write_blob")
+    assert not hasattr(S3BlobBackend, "read_blob")
 
 
-# =============================================================================
-# S3BlobBackend Core Operations Tests
-# =============================================================================
+def test_inventory_service_error_is_typed_not_an_empty_result(s3_participant, monkeypatch) -> None:
+    """A remote list error does not collapse into false evidence of absence."""
+    from botocore.exceptions import ClientError
+    from cacheness.error_handling import CacheBlobBackendError
 
-class TestS3BlobBackendBasics:
-    """Test basic S3BlobBackend operations."""
-    
-    def test_write_and_read_blob(self, aws_credentials, s3_bucket):
-        """Test basic write and read operations."""
-        from cacheness.storage.backends.s3_backend import S3BlobBackend
-        
-        with mock_aws():
-            client = boto3.client("s3", region_name="us-east-1")
-            client.create_bucket(Bucket=s3_bucket)
-            
-            backend = S3BlobBackend(bucket=s3_bucket)
-            
-            blob_id = "test_blob_123"
-            data = b"Hello, S3!"
-            
-            # Write
-            blob_path = backend.write_blob(blob_id, data)
-            assert blob_path.startswith(f"s3://{s3_bucket}/")
-            
-            # Read
-            read_data = backend.read_blob(blob_path)
-            assert read_data == data
-    
-    def test_exists(self, aws_credentials, s3_bucket):
-        """Test exists() method."""
-        from cacheness.storage.backends.s3_backend import S3BlobBackend
-        
-        with mock_aws():
-            client = boto3.client("s3", region_name="us-east-1")
-            client.create_bucket(Bucket=s3_bucket)
-            
-            backend = S3BlobBackend(bucket=s3_bucket)
-            
-            blob_id = "exists_test"
-            data = b"test data"
-            
-            # Should not exist initially
-            fake_path = f"s3://{s3_bucket}/nonexistent"
-            assert not backend.exists(fake_path)
-            
-            # Write and check
-            blob_path = backend.write_blob(blob_id, data)
-            assert backend.exists(blob_path)
-    
-    def test_delete(self, aws_credentials, s3_bucket):
-        """Test delete operation."""
-        from cacheness.storage.backends.s3_backend import S3BlobBackend
-        
-        with mock_aws():
-            client = boto3.client("s3", region_name="us-east-1")
-            client.create_bucket(Bucket=s3_bucket)
-            
-            backend = S3BlobBackend(bucket=s3_bucket)
-            
-            blob_id = "delete_test"
-            data = b"data to delete"
-            
-            blob_path = backend.write_blob(blob_id, data)
-            assert backend.exists(blob_path)
-            
-            # Delete
-            result = backend.delete_blob(blob_path)
-            assert result is True
-            assert not backend.exists(blob_path)
-    
-    def test_get_size(self, aws_credentials, s3_bucket):
-        """Test get_size() method."""
-        from cacheness.storage.backends.s3_backend import S3BlobBackend
-        
-        with mock_aws():
-            client = boto3.client("s3", region_name="us-east-1")
-            client.create_bucket(Bucket=s3_bucket)
-            
-            backend = S3BlobBackend(bucket=s3_bucket)
-            
-            blob_id = "size_test"
-            data = b"x" * 1000
-            
-            blob_path = backend.write_blob(blob_id, data)
-            size = backend.get_size(blob_path)
-            assert size == 1000
-    
-    def test_read_nonexistent_raises(self, aws_credentials, s3_bucket):
-        """Test reading non-existent blob raises FileNotFoundError."""
-        from cacheness.storage.backends.s3_backend import S3BlobBackend
-        
-        with mock_aws():
-            client = boto3.client("s3", region_name="us-east-1")
-            client.create_bucket(Bucket=s3_bucket)
-            
-            backend = S3BlobBackend(bucket=s3_bucket)
-            
-            with pytest.raises(FileNotFoundError):
-                backend.read_blob(f"s3://{s3_bucket}/nonexistent")
+    backend, client, _bucket = s3_participant
+    guarded_io = backend.materialize_handler_io()
 
+    def fail_list(**_kwargs: object) -> dict[str, object]:
+        raise ClientError({"Error": {"Code": "AccessDenied"}}, "ListObjectsV2")
 
-# =============================================================================
-# S3 Directory Sharding Tests
-# =============================================================================
-
-class TestS3Sharding:
-    """Test Git-style directory sharding in S3BlobBackend."""
-    
-    def test_default_shard_chars_is_two(self, aws_credentials, s3_bucket):
-        """Default shard_chars should be 2."""
-        from cacheness.storage.backends.s3_backend import S3BlobBackend
-        
-        with mock_aws():
-            client = boto3.client("s3", region_name="us-east-1")
-            client.create_bucket(Bucket=s3_bucket)
-            
-            backend = S3BlobBackend(bucket=s3_bucket)
-            assert backend.shard_chars == 2
-    
-    def test_sharding_creates_correct_key(self, aws_credentials, s3_bucket):
-        """Test that sharding creates correct S3 keys."""
-        from cacheness.storage.backends.s3_backend import S3BlobBackend
-        
-        with mock_aws():
-            client = boto3.client("s3", region_name="us-east-1")
-            client.create_bucket(Bucket=s3_bucket)
-            
-            backend = S3BlobBackend(bucket=s3_bucket, shard_chars=2)
-            
-            blob_id = "abc123def456"
-            key = backend._get_s3_key(blob_id)
-            
-            # Should be sharded: ab/abc123def456
-            assert key == "ab/abc123def456"
-    
-    def test_sharding_with_prefix(self, aws_credentials, s3_bucket):
-        """Test sharding with prefix."""
-        from cacheness.storage.backends.s3_backend import S3BlobBackend
-        
-        with mock_aws():
-            client = boto3.client("s3", region_name="us-east-1")
-            client.create_bucket(Bucket=s3_bucket)
-            
-            backend = S3BlobBackend(bucket=s3_bucket, prefix="cache/v1", shard_chars=2)
-            
-            blob_id = "xyz789"
-            key = backend._get_s3_key(blob_id)
-            
-            # Should be: cache/v1/xy/xyz789
-            assert key == "cache/v1/xy/xyz789"
-    
-    def test_sharding_disabled(self, aws_credentials, s3_bucket):
-        """Test with sharding disabled."""
-        from cacheness.storage.backends.s3_backend import S3BlobBackend
-        
-        with mock_aws():
-            client = boto3.client("s3", region_name="us-east-1")
-            client.create_bucket(Bucket=s3_bucket)
-            
-            backend = S3BlobBackend(bucket=s3_bucket, shard_chars=0)
-            
-            blob_id = "abc123"
-            key = backend._get_s3_key(blob_id)
-            
-            # No sharding
-            assert key == "abc123"
-    
-    def test_sharding_with_write_read(self, aws_credentials, s3_bucket):
-        """Test sharding works end-to-end."""
-        from cacheness.storage.backends.s3_backend import S3BlobBackend
-        
-        with mock_aws():
-            client = boto3.client("s3", region_name="us-east-1")
-            client.create_bucket(Bucket=s3_bucket)
-            
-            backend = S3BlobBackend(bucket=s3_bucket, shard_chars=2)
-            
-            blob_id = "abc123def456"
-            data = b"sharded data"
-            
-            blob_path = backend.write_blob(blob_id, data)
-            
-            # Verify the key is sharded
-            assert "/ab/" in blob_path
-            
-            # Should still be readable
-            read_data = backend.read_blob(blob_path)
-            assert read_data == data
-
-
-# =============================================================================
-# S3 ETag Tests
-# =============================================================================
-
-class TestS3ETag:
-    """Test S3 ETag handling."""
-    
-    def test_get_etag(self, aws_credentials, s3_bucket):
-        """Test get_etag() method."""
-        from cacheness.storage.backends.s3_backend import S3BlobBackend
-        
-        with mock_aws():
-            client = boto3.client("s3", region_name="us-east-1")
-            client.create_bucket(Bucket=s3_bucket)
-            
-            backend = S3BlobBackend(bucket=s3_bucket)
-            
-            blob_id = "etag_test"
-            data = b"test data for etag"
-            
-            blob_path = backend.write_blob(blob_id, data)
-            etag = backend.get_etag(blob_path)
-            
-            assert etag is not None
-            assert isinstance(etag, str)
-            assert len(etag) > 0
-            # ETag should not have quotes
-            assert '"' not in etag
-    
-    def test_verify_etag(self, aws_credentials, s3_bucket):
-        """Test verify_etag() method."""
-        from cacheness.storage.backends.s3_backend import S3BlobBackend
-        
-        with mock_aws():
-            client = boto3.client("s3", region_name="us-east-1")
-            client.create_bucket(Bucket=s3_bucket)
-            
-            backend = S3BlobBackend(bucket=s3_bucket)
-            
-            blob_id = "verify_etag_test"
-            data = b"verify this"
-            
-            blob_path = backend.write_blob(blob_id, data)
-            etag = backend.get_etag(blob_path)
-            
-            # Should verify correctly
-            assert backend.verify_etag(blob_path, etag)
-            
-            # Should fail with wrong etag
-            assert not backend.verify_etag(blob_path, "wrong_etag")
-    
-    def test_get_blob_metadata(self, aws_credentials, s3_bucket):
-        """Test get_blob_metadata() method."""
-        from cacheness.storage.backends.s3_backend import S3BlobBackend
-        
-        with mock_aws():
-            client = boto3.client("s3", region_name="us-east-1")
-            client.create_bucket(Bucket=s3_bucket)
-            
-            backend = S3BlobBackend(bucket=s3_bucket)
-            
-            blob_id = "metadata_test"
-            data = b"metadata test data"
-            
-            blob_path = backend.write_blob(blob_id, data)
-            metadata = backend.get_blob_metadata(blob_path)
-            
-            assert metadata is not None
-            assert metadata["s3_bucket"] == s3_bucket
-            assert "s3_key" in metadata
-            assert "s3_etag" in metadata
-            assert metadata["size"] == len(data)
-
-
-# =============================================================================
-# S3 Streaming Tests
-# =============================================================================
-
-class TestS3Streaming:
-    """Test streaming operations."""
-    
-    def test_write_blob_stream(self, aws_credentials, s3_bucket):
-        """Test streaming write."""
-        from cacheness.storage.backends.s3_backend import S3BlobBackend
-        
-        with mock_aws():
-            client = boto3.client("s3", region_name="us-east-1")
-            client.create_bucket(Bucket=s3_bucket)
-            
-            backend = S3BlobBackend(bucket=s3_bucket)
-            
-            blob_id = "stream_write_test"
-            data = b"streamed data content"
-            stream = BytesIO(data)
-            
-            blob_path = backend.write_blob_stream(blob_id, stream)
-            
-            # Verify
-            read_data = backend.read_blob(blob_path)
-            assert read_data == data
-    
-    def test_read_blob_stream(self, aws_credentials, s3_bucket):
-        """Test streaming read."""
-        from cacheness.storage.backends.s3_backend import S3BlobBackend
-        
-        with mock_aws():
-            client = boto3.client("s3", region_name="us-east-1")
-            client.create_bucket(Bucket=s3_bucket)
-            
-            backend = S3BlobBackend(bucket=s3_bucket)
-            
-            blob_id = "stream_read_test"
-            data = b"data to stream read"
-            
-            blob_path = backend.write_blob(blob_id, data)
-            
-            # Read as stream
-            stream = backend.read_blob_stream(blob_path)
-            read_data = stream.read()
-            assert read_data == data
-
-
-# =============================================================================
-# S3 List Keys Tests
-# =============================================================================
-
-class TestS3ListKeys:
-    """Test listing S3 keys."""
-    
-    def test_list_keys_empty(self, aws_credentials, s3_bucket):
-        """Test list_keys() on empty bucket."""
-        from cacheness.storage.backends.s3_backend import S3BlobBackend
-        
-        with mock_aws():
-            client = boto3.client("s3", region_name="us-east-1")
-            client.create_bucket(Bucket=s3_bucket)
-            
-            backend = S3BlobBackend(bucket=s3_bucket)
-            
-            keys = backend.list_keys()
-            assert keys == []
-    
-    def test_list_keys(self, aws_credentials, s3_bucket):
-        """Test list_keys() with blobs."""
-        from cacheness.storage.backends.s3_backend import S3BlobBackend
-        
-        with mock_aws():
-            client = boto3.client("s3", region_name="us-east-1")
-            client.create_bucket(Bucket=s3_bucket)
-            
-            backend = S3BlobBackend(bucket=s3_bucket, shard_chars=0)
-            
-            # Write several blobs
-            for i in range(5):
-                backend.write_blob(f"blob_{i}", f"data_{i}".encode())
-            
-            keys = backend.list_keys()
-            assert len(keys) == 5
-            for key in keys:
-                assert key.startswith(f"s3://{s3_bucket}/")
-    
-    def test_list_keys_with_prefix(self, aws_credentials, s3_bucket):
-        """Test list_keys() with prefix filter."""
-        from cacheness.storage.backends.s3_backend import S3BlobBackend
-        
-        with mock_aws():
-            client = boto3.client("s3", region_name="us-east-1")
-            client.create_bucket(Bucket=s3_bucket)
-            
-            backend = S3BlobBackend(bucket=s3_bucket, prefix="cache/", shard_chars=0)
-            
-            # Write blobs
-            backend.write_blob("item1", b"data1")
-            backend.write_blob("item2", b"data2")
-            
-            keys = backend.list_keys()
-            assert len(keys) == 2
-            for key in keys:
-                assert "cache/" in key
-
-
-# =============================================================================
-# S3 MinIO Compatibility Tests
-# =============================================================================
-
-class TestS3MinIOCompatibility:
-    """Test MinIO-specific configuration."""
-    
-    def test_custom_endpoint_url(self, aws_credentials, s3_bucket):
-        """Test custom endpoint_url for MinIO."""
-        from cacheness.storage.backends.s3_backend import S3BlobBackend
-        
-        with mock_aws():
-            # Note: moto doesn't really simulate MinIO, but we can test the config
-            client = boto3.client("s3", region_name="us-east-1")
-            client.create_bucket(Bucket=s3_bucket)
-            
-            # This tests that custom endpoint_url is accepted
-            backend = S3BlobBackend(
-                bucket=s3_bucket,
-                endpoint_url="http://localhost:9000",  # MinIO endpoint
-                access_key="minioadmin",
-                secret_key="minioadmin",
-                use_ssl=False,
-            )
-            
-            assert backend.endpoint_url == "http://localhost:9000"
-            assert backend.use_ssl is False
-
-
-# =============================================================================
-# S3BlobBackend Registration Tests
-# =============================================================================
-
-class TestS3BackendRegistration:
-    """Test local S3 payload-factory registration without topology claims."""
-    
-    def test_construct_s3_through_local_payload_role_registry(
-        self, aws_credentials, s3_bucket
-    ):
-        """A role registration forwards options, but does not qualify S3 topology."""
-        from cacheness.storage.backends.s3_backend import S3BlobBackend
-        from cacheness.storage.composition import BackendRole, RoleRegistry
-        
-        with mock_aws():
-            client = boto3.client("s3", region_name="us-east-1")
-            client.create_bucket(Bucket=s3_bucket)
-            
-            registry = RoleRegistry()
-            registry.register(BackendRole.PAYLOAD, "s3", S3BlobBackend)
-
-            registration = registry.resolve(BackendRole.PAYLOAD, "s3")
-            backend = registration.construct(
-                {
-                    "bucket": s3_bucket,
-                    "endpoint_url": "http://localhost:9000",
-                    "region": "us-east-1",
-                    "use_ssl": False,
-                    "shard_chars": 3,
-                }
-            )
-
-            assert isinstance(backend, S3BlobBackend)
-            assert backend.bucket == s3_bucket
-            assert backend.endpoint_url == "http://localhost:9000"
-            assert backend.region == "us-east-1"
-            assert backend.use_ssl is False
-            assert backend.shard_chars == 3
-
-
-# =============================================================================
-# S3 Error Handling Tests
-# =============================================================================
-
-class TestS3ErrorHandling:
-    """Test error handling in S3 backend."""
-    
-    def test_boto3_not_available_error(self):
-        """Test error when boto3 is not available."""
-        # This is hard to test since boto3 IS available in our test env
-        # Just document that the error is raised in the code
-        pass
-    
-    def test_nonexistent_blob_returns_none_for_etag(self, aws_credentials, s3_bucket):
-        """Test get_etag returns None for non-existent blob."""
-        from cacheness.storage.backends.s3_backend import S3BlobBackend
-        
-        with mock_aws():
-            client = boto3.client("s3", region_name="us-east-1")
-            client.create_bucket(Bucket=s3_bucket)
-            
-            backend = S3BlobBackend(bucket=s3_bucket)
-            
-            etag = backend.get_etag(f"s3://{s3_bucket}/nonexistent")
-            assert etag is None
-    
-    def test_nonexistent_blob_returns_none_for_metadata(self, aws_credentials, s3_bucket):
-        """Test get_blob_metadata returns None for non-existent blob."""
-        from cacheness.storage.backends.s3_backend import S3BlobBackend
-        
-        with mock_aws():
-            client = boto3.client("s3", region_name="us-east-1")
-            client.create_bucket(Bucket=s3_bucket)
-            
-            backend = S3BlobBackend(bucket=s3_bucket)
-            
-            metadata = backend.get_blob_metadata(f"s3://{s3_bucket}/nonexistent")
-            assert metadata is None
-    
-    def test_get_size_nonexistent(self, aws_credentials, s3_bucket):
-        """Test get_size returns -1 for non-existent blob."""
-        from cacheness.storage.backends.s3_backend import S3BlobBackend
-        
-        with mock_aws():
-            client = boto3.client("s3", region_name="us-east-1")
-            client.create_bucket(Bucket=s3_bucket)
-            
-            backend = S3BlobBackend(bucket=s3_bucket)
-            
-            size = backend.get_size(f"s3://{s3_bucket}/nonexistent")
-            assert size == -1
+    monkeypatch.setattr(client, "list_objects_v2", fail_list)
+    with pytest.raises(CacheBlobBackendError, match="inventory"):
+        guarded_io.inventory_page()
