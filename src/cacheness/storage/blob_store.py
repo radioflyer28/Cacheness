@@ -42,7 +42,7 @@ from .catalog import (
     validate_catalog_mapping,
     validate_catalog_page_request,
 )
-from .composition import StoreTopology
+from .composition import BackendRole, ParticipantCapabilities, StoreTopology
 from .coordination import InstanceAdmission
 from .handlers import HandlerRegistry
 from .integrity import (
@@ -256,7 +256,9 @@ class BlobStore:
                 query=query,
                 schema=schema,
                 source_store_id=getattr(projection, "source_store_id", None),
-                capabilities=self.capabilities,
+                capabilities=ParticipantCapabilities.from_participant(
+                    projection, BackendRole.PROJECTION.value
+                ),
             )
             if controller.projection_name in names:
                 raise TypeError("ProjectionSink names must be unique within one BlobStore")

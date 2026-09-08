@@ -236,6 +236,68 @@ def test_post_commit_projection_failure_preserves_the_authority_receipt() -> Non
     assert store.get_entry_info("committed-key") is not None
 
 
+def test_named_rebuild_uses_its_own_sink_capabilities(tmp_path) -> None:
+    from cacheness.storage.backends.blob_backends import InMemoryBlobBackend
+    from cacheness.storage.blob_store import BlobStore
+    from cacheness.storage.catalog import CatalogField, CatalogQuery, CatalogSchema
+    from cacheness.storage.composition import StoreTopology
+    from cacheness.storage.memory_lifecycle_authority import InMemoryLifecycleAuthority
+
+    class _RebuildSink:
+        projection_query = CatalogQuery()
+        projection_schema = CatalogSchema(
+            (CatalogField("kind", "string"),), schema_id="rebuild-schema"
+        )
+
+        def __init__(self, name: str, *, can_rebuild: bool) -> None:
+            self.projection_name = name
+            self.topology_capabilities = {
+                "projection_rebuild": can_rebuild,
+                "offline_rebuild": can_rebuild,
+            }
+            self.applied: list[object] = []
+            self.published: object | None = None
+            self.discarded: object | None = None
+
+        def apply_projection_batch(self, batch: object) -> None:
+            self.applied.append(batch)
+
+        def save_projection_checkpoint(self, checkpoint: object) -> None:
+            self.checkpoint = checkpoint
+
+        def load_projection_checkpoint(self) -> None:
+            return None
+
+        def begin_isolated_rebuild(self):
+            return _RebuildSink(f"{self.projection_name}-candidate", can_rebuild=True)
+
+        def publish_isolated_rebuild(self, candidate: object, checkpoint: object) -> None:
+            self.published = (candidate, checkpoint)
+
+        def discard_isolated_rebuild(self, candidate: object) -> None:
+            self.discarded = candidate
+
+    capable = _RebuildSink("capable", can_rebuild=True)
+    incapable = _RebuildSink("incapable", can_rebuild=False)
+    store = BlobStore(
+        StoreTopology(
+            InMemoryBlobBackend(),
+            InMemoryLifecycleAuthority(),
+            (capable, incapable),
+        ),
+        cache_dir=tmp_path,
+    )
+    try:
+        # Whole-topology reporting remains conservative, but selecting the
+        # capable sink must not inherit the other sink's limitation.
+        assert store.capabilities.offline_rebuild is False
+        result = store.rebuild_projection("capable", requested="offline")
+        assert result.exhausted is True
+        assert capable.published is not None
+    finally:
+        store.close()
+
+
 def test_receipt_outcomes_are_named_and_immutable() -> None:
     from cacheness.storage.lifecycle_authority import EntryExpectation
     from cacheness.storage.read_contract import BlobReceipt

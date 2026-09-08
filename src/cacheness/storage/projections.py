@@ -15,7 +15,7 @@ import hashlib
 import json
 from typing import Any
 
-from cacheness.error_handling import CacheBlobCommittedPartialError, CacheError
+from cacheness.error_handling import CacheBlobCommittedPartialError
 
 from .catalog import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, MAX_WORK_CAP, STORE_EPOCH
 from .composition import (
@@ -44,15 +44,6 @@ class ProjectionStatus(str, Enum):
     CURRENT = "current"
     DIRTY = "dirty"
     PARTIAL = "partial"
-
-
-_PROJECTION_OPERATION_ERRORS = (
-    CacheError,
-    OSError,
-    RuntimeError,
-    TypeError,
-    ValueError,
-)
 
 
 @dataclass(frozen=True)
@@ -317,7 +308,10 @@ class ProjectionController:
         """Attempt derived work without changing the already committed receipt."""
         try:
             result = self.pull()
-        except _PROJECTION_OPERATION_ERRORS as error:
+        # Projection sinks are external derived consumers. A committed
+        # authority result must survive every ordinary application/driver
+        # failure, while BaseException control flow remains visible.
+        except Exception as error:
             outcome = ProjectionOutcome(
                 self.projection_name,
                 ProjectionStatus.DIRTY,
@@ -352,7 +346,7 @@ class ProjectionController:
         """
         try:
             return self.pull()
-        except _PROJECTION_OPERATION_ERRORS as error:
+        except Exception as error:
             remaining_cursor = self._last_page_cursor
             if remaining_cursor is None and self._active_checkpoint is not None:
                 remaining_cursor = self._active_checkpoint.cursor
@@ -379,32 +373,40 @@ class ProjectionController:
             raise ProjectionRebuildError(
                 "Projection sink does not provide isolated rebuild publication"
             )
-        candidate = begin()
-        if candidate is self.sink:
-            raise ProjectionRebuildError("Projection rebuild destination must be isolated")
-        controller = ProjectionController(
-            self.source,
-            candidate,
-            page_size=self.page_size,
-            work_cap=self.work_cap,
-            query=self.query,
-            schema=self.schema,
-            source_store_id=self.source_store_id,
-            store_epoch=self.store_epoch,
-            schema_id=self.schema_id,
-            schema_fingerprint=self.schema_fingerprint,
-            query_fingerprint=self.query_fingerprint,
-            capabilities=self.capabilities,
-        )
+        candidate: object | None = None
         try:
+            candidate = begin()
+            if candidate is self.sink:
+                raise ProjectionRebuildError(
+                    "Projection rebuild destination must be isolated"
+                )
+            controller = ProjectionController(
+                self.source,
+                candidate,
+                page_size=self.page_size,
+                work_cap=self.work_cap,
+                query=self.query,
+                schema=self.schema,
+                source_store_id=self.source_store_id,
+                store_epoch=self.store_epoch,
+                schema_id=self.schema_id,
+                schema_fingerprint=self.schema_fingerprint,
+                query_fingerprint=self.query_fingerprint,
+                capabilities=self.capabilities,
+            )
             result = controller.pull()
             if not result.exhausted:
                 raise ProjectionRebuildError("Projection rebuild did not reach completion")
             publish(candidate, result.checkpoint)
             return result
-        except _PROJECTION_OPERATION_ERRORS as error:
-            if callable(discard):
-                discard(candidate)
+        except Exception as error:
+            if candidate is not None and callable(discard):
+                try:
+                    discard(candidate)
+                except Exception as discard_error:
+                    raise ProjectionRebuildError(
+                        "Isolated projection rebuild discard failed"
+                    ) from discard_error
             if isinstance(error, ProjectionRebuildError):
                 raise
             raise ProjectionRebuildError("Isolated projection rebuild failed") from error
