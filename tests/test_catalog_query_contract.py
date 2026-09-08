@@ -244,6 +244,40 @@ def test_cursor_encoded_and_decoded_limits_accept_the_closed_record_boundary() -
         "\x00" * catalog.MAX_CURSOR_FIELD_BYTES
     )
 
+    below_boundary = _signed_cursor(
+        _cursor_record(catalog, field_bytes=catalog.MAX_CURSOR_FIELD_BYTES - 1)
+    )
+    assert len(below_boundary.encode("utf-8")) < catalog.MAX_CURSOR_ENCODED_BYTES
+    assert catalog.CatalogCursor.inspect(below_boundary, signing_key=b"x" * 32)
+
+
+def test_cursor_creation_never_emits_a_token_the_inspector_rejects() -> None:
+    catalog = _catalog()
+    value = "\x00" * catalog.MAX_CURSOR_FIELD_BYTES
+    cursor = catalog.CatalogCursor.create(
+        store_id=value,
+        format_version=catalog.STORE_FORMAT_VERSION,
+        schema_id=value,
+        schema_fingerprint=value,
+        query_fingerprint=value,
+        revision=catalog.MAX_SIGNED_64,
+        last_identity=(value, value),
+        signing_key=b"x" * 32,
+        store_epoch=catalog.MAX_SIGNED_64,
+    )
+
+    assert catalog.CatalogCursor.inspect(cursor, signing_key=b"x" * 32)
+    with pytest.raises(catalog.CatalogCursorError):
+        catalog.CatalogCursor.create(
+            store_id="x" * (catalog.MAX_CURSOR_FIELD_BYTES + 1),
+            format_version=catalog.STORE_FORMAT_VERSION,
+            schema_id="schema",
+            query_fingerprint="query",
+            revision=1,
+            last_identity=("key", "generation"),
+            signing_key=b"x" * 32,
+        )
+
 
 def test_oversized_cursor_is_rejected_before_base64_or_json_work(
     monkeypatch: pytest.MonkeyPatch,
@@ -285,6 +319,22 @@ def test_oversized_decoded_cursor_is_rejected_before_json(
     assert calls == []
 
 
+def test_non_urlsafe_base64_is_rejected_before_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    catalog = _catalog()
+    calls: list[str] = []
+
+    def reached(*_args: object, **_kwargs: object) -> object:
+        calls.append("json")
+        raise AssertionError("malformed base64 reached JSON")
+
+    monkeypatch.setattr(catalog.json, "loads", reached)
+    with pytest.raises(catalog.CatalogCursorError):
+        catalog.CatalogCursor.inspect("!!!!", signing_key=b"x" * 32)
+    assert calls == []
+
+
 @pytest.mark.parametrize(
     "field",
     (
@@ -312,6 +362,24 @@ def test_cursor_fields_are_bounded_before_hmac_comparison(
 
     def hmac_reached(*_args: object, **_kwargs: object) -> bool:
         raise AssertionError("oversized cursor field reached HMAC comparison")
+
+    monkeypatch.setattr(catalog.hmac, "compare_digest", hmac_reached)
+    with pytest.raises(catalog.CatalogCursorError):
+        catalog.CatalogCursor.inspect(cursor, signing_key=b"x" * 32)
+
+
+def test_malformed_fixed_signature_is_rejected_before_hmac_comparison(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    catalog = _catalog()
+    record = _cursor_record(catalog, field_bytes=1)
+    record["signature"] = "f" * (catalog.MAX_CURSOR_SIGNATURE_BYTES + 1)
+    cursor = base64.urlsafe_b64encode(
+        json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).decode("ascii").rstrip("=")
+
+    def hmac_reached(*_args: object, **_kwargs: object) -> bool:
+        raise AssertionError("malformed signature reached HMAC comparison")
 
     monkeypatch.setattr(catalog.hmac, "compare_digest", hmac_reached)
     with pytest.raises(catalog.CatalogCursorError):
@@ -351,12 +419,22 @@ def test_rejected_cursor_never_reaches_authority_or_manifest_loading(
     monkeypatch.setattr(store.lifecycle_authority, "catalog_page", reached("authority"))
     monkeypatch.setattr(store, "_authenticated_authority_manifest", reached("manifest"))
     try:
-        with pytest.raises(catalog.CatalogCursorError):
-            store.query_catalog(
-                catalog.CatalogQuery(),
-                schema=_queryable_schema(),
-                cursor="A" * (catalog.MAX_CURSOR_ENCODED_BYTES + 1),
-            )
+        oversized_field = _cursor_record(catalog, field_bytes=1)
+        oversized_field["last_identity"] = [
+            "x" * (catalog.MAX_CURSOR_FIELD_BYTES + 1),
+            "generation",
+        ]
+        for cursor in (
+            "A" * (catalog.MAX_CURSOR_ENCODED_BYTES + 1),
+            "A" * 2_000_000,
+            _signed_cursor(oversized_field),
+        ):
+            with pytest.raises(catalog.CatalogCursorError):
+                store.query_catalog(
+                    catalog.CatalogQuery(),
+                    schema=_queryable_schema(),
+                    cursor=cursor,
+                )
         assert calls == []
     finally:
         store.close()

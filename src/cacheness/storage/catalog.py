@@ -9,6 +9,7 @@ the sole visibility and transactional boundary.
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import hmac
 import json
@@ -40,6 +41,14 @@ DEFAULT_PAGE_SIZE: Final[int] = 100
 MAX_PAGE_SIZE: Final[int] = 256
 MAX_WORK_CAP: Final[int] = 4_096
 STORE_EPOCH: Final[int] = 1
+# Cursor fields carry exactly six caller-controlled identities: the store,
+# schema, schema/query fingerprints, and key/generation keyset identity.  The
+# 512-byte checkpoint identity bound is deliberately reused here.  JSON may
+# expand one input byte to a six-byte ``\\u00XX`` escape, so envelope bounds
+# account for the closed record's worst valid representation rather than its
+# happy-path ASCII encoding.
+MAX_CURSOR_FIELD_BYTES: Final[int] = 512
+MAX_CURSOR_SIGNATURE_BYTES: Final[int] = 64
 
 _SUPPORTED_FIELD_KINDS: Final[frozenset[str]] = frozenset(
     {"string", "integer", "boolean"}
@@ -77,6 +86,24 @@ def _canonical_json(value: Any) -> bytes:
         ensure_ascii=False,
         allow_nan=False,
     ).encode("utf-8")
+
+
+_MAX_CURSOR_FIELD_VALUE: Final[str] = "\x00" * MAX_CURSOR_FIELD_BYTES
+_MAX_CURSOR_RECORD: Final[dict[str, object]] = {
+    "format_version": STORE_FORMAT_VERSION,
+    "last_identity": [_MAX_CURSOR_FIELD_VALUE, _MAX_CURSOR_FIELD_VALUE],
+    "query_fingerprint": _MAX_CURSOR_FIELD_VALUE,
+    "revision": MAX_SIGNED_64,
+    "schema_fingerprint": _MAX_CURSOR_FIELD_VALUE,
+    "schema_id": _MAX_CURSOR_FIELD_VALUE,
+    "signature": "0" * MAX_CURSOR_SIGNATURE_BYTES,
+    "store_epoch": MAX_SIGNED_64,
+    "store_id": _MAX_CURSOR_FIELD_VALUE,
+}
+MAX_CURSOR_DECODED_BYTES: Final[int] = len(_canonical_json(_MAX_CURSOR_RECORD))
+MAX_CURSOR_ENCODED_BYTES: Final[int] = len(
+    base64.urlsafe_b64encode(b"\0" * MAX_CURSOR_DECODED_BYTES).rstrip(b"=")
+)
 
 
 def _freeze_value(value: Any) -> Any:
@@ -486,7 +513,13 @@ class CatalogCursor:
         _validate_cursor_record(record)
         unsigned = _canonical_json(record)
         record["signature"] = hmac.new(signing_key, unsigned, hashlib.sha256).hexdigest()
-        return base64.urlsafe_b64encode(_canonical_json(record)).decode("ascii").rstrip("=")
+        raw = _canonical_json(record)
+        if len(raw) > MAX_CURSOR_DECODED_BYTES:
+            raise CatalogCursorError("Catalog cursor exceeds the decoded size bound")
+        encoded = base64.urlsafe_b64encode(raw).rstrip(b"=")
+        if len(encoded) > MAX_CURSOR_ENCODED_BYTES:
+            raise CatalogCursorError("Catalog cursor exceeds the encoded size bound")
+        return encoded.decode("ascii")
 
     @staticmethod
     def parse(
@@ -526,14 +559,28 @@ class CatalogCursor:
         if not isinstance(cursor, str) or not cursor:
             raise CatalogCursorError("Catalog cursor must be a non-empty string")
         try:
-            raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
+            encoded = cursor.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise CatalogCursorError("Catalog cursor is malformed") from exc
+        if len(encoded) > MAX_CURSOR_ENCODED_BYTES:
+            raise CatalogCursorError("Catalog cursor exceeds the encoded size bound")
+        try:
+            encoded.decode("ascii")
+            raw = base64.b64decode(
+                encoded + b"=" * (-len(encoded) % 4), altchars=b"-_", validate=True
+            )
+        except (UnicodeDecodeError, binascii.Error, ValueError) as exc:
+            raise CatalogCursorError("Catalog cursor is malformed") from exc
+        if len(raw) > MAX_CURSOR_DECODED_BYTES:
+            raise CatalogCursorError("Catalog cursor exceeds the decoded size bound")
+        try:
             record = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
             raise CatalogCursorError("Catalog cursor is malformed") from exc
         if not isinstance(record, dict):
             raise CatalogCursorError("Catalog cursor is malformed")
         signature = record.pop("signature", None)
-        if not isinstance(signature, str):
+        if not _is_cursor_signature(signature):
             raise CatalogCursorError("Catalog cursor signature is malformed")
         _validate_cursor_record(record)
         expected = hmac.new(signing_key, _canonical_json(record), hashlib.sha256).hexdigest()
@@ -558,16 +605,19 @@ def _validate_cursor_record(record: Mapping[str, Any]) -> None:
     if (
         not isinstance(record["format_version"], int)
         or isinstance(record["format_version"], bool)
+        or not 1 <= record["format_version"] <= STORE_FORMAT_VERSION
         or not isinstance(record["store_epoch"], int)
         or isinstance(record["store_epoch"], bool)
         or record["store_epoch"] < 1
+        or record["store_epoch"] > MAX_SIGNED_64
         or not isinstance(record["revision"], int)
         or isinstance(record["revision"], bool)
         or record["revision"] < 0
+        or record["revision"] > MAX_SIGNED_64
     ):
         raise CatalogCursorError("Catalog cursor numeric fields are invalid")
     if any(
-        not isinstance(record[name], str) or not record[name]
+        not _is_bounded_cursor_field(record[name])
         for name in ("store_id", "schema_id", "schema_fingerprint", "query_fingerprint")
     ):
         raise CatalogCursorError("Catalog cursor string fields are invalid")
@@ -575,9 +625,27 @@ def _validate_cursor_record(record: Mapping[str, Any]) -> None:
     if (
         not isinstance(identity, list)
         or len(identity) != 2
-        or any(not isinstance(value, str) or not value for value in identity)
+        or any(not _is_bounded_cursor_field(value) for value in identity)
     ):
         raise CatalogCursorError("Catalog cursor identity is invalid")
+
+
+def _is_bounded_cursor_field(value: object) -> bool:
+    """Return whether one opaque cursor text field is non-empty and finite."""
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and len(value.encode("utf-8")) <= MAX_CURSOR_FIELD_BYTES
+    )
+
+
+def _is_cursor_signature(value: object) -> bool:
+    """Return whether the fixed SHA-256 HMAC representation is well formed."""
+    return (
+        isinstance(value, str)
+        and len(value.encode("utf-8")) == MAX_CURSOR_SIGNATURE_BYTES
+        and all("0" <= character <= "9" or "a" <= character <= "f" for character in value)
+    )
 
 
 def require_current_revision(*, cursor_revision: int, authority_revision: int) -> None:
