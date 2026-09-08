@@ -14,7 +14,7 @@ affects: [05-02, 05-03, 05-04, 05-05, 05-06, 05-07, 05-08, 05-09]
 actuals:
   tokens: 7250
   tasks: 2
-  commits: 5
+  commits: 6
 tech-stack:
   added: []
   patterns:
@@ -87,6 +87,8 @@ status: complete
 2. **Task 2: Reject empty, adjacent, Cartesian, and order-dependent topology declarations before I/O**
    - `051bebb` — `test(05-01): add failing topology rejection matrix`
    - `42f9fcc` — `feat(05-01): reject duplicate topology declarations`
+3. **Post-wave integration repair: Declare identities in current supported fixtures**
+   - `33aef26` — `test(05-01): declare supported topology fixture identities`
 
 ## Files Created/Modified
 
@@ -119,7 +121,7 @@ status: complete
 - **Fix:** Declared the matching support identity in current test fixtures; registry-only application names now assert pre-construction rejection rather than creating an unsupported alias.
 - **Files modified:** `tests/test_blob_store_composition.py`, `tests/test_catalog_projection.py`, `tests/test_catalog_query_contract.py`, `tests/test_sqlite_bootstrap_concurrency.py`
 - **Verification:** `uv run --frozen python tools/verify_phase4_cutover.py` reports 610 passed, 3 skipped.
-- **Committed in:** pending 05-01 post-wave repair commit
+- **Committed in:** `33aef26`
 
 **Total deviations:** 2 auto-fixed (Rule 1)
 
