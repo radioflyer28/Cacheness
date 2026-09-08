@@ -1,0 +1,154 @@
+"""Red contracts for the one-root BlobStore composition and ownership model."""
+
+from __future__ import annotations
+
+import ast
+from importlib import import_module
+from importlib.util import find_spec
+from pathlib import Path
+
+import pytest
+
+
+COMPOSITION_MODULE = "cacheness.storage.composition"
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _composition():
+    assert find_spec(COMPOSITION_MODULE) is not None, (
+        "Phase 4 must provide StoreTopology as the only BlobStore composition root"
+    )
+    return import_module(COMPOSITION_MODULE)
+
+
+class _ClosableParticipant:
+    def __init__(self) -> None:
+        self.close_calls = 0
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
+class _Payload(_ClosableParticipant):
+    capabilities = {"immutable_generations": True, "streaming": True, "listing": True}
+
+
+class _Authority(_ClosableParticipant):
+    capabilities = {"transactional": True, "compare_and_swap": True, "portable_query": True}
+
+
+def test_one_topology_keeps_exact_injected_instances_and_caller_ownership() -> None:
+    composition = _composition()
+    payload = _Payload()
+    authority = _Authority()
+    topology = composition.StoreTopology(payload=payload, authority=authority)
+
+    resolved = topology.resolve()
+    resolved.close()
+
+    assert resolved.payload is payload
+    assert resolved.authority is authority
+    assert payload.close_calls == 0
+    assert authority.close_calls == 0
+
+
+def test_name_and_instance_or_options_and_instance_fail_before_initialization() -> None:
+    composition = _composition()
+    payload = _Payload()
+
+    with pytest.raises(composition.CompositionValidationError):
+        composition.BackendRef(instance=payload, name="memory-payload")
+    with pytest.raises(composition.CompositionValidationError):
+        composition.BackendRef(instance=payload, options={"root": "unused"})
+
+
+def test_registered_names_and_builtins_use_the_same_role_registry_path() -> None:
+    composition = _composition()
+    registry = composition.RoleRegistry()
+    registry.register("payload", "fake", _Payload)
+    registry.register("authority", "fake", _Authority)
+
+    resolved = composition.StoreTopology(
+        payload=composition.BackendRef(name="fake"),
+        authority=composition.BackendRef(name="fake"),
+    ).resolve(registry)
+
+    assert isinstance(resolved.payload, _Payload)
+    assert isinstance(resolved.authority, _Authority)
+
+
+def test_named_options_are_isolated_per_construction() -> None:
+    composition = _composition()
+    first = composition.BackendRef(name="memory", options={"namespace": "one"})
+    second = composition.BackendRef(name="memory", options={"namespace": "two"})
+
+    assert first.options == {"namespace": "one"}
+    assert second.options == {"namespace": "two"}
+    assert first.options is not second.options
+
+
+def test_explicit_ownership_transfer_closes_constructed_or_transferred_resources_once() -> None:
+    composition = _composition()
+    payload = _Payload()
+    authority = _Authority()
+    resolved = composition.StoreTopology(
+        payload=composition.BackendRef(instance=payload, transfer_ownership=True),
+        authority=composition.BackendRef(instance=authority, transfer_ownership=True),
+    ).resolve()
+
+    resolved.close()
+    resolved.close()
+
+    assert payload.close_calls == 1
+    assert authority.close_calls == 1
+
+
+def test_failed_construction_closes_only_resources_owned_by_the_store() -> None:
+    composition = _composition()
+    payload = _Payload()
+    authority = _Authority()
+
+    with pytest.raises(composition.CompositionValidationError):
+        composition.StoreTopology(
+            payload=composition.BackendRef(instance=payload, transfer_ownership=True),
+            authority=composition.BackendRef(instance=authority),
+            minimum_capabilities={"durable": True},
+        ).resolve()
+
+    assert payload.close_calls == 1
+    assert authority.close_calls == 0
+
+
+def test_legacy_selectors_factories_and_constructor_overload_are_absent() -> None:
+    blob_store = ast.parse(
+        (REPOSITORY_ROOT / "src/cacheness/storage/blob_store.py").read_text(encoding="utf-8")
+    )
+    class_node = next(node for node in blob_store.body if isinstance(node, ast.ClassDef) and node.name == "BlobStore")
+    method_names = {node.name for node in class_node.body if isinstance(node, ast.FunctionDef)}
+    constructor = next(node for node in class_node.body if isinstance(node, ast.FunctionDef) and node.name == "__init__")
+    parameters = {argument.arg for argument in constructor.args.args + constructor.args.kwonlyargs}
+
+    assert "_select_projection_backend" not in method_names
+    assert "_create_lifecycle_authority" not in method_names
+    assert "backend" not in parameters
+    assert "metadata_backend" not in parameters
+
+
+def test_no_parallel_metadata_factory_or_runtime_orm_selector_survives() -> None:
+    source = "\n".join(
+        (REPOSITORY_ROOT / path).read_text(encoding="utf-8")
+        for path in (
+            "src/cacheness/metadata.py",
+            "src/cacheness/storage/backends/__init__.py",
+            "src/cacheness/core.py",
+        )
+    )
+
+    for forbidden in (
+        "create_metadata_backend",
+        "get_metadata_backend",
+        "_metadata_backend_registry",
+        "CacheMetadataLink",
+        "get_custom_metadata_model",
+    ):
+        assert forbidden not in source
