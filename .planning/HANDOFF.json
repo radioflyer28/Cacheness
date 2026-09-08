@@ -1,0 +1,118 @@
+{
+  "version": "1.0",
+  "timestamp": "2026-09-08T21:43:06.990Z",
+  "phase": "06",
+  "phase_name": "UnifiedCache Policy Composition",
+  "phase_dir": ".planning/phases/06-unifiedcache-policy-composition",
+  "plan": null,
+  "task": null,
+  "total_tasks": 8,
+  "status": "paused",
+  "completed_tasks": [
+    {
+      "id": 1,
+      "name": "Complete and verify Phase 5",
+      "status": "done",
+      "commit": "3a10d48"
+    },
+    {
+      "id": 2,
+      "name": "Capture Phase 6 context",
+      "status": "done",
+      "commit": "d5956b2"
+    },
+    {
+      "id": 3,
+      "name": "Research Phase 6 and define its validation strategy",
+      "status": "done",
+      "commit": "245676c"
+    },
+    {
+      "id": 4,
+      "name": "Map Phase 6 implementation patterns",
+      "status": "done",
+      "commit": "674bbc6"
+    },
+    {
+      "id": 5,
+      "name": "Draft Phase 6 plans",
+      "status": "in_progress",
+      "progress": "The interrupted planner wrote eight untracked draft plans and COVERAGE.md. They have not been reviewed by gsd-plan-checker and are not execution-ready."
+    }
+  ],
+  "remaining_tasks": [
+    {
+      "id": 6,
+      "name": "Inspect and finish or revise the interrupted Phase 6 plans",
+      "status": "not_started"
+    },
+    {
+      "id": 7,
+      "name": "Run the bounded gsd-plan-checker revision loop",
+      "status": "not_started"
+    },
+    {
+      "id": 8,
+      "name": "Commit approved Phase 6 plans and update tracking",
+      "status": "not_started"
+    },
+    {
+      "id": 9,
+      "name": "Execute, review, and verify Phase 6",
+      "status": "not_started"
+    },
+    {
+      "id": 10,
+      "name": "Continue Phases 7 and 8",
+      "status": "not_started"
+    }
+  ],
+  "blockers": [],
+  "async_jobs": [],
+  "human_actions_pending": [],
+  "decisions": [
+    {
+      "decision": "BlobStore remains the sole storage lifecycle authority; UnifiedCache is a cache-policy layer that uses BlobStore as its engine.",
+      "rationale": "This prevents a second lifecycle authority and the race-fix loop described by ADR 0001.",
+      "phase": "06"
+    },
+    {
+      "decision": "Use one presence-bearing lookup outcome vocabulary: hit, absent, expired, corrupt, conflict, and backend_error.",
+      "rationale": "Cached None must remain distinguishable from absence and decorators must make recomputation policy explicit.",
+      "phase": "06"
+    },
+    {
+      "decision": "All invalidation and size enforcement use bounded authoritative catalog selection plus exact-generation BlobStore deletion.",
+      "rationale": "Policy must not recreate lifecycle coordination or claim unprovable global ordering and completion guarantees.",
+      "phase": "06"
+    },
+    {
+      "decision": "Perform a pre-production API cutover without backward-compatibility wrappers, while retaining explicit versioned offline migration tooling.",
+      "rationale": "Cacheness is not deployed in production, so redundant compatibility surfaces add complexity without protecting real users.",
+      "phase": "06"
+    },
+    {
+      "decision": "A cache-created BlobStore is cache-owned; an injected BlobStore is caller-owned.",
+      "rationale": "Explicit ownership makes close and resource-lifecycle behavior predictable.",
+      "phase": "06"
+    },
+    {
+      "decision": "Live PostgreSQL and AWS S3 qualification remains Phase 8 work.",
+      "rationale": "BACK-05 cannot be claimed without eligible external environments and was deliberately moved under decision D-23.",
+      "phase": "08"
+    }
+  ],
+  "uncommitted_files": [
+    ".planning/phases/06-unifiedcache-policy-composition/06-01-PLAN.md",
+    ".planning/phases/06-unifiedcache-policy-composition/06-02-PLAN.md",
+    ".planning/phases/06-unifiedcache-policy-composition/06-03-PLAN.md",
+    ".planning/phases/06-unifiedcache-policy-composition/06-04-PLAN.md",
+    ".planning/phases/06-unifiedcache-policy-composition/06-05-PLAN.md",
+    ".planning/phases/06-unifiedcache-policy-composition/06-06-PLAN.md",
+    ".planning/phases/06-unifiedcache-policy-composition/06-07-PLAN.md",
+    ".planning/phases/06-unifiedcache-policy-composition/06-08-PLAN.md",
+    ".planning/phases/06-unifiedcache-policy-composition/COVERAGE.md"
+  ],
+  "next_action": "Run $gsd-plan-phase 6 --auto to inspect and complete or revise the interrupted drafts, then require gsd-plan-checker approval before execution.",
+  "context_notes": "Phase 5 is complete. Phase 6 discussion, research, validation strategy, and pattern mapping are committed. The Phase 6 planner was interrupted at the user's request after writing eight substantial drafts; preserve them but treat them as unverified. Read ADR 0001 before planning or changing lifecycle behavior, and reject any design that adds another lock, queue, coordinator, projection authority, cross-resource ACID promise, or universal contender-success guarantee. Unrelated dirty codebase maps, config, .claude content, and historical Phase 3 review artifacts are user-owned and must remain untouched."
+}
