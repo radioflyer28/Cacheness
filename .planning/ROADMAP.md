@@ -237,7 +237,7 @@ For Phases 4–8, every lifecycle change must name its supported topology, trans
   5. Direct BlobStore users can define application metadata, validate/query supported fields, update attributes and reopen current-layout stores without implementing a lifecycle backend. Authoritative attributes commit with the descriptor; external ORM links/indexes are explicitly derived. Pre-Phase-4 development layouts need not reopen through runtime shims and instead fail with explicit migration/rebuild-required evidence; no unchosen schema framework is implied.
   6. Catalog and derived-index APIs state their consistency and failure behavior. Preserve committed receipts, exact expectations, non-destructive corruption handling and explicit partial outcomes; any index reconstruction is an explicit derived operation, not a prerequisite for canonical reads or cleanup.
 
-**Plans**: 7/8 plans executed
+**Plans**: 8/8 plans executed
 
 Plans:
 **Wave 0**
@@ -270,7 +270,7 @@ Plans:
 
 **Wave 7** *(blocked on Wave 6 completion)*
 
-- [ ] 04-08-PLAN.md — Atomically remove obsolete source/public surfaces and run the Python 3.11/3.13 release matrix.
+- [x] 04-08-PLAN.md — Atomically remove obsolete source/public surfaces and run the Python 3.11/3.13 release matrix.
 
 ### Phase 5: Payload Backends and Supported Topology Qualification
 
@@ -343,7 +343,7 @@ Plans:
 | 1. Compatibility and Security Baseline | 15/15 | Complete | 2026-08-30 |
 | 2. Canonical Storage and Integrity Contract | 7/7 | Complete    | 2026-08-30 |
 | 3. Atomic Lifecycle and Recovery Engine | 24/24 | Complete — direct qualification | 2026-09-06 |
-| 4. Metadata Composition and Topology Contracts | 7/8 | In Progress|  |
+| 4. Metadata Composition and Topology Contracts | 8/8 | In Progress|  |
 | 5. Payload Backends and Supported Topology Qualification | 0/TBD | Not started | - |
 | 6. UnifiedCache Policy Composition | 0/TBD | Not started | - |
 | 7. Explicit Migration and Rebuild Cutover | 0/TBD | Not started | - |

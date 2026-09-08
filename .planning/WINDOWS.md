@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 2
+open_count: 3
 waived_count: 0
 fixed_count: 29
-total_count: 31
-last_updated: 2026-09-08T02:04:10.125Z
+total_count: 32
+last_updated: 2026-09-08T04:19:10.179Z
 ---
 
 # Broken Windows Ledger
@@ -46,6 +46,7 @@ last_updated: 2026-09-08T02:04:10.125Z
 | 29 | 04 | deviation | tests/test_blob_store_composition.py |  | Scoped the legacy-selector retirement assertion to the direct BlobStore path; Plan 08 owns global factory deletion. | fixed |  | 2026-09-08T02:01:45.453Z | 2026-09-08T02:04:00.181Z |
 | 30 | 04 | deviation | src/cacheness/storage/composition.py |  | Named capability minima now reject before participant factory construction or I/O. | fixed |  | 2026-09-08T02:01:51.758Z | 2026-09-08T02:04:05.304Z |
 | 31 | 04 | deviation | src/cacheness/storage/blob_store.py |  | Temporary memory handler snapshots apply private permissions to the filesystem path rather than the buffered writer. | fixed |  | 2026-09-08T02:01:57.547Z | 2026-09-08T02:04:10.125Z |
+| 32 | 04 | unmet-truth | .planning/phases/04-metadata-composition-and-topology-contracts/04-VALIDATION.md |  | Unexcluded Python 3.11 and 3.13 suites stop during retired metadata-authority and missing-pandas test collection; see release evidence. | open |  | 2026-09-08T04:19:10.179Z |  |
 
 ````json
 [
@@ -420,6 +421,18 @@ last_updated: 2026-09-08T02:04:10.125Z
     "reason": "",
     "recorded_at": "2026-09-08T02:01:57.547Z",
     "resolved_at": "2026-09-08T02:04:10.125Z"
+  },
+  {
+    "id": 32,
+    "kind": "unmet-truth",
+    "phase": "04",
+    "file": ".planning/phases/04-metadata-composition-and-topology-contracts/04-VALIDATION.md",
+    "line": null,
+    "description": "Unexcluded Python 3.11 and 3.13 suites stop during retired metadata-authority and missing-pandas test collection; see release evidence.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-08T04:19:10.179Z",
+    "resolved_at": null
   }
 ]
 ````

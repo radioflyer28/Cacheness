@@ -3,17 +3,17 @@ gsd_state_version: 1.0
 milestone: v1.0
 current_phase: 04
 current_phase_name: Metadata Composition and Topology Contracts
-status: executing
-stopped_at: Completed 04-07-PLAN.md
-last_updated: "2026-09-08T03:47:53.639Z"
+status: verifying
+stopped_at: Completed 04-08-PLAN.md
+last_updated: "2026-09-08T04:19:02.837Z"
 last_activity: 2026-09-07
 last_activity_desc: Phase 04 execution started
-state_head: fd4f36f66259fc18a1f59832cff826fea50b0b67
+state_head: 151650f639ebbd778e43c1ef8f6a07be4e28f0fc
 progress:
   total_phases: 8
   completed_phases: 2
   total_plans: 55
-  completed_plans: 53
+  completed_plans: 54
 milestone_name: milestone
 ---
 
@@ -30,7 +30,7 @@ See: .planning/PROJECT.md (updated 2026-09-06)
 
 Phase: 04 (Metadata Composition and Topology Contracts) — EXECUTING
 Plan: 8 of 8
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-09-07 — Phase 04 execution started
 
 The user explicitly bypassed GSD execute/review/checker. The older
@@ -133,6 +133,7 @@ Phase 03 rows in this historical table include superseded attempts and do not de
 | Phase 04 P05 | 13m 52s | 2 tasks | 7 files |
 | Phase 04-metadata-composition-and-topology-contracts P06 | 1575s | 2 tasks | 13 files |
 | Phase 04 P07 | 22min | 2 tasks | 13 files |
+| Phase 04 P08 | 5m | 2 tasks | 17 files |
 
 ## Accumulated Context
 
@@ -282,6 +283,9 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 04]: Mixed-scope UnifiedCache policy tests retain their outcomes while only retired metadata-selector setup changes.
 - [Phase 04]: JSON, PostgreSQL, and former ORM read models are tested solely as derived ProjectionSink consumers.
 - [Phase 04]: Retired metadata authority exports have explicit absence assertions for the atomic Plan 04-08 cutover.
+- [Phase 04]: BlobStore is the sole payload/catalog lifecycle authority; UnifiedCache remains a narrow policy facade.
+- [Phase 04]: Pre-production metadata authority compatibility surfaces are deleted rather than shimmed.
+- [Phase 04]: Python 3.11/3.13 full-suite collection evidence is recorded as a release gap, without reopening retired APIs.
 
 ### Pending Todos
 
@@ -307,6 +311,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-08T03:47:53.586Z
-Stopped at: Completed 04-07-PLAN.md
+Last session: 2026-09-08T04:19:02.782Z
+Stopped at: Completed 04-08-PLAN.md
 Resume file: None
