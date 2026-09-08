@@ -1,506 +1,496 @@
-"""
-S3 Blob Storage Backend
-=======================
+"""Amazon S3 immutable-generation payload participant.
 
-S3-compatible blob storage backend for distributed caching.
-Supports Amazon S3, MinIO, and other S3-compatible services.
-
-Requirements:
-    pip install cacheness[s3]
-    # or
-    pip install boto3
-
-Usage:
-    from cacheness.storage.backends.s3_backend import S3BlobBackend
-    from cacheness.storage import BackendRole, RoleRegistry
-
-    # Register S3 for one application's payload role.
-    registry = RoleRegistry()
-    registry.register(BackendRole.PAYLOAD, "s3", S3BlobBackend)
-    backend = registry.construct(BackendRole.PAYLOAD, "s3", {
-        "bucket": "my-cache-bucket",
-        "region": "us-east-1",
-    })
-
-``S3BlobBackend`` may be locally registered and constructed in Phase 4. It is
-not thereby qualified as a ``BlobStore`` topology or immutable-generation
-lifecycle participant; that service/topology qualification belongs to Phase 5.
+This module supplies bounded object mechanics below the shared BlobStore
+lifecycle engine. Object presence is never visibility: the selected lifecycle
+authority promotes verified immutable generations and owns recovery intent and
+cleanup debt. The participant deliberately supports Amazon S3 through boto3
+credential resolution or an injected boto3-compatible client; compatible
+endpoints require separate qualification.
 """
 
-import logging
-from typing import BinaryIO, Dict, List, Optional, Any
+from __future__ import annotations
 
-from .blob_backends import BlobBackend
+import hashlib
+import os
+from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+import tempfile
+from typing import Any, Iterator, Mapping
 
-logger = logging.getLogger(__name__)
+from cacheness.error_handling import (
+    CacheBlobBackendError,
+    CacheBlobLifecycleConflictError,
+    CacheConfigurationError,
+    CacheReason,
+    CacheUnsafePathError,
+)
+from cacheness.interfaces import GuardedReadSnapshot, GuardedWriteResult
+from cacheness.storage.guarded_handler_io import GuardedHandlerIO, GuardedStagedArtifact
 
 
-# Check for boto3 availability
-try:
+try:  # Keep the base package importable without the optional S3 dependency.
     import boto3
-    from botocore.exceptions import ClientError, NoCredentialsError
+    from botocore.exceptions import BotoCoreError, ClientError
+
     BOTO3_AVAILABLE = True
-except ImportError:
-    BOTO3_AVAILABLE = False
+except ImportError:  # pragma: no cover - depends on optional installation
     boto3 = None
-    ClientError = None
-    NoCredentialsError = None
+    BotoCoreError = Exception
+    ClientError = Exception
+    BOTO3_AVAILABLE = False
 
 
-class S3BlobBackend(BlobBackend):
+_MAX_LOCATOR_LENGTH = 512
+_DEFAULT_CHUNK_SIZE = 1024 * 1024
+_DEFAULT_DOWNLOAD_LIMIT = 128 * 1024 * 1024
+_DEFAULT_DOWNLOAD_WORK_LIMIT = 4096
+
+
+@dataclass(frozen=True)
+class S3ObjectEvidence:
+    """One bounded S3 object observation used only as reconciliation evidence."""
+
+    locator: str
+    byte_size: int
+
+
+@dataclass(frozen=True)
+class S3InventoryPage:
+    """A single bounded continuation-token object inventory page."""
+
+    objects: tuple[S3ObjectEvidence, ...]
+    next_token: str | None
+
+
+def _positive_int(name: str, value: int, *, minimum: int = 1) -> int:
+    """Validate a configuration work bound without coercing surprising values."""
+    if type(value) is not int or value < minimum:
+        raise CacheConfigurationError(f"{name} must be an integer of at least {minimum}")
+    return value
+
+
+def _client_error_code(error: BaseException) -> str:
+    """Extract one stable S3 service code without parsing exception text."""
+    if isinstance(error, ClientError):
+        response = error.response
+        error_data = response.get("Error", {}) if isinstance(response, Mapping) else {}
+        code = error_data.get("Code") if isinstance(error_data, Mapping) else None
+        return str(code) if code is not None else ""
+    return ""
+
+
+def _is_absence(error: BaseException) -> bool:
+    """Return whether an exact S3 operation proves only key absence."""
+    return _client_error_code(error) in {"404", "NoSuchKey", "NotFound"}
+
+
+class S3BlobBackend:
+    """Provide bounded immutable-generation I/O for one managed Amazon S3 prefix.
+
+    The public participant has no byte CRUD compatibility API. Callers compose
+    it as a payload participant and the BlobStore engine materializes its one
+    guarded I/O object through :meth:`materialize_handler_io`.
     """
-    S3-compatible blob storage backend.
-    
-    Stores blobs in Amazon S3 or S3-compatible services (MinIO, etc.).
-    Supports Git-style directory sharding for better performance with
-    large numbers of objects.
-    
-    Attributes:
-        bucket: S3 bucket name
-        prefix: Optional prefix (folder) for all objects
-        region: AWS region (default: us-east-1)
-        endpoint_url: Custom endpoint URL for S3-compatible services (MinIO)
-        shard_chars: Number of leading chars for directory sharding (default: 2)
-    
-    Example:
-        # Amazon S3
-        backend = S3BlobBackend(
-            bucket="my-cache-bucket",
-            prefix="cache/v1/",
-            region="us-east-1",
-        )
-        
-        # MinIO
-        backend = S3BlobBackend(
-            bucket="local-cache",
-            endpoint_url="http://minio:9000",
-            access_key="minioadmin",
-            secret_key="minioadmin",
-            use_ssl=False,
-        )
-    """
-    
-    # Multipart upload threshold (5MB minimum for S3)
-    MULTIPART_THRESHOLD = 5 * 1024 * 1024  # 5MB
-    MULTIPART_CHUNKSIZE = 8 * 1024 * 1024  # 8MB chunks
-    
+
+    topology_capabilities = {
+        "durable": True,
+        "process_scope": "multi_host",
+        "host_scope": "multi_host",
+        "immutable_generations": True,
+        "streaming": True,
+        "listing": True,
+    }
+
     def __init__(
         self,
+        *,
         bucket: str,
-        prefix: str = "",
+        prefix: str = "cacheness",
         region: str = "us-east-1",
-        endpoint_url: Optional[str] = None,
-        use_ssl: bool = True,
-        access_key: Optional[str] = None,
-        secret_key: Optional[str] = None,
-        shard_chars: int = 2,
-        **kwargs
-    ):
+        client: Any | None = None,
+        expected_bucket_owner: str | None = None,
+        staging_root: Path | str | None = None,
+        multipart_threshold: int = 8 * 1024 * 1024,
+        part_size: int = 8 * 1024 * 1024,
+        max_upload_bytes: int = _DEFAULT_DOWNLOAD_LIMIT,
+        max_download_bytes: int = _DEFAULT_DOWNLOAD_LIMIT,
+        max_download_work: int = _DEFAULT_DOWNLOAD_WORK_LIMIT,
+        chunk_size: int = _DEFAULT_CHUNK_SIZE,
+    ) -> None:
+        """Configure one exact Amazon S3 bucket/prefix participant.
+
+        Authentication uses the standard boto3 provider chain unless a caller
+        injects a client. Inline access keys and endpoint URLs are intentionally
+        absent: this module does not claim compatibility-service support.
         """
-        Initialize S3 blob backend.
-        
-        Args:
-            bucket: S3 bucket name
-            prefix: Optional key prefix (e.g., "cache/v1/")
-            region: AWS region (default: us-east-1)
-            endpoint_url: Custom endpoint for S3-compatible services (MinIO)
-            use_ssl: Use HTTPS (default: True)
-            access_key: AWS access key (optional, falls back to credential chain)
-            secret_key: AWS secret key (optional, falls back to credential chain)
-            shard_chars: Number of leading chars for directory sharding (default: 2)
-            **kwargs: Additional boto3 client options
-        """
-        if not BOTO3_AVAILABLE:
+        if not BOTO3_AVAILABLE and client is None:
             raise ImportError(
-                "boto3 is required for S3 backend. "
-                "Install with: pip install cacheness[s3] or pip install boto3"
+                "boto3 is required for Amazon S3 payload storage; install cacheness[s3]"
             )
-        
-        self.bucket = bucket
-        self.prefix = prefix.rstrip("/") + "/" if prefix and not prefix.endswith("/") else prefix
+        self.bucket = self._validate_bucket(bucket)
+        self.prefix = self._validate_prefix(prefix)
+        if not isinstance(region, str) or not region.strip():
+            raise CacheConfigurationError("region must be a non-empty string")
         self.region = region
-        self.endpoint_url = endpoint_url
-        self.use_ssl = use_ssl
-        self.shard_chars = shard_chars
-        
-        # Build client config
-        client_kwargs = {
-            "region_name": region,
-            "use_ssl": use_ssl,
-        }
-        
-        if endpoint_url:
-            client_kwargs["endpoint_url"] = endpoint_url
-        
-        # Only add credentials if explicitly provided
-        # Otherwise boto3 will use its credential chain
-        if access_key and secret_key:
-            client_kwargs["aws_access_key_id"] = access_key
-            client_kwargs["aws_secret_access_key"] = secret_key
-        
-        # Create S3 client
-        self._client = boto3.client("s3", **client_kwargs)
-        
-        logger.debug(
-            f"S3BlobBackend initialized: bucket={bucket}, prefix={self.prefix}, "
-            f"region={region}, endpoint={endpoint_url}, shard_chars={shard_chars}"
+        if expected_bucket_owner is not None and (
+            not isinstance(expected_bucket_owner, str) or not expected_bucket_owner.strip()
+        ):
+            raise CacheConfigurationError("expected_bucket_owner must be a non-empty string")
+        self.expected_bucket_owner = expected_bucket_owner
+        self.multipart_threshold = _positive_int("multipart_threshold", multipart_threshold)
+        self.part_size = _positive_int("part_size", part_size, minimum=5 * 1024 * 1024)
+        self.max_upload_bytes = _positive_int("max_upload_bytes", max_upload_bytes)
+        self.max_download_bytes = _positive_int("max_download_bytes", max_download_bytes)
+        self.max_download_work = _positive_int("max_download_work", max_download_work)
+        self.chunk_size = _positive_int("chunk_size", chunk_size)
+        if self.multipart_threshold > self.max_upload_bytes:
+            raise CacheConfigurationError("multipart_threshold exceeds max_upload_bytes")
+
+        if client is None:
+            client = boto3.client("s3", region_name=region)
+        self._client = client
+
+        base = Path(staging_root) if staging_root is not None else None
+        if base is not None:
+            base.mkdir(parents=True, exist_ok=True)
+            if not base.is_dir():
+                raise CacheConfigurationError("staging_root must name a directory")
+        self._temporary_root = tempfile.TemporaryDirectory(
+            prefix="cacheness-s3-", dir=str(base) if base is not None else None
         )
-    
-    def _get_s3_key(self, blob_id: str) -> str:
-        """
-        Get the S3 object key for a blob ID with directory sharding.
-        
-        Args:
-            blob_id: Unique blob identifier
-            
-        Returns:
-            Full S3 key including prefix and shard directory
-            
-        Example (shard_chars=2, prefix="cache/"):
-            blob_id = "abc123def456"
-            returns: "cache/ab/abc123def456"
-        """
-        # Apply Git-style sharding
-        if self.shard_chars > 0 and len(blob_id) >= self.shard_chars:
-            shard_dir = blob_id[:self.shard_chars]
-            return f"{self.prefix}{shard_dir}/{blob_id}"
-        
-        return f"{self.prefix}{blob_id}"
-    
-    def write_blob(self, blob_id: str, data: bytes) -> str:
-        """
-        Write blob to S3.
-        
-        Args:
-            blob_id: Unique identifier for the blob
-            data: Raw bytes to store
-            
-        Returns:
-            S3 URI in format s3://bucket/key
-            
-        Raises:
-            Exception: If upload fails
-        """
-        s3_key = self._get_s3_key(blob_id)
-        
-        try:
-            response = self._client.put_object(
-                Bucket=self.bucket,
-                Key=s3_key,
-                Body=data,
+        self._private_root = Path(self._temporary_root.name)
+        self._private_root.chmod(0o700)
+        self._handler_io: _S3GenerationIO | None = None
+        self._closed = False
+
+    @staticmethod
+    def _validate_bucket(bucket: str) -> str:
+        if (
+            not isinstance(bucket, str)
+            or not bucket.strip()
+            or len(bucket) > 255
+            or "/" in bucket
+            or "\\" in bucket
+            or bucket.startswith("s3:")
+        ):
+            raise CacheConfigurationError("bucket must be one exact S3 bucket name")
+        return bucket
+
+    @staticmethod
+    def _validate_prefix(prefix: str) -> str:
+        if not isinstance(prefix, str) or not prefix.strip():
+            raise CacheConfigurationError("prefix must be a non-empty managed S3 prefix")
+        candidate = prefix.strip().strip("/")
+        if (
+            not candidate
+            or len(candidate) > _MAX_LOCATOR_LENGTH
+            or "\\" in candidate
+            or any(part in {"", ".", ".."} for part in candidate.split("/"))
+        ):
+            raise CacheConfigurationError("prefix must be a normalized managed S3 prefix")
+        return f"{candidate}/"
+
+    def _request_kwargs(self, **kwargs: Any) -> dict[str, Any]:
+        """Attach the optional expected-owner guard without adding credentials."""
+        if self.expected_bucket_owner is not None:
+            kwargs["ExpectedBucketOwner"] = self.expected_bucket_owner
+        return kwargs
+
+    def _locator_text(self, locator: Path | str) -> str:
+        """Validate one relative generation locator below this exact prefix."""
+        if not isinstance(locator, (str, Path)):
+            raise CacheUnsafePathError(
+                "S3 generation locator must be a relative path",
+                reason=CacheReason.INVALID_IDENTIFIER,
             )
-            
-            etag = response.get("ETag", "").strip('"')
-            
-            logger.debug(
-                f"Wrote blob {blob_id} ({len(data)} bytes) to s3://{self.bucket}/{s3_key} "
-                f"(ETag: {etag})"
+        text = str(locator)
+        if (
+            not text
+            or len(text) > _MAX_LOCATOR_LENGTH
+            or "\\" in text
+            or text.startswith("s3:")
+            or text.startswith("/")
+            or any(part in {"", ".", ".."} for part in text.split("/"))
+        ):
+            raise CacheUnsafePathError(
+                "S3 generation locator is outside the managed prefix",
+                reason=CacheReason.INVALID_IDENTIFIER,
             )
-            
-            return f"s3://{self.bucket}/{s3_key}"
-            
-        except ClientError as e:
-            logger.error(f"Failed to write blob {blob_id} to S3: {e}")
-            raise
-    
-    def read_blob(self, blob_path: str) -> bytes:
-        """
-        Read blob from S3.
-        
-        Args:
-            blob_path: S3 URI (s3://bucket/key) or just the key
-            
-        Returns:
-            Raw bytes of the blob
-            
-        Raises:
-            FileNotFoundError: If blob doesn't exist
-        """
-        s3_key = self._parse_blob_path(blob_path)
-        
-        try:
-            response = self._client.get_object(
-                Bucket=self.bucket,
-                Key=s3_key,
+        normalized = PurePosixPath(text)
+        if normalized.is_absolute() or normalized.parts != tuple(text.split("/")):
+            raise CacheUnsafePathError(
+                "S3 generation locator is not normalized",
+                reason=CacheReason.INVALID_IDENTIFIER,
             )
-            
-            data = response["Body"].read()
-            logger.debug(f"Read blob from s3://{self.bucket}/{s3_key} ({len(data)} bytes)")
-            return data
-            
-        except ClientError as e:
-            error_code = e.response.get("Error", {}).get("Code", "")
-            if error_code in ("NoSuchKey", "404"):
-                raise FileNotFoundError(f"Blob not found: {blob_path}")
-            logger.error(f"Failed to read blob from S3: {e}")
-            raise
-    
-    def delete_blob(self, blob_path: str) -> bool:
-        """
-        Delete blob from S3.
-        
-        Args:
-            blob_path: S3 URI (s3://bucket/key) or just the key
-            
-        Returns:
-            True if deleted (S3 delete always returns success even if key doesn't exist)
-        """
-        s3_key = self._parse_blob_path(blob_path)
-        
-        try:
-            self._client.delete_object(
-                Bucket=self.bucket,
-                Key=s3_key,
-            )
-            
-            logger.debug(f"Deleted blob from s3://{self.bucket}/{s3_key}")
-            return True
-            
-        except ClientError as e:
-            logger.error(f"Failed to delete blob from S3: {e}")
-            return False
-    
-    def exists(self, blob_path: str) -> bool:
-        """
-        Check if blob exists in S3.
-        
-        Args:
-            blob_path: S3 URI (s3://bucket/key) or just the key
-            
-        Returns:
-            True if blob exists
-        """
-        s3_key = self._parse_blob_path(blob_path)
-        
-        try:
-            self._client.head_object(
-                Bucket=self.bucket,
-                Key=s3_key,
-            )
-            return True
-            
-        except ClientError as e:
-            error_code = e.response.get("Error", {}).get("Code", "")
-            if error_code in ("NoSuchKey", "404"):
-                return False
-            # Re-raise unexpected errors
-            raise
-    
-    def write_blob_stream(self, blob_id: str, stream: BinaryIO) -> str:
-        """
-        Write blob from stream to S3 (supports multipart upload for large objects).
-        
-        Args:
-            blob_id: Unique identifier for the blob
-            stream: File-like object with read() method
-            
-        Returns:
-            S3 URI in format s3://bucket/key
-        """
-        s3_key = self._get_s3_key(blob_id)
-        
-        try:
-            # Use upload_fileobj which handles multipart automatically
-            self._client.upload_fileobj(
-                stream,
-                self.bucket,
-                s3_key,
-            )
-            
-            logger.debug(f"Wrote blob stream {blob_id} to s3://{self.bucket}/{s3_key}")
-            return f"s3://{self.bucket}/{s3_key}"
-            
-        except ClientError as e:
-            logger.error(f"Failed to upload stream {blob_id} to S3: {e}")
-            raise
-    
-    def read_blob_stream(self, blob_path: str) -> BinaryIO:
-        """
-        Read blob as stream from S3.
-        
-        Args:
-            blob_path: S3 URI (s3://bucket/key) or just the key
-            
-        Returns:
-            File-like object with read() method
-            
-        Raises:
-            FileNotFoundError: If blob doesn't exist
-        """
-        s3_key = self._parse_blob_path(blob_path)
-        
-        try:
-            response = self._client.get_object(
-                Bucket=self.bucket,
-                Key=s3_key,
-            )
-            
-            # Return the streaming body wrapped in BytesIO for consistent interface
-            return response["Body"]
-            
-        except ClientError as e:
-            error_code = e.response.get("Error", {}).get("Code", "")
-            if error_code in ("NoSuchKey", "404"):
-                raise FileNotFoundError(f"Blob not found: {blob_path}")
-            raise
-    
-    def get_size(self, blob_path: str) -> int:
-        """
-        Get blob size using HEAD request (efficient, doesn't download data).
-        
-        Args:
-            blob_path: S3 URI (s3://bucket/key) or just the key
-            
-        Returns:
-            Size in bytes, or -1 if not found
-        """
-        s3_key = self._parse_blob_path(blob_path)
-        
-        try:
-            response = self._client.head_object(
-                Bucket=self.bucket,
-                Key=s3_key,
-            )
-            return response.get("ContentLength", -1)
-            
-        except ClientError:
-            return -1
-    
-    def get_etag(self, blob_path: str) -> Optional[str]:
-        """
-        Get S3 ETag for a blob (HEAD request).
-        
-        The ETag is S3's content hash (MD5 for single uploads, composite for multipart).
-        
-        Args:
-            blob_path: S3 URI (s3://bucket/key) or just the key
-            
-        Returns:
-            ETag string (without quotes), or None if not found
-        """
-        s3_key = self._parse_blob_path(blob_path)
-        
-        try:
-            response = self._client.head_object(
-                Bucket=self.bucket,
-                Key=s3_key,
-            )
-            etag = response.get("ETag", "")
-            return etag.strip('"') if etag else None
-            
-        except ClientError:
-            return None
-    
-    def verify_etag(self, blob_path: str, expected_etag: str) -> bool:
-        """
-        Verify blob integrity via ETag comparison.
-        
-        Args:
-            blob_path: S3 URI or key
-            expected_etag: Expected ETag value
-            
-        Returns:
-            True if ETag matches
-        """
-        actual_etag = self.get_etag(blob_path)
-        if actual_etag is None:
-            return False
-        return actual_etag == expected_etag.strip('"')
-    
-    def get_blob_metadata(self, blob_path: str) -> Optional[Dict[str, Any]]:
-        """
-        Get full metadata for a blob.
-        
-        Returns:
-            Dictionary with s3_key, s3_bucket, s3_etag, size, last_modified
-            or None if blob doesn't exist
-        """
-        s3_key = self._parse_blob_path(blob_path)
-        
-        try:
-            response = self._client.head_object(
-                Bucket=self.bucket,
-                Key=s3_key,
-            )
-            
-            return {
-                "s3_bucket": self.bucket,
-                "s3_key": s3_key,
-                "s3_etag": response.get("ETag", "").strip('"'),
-                "size": response.get("ContentLength", 0),
-                "last_modified": response.get("LastModified"),
-                "content_type": response.get("ContentType", "application/octet-stream"),
-            }
-            
-        except ClientError:
-            return None
-    
-    def list_keys(self, prefix: Optional[str] = None) -> List[str]:
-        """
-        List blob keys in the bucket.
-        
-        Args:
-            prefix: Optional additional prefix to filter by
-            
-        Returns:
-            List of S3 URIs
-        """
-        search_prefix = self.prefix
-        if prefix:
-            search_prefix = f"{self.prefix}{prefix}"
-        
-        keys = []
-        paginator = self._client.get_paginator("list_objects_v2")
-        
-        try:
-            for page in paginator.paginate(Bucket=self.bucket, Prefix=search_prefix):
-                for obj in page.get("Contents", []):
-                    keys.append(f"s3://{self.bucket}/{obj['Key']}")
-            
-            return keys
-            
-        except ClientError as e:
-            logger.error(f"Failed to list objects in S3: {e}")
-            return []
-    
-    def _parse_blob_path(self, blob_path: str) -> str:
-        """
-        Parse blob path to extract S3 key.
-        
-        Handles both s3://bucket/key URIs and plain keys.
-        
-        Args:
-            blob_path: S3 URI or key
-            
-        Returns:
-            S3 key (without s3://bucket/ prefix)
-        """
-        if blob_path.startswith("s3://"):
-            # Parse s3://bucket/key format
-            path = blob_path[5:]  # Remove "s3://"
-            if "/" in path:
-                bucket, key = path.split("/", 1)
-                if bucket != self.bucket:
-                    logger.warning(
-                        f"Blob path bucket '{bucket}' doesn't match configured bucket '{self.bucket}'"
-                    )
-                return key
-            return ""
-        
-        # Assume it's already a key
-        return blob_path
-    
+        return normalized.as_posix()
+
+    def _object_key(self, locator: Path | str) -> str:
+        """Map one validated relative generation locator beneath the managed prefix."""
+        return f"{self.prefix}{self._locator_text(locator)}"
+
+    def materialize_handler_io(self) -> "_S3GenerationIO":
+        """Return the one guarded primitive consumed by the lifecycle engine."""
+        if self._closed:
+            raise RuntimeError("S3 payload participant is closed")
+        if self._handler_io is None:
+            self._handler_io = _S3GenerationIO(self)
+        return self._handler_io
+
     def close(self) -> None:
-        """Close S3 client (boto3 handles connection pooling automatically)."""
-        # boto3 clients manage their own connection pools
-        pass
+        """Release private local staging resources; boto3 owns its connection pool."""
+        if not self._closed:
+            if self._handler_io is not None:
+                self._handler_io.close()
+            self._temporary_root.cleanup()
+            self._closed = True
 
 
-# =============================================================================
-# Module Exports
-# =============================================================================
+class _S3GenerationIO:
+    """Guarded handler I/O backed by immutable objects below one S3 prefix."""
+
+    def __init__(self, backend: S3BlobBackend) -> None:
+        self._backend = backend
+        self._staging = GuardedHandlerIO(backend._private_root)
+        self._closed = False
+
+    def _require_open(self) -> None:
+        if self._closed or self._backend._closed:
+            raise RuntimeError("S3 generation I/O is closed")
+
+    @contextmanager
+    def stage(
+        self, handler: Any, data: Any, config: Any
+    ) -> Iterator[GuardedStagedArtifact]:
+        """Stage one handler-native file privately before authority intent exists."""
+        self._require_open()
+        with self._staging.stage(handler, data, config) as staged:
+            yield staged
+
+    @staticmethod
+    def _stage_digest(source: Any, expected_size: int) -> str:
+        """Hash one validated staged file and restore it for a single request upload."""
+        digest = hashlib.sha256()
+        observed = 0
+        while True:
+            chunk = source.read(_DEFAULT_CHUNK_SIZE)
+            if not chunk:
+                break
+            if not isinstance(chunk, bytes):
+                raise CacheBlobBackendError("S3 staged payload stream returned non-bytes")
+            observed += len(chunk)
+            if observed > expected_size:
+                raise CacheBlobBackendError("S3 staged payload size changed before upload")
+            digest.update(chunk)
+        if observed != expected_size:
+            raise CacheBlobBackendError("S3 staged payload size changed before upload")
+        source.seek(0)
+        return digest.hexdigest()
+
+    def publish_generation(
+        self, staged: GuardedStagedArtifact, locator: Path | str
+    ) -> GuardedWriteResult:
+        """Conditionally create one immutable small S3 generation.
+
+        Multipart publication belongs to the same primitive but is added in the
+        next implementation step; this tracer intentionally establishes the
+        single-request immutable path first.
+        """
+        self._require_open()
+        locator_text = self._backend._locator_text(locator)
+        key = self._backend._object_key(locator_text)
+        with staged.open() as (source, file_size):
+            if file_size > self._backend.max_upload_bytes:
+                raise CacheBlobBackendError(
+                    "S3 staged payload exceeds configured upload bound",
+                    context={"operation": "s3.publish", "stage": "validate"},
+                )
+            if file_size > self._backend.multipart_threshold:
+                raise CacheBlobBackendError(
+                    "S3 multipart publication is not yet available",
+                    context={"operation": "s3.publish", "stage": "select"},
+                )
+            self._stage_digest(source, file_size)
+            try:
+                self._backend._client.put_object(
+                    **self._backend._request_kwargs(
+                        Bucket=self._backend.bucket,
+                        Key=key,
+                        Body=source,
+                        ContentLength=file_size,
+                        IfNoneMatch="*",
+                    )
+                )
+            except ClientError as error:
+                if _client_error_code(error) in {"412", "PreconditionFailed"}:
+                    raise CacheBlobLifecycleConflictError(
+                        "S3 immutable generation already exists",
+                        context={"operation": "s3.publish", "stage": "conditional_put"},
+                    ) from error
+                raise CacheBlobBackendError(
+                    "S3 conditional generation publication failed",
+                    context={"operation": "s3.publish", "stage": "conditional_put"},
+                ) from error
+            except BotoCoreError as error:
+                raise CacheBlobBackendError(
+                    "S3 conditional generation publication was not confirmed",
+                    context={"operation": "s3.publish", "stage": "conditional_put"},
+                ) from error
+        return staged.result_for(Path(locator_text), file_size)
+
+    @contextmanager
+    def open_snapshot(
+        self, locator: Path | str, metadata: Mapping[str, Any]
+    ) -> Iterator[GuardedReadSnapshot]:
+        """Stream one exact object into a bounded private snapshot and close it."""
+        self._require_open()
+        locator_text = self._backend._locator_text(locator)
+        key = self._backend._object_key(locator_text)
+        try:
+            head = self._backend._client.head_object(
+                **self._backend._request_kwargs(Bucket=self._backend.bucket, Key=key)
+            )
+        except ClientError as error:
+            if _is_absence(error):
+                raise FileNotFoundError("S3 generation is absent") from error
+            raise CacheBlobBackendError(
+                "S3 generation preflight failed",
+                context={"operation": "s3.snapshot", "stage": "head"},
+            ) from error
+        except BotoCoreError as error:
+            raise CacheBlobBackendError(
+                "S3 generation preflight was not confirmed",
+                context={"operation": "s3.snapshot", "stage": "head"},
+            ) from error
+        if not isinstance(head, Mapping) or type(head.get("ContentLength")) is not int:
+            raise CacheBlobBackendError(
+                "S3 generation preflight returned an invalid content length",
+                context={"operation": "s3.snapshot", "stage": "head"},
+            )
+        expected_size = head["ContentLength"]
+        if expected_size < 0 or expected_size > self._backend.max_download_bytes:
+            raise CacheBlobBackendError(
+                "S3 generation exceeds configured snapshot bound",
+                context={"operation": "s3.snapshot", "stage": "head"},
+            )
+        try:
+            response = self._backend._client.get_object(
+                **self._backend._request_kwargs(Bucket=self._backend.bucket, Key=key)
+            )
+        except ClientError as error:
+            if _is_absence(error):
+                raise FileNotFoundError("S3 generation is absent") from error
+            raise CacheBlobBackendError(
+                "S3 generation read request failed",
+                context={"operation": "s3.snapshot", "stage": "get"},
+            ) from error
+        except BotoCoreError as error:
+            raise CacheBlobBackendError(
+                "S3 generation read request was not confirmed",
+                context={"operation": "s3.snapshot", "stage": "get"},
+            ) from error
+        if not isinstance(response, Mapping) or not callable(getattr(response.get("Body"), "read", None)):
+            raise CacheBlobBackendError(
+                "S3 generation response lacks a streaming body",
+                context={"operation": "s3.snapshot", "stage": "get"},
+            )
+        body = response["Body"]
+        suffix = "".join(Path(locator_text).suffixes)
+        if len(suffix) > 96:
+            raise CacheUnsafePathError(
+                "S3 generation suffix exceeds the private snapshot bound",
+                reason=CacheReason.INVALID_IDENTIFIER,
+            )
+        with tempfile.TemporaryDirectory(
+            prefix="cacheness-s3-read-", dir=self._backend._private_root
+        ) as temporary:
+            snapshot_path = Path(temporary) / f"snapshot{suffix}"
+            observed = 0
+            work = 0
+            file_descriptor: int | None = None
+            destination = None
+            try:
+                file_descriptor = os.open(
+                    snapshot_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+                )
+                destination = os.fdopen(file_descriptor, "wb")
+                file_descriptor = None
+                while observed < expected_size:
+                    work += 1
+                    if work > self._backend.max_download_work:
+                        raise CacheBlobBackendError(
+                            "S3 generation exceeded configured snapshot work bound",
+                            context={"operation": "s3.snapshot", "stage": "stream"},
+                        )
+                    chunk = body.read(min(self._backend.chunk_size, expected_size - observed + 1))
+                    if not isinstance(chunk, bytes) or not chunk:
+                        raise CacheBlobBackendError(
+                            "S3 generation stream ended before declared length",
+                            context={"operation": "s3.snapshot", "stage": "stream"},
+                        )
+                    observed += len(chunk)
+                    if observed > expected_size:
+                        raise CacheBlobBackendError(
+                            "S3 generation stream exceeded declared length",
+                            context={"operation": "s3.snapshot", "stage": "stream"},
+                        )
+                    destination.write(chunk)
+                work += 1
+                if work > self._backend.max_download_work:
+                    raise CacheBlobBackendError(
+                        "S3 generation exceeded configured snapshot work bound",
+                        context={"operation": "s3.snapshot", "stage": "stream"},
+                    )
+                if body.read(1):
+                    raise CacheBlobBackendError(
+                        "S3 generation stream exceeded declared length",
+                        context={"operation": "s3.snapshot", "stage": "stream"},
+                    )
+                destination.flush()
+                os.fsync(destination.fileno())
+            except CacheBlobBackendError:
+                raise
+            except (OSError, TypeError, ValueError) as error:
+                raise CacheBlobBackendError(
+                    "S3 generation snapshot copy failed",
+                    context={"operation": "s3.snapshot", "stage": "stream"},
+                ) from error
+            finally:
+                if destination is not None:
+                    destination.close()
+                elif file_descriptor is not None:
+                    os.close(file_descriptor)
+                close = getattr(body, "close", None)
+                if callable(close):
+                    close()
+            snapshot_metadata = dict(metadata)
+            snapshot_metadata["actual_path"] = str(snapshot_path)
+            yield GuardedReadSnapshot(snapshot_path, snapshot_metadata)
+
+    def delete_or_prove_absent(self, locator: Path | str) -> None:
+        """Delete one exact generation; final absence proof is added with inventory work."""
+        self._require_open()
+        key = self._backend._object_key(locator)
+        try:
+            self._backend._client.delete_object(
+                **self._backend._request_kwargs(Bucket=self._backend.bucket, Key=key)
+            )
+        except (ClientError, BotoCoreError) as error:
+            raise CacheBlobBackendError(
+                "S3 generation deletion was not confirmed",
+                context={"operation": "s3.delete", "stage": "delete"},
+            ) from error
+
+    def close(self) -> None:
+        """Release only local guarded staging resources."""
+        if not self._closed:
+            self._staging.close()
+            self._closed = True
+
 
 __all__ = [
-    "S3BlobBackend",
     "BOTO3_AVAILABLE",
+    "S3BlobBackend",
+    "S3InventoryPage",
+    "S3ObjectEvidence",
 ]
