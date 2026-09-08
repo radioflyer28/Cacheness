@@ -98,6 +98,9 @@ markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests",
     "optional_deps: tests that require optional dependencies like polars/pandas",
+    "live_postgresql: requires an externally configured PostgreSQL service",
+    "live_aws_s3: requires a real Amazon S3 bucket and standard AWS credentials",
+    "live_remote: requires the qualified PostgreSQL/Amazon-S3 topology",
 ]
 
 # Logging configuration
