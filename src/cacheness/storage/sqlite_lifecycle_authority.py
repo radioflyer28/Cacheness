@@ -18,7 +18,7 @@ import subprocess
 import tempfile
 from threading import Lock
 import time
-from typing import Callable, Iterator, TypeVar
+from typing import Any, Callable, Iterator, TypeVar
 from uuid import uuid4
 
 from cacheness.config import LifecycleAuthorityTopology, LifecycleLimits
@@ -47,6 +47,15 @@ from .lifecycle_authority import (
     ReconciliationSnapshot,
     ReconciliationWork,
     VerificationProof,
+)
+from .catalog import (
+    CatalogCursor,
+    CatalogCursorError,
+    CatalogPage,
+    CatalogQuery,
+    CatalogSchema,
+    page_from_canonical_scan,
+    validate_catalog_page_request,
 )
 
 
@@ -82,6 +91,16 @@ class SqliteLifecycleAuthority:
     """One SQLite authority with method-scoped, process-owned connections."""
 
     capabilities = AuthorityCapabilities(durable=True, multiprocess=True)
+    topology_capabilities = {
+        "durable": True,
+        "process_scope": "multi_host",
+        "host_scope": "multi_host",
+        "transaction_scope": "authority",
+        "exact_cas": True,
+        "portable_query": True,
+        "canonical_scan": True,
+        "index_acceleration": False,
+    }
 
     def __init__(
         self,
@@ -1466,6 +1485,107 @@ class SqliteLifecycleAuthority:
                 )
                 for row in rows
             )
+
+    def catalog_page(
+        self,
+        query: CatalogQuery,
+        cursor: str | None,
+        *,
+        schema: CatalogSchema,
+        limit: int,
+        work_cap: int,
+        signing_key: bytes,
+        manifest_loader: Callable[[bytes], Any],
+    ) -> CatalogPage:
+        """Read a bounded canonical keyset page without a catalog mirror.
+
+        SQLite only enumerates current authority identities.  Predicate
+        evaluation happens after the BlobStore authenticates each signed
+        descriptor, so this method never interpolates caller supplied fields
+        or operators into SQL.
+        """
+        validate_catalog_page_request(
+            query,
+            schema=schema,
+            cursor=cursor,
+            limit=limit,
+            work_cap=work_cap,
+        )
+        if cursor is not None:
+            CatalogCursor.inspect(cursor, signing_key=signing_key)
+        with self._read_connection() as connection:
+            if connection is None:
+                if cursor is not None:
+                    raise CatalogCursorError("Catalog cursor does not match an absent authority")
+                return CatalogPage((), 0, None, True)
+            connection.execute("BEGIN")
+            try:
+                store_id = connection.execute(
+                    "SELECT identity FROM store_identity"
+                ).fetchone()[0]
+                revision = connection.execute(
+                    "SELECT revision FROM authority_state WHERE singleton = 1"
+                ).fetchone()[0]
+                cursor_identity = (
+                    None
+                    if cursor is None
+                    else CatalogCursor.parse(
+                        cursor,
+                        store_id=store_id,
+                        format_version=2,
+                        schema_id=schema.schema_id,
+                        schema_fingerprint=schema.fingerprint,
+                        query_fingerprint=query.fingerprint,
+                        revision=revision,
+                        signing_key=signing_key,
+                    )
+                )
+                if cursor_identity is None:
+                    rows = connection.execute(
+                        "SELECT key, generation, locator, manifest, manifest_digest, lineage, revision "
+                        "FROM entries ORDER BY key, generation LIMIT ?",
+                        (work_cap + 1,),
+                    ).fetchall()
+                else:
+                    rows = connection.execute(
+                        "SELECT key, generation, locator, manifest, manifest_digest, lineage, revision "
+                        "FROM entries WHERE key > ? OR (key = ? AND generation > ?) "
+                        "ORDER BY key, generation LIMIT ?",
+                        (
+                            cursor_identity[0],
+                            cursor_identity[0],
+                            cursor_identity[1],
+                            work_cap + 1,
+                        ),
+                    ).fetchall()
+                snapshots = tuple(
+                    EntrySnapshot(
+                        row[0],
+                        row[1],
+                        row[2],
+                        bytes(row[3]),
+                        EntryExpectation(row[5], row[6], row[1], row[4]),
+                    )
+                    for row in rows
+                )
+                page = page_from_canonical_scan(
+                    snapshots,
+                    query=query,
+                    schema=schema,
+                    revision=revision,
+                    store_id=store_id,
+                    cursor_identity=cursor_identity,
+                    limit=limit,
+                    work_cap=work_cap,
+                    signing_key=signing_key,
+                    manifest_loader=manifest_loader,
+                )
+                connection.execute("COMMIT")
+                return page
+            except BaseException:
+                if connection.in_transaction:
+                    connection.execute("ROLLBACK")
+                raise
 
     def pending_cleanup_debts(
         self,

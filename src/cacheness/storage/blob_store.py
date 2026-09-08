@@ -9,7 +9,6 @@ authority or a recovery path.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import replace
 import hashlib
 import logging
 import secrets
@@ -35,6 +34,14 @@ from cacheness.error_handling import (
 )
 from .backends import JsonBackend
 from .backends.blob_backends import InMemoryBlobBackend, InMemoryHandlerIO
+from .catalog import (
+    CatalogCursor,
+    CatalogPage,
+    CatalogQuery,
+    CatalogSchema,
+    DEFAULT_PAGE_SIZE,
+    validate_catalog_page_request,
+)
 from .composition import StoreTopology
 from .coordination import InstanceAdmission, KeyCoordinatorRegistry
 from .guarded_handler_io import GuardedHandlerIO
@@ -378,6 +385,58 @@ class BlobStore:
     ) -> List[str]:
         """List committed authority entries, optionally filtering signed metadata."""
         return self.lifecycle.list(prefix, metadata_filter)
+
+    @_ordinary_admitted
+    def query_catalog(
+        self,
+        query: CatalogQuery,
+        *,
+        schema: CatalogSchema,
+        cursor: str | None = None,
+        limit: int | None = None,
+        work_cap: int | None = None,
+    ) -> CatalogPage:
+        """Return a bounded portable page from signed current descriptors.
+
+        The authority is the sole membership catalog.  It keyset-enumerates
+        current descriptor bytes; this facade authenticates each descriptor
+        before applying native predicates, without creating a metadata mirror
+        or claiming an acceleration index.
+        """
+        if not isinstance(query, CatalogQuery):
+            # Keep the error type and input validation boundary in catalog.py.
+            validate_catalog_page_request(
+                query, schema=schema, cursor=cursor, limit=1, work_cap=1
+            )
+        effective_cursor = query.cursor if cursor is None else cursor
+        effective_limit = query.page_size if limit is None else limit
+        if work_cap is None:
+            effective_work_cap = (
+                max(effective_limit, DEFAULT_PAGE_SIZE)
+                if isinstance(effective_limit, int) and not isinstance(effective_limit, bool)
+                else DEFAULT_PAGE_SIZE
+            )
+        else:
+            effective_work_cap = work_cap
+        validate_catalog_page_request(
+            query,
+            schema=schema,
+            cursor=effective_cursor,
+            limit=effective_limit,
+            work_cap=effective_work_cap,
+        )
+        signing_key = self._authority_manifest_key()
+        if effective_cursor is not None:
+            CatalogCursor.inspect(effective_cursor, signing_key=signing_key)
+        return self.lifecycle_authority.catalog_page(
+            query,
+            effective_cursor,
+            schema=schema,
+            limit=effective_limit,
+            work_cap=effective_work_cap,
+            signing_key=signing_key,
+            manifest_loader=self._authenticated_authority_manifest,
+        )
 
     def clear(self) -> int:
         """Clear one authority-owned membership snapshot."""

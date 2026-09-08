@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from importlib import import_module
 from importlib.util import find_spec
+import hashlib
+from pathlib import Path
 
 import pytest
 
@@ -203,3 +205,116 @@ def test_sparse_work_capped_scan_advances_to_last_examined_identity_without_matc
     assert page.exhausted is False
     assert page.cursor == "opaque-last-examined"
     assert page.examined_identity == ("unmatched", "generation-2")
+
+
+@pytest.mark.parametrize("authority_name", ["memory", "sqlite"])
+def test_authenticated_canonical_scan_is_dense_sparse_and_revision_bound(
+    tmp_path: Path, authority_name: str
+) -> None:
+    """Both authorities page authenticated descriptors without a catalog mirror."""
+    from cacheness.storage.blob_store import BlobStore
+    from cacheness.storage.composition import BackendRef, StoreTopology
+    from cacheness.storage.lifecycle_authority import MutationSpec, VerificationProof
+    from cacheness.storage.manifest import BlobManifest, StoreVersionDimensions, sign_current_manifest
+
+    catalog = _catalog()
+    root = tmp_path / authority_name
+    if authority_name == "memory":
+        topology = StoreTopology(
+            payload=BackendRef(name="memory"), authority=BackendRef(name="memory")
+        )
+    else:
+        topology = StoreTopology(
+            payload=BackendRef(name="filesystem", options={"base_dir": root}),
+            authority=BackendRef(name="sqlite", options={"root": root}),
+        )
+    store = BlobStore(topology, cache_dir=root)
+    store.initialize()
+    schema = _queryable_schema()
+    authority = store.lifecycle_authority
+    signing_key = store._authority_manifest_key()
+
+    def promote(key: str, generation: str, rank: int) -> None:
+        manifest = BlobManifest(
+            versions=StoreVersionDimensions(),
+            key=key,
+            generation=generation,
+            locator=f"generations/{key}/{generation}",
+            handler_type="object",
+            payload_format="pickle",
+            digest="a" * 64,
+            byte_size=0,
+            created_at="2026-09-08T00:00:00+00:00",
+            catalog_schema_id=schema.schema_id,
+            catalog_schema_revision=schema.revision,
+            catalog_schema_fingerprint=schema.fingerprint,
+            catalog_values={"rank": rank},
+            catalog_presence=("rank",),
+            user_metadata={},
+            handler_metadata={},
+        )
+        raw = sign_current_manifest(manifest, signing_key).canonical_bytes()
+        prepared = authority.prepare_mutation(
+            MutationSpec(
+                operation_id=f"operation-{key}",
+                key=key,
+                generation=generation,
+                candidate_locator=f"generations/{key}/{generation}",
+                expected=authority.read_expectation(key),
+                manifest=raw,
+            )
+        )
+        authority.record_verification(
+            prepared,
+            VerificationProof(
+                digest=hashlib.sha256(raw).hexdigest(), byte_size=0, manifest=raw
+            ),
+        )
+        authority.promote_mutation(prepared)
+
+    try:
+        promote("a", "generation-a", 0)
+        promote("b", "generation-b", 1)
+        promote("c", "generation-c", 2)
+
+        sparse = catalog.CatalogQuery(
+            predicates=(catalog.CatalogPredicate("rank", "gte", 99),)
+        )
+        first_sparse = store.query_catalog(sparse, schema=schema, work_cap=2)
+        assert first_sparse.entries == ()
+        assert first_sparse.exhausted is False
+        assert first_sparse.examined_identity == ("b", "generation-b")
+        final_sparse = store.query_catalog(
+            sparse, schema=schema, cursor=first_sparse.cursor, work_cap=2
+        )
+        assert final_sparse.entries == ()
+        assert final_sparse.exhausted is True
+        assert final_sparse.examined_identity == ("c", "generation-c")
+
+        dense = catalog.CatalogQuery(
+            predicates=(catalog.CatalogPredicate("rank", "gte", 1),)
+        )
+        first_dense = store.query_catalog(dense, schema=schema, limit=1, work_cap=3)
+        assert [(entry.key, entry.values["rank"]) for entry in first_dense.entries] == [
+            ("b", 1)
+        ]
+        assert first_dense.exhausted is False
+        assert first_dense.examined_identity == ("b", "generation-b")
+        final_dense = store.query_catalog(
+            dense, schema=schema, cursor=first_dense.cursor, limit=1, work_cap=3
+        )
+        assert [(entry.key, entry.values["rank"]) for entry in final_dense.entries] == [
+            ("c", 2)
+        ]
+        assert final_dense.exhausted is True
+        assert store.capabilities.portable_query is True
+        assert store.capabilities.index_acceleration is False
+
+        stale = store.query_catalog(dense, schema=schema, limit=1, work_cap=1)
+        promote("d", "generation-d", 3)
+        with pytest.raises(catalog.CatalogStaleCursorError):
+            store.query_catalog(
+                dense, schema=schema, cursor=stale.cursor, limit=1, work_cap=1
+            )
+    finally:
+        store.close()

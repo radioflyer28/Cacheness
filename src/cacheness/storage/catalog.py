@@ -38,6 +38,8 @@ MAX_QUERY_PREDICATES: Final[int] = 32
 MAX_MEMBERSHIP_VALUES: Final[int] = 128
 DEFAULT_PAGE_SIZE: Final[int] = 100
 MAX_PAGE_SIZE: Final[int] = 256
+MAX_WORK_CAP: Final[int] = 4_096
+STORE_EPOCH: Final[int] = 1
 
 _SUPPORTED_FIELD_KINDS: Final[frozenset[str]] = frozenset(
     {"string", "integer", "boolean"}
@@ -381,6 +383,38 @@ def validate_catalog_query(
     return query
 
 
+def validate_catalog_page_request(
+    query: CatalogQuery,
+    *,
+    schema: CatalogSchema,
+    cursor: str | None,
+    limit: int,
+    work_cap: int,
+) -> CatalogQuery:
+    """Validate finite query and page inputs before opening an authority session.
+
+    ``work_cap`` bounds authenticated descriptor examinations, rather than just
+    returned matches.  This makes sparse queries resumable without treating an
+    empty page as authority exhaustion.
+    """
+    validate_catalog_query(query, schema=schema)
+    if cursor is not None and (not isinstance(cursor, str) or not cursor):
+        raise CatalogCursorError("Catalog cursor must be an opaque non-empty string")
+    for value, name, maximum in (
+        (limit, "limit", MAX_PAGE_SIZE),
+        (work_cap, "work cap", MAX_WORK_CAP),
+    ):
+        if (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or not 1 <= value <= maximum
+        ):
+            raise CatalogQueryValidationError(
+                f"Catalog {name} is outside the portable bound"
+            )
+    return query
+
+
 def evaluate_predicates(
     predicates: tuple[CatalogPredicate, ...],
     stored_values: Mapping[str, Any],
@@ -429,7 +463,9 @@ class CatalogCursor:
         *,
         store_id: str,
         format_version: int,
+        store_epoch: int = STORE_EPOCH,
         schema_id: str,
+        schema_fingerprint: str | None = None,
         query_fingerprint: str,
         revision: int,
         last_identity: tuple[str, str],
@@ -442,7 +478,9 @@ class CatalogCursor:
             "last_identity": list(last_identity),
             "query_fingerprint": query_fingerprint,
             "revision": revision,
+            "schema_fingerprint": schema_fingerprint or schema_id,
             "schema_id": schema_id,
+            "store_epoch": store_epoch,
             "store_id": store_id,
         }
         _validate_cursor_record(record)
@@ -456,12 +494,34 @@ class CatalogCursor:
         *,
         store_id: str,
         format_version: int,
+        store_epoch: int = STORE_EPOCH,
         schema_id: str,
+        schema_fingerprint: str | None = None,
         query_fingerprint: str,
         revision: int,
         signing_key: bytes,
     ) -> tuple[str, str]:
         """Authenticate a cursor and reject every mismatched snapshot binding."""
+        record = CatalogCursor.inspect(cursor, signing_key=signing_key)
+        expected_context = {
+            "store_id": store_id,
+            "format_version": format_version,
+            "store_epoch": store_epoch,
+            "schema_id": schema_id,
+            "schema_fingerprint": schema_fingerprint or schema_id,
+            "query_fingerprint": query_fingerprint,
+        }
+        if any(record[name] != value for name, value in expected_context.items()):
+            raise CatalogCursorError("Catalog cursor does not match this snapshot")
+        require_current_revision(
+            cursor_revision=record["revision"], authority_revision=revision
+        )
+        identity = record["last_identity"]
+        return identity[0], identity[1]
+
+    @staticmethod
+    def inspect(cursor: str, *, signing_key: bytes) -> dict[str, Any]:
+        """Authenticate cursor syntax before a caller opens an authority session."""
         _require_signing_key(signing_key)
         if not isinstance(cursor, str) or not cursor:
             raise CatalogCursorError("Catalog cursor must be a non-empty string")
@@ -479,17 +539,7 @@ class CatalogCursor:
         expected = hmac.new(signing_key, _canonical_json(record), hashlib.sha256).hexdigest()
         if not hmac.compare_digest(signature, expected):
             raise CatalogCursorError("Catalog cursor authentication failed")
-        expected_context = {
-            "store_id": store_id,
-            "format_version": format_version,
-            "schema_id": schema_id,
-            "query_fingerprint": query_fingerprint,
-            "revision": revision,
-        }
-        if any(record[name] != value for name, value in expected_context.items()):
-            raise CatalogCursorError("Catalog cursor does not match this snapshot")
-        identity = record["last_identity"]
-        return identity[0], identity[1]
+        return dict(record)
 
 
 def _validate_cursor_record(record: Mapping[str, Any]) -> None:
@@ -498,7 +548,9 @@ def _validate_cursor_record(record: Mapping[str, Any]) -> None:
         "last_identity",
         "query_fingerprint",
         "revision",
+        "schema_fingerprint",
         "schema_id",
+        "store_epoch",
         "store_id",
     }
     if set(record) != required:
@@ -506,6 +558,9 @@ def _validate_cursor_record(record: Mapping[str, Any]) -> None:
     if (
         not isinstance(record["format_version"], int)
         or isinstance(record["format_version"], bool)
+        or not isinstance(record["store_epoch"], int)
+        or isinstance(record["store_epoch"], bool)
+        or record["store_epoch"] < 1
         or not isinstance(record["revision"], int)
         or isinstance(record["revision"], bool)
         or record["revision"] < 0
@@ -513,7 +568,7 @@ def _validate_cursor_record(record: Mapping[str, Any]) -> None:
         raise CatalogCursorError("Catalog cursor numeric fields are invalid")
     if any(
         not isinstance(record[name], str) or not record[name]
-        for name in ("store_id", "schema_id", "query_fingerprint")
+        for name in ("store_id", "schema_id", "schema_fingerprint", "query_fingerprint")
     ):
         raise CatalogCursorError("Catalog cursor string fields are invalid")
     identity = record["last_identity"]
@@ -581,6 +636,98 @@ class CatalogPage:
             raise CatalogQueryValidationError("Catalog examined identity is invalid")
 
 
+def page_from_canonical_scan(
+    snapshots: Sequence[Any],
+    *,
+    query: CatalogQuery,
+    schema: CatalogSchema,
+    revision: int,
+    store_id: str,
+    cursor_identity: tuple[str, str] | None,
+    limit: int,
+    work_cap: int,
+    signing_key: bytes,
+    manifest_loader: Any,
+) -> CatalogPage:
+    """Build one portable page from a bounded, authority-owned keyset scan.
+
+    Callers provide at most ``work_cap + 1`` snapshots ordered by
+    ``(key, generation)``.  The look-ahead snapshot establishes exhaustion but
+    is deliberately not decoded: cursor progress always describes the last
+    authenticated descriptor actually examined.
+    """
+    del cursor_identity  # The authority applies the keyset predicate before scan.
+    if len(snapshots) > work_cap + 1:
+        raise CatalogQueryValidationError("Catalog authority scan exceeds the work cap")
+    entries: list[CatalogEntry] = []
+    examined_identity: tuple[str, str] | None = None
+    stopped_for_limit = False
+    examined_count = 0
+    for snapshot in snapshots[:work_cap]:
+        identity = (snapshot.key, snapshot.generation)
+        if examined_identity is not None and identity <= examined_identity:
+            raise CatalogQueryValidationError("Catalog authority scan is not keyset ordered")
+        manifest = manifest_loader(snapshot.manifest)
+        if manifest.key != snapshot.key or manifest.generation != snapshot.generation:
+            raise CatalogValidationError("Authority descriptor identity does not match entry")
+        if manifest.state != "committed":
+            raise CatalogValidationError("Authority catalog scan found a non-committed descriptor")
+        if manifest.versions.store_epoch != STORE_EPOCH:
+            raise CatalogMigrationRequiredError(
+                "Catalog descriptor store epoch requires explicit migration or rebuild"
+            )
+        examined_identity = identity
+        examined_count += 1
+        if (
+            manifest.catalog_schema_id != schema.schema_id
+            or manifest.catalog_schema_revision != schema.revision
+            or manifest.catalog_schema_fingerprint != schema.fingerprint
+        ):
+            continue
+        stored_values = {
+            name: manifest.catalog_values[name]
+            for name in manifest.catalog_presence
+        }
+        if evaluate_predicates(query.predicates, stored_values, schema=schema):
+            entries.append(CatalogEntry(identity[0], identity[1], stored_values))
+            if len(entries) == limit:
+                stopped_for_limit = True
+                break
+
+    authority_exhausted = examined_count == len(snapshots)
+    exhausted = authority_exhausted and not (
+        stopped_for_limit and examined_count < len(snapshots)
+    )
+    if exhausted:
+        return CatalogPage(
+            entries=tuple(entries),
+            revision=revision,
+            cursor=None,
+            exhausted=True,
+            examined_identity=examined_identity,
+        )
+    if examined_identity is None:
+        raise CatalogQueryValidationError("Incomplete catalog page has no examined identity")
+    next_cursor = CatalogCursor.create(
+        store_id=store_id,
+        format_version=STORE_FORMAT_VERSION,
+        store_epoch=STORE_EPOCH,
+        schema_id=schema.schema_id,
+        schema_fingerprint=schema.fingerprint,
+        query_fingerprint=query.fingerprint,
+        revision=revision,
+        last_identity=examined_identity,
+        signing_key=signing_key,
+    )
+    return CatalogPage(
+        entries=tuple(entries),
+        revision=revision,
+        cursor=next_cursor,
+        exhausted=False,
+        examined_identity=examined_identity,
+    )
+
+
 __all__ = [
     "CatalogCursor",
     "CatalogCursorError",
@@ -596,10 +743,14 @@ __all__ = [
     "CatalogValidationError",
     "DEFAULT_PAGE_SIZE",
     "MAX_PAGE_SIZE",
+    "MAX_WORK_CAP",
+    "STORE_EPOCH",
     "STORE_FORMAT_VERSION",
     "evaluate_predicates",
     "inspect_store_layout",
+    "page_from_canonical_scan",
     "require_current_revision",
     "validate_catalog_mapping",
+    "validate_catalog_page_request",
     "validate_catalog_query",
 ]

@@ -10,7 +10,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Any, Callable, Protocol, runtime_checkable
+
+from .catalog import CatalogPage, CatalogQuery, CatalogSchema
 
 
 _MAX_TEXT_BYTES = 512
@@ -306,6 +308,18 @@ class LifecycleAuthority(Protocol):
     ) -> None: ...
 
     def list_entries(self) -> tuple[EntrySnapshot, ...]: ...
+
+    def catalog_page(
+        self,
+        query: CatalogQuery,
+        cursor: str | None,
+        *,
+        schema: CatalogSchema,
+        limit: int,
+        work_cap: int,
+        signing_key: bytes,
+        manifest_loader: Callable[[bytes], Any],
+    ) -> CatalogPage: ...
 
     def pending_cleanup_debts(
         self,

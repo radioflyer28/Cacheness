@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from threading import RLock
+from typing import Any, Callable
 from uuid import uuid4
 
 from cacheness.config import LifecycleLimits
@@ -25,6 +26,14 @@ from .lifecycle_authority import (
     ReconciliationWork,
     VerificationProof,
 )
+from .catalog import (
+    CatalogCursor,
+    CatalogPage,
+    CatalogQuery,
+    CatalogSchema,
+    page_from_canonical_scan,
+    validate_catalog_page_request,
+)
 
 
 class InMemoryLifecycleAuthority:
@@ -43,7 +52,7 @@ class InMemoryLifecycleAuthority:
         "host_scope": "process",
         "transaction_scope": "authority",
         "exact_cas": True,
-        "portable_query": False,
+        "portable_query": True,
         "canonical_scan": True,
         "index_acceleration": False,
     }
@@ -68,6 +77,7 @@ class InMemoryLifecycleAuthority:
         self._reconciliation_states: dict[str, str] = {}
         self._reconciliation_snapshots: dict[str, ReconciliationSnapshot] = {}
         self._revision = 0
+        self._catalog_store_id = uuid4().hex
         self._projection_dirty = False
         self._closed = False
         self.open_write_transactions = 0
@@ -261,6 +271,63 @@ class InMemoryLifecycleAuthority:
         self._require_open()
         with self._lock:
             return tuple(self._copy(entry) for _, entry in sorted(self._entries.items()))
+
+    def catalog_page(
+        self,
+        query: CatalogQuery,
+        cursor: str | None,
+        *,
+        schema: CatalogSchema,
+        limit: int,
+        work_cap: int,
+        signing_key: bytes,
+        manifest_loader: Callable[[bytes], Any],
+    ) -> CatalogPage:
+        """Scan authenticated current descriptors in portable keyset order."""
+        validate_catalog_page_request(
+            query,
+            schema=schema,
+            cursor=cursor,
+            limit=limit,
+            work_cap=work_cap,
+        )
+        if cursor is not None:
+            CatalogCursor.inspect(cursor, signing_key=signing_key)
+        self._require_open()
+        with self._lock:
+            cursor_identity = (
+                None
+                if cursor is None
+                else CatalogCursor.parse(
+                    cursor,
+                    store_id=self._catalog_store_id,
+                    format_version=2,
+                    schema_id=schema.schema_id,
+                    schema_fingerprint=schema.fingerprint,
+                    query_fingerprint=query.fingerprint,
+                    revision=self._revision,
+                    signing_key=signing_key,
+                )
+            )
+            snapshots = tuple(
+                self._copy(entry)
+                for entry in self._entries.values()
+                if cursor_identity is None
+                or (entry.key, entry.generation) > cursor_identity
+            )
+            ordered = tuple(sorted(snapshots, key=lambda entry: (entry.key, entry.generation)))
+            return page_from_canonical_scan(
+                ordered[: work_cap + 1],
+                query=query,
+                schema=schema,
+                revision=self._revision,
+                store_id=self._catalog_store_id,
+                cursor_identity=cursor_identity,
+                limit=limit,
+                work_cap=work_cap,
+                signing_key=signing_key,
+                manifest_loader=manifest_loader,
+            )
 
     def pending_cleanup_debts(
         self,
