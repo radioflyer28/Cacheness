@@ -37,6 +37,16 @@ class InMemoryLifecycleAuthority:
         indexed_paging=True,
         projection=False,
     )
+    topology_capabilities = {
+        "durable": False,
+        "process_scope": "process",
+        "host_scope": "process",
+        "transaction_scope": "authority",
+        "exact_cas": True,
+        "portable_query": False,
+        "canonical_scan": True,
+        "index_acceleration": False,
+    }
 
     def __init__(self, *, lifecycle_limits: LifecycleLimits | None = None) -> None:
         self._lock = RLock()

@@ -68,7 +68,7 @@ def test_composed_report_intersects_actual_participant_capabilities_not_names() 
     ).capability_report()
 
     assert report.immutable_generations is True
-    assert report.compare_and_swap is True
+    assert report.exact_cas is True
     assert report.streaming is False
     assert report.online_rebuild is False
 
@@ -104,6 +104,37 @@ def test_projection_can_never_satisfy_authority_capability_minima() -> None:
         composition.StoreTopology(
             payload=_Payload(), authority=_Projection(), minimum_capabilities={"portable_query": True}
         ).resolve()
+
+
+def test_unmet_minimum_rejects_named_factory_before_it_can_perform_io() -> None:
+    composition = _composition()
+    factory_calls: list[object] = []
+
+    def payload_factory() -> _Payload:
+        factory_calls.append(object())
+        return _Payload()
+
+    registry = composition.RoleRegistry()
+    registry.register(
+        "payload",
+        "side-effecting",
+        payload_factory,
+        capabilities={
+            "durable": False,
+            "process_scope": "process",
+            "host_scope": "process",
+            "immutable_generations": True,
+        },
+    )
+
+    with pytest.raises(composition.CapabilityRequirementError):
+        composition.StoreTopology(
+            payload=composition.BackendRef(name="side-effecting"),
+            authority=_Authority(),
+            minimum_capabilities={"durable": True},
+        ).resolve(registry)
+
+    assert factory_calls == []
 
 
 def test_sqlite_local_scope_allows_conflict_or_retryable_timeout_not_universal_success() -> None:

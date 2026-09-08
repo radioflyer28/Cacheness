@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 import hashlib
 import logging
+import secrets
 import stat
 import uuid
 from functools import wraps
@@ -33,6 +34,7 @@ from cacheness.error_handling import (
     CacheStorageError,
 )
 from .backends import JsonBackend
+from .backends.blob_backends import InMemoryBlobBackend, InMemoryHandlerIO
 from .composition import StoreTopology
 from .coordination import InstanceAdmission, KeyCoordinatorRegistry
 from .guarded_handler_io import GuardedHandlerIO
@@ -52,6 +54,7 @@ from .manifest import (
     decode_canonical_manifest_record,
 )
 from .manifest_repository import JsonProjectionExporter
+from .memory_lifecycle_authority import InMemoryLifecycleAuthority
 from .path_security import encode_physical_name
 from .reconciliation import ReconciliationReport, _AuthorityReconciler
 from .read_contract import BlobEntryInfo
@@ -73,6 +76,22 @@ _RETIRED_SCHEDULER_CONTROL_SENTINELS = (
     (".cacheness-inventory-v2", stat.S_IFREG),
     ("operations", stat.S_IFDIR),
 )
+
+
+class _EphemeralManifestKeyProvider:
+    """One process-local signing key for an explicitly memory-only topology."""
+
+    def __init__(self) -> None:
+        self._key = secrets.token_bytes(32)
+
+    def get_key(self) -> bytes:
+        return self._key
+
+    def get_or_initialize_new_store(self) -> bytes:
+        return self._key
+
+    def initialize_new_store(self) -> bytes:
+        return self._key
 
 
 def _retired_scheduler_control(root: Path) -> str | None:
@@ -135,9 +154,7 @@ class BlobStore:
         self.payload_backend = self.topology.payload
         self.lifecycle_authority = self.topology.authority
         self.projections = self.topology.projections
-        self.guarded_handler_io = (
-            GuardedHandlerIO(self.cache_dir) if self.cache_dir.is_dir() else None
-        )
+        self.guarded_handler_io = None
         self._initialized = False
         self._guarded_handler_io_released = False
         try:
@@ -187,10 +204,15 @@ class BlobStore:
         self._key_coordinator = KeyCoordinatorRegistry()
         self._immutable_metadata_patch_fields = _IMMUTABLE_METADATA_PATCH_FIELDS
         self.handlers = HandlerRegistry()
-        self._manifest_key_provider = manifest_key_provider or ManifestKeyProvider(
-            self.cache_dir / "blob_manifest_hmac_key.bin",
-            lifecycle_limits=self.lifecycle_limits,
+        self._manifest_key_provider = manifest_key_provider or (
+            _EphemeralManifestKeyProvider()
+            if self._is_memory_topology()
+            else ManifestKeyProvider(
+                self.cache_dir / "blob_manifest_hmac_key.bin",
+                lifecycle_limits=self.lifecycle_limits,
+            )
         )
+        self.capabilities = self.topology.capabilities
         self._projection_exporter = (
             JsonProjectionExporter(
                 self.lifecycle_authority,
@@ -423,8 +445,11 @@ class BlobStore:
     def _materialize_authority_store(self) -> GuardedHandlerIO:
         """Open contained payload I/O after authority root validation."""
         if self.guarded_handler_io is None:
-            self.cache_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-            self.guarded_handler_io = GuardedHandlerIO(self.cache_dir)
+            if isinstance(self.payload_backend, InMemoryBlobBackend):
+                self.guarded_handler_io = InMemoryHandlerIO(self.payload_backend)
+            else:
+                self.cache_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+                self.guarded_handler_io = GuardedHandlerIO(self.cache_dir)
         return self.guarded_handler_io
 
     def _authority_manifest_key(self, *, initialize_new_store: bool = False) -> bytes:
@@ -501,6 +526,10 @@ class BlobStore:
     def _delete_or_prove_absent(self, locator: Path) -> None:
         """Use durable exact deletion, otherwise prove the managed path absent."""
         guarded_io = self._materialize_authority_store()
+        memory_delete = getattr(guarded_io, "delete_or_prove_absent", None)
+        if callable(memory_delete):
+            memory_delete(locator)
+            return
         cleanup_error: Exception | None = None
         try:
             if guarded_io.file_ops.delete_durable(locator):
@@ -570,6 +599,11 @@ class BlobStore:
     def _require_canonical_store(self) -> None:
         if self._legacy_identity is not None:
             self._legacy_identity.require_explicit_migration()
+
+    def _is_memory_topology(self) -> bool:
+        return isinstance(self.payload_backend, InMemoryBlobBackend) and isinstance(
+            self.lifecycle_authority, InMemoryLifecycleAuthority
+        )
 
     @staticmethod
     def _generate_unique_key() -> str:

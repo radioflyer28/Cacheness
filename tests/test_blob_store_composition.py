@@ -87,6 +87,15 @@ def test_named_options_are_isolated_per_construction() -> None:
     assert first.options is not second.options
 
 
+def test_backend_ref_makes_caller_and_store_ownership_explicit() -> None:
+    composition = _composition()
+    injected = composition.BackendRef(instance=_Payload())
+    registered = composition.BackendRef(name="memory")
+
+    assert injected.ownership is composition.Ownership.CALLER
+    assert registered.ownership is composition.Ownership.STORE
+
+
 def test_explicit_ownership_transfer_closes_constructed_or_transferred_resources_once() -> None:
     composition = _composition()
     payload = _Payload()
@@ -146,3 +155,54 @@ def test_direct_blob_store_uses_no_legacy_metadata_selector() -> None:
         "create_metadata_backend",
     ):
         assert forbidden not in source
+
+
+def test_memory_tracer_uses_registered_same_process_participants(tmp_path: Path) -> None:
+    """The first direct BlobStore slice keeps committed memory bytes in-process."""
+    from cacheness.storage.blob_store import BlobStore
+
+    composition = _composition()
+    store_root = tmp_path / "memory-only-store"
+    topology = composition.StoreTopology(
+        payload=composition.BackendRef(name="memory"),
+        authority=composition.BackendRef(name="memory"),
+    )
+    store = BlobStore(topology, cache_dir=store_root)
+    try:
+        written = store.put_entry({"answer": 42}, key="memory-tracer")
+        observed = store.get_entry_info("memory-tracer")
+
+        assert observed is not None
+        assert observed.key == written.key == "memory-tracer"
+        assert store.capabilities.durable is False
+        assert store.capabilities.process_scope == "process"
+        assert store.capabilities.host_scope == "process"
+        assert store.capabilities.canonical_scan is True
+        assert store.capabilities.index_acceleration is False
+        assert not store_root.exists()
+    finally:
+        store.close()
+
+
+def test_memory_tracer_keeps_exact_injected_instances_caller_owned(tmp_path: Path) -> None:
+    """Injected memory participants survive the store close unless ownership transfers."""
+    from cacheness.storage.backends.blob_backends import InMemoryBlobBackend
+    from cacheness.storage.blob_store import BlobStore
+    from cacheness.storage.memory_lifecycle_authority import InMemoryLifecycleAuthority
+
+    composition = _composition()
+    payload = InMemoryBlobBackend()
+    authority = InMemoryLifecycleAuthority()
+    store = BlobStore(
+        composition.StoreTopology(payload=payload, authority=authority),
+        cache_dir=tmp_path / "injected-memory-store",
+    )
+    try:
+        store.put_entry("injected", key="memory-injected")
+        assert store.payload_backend is payload
+        assert store.lifecycle_authority is authority
+    finally:
+        store.close()
+
+    assert authority.read_entry("memory-injected") is not None
+    assert payload.exists("memory://generations") is False
