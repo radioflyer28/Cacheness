@@ -237,7 +237,7 @@ For Phases 4–8, every lifecycle change must name its supported topology, trans
   5. Direct BlobStore users can define application metadata, validate/query supported fields, update attributes and reopen current-layout stores without implementing a lifecycle backend. Authoritative attributes commit with the descriptor; external ORM links/indexes are explicitly derived. Pre-Phase-4 development layouts need not reopen through runtime shims and instead fail with explicit migration/rebuild-required evidence; no unchosen schema framework is implied.
   6. Catalog and derived-index APIs state their consistency and failure behavior. Preserve committed receipts, exact expectations, non-destructive corruption handling and explicit partial outcomes; any index reconstruction is an explicit derived operation, not a prerequisite for canonical reads or cleanup.
 
-**Plans**: 8/8 plans executed
+**Plans**: 8/13 plans executed; 5 gap-closure plans ready
 
 Plans:
 **Wave 0**
@@ -271,6 +271,26 @@ Plans:
 **Wave 7** *(blocked on Wave 6 completion)*
 
 - [x] 04-08-PLAN.md — Atomically remove obsolete source/public surfaces and run the Python 3.11/3.13 release matrix.
+
+**Wave 8** *(gap closure; blocked on Wave 7 completion)*
+
+- [ ] 04-09-PLAN.md — Close the public catalog and selected-payload data-flow gaps through the existing BlobStore/authority lifecycle.
+
+**Wave 9** *(blocked on Wave 8 completion)*
+
+- [ ] 04-10-PLAN.md — Close application registration, structural validation, and ownership unwind in the single composition root.
+
+**Wave 10** *(blocked on Wave 9 completion)*
+
+- [ ] 04-11-PLAN.md — Harden post-commit projection outcomes and bounded public cursor inputs.
+
+**Wave 11** *(blocked on Wave 10 completion)*
+
+- [ ] 04-12-PLAN.md — Rewrite remaining registry, lifecycle, integrity, initialization, and cache consumers against the final public seams.
+
+**Wave 12** *(blocked on Wave 11 completion)*
+
+- [ ] 04-13-PLAN.md — Finish consumer cutover and produce honest, reproducible Python 3.11/3.13 release evidence.
 
 ### Phase 5: Payload Backends and Supported Topology Qualification
 
