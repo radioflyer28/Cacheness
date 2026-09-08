@@ -12,11 +12,23 @@ import pytest
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 RUNNER_PATH = REPOSITORY_ROOT / "tools" / "run_phase5_qualification.py"
+FIXTURES_PATH = REPOSITORY_ROOT / "tests" / "qualification" / "conftest.py"
 
 
 def _load_runner():
     """Load the standalone runner without requiring ``tools`` to be a package."""
     spec = importlib.util.spec_from_file_location("phase5_qualification_runner", RUNNER_PATH)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_fixtures():
+    """Load qualification fixtures directly for non-live ownership contracts."""
+    spec = importlib.util.spec_from_file_location("phase5_qualification_fixtures", FIXTURES_PATH)
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -121,3 +133,57 @@ def test_evidence_serializer_rejects_secret_fragments_and_non_allowlisted_fields
             {**evidence, "dsn": "postgresql://test:password@db"},
             forbidden_fragments=(),
         )
+
+
+def test_fixture_configuration_uses_one_bounded_owned_namespace_and_two_signers() -> None:
+    """Fixtures derive service resource names from one exact random run identifier."""
+    fixtures = _load_fixtures()
+    environment = {
+        "CACHENESS_TEST_POSTGRES_DSN": "postgresql://test:password@db/qualification",
+        "CACHENESS_TEST_S3_BUCKET": "qualification-bucket",
+        "CACHENESS_TEST_MANIFEST_KEY_B64": "bW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW0=",
+    }
+
+    config = fixtures.qualification_config_from_environment(environment)
+    namespace = fixtures.qualification_namespace("phase5-" + "a" * 32)
+    first, second = fixtures.independent_manifest_signers(config)
+
+    assert namespace.schema == "cacheness_q5_" + "a" * 32
+    assert namespace.prefix == "cacheness-qualification/phase5-" + "a" * 32 + "/"
+    assert first is not second
+    assert first.get_key() == second.get_key() == b"m" * 32
+    assert "m" * 32 not in repr(first)
+
+
+def test_bounded_cleanup_refuses_unowned_or_prefix_escaping_s3_objects() -> None:
+    """Cleanup reports residue rather than deleting outside its owned run namespace."""
+    fixtures = _load_fixtures()
+    namespace = fixtures.qualification_namespace("phase5-" + "b" * 32)
+
+    class FakeS3:
+        def __init__(self) -> None:
+            self.deleted = False
+
+        def get_object(self, **_kwargs: object) -> dict[str, object]:
+            return {"Body": _Body(b'{"run_id":"wrong-run"}')}
+
+        def list_objects_v2(self, **_kwargs: object) -> dict[str, object]:
+            return {"Contents": [{"Key": "outside/never-delete", "Size": 1}]}
+
+        def delete_objects(self, **_kwargs: object) -> dict[str, object]:
+            self.deleted = True
+            return {}
+
+    class _Body:
+        def __init__(self, value: bytes) -> None:
+            self._value = value
+
+        def read(self, _size: int) -> bytes:
+            return self._value
+
+        def close(self) -> None:
+            return None
+
+    client = FakeS3()
+    assert fixtures.cleanup_s3_run(client, "bucket", namespace) == "RESIDUE"
+    assert client.deleted is False
