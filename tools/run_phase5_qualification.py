@@ -76,6 +76,20 @@ _FORBIDDEN_VALUE_PATTERN = re.compile(
     r"://|access[_-]?key|credential|manifest|password|secret|token|payload",
     re.IGNORECASE,
 )
+_SECRET_ENVIRONMENT_NAME = re.compile(
+    r"(?:^AWS_(?:ACCESS_KEY_ID|SECRET_ACCESS_KEY|SESSION_TOKEN)$|"
+    r"(?:DSN|KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL))",
+    re.IGNORECASE,
+)
+_DISALLOWED_S3_ENDPOINT_ENVIRONMENT = (
+    "CACHENESS_TEST_S3_ENDPOINT",
+    "AWS_ENDPOINT_URL",
+    "AWS_ENDPOINT_URL_S3",
+)
+_NON_AWS_LIVE_SUITE_SOURCE = re.compile(
+    r"\b(?:moto|mock_aws|localstack|minio)\b|endpoint_url|127\.0\.0\.1|localhost",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -134,6 +148,15 @@ def _missing_configuration(environment: Mapping[str, str]) -> list[str]:
     return sorted(name for name in REQUIRED_CONFIGURATION if not environment.get(name))
 
 
+def _supplied_secret_fragments(environment: Mapping[str, str]) -> tuple[str, ...]:
+    """Return only secret-shaped values for a final serialized-evidence scan."""
+    return tuple(
+        value
+        for name, value in environment.items()
+        if value and len(value) >= 8 and _SECRET_ENVIRONMENT_NAME.search(name)
+    )
+
+
 def _validate_external_configuration(environment: Mapping[str, str]) -> None:
     """Validate only shape and key material in memory before a live run."""
     bucket = environment["CACHENESS_TEST_S3_BUCKET"]
@@ -146,7 +169,9 @@ def _validate_external_configuration(environment: Mapping[str, str]) -> None:
         )
     except Exception as error:
         raise ValueError("invalid external configuration") from error
-    if len(manifest_key) < 32:
+    if len(manifest_key) != 32:
+        raise ValueError("invalid external configuration")
+    if any(environment.get(name) for name in _DISALLOWED_S3_ENDPOINT_ENVIRONMENT):
         raise ValueError("invalid external configuration")
 
 
@@ -319,6 +344,19 @@ def _qualification_arguments() -> list[str]:
     ]
 
 
+def _fixed_live_suite_is_real() -> bool:
+    """Reject absent or emulator-oriented fixed modules before they can qualify."""
+    for relative_path in LIVE_TEST_MODULES:
+        path = REPOSITORY_ROOT / relative_path
+        try:
+            source = path.read_text(encoding="utf-8")
+        except OSError:
+            return False
+        if _NON_AWS_LIVE_SUITE_SOURCE.search(source):
+            return False
+    return True
+
+
 def _timeout_seconds(environment: Mapping[str, str]) -> int:
     raw_timeout = environment.get("CACHENESS_TEST_QUALIFICATION_TIMEOUT_SECONDS")
     if raw_timeout is None:
@@ -332,8 +370,12 @@ def _timeout_seconds(environment: Mapping[str, str]) -> int:
     return timeout
 
 
-def _run_fixed_suite(arguments: Sequence[str], timeout: int) -> subprocess.CompletedProcess[str]:
+def _run_fixed_suite(
+    arguments: Sequence[str], timeout: int, environment: Mapping[str, str]
+) -> subprocess.CompletedProcess[str]:
     """Run the live suite without forwarding its potentially sensitive output."""
+    if not _fixed_live_suite_is_real():
+        return subprocess.CompletedProcess(list(arguments), 1, "", "")
     return subprocess.run(
         list(arguments),
         cwd=REPOSITORY_ROOT,
@@ -341,6 +383,7 @@ def _run_fixed_suite(arguments: Sequence[str], timeout: int) -> subprocess.Compl
         text=True,
         timeout=timeout,
         check=False,
+        env=dict(environment),
     )
 
 
@@ -408,7 +451,7 @@ def run_qualification(
     *,
     output: Path,
     environment: Mapping[str, str] | None = None,
-    run_tests: Callable[[Sequence[str], int], subprocess.CompletedProcess[str]] = _run_fixed_suite,
+    run_tests: Callable[[Sequence[str], int], subprocess.CompletedProcess[str]] | None = None,
     resolve_aws: Callable[[Mapping[str, str]], AwsServiceIdentity] = resolve_aws_service_identity,
     cleanup: Callable[[Mapping[str, str], str], str] = _cleanup_from_fixtures,
     run_namespace: str | None = None,
@@ -416,9 +459,7 @@ def run_qualification(
     """Write one terminal evidence record and return its fixed process status."""
     supplied_environment = dict(os.environ if environment is None else environment)
     namespace = run_namespace or _new_run_namespace()
-    forbidden_fragments = tuple(
-        value for value in supplied_environment.values() if value and len(value) >= 8
-    )
+    forbidden_fragments = _supplied_secret_fragments(supplied_environment)
     missing = _missing_configuration(supplied_environment)
     if missing:
         _write_terminal_evidence(
@@ -466,8 +507,15 @@ def run_qualification(
 
     completed: subprocess.CompletedProcess[str] | None = None
     cleanup_status = "ERROR"
+    child_environment = dict(supplied_environment)
+    child_environment["CACHENESS_PHASE5_QUALIFICATION_RUN_ID"] = namespace
     try:
-        completed = run_tests(_qualification_arguments(), timeout)
+        if run_tests is None:
+            completed = _run_fixed_suite(
+                _qualification_arguments(), timeout, child_environment
+            )
+        else:
+            completed = run_tests(_qualification_arguments(), timeout)
     except (OSError, subprocess.SubprocessError):
         completed = None
     finally:

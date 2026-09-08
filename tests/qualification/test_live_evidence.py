@@ -82,7 +82,7 @@ def test_only_a_complete_live_run_and_clean_cleanup_can_qualify(
     environment = {
         "CACHENESS_TEST_POSTGRES_DSN": "postgresql://test:password@db/qualification",
         "CACHENESS_TEST_S3_BUCKET": "qualification-bucket",
-        "CACHENESS_TEST_MANIFEST_KEY_B64": "dGVzdC1tYW5pZmVzdC1rZXktZm9yLXJlZGFjdGlvbi1vbmx5",
+        "CACHENESS_TEST_MANIFEST_KEY_B64": "bW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW0=",
     }
 
     exit_code = runner.run_qualification(
@@ -101,6 +101,69 @@ def test_only_a_complete_live_run_and_clean_cleanup_can_qualify(
         "QUALIFIED" if expected_exit_code == 0 else "NOT_QUALIFIED"
     )
     runner.validate_evidence(evidence)
+
+
+def test_runner_passes_only_the_exact_run_identifier_to_its_live_subprocess(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fixture cleanup backstop and child process address the same namespace."""
+    runner = _load_runner()
+    observed_environment: dict[str, str] = {}
+
+    def fake_suite(
+        _arguments: list[str], _timeout: int, environment: dict[str, str]
+    ) -> subprocess.CompletedProcess[str]:
+        observed_environment.update(environment)
+        return subprocess.CompletedProcess([], 0, "3 passed", "")
+
+    monkeypatch.setattr(runner, "_run_fixed_suite", fake_suite)
+    exit_code = runner.run_qualification(
+        output=tmp_path / "qualification.json",
+        environment={
+            "CACHENESS_TEST_POSTGRES_DSN": "postgresql://test:password@db/qualification",
+            "CACHENESS_TEST_S3_BUCKET": "qualification-bucket",
+            "CACHENESS_TEST_MANIFEST_KEY_B64": "bW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW0=",
+            "AWS_REGION": "us-east-1",
+        },
+        resolve_aws=lambda _environment: runner.AwsServiceIdentity(
+            region="us-east-1", provider="standard"
+        ),
+        cleanup=lambda _environment, _run_namespace: "CLEAN",
+        run_namespace="phase5-" + "c" * 32,
+    )
+
+    assert exit_code == 0
+    assert observed_environment["CACHENESS_PHASE5_QUALIFICATION_RUN_ID"] == (
+        "phase5-" + "c" * 32
+    )
+
+
+def test_endpoint_override_is_not_a_live_amazon_s3_configuration(tmp_path: Path) -> None:
+    """A compatible endpoint cannot be substituted for the real AWS gate."""
+    runner = _load_runner()
+    called = False
+
+    def should_not_run(
+        _arguments: list[str], _timeout: int
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal called
+        called = True
+        return subprocess.CompletedProcess([], 0, "3 passed", "")
+
+    exit_code = runner.run_qualification(
+        output=tmp_path / "qualification.json",
+        environment={
+            "CACHENESS_TEST_POSTGRES_DSN": "postgresql://test:password@db/qualification",
+            "CACHENESS_TEST_S3_BUCKET": "qualification-bucket",
+            "CACHENESS_TEST_MANIFEST_KEY_B64": "bW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW0=",
+            "AWS_ENDPOINT_URL_S3": "http://localhost:4566",
+        },
+        run_tests=should_not_run,
+    )
+
+    assert exit_code == 1
+    assert called is False
+    assert runner.load_evidence(tmp_path / "qualification.json")["status"] == "NOT_QUALIFIED"
 
 
 def test_evidence_serializer_rejects_secret_fragments_and_non_allowlisted_fields(
