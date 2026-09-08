@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 04
 current_phase_name: Metadata Composition and Topology Contracts
 status: executing
-stopped_at: Completed 04-01-PLAN.md
-last_updated: "2026-09-08T01:10:09.795Z"
+stopped_at: Completed 04-02-PLAN.md
+last_updated: "2026-09-08T01:31:04.712Z"
 last_activity: 2026-09-07
 last_activity_desc: Phase 04 execution started
-state_head: acd5fa897e10e9b4ebbfe516796c0cae16f7e9ec
+state_head: 014373cf9c9d78fe050c5ec091c8b558ce67bb46
 progress:
   total_phases: 8
   completed_phases: 2
   total_plans: 55
-  completed_plans: 47
+  completed_plans: 48
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-09-06)
 ## Current Position
 
 Phase: 04 (Metadata Composition and Topology Contracts) — EXECUTING
-Plan: 2 of 8
+Plan: 3 of 8
 Status: Ready to execute
 Last activity: 2026-09-07 — Phase 04 execution started
 
@@ -127,6 +127,7 @@ Phase 03 rows in this historical table include superseded attempts and do not de
 | Phase 03 P18 | 1h 31m | 5 tasks | 9 files |
 | Phase 03 P20 | 1920 | 4 tasks | 12 files |
 | Phase 04 P01 | 5m 13s | 2 tasks | 8 files |
+| Phase 04-metadata-composition-and-topology-contracts P02 | 16m 10s | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -259,6 +260,9 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 03]: The 5.0-second authority default is caller policy; 0.187-second evidence remains benchmark-only.
 - [Phase 04]: Phase 4 Ruff debt is frozen from the declared plan inventory; scope drift, changed findings, and dirty new Python files fail the gate.
 - [Phase 04]: Wave 0 contracts use assertion-level import gates so absent clean APIs fail red without collection errors.
+- [Phase 04]: Catalog defaults materialize only on new writes; portable predicates inspect stored presence rather than effective defaults.
+- [Phase 04]: Format 2 keeps store epoch, manifest schema, SQLite user version, and payload format independently versioned; unsupported layouts fail read-only.
+- [Phase 04]: BlobReceipt is the frozen public semantic result; BlobEntryInfo is not re-exported as a compatibility alias.
 
 ### Pending Todos
 
@@ -284,6 +288,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-08T01:10:09.744Z
-Stopped at: Completed 04-01-PLAN.md
+Last session: 2026-09-08T01:31:04.660Z
+Stopped at: Completed 04-02-PLAN.md
 Resume file: None
