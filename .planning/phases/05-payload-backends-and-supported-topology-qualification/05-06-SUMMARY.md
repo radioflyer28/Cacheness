@@ -16,7 +16,7 @@ provides:
   - common lifecycle contracts for memory, SQLite/filesystem, and PostgreSQL/S3 profiles
 affects: [phase-05-07, phase-05-08, phase-07-migration-rebuild]
 actuals:
-  tokens: 11855
+  tokens: 11992
   tasks: 2
   commits: 5
 tech-stack:
