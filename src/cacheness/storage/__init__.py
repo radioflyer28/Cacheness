@@ -25,6 +25,8 @@ Usage:
 
 # Import from backends subpackage
 # Import from handlers subpackage
+from importlib.util import find_spec
+
 from .handlers import (
     CacheHandler,
     HandlerRegistry,
@@ -95,6 +97,20 @@ from cacheness.error_handling import (
 
 from .composition import BackendRef, BackendRole, RoleRegistry, StoreTopology
 
+try:
+    from .backends.s3_backend import BOTO3_AVAILABLE, S3BlobBackend
+except ImportError:
+    BOTO3_AVAILABLE = False
+
+try:
+    if find_spec("psycopg") is None:
+        raise ImportError
+    from .backends.postgresql_lifecycle_authority import PostgresqlLifecycleAuthority
+except ImportError:
+    POSTGRESQL_AVAILABLE = False
+else:
+    POSTGRESQL_AVAILABLE = True
+
 __all__ = [
     # Main API
     "BlobStore",
@@ -157,3 +173,9 @@ __all__ = [
     # Security
     "CacheEntrySigner",
 ]
+
+if BOTO3_AVAILABLE:
+    __all__.append(S3BlobBackend.__name__)
+
+if POSTGRESQL_AVAILABLE:
+    __all__.append(PostgresqlLifecycleAuthority.__name__)

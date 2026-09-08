@@ -136,12 +136,14 @@ def test_remote_profile_requires_external_key_and_retains_one_engine(tmp_path) -
         "s3",
         _RemotePayload,
         capabilities=_RemotePayload.topology_capabilities,
+        replace=True,
     )
     registry.register(
         "authority",
         "postgresql",
         _RemoteAuthority,
         capabilities=_RemoteAuthority.topology_capabilities,
+        replace=True,
     )
     topology = StoreTopology(
         payload=BackendRef(name="s3"),
@@ -229,7 +231,7 @@ def _registry_with_factory_spies() -> tuple[RoleRegistry, list[tuple[str, str]]]
             "authority",
             authority_name,
             authority_factory(authority_name),
-            replace=authority_name != "postgresql",
+            replace=True,
         )
     return registry, calls
 
@@ -292,8 +294,18 @@ def test_registration_and_projection_order_do_not_change_support_identity() -> N
     """JSON is derived-only and profile lookup ignores registration order."""
     first_registry, _ = _registry_with_factory_spies()
     second_registry = RoleRegistry()
-    second_registry.register("authority", "postgresql", lambda: _QualifiedAuthority("postgresql"))
-    second_registry.register("payload", "s3", lambda: _QualifiedPayload("s3"))
+    second_registry.register(
+        "authority",
+        "postgresql",
+        lambda: _QualifiedAuthority("postgresql"),
+        replace=True,
+    )
+    second_registry.register(
+        "payload",
+        "s3",
+        lambda: _QualifiedPayload("s3"),
+        replace=True,
+    )
 
     base = StoreTopology(
         payload=BackendRef(name="memory"),

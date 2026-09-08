@@ -167,7 +167,15 @@ BUILTIN_QUALIFIED_TOPOLOGY_PROFILES: Mapping[
                 "objects reconcile outside cross-resource ACID"
             ),
             progress_outcomes=frozenset(
-                {"success", "conflict", "retryable_timeout"}
+                {
+                    "success",
+                    "conflict",
+                    "retryable_serialization",
+                    "retryable_deadlock",
+                    "retryable_lock_timeout",
+                    "retryable_statement_timeout",
+                    "retryable_connection_timeout",
+                }
             ),
             service_prerequisites=(
                 "explicit PostgreSQL initialization before shared workers",
@@ -553,6 +561,34 @@ class RoleRegistry:
             },
         )
         self.register(
+            BackendRole.PAYLOAD.value,
+            "s3",
+            _construct_s3_payload,
+            capabilities={
+                "durable": True,
+                "process_scope": "multi_host",
+                "host_scope": "multi_host",
+                "immutable_generations": True,
+                "streaming": True,
+                "listing": True,
+            },
+        )
+        self.register(
+            BackendRole.AUTHORITY.value,
+            "postgresql",
+            _construct_postgresql_authority,
+            capabilities={
+                "durable": True,
+                "process_scope": "multi_host",
+                "host_scope": "multi_host",
+                "transaction_scope": "authority",
+                "exact_cas": True,
+                "portable_query": True,
+                "canonical_scan": True,
+                "index_acceleration": True,
+            },
+        )
+        self.register(
             BackendRole.PROJECTION.value,
             "json",
             _construct_json_projection,
@@ -650,6 +686,34 @@ class ResolvedTopology:
 def _construct_sqlite_authority(*, root: str | Path, **options: object) -> object:
     """Build a local authority only when a topology supplies its explicit root."""
     return SqliteLifecycleAuthority.for_root(Path(root), **options)
+
+
+def _construct_s3_payload(**options: object) -> object:
+    """Construct only the guarded Amazon S3 generation-I/O participant.
+
+    The lazy import leaves base-package import independent of boto3.  The
+    participant itself raises its install-oriented ImportError when the cloud
+    extra is absent; registration remains constructibility, not qualification.
+    """
+    from .backends.s3_backend import S3BlobBackend
+
+    participant = S3BlobBackend(**options)
+    participant.qualification_identity = "s3"
+    return participant
+
+
+def _construct_postgresql_authority(**options: object) -> object:
+    """Construct only the narrow PostgreSQL lifecycle authority.
+
+    Importing the storage package never requires psycopg.  Construction keeps
+    the authority's actionable missing-extra error and does not initialize or
+    migrate a schema.
+    """
+    from .backends.postgresql_lifecycle_authority import PostgresqlLifecycleAuthority
+
+    participant = PostgresqlLifecycleAuthority(**options)
+    participant.qualification_identity = "postgresql"
+    return participant
 
 
 def _construct_json_projection(*, metadata_file: str | Path, **options: object) -> object:
@@ -1019,6 +1083,16 @@ def allowed_progress_outcomes(authority_kind: str) -> set[str]:
         return {"success", "conflict", "retryable_timeout"}
     if authority_kind == "memory":
         return {"success", "conflict"}
+    if authority_kind == "postgresql-remote":
+        return {
+            "success",
+            "conflict",
+            "retryable_serialization",
+            "retryable_deadlock",
+            "retryable_lock_timeout",
+            "retryable_statement_timeout",
+            "retryable_connection_timeout",
+        }
     raise CompositionValidationError(
         f"No declared progress behavior for authority kind {authority_kind!r}"
     )

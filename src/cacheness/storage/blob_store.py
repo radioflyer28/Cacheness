@@ -32,7 +32,6 @@ from cacheness.error_handling import (
     CacheReason,
     CacheStorageError,
 )
-from .backends.blob_backends import InMemoryBlobBackend
 from .catalog import (
     CatalogCursor,
     CatalogPage,
@@ -62,7 +61,6 @@ from .manifest import (
     BlobManifest,
     verify_current_manifest,
 )
-from .memory_lifecycle_authority import InMemoryLifecycleAuthority
 from .path_security import encode_physical_name
 from .projections import (
     ProjectionCapabilityError,
@@ -217,14 +215,20 @@ class BlobStore:
         self._instance_admission = InstanceAdmission(self.lifecycle_limits)
         self._immutable_metadata_patch_fields = _IMMUTABLE_METADATA_PATCH_FIELDS
         self.handlers = HandlerRegistry()
-        self._manifest_key_provider = manifest_key_provider or (
-            _EphemeralManifestKeyProvider()
-            if self._is_memory_topology()
-            else ManifestKeyProvider(
+        if manifest_key_provider is not None:
+            self._manifest_key_provider = manifest_key_provider
+        elif self._is_memory_topology():
+            self._manifest_key_provider = _EphemeralManifestKeyProvider()
+        elif self.topology.qualified_profile.requirements.coordination_scope == "multiple_hosts":
+            raise CacheBlobBackendError(
+                "A multi-host BlobStore requires an external manifest signing key",
+                context={"operation": "blob_store_composition", "stage": "signing_key"},
+            )
+        else:
+            self._manifest_key_provider = ManifestKeyProvider(
                 self.cache_dir / "blob_manifest_hmac_key.bin",
                 lifecycle_limits=self.lifecycle_limits,
             )
-        )
         self.capabilities = self.topology.capabilities
         self.lifecycle = AuthorityLifecycleEngine(self, self.lifecycle_authority)
         # Kept as a direct engine alias for private timing seams only. It is
@@ -832,9 +836,7 @@ class BlobStore:
             self._legacy_identity.require_explicit_migration()
 
     def _is_memory_topology(self) -> bool:
-        return isinstance(self.payload_backend, InMemoryBlobBackend) and isinstance(
-            self.lifecycle_authority, InMemoryLifecycleAuthority
-        )
+        return self.topology.qualified_profile.pair == ("memory", "memory")
 
     @staticmethod
     def _generate_unique_key() -> str:
