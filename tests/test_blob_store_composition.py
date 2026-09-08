@@ -6,6 +6,7 @@ import ast
 from importlib import import_module
 from importlib.util import find_spec
 from pathlib import Path
+import sqlite3
 
 import pytest
 
@@ -206,3 +207,49 @@ def test_memory_tracer_keeps_exact_injected_instances_caller_owned(tmp_path: Pat
 
     assert authority.read_entry("memory-injected") is not None
     assert payload.exists("memory://generations") is False
+
+
+def test_sqlite_tracer_reopens_one_signed_canonical_descriptor(tmp_path: Path) -> None:
+    """A format-2 filesystem/SQLite store persists no catalog mirror."""
+    from cacheness.storage.blob_store import BlobStore
+    from cacheness.storage.composition import BackendRef, StoreTopology
+    from cacheness.storage.manifest import BlobManifest, verify_current_manifest
+    from cacheness.storage.sqlite_lifecycle_authority import AUTHORITY_RELATIVE_PATH
+
+    root = tmp_path / "persistent-sqlite-store"
+
+    def topology() -> StoreTopology:
+        return StoreTopology(
+            payload=BackendRef(name="filesystem", options={"base_dir": root}),
+            authority=BackendRef(name="sqlite", options={"root": root}),
+        )
+
+    with BlobStore(topology(), cache_dir=root) as first:
+        first.initialize()
+        receipt = first.put_entry(
+            {"answer": 42}, key="persistent-tracer", metadata={"label": "answer"}
+        )
+        committed = first.lifecycle_authority.read_entry("persistent-tracer")
+        assert committed is not None
+        descriptor = BlobManifest.from_canonical_bytes(committed.manifest)
+        verify_current_manifest(descriptor, first._authority_manifest_key())
+        assert descriptor.key == receipt.key
+        assert descriptor.user_metadata == {"label": "answer"}
+
+    with sqlite3.connect(root / AUTHORITY_RELATIVE_PATH) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+    assert not {name for name in tables if name.startswith("catalog_")}
+
+    with BlobStore(topology(), cache_dir=root) as reopened:
+        reopened.initialize()
+        assert reopened.get("persistent-tracer") == {"answer": 42}
+        observed = reopened.get_entry_info("persistent-tracer")
+        assert observed is not None
+        assert observed.key == receipt.key
+        assert observed.generation == receipt.generation
+        assert observed.metadata["metadata"]["label"] == "answer"

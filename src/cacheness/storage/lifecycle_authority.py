@@ -83,6 +83,9 @@ class MutationSpec:
     generation: str
     candidate_locator: str
     expected: EntryExpectation
+    # The lifecycle engine supplies one already-validated, signed canonical
+    # descriptor. Authorities preserve these opaque bytes and never rebuild a
+    # second catalog representation from individual fields.
     manifest: bytes = b""
 
     def __post_init__(self) -> None:

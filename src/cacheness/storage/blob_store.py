@@ -43,21 +43,19 @@ from .integrity import (
     ManifestKeyError,
     ManifestKeyProvider,
     ManifestSigningKeyProvider,
-    verify_hmac_sha256,
 )
 from .legacy_manifest import LegacyManifestIdentity, recognize_legacy_fixture_tree
 from .lifecycle import AuthorityLifecycleEngine
 from .lifecycle_authority import EntryExpectation
 from .manifest import (
-    BlobManifestV1,
-    canonical_signing_bytes_from_record,
-    decode_canonical_manifest_record,
+    BlobManifest,
+    verify_current_manifest,
 )
 from .manifest_repository import JsonProjectionExporter
 from .memory_lifecycle_authority import InMemoryLifecycleAuthority
 from .path_security import encode_physical_name
 from .reconciliation import ReconciliationReport, _AuthorityReconciler
-from .read_contract import BlobEntryInfo
+from .read_contract import BlobEntryInfo, BlobReceipt
 
 
 logger = logging.getLogger(__name__)
@@ -298,12 +296,19 @@ class BlobStore:
         return self.lifecycle.get_entry_info(key)
 
     @_ordinary_admitted
-    def put_entry(self, data: Any, key=None, metadata=None) -> BlobEntryInfo:
+    def put_entry(self, data: Any, key=None, metadata=None) -> BlobReceipt:
         """Commit an entry and own its cleanup, returning the exact receipt."""
         result = self._put_with_result_admitted(data, key=key, metadata=metadata)
-        return replace(
-            self.lifecycle.entry_info(result.promoted),
-            previous_locator=None if result.previous is None else result.previous.locator,
+        if result.promoted is None:
+            raise CacheBlobLifecycleConflictError("Committed put lacks an authority entry")
+        return BlobReceipt(
+            operation_id=result.operation_id,
+            key=result.promoted.key,
+            generation=result.promoted.generation,
+            locator=result.promoted.locator,
+            expectation=result.promoted.expectation,
+            catalog_revision=result.promoted.expectation.revision or 0,
+            projections={},
         )
 
     @_ordinary_admitted
@@ -492,30 +497,22 @@ class BlobStore:
 
     def _authenticated_authority_manifest(
         self, raw: bytes, *, allow_tombstone: bool = False
-    ) -> BlobManifestV1:
+    ) -> BlobManifest:
         """Authenticate canonical authority bytes before trusting any locator."""
         try:
-            raw_record = decode_canonical_manifest_record(raw)
+            manifest = BlobManifest.from_canonical_bytes(raw)
         except CacheManifestUnsupportedVersionError as exc:
             raise CacheBlobManifestUnsupportedVersionError(
                 "Authority manifest schema version is unsupported"
             ) from exc
         except CacheManifestIntegrityError as exc:
             raise CacheBlobManifestMalformedError("Authority manifest is malformed") from exc
-        if not verify_hmac_sha256(
-            canonical_signing_bytes_from_record(raw_record),
-            raw_record.get("signature"),
-            self._authority_manifest_key(),
-        ):
-            raise CacheBlobManifestUnauthenticatedError("Authority manifest cannot be authenticated")
         try:
-            manifest = BlobManifestV1.from_mapping(raw_record)
-        except CacheManifestUnsupportedVersionError as exc:
-            raise CacheBlobManifestUnsupportedVersionError(
-                "Authority manifest schema version is unsupported"
-            ) from exc
+            verify_current_manifest(manifest, self._authority_manifest_key())
         except CacheManifestIntegrityError as exc:
-            raise CacheBlobManifestMalformedError("Authority manifest is malformed") from exc
+            raise CacheBlobManifestUnauthenticatedError(
+                "Authority manifest cannot be authenticated"
+            ) from exc
         if manifest.canonical_bytes() != raw:
             raise CacheBlobManifestMalformedError("Authority manifest is not canonical")
         return manifest
@@ -546,7 +543,7 @@ class BlobStore:
             context["cleanup_error"] = type(cleanup_error).__name__
         raise CacheStorageError("Could not prove managed payload cleanup", context=context)
 
-    def _resolve_payload_handler(self, manifest: BlobManifestV1) -> Any:
+    def _resolve_payload_handler(self, manifest: BlobManifest) -> Any:
         """Resolve one signed handler/payload contract before opening bytes."""
         resolver = getattr(self.handlers, "resolve_payload_contract", None)
         try:
@@ -568,7 +565,7 @@ class BlobStore:
             ) from exc
 
     @staticmethod
-    def _handler_metadata(manifest: BlobManifestV1) -> Dict[str, Any]:
+    def _handler_metadata(manifest: BlobManifest) -> Dict[str, Any]:
         return {
             **dict(manifest.user_metadata), **dict(manifest.handler_metadata),
             "cache_key": manifest.key, "data_type": manifest.handler_type,
@@ -576,7 +573,7 @@ class BlobStore:
             "created_at": manifest.created_at,
         }
 
-    def _manifest_entry_data(self, manifest: BlobManifestV1) -> Dict[str, Any]:
+    def _manifest_entry_data(self, manifest: BlobManifest) -> Dict[str, Any]:
         return {
             "cache_key": manifest.key,
             "data_type": manifest.handler_type,
@@ -585,6 +582,13 @@ class BlobStore:
             "metadata": {
                 **dict(manifest.user_metadata), **dict(manifest.handler_metadata),
                 "actual_path": manifest.locator,
+            },
+            "catalog": {
+                "schema_id": manifest.catalog_schema_id,
+                "schema_revision": manifest.catalog_schema_revision,
+                "schema_fingerprint": manifest.catalog_schema_fingerprint,
+                "values": dict(manifest.catalog_values),
+                "presence": manifest.catalog_presence,
             },
         }
 

@@ -183,6 +183,14 @@ class InMemoryLifecycleAuthority:
                 return self._promoted_result(prepared.operation_id)
             if proof is None:
                 raise CacheBlobLifecycleConflictError("Mutation is not verified and prepared")
+            if (
+                spec.manifest
+                and proof.manifest
+                and spec.manifest != proof.manifest
+            ):
+                raise CacheBlobLifecycleConflictError(
+                    "Verification descriptor differs from prepared descriptor"
+                )
             if self._expectation(spec.key) != spec.expected:
                 raise CacheBlobLifecycleConflictError("Mutation lineage changed before promotion")
             previous = self._entries.get(spec.key)

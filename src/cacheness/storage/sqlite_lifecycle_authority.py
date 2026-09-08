@@ -1249,15 +1249,26 @@ class SqliteLifecycleAuthority:
     def record_verification(
         self, prepared: PreparedMutation, proof: VerificationProof
     ) -> None:
+        if (
+            prepared.spec.manifest
+            and proof.manifest
+            and prepared.spec.manifest != proof.manifest
+        ):
+            raise CacheBlobLifecycleConflictError(
+                "Verification descriptor differs from prepared descriptor"
+            )
+        descriptor = proof.manifest or prepared.spec.manifest
+
         def record(connection: sqlite3.Connection) -> None:
             cursor = connection.execute(
                 "UPDATE mutations SET verified_digest = ?, verified_size = ?, manifest = ? "
-                "WHERE operation_id = ? AND state = 'prepared'",
+                "WHERE operation_id = ? AND state = 'prepared' AND manifest = ?",
                 (
                     proof.digest,
                     proof.byte_size,
-                    proof.manifest or prepared.spec.manifest,
+                    descriptor,
                     prepared.operation_id,
+                    prepared.spec.manifest,
                 ),
             )
             if cursor.rowcount != 1:
@@ -1321,6 +1332,7 @@ class SqliteLifecycleAuthority:
                 (row[0], row[1], row[2], row[7], manifest_digest, next_lineage, revision),
             )
             self._reach_transaction_boundary("promote.after_entry")
+            self._reach_transaction_boundary("promote.after_descriptor")
             connection.execute(
                 "UPDATE mutations SET state = 'promoted' WHERE operation_id = ?",
                 (prepared.operation_id,),
@@ -1338,6 +1350,7 @@ class SqliteLifecycleAuthority:
                 (revision,),
             )
             self._reach_transaction_boundary("promote.after_projection")
+            self._reach_transaction_boundary("promote.after_revision")
             return self._promoted_result(connection, prepared.operation_id)
 
         return self._transaction(

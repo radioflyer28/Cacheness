@@ -9,6 +9,7 @@ from __future__ import annotations
 from contextlib import contextmanager, ExitStack
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+import hashlib
 from pathlib import Path
 import time
 from typing import Any, Callable
@@ -24,7 +25,7 @@ from cacheness.error_handling import (
     CacheBlobRecoverableCleanupError,
 )
 
-from .integrity import sha256_and_size, sign_hmac_sha256
+from .integrity import sha256_and_size
 from .lifecycle_authority import (
     CleanupDebt,
     EntryExpectation,
@@ -35,12 +36,17 @@ from .lifecycle_authority import (
     PreparedMutation,
     VerificationProof,
 )
-from .manifest import BlobManifestV1
+from .manifest import BlobManifest, StoreVersionDimensions, sign_current_manifest
 from .path_security import resolve_managed_locator
 from .read_contract import BlobEntry, BlobEntryInfo
 
 
 _TOMBSTONE_OPERATION_ID_FIELD = "_cacheness_tombstone_operation_id"
+_DEFAULT_CATALOG_SCHEMA_ID = "cacheness.default"
+_DEFAULT_CATALOG_SCHEMA_REVISION = 1
+_DEFAULT_CATALOG_SCHEMA_FINGERPRINT = hashlib.sha256(
+    b"cacheness.catalog.default.v1"
+).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -54,6 +60,7 @@ class _LifecycleHookContext:
 class LifecyclePutResult:
     """Private immutable context for one completed authority-backed put."""
 
+    operation_id: str
     key: str
     expected: EntryExpectation
     promoted: EntrySnapshot | None
@@ -94,7 +101,7 @@ class AuthorityLifecycleEngine:
 
     def _entry_manifest(
         self, entry: EntrySnapshot, *, allow_tombstone: bool = False
-    ) -> BlobManifestV1:
+    ) -> BlobManifest:
         manifest = self.store._authenticated_authority_manifest(entry.manifest)
         if manifest.key != entry.key:
             raise CacheBlobLifecycleConflictError(
@@ -123,15 +130,13 @@ class AuthorityLifecycleEngine:
         return manifest
 
     def _sign(
-        self, manifest: BlobManifestV1, *, initialize_new_store: bool = False
-    ) -> BlobManifestV1:
-        return manifest.with_signature(
-            sign_hmac_sha256(
-                manifest.signing_bytes(),
-                self.store._authority_manifest_key(
-                    initialize_new_store=initialize_new_store
-                ),
-            )
+        self, manifest: BlobManifest, *, initialize_new_store: bool = False
+    ) -> BlobManifest:
+        return sign_current_manifest(
+            manifest,
+            self.store._authority_manifest_key(
+                initialize_new_store=initialize_new_store
+            ),
         )
 
     def _candidate_locator(self, key: str, generation: str, suffix: str) -> Path:
@@ -205,6 +210,83 @@ class AuthorityLifecycleEngine:
         with guarded_io.stage(handler, data, self.store.config) as staged:
             generation = uuid4().hex
             locator = self._candidate_locator(key, generation, staged.suffix)
+            raw_result = staged.raw_result
+            with staged.open() as (source, byte_size):
+                digest_builder = hashlib.sha256()
+                while chunk := source.read(64 * 1024):
+                    digest_builder.update(chunk)
+                digest = digest_builder.hexdigest()
+            payload_format = str(
+                raw_result.get(
+                    "payload_format",
+                    getattr(
+                        handler,
+                        "payload_format",
+                        raw_result.get("storage_format", "native"),
+                    ),
+                )
+            )
+            payload_format_version = int(
+                raw_result.get(
+                    "payload_format_version",
+                    getattr(handler, "payload_format_version", 1),
+                )
+            )
+            handler_metadata = raw_result.get("metadata", {})
+            if not isinstance(handler_metadata, dict):
+                raise CacheBlobLifecycleConflictError(
+                    "Handler staging metadata must be a mapping"
+                )
+            manifest = BlobManifest(
+                versions=StoreVersionDimensions(
+                    payload_format_version=payload_format_version
+                ),
+                key=key,
+                generation=generation,
+                locator=locator.as_posix(),
+                handler_type=handler.data_type,
+                payload_format=payload_format,
+                digest=digest,
+                byte_size=byte_size,
+                created_at=datetime.now(timezone.utc).isoformat(),
+                catalog_schema_id=_DEFAULT_CATALOG_SCHEMA_ID,
+                catalog_schema_revision=_DEFAULT_CATALOG_SCHEMA_REVISION,
+                catalog_schema_fingerprint=_DEFAULT_CATALOG_SCHEMA_FINGERPRINT,
+                catalog_values={},
+                catalog_presence=(),
+                user_metadata=dict(metadata or {}),
+                handler_metadata={
+                    **handler_metadata,
+                    "storage_format": payload_format,
+                },
+            )
+            before_promotion = getattr(self.store, "_before_authority_promotion", None)
+            if callable(before_promotion):
+                unsigned_manifest = manifest
+                manifest = before_promotion(
+                    manifest,
+                    LifecyclePutResult(
+                        operation_id="pending",
+                        key=key,
+                        expected=expected,
+                        promoted=None,
+                        previous=previous,
+                    ),
+                )
+                if not isinstance(manifest, BlobManifest):
+                    raise CacheBlobLifecycleConflictError(
+                        "Lifecycle hook must return a format-2 BlobManifest"
+                    )
+                if (
+                    replace(manifest, user_metadata=unsigned_manifest.user_metadata)
+                    != unsigned_manifest
+                ):
+                    raise CacheBlobLifecycleConflictError(
+                        "Compatibility metadata cannot change blob identity or integrity fields"
+                    )
+            manifest = self._sign(
+                manifest, initialize_new_store=previous is None
+            )
             prepared = self.authority.prepare_mutation(
                 MutationSpec.create(
                     operation_id=uuid4().hex,
@@ -212,6 +294,7 @@ class AuthorityLifecycleEngine:
                     generation=generation,
                     candidate_locator=locator.as_posix(),
                     expected=expected,
+                    manifest=manifest.canonical_bytes(),
                 )
             )
             candidate_persisted = False
@@ -225,66 +308,13 @@ class AuthorityLifecycleEngine:
                     locator, dict(published.get("metadata", {}))
                 ) as snapshot:
                     digest, byte_size = sha256_and_size(snapshot.path)
-                payload_format = str(
-                    published.get(
-                        "payload_format",
-                        getattr(
-                            handler,
-                            "payload_format",
-                            published.get("storage_format", "native"),
-                        ),
+                # The staged digest is carried into the signed descriptor
+                # before durable intent is recorded. Verify the published
+                # immutable generation independently before promotion.
+                if digest != manifest.digest or byte_size != manifest.byte_size:
+                    raise CacheBlobLifecycleConflictError(
+                        "Published payload disagrees with its prepared descriptor"
                     )
-                )
-                payload_format_version = int(
-                    published.get(
-                        "payload_format_version",
-                        getattr(handler, "payload_format_version", 1),
-                    )
-                )
-                manifest = BlobManifestV1(
-                    schema_version=1,
-                    key=key,
-                    generation=generation,
-                    state="committed",
-                    locator=locator.as_posix(),
-                    handler_type=handler.data_type,
-                    payload_format=payload_format,
-                    payload_format_version=payload_format_version,
-                    digest_algorithm="sha256",
-                    digest=digest,
-                    byte_size=byte_size,
-                    created_at=datetime.now(timezone.utc).isoformat(),
-                    handler_metadata={
-                        **dict(published.get("metadata", {})),
-                        "storage_format": payload_format,
-                    },
-                    user_metadata=dict(metadata or {}),
-                )
-                before_promotion = getattr(
-                    self.store, "_before_authority_promotion", None
-                )
-                if callable(before_promotion):
-                    unsigned_manifest = manifest
-                    manifest = before_promotion(
-                        manifest,
-                        LifecyclePutResult(
-                            key=key,
-                            expected=expected,
-                            promoted=None,
-                            previous=previous,
-                        ),
-                    )
-                    if not isinstance(manifest, BlobManifestV1):
-                        raise CacheBlobLifecycleConflictError(
-                            "Lifecycle projection hook must return a BlobManifestV1"
-                        )
-                    if replace(manifest, user_metadata=unsigned_manifest.user_metadata) != unsigned_manifest:
-                        raise CacheBlobLifecycleConflictError(
-                            "Compatibility metadata cannot change blob identity or integrity fields"
-                        )
-                manifest = self._sign(
-                    manifest, initialize_new_store=previous is None
-                )
                 self._reach("put.candidate_verified", key=key)
                 self.authority.record_verification(
                     prepared,
@@ -317,6 +347,7 @@ class AuthorityLifecycleEngine:
             raise
         self._reach("put.cleanup_retired", key=key)
         return LifecyclePutResult(
+            operation_id=prepared.operation_id,
             key=key,
             expected=expected,
             promoted=promoted.entry,
@@ -354,6 +385,7 @@ class AuthorityLifecycleEngine:
                 generation=updated.generation,
                 candidate_locator=manifest.locator,
                 expected=entry.expectation,
+                manifest=updated.canonical_bytes(),
             )
         )
         try:
@@ -421,6 +453,7 @@ class AuthorityLifecycleEngine:
                 generation=generation,
                 candidate_locator=tombstone.locator,
                 expected=entry.expectation,
+                manifest=tombstone.canonical_bytes(),
             )
         )
         try:
@@ -447,7 +480,7 @@ class AuthorityLifecycleEngine:
         manifest = self._entry_manifest(entry, allow_tombstone=True)
         return self._entry_info(entry, manifest)
 
-    def _entry_info(self, entry: EntrySnapshot, manifest: BlobManifestV1) -> BlobEntryInfo:
+    def _entry_info(self, entry: EntrySnapshot, manifest: BlobManifest) -> BlobEntryInfo:
         """Render an already authenticated manifest without another observation."""
         return BlobEntryInfo(
             entry.key, entry.generation, entry.locator, entry.expectation,
