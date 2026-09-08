@@ -3,11 +3,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
 from typing import Any
 
 import pytest
 
-from cacheness.error_handling import CacheBlobMigrationRequiredError
+from cacheness.error_handling import (
+    CacheBlobLifecycleConflictError,
+    CacheBlobMigrationRequiredError,
+)
+from cacheness.storage.lifecycle_authority import (
+    EntryExpectation,
+    MutationSpec,
+    PreparedMutation,
+    VerificationProof,
+)
 
 
 @dataclass
@@ -23,6 +33,8 @@ class _Cursor:
         self.connection.executions.append((query, params))
         if "set local" in _query_text(query):
             return self
+        self.row = None
+        self.rows = []
         response = self.connection.responses.pop(0) if self.connection.responses else None
         if isinstance(response, BaseException):
             raise response
@@ -55,6 +67,8 @@ class _Transaction:
             self.connection.rollback_count += 1
         else:
             self.connection.commit_count += 1
+            if self.connection.commit_error is not None:
+                raise self.connection.commit_error
         return False
 
 
@@ -66,6 +80,7 @@ class _Connection:
     commit_count: int = 0
     rollback_count: int = 0
     closed: bool = False
+    commit_error: BaseException | None = None
 
     def cursor(self) -> _Cursor:
         return _Cursor(self)
@@ -80,13 +95,15 @@ class _Connection:
 @dataclass
 class _Factory:
     scripts: list[list[object]] = field(default_factory=list)
+    commit_errors: list[BaseException | None] = field(default_factory=list)
     connections: list[_Connection] = field(default_factory=list)
     calls: int = 0
 
     def __call__(self) -> _Connection:
         self.calls += 1
         responses = self.scripts.pop(0) if self.scripts else []
-        connection = _Connection(responses=responses)
+        commit_error = self.commit_errors.pop(0) if self.commit_errors else None
+        connection = _Connection(responses=responses, commit_error=commit_error)
         self.connections.append(connection)
         return connection
 
@@ -208,3 +225,205 @@ def test_schema_identifier_is_validated_before_driver_use() -> None:
     with pytest.raises(ValueError, match="schema"):
         PostgresqlLifecycleAuthority(factory, schema="authority; drop schema public")
     assert factory.calls == 0
+
+
+def _spec(operation_id: str = "operation-1") -> MutationSpec:
+    """Build one transition with a fully bounded, canonical descriptor."""
+    return MutationSpec.create(
+        operation_id=operation_id,
+        key="authority-key",
+        generation="generation-1",
+        candidate_locator="generations/generation-1.native",
+        expected=EntryExpectation.absent(),
+        manifest=b"canonical-manifest",
+    )
+
+
+def test_prepare_rejects_a_stale_expectation_without_creating_intent() -> None:
+    """A stale exact expectation is a conflict, never an implicit retry."""
+    from cacheness.storage.backends.postgresql_lifecycle_authority import (
+        PostgresqlLifecycleAuthority,
+    )
+
+    factory = _Factory(scripts=[[None, (3, 7, "old-generation", "a" * 64)]])
+    authority = PostgresqlLifecycleAuthority(factory, schema="phase5_authority")
+
+    with pytest.raises(CacheBlobLifecycleConflictError):
+        authority.prepare_mutation(_spec())
+
+    statements = [_query_text(query) for query, _ in factory.connections[0].executions]
+    assert not any("insert into" in statement and "mutations" in statement for statement in statements)
+    assert factory.connections[0].rollback_count == 1
+
+
+def test_promotion_marks_fresh_lineage_before_matching_absence() -> None:
+    """A fresh lineage sentinel must not turn its own absent create into ABA."""
+    from cacheness.storage.backends.postgresql_lifecycle_authority import (
+        PostgresqlLifecycleAuthority,
+    )
+
+    spec = _spec()
+    prepared = PreparedMutation(spec.operation_id, spec)
+    digest = hashlib.sha256(spec.manifest).hexdigest()
+    mutation_row = (
+        spec.key,
+        spec.generation,
+        spec.candidate_locator,
+        None,
+        None,
+        None,
+        None,
+        spec.manifest,
+        digest,
+        len(spec.manifest),
+        "prepared",
+    )
+    factory = _Factory(
+        scripts=[[
+            mutation_row,
+            (spec.key,),
+            (0, None, None, None),
+            None,
+            (0,),
+            (1,),
+            (spec.generation, spec.candidate_locator),
+            (spec.operation_id,),
+            (1,),
+            (
+                spec.key,
+                spec.generation,
+                spec.candidate_locator,
+                spec.manifest,
+                digest,
+                1,
+                1,
+            ),
+            [],
+        ]]
+    )
+
+    PostgresqlLifecycleAuthority(factory, schema="phase5_authority").promote_mutation(
+        prepared
+    )
+
+    statements = [_query_text(query) for query, _ in factory.connections[0].executions]
+    lineage_insert = next(statement for statement in statements if "entry_lineage" in statement)
+    assert "returning key" in lineage_insert
+
+
+def test_prepare_and_verification_use_exact_bound_values() -> None:
+    """Intent replay is operation-idempotent and proof writes are exact CAS updates."""
+    from cacheness.storage.backends.postgresql_lifecycle_authority import (
+        PostgresqlLifecycleAuthority,
+    )
+
+    spec = _spec()
+    factory = _Factory(scripts=[[None, None, None], [(spec.operation_id,)]])
+    authority = PostgresqlLifecycleAuthority(factory, schema="phase5_authority")
+
+    prepared = authority.prepare_mutation(spec)
+    authority.record_verification(
+        prepared, VerificationProof("c" * 64, len(spec.manifest), spec.manifest)
+    )
+
+    executions = [
+        execution
+        for connection in factory.connections
+        for execution in connection.executions
+    ]
+    insert_query, insert_params = next(
+        (query, params)
+        for query, params in executions
+        if "insert into" in _query_text(query) and "mutations" in _query_text(query)
+    )
+    assert "%s" in _query_text(insert_query)
+    assert spec.operation_id in insert_params
+    verification_query = next(
+        query
+        for query, _ in executions
+        if "update" in _query_text(query) and "verified_digest" in _query_text(query)
+    )
+    assert "returning operation_id" in _query_text(verification_query)
+
+
+def test_verification_rejects_zero_affected_rows_and_rolls_back() -> None:
+    """A proof can only attach to its exact prepared mutation."""
+    from cacheness.storage.backends.postgresql_lifecycle_authority import (
+        PostgresqlLifecycleAuthority,
+    )
+
+    spec = _spec()
+    factory = _Factory(scripts=[[None]])
+    authority = PostgresqlLifecycleAuthority(factory, schema="phase5_authority")
+
+    with pytest.raises(CacheBlobLifecycleConflictError):
+        authority.record_verification(
+            PreparedMutation(spec.operation_id, spec),
+            VerificationProof("d" * 64, 0, spec.manifest),
+        )
+
+    assert factory.connections[0].rollback_count == 1
+
+
+def test_abort_records_candidate_debt_without_payload_effects() -> None:
+    """Abort retains exact candidate cleanup debt but never performs object I/O."""
+    from cacheness.storage.backends.postgresql_lifecycle_authority import (
+        PostgresqlLifecycleAuthority,
+    )
+
+    spec = _spec()
+    mutation_row = (
+        spec.key,
+        spec.generation,
+        spec.candidate_locator,
+        None,
+        None,
+        None,
+        None,
+        spec.manifest,
+        None,
+        None,
+        "prepared",
+    )
+    factory = _Factory(scripts=[[mutation_row, (spec.operation_id,), None]])
+    authority = PostgresqlLifecycleAuthority(factory, schema="phase5_authority")
+
+    authority.abort_mutation(PreparedMutation(spec.operation_id, spec), candidate_persisted=True)
+
+    statements = [_query_text(query) for query, _ in factory.connections[0].executions]
+    assert any("cleanup_debt" in statement and "insert into" in statement for statement in statements)
+    assert not any("boto3" in statement or "s3" in statement for statement in statements)
+
+
+def test_uncertain_promotion_reopens_a_fresh_lease_for_exact_operation_state() -> None:
+    """A commit transport failure is classified from durable operation identity, never guessed."""
+    from cacheness.storage.backends.postgresql_lifecycle_authority import (
+        PostgresqlLifecycleAuthority,
+    )
+
+    spec = _spec()
+    prepared = PreparedMutation(spec.operation_id, spec)
+    digest = hashlib.sha256(spec.manifest).hexdigest()
+    prepared_row = (
+        spec.key, spec.generation, spec.candidate_locator, None, None, None, None,
+        spec.manifest, digest, len(spec.manifest), "prepared",
+    )
+    promoted_row = prepared_row[:-1] + ("promoted",)
+    entry_row = (
+        spec.key, spec.generation, spec.candidate_locator, spec.manifest, digest, 1, 1,
+    )
+    factory = _Factory(
+        scripts=[[
+            prepared_row, (spec.key,), (0, None, None, None), None, (0,), (1,),
+            (spec.generation, spec.candidate_locator), (spec.operation_id,), (1,),
+            entry_row, [],
+        ], [promoted_row, entry_row, []]],
+        commit_errors=[RuntimeError("connection closed during commit"), None],
+    )
+
+    result = PostgresqlLifecycleAuthority(factory, schema="phase5_authority").promote_mutation(
+        prepared
+    )
+
+    assert result.entry.generation == spec.generation
+    assert factory.calls == 2

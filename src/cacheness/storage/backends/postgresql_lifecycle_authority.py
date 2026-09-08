@@ -657,12 +657,19 @@ class PostgresqlLifecycleAuthority:
         if mutation.state != "prepared" or mutation.verified_digest is None:
             raise CacheBlobLifecycleConflictError("Mutation is not verified and prepared")
         cursor.execute(
-            sql.SQL("INSERT INTO {} (key, lineage) VALUES (%s, 0) ON CONFLICT (key) DO NOTHING").format(
-                self._table("entry_lineage")
-            ),
+            sql.SQL(
+                "INSERT INTO {} (key, lineage) VALUES (%s, 0) "
+                "ON CONFLICT (key) DO NOTHING RETURNING key"
+            ).format(self._table("entry_lineage")),
             (mutation.spec.key,),
         )
+        created_lineage = cursor.fetchone() is not None
         observed = self._expectation(cursor, mutation.spec.key, lock=True)
+        # The row inserted above is the transaction's own fresh lineage
+        # sentinel.  It must preserve future ABA evidence without making a
+        # first create conflict with its own absent expectation.
+        if created_lineage and observed.revision is None:
+            observed = EntryExpectation.absent()
         if not self._matches(mutation.spec.expected, observed):
             raise CacheBlobLifecycleConflictError("Mutation lineage changed before promotion")
         cursor.execute(
