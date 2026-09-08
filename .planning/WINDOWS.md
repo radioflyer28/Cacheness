@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 3
+open_count: 4
 waived_count: 0
 fixed_count: 29
-total_count: 32
-last_updated: 2026-09-08T04:19:10.179Z
+total_count: 33
+last_updated: 2026-09-08T06:19:37.981Z
 ---
 
 # Broken Windows Ledger
@@ -47,6 +47,7 @@ last_updated: 2026-09-08T04:19:10.179Z
 | 30 | 04 | deviation | src/cacheness/storage/composition.py |  | Named capability minima now reject before participant factory construction or I/O. | fixed |  | 2026-09-08T02:01:51.758Z | 2026-09-08T02:04:05.304Z |
 | 31 | 04 | deviation | src/cacheness/storage/blob_store.py |  | Temporary memory handler snapshots apply private permissions to the filesystem path rather than the buffered writer. | fixed |  | 2026-09-08T02:01:57.547Z | 2026-09-08T02:04:10.125Z |
 | 32 | 04 | unmet-truth | .planning/phases/04-metadata-composition-and-topology-contracts/04-VALIDATION.md |  | Unexcluded Python 3.11 and 3.13 suites stop during retired metadata-authority and missing-pandas test collection; see release evidence. | open |  | 2026-09-08T04:19:10.179Z |  |
+| 33 | 04 | unrun-verify | tools/verify_phase4_ruff_delta.py |  | Phase 4 Ruff delta gate fails because its frozen scope omits existing S3 source and test paths. | open |  | 2026-09-08T06:19:37.981Z |  |
 
 ````json
 [
@@ -432,6 +433,18 @@ last_updated: 2026-09-08T04:19:10.179Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-09-08T04:19:10.179Z",
+    "resolved_at": null
+  },
+  {
+    "id": 33,
+    "kind": "unrun-verify",
+    "phase": "04",
+    "file": "tools/verify_phase4_ruff_delta.py",
+    "line": null,
+    "description": "Phase 4 Ruff delta gate fails because its frozen scope omits existing S3 source and test paths.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-08T06:19:37.981Z",
     "resolved_at": null
   }
 ]
