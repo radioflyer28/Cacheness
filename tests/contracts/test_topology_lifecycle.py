@@ -58,10 +58,17 @@ class _InventoryGenerationIO:
 
     def inventory_page(self, continuation_token: str | None = None) -> S3InventoryPage:
         self.inventory_calls.append(continuation_token)
+        if continuation_token == "remote-page-2":
+            return S3InventoryPage(
+                (S3ObjectEvidence("unknown/continued-generation", 17),), None
+            )
         if continuation_token is not None:
             return S3InventoryPage((), None)
         return S3InventoryPage(
-            (S3ObjectEvidence("unattributed/immutable-generation", 17),),
+            (
+                S3ObjectEvidence("committed/immutable-generation", 17),
+                S3ObjectEvidence("unknown/immutable-generation", 17),
+            ),
             "remote-page-2",
         )
 
@@ -107,10 +114,25 @@ class _NoUnboundedRemoteAuthority(InMemoryLifecycleAuthority):
     def __init__(self) -> None:
         super().__init__()
         self.unbounded_list_calls = 0
+        self.inventory_attributed_locators: set[str] = set()
+        self.inventory_attribution_available = True
+        self.inventory_attribution_calls: list[tuple[int, tuple[str, ...]]] = []
 
     def list_entries(self):
         self.unbounded_list_calls += 1
         raise AssertionError("remote workflows must use bounded authority pages")
+
+    def inventory_locator_attribution(self, snapshot, locators):
+        """Test double for the narrow current-page authority capability."""
+        self.inventory_attribution_calls.append((snapshot.authority_revision, locators))
+        if (
+            not self.inventory_attribution_available
+            or snapshot.authority_revision != self._revision
+        ):
+            return None
+        return frozenset(
+            locator for locator in locators if locator in self.inventory_attributed_locators
+        )
 
 
 def _remote_store(tmp_path: Path) -> BlobStore:
@@ -180,6 +202,9 @@ def test_remote_profile_uses_one_engine_and_bounded_authority_pages(tmp_path: Pa
             catalog_schema=schema,
             catalog_values={"tenant": "alpha"},
         ).key == "remote-key"
+        store.lifecycle_authority.inventory_attributed_locators.add(
+            "committed/immutable-generation"
+        )
 
         page = store.list_page(schema=schema, limit=1, work_cap=2)
         assert [entry.key for entry in page.entries] == ["remote-key"]
@@ -192,6 +217,15 @@ def test_remote_profile_uses_one_engine_and_bounded_authority_pages(tmp_path: Pa
         assert len(report.findings) == 1
         assert report.findings[0].action is ReconciliationAction.REPORT_ONLY
         assert report.findings[0].reason == "unattributed_payload_inventory"
+        assert store.lifecycle_authority.inventory_attribution_calls == [
+            (
+                store.lifecycle_authority._revision,
+                (
+                    "committed/immutable-generation",
+                    "unknown/immutable-generation",
+                ),
+            )
+        ]
         assert store.payload_backend.inventory_io.inventory_calls == [None]
 
         assert store.clear() == 1
@@ -213,10 +247,34 @@ def test_remote_inventory_continuation_is_signed_with_the_authority_resume_token
         second = store.reconcile(resume_token=first.resume_token)
         assert second.inventory_cursor is None
         assert store.payload_backend.inventory_io.inventory_calls == [None, "remote-page-2"]
+        assert [finding.reason for finding in (*first.findings, *second.findings)] == [
+            "unattributed_payload_inventory",
+            "unattributed_payload_inventory",
+            "unattributed_payload_inventory",
+        ]
         assert all(
             finding.action is ReconciliationAction.REPORT_ONLY
             for finding in (*first.findings, *second.findings)
         )
         assert store.lifecycle_authority.unbounded_list_calls == 0
+    finally:
+        store.close()
+
+
+def test_remote_inventory_without_snapshot_attribution_is_indeterminate(tmp_path: Path) -> None:
+    """A stale authority revision cannot turn remote inventory into residue."""
+    store = _remote_store(tmp_path)
+    try:
+        store.lifecycle_authority.inventory_attribution_available = False
+
+        report = store.reconcile()
+
+        assert {finding.reason for finding in report.findings} == {
+            "payload_inventory_attribution_indeterminate"
+        }
+        assert {finding.status.value for finding in report.findings} == {
+            "requires_confirmation"
+        }
+        assert {finding.residue_role for finding in report.findings} == {"indeterminate"}
     finally:
         store.close()

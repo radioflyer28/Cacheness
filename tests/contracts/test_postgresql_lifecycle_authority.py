@@ -648,6 +648,36 @@ def test_reconciliation_cursor_advances_only_to_emitted_byte_bounded_mutations()
     ) == (1, 2, 3)
 
 
+def test_inventory_attribution_uses_one_snapshot_consistent_bounded_query() -> None:
+    """An inventory page can prove only its own snapshot-owned locators."""
+    from cacheness.storage.backends.postgresql_lifecycle_authority import (
+        PostgresqlLifecycleAuthority,
+    )
+    from cacheness.storage.lifecycle_authority import ReconciliationSnapshot
+
+    factory = _Factory(
+        scripts=[
+            [[(7, "generations/committed.native")]],
+            [[(8, None)]],
+        ]
+    )
+    authority = PostgresqlLifecycleAuthority(factory, schema="phase5_authority")
+    snapshot = ReconciliationSnapshot(7, 11, 13)
+    locators = ("generations/committed.native", "generations/unknown.native")
+
+    assert authority.inventory_locator_attribution(snapshot, locators) == frozenset(
+        {"generations/committed.native"}
+    )
+    assert authority.inventory_locator_attribution(snapshot, locators) is None
+
+    query, params = factory.connections[0].executions[-1]
+    assert "with revision" in _query_text(query)
+    assert "left join owned" in _query_text(query)
+    assert params == (list(locators), 11, list(locators), 13, list(locators))
+    assert factory.connections[0].transaction_count == 1
+    assert factory.connections[1].transaction_count == 1
+
+
 def test_reconciliation_cursor_does_not_skip_unemitted_debt_rows() -> None:
     """Debt rows fetched beside a full mutation page resume from their old cursor."""
     from cacheness.config import LifecycleLimits

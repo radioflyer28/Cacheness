@@ -1560,6 +1560,116 @@ class PostgresqlLifecycleAuthority:
 
         return self._read_only("reconciliation_snapshot", snapshot)
 
+    def inventory_locator_attribution(
+        self,
+        snapshot: ReconciliationSnapshot,
+        locators: tuple[str, ...],
+    ) -> frozenset[str] | None:
+        """Return only locators owned by one exact reconciliation snapshot.
+
+        S3 inventory is evidence, never a visibility authority.  This bounded
+        lookup lets the reconciler distinguish a committed locator from an
+        unknown one without scanning the catalog or treating an S3 key as
+        provenance.  One SQL statement gives the revision check and the three
+        ownership sources the same PostgreSQL MVCC snapshot.  A concurrent
+        authority revision makes the page indeterminate rather than silently
+        attributing it to a different lifecycle state.
+        """
+        if not isinstance(snapshot, ReconciliationSnapshot):
+            raise TypeError("snapshot must be a ReconciliationSnapshot")
+        if not isinstance(locators, tuple):
+            raise TypeError("locators must be a tuple")
+        if len(locators) > self.lifecycle_limits.max_inventory_items:
+            raise ValueError("inventory locator page exceeds the configured bound")
+        normalized = tuple(
+            _bounded_authority_text(locator, "inventory locator") for locator in locators
+        )
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("inventory locator page contains duplicate locators")
+        if not normalized:
+            return frozenset()
+
+        def locate(cursor: Any) -> frozenset[str] | None:
+            # A single statement is intentional: PostgreSQL takes one MVCC
+            # snapshot per statement at READ COMMITTED.  Splitting this into a
+            # revision read and a locator query could mix two lifecycle states.
+            cursor.execute(
+                sql.SQL(
+                    "WITH revision AS ("
+                    "SELECT authority_revision FROM {} WHERE singleton = TRUE"
+                    "), owned AS ("
+                    "SELECT locator FROM {} WHERE locator = ANY(%s) "
+                    "UNION SELECT locator FROM {} "
+                    "WHERE state = 'prepared' AND mutation_id <= %s AND locator = ANY(%s) "
+                    "UNION SELECT locator FROM {} "
+                    "WHERE state = 'pending' AND debt_id <= %s AND locator = ANY(%s)"
+                    ") SELECT revision.authority_revision, owned.locator "
+                    "FROM revision LEFT JOIN owned ON TRUE"
+                ).format(
+                    self._table("authority_meta"),
+                    self._table("entries"),
+                    self._table("mutations"),
+                    self._table("cleanup_debt"),
+                ),
+                (
+                    list(normalized),
+                    snapshot.mutation_high_water,
+                    list(normalized),
+                    snapshot.debt_high_water,
+                    list(normalized),
+                ),
+            )
+            rows = cursor.fetchall()
+            if not rows:
+                raise CacheBlobMigrationRequiredError(
+                    "PostgreSQL lifecycle authority is absent"
+                )
+            try:
+                revisions = {row[0] for row in rows}
+            except (IndexError, TypeError) as error:
+                raise CacheBlobBackendError(
+                    "PostgreSQL inventory attribution row is malformed",
+                    context={
+                        "operation": "postgresql_lifecycle_authority",
+                        "stage": "inventory_locator_attribution",
+                    },
+                ) from error
+            if not all(type(revision) is int and revision >= 0 for revision in revisions):
+                raise CacheBlobBackendError(
+                    "PostgreSQL inventory attribution row is malformed",
+                    context={
+                        "operation": "postgresql_lifecycle_authority",
+                        "stage": "inventory_locator_attribution",
+                    },
+                )
+            if revisions != {snapshot.authority_revision}:
+                return None
+            try:
+                owned = frozenset(
+                    _bounded_authority_text(row[1], "owned inventory locator")
+                    for row in rows
+                    if row[1] is not None
+                )
+            except (IndexError, TypeError, ValueError) as error:
+                raise CacheBlobBackendError(
+                    "PostgreSQL inventory attribution row is malformed",
+                    context={
+                        "operation": "postgresql_lifecycle_authority",
+                        "stage": "inventory_locator_attribution",
+                    },
+                ) from error
+            if not owned.issubset(normalized):
+                raise CacheBlobBackendError(
+                    "PostgreSQL inventory attribution escaped its requested page",
+                    context={
+                        "operation": "postgresql_lifecycle_authority",
+                        "stage": "inventory_locator_attribution",
+                    },
+                )
+            return owned
+
+        return self._read_only("inventory_locator_attribution", locate)
+
     def page_reconciliation_work(
         self,
         snapshot: ReconciliationSnapshot,

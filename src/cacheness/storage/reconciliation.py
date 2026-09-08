@@ -340,19 +340,35 @@ class _AuthorityReconciler:
         if not isinstance(objects, tuple):
             raise CacheStorageError("S3 inventory evidence page is malformed")
 
-        findings: list[ReconciliationFinding] = []
+        locators: list[str] = []
         for item in objects:
             locator = getattr(item, "locator", None)
             if not isinstance(locator, str) or not locator:
                 raise CacheStorageError("S3 inventory evidence object is malformed")
-            if locator in attributed_locators:
+            locators.append(locator)
+        owned_locators = self._inventory_locator_attribution(snapshot, tuple(locators))
+
+        findings: list[ReconciliationFinding] = []
+        for locator in locators:
+            if locator in attributed_locators or (
+                owned_locators is not None and locator in owned_locators
+            ):
                 continue
             locator_fingerprint = _fingerprint(locator)
+            indeterminate = owned_locators is None
             findings.append(
                 ReconciliationFinding(
-                    status=ReconciliationStatus.BLOCKED,
+                    status=(
+                        ReconciliationStatus.REQUIRES_CONFIRMATION
+                        if indeterminate
+                        else ReconciliationStatus.BLOCKED
+                    ),
                     action=ReconciliationAction.REPORT_ONLY,
-                    reason="unattributed_payload_inventory",
+                    reason=(
+                        "payload_inventory_attribution_indeterminate"
+                        if indeterminate
+                        else "unattributed_payload_inventory"
+                    ),
                     evidence_id=locator_fingerprint,
                     locator_fingerprint=locator_fingerprint,
                     finding_id=_fingerprint(
@@ -361,10 +377,35 @@ class _AuthorityReconciler:
                     authority_revision=snapshot.authority_revision,
                     run_revision=snapshot.authority_revision,
                     residue_type="payload_inventory",
-                    residue_role="unattributed",
+                    residue_role=("indeterminate" if indeterminate else "unattributed"),
                 )
             )
         return tuple(findings), next_token
+
+    def _inventory_locator_attribution(
+        self,
+        snapshot: ReconciliationSnapshot,
+        locators: tuple[str, ...],
+    ) -> frozenset[str] | None:
+        """Use an optional bounded authority lookup for this inventory page.
+
+        Not every authority can make a remote-inventory ownership claim.  A
+        missing capability is deliberately an indeterminate report, never a
+        synthetic catalog scan or a claim that an S3 name is residue.
+        """
+        locator_attribution = getattr(
+            self.authority, "inventory_locator_attribution", None
+        )
+        if not callable(locator_attribution):
+            return None
+        result = locator_attribution(snapshot, locators)
+        if result is None:
+            return None
+        if not isinstance(result, frozenset) or not all(
+            isinstance(locator, str) and locator in locators for locator in result
+        ):
+            raise CacheStorageError("S3 inventory authority attribution is malformed")
+        return result
 
     @staticmethod
     def _bounded_inventory_cursor(value: object) -> str | None:
