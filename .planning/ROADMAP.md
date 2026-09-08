@@ -94,6 +94,7 @@ Plans:
 **Plans**: 7/7 plans complete
 
 Plans:
+
 - [x] 02-01-PLAN.md
 - [x] 02-02-PLAN.md
 - [x] 02-03-PLAN.md
@@ -314,16 +315,35 @@ Plans:
 **Plans**: 10 plans
 
 Plans:
+**Wave 1**
 
 - [ ] 05-01-PLAN.md — Freeze the exact three-profile support boundary and reject every unqualified/edge pairing before I/O.
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [ ] 05-02-PLAN.md — Establish reusable local payload and deterministic lifecycle-fault contracts.
 - [ ] 05-03-PLAN.md — Replace direct S3 CRUD with bounded immutable-generation I/O for the shared engine.
 - [ ] 05-04-PLAN.md — Implement explicit versioned PostgreSQL initialization and core exact-CAS transitions.
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
 - [ ] 05-05-PLAN.md — Complete bounded PostgreSQL authority workflows and typed progress contracts.
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
 - [ ] 05-06-PLAN.md — Compose all three profiles through the one lifecycle engine and bounded reconciliation evidence.
 - [ ] 05-07-PLAN.md — Build the sanitized, non-skippable real-service qualification harness.
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
 - [ ] 05-08-PLAN.md — Define real PostgreSQL, real AWS S3, and independent-client integration suites.
+
+**Wave 6** *(blocked on Wave 5 completion)*
+
 - [ ] 05-09-PLAN.md — Publish exact API/topology coverage and a reproducible local architecture gate.
+
+**Wave 7** *(blocked on Wave 6 completion)*
+
 - [ ] 05-10-PLAN.md — Run the non-substitutable real-service qualification and record final support evidence.
 
 ### Phase 6: UnifiedCache Policy Composition
