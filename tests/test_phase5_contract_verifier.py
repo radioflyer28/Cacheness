@@ -296,13 +296,20 @@ def test_local_verifier_inventory_and_evidence_boundary_are_fixed(tmp_path: Path
     """Local verification reports evidence but cannot write or upgrade it."""
     verifier = _load_verifier()
 
-    assert set(verifier.CONTRACT_TEST_MODULES) >= {
+    assert set(verifier.CONTRACT_TEST_MODULES) == {
         "tests/test_supported_topologies.py",
+        "tests/test_topology_capabilities.py",
         "tests/contracts/test_payload_generation_io.py",
+        "tests/test_s3_blob_backend.py",
+        "tests/contracts/test_s3_generation_io.py",
+        "tests/contracts/test_postgresql_lifecycle_authority.py",
         "tests/contracts/test_lifecycle_authority.py",
+        "tests/test_lifecycle_authority_contract.py",
         "tests/test_payload_faults.py",
         "tests/contracts/test_topology_lifecycle.py",
+        "tests/test_blob_store_composition.py",
         "tests/qualification/test_live_evidence.py",
+        "tests/test_phase5_contract_verifier.py",
     }
     assert set(verifier.LIVE_COLLECTION_MODULES) == {
         "tests/integration/test_postgresql_authority.py",

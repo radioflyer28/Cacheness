@@ -60,7 +60,9 @@ EXPECTED_PAIRS = frozenset(
 # turn a skipped or absent external service into an executable substitute.
 CONTRACT_TEST_MODULES = (
     "tests/test_supported_topologies.py",
+    "tests/test_topology_capabilities.py",
     "tests/contracts/test_payload_generation_io.py",
+    "tests/test_s3_blob_backend.py",
     "tests/contracts/test_s3_generation_io.py",
     "tests/contracts/test_postgresql_lifecycle_authority.py",
     "tests/contracts/test_lifecycle_authority.py",
