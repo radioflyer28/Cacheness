@@ -2,9 +2,9 @@
 schema_version: 1
 open_count: 2
 waived_count: 0
-fixed_count: 32
-total_count: 34
-last_updated: 2026-09-08T07:38:06.108Z
+fixed_count: 33
+total_count: 35
+last_updated: 2026-09-08T12:33:47.339Z
 ---
 
 # Broken Windows Ledger
@@ -49,6 +49,7 @@ last_updated: 2026-09-08T07:38:06.108Z
 | 32 | 04 | unmet-truth | .planning/phases/04-metadata-composition-and-topology-contracts/04-VALIDATION.md |  | Unexcluded Python 3.11 and 3.13 suites stop during retired metadata-authority and missing-pandas test collection; see release evidence. | fixed |  | 2026-09-08T04:19:10.179Z | 2026-09-08T07:38:05.913Z |
 | 33 | 04 | unrun-verify | tools/verify_phase4_ruff_delta.py |  | Phase 4 Ruff delta gate fails because its frozen scope omits existing S3 source and test paths. | fixed |  | 2026-09-08T06:19:37.981Z | 2026-09-08T07:38:06.012Z |
 | 34 | 04 | deviation | tools/verify_phase4_ruff_delta.py |  | Phase-wide Ruff-delta helper fails because its frozen authorized scope drifted outside Plan 04-11; scoped checks pass. | fixed |  | 2026-09-08T06:56:40.340Z | 2026-09-08T07:38:06.108Z |
+| 35 | 05 | deviation | src/cacheness/storage/backends/postgresql_lifecycle_authority.py |  | Fresh lineage sentinel remapping preserves initial absent create CAS | fixed |  | 2026-09-08T12:33:24.402Z | 2026-09-08T12:33:47.339Z |
 
 ````json
 [
@@ -459,6 +460,18 @@ last_updated: 2026-09-08T07:38:06.108Z
     "reason": "",
     "recorded_at": "2026-09-08T06:56:40.340Z",
     "resolved_at": "2026-09-08T07:38:06.108Z"
+  },
+  {
+    "id": 35,
+    "kind": "deviation",
+    "phase": "05",
+    "file": "src/cacheness/storage/backends/postgresql_lifecycle_authority.py",
+    "line": null,
+    "description": "Fresh lineage sentinel remapping preserves initial absent create CAS",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-09-08T12:33:24.402Z",
+    "resolved_at": "2026-09-08T12:33:47.339Z"
   }
 ]
 ````
