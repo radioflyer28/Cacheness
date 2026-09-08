@@ -1,17 +1,17 @@
 ---
 gsd_state_version: 1.0
 milestone: v1.0
-current_phase: 05
-current_phase_name: Payload Backends and Supported Topology Qualification
-status: verifying
-stopped_at: Phase 5 post-execution verification after approved BACK-05 transfer to Phase 8
-last_updated: "2026-09-08T19:46:10.110Z"
+current_phase: 6
+current_phase_name: UnifiedCache Policy Composition
+status: planning
+stopped_at: Phase 5 complete, ready to plan Phase 6
+last_updated: "2026-09-08T20:28:55.092Z"
 last_activity: 2026-09-08
-last_activity_desc: Phase 05 canonical plans complete; BACK-05 real-service release gate transferred intact to Phase 8
-state_head: fc636701cea4997de9be0aeaff697b12ce18902a
+last_activity_desc: Phase 5 complete, transitioned to Phase 6
+state_head: 364e79fb454e8f008b8fd6c195ba305225b1470c
 progress:
   total_phases: 8
-  completed_phases: 4
+  completed_phases: 5
   total_plans: 69
   completed_plans: 69
 milestone_name: milestone
@@ -24,15 +24,20 @@ milestone_name: milestone
 See: .planning/PROJECT.md (updated 2026-09-06)
 
 **Core value:** Applications can store and retrieve data reliably through one backend-neutral lifecycle, with caching policy layered above storage without compromising integrity or cleanup correctness.
-**Current focus:** Phase 05 — Payload Backends and Supported Topology Qualification
+**Current focus:** Phase 06 — UnifiedCache Policy Composition
 
 ## Current Position
 
-Phase: 05 (Payload Backends and Supported Topology Qualification) — VERIFYING
-Plan: 9 of 9 canonical plans complete; 05-10 superseded
-Status: post-execution gates in progress; BACK-05 moved intact to Phase 8
-Last activity: 2026-09-08 — user approved the Phase 8 transfer; Phase 05
-retains truthful sanitized UNAVAILABLE evidence without a release support claim
+Phase: 6 — UnifiedCache Policy Composition
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-09-08 — Phase 5 complete, transitioned to Phase 6
+
+Phase 05 closed with 9/9 canonical plans summarized, 9/9 verified must-haves,
+19/19 Nyquist-covered tasks, and 43/43 canonical security threats closed
+(`threats_open: 0`). BACK-05 and its five real-service threats moved intact to
+Phase 8; sanitized `UNAVAILABLE` evidence does not create a release support
+claim.
 
 Phase 04 closed with 14/14 plans summarized, a clean final code review,
 18/18 verified must-haves, 29/29 Nyquist-covered tasks, and 64/64 plan-time
@@ -46,7 +51,7 @@ disposition or an instruction to re-execute closed plans. This completion is
 direct primary-agent qualification, not an independent GSD verifier verdict.
 Windows remains UNAVAILABLE/NOT_QUALIFIED; Phase 999.1 is unchanged.
 
-Progress: [█████░░░░░] 4 of 8 phases complete
+Progress: [██████░░░░] 5 of 8 phases complete
 
 ## Roadmap Evolution
 
@@ -337,5 +342,5 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 ## Session Continuity
 
 Last session: 2026-09-08T09:43:22.710Z
-Stopped at: Phase 5 context gathered
+Stopped at: Phase 5 complete, ready to plan Phase 6
 Resume file: .planning/phases/05-payload-backends-and-supported-topology-qualification/05-CONTEXT.md
