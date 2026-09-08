@@ -43,6 +43,16 @@ LIVE_TEST_MODULES = (
 )
 LIVE_MARKER_EXPRESSION = "live_postgresql or live_aws_s3 or live_remote"
 QUALIFICATION_FIXTURE_PLUGIN = "tests.qualification.conftest"
+QUALIFICATION_SOURCE_PATHS = (
+    "pyproject.toml",
+    "docs/CATALOG_AND_TOPOLOGY.md",
+    "docs/STORAGE_INITIALIZATION.md",
+    "src/cacheness/storage",
+    "tests/integration",
+    "tests/qualification",
+    "tools/run_phase5_qualification.py",
+    "tools/verify_phase5_contracts.py",
+)
 DEFAULT_TIMEOUT_SECONDS = 900
 MIN_TIMEOUT_SECONDS = 60
 MAX_TIMEOUT_SECONDS = 3600
@@ -121,6 +131,32 @@ def _git_revision() -> str:
         return "unavailable"
     revision = completed.stdout.strip()
     return revision if re.fullmatch(r"[0-9a-f]{40}", revision) else "unavailable"
+
+
+def _qualification_source_revision() -> str | None:
+    """Return a clean, immutable source revision eligible for live evidence."""
+    revision = _git_revision()
+    if not re.fullmatch(r"[0-9a-f]{40}", revision):
+        return None
+    try:
+        status = subprocess.run(
+            [
+                "git",
+                "status",
+                "--porcelain",
+                "--untracked-files=all",
+                "--",
+                *QUALIFICATION_SOURCE_PATHS,
+            ],
+            cwd=REPOSITORY_ROOT,
+            capture_output=True,
+            check=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return revision if not status.stdout.strip() else None
 
 
 def _package_version(package: str) -> str:
@@ -212,6 +248,7 @@ def make_evidence(
     aws_identity: AwsServiceIdentity | None,
     result: str,
     cleanup_status: str,
+    revision: str | None = None,
 ) -> dict[str, object]:
     """Build the exact allow-listed evidence record before serializing it."""
     services: dict[str, object] = {
@@ -230,7 +267,7 @@ def make_evidence(
     return {
         "schema": EVIDENCE_SCHEMA,
         "status": status,
-        "revision": _git_revision(),
+        "revision": _git_revision() if revision is None else revision,
         "generated_at_utc": datetime.now(UTC).isoformat(),
         "run_namespace": _redacted_namespace(run_namespace),
         "missing_configuration": list(missing_configuration),
@@ -325,7 +362,9 @@ def validate_evidence(evidence: Mapping[str, object]) -> None:
         and _is_standard_amazon_s3_identity(aws)
     )
     if status == "QUALIFIED":
-        if not complete_qualified_evidence:
+        if not complete_qualified_evidence or not re.fullmatch(
+            r"[0-9a-f]{40}", evidence["revision"]
+        ):
             raise ValueError("qualified evidence contradicts its required service proof")
     elif status == "UNAVAILABLE":
         if result != "not_run" or cleanup_status != "NOT_ATTEMPTED":
@@ -467,6 +506,7 @@ def _write_terminal_evidence(
     result: str,
     cleanup_status: str,
     forbidden_fragments: Sequence[str],
+    revision: str | None = None,
 ) -> None:
     evidence = make_evidence(
         status=status,
@@ -475,6 +515,7 @@ def _write_terminal_evidence(
         aws_identity=aws_identity,
         result=result,
         cleanup_status=cleanup_status,
+        revision=revision,
     )
     write_evidence(output, evidence, forbidden_fragments=forbidden_fragments)
 
@@ -522,6 +563,20 @@ def run_qualification(
         )
         return 1
 
+    source_revision = _qualification_source_revision()
+    if source_revision is None:
+        _write_terminal_evidence(
+            output=output,
+            status="NOT_QUALIFIED",
+            missing_configuration=[],
+            run_namespace=namespace,
+            aws_identity=None,
+            result="not_run",
+            cleanup_status="NOT_ATTEMPTED",
+            forbidden_fragments=forbidden_fragments,
+        )
+        return 1
+
     try:
         aws_identity = resolve_aws(supplied_environment)
     except QualificationUnavailableError:
@@ -557,16 +612,24 @@ def run_qualification(
             cleanup_status = "ERROR"
 
     is_complete_pass = completed is not None and _is_complete_pass(completed)
-    qualified = is_complete_pass and cleanup_status == "CLEAN"
+    source_is_stable = _qualification_source_revision() == source_revision
+    qualified = is_complete_pass and cleanup_status == "CLEAN" and source_is_stable
     _write_terminal_evidence(
         output=output,
         status="QUALIFIED" if qualified else "NOT_QUALIFIED",
         missing_configuration=[],
         run_namespace=namespace,
         aws_identity=aws_identity,
-        result="passed" if is_complete_pass else "incomplete" if completed is None else "failed",
+        result=(
+            "passed"
+            if is_complete_pass and source_is_stable
+            else "incomplete"
+            if completed is None or not source_is_stable
+            else "failed"
+        ),
         cleanup_status=cleanup_status,
         forbidden_fragments=forbidden_fragments,
+        revision=source_revision,
     )
     return 0 if qualified else 1
 

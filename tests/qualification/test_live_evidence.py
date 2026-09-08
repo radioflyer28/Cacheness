@@ -89,9 +89,11 @@ def test_only_a_complete_live_run_and_clean_cleanup_can_qualify(
     completed: subprocess.CompletedProcess[str],
     cleanup_status: str,
     expected_exit_code: int,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Skipped, empty, failed, or uncleared runs cannot create a claim."""
     runner = _load_runner()
+    monkeypatch.setattr(runner, "_qualification_source_revision", lambda: "a" * 40)
     output = tmp_path / "qualification.json"
     environment = {
         "CACHENESS_TEST_POSTGRES_DSN": "postgresql://test:password@db/qualification",
@@ -131,6 +133,7 @@ def test_runner_passes_only_the_exact_run_identifier_to_its_live_subprocess(
         return subprocess.CompletedProcess([], 0, "3 passed", "")
 
     monkeypatch.setattr(runner, "_run_fixed_suite", fake_suite)
+    monkeypatch.setattr(runner, "_qualification_source_revision", lambda: "a" * 40)
     exit_code = runner.run_qualification(
         output=tmp_path / "qualification.json",
         environment={
@@ -174,6 +177,61 @@ def test_frozen_live_suite_loads_the_qualification_fixture_plugin() -> None:
     assert completed.returncode != 0
     assert "required external configuration is absent" in output
     assert "fixture 'live_qualification_resources' not found" not in output
+
+
+def test_dirty_qualification_source_prevents_live_subprocess_execution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dirty implementation/test/tool/doc path is never eligible for a claim."""
+    runner = _load_runner()
+    called = False
+
+    def should_not_run(
+        _arguments: list[str], _timeout: int
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal called
+        called = True
+        return subprocess.CompletedProcess([], 0, "3 passed", "")
+
+    monkeypatch.setattr(runner, "_qualification_source_revision", lambda: None)
+    output = tmp_path / "qualification.json"
+    exit_code = runner.run_qualification(
+        output=output,
+        environment={
+            "CACHENESS_TEST_POSTGRES_DSN": "postgresql://test:password@db/qualification",
+            "CACHENESS_TEST_S3_BUCKET": "qualification-bucket",
+            "CACHENESS_TEST_MANIFEST_KEY_B64": "bW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW0=",
+        },
+        run_tests=should_not_run,
+    )
+
+    evidence = runner.load_evidence(output)
+    assert exit_code == 1
+    assert called is False
+    assert evidence["status"] == "NOT_QUALIFIED"
+    assert evidence["result"] == "not_run"
+    assert evidence["cleanup_status"] == "NOT_ATTEMPTED"
+
+
+def test_source_revision_rejects_a_dirty_qualification_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dirty relevant path cannot be represented by the current HEAD revision."""
+    runner = _load_runner()
+    revision = "a" * 40
+
+    def git_with_dirty_runner_path(*arguments, **_kwargs):
+        command = arguments[0]
+        if command[:3] == ["git", "rev-parse", "HEAD"]:
+            return subprocess.CompletedProcess(command, 0, f"{revision}\n", "")
+        assert command[:3] == ["git", "status", "--porcelain"]
+        return subprocess.CompletedProcess(
+            command, 0, " M tools/run_phase5_qualification.py\n", ""
+        )
+
+    monkeypatch.setattr(runner.subprocess, "run", git_with_dirty_runner_path)
+
+    assert runner._qualification_source_revision() is None
 
 
 def test_endpoint_override_is_not_a_live_amazon_s3_configuration(tmp_path: Path) -> None:
@@ -262,6 +320,14 @@ def test_evidence_serializer_rejects_secret_fragments_and_non_allowlisted_fields
             lambda evidence: evidence["services"].update(
                 aws={"provider": "emulated", "region": "us-east-1", "service": "amazon-s3"}
             ),
+        ),
+        (
+            "qualified has unavailable revision",
+            lambda evidence: evidence.update(revision="unavailable"),
+        ),
+        (
+            "qualified has malformed revision",
+            lambda evidence: evidence.update(revision="A" * 40),
         ),
         (
             "unavailable claims a completed run",
