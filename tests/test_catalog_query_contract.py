@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from importlib import import_module
 from importlib.util import find_spec
-import hashlib
 from pathlib import Path
 
 import pytest
@@ -208,113 +207,106 @@ def test_sparse_work_capped_scan_advances_to_last_examined_identity_without_matc
 
 
 @pytest.mark.parametrize("authority_name", ["memory", "sqlite"])
-def test_authenticated_canonical_scan_is_dense_sparse_and_revision_bound(
+def test_public_catalog_put_update_query_and_reopen(
     tmp_path: Path, authority_name: str
 ) -> None:
-    """Both authorities page authenticated descriptors without a catalog mirror."""
+    """Public BlobStore calls own catalog validation and authority promotion."""
     from cacheness.storage.blob_store import BlobStore
     from cacheness.storage.composition import BackendRef, StoreTopology
-    from cacheness.storage.lifecycle_authority import MutationSpec, VerificationProof
-    from cacheness.storage.manifest import BlobManifest, StoreVersionDimensions, sign_current_manifest
+    from cacheness.storage.backends.blob_backends import InMemoryBlobBackend
+    from cacheness.storage.memory_lifecycle_authority import InMemoryLifecycleAuthority
 
     catalog = _catalog()
     root = tmp_path / authority_name
+    resources: tuple[object, ...] = ()
     if authority_name == "memory":
+        payload = InMemoryBlobBackend()
+        authority = InMemoryLifecycleAuthority()
         topology = StoreTopology(
-            payload=BackendRef(name="memory"), authority=BackendRef(name="memory")
+            payload=BackendRef(instance=payload), authority=BackendRef(instance=authority)
         )
+        resources = (payload, authority)
     else:
         topology = StoreTopology(
             payload=BackendRef(name="filesystem", options={"base_dir": root}),
             authority=BackendRef(name="sqlite", options={"root": root}),
         )
-    store = BlobStore(topology, cache_dir=root)
-    store.initialize()
-    schema = _queryable_schema()
-    authority = store.lifecycle_authority
-    signing_key = store._authority_manifest_key()
+    class _SharedKey:
+        def __init__(self) -> None:
+            self.key = b"k" * 32
 
-    def promote(key: str, generation: str, rank: int) -> None:
-        manifest = BlobManifest(
-            versions=StoreVersionDimensions(),
-            key=key,
-            generation=generation,
-            locator=f"generations/{key}/{generation}",
-            handler_type="object",
-            payload_format="pickle",
-            digest="a" * 64,
-            byte_size=0,
-            created_at="2026-09-08T00:00:00+00:00",
-            catalog_schema_id=schema.schema_id,
-            catalog_schema_revision=schema.revision,
-            catalog_schema_fingerprint=schema.fingerprint,
-            catalog_values={"rank": rank},
-            catalog_presence=("rank",),
-            user_metadata={},
-            handler_metadata={},
-        )
-        raw = sign_current_manifest(manifest, signing_key).canonical_bytes()
-        prepared = authority.prepare_mutation(
-            MutationSpec(
-                operation_id=f"operation-{key}",
-                key=key,
-                generation=generation,
-                candidate_locator=f"generations/{key}/{generation}",
-                expected=authority.read_expectation(key),
-                manifest=raw,
-            )
-        )
-        authority.record_verification(
-            prepared,
-            VerificationProof(
-                digest=hashlib.sha256(raw).hexdigest(), byte_size=0, manifest=raw
-            ),
-        )
-        authority.promote_mutation(prepared)
+        def get_key(self) -> bytes:
+            return self.key
 
+        def get_or_initialize_new_store(self) -> bytes:
+            return self.key
+
+        def initialize_new_store(self) -> bytes:
+            return self.key
+
+    signing = _SharedKey()
+    schema = catalog.CatalogSchema(
+        fields=(
+            catalog.CatalogField("rank", "integer", default=0, queryable=True),
+            catalog.CatalogField("note", "string", nullable=True),
+        ),
+        schema_id="public-catalog",
+    )
+    store = BlobStore(topology, cache_dir=root, manifest_key_provider=signing)
     try:
-        promote("a", "generation-a", 0)
-        promote("b", "generation-b", 1)
-        promote("c", "generation-c", 2)
+        receipt = store.put_entry(
+            {"payload": "one"},
+            key="public-entry",
+            catalog_schema=schema,
+            catalog_values={"note": None, "vendor": {"opaque": "kept"}},
+        )
+        initial = store.get_entry_info(receipt.key)
+        assert initial is not None
+        assert initial.metadata["catalog"]["values"] == {
+            "rank": 0,
+            "note": None,
+            "vendor": {"opaque": "kept"},
+        }
+        assert initial.metadata["catalog"]["presence"] == ("note", "rank", "vendor")
 
-        sparse = catalog.CatalogQuery(
-            predicates=(catalog.CatalogPredicate("rank", "gte", 99),)
+        updated = store.update_catalog(
+            receipt.key,
+            catalog_schema=schema,
+            catalog_values={"rank": 3},
+            expected=receipt.expectation,
         )
-        first_sparse = store.query_catalog(sparse, schema=schema, work_cap=2)
-        assert first_sparse.entries == ()
-        assert first_sparse.exhausted is False
-        assert first_sparse.examined_identity == ("b", "generation-b")
-        final_sparse = store.query_catalog(
-            sparse, schema=schema, cursor=first_sparse.cursor, work_cap=2
-        )
-        assert final_sparse.entries == ()
-        assert final_sparse.exhausted is True
-        assert final_sparse.examined_identity == ("c", "generation-c")
+        assert updated is not None
+        assert updated.generation == receipt.generation
+        assert updated.locator == receipt.locator
+        assert updated.expectation != receipt.expectation
+        assert store.get(receipt.key) == {"payload": "one"}
 
-        dense = catalog.CatalogQuery(
-            predicates=(catalog.CatalogPredicate("rank", "gte", 1),)
+        query = catalog.CatalogQuery(
+            predicates=(catalog.CatalogPredicate("rank", "eq", 3),)
         )
-        first_dense = store.query_catalog(dense, schema=schema, limit=1, work_cap=3)
-        assert [(entry.key, entry.values["rank"]) for entry in first_dense.entries] == [
-            ("b", 1)
+        page = store.query_catalog(query, schema=schema)
+        assert [(entry.key, entry.values["rank"]) for entry in page.entries] == [
+            ("public-entry", 3)
         ]
-        assert first_dense.exhausted is False
-        assert first_dense.examined_identity == ("b", "generation-b")
-        final_dense = store.query_catalog(
-            dense, schema=schema, cursor=first_dense.cursor, limit=1, work_cap=3
-        )
-        assert [(entry.key, entry.values["rank"]) for entry in final_dense.entries] == [
-            ("c", 2)
-        ]
-        assert final_dense.exhausted is True
-        assert store.capabilities.portable_query is True
-        assert store.capabilities.index_acceleration is False
 
-        stale = store.query_catalog(dense, schema=schema, limit=1, work_cap=1)
-        promote("d", "generation-d", 3)
-        with pytest.raises(catalog.CatalogStaleCursorError):
-            store.query_catalog(
-                dense, schema=schema, cursor=stale.cursor, limit=1, work_cap=1
+        with pytest.raises(Exception):
+            store.update_catalog(
+                receipt.key,
+                catalog_schema=schema,
+                catalog_values={"rank": 4},
+                expected=receipt.expectation,
             )
     finally:
         store.close()
+    try:
+        reopened = BlobStore(topology, cache_dir=root, manifest_key_provider=signing)
+        try:
+            page = reopened.query_catalog(query, schema=schema)
+            assert [(entry.key, entry.values["rank"]) for entry in page.entries] == [
+                ("public-entry", 3)
+            ]
+        finally:
+            reopened.close()
+    finally:
+        for resource in resources:
+            resource.close()
