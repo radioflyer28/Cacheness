@@ -32,7 +32,7 @@ from cacheness.error_handling import (
     CacheReason,
     CacheStorageError,
 )
-from .backends.blob_backends import InMemoryBlobBackend, InMemoryHandlerIO
+from .backends.blob_backends import InMemoryBlobBackend
 from .catalog import (
     CatalogCursor,
     CatalogPage,
@@ -44,7 +44,6 @@ from .catalog import (
 )
 from .composition import StoreTopology
 from .coordination import InstanceAdmission
-from .guarded_handler_io import GuardedHandlerIO
 from .handlers import HandlerRegistry
 from .integrity import (
     ManifestKeyError,
@@ -686,14 +685,24 @@ class BlobStore:
         self.close()
         return False
 
-    def _materialize_authority_store(self) -> GuardedHandlerIO:
-        """Open contained payload I/O after authority root validation."""
+    def _materialize_authority_store(self) -> Any:
+        """Materialize guarded generation I/O from the selected payload only."""
         if self.guarded_handler_io is None:
-            if isinstance(self.payload_backend, InMemoryBlobBackend):
-                self.guarded_handler_io = InMemoryHandlerIO(self.payload_backend)
-            else:
-                self.cache_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-                self.guarded_handler_io = GuardedHandlerIO(self.cache_dir)
+            self.guarded_handler_io = self.payload_backend.materialize_handler_io()
+            required_methods = (
+                "stage",
+                "publish_generation",
+                "open_snapshot",
+                "delete_or_prove_absent",
+                "close",
+            )
+            if not all(
+                callable(getattr(self.guarded_handler_io, name, None))
+                for name in required_methods
+            ):
+                raise CacheBlobBackendError(
+                    "Payload participant returned incomplete guarded generation I/O"
+                )
         return self.guarded_handler_io
 
     def _authority_manifest_key(self, *, initialize_new_store: bool = False) -> bytes:
@@ -756,27 +765,8 @@ class BlobStore:
         return encode_physical_name(key, namespace="blob-store")
 
     def _delete_or_prove_absent(self, locator: Path) -> None:
-        """Use durable exact deletion, otherwise prove the managed path absent."""
-        guarded_io = self._materialize_authority_store()
-        memory_delete = getattr(guarded_io, "delete_or_prove_absent", None)
-        if callable(memory_delete):
-            memory_delete(locator)
-            return
-        cleanup_error: Exception | None = None
-        try:
-            if guarded_io.file_ops.delete_durable(locator):
-                return
-        except Exception as exc:
-            cleanup_error = exc
-        try:
-            if not guarded_io.file_ops.exists(locator):
-                return
-        except Exception as exc:
-            cleanup_error = exc
-        context = {"operation": "payload_cleanup"}
-        if cleanup_error is not None:
-            context["cleanup_error"] = type(cleanup_error).__name__
-        raise CacheStorageError("Could not prove managed payload cleanup", context=context)
+        """Delegate exact cleanup to the selected payload participant's I/O."""
+        self._materialize_authority_store().delete_or_prove_absent(locator)
 
     def _resolve_payload_handler(self, manifest: BlobManifest) -> Any:
         """Resolve one signed handler/payload contract before opening bytes."""

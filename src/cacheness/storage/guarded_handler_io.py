@@ -184,6 +184,23 @@ class GuardedHandlerIO:
         result["_managed_generation_identity"] = self.file_ops.file_identity(final_path)
         return result
 
+    def delete_or_prove_absent(self, locator: Path | str) -> None:
+        """Delete one exact generation or prove its managed locator absent."""
+        cleanup_error: Exception | None = None
+        try:
+            if self.file_ops.delete_durable(locator):
+                return
+        except Exception as exc:
+            cleanup_error = exc
+        try:
+            if not self.file_ops.exists(locator):
+                return
+        except Exception as exc:
+            cleanup_error = exc
+        if cleanup_error is not None:
+            raise OSError("Could not prove managed payload cleanup") from cleanup_error
+        raise OSError("Managed payload remains after deletion")
+
     @contextmanager
     def _private_stage(self) -> Iterator[Path]:
         """Yield a mode-restricted temporary directory outside managed storage."""

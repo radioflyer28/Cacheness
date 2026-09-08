@@ -222,6 +222,15 @@ class FilesystemBlobBackend(BlobBackend):
         shard_chars: Number of leading characters for directory sharding (0 to disable)
     """
 
+    topology_capabilities = {
+        "durable": True,
+        "process_scope": "host",
+        "host_scope": "host",
+        "immutable_generations": True,
+        "streaming": True,
+        "listing": True,
+    }
+
     def __init__(self, base_dir: Union[str, Path], shard_chars: int = 2):
         """
         Initialize filesystem blob backend.
@@ -285,6 +294,10 @@ class FilesystemBlobBackend(BlobBackend):
             "abc123def456" -> base_dir/abc123def456
         """
         return self._file_ops.blob_locator(blob_id, self.shard_chars)
+
+    def materialize_handler_io(self) -> GuardedHandlerIO:
+        """Provide guarded generation I/O rooted at this participant's root."""
+        return GuardedHandlerIO(self.base_dir)
 
     def close(self) -> None:
         """Release the managed root descriptor when this backend is closed."""
@@ -365,6 +378,10 @@ class InMemoryBlobBackend(BlobBackend):
         count = len(self._storage)
         self._storage.clear()
         return count
+
+    def materialize_handler_io(self) -> "InMemoryHandlerIO":
+        """Provide the process-local generation adapter for this participant."""
+        return InMemoryHandlerIO(self)
 
     def close(self) -> None:
         """Discard the process-local payload generation set exactly once."""

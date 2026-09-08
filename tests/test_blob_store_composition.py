@@ -280,6 +280,7 @@ def test_selected_filesystem_participant_supplies_generation_io_at_its_own_root(
         authority=BackendRef(name="sqlite", options={"root": root_a}),
     )
     store = BlobStore(topology, cache_dir=root_b)
+    receipt = None
     try:
         receipt = store.put_entry(
             {"payload": "selected"},
@@ -297,7 +298,19 @@ def test_selected_filesystem_participant_supplies_generation_io_at_its_own_root(
         assert store.guarded_handler_io.root == payload.base_dir
         assert any((root_a / "generations").rglob("*"))
         assert not (root_b / "generations").exists()
+        assert store.capabilities.durable is True
+        assert store.capabilities.streaming is True
         assert store.get(receipt.key) == {"payload": "selected"}
     finally:
         store.close()
+    assert receipt is not None
+    reopened = BlobStore(topology, cache_dir=root_b)
+    try:
+        assert reopened.get(receipt.key) == {"payload": "selected"}
+        assert reopened.delete(receipt.key)
+        assert not [
+            path for path in (root_a / "generations").rglob("*") if path.is_file()
+        ]
+    finally:
+        reopened.close()
         payload.close()

@@ -64,6 +64,20 @@ class ProjectionSink(Protocol):
         """Return the last committed derived checkpoint, if any."""
 
 
+@runtime_checkable
+class PayloadGenerationIOProvider(Protocol):
+    """Materialize the one guarded generation-I/O primitive a store consumes.
+
+    This payload role deliberately supplies only staging, snapshot, publication,
+    and deletion mechanics. It does not receive authority mutation methods or
+    decide lifecycle sequencing, recovery, or catalog completeness.
+    """
+
+    def materialize_handler_io(self) -> object:
+        """Return the participant-rooted guarded generation-I/O primitive."""
+        ...
+
+
 class Ownership(str, Enum):
     """The resource owner responsible for one selected participant's close."""
 
@@ -644,6 +658,12 @@ def _validate_participant_role(role: str, participant: object) -> None:
         raise CompositionValidationError("A payload participant cannot be an authority")
     if role == BackendRole.PAYLOAD.value and is_authority:
         raise CompositionValidationError("A lifecycle authority cannot be a payload")
+    if role == BackendRole.PAYLOAD.value and not isinstance(
+        participant, PayloadGenerationIOProvider
+    ):
+        raise CompositionValidationError(
+            "A payload participant must provide guarded generation I/O"
+        )
     if role != BackendRole.PROJECTION.value and participant is None:
         raise CompositionValidationError(f"{role} participant cannot be None")
 
@@ -761,6 +781,7 @@ __all__ = [
     "CompositionValidationError",
     "MetadataRole",
     "Ownership",
+    "PayloadGenerationIOProvider",
     "ParticipantCapabilities",
     "ProjectionRole",
     "ProjectionSink",
