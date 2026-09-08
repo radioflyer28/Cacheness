@@ -384,6 +384,9 @@ class InMemoryHandlerIO:
         self._require_open()
         locator_text = Path(locator).as_posix()
         with staged.open() as (source, file_size):
+            memory_locator = f"memory://{locator_text}"
+            if self.backend.exists(memory_locator):
+                raise FileExistsError("In-memory payload generation already exists")
             self.backend.write_blob(locator_text, source.read())
         return staged.result_for(Path(locator_text), file_size)
 
