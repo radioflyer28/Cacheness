@@ -23,7 +23,7 @@ def test_memory_profile_resolves_before_the_public_store_round_trip(tmp_path) ->
 
     with BlobStore(topology, cache_dir=tmp_path / "memory-store") as store:
         assert isinstance(store.lifecycle, AuthorityLifecycleEngine)
-        assert store.qualified_profile is profile
+        assert store.topology.qualified_profile is profile
         assert store.put({"answer": 42}, key="answer") == "answer"
         assert store.get("answer") == {"answer": 42}
 

@@ -28,6 +28,169 @@ class CapabilityRequirementError(CompositionValidationError):
     """Raised before lifecycle I/O when a topology misses a required guarantee."""
 
 
+@dataclass(frozen=True)
+class TopologyQualificationRequirements:
+    """Immutable release contract for one explicitly supported topology.
+
+    This declaration contains no observed readiness or latest-run state.
+    Real-service observations belong in sanitized release evidence outside
+    runtime composition.
+    """
+
+    coordination_scope: str
+    durability_atomicity_boundary: str
+    progress_outcomes: frozenset[str]
+    service_prerequisites: tuple[str, ...]
+    projection_available: bool
+    evidence_requirement_id: str
+    evidence_schema_id: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.coordination_scope, str) or not self.coordination_scope:
+            raise CompositionValidationError("coordination_scope must be a non-empty string")
+        if (
+            not isinstance(self.durability_atomicity_boundary, str)
+            or not self.durability_atomicity_boundary
+        ):
+            raise CompositionValidationError(
+                "durability_atomicity_boundary must be a non-empty string"
+            )
+        if not isinstance(self.progress_outcomes, frozenset) or not self.progress_outcomes:
+            raise CompositionValidationError("progress_outcomes must be a non-empty frozenset")
+        if not all(isinstance(outcome, str) and outcome for outcome in self.progress_outcomes):
+            raise CompositionValidationError("progress_outcomes must contain non-empty strings")
+        if not isinstance(self.service_prerequisites, tuple) or not all(
+            isinstance(prerequisite, str) and prerequisite
+            for prerequisite in self.service_prerequisites
+        ):
+            raise CompositionValidationError(
+                "service_prerequisites must be a tuple of non-empty strings"
+            )
+        if type(self.projection_available) is not bool:
+            raise CompositionValidationError("projection_available must be a bool")
+        for name in ("evidence_requirement_id", "evidence_schema_id"):
+            if not isinstance(getattr(self, name), str) or not getattr(self, name):
+                raise CompositionValidationError(f"{name} must be a non-empty string")
+
+
+@dataclass(frozen=True)
+class QualifiedTopologyProfile:
+    """One exact authority/payload pairing with its immutable qualification contract."""
+
+    authority_identity: str
+    payload_identity: str
+    requirements: TopologyQualificationRequirements
+
+    def __post_init__(self) -> None:
+        for name in ("authority_identity", "payload_identity"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value:
+                raise CompositionValidationError(f"{name} must be a non-empty string")
+        if not isinstance(self.requirements, TopologyQualificationRequirements):
+            raise CompositionValidationError(
+                "requirements must be TopologyQualificationRequirements"
+            )
+
+    @property
+    def pair(self) -> tuple[str, str]:
+        """Return the normalized authority/payload lookup key."""
+        return (self.authority_identity, self.payload_identity)
+
+
+def _qualified_profile(
+    authority_identity: str,
+    payload_identity: str,
+    *,
+    coordination_scope: str,
+    durability_atomicity_boundary: str,
+    progress_outcomes: frozenset[str],
+    service_prerequisites: tuple[str, ...],
+    evidence_requirement_id: str,
+    evidence_schema_id: str,
+) -> QualifiedTopologyProfile:
+    """Build one catalog row while keeping the catalog declaration concise."""
+    return QualifiedTopologyProfile(
+        authority_identity=authority_identity,
+        payload_identity=payload_identity,
+        requirements=TopologyQualificationRequirements(
+            coordination_scope=coordination_scope,
+            durability_atomicity_boundary=durability_atomicity_boundary,
+            progress_outcomes=progress_outcomes,
+            service_prerequisites=service_prerequisites,
+            projection_available=True,
+            evidence_requirement_id=evidence_requirement_id,
+            evidence_schema_id=evidence_schema_id,
+        ),
+    )
+
+
+BUILTIN_QUALIFIED_TOPOLOGY_PROFILES: Mapping[
+    tuple[str, str], QualifiedTopologyProfile
+] = MappingProxyType(
+    {
+        ("memory", "memory"): _qualified_profile(
+            "memory",
+            "memory",
+            coordination_scope="one_process",
+            durability_atomicity_boundary=(
+                "atomic only within one process; no crash durability"
+            ),
+            progress_outcomes=frozenset({"success", "conflict"}),
+            service_prerequisites=("no external service",),
+            evidence_requirement_id="local-memory-contract",
+            evidence_schema_id="phase5-local-contract-v1",
+        ),
+        ("sqlite", "filesystem"): _qualified_profile(
+            "sqlite",
+            "filesystem",
+            coordination_scope="one_host_multiple_processes",
+            durability_atomicity_boundary=(
+                "SQLite transaction is authoritative; immutable filesystem "
+                "generations reconcile outside cross-resource ACID"
+            ),
+            progress_outcomes=frozenset(
+                {"success", "conflict", "retryable_timeout"}
+            ),
+            service_prerequisites=(
+                "explicit initialization before shared workers",
+                "writable local filesystem",
+            ),
+            evidence_requirement_id="local-sqlite-filesystem-contract",
+            evidence_schema_id="phase5-local-contract-v1",
+        ),
+        ("postgresql", "s3"): _qualified_profile(
+            "postgresql",
+            "s3",
+            coordination_scope="multiple_hosts",
+            durability_atomicity_boundary=(
+                "PostgreSQL transaction is authoritative; immutable Amazon S3 "
+                "objects reconcile outside cross-resource ACID"
+            ),
+            progress_outcomes=frozenset(
+                {"success", "conflict", "retryable_timeout"}
+            ),
+            service_prerequisites=(
+                "explicit PostgreSQL initialization before shared workers",
+                "real PostgreSQL service",
+                "real Amazon S3 bucket and test-owned prefix",
+                "shared external manifest signing key",
+            ),
+            evidence_requirement_id="live-postgresql-amazon-s3",
+            evidence_schema_id="phase5-live-service-evidence-v1",
+        ),
+    }
+)
+
+
+def qualified_topology_profiles() -> Mapping[tuple[str, str], QualifiedTopologyProfile]:
+    """Return the immutable built-in qualification catalog.
+
+    Registration answers whether a participant can be constructed. This
+    catalog answers the separate question of whether a pairing is supported.
+    """
+    return BUILTIN_QUALIFIED_TOPOLOGY_PROFILES
+
+
 class BackendRole(str, Enum):
     """The only participant roles accepted by a store topology."""
 
@@ -384,7 +547,7 @@ class RoleRegistry:
                 "host_scope": "host",
                 "transaction_scope": "authority",
                 "exact_cas": True,
-                "portable_query": False,
+                "portable_query": True,
                 "canonical_scan": True,
                 "index_acceleration": False,
             },
@@ -472,6 +635,7 @@ class ResolvedTopology:
     authority: object
     projections: tuple[object, ...]
     capabilities: TopologyCapabilities
+    qualified_profile: QualifiedTopologyProfile
     _owned_in_creation_order: tuple[object, ...] = ()
     _closed: bool = False
 
@@ -532,6 +696,7 @@ class StoreTopology:
                 self.minimum_capabilities.require(
                     _capabilities_from_references(self, active_registry)
                 )
+            qualified_profile = self.qualification_report()
             payload = _resolve_ref(
                 BackendRole.PAYLOAD.value,
                 self.payload,
@@ -560,6 +725,7 @@ class StoreTopology:
                 authority,
                 projections,
                 capabilities,
+                qualified_profile,
                 tuple(owned),
             )
         except BaseException:
@@ -567,12 +733,31 @@ class StoreTopology:
             raise
 
     def capability_report(self) -> TopologyCapabilities:
-        """Return the resolved topology's capability report without retaining it."""
-        resolved = self.resolve()
+        """Report constructible capabilities without asserting supported pairing.
+
+        The report avoids participant construction. Use
+        :meth:`qualification_report` to inspect the distinct support contract.
+        """
+        _record_and_validate_injected_participants(self, [])
+        return _capabilities_from_references(self, self.role_registry)
+
+    def qualification_report(self) -> QualifiedTopologyProfile:
+        """Return one immutable profile before factories or payload I/O run."""
+        authority_identity = _reference_qualification_identity(
+            BackendRole.AUTHORITY.value, self.authority
+        )
+        payload_identity = _reference_qualification_identity(
+            BackendRole.PAYLOAD.value, self.payload
+        )
         try:
-            return resolved.capabilities
-        finally:
-            resolved.close()
+            return BUILTIN_QUALIFIED_TOPOLOGY_PROFILES[
+                (authority_identity, payload_identity)
+            ]
+        except KeyError as error:
+            raise CompositionValidationError(
+                "Unsupported topology pairing: "
+                f"authority={authority_identity!r}, payload={payload_identity!r}"
+            ) from error
 
 
 def resolve_metadata_role(implementation: str) -> MetadataRole:
@@ -600,6 +785,20 @@ def _normalize_role(role: str | BackendRole) -> str:
 
 def _as_ref(value: BackendRef | object) -> BackendRef:
     return value if isinstance(value, BackendRef) else BackendRef(instance=value)
+
+
+def _reference_qualification_identity(role: str, reference: BackendRef) -> str:
+    """Read one explicit support identity without constructing a participant."""
+    if reference.name is not None:
+        return reference.name
+    assert reference.instance is not None
+    identity = getattr(reference.instance, "qualification_identity", None)
+    if not isinstance(identity, str) or not identity:
+        raise CompositionValidationError(
+            f"Injected {role} participant must declare a non-empty "
+            "qualification_identity"
+        )
+    return identity
 
 
 def _resolve_ref(
@@ -814,17 +1013,21 @@ __all__ = [
     "CapabilityMinimum",
     "CapabilityRequirementError",
     "CompositionValidationError",
+    "BUILTIN_QUALIFIED_TOPOLOGY_PROFILES",
     "MetadataRole",
     "Ownership",
     "PayloadGenerationIOProvider",
     "ParticipantCapabilities",
     "ProjectionRole",
     "ProjectionSink",
+    "QualifiedTopologyProfile",
     "ResolvedTopology",
     "RoleRegistration",
     "RoleRegistry",
     "StoreTopology",
     "TopologyCapabilities",
+    "TopologyQualificationRequirements",
     "allowed_progress_outcomes",
+    "qualified_topology_profiles",
     "resolve_metadata_role",
 ]
