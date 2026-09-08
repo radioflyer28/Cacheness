@@ -12,10 +12,13 @@ from cacheness.storage.composition import (
     CompositionValidationError,
     RoleRegistry,
     StoreTopology,
+    allowed_progress_outcomes,
     resolve_metadata_role,
 )
+from cacheness.storage.backends.blob_backends import InMemoryBlobBackend
 from cacheness.storage.lifecycle import AuthorityLifecycleEngine
 from cacheness.storage.memory_lifecycle_authority import InMemoryLifecycleAuthority
+from cacheness.error_handling import CacheBlobBackendError
 
 
 def test_memory_profile_resolves_before_the_public_store_round_trip(tmp_path) -> None:
@@ -53,6 +56,111 @@ def test_builtin_catalog_has_only_the_three_declared_reference_pairs() -> None:
     registry = RoleRegistry()
     assert registry.resolve("authority", "sqlite").capabilities is not None
     assert registry.resolve("authority", "sqlite").capabilities.portable_query is True
+
+
+def test_builtin_remote_roles_expose_only_the_qualified_participants() -> None:
+    """Remote construction names identify the completed narrow role adapters."""
+    registry = RoleRegistry()
+
+    payload = registry.resolve("payload", "s3")
+    authority = registry.resolve("authority", "postgresql")
+
+    assert payload.capabilities is not None
+    assert payload.capabilities.process_scope == "multi_host"
+    assert payload.capabilities.streaming is True
+    assert authority.capabilities is not None
+    assert authority.capabilities.transaction_scope == "authority"
+    assert authority.capabilities.exact_cas is True
+    assert allowed_progress_outcomes("postgresql-remote") == {
+        "success",
+        "conflict",
+        "retryable_serialization",
+        "retryable_deadlock",
+        "retryable_lock_timeout",
+        "retryable_statement_timeout",
+        "retryable_connection_timeout",
+    }
+
+
+class _StaticRemoteManifestKey:
+    """Application-owned shared key material used by independent remote clients."""
+
+    def __init__(self, key: bytes) -> None:
+        self._key = key
+
+    def get_key(self) -> bytes:
+        return self._key
+
+    def get_or_initialize_new_store(self) -> bytes:
+        return self._key
+
+    def initialize_new_store(self) -> bytes:
+        return self._key
+
+
+class _RemotePayload(InMemoryBlobBackend):
+    """Deterministic participant boundary used without claiming live S3 evidence."""
+
+    qualification_identity = "s3"
+    topology_capabilities = {
+        "durable": True,
+        "process_scope": "multi_host",
+        "host_scope": "multi_host",
+        "immutable_generations": True,
+        "streaming": True,
+        "listing": True,
+    }
+
+
+class _RemoteAuthority(InMemoryLifecycleAuthority):
+    """Deterministic authority boundary used without a PostgreSQL service."""
+
+    qualification_identity = "postgresql"
+    topology_capabilities = {
+        "durable": True,
+        "process_scope": "multi_host",
+        "host_scope": "multi_host",
+        "transaction_scope": "authority",
+        "exact_cas": True,
+        "portable_query": True,
+        "canonical_scan": True,
+        "index_acceleration": True,
+    }
+
+
+def test_remote_profile_requires_external_key_and_retains_one_engine(tmp_path) -> None:
+    """A remote profile never falls back to a per-host signing-key file."""
+    registry = RoleRegistry()
+    registry.register(
+        "payload",
+        "s3",
+        _RemotePayload,
+        capabilities=_RemotePayload.topology_capabilities,
+    )
+    registry.register(
+        "authority",
+        "postgresql",
+        _RemoteAuthority,
+        capabilities=_RemoteAuthority.topology_capabilities,
+    )
+    topology = StoreTopology(
+        payload=BackendRef(name="s3"),
+        authority=BackendRef(name="postgresql"),
+        role_registry=registry,
+    )
+
+    with pytest.raises(CacheBlobBackendError, match="external manifest signing key"):
+        BlobStore(topology, cache_dir=tmp_path / "remote-default-key")
+
+    with BlobStore(
+        topology,
+        cache_dir=tmp_path / "remote-explicit-key",
+        manifest_key_provider=_StaticRemoteManifestKey(b"r" * 32),
+    ) as store:
+        assert type(store.lifecycle) is AuthorityLifecycleEngine
+        assert store.payload_backend.qualification_identity == "s3"
+        assert store.lifecycle_authority.qualification_identity == "postgresql"
+        assert store.topology.qualified_profile.pair == ("postgresql", "s3")
 
 
 class _QualifiedPayload:
