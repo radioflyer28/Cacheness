@@ -539,7 +539,7 @@ def test_complete_workflow_calls_stay_at_the_authority_boundary() -> None:
             [None],
             [None, (7,), None],
             [(7, "", True), ("active", ""), []],
-            [("active", True), None],
+            [("active", True), ("clear-run",)],
             [None, (0,), (0,), (7,), None],
             [(7, 0, 0)],
             [(7, True), (7,)],

@@ -70,6 +70,7 @@ SCHEMA_VERSION = POSTGRESQL_AUTHORITY_SCHEMA_VERSION
 
 _SCHEMA_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,62}\Z")
 _MAX_STORE_IDENTITY_BYTES = 64
+_MAX_AUTHORITY_TEXT_BYTES = 512
 _PROGRESS_SQLSTATE_OUTCOMES = {
     "40001": "serialization",
     "40P01": "deadlock",
@@ -106,6 +107,17 @@ _T = TypeVar("_T")
 def _bounded_identity(value: str) -> str:
     if not isinstance(value, str) or not value or len(value.encode("utf-8")) > _MAX_STORE_IDENTITY_BYTES:
         raise ValueError("store_identity must be a non-empty bounded string")
+    return value
+
+
+def _bounded_authority_text(value: str, field_name: str) -> str:
+    """Validate persisted authority identifiers before exposing semantic values."""
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value.encode("utf-8")) > _MAX_AUTHORITY_TEXT_BYTES
+    ):
+        raise ValueError(f"{field_name} must be a non-empty bounded string")
     return value
 
 
@@ -204,6 +216,12 @@ class PostgresqlLifecycleAuthority:
     def _table(self, name: str) -> Any:
         """Compose the only dynamic SQL values as psycopg identifiers."""
         return sql.SQL("{}.{}").format(sql.Identifier(self.schema), sql.Identifier(name))
+
+    @staticmethod
+    def _token_value(token: PageToken) -> str:
+        if not isinstance(token, PageToken):
+            raise TypeError("token must be a PageToken")
+        return _bounded_authority_text(token.value, "token")
 
     @contextmanager
     def _lease(self) -> Iterator[Any]:
@@ -566,7 +584,19 @@ class PostgresqlLifecycleAuthority:
             if meta is None:
                 raise CacheBlobMigrationRequiredError("PostgreSQL lifecycle authority is absent")
             cursor.execute(sql.SQL("SELECT operation_id, state FROM {} ORDER BY operation_id").format(self._table("mutations")))
-            states = tuple((str(row[0]), str(row[1])) for row in cursor.fetchall())
+            try:
+                states = tuple(
+                    (
+                        _bounded_authority_text(row[0], "operation_id"),
+                        _bounded_authority_text(row[1], "mutation_state"),
+                    )
+                    for row in cursor.fetchall()
+                )
+            except (TypeError, ValueError) as error:
+                raise CacheBlobBackendError(
+                    "PostgreSQL lifecycle authority mutation row is malformed",
+                    context={"operation": "postgresql_lifecycle_authority", "stage": "snapshot_state"},
+                ) from error
             cursor.execute(
                 sql.SQL(
                     "SELECT debt_id, operation_id, locator, key, generation, role FROM {} "
@@ -1035,9 +1065,9 @@ class PostgresqlLifecycleAuthority:
     ) -> tuple[CleanupDebt, ...]:
         """Return only one bounded, exact cleanup-debt work page."""
         if key is not None:
-            _bounded_identity(key)
+            _bounded_authority_text(key, "key")
         if operation_id is not None:
-            _bounded_identity(operation_id)
+            _bounded_authority_text(operation_id, "operation_id")
 
         def read_debts(cursor: Any) -> tuple[CleanupDebt, ...]:
             predicates = [sql.SQL("state = 'pending'")]
@@ -1151,7 +1181,7 @@ class PostgresqlLifecycleAuthority:
 
     def delete_entry(self, key: str, *, expected: EntryExpectation) -> None:
         """Retire one exact visible generation and advance its lineage atomically."""
-        _bounded_identity(key)
+        _bounded_authority_text(key, "key")
 
         def delete(cursor: Any) -> None:
             observed = self._expectation(cursor, key, lock=True)
@@ -1212,7 +1242,13 @@ class PostgresqlLifecycleAuthority:
             )
             active = cursor.fetchone()
             if active is not None:
-                return PageToken(str(active[0]))
+                try:
+                    return PageToken(_bounded_authority_text(active[0], "run_id"))
+                except (TypeError, ValueError) as error:
+                    raise CacheBlobBackendError(
+                        "PostgreSQL clear run row is malformed",
+                        context={"operation": "postgresql_lifecycle_authority", "stage": "begin_clear"},
+                    ) from error
             cursor.execute(
                 sql.SQL("SELECT authority_revision FROM {} WHERE singleton = TRUE FOR UPDATE").format(
                     self._table("authority_meta")
@@ -1235,12 +1271,13 @@ class PostgresqlLifecycleAuthority:
 
     def _capture_clear_page(self, cursor: Any, token: PageToken) -> None:
         """Persist one finite membership page before returning its targets."""
+        token_value = self._token_value(token)
         cursor.execute(
             sql.SQL(
                 "SELECT revision, capture_cursor, snapshot_complete FROM {} "
                 "WHERE run_id = %s AND state = 'active' FOR UPDATE"
             ).format(self._table("clear_runs")),
-            (token.value,),
+            (token_value,),
         )
         run = cursor.fetchone()
         if run is None:
@@ -1265,7 +1302,7 @@ class PostgresqlLifecycleAuthority:
                     "ON CONFLICT (run_id, key) DO NOTHING"
                 ).format(self._table("clear_targets")),
                 (
-                    token.value,
+                    token_value,
                     entry.key,
                     entry.expectation.lineage,
                     entry.expectation.revision,
@@ -1280,11 +1317,12 @@ class PostgresqlLifecycleAuthority:
             sql.SQL(
                 "UPDATE {} SET capture_cursor = %s, snapshot_complete = %s WHERE run_id = %s"
             ).format(self._table("clear_runs")),
-            (capture_cursor, len(rows) <= self.lifecycle_limits.manifest_page_size, token.value),
+            (capture_cursor, len(rows) <= self.lifecycle_limits.manifest_page_size, token_value),
         )
 
     def page_clear(self, token: PageToken) -> tuple[EntrySnapshot, ...]:
         """Return a bounded persisted clear-target page, extending the snapshot safely."""
+        token_value = self._token_value(token)
 
         def page(cursor: Any) -> tuple[EntrySnapshot, ...]:
             self._capture_clear_page(cursor, token)
@@ -1292,7 +1330,7 @@ class PostgresqlLifecycleAuthority:
                 sql.SQL(
                     "SELECT c.state, c.last_key FROM {} AS c WHERE c.run_id = %s"
                 ).format(self._table("clear_runs")),
-                (token.value,),
+                (token_value,),
             )
             run = cursor.fetchone()
             if run is None:
@@ -1305,7 +1343,7 @@ class PostgresqlLifecycleAuthority:
                     "FROM {} WHERE run_id = %s AND state = 'pending' AND key > %s "
                     "ORDER BY key LIMIT %s"
                 ).format(self._table("clear_targets")),
-                (token.value, run[1], self.lifecycle_limits.manifest_page_size + 1),
+                (token_value, run[1], self.lifecycle_limits.manifest_page_size + 1),
             )
             rows = cursor.fetchall()
             selected = rows[: self.lifecycle_limits.manifest_page_size]
@@ -1334,13 +1372,14 @@ class PostgresqlLifecycleAuthority:
         state: str = "completed",
     ) -> None:
         """Checkpoint exact clear work without ever deriving membership from S3."""
+        token_value = self._token_value(token)
 
         def checkpoint(cursor: Any) -> None:
             cursor.execute(
                 sql.SQL(
                     "SELECT state, snapshot_complete FROM {} WHERE run_id = %s FOR UPDATE"
                 ).format(self._table("clear_runs")),
-                (token.value,),
+                (token_value,),
             )
             run = cursor.fetchone()
             if target is None and run is not None and run[0] == "completed":
@@ -1353,10 +1392,14 @@ class PostgresqlLifecycleAuthority:
                 cursor.execute(
                     sql.SQL(
                         "UPDATE {} SET state = 'completed' WHERE run_id = %s AND NOT EXISTS "
-                        "(SELECT 1 FROM {} WHERE run_id = %s AND state = 'pending')"
+                        "(SELECT 1 FROM {} WHERE run_id = %s AND state = 'pending') RETURNING run_id"
                     ).format(self._table("clear_runs"), self._table("clear_targets")),
-                    (token.value, token.value),
+                    (token_value, token_value),
                 )
+                if cursor.fetchone() is None:
+                    raise CacheBlobLifecycleConflictError(
+                        "Clear run cannot complete while targets remain"
+                    )
                 return
             if state not in {"completed", "conflicted", "blocked"}:
                 raise ValueError("Clear target state is unsupported")
@@ -1366,7 +1409,7 @@ class PostgresqlLifecycleAuthority:
                     "AND entry_revision = %s AND generation = %s AND manifest_digest = %s FOR UPDATE"
                 ).format(self._table("clear_targets")),
                 (
-                    token.value,
+                    token_value,
                     target.key,
                     target.expectation.lineage,
                     target.expectation.revision,
@@ -1408,7 +1451,7 @@ class PostgresqlLifecycleAuthority:
                     "UPDATE {} SET state = %s WHERE run_id = %s AND key = %s AND state = 'pending' "
                     "RETURNING key"
                 ).format(self._table("clear_targets")),
-                (state, token.value, target.key),
+                (state, token_value, target.key),
             )
             if cursor.fetchone() is None:
                 raise CacheBlobLifecycleConflictError("Clear target cannot accept checkpoint")
@@ -1418,7 +1461,7 @@ class PostgresqlLifecycleAuthority:
                     "(SELECT 1 FROM {} WHERE run_id = %s AND state = 'pending') THEN 'completed' "
                     "ELSE 'active' END WHERE run_id = %s"
                 ).format(self._table("clear_runs"), self._table("clear_targets")),
-                (target.key, token.value, token.value),
+                (target.key, token_value, token_value),
             )
 
         self._transaction("checkpoint_clear", checkpoint)
@@ -1434,7 +1477,13 @@ class PostgresqlLifecycleAuthority:
             )
             active = cursor.fetchone()
             if active is not None:
-                return PageToken(str(active[0]))
+                try:
+                    return PageToken(_bounded_authority_text(active[0], "run_id"))
+                except (TypeError, ValueError) as error:
+                    raise CacheBlobBackendError(
+                        "PostgreSQL reconciliation run row is malformed",
+                        context={"operation": "postgresql_lifecycle_authority", "stage": "begin_reconciliation"},
+                    ) from error
             cursor.execute(sql.SQL("SELECT COALESCE(MAX(mutation_id), 0) FROM {}").format(self._table("mutations")))
             mutation_high_water = cursor.fetchone()[0]
             cursor.execute(sql.SQL("SELECT COALESCE(MAX(debt_id), 0) FROM {}").format(self._table("cleanup_debt")))
@@ -1463,20 +1512,21 @@ class PostgresqlLifecycleAuthority:
         self, token: PageToken | None = None
     ) -> ReconciliationSnapshot:
         """Return durable high-water bounds without payload inspection."""
+        token_value = None if token is None else self._token_value(token)
 
         def snapshot(cursor: Any) -> ReconciliationSnapshot:
-            if token is not None:
+            if token_value is not None:
                 cursor.execute(
                     sql.SQL(
                         "SELECT authority_revision, mutation_high_water, debt_high_water FROM {} "
                         "WHERE run_id = %s"
                     ).format(self._table("reconciliation_runs")),
-                    (token.value,),
+                    (token_value,),
                 )
                 row = cursor.fetchone()
                 if row is None:
                     raise CacheBlobLifecycleConflictError("Reconciliation run does not exist")
-                return ReconciliationSnapshot(row[0], row[1], row[2], token.value)
+                return ReconciliationSnapshot(row[0], row[1], row[2], token_value)
             cursor.execute(
                 sql.SQL("SELECT authority_revision FROM {} WHERE singleton = TRUE").format(
                     self._table("authority_meta")
@@ -1573,13 +1623,14 @@ class PostgresqlLifecycleAuthority:
 
     def page_reconciliation(self, token: PageToken) -> tuple[CleanupDebt, ...]:
         """Return the bounded pending-debt compatibility view for one run."""
+        token_value = self._token_value(token)
 
         def page(cursor: Any) -> tuple[CleanupDebt, ...]:
             cursor.execute(
                 sql.SQL("SELECT debt_high_water FROM {} WHERE run_id = %s").format(
                     self._table("reconciliation_runs")
                 ),
-                (token.value,),
+                (token_value,),
             )
             run = cursor.fetchone()
             if run is None:
@@ -1612,6 +1663,7 @@ class PostgresqlLifecycleAuthority:
         state: str = "completed",
     ) -> None:
         """Persist a bounded replay checkpoint; retry policy stays with the caller."""
+        token_value = self._token_value(token)
 
         def checkpoint(cursor: Any) -> None:
             if work is None:
@@ -1620,7 +1672,7 @@ class PostgresqlLifecycleAuthority:
                         "UPDATE {} SET state = 'completed' WHERE run_id = %s AND state = 'active' "
                         "RETURNING run_id"
                     ).format(self._table("reconciliation_runs")),
-                    (token.value,),
+                    (token_value,),
                 )
                 if cursor.fetchone() is None:
                     raise CacheBlobLifecycleConflictError(
@@ -1637,7 +1689,7 @@ class PostgresqlLifecycleAuthority:
                     "INSERT INTO {} (run_id, source, action_id, state) VALUES (%s, %s, %s, %s) "
                     "ON CONFLICT (run_id, source, action_id) DO UPDATE SET state = EXCLUDED.state"
                 ).format(self._table("reconciliation_actions")),
-                (token.value, work.source, work.row_id, state),
+                (token_value, work.source, work.row_id, state),
             )
             cursor.execute(
                 sql.SQL(
@@ -1648,7 +1700,7 @@ class PostgresqlLifecycleAuthority:
                     sql.Identifier(cursor_column),
                     sql.Identifier(cursor_column),
                 ),
-                (work.row_id, token.value),
+                (work.row_id, token_value),
             )
             if cursor.fetchone() is None:
                 raise CacheBlobLifecycleConflictError(
