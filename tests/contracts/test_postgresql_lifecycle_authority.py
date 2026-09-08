@@ -21,6 +21,8 @@ class _Cursor:
 
     def execute(self, query: object, params: object = None) -> "_Cursor":
         self.connection.executions.append((query, params))
+        if "set local" in _query_text(query):
+            return self
         response = self.connection.responses.pop(0) if self.connection.responses else None
         if isinstance(response, BaseException):
             raise response
@@ -77,12 +79,14 @@ class _Connection:
 
 @dataclass
 class _Factory:
+    scripts: list[list[object]] = field(default_factory=list)
     connections: list[_Connection] = field(default_factory=list)
     calls: int = 0
 
     def __call__(self) -> _Connection:
         self.calls += 1
-        connection = _Connection()
+        responses = self.scripts.pop(0) if self.scripts else []
+        connection = _Connection(responses=responses)
         self.connections.append(connection)
         return connection
 
@@ -118,12 +122,12 @@ def test_reopen_rejects_wrong_version_without_ddl_or_mutation() -> None:
         PostgresqlLifecycleAuthority,
     )
 
-    factory = _Factory()
+    factory = _Factory(
+        scripts=[[(999, "identity", "postgresql-lifecycle-authority-v1")]]
+    )
     authority = PostgresqlLifecycleAuthority(factory, schema="phase5_authority")
     # The read-only validation query finds the owned marker but an unsupported
     # schema version.  It must fail before any mutating statement is sent.
-    factory.connections.append(_Connection(responses=[(999, "identity", "postgresql-authority-v1")]))
-
     with pytest.raises(CacheBlobMigrationRequiredError):
         authority.open()
 
@@ -131,6 +135,67 @@ def test_reopen_rejects_wrong_version_without_ddl_or_mutation() -> None:
     assert not any("create " in statement or "alter " in statement for statement in statements)
     assert factory.connections[-1].commit_count == 0
     assert factory.connections[-1].closed is True
+
+
+def test_open_validates_exact_layout_without_emitting_ddl() -> None:
+    """A reopened current layout is inspected read-only, not silently upgraded."""
+    from cacheness.storage.backends.postgresql_lifecycle_authority import (
+        POSTGRESQL_AUTHORITY_CAPABILITY,
+        POSTGRESQL_AUTHORITY_SCHEMA_VERSION,
+        PostgresqlLifecycleAuthority,
+    )
+
+    required_tables = [
+        ("authority_meta",),
+        ("entry_lineage",),
+        ("entries",),
+        ("mutations",),
+        ("cleanup_debt",),
+        ("clear_runs",),
+        ("clear_targets",),
+        ("reconciliation_runs",),
+        ("reconciliation_actions",),
+    ]
+    required_constraints = [
+        ("authority_meta_singleton_check",),
+        ("mutations_operation_id_key",),
+        ("cleanup_debt_operation_locator_role_key",),
+        ("clear_targets_run_id_key_key",),
+        ("reconciliation_actions_run_id_action_id_key",),
+    ]
+    factory = _Factory(
+        scripts=[[
+            (POSTGRESQL_AUTHORITY_SCHEMA_VERSION, "identity", POSTGRESQL_AUTHORITY_CAPABILITY),
+            required_tables,
+            required_constraints,
+        ]]
+    )
+
+    PostgresqlLifecycleAuthority(factory, schema="phase5_authority").open()
+
+    statements = [_query_text(query) for query, _ in factory.connections[0].executions]
+    assert not any("create " in statement or "alter " in statement for statement in statements)
+    assert factory.connections[0].rollback_count == 0
+
+
+def test_initialize_rolls_back_and_redacts_driver_details() -> None:
+    """Driver failures preserve a cause without exposing a PostgreSQL DSN."""
+    from cacheness.error_handling import CacheBlobBackendError
+    from cacheness.storage.backends.postgresql_lifecycle_authority import (
+        PostgresqlLifecycleAuthority,
+    )
+
+    secret = "postgresql://user:super-secret@example.invalid/cacheness"
+    factory = _Factory(scripts=[[RuntimeError(secret)]])
+    authority = PostgresqlLifecycleAuthority(factory, schema="phase5_authority")
+
+    with pytest.raises(CacheBlobBackendError) as captured:
+        authority.initialize()
+
+    assert isinstance(captured.value.__cause__, RuntimeError)
+    assert secret not in str(captured.value)
+    assert secret not in repr(captured.value.context)
+    assert factory.connections[0].rollback_count == 1
 
 
 def test_schema_identifier_is_validated_before_driver_use() -> None:
