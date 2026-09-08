@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 04
 current_phase_name: Metadata Composition and Topology Contracts
 status: executing
-stopped_at: Completed 04-02-PLAN.md
-last_updated: "2026-09-08T01:31:04.712Z"
+stopped_at: Completed 04-03-PLAN.md
+last_updated: "2026-09-08T02:03:12.928Z"
 last_activity: 2026-09-07
 last_activity_desc: Phase 04 execution started
-state_head: 014373cf9c9d78fe050c5ec091c8b558ce67bb46
+state_head: 74acb5f0850296293bf402551156576848ca8b98
 progress:
   total_phases: 8
   completed_phases: 2
   total_plans: 55
-  completed_plans: 48
+  completed_plans: 49
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-09-06)
 ## Current Position
 
 Phase: 04 (Metadata Composition and Topology Contracts) — EXECUTING
-Plan: 3 of 8
+Plan: 4 of 8
 Status: Ready to execute
 Last activity: 2026-09-07 — Phase 04 execution started
 
@@ -128,6 +128,7 @@ Phase 03 rows in this historical table include superseded attempts and do not de
 | Phase 03 P20 | 1920 | 4 tasks | 12 files |
 | Phase 04 P01 | 5m 13s | 2 tasks | 8 files |
 | Phase 04-metadata-composition-and-topology-contracts P02 | 16m 10s | 2 tasks | 6 files |
+| Phase 04-metadata-composition-and-topology-contracts P03 | 12m 43s | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -263,6 +264,9 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 04]: Catalog defaults materialize only on new writes; portable predicates inspect stored presence rather than effective defaults.
 - [Phase 04]: Format 2 keeps store epoch, manifest schema, SQLite user version, and payload format independently versioned; unsupported layouts fail read-only.
 - [Phase 04]: BlobReceipt is the frozen public semantic result; BlobEntryInfo is not re-exported as a compatibility alias.
+- [Phase 04]: StoreTopology is the sole direct BlobStore composition root; injected participants retain exact identity and default caller ownership.
+- [Phase 04]: Memory topology provides only same-process ephemeral behavior, with canonical scan but no durability or index acceleration.
+- [Phase 04]: Capability minima are checked before named factory construction or participant I/O.
 
 ### Pending Todos
 
@@ -288,6 +292,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-08T01:31:04.660Z
-Stopped at: Completed 04-02-PLAN.md
+Last session: 2026-09-08T02:03:12.874Z
+Stopped at: Completed 04-03-PLAN.md
 Resume file: None

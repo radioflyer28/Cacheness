@@ -2,9 +2,9 @@
 schema_version: 1
 open_count: 2
 waived_count: 0
-fixed_count: 26
-total_count: 28
-last_updated: 2026-09-05T20:37:24.296Z
+fixed_count: 29
+total_count: 31
+last_updated: 2026-09-08T02:04:10.125Z
 ---
 
 # Broken Windows Ledger
@@ -43,6 +43,9 @@ last_updated: 2026-09-05T20:37:24.296Z
 | 26 | 03 | deviation | tests/test_blob_store_read_contract.py |  | Mutation contracts rebuild a corrupt JSON projection from committed authority state while direct reads remain non-mutating. | fixed |  | 2026-09-05T19:32:18.392Z | 2026-09-05T19:32:43.069Z |
 | 27 | 03 | deviation | src/cacheness/storage/blob_store.py | 948 | Dry-run reconciliation remains projection-free so it cannot acknowledge JSON projection debt or mutate authority state. | fixed |  | 2026-09-05T19:38:04.027Z | 2026-09-05T19:38:04.145Z |
 | 28 | 03 | deviation | tests/test_blob_manifest_backends.py |  | Legacy repository/admission test seams were replaced by authority contracts during Plan 03-08. | fixed |  | 2026-09-05T20:37:02.486Z | 2026-09-05T20:37:24.296Z |
+| 29 | 04 | deviation | tests/test_blob_store_composition.py |  | Scoped the legacy-selector retirement assertion to the direct BlobStore path; Plan 08 owns global factory deletion. | fixed |  | 2026-09-08T02:01:45.453Z | 2026-09-08T02:04:00.181Z |
+| 30 | 04 | deviation | src/cacheness/storage/composition.py |  | Named capability minima now reject before participant factory construction or I/O. | fixed |  | 2026-09-08T02:01:51.758Z | 2026-09-08T02:04:05.304Z |
+| 31 | 04 | deviation | src/cacheness/storage/blob_store.py |  | Temporary memory handler snapshots apply private permissions to the filesystem path rather than the buffered writer. | fixed |  | 2026-09-08T02:01:57.547Z | 2026-09-08T02:04:10.125Z |
 
 ````json
 [
@@ -381,6 +384,42 @@ last_updated: 2026-09-05T20:37:24.296Z
     "reason": "",
     "recorded_at": "2026-09-05T20:37:02.486Z",
     "resolved_at": "2026-09-05T20:37:24.296Z"
+  },
+  {
+    "id": 29,
+    "kind": "deviation",
+    "phase": "04",
+    "file": "tests/test_blob_store_composition.py",
+    "line": null,
+    "description": "Scoped the legacy-selector retirement assertion to the direct BlobStore path; Plan 08 owns global factory deletion.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-09-08T02:01:45.453Z",
+    "resolved_at": "2026-09-08T02:04:00.181Z"
+  },
+  {
+    "id": 30,
+    "kind": "deviation",
+    "phase": "04",
+    "file": "src/cacheness/storage/composition.py",
+    "line": null,
+    "description": "Named capability minima now reject before participant factory construction or I/O.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-09-08T02:01:51.758Z",
+    "resolved_at": "2026-09-08T02:04:05.304Z"
+  },
+  {
+    "id": 31,
+    "kind": "deviation",
+    "phase": "04",
+    "file": "src/cacheness/storage/blob_store.py",
+    "line": null,
+    "description": "Temporary memory handler snapshots apply private permissions to the filesystem path rather than the buffered writer.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-09-08T02:01:57.547Z",
+    "resolved_at": "2026-09-08T02:04:10.125Z"
   }
 ]
 ````
