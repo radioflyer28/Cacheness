@@ -263,6 +263,15 @@ class PostgresqlLifecycleAuthority:
         )
         return cursor.fetchone()
 
+    def _known_table_names(self, cursor: Any) -> set[str]:
+        """Return only tables belonging to this exact persisted authority layout."""
+        cursor.execute(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema = %s AND table_name = ANY(%s)",
+            (self.schema, list(_REQUIRED_TABLES)),
+        )
+        return {row[0] for row in cursor.fetchall()}
+
     def _validate_schema(self, cursor: Any) -> None:
         """Validate persisted version, identity, capability, tables, and constraints."""
         try:
@@ -296,12 +305,7 @@ class PostgresqlLifecycleAuthority:
             raise CacheBlobMigrationRequiredError(
                 "PostgreSQL lifecycle authority capability is incompatible"
             )
-        cursor.execute(
-            "SELECT table_name FROM information_schema.tables "
-            "WHERE table_schema = %s AND table_name = ANY(%s)",
-            (self.schema, list(_REQUIRED_TABLES)),
-        )
-        table_names = {row[0] for row in cursor.fetchall()}
+        table_names = self._known_table_names(cursor)
         if table_names != _REQUIRED_TABLES:
             raise CacheBlobMigrationRequiredError(
                 "PostgreSQL lifecycle authority table layout is incompatible"
@@ -339,6 +343,12 @@ class PostgresqlLifecycleAuthority:
 
     def _initialize_once(self, cursor: Any) -> None:
         """Emit current-version DDL only in the caller-selected initialization action."""
+        # Existing recognized authority tables are evidence of a persisted
+        # layout.  Validate them before DDL so a partial/foreign schema is
+        # never completed, adopted, or implicitly migrated.
+        if self._known_table_names(cursor):
+            self._validate_schema(cursor)
+            return
         schema = sql.Identifier(self.schema)
         cursor.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(schema))
         cursor.execute(

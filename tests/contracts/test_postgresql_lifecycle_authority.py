@@ -215,6 +215,23 @@ def test_initialize_rolls_back_and_redacts_driver_details() -> None:
     assert factory.connections[0].rollback_count == 1
 
 
+def test_initialize_rejects_an_existing_partial_layout_before_ddl() -> None:
+    """Explicit initialization never adopts or completes a foreign partial schema."""
+    from cacheness.storage.backends.postgresql_lifecycle_authority import (
+        PostgresqlLifecycleAuthority,
+    )
+
+    factory = _Factory(scripts=[[[("entries",)], None]])
+    authority = PostgresqlLifecycleAuthority(factory, schema="phase5_authority")
+
+    with pytest.raises(CacheBlobMigrationRequiredError):
+        authority.initialize()
+
+    statements = [_query_text(query) for query, _ in factory.connections[0].executions]
+    assert not any("create " in statement or "alter " in statement for statement in statements)
+    assert factory.connections[0].rollback_count == 1
+
+
 def test_schema_identifier_is_validated_before_driver_use() -> None:
     """Schema names are identifiers, never interpolated value strings."""
     from cacheness.storage.backends.postgresql_lifecycle_authority import (
