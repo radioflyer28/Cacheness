@@ -21,14 +21,16 @@ def test_postgresql_is_declared_as_a_derived_projection_not_an_authority() -> No
     assert role.authorizes("query_complete") is False
 
 
-def test_postgresql_is_deferred_until_a_qualified_projection_sink_exists() -> None:
-    """PostgreSQL remains classified, but is not advertised as constructible yet."""
+def test_postgresql_lifecycle_authority_is_registered_but_projection_is_not() -> None:
+    """The qualified authority is constructible without inventing a projection."""
     registry = RoleRegistry()
 
     with pytest.raises(CompositionValidationError, match="No projection participant"):
         registry.resolve(BackendRole.PROJECTION, "postgresql")
-    with pytest.raises(CompositionValidationError, match="No authority participant"):
-        registry.resolve(BackendRole.AUTHORITY, "postgresql")
+
+    authority = registry.resolve(BackendRole.AUTHORITY, "postgresql")
+    assert authority.role == BackendRole.AUTHORITY.value
+    assert authority.name == "postgresql"
 
 
 def test_postgresql_optional_dependency_failure_is_explicit() -> None:

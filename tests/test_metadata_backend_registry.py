@@ -63,9 +63,13 @@ def test_registry_rejects_duplicate_names_within_the_same_role() -> None:
         registry.register(BackendRole.PROJECTION, "recording", _RecordingProjection)
 
 
-def test_postgresql_name_cannot_be_resolved_as_a_lifecycle_authority() -> None:
-    """A PostgreSQL projection is never a hidden canonical metadata selector."""
+def test_postgresql_name_resolves_as_a_lifecycle_authority_not_projection() -> None:
+    """PostgreSQL is an explicit canonical authority role, never a projection."""
     registry = RoleRegistry()
 
-    with pytest.raises(CompositionValidationError, match="No authority participant"):
-        registry.resolve(BackendRole.AUTHORITY, "postgresql")
+    authority = registry.resolve(BackendRole.AUTHORITY, "postgresql")
+
+    assert authority.role == BackendRole.AUTHORITY.value
+    assert authority.name == "postgresql"
+    with pytest.raises(CompositionValidationError, match="No projection participant"):
+        registry.resolve(BackendRole.PROJECTION, "postgresql")

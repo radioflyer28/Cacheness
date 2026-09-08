@@ -78,8 +78,8 @@ def test_lifecycle_reason_values_and_typed_error_bases_are_frozen() -> None:
     assert issubclass(CacheBlobLifecycleTimeoutError, CacheStorageError)
 
 
-def test_reconciliation_v1_dictionary_and_human_summary_are_exact() -> None:
-    """The zero-argument dictionaries stay the legacy v1 compatibility view."""
+def test_reconciliation_dictionary_and_human_summary_are_exact() -> None:
+    """The report exposes the exact bounded-inventory cursor shape."""
     finding = ReconciliationFinding(
         status=ReconciliationStatus.SAFE,
         action=ReconciliationAction.DELETE_CANDIDATE,
@@ -114,6 +114,7 @@ def test_reconciliation_v1_dictionary_and_human_summary_are_exact() -> None:
         "manifest_records_seen": 2,
         "operation_records_seen": 3,
         "resume_token": "resume-1",
+        "inventory_cursor": None,
         "human_summary": (
             "Reconciliation (dry-run): 1 finding(s); safe=1, blocked=0, "
             "requires_confirmation=0, resume=yes"
