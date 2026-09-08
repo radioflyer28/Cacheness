@@ -7,15 +7,15 @@ import time
 import pytest
 
 from cacheness import CacheConfig
-from cacheness.config import LifecycleAuthorityTopology, LifecycleLimits
+from cacheness.config import LifecycleLimits
 from cacheness.core import UnifiedCache
 from cacheness.error_handling import (
-    CacheIntegrityError, CacheBlobBackendError, CacheBlobLifecycleTimeoutError,
-    CacheBlobMigrationRequiredError, CacheMetadataError,
+    CacheBlobBackendError, CacheBlobLifecycleTimeoutError,
+    CacheBlobMigrationRequiredError,
     CacheBlobRecoverableCleanupError,
 )
-from cacheness.metadata import SqliteBackend
 from cacheness.storage import BlobStore
+from cacheness.storage.composition import BackendRef, StoreTopology
 from cacheness.storage.lifecycle_authority import EntryExpectation, MutationSpec
 from cacheness.storage.sqlite_lifecycle_authority import SqliteLifecycleAuthority
 
@@ -29,8 +29,24 @@ def prepared(authority, number):
     ))
 
 
+def _local_topology(root):
+    """Create the supported filesystem/SQLite direct-store composition."""
+    return StoreTopology(
+        payload=BackendRef(name="filesystem", options={"base_dir": root}),
+        authority=BackendRef(name="sqlite", options={"root": root}),
+    )
+
+
+def _memory_topology():
+    """Create the explicit same-process-only direct-store composition."""
+    return StoreTopology(
+        payload=BackendRef(name="memory"),
+        authority=BackendRef(name="memory"),
+    )
+
+
 def test_memory_unpublished_abort_is_pageable(tmp_path):
-    with BlobStore(tmp_path, backend="memory", config=memory_config(tmp_path)) as store:
+    with BlobStore(_memory_topology(), cache_dir=tmp_path, config=memory_config(tmp_path)) as store:
         authority = store.lifecycle_authority
         mutation = prepared(authority, 1)
         authority.abort_mutation(mutation, candidate_persisted=False)
@@ -39,7 +55,7 @@ def test_memory_unpublished_abort_is_pageable(tmp_path):
 
 
 def test_memory_debt_resume_survives_retirement(tmp_path):
-    with BlobStore(tmp_path, backend="memory", config=memory_config(tmp_path)) as store:
+    with BlobStore(_memory_topology(), cache_dir=tmp_path, config=memory_config(tmp_path)) as store:
         authority = store.lifecycle_authority
         authority.lifecycle_limits = LifecycleLimits(operation_page_size=1)
         for number in range(3):
@@ -65,7 +81,7 @@ def test_memory_debt_resume_survives_retirement(tmp_path):
 def test_memory_public_apply_reclaims_three_paged_debts(tmp_path, monkeypatch):
     config = memory_config(tmp_path)
     config.lifecycle_limits = LifecycleLimits(operation_page_size=1, max_reconcile_actions=1)
-    with BlobStore(tmp_path, backend="memory", config=config) as store:
+    with BlobStore(_memory_topology(), cache_dir=tmp_path, config=config) as store:
         old_paths = []
         cleanup = store._delete_or_prove_absent
         for number in range(3):
@@ -94,27 +110,11 @@ def test_memory_public_apply_reclaims_three_paged_debts(tmp_path, monkeypatch):
 
 
 def memory_config(root):
-    return CacheConfig(cache_dir=root, lifecycle_topology=LifecycleAuthorityTopology(
-        durable=False, multiprocess=False, projection=False,
-    ))
-
-
-@pytest.mark.parametrize("value", ['{', '[]', '{"x":1,"x":2}', sqlite3.Binary(b'\xff')])
-@pytest.mark.parametrize("operation", ["get_entry", "list_entries"])
-def test_projection_observation_is_strict(tmp_path, value, operation):
-    backend = SqliteBackend(tmp_path / "metadata.sqlite3")
-    try:
-        backend.put_entry("key", {"data_type": "object", "metadata": {}})
-        with sqlite3.connect(tmp_path / "metadata.sqlite3") as connection:
-            connection.execute("UPDATE cache_entries SET cache_key_params=?", (value,))
-        with pytest.raises(CacheIntegrityError):
-            getattr(backend, operation)(*(["key"] if operation == "get_entry" else []))
-    finally:
-        backend.close()
+    return CacheConfig(cache_dir=root)
 
 
 def test_entry_snapshot_and_receipt_preserve_generation(tmp_path):
-    with BlobStore(tmp_path) as store:
+    with BlobStore(_local_topology(tmp_path), cache_dir=tmp_path) as store:
         store.initialize()
         first = store.put_entry(None, key="key", metadata={"label": "first"})
         with store.open_entry("key") as entry:
@@ -129,35 +129,14 @@ def test_entry_snapshot_and_receipt_preserve_generation(tmp_path):
             assert missing is None
 
 
-def test_cache_reads_authority_despite_corrupt_projection(tmp_path):
-    cache = UnifiedCache(CacheConfig(
-        cache_dir=tmp_path, metadata_backend="sqlite",
-        enable_memory_cache=False, store_cache_key_params=True,
-    ))
-    try:
-        cache.initialize()
-        key = cache.put("valid", parameter="value")
-        backend = cache.metadata_backend
-        with backend.engine.begin() as connection:
-            connection.exec_driver_sql(
-                "UPDATE cache_entries SET cache_key_params='{' WHERE cache_key=?", (key,)
-            )
-        assert cache.get(key) == "valid"
-        with pytest.raises(CacheIntegrityError):
-            backend.get_entry(key)
-        assert cache._cache_blob_store.get(key) == "valid"
-    finally:
-        cache.close()
-
-
 def _initialized_worker(root, key):
-    with BlobStore(root) as store:
+    with BlobStore(_local_topology(root), cache_dir=root) as store:
         store.put({"key": key}, key=key)
         assert store.get(key) == {"key": key}
 
 
 def test_initialize_before_independent_workers(tmp_path):
-    with BlobStore(tmp_path) as store:
+    with BlobStore(_local_topology(tmp_path), cache_dir=tmp_path) as store:
         store.initialize()
     context = multiprocessing.get_context("spawn")
     workers = [context.Process(target=_initialized_worker, args=(tmp_path, str(n)))
@@ -170,7 +149,7 @@ def test_initialize_before_independent_workers(tmp_path):
             worker.terminate()
             worker.join(5)
         assert worker.exitcode == 0
-    with BlobStore(tmp_path) as store:
+    with BlobStore(_local_topology(tmp_path), cache_dir=tmp_path) as store:
         assert store.list() == ["0", "1", "2"]
 
 
@@ -211,26 +190,10 @@ def test_sqlite_primary_error_meaning(tmp_path, code, expected):
     authority.close()
 
 
-def test_optional_export_failure_does_not_revoke_commit(tmp_path, monkeypatch):
-    cache = UnifiedCache(CacheConfig(cache_dir=tmp_path, metadata_backend="sqlite"))
-    try:
-        def unavailable(*args, **kwargs):
-            raise OSError("projection offline")
-        monkeypatch.setattr(cache, "_publish_entry_projection", unavailable)
-        key = cache.put("stored", identity="one")
-        assert cache.get(key) == "stored"
-        with pytest.raises(CacheMetadataError) as caught:
-            cache.put("also stored", identity="two", custom_metadata=object())
-        assert caught.value.context["committed"] is True
-        assert cache.get(caught.value.context["key"]) == "also stored"
-    finally:
-        cache.close()
-
-
 def test_cache_expiry_leaves_separate_blob_store_untouched(tmp_path):
-    with BlobStore(tmp_path / "objects") as objects:
+    object_root = tmp_path / "objects"
+    with BlobStore(_local_topology(object_root), cache_dir=object_root) as objects:
         objects.put("durable", key="key", metadata={"label": "first"})
-        assert objects.list(metadata_filter={"label": "first"}) == ["key"]
         objects.update_metadata("key", {"label": "second"})
         assert objects.get_metadata("key")["metadata"]["label"] == "second"
         cache = UnifiedCache(CacheConfig(cache_dir=tmp_path / "cache"))
@@ -243,9 +206,8 @@ def test_cache_expiry_leaves_separate_blob_store_untouched(tmp_path):
             cache.close()
 
 
-@pytest.mark.parametrize("requested_links", [False, True])
-def test_close_after_commit_has_declared_derived_outcome(tmp_path, monkeypatch, requested_links):
-    cache = UnifiedCache(CacheConfig(cache_dir=tmp_path, metadata_backend="sqlite"))
+def test_close_after_commit_has_declared_derived_outcome(tmp_path, monkeypatch):
+    cache = UnifiedCache(CacheConfig(cache_dir=tmp_path))
     put_entry = cache._cache_blob_store.put_entry
 
     def commit_then_close(*args, **kwargs):
@@ -254,14 +216,8 @@ def test_close_after_commit_has_declared_derived_outcome(tmp_path, monkeypatch, 
         return receipt
 
     monkeypatch.setattr(cache._cache_blob_store, "put_entry", commit_then_close)
-    if requested_links:
-        with pytest.raises(CacheMetadataError) as failure:
-            cache.put("committed", custom_metadata=object(), identity="close")
-        assert failure.value.context["committed"] is True
-        key = failure.value.context["key"]
-    else:
-        key = cache.put("committed", identity="close")
-    reopened = UnifiedCache(CacheConfig(cache_dir=tmp_path, metadata_backend="sqlite"))
+    key = cache.put("committed", identity="close")
+    reopened = UnifiedCache(CacheConfig(cache_dir=tmp_path))
     try:
         assert reopened.get(key) == "committed"
     finally:

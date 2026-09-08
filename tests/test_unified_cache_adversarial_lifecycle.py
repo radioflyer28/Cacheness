@@ -6,30 +6,13 @@ from pathlib import Path
 from threading import Event, Thread
 
 import pytest
-from sqlalchemy import Column, String, select
 
 from cacheness import CacheConfig, cacheness
-from cacheness.custom_metadata import (
-    CacheMetadataLink,
-    CustomMetadataBase,
-    custom_metadata_model,
-)
 from cacheness.error_handling import (
-    CacheBlobLifecycleConflictError,
     CacheBlobStoreClosedError,
-    CacheMetadataError,
 )
-from cacheness.metadata import Base, CacheEntry
 from cacheness.storage import BlobStore
-
-
-@custom_metadata_model("plan15_linked_metadata")
-class Plan15LinkedMetadata(Base, CustomMetadataBase):
-    """One custom-metadata model used to prove M1 link ownership."""
-
-    __tablename__ = "plan15_linked_metadata"
-
-    label = Column(String(100), nullable=False)
+from cacheness.storage.composition import BackendRef, StoreTopology
 
 
 def _cache(root: Path):
@@ -37,16 +20,20 @@ def _cache(root: Path):
     return cacheness(
         CacheConfig(
             cache_dir=str(root),
-            metadata_backend="sqlite",
             cleanup_on_init=False,
         )
     )
 
 
-def _sqlite_cache(root: Path):
-    """Construct a facade whose custom-link table uses exact SQL tokens."""
-    custom_metadata_model("plan15_linked_metadata")(Plan15LinkedMetadata)
-    return _cache(root)
+def _store(root: Path) -> BlobStore:
+    """Construct the supported local topology for direct lifecycle schedules."""
+    return BlobStore(
+        StoreTopology(
+            payload=BackendRef(name="filesystem", options={"base_dir": root}),
+            authority=BackendRef(name="sqlite", options={"root": root}),
+        ),
+        cache_dir=root,
+    )
 
 
 def _join(thread: Thread) -> None:
@@ -111,7 +98,7 @@ def test_clear_clear_queued_clear_reopens_after_snapshot_but_cannot_overtake_clo
     tmp_path: Path,
 ) -> None:
     """Only the active clear owns admission; its queued peer is never counted."""
-    store = BlobStore(tmp_path / "clear-admission", backend="json")
+    store = _store(tmp_path / "clear-admission")
     snapshot_entered = Event()
     release_snapshot = Event()
     cleanup_entered = Event()
@@ -201,218 +188,6 @@ def test_clear_clear_queued_clear_reopens_after_snapshot_but_cannot_overtake_clo
         store.close()
 
 
-def test_linked_m1_survives_a_pre_promotion_verification_failure(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """M2 must not retire M1 links until its own authority promotion wins."""
-    cache = _sqlite_cache(tmp_path / "linked-m1-verification-failure")
-    try:
-        key = cache.put(
-            {"generation": "m1"},
-            custom_metadata=Plan15LinkedMetadata(label="m1"),
-            race_key="linked-m1",
-        )
-        before = cache.metadata_backend.get_entry(key)
-        assert before is not None
-        original_record = cache._cache_blob_store.lifecycle_authority.record_verification
-
-        def fail_verification(*_args, **_kwargs) -> None:
-            raise OSError("forced verification failure")
-
-        monkeypatch.setattr(
-            cache._cache_blob_store.lifecycle_authority,
-            "record_verification",
-            fail_verification,
-        )
-        with pytest.raises(OSError, match="forced verification failure"):
-            cache.put(
-                {"generation": "m2"},
-                custom_metadata=Plan15LinkedMetadata(label="m2"),
-                race_key="linked-m1",
-            )
-        monkeypatch.setattr(
-            cache._cache_blob_store.lifecycle_authority,
-            "record_verification",
-            original_record,
-        )
-
-        after = cache.metadata_backend.get_entry(key)
-        assert after is not None
-        assert after["metadata"]["actual_path"] == before["metadata"]["actual_path"]
-        assert cache.get(race_key="linked-m1") == {"generation": "m1"}
-        assert cache.get_custom_metadata_for_entry(cache_key=key)[
-            "plan15_linked_metadata"
-        ].label == "m1"
-    finally:
-        cache.close()
-
-
-def test_postpromotion_same_generation_projection_repair_is_idempotent(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A peer repair of exact M2 is safe convergence, not a stale-token conflict."""
-    cache = _cache(tmp_path / "same-generation-projection-repair")
-    try:
-        key = cache.put({"generation": "m1"}, race_key="same-generation")
-        conditional_mutation = cache._conditional_projection_mutation
-        repaired = False
-
-        def peer_repairs_m2(cache_key, *, expected_locator, replacement):
-            nonlocal repaired
-            if not repaired:
-                repaired = True
-                conditional_mutation(
-                    cache_key,
-                    expected_locator=expected_locator,
-                    replacement=replacement,
-                )
-            return conditional_mutation(
-                cache_key,
-                expected_locator=expected_locator,
-                replacement=replacement,
-            )
-
-        monkeypatch.setattr(
-            cache, "_conditional_projection_mutation", peer_repairs_m2
-        )
-        assert cache.put({"generation": "m2"}, race_key="same-generation") == key
-        assert repaired
-        assert cache.get(race_key="same-generation") == {"generation": "m2"}
-    finally:
-        cache.close()
-
-
-def test_two_pending_candidates_preserve_m1_links_until_one_promotes(
-    tmp_path: Path,
-) -> None:
-    """Peer candidates cannot publish or adopt each other's projection token."""
-    first = _sqlite_cache(tmp_path / "two-pending-candidates")
-    second = _sqlite_cache(tmp_path / "two-pending-candidates")
-    first_entered = Event()
-    second_entered = Event()
-    release = Event()
-    results: list[str] = []
-    errors: list[BaseException] = []
-    try:
-        key = first.put(
-            {"generation": "m1"},
-            custom_metadata=Plan15LinkedMetadata(label="m1"),
-            race_key="two-pending",
-        )
-        before = first.metadata_backend.get_entry(key)
-        assert before is not None
-
-        def pause_first(boundary: str) -> None:
-            if boundary == "put.before_promotion":
-                first_entered.set()
-                assert release.wait(timeout=5)
-
-        def pause_second(boundary: str) -> None:
-            if boundary == "put.before_promotion":
-                second_entered.set()
-                assert release.wait(timeout=5)
-
-        def put(cache, label: str) -> None:
-            try:
-                results.append(
-                    cache.put(
-                        {"generation": label},
-                        custom_metadata=Plan15LinkedMetadata(label=label),
-                        race_key="two-pending",
-                    )
-                )
-            except BaseException as error:  # pragma: no cover - asserted below.
-                errors.append(error)
-
-        first._cache_blob_store.lifecycle.test_hook = pause_first
-        second._cache_blob_store.lifecycle.test_hook = pause_second
-        writer_a = Thread(target=put, args=(first, "a"))
-        writer_b = Thread(target=put, args=(second, "b"))
-        writer_a.start()
-        writer_b.start()
-        assert first_entered.wait(timeout=5)
-        assert second_entered.wait(timeout=5)
-
-        pending = first.metadata_backend.get_entry(key)
-        assert pending is not None
-        assert pending["metadata"]["actual_path"] == before["metadata"]["actual_path"]
-        assert first.get_custom_metadata_for_entry(cache_key=key)[
-            "plan15_linked_metadata"
-        ].label == "m1"
-
-        release.set()
-        _join(writer_a)
-        _join(writer_b)
-        assert results == [key]
-        assert len(errors) == 1
-        assert isinstance(errors[0], CacheBlobLifecycleConflictError)
-        assert first.get(race_key="two-pending") in (
-            {"generation": "a"},
-            {"generation": "b"},
-        )
-        assert first.get_custom_metadata_for_entry(cache_key=key)[
-            "plan15_linked_metadata"
-        ].label in {"a", "b"}
-    finally:
-        release.set()
-        _join(writer_a)
-        _join(writer_b)
-        second.close()
-        first.close()
-
-
-def test_hostile_projection_cannot_redirect_put_or_custom_metadata(
-    tmp_path: Path,
-) -> None:
-    """A persisted outside-root projection is not a replacement CAS token."""
-    cache = _sqlite_cache(tmp_path / "hostile-put-locator")
-    outside = tmp_path / "outside.bin"
-    outside.write_bytes(b"outside")
-    try:
-        key = cache.put(
-            {"generation": "m1"},
-            custom_metadata=Plan15LinkedMetadata(label="m1"),
-            race_key="hostile-put",
-        )
-        authority_before = cache._cache_blob_store.lifecycle_authority.read_entry(key)
-        assert authority_before is not None
-        # Persist the hostile locator without calling the compatibility
-        # projection transition.  A raw row mutation models a corrupted or
-        # externally altered metadata store while preserving M1's custom link.
-        with cache.metadata_backend.SessionLocal() as session:
-            row = session.get(CacheEntry, key)
-            assert row is not None
-            row.actual_path = str(outside)
-            session.commit()
-
-        with pytest.raises(CacheMetadataError) as failure:
-            cache.put(
-                {"generation": "m2"},
-                custom_metadata=Plan15LinkedMetadata(label="m2"),
-                race_key="hostile-put",
-            )
-
-        assert failure.value.context["committed"] is True
-        assert cache._cache_blob_store.lifecycle_authority.read_entry(key) != authority_before
-        assert cache.get(race_key="hostile-put") == {"generation": "m2"}
-        unchanged = cache.metadata_backend.get_entry(key)
-        assert unchanged is not None
-        assert unchanged["metadata"]["actual_path"] == str(outside)
-        with cache.metadata_backend.SessionLocal() as session:
-            link = session.scalar(
-                select(CacheMetadataLink).where(CacheMetadataLink.cache_key == key)
-            )
-            assert link is not None
-            linked_metadata = session.get(Plan15LinkedMetadata, link.metadata_id)
-            assert linked_metadata is not None
-            assert linked_metadata.label == "m1"
-        assert outside.read_bytes() == b"outside"
-    finally:
-        cache.close()
-
-
 def test_empty_authority_clear_preserves_a_peer_first_put_after_durable_intent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -459,6 +234,7 @@ def test_empty_authority_clear_preserves_a_peer_first_put_after_durable_intent(
         _join(writer)
         second.close()
         first.close()
+
 
 
 def test_empty_authority_invalidate_preserves_a_peer_first_put_after_durable_intent(
@@ -516,52 +292,3 @@ def test_empty_authority_invalidate_preserves_a_peer_first_put_after_durable_int
         _join(writer)
         second.close()
         first.close()
-
-
-def test_explicit_legacy_empty_clear_uses_fallback_only_when_recognized(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Legacy cleanup remains an opt-in branch, never an empty canonical heuristic."""
-    cache = _cache(tmp_path / "recognized-legacy-clear")
-    try:
-        monkeypatch.setattr(cache, "_recognized_legacy_backend", lambda: object())
-        monkeypatch.setattr(
-            cache._cache_blob_store,
-            "clear",
-            lambda: pytest.fail("canonical clear must not run for explicit legacy"),
-        )
-        assert cache.clear_all() == 0
-    finally:
-        cache.close()
-
-
-def test_nested_hostile_projection_cannot_redirect_canonical_overwrite(
-    tmp_path: Path,
-) -> None:
-    """A derived JSON locator cannot become authority or redirect cleanup."""
-    cache = cacheness(
-        CacheConfig(
-            cache_dir=str(tmp_path / "nested-hostile-put-locator"),
-            metadata_backend="json",
-            cleanup_on_init=False,
-        )
-    )
-    outside = tmp_path / "nested-outside.bin"
-    outside.write_bytes(b"outside")
-    try:
-        key = cache.put({"generation": "m1"}, race_key="nested-hostile-put")
-        authority_before = cache._cache_blob_store.lifecycle_authority.read_entry(key)
-        assert authority_before is not None
-        projection = cache.metadata_backend.get_entry(key)
-        assert projection is not None
-        projection["metadata"]["actual_path"] = str(outside)
-        cache.metadata_backend.put_entry(key, projection)
-        assert cache.put({"generation": "m2"}, race_key="nested-hostile-put") == key
-
-        assert cache._cache_blob_store.lifecycle_authority.read_entry(key) != authority_before
-        assert cache.metadata_backend.get_entry(key) == projection
-        assert cache.get(race_key="nested-hostile-put") == {"generation": "m2"}
-        assert outside.read_bytes() == b"outside"
-    finally:
-        cache.close()

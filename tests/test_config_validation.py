@@ -12,7 +12,6 @@ from pathlib import Path
 # Import configuration classes and functions
 from cacheness.config import (
     CacheConfig,
-    CacheMetadataConfig,
     CacheBlobConfig,
     LifecycleLimits,
     ConfigValidationError,
@@ -81,39 +80,6 @@ class TestCacheBlobConfig:
             CacheBlobConfig(stream_threshold_bytes=-1)
 
 
-class TestCacheMetadataConfigExtensions:
-    """Test the extended CacheMetadataConfig with metadata_backend_options."""
-    
-    def test_default_backend_options(self):
-        """Test default metadata_backend_options is None."""
-        config = CacheMetadataConfig()
-        assert config.metadata_backend_options is None
-    
-    def test_custom_backend_options(self):
-        """Test setting custom backend options."""
-        config = CacheMetadataConfig(
-            metadata_backend="postgresql",
-            metadata_backend_options={
-                "connection_url": "postgresql://localhost/cache",
-                "pool_size": 10
-            }
-        )
-        assert config.metadata_backend == "postgresql"
-        assert config.metadata_backend_options["connection_url"] == "postgresql://localhost/cache"
-        assert config.metadata_backend_options["pool_size"] == 10
-    
-    def test_invalid_backend_options_type(self):
-        """Test that non-dict metadata_backend_options raises error."""
-        with pytest.raises(ValueError, match="must be a dictionary"):
-            CacheMetadataConfig(metadata_backend_options="not a dict")
-    
-    def test_custom_backend_name_allowed(self):
-        """Test that custom backend names are allowed (validated at runtime)."""
-        # Custom backends are validated when get_metadata_backend() is called
-        config = CacheMetadataConfig(metadata_backend="my_custom_backend")
-        assert config.metadata_backend == "my_custom_backend"
-
-
 class TestCacheConfigBlobIntegration:
     """Test CacheConfig integration with blob configuration."""
     
@@ -136,28 +102,17 @@ class TestCacheConfigBlobIntegration:
         assert config.blob.blob_backend_options == options
         assert config.blob_backend_options == options  # Via property
     
-    def test_metadata_backend_options_parameter(self):
-        """Test metadata_backend_options top-level parameter."""
-        options = {"connection_url": "postgresql://..."}
-        config = CacheConfig(metadata_backend_options=options)
-        assert config.metadata.metadata_backend_options == options
-        assert config.metadata_backend_options == options  # Via property
-    
-    def test_full_config_with_backends(self):
-        """Test full configuration with both backend options."""
+    def test_full_config_with_blob_options(self):
+        """Test storage configuration preserves explicit blob options."""
         config = CacheConfig(
             cache_dir="./test_cache",
-            metadata_backend="postgresql",
-            metadata_backend_options={"connection_url": "postgresql://localhost/cache"},
-            blob_backend="s3",
-            blob_backend_options={"bucket": "my-cache"}
+            blob_backend="filesystem",
+            blob_backend_options={"use_atomic_writes": True},
         )
         
         assert config.storage.cache_dir == "./test_cache"
-        assert config.metadata.metadata_backend == "postgresql"
-        assert config.metadata.metadata_backend_options["connection_url"] == "postgresql://localhost/cache"
-        assert config.blob.blob_backend == "s3"
-        assert config.blob.blob_backend_options["bucket"] == "my-cache"
+        assert config.blob.blob_backend == "filesystem"
+        assert config.blob.blob_backend_options["use_atomic_writes"] is True
 
 
 # =============================================================================
@@ -182,8 +137,20 @@ class TestLifecycleLimits:
 
         config = CacheConfig(cache_dir=str(temp_dir / "configured"), lifecycle_limits=limits)
         from cacheness.storage import BlobStore
+        from cacheness.storage.composition import BackendRef, StoreTopology
 
-        store = BlobStore(config=config, backend="json")
+        root = temp_dir / "configured"
+        store = BlobStore(
+            StoreTopology(
+                payload=BackendRef(name="filesystem", options={"base_dir": root}),
+                authority=BackendRef(
+                    name="sqlite",
+                    options={"root": root, "lifecycle_limits": limits},
+                ),
+            ),
+            cache_dir=root,
+            config=config,
+        )
         try:
             assert config.lifecycle_limits is limits
             assert store.config is config
@@ -388,21 +355,18 @@ class TestLoadConfigFromDict:
         """Test loading flat dictionary format."""
         data = {
             "cache_dir": "./cache",  # Use "./cache" which is preserved as-is
-            "metadata_backend": "sqlite",
             "blob_backend": "memory"
         }
         
         config = load_config_from_dict(data)
         
         assert config.storage.cache_dir == "./cache"
-        assert config.metadata.metadata_backend == "sqlite"
         assert config.blob.blob_backend == "memory"
     
     def test_nested_format(self):
         """Test loading nested dictionary format."""
         data = {
             "storage": {"cache_dir": "./cache"},  # Use "./cache" which is preserved as-is
-            "metadata": {"metadata_backend": "sqlite"},
             "blob": {"blob_backend": "memory"}
         }
         
@@ -410,28 +374,21 @@ class TestLoadConfigFromDict:
         
         # Note: CacheStorageConfig converts non-./cache relative paths to absolute
         assert config.storage.cache_dir == "./cache"
-        assert config.metadata.metadata_backend == "sqlite"
         assert config.blob.blob_backend == "memory"
     
-    def test_nested_with_options(self):
-        """Test nested format with backend options."""
+    def test_nested_blob_options(self):
+        """Test nested storage options remain serializable."""
         data = {
-            "metadata": {
-                "metadata_backend": "postgresql",
-                "metadata_backend_options": {"connection_url": "postgresql://..."}
-            },
             "blob": {
-                "blob_backend": "s3",
-                "blob_backend_options": {"bucket": "my-cache"}
+                "blob_backend": "filesystem",
+                "blob_backend_options": {"use_atomic_writes": True},
             }
         }
         
         config = load_config_from_dict(data)
         
-        assert config.metadata.metadata_backend == "postgresql"
-        assert config.metadata.metadata_backend_options["connection_url"] == "postgresql://..."
-        assert config.blob.blob_backend == "s3"
-        assert config.blob.blob_backend_options["bucket"] == "my-cache"
+        assert config.blob.blob_backend == "filesystem"
+        assert config.blob.blob_backend_options["use_atomic_writes"] is True
     
     def test_partial_nested_format(self):
         """Test partial nested format with defaults."""
@@ -443,7 +400,6 @@ class TestLoadConfigFromDict:
         
         assert config.storage.cache_dir == "./cache"
         # Other configs should have defaults
-        assert config.metadata.metadata_backend == "auto"
         assert config.blob.blob_backend == "filesystem"
 
 
@@ -454,14 +410,12 @@ class TestLoadConfigFromJson:
         """Test loading flat JSON config."""
         config_file = temp_dir / "config.json"
         config_file.write_text(json.dumps({
-            "cache_dir": "./cache",  # Use "./cache" which is preserved as-is
-            "metadata_backend": "sqlite"
+            "cache_dir": "./cache"  # Use "./cache" which is preserved as-is
         }))
         
         config = load_config_from_json(config_file)
         
         assert config.storage.cache_dir == "./cache"
-        assert config.metadata.metadata_backend == "sqlite"
     
     def test_load_nested_json(self, temp_dir):
         """Test loading nested JSON config."""
@@ -508,7 +462,6 @@ class TestSaveConfigToJson:
         """Test saving and reloading config."""
         original = CacheConfig(
             cache_dir="./cache",  # Use "./cache" which is preserved as-is
-            metadata_backend="sqlite",
             blob_backend="memory"
         )
         
@@ -519,7 +472,6 @@ class TestSaveConfigToJson:
         
         # Both should have the same cache_dir
         assert loaded.storage.cache_dir == original.storage.cache_dir
-        assert loaded.metadata.metadata_backend == original.metadata.metadata_backend
         assert loaded.blob.blob_backend == original.blob.blob_backend
     
     def test_json_is_valid(self, temp_dir):
@@ -549,7 +501,6 @@ class TestModuleLevelConfigAPI:
         """Test that config classes are exported."""
         assert hasattr(cacheness, "CacheConfig")
         assert hasattr(cacheness, "CacheBlobConfig")
-        assert hasattr(cacheness, "CacheMetadataConfig")
         assert hasattr(cacheness, "CacheStorageConfig")
         assert hasattr(cacheness, "CompressionConfig")
         assert hasattr(cacheness, "SerializationConfig")
@@ -618,11 +569,9 @@ class TestCreateCacheConfig:
         """Test creation with overrides."""
         config = create_cache_config(
             cache_dir="./override_cache",
-            metadata_backend="json",
             blob_backend="memory"
         )
         assert config.storage.cache_dir == "./override_cache"
-        assert config.metadata.metadata_backend == "json"
         assert config.blob.blob_backend == "memory"
 
 
@@ -638,8 +587,6 @@ class TestConfigIntegration:
         # Create config
         config = CacheConfig(
             cache_dir=str(temp_dir / "cache"),
-            metadata_backend="sqlite",
-            metadata_backend_options={"sqlite_db_file": "meta.db"},
             blob_backend="filesystem",
             blob_backend_options={"use_atomic_writes": True}
         )
@@ -657,7 +604,6 @@ class TestConfigIntegration:
         
         # Verify
         assert loaded.storage.cache_dir == str(temp_dir / "cache")
-        assert loaded.metadata.metadata_backend == "sqlite"
         assert loaded.blob.blob_backend == "filesystem"
     
     def test_invalid_config_caught_by_validation(self):
@@ -700,8 +646,6 @@ class TestYamlConfig:
         config_file.write_text("""
 storage:
   cache_dir: ./yaml_cache
-metadata:
-  metadata_backend: sqlite
 blob:
   blob_backend: memory
 """)
@@ -709,7 +653,6 @@ blob:
         config = load_config_from_yaml(config_file)
         
         assert config.storage.cache_dir == "./yaml_cache"
-        assert config.metadata.metadata_backend == "sqlite"
         assert config.blob.blob_backend == "memory"
     
     def test_save_yaml_config(self, temp_dir, yaml_available):
@@ -718,7 +661,6 @@ blob:
         
         original = CacheConfig(
             cache_dir="./saved_yaml",
-            metadata_backend="json",
             blob_backend="filesystem"
         )
         
@@ -728,7 +670,6 @@ blob:
         loaded = load_config_from_yaml(config_file)
         
         assert loaded.storage.cache_dir == original.storage.cache_dir
-        assert loaded.metadata.metadata_backend == original.metadata.metadata_backend
 
     @pytest.mark.parametrize(
         "cache_dir", ["./yaml_cache", "relative/yaml_cache", "../yaml-parent"]

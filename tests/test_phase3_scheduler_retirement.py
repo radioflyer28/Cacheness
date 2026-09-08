@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from cacheness.storage import BlobStore
+from cacheness.storage.composition import BackendRef, StoreTopology
 
 
 RETIRED_SCHEDULER_MODULES = (
@@ -15,6 +16,14 @@ RETIRED_SCHEDULER_MODULES = (
     "cacheness.storage.operation_record",
     "cacheness.storage.clear_recovery",
 )
+
+
+def _topology(root: Path) -> StoreTopology:
+    """Create the supported local direct-store composition."""
+    return StoreTopology(
+        payload=BackendRef(name="filesystem", options={"base_dir": root}),
+        authority=BackendRef(name="sqlite", options={"root": root}),
+    )
 
 
 def _defined_names(source_path: Path) -> set[str]:
@@ -71,7 +80,7 @@ def test_fresh_and_reopened_stores_never_create_retired_control_artifacts(
 ) -> None:
     """Normal authority-backed use never creates a retired control path."""
     root = tmp_path / "runtime-tree"
-    store = BlobStore(root, backend="json")
+    store = BlobStore(_topology(root), cache_dir=root)
     try:
         assert store.get("absent") is None
         assert store.put({"value": "present"}, key="present") == "present"
@@ -80,7 +89,7 @@ def test_fresh_and_reopened_stores_never_create_retired_control_artifacts(
         store.close()
 
     assert not (root / "operations").exists()
-    reopened = BlobStore(root, backend="json")
+    reopened = BlobStore(_topology(root), cache_dir=root)
     try:
         assert reopened.get("present") == {"value": "present"}
         assert reopened.lifecycle_authority.read_entry("present") is not None
@@ -133,39 +142,25 @@ def test_retained_helpers_have_no_file_native_lock_or_control_authority() -> Non
     )
 
 
-def test_blob_store_has_one_authority_and_only_projection_manifest_compatibility() -> None:
-    """Authority lifecycle is exclusive; JSON is a derived export, never a fallback."""
+def test_blob_store_has_one_authority_and_no_legacy_selector_or_repository_path() -> None:
+    """The direct facade retains only StoreTopology-based lifecycle composition."""
     storage_root = Path(__file__).parents[1] / "src" / "cacheness" / "storage"
     blob_store_source = storage_root / "blob_store.py"
-    manifest_repository_source = storage_root / "manifest_repository.py"
-
-    assert _defined_names(manifest_repository_source) == {"JsonProjectionExporter"}
 
     blob_store_text = blob_store_source.read_text(encoding="utf-8")
-    manifest_repository_text = manifest_repository_source.read_text(encoding="utf-8")
+    assert "StoreTopology" in blob_store_text
     assert all(
         forbidden not in blob_store_text
         for forbidden in (
             "_authority_mode",
             "self.manifest_repository",
+            "manifest_repository",
             "ManifestCursor",
             "ManifestExpectation",
             "_authority_lifecycle is not None",
             "_reconciler",
-        )
-    )
-    assert all(
-        forbidden not in manifest_repository_text
-        for forbidden in (
-            "ManifestExpectation",
-            "ManifestCursor",
-            "ManifestRepository",
-            "JsonManifestRepository",
-            "SqliteManifestRepository",
-            "InMemoryManifestRepository",
-            "create_manifest_repository",
-            "JsonBackend",
-            "SqliteBackend",
-            "InMemoryBackend",
+            "backend=",
+            "_select_projection_backend",
+            "_create_lifecycle_authority",
         )
     )
