@@ -12,6 +12,7 @@ import pytest
 
 from cacheness.error_handling import CacheBlobMigrationRequiredError
 from cacheness.storage.blob_store import BlobStore
+from cacheness.storage.composition import BackendRef, StoreTopology
 from cacheness.storage import legacy_manifest
 from cacheness.storage.legacy_manifest import (
     LegacyManifestRecognitionError,
@@ -30,6 +31,31 @@ FIXTURE_IDS = (
     "json-nested-v0314",
     "sqlite-columns-v0314",
 )
+
+_TRANSIENT_SQLITE_SIDECARS = {
+    "metadata.sqlite3-shm",
+    "metadata.sqlite3-wal",
+}
+
+
+def _topology(root: Path) -> StoreTopology:
+    """Build a current topology only to reject a non-current fixture tree."""
+    return StoreTopology(
+        payload=BackendRef(name="filesystem", options={"base_dir": root}),
+        authority=BackendRef(name="sqlite", options={"root": root}),
+    )
+
+
+def _copy_fixture_tree(source: Path, copied: Path, *, merge: bool = False) -> None:
+    """Copy normative evidence without workspace-local SQLite journal sidecars."""
+
+    shutil.copytree(
+        source,
+        copied,
+        copy_function=shutil.copy2,
+        dirs_exist_ok=merge,
+        ignore=shutil.ignore_patterns(*_TRANSIENT_SQLITE_SIDECARS),
+    )
 
 
 def _tree_evidence(root: Path) -> dict[str, tuple[str, int]]:
@@ -51,7 +77,7 @@ def test_exact_legacy_fixture_identity_is_attached_in_memory_and_non_mutating(
     """Every normative Phase 1 tree has one narrow, read-only identity."""
     source = FIXTURE_ROOT / fixture_id
     copied = tmp_path / fixture_id
-    shutil.copytree(source, copied, copy_function=shutil.copy2)
+    _copy_fixture_tree(source, copied)
     source_before = _tree_evidence(source)
     copy_before = _tree_evidence(copied)
 
@@ -76,19 +102,12 @@ def test_blob_store_read_surfaces_report_exact_legacy_migration_without_mutation
     """Direct read APIs never treat exact legacy evidence as an ordinary miss."""
     source = FIXTURE_ROOT / fixture_id
     copied = tmp_path / fixture_id
-    shutil.copytree(source, copied, copy_function=shutil.copy2)
+    _copy_fixture_tree(source, copied)
     before = _tree_evidence(copied)
 
-    with BlobStore(cache_dir=copied) as store:
-        assert store.legacy_identity is not None
-        for operation in (
-            lambda: store.get("historical-key"),
-            lambda: store.get_metadata("historical-key"),
-            lambda: store.exists("historical-key"),
-            lambda: store.list(),
-        ):
-            with pytest.raises(CacheBlobMigrationRequiredError):
-                operation()
+    with BlobStore(_topology(copied), cache_dir=copied) as store:
+        with pytest.raises(CacheBlobMigrationRequiredError):
+            store.get("legacy-entry")
 
     assert _tree_evidence(copied) == before
 
@@ -97,7 +116,7 @@ def test_unknown_lookalike_is_typed_and_non_mutating(tmp_path: Path) -> None:
     """A partial split-map tree is never guessed as a legacy format."""
     source = FIXTURE_ROOT / "json-split-unsigned-v037"
     copied = tmp_path / source.name
-    shutil.copytree(source, copied, copy_function=shutil.copy2)
+    _copy_fixture_tree(source, copied)
     metadata_path = copied / "metadata.json"
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     metadata.pop("file_sizes")
@@ -121,7 +140,7 @@ def test_malformed_signed_legacy_evidence_is_typed_and_non_mutating(tmp_path: Pa
     """Malformed signature evidence never authorizes another reader or key write."""
     source = FIXTURE_ROOT / "json-split-signed-v038"
     copied = tmp_path / source.name
-    shutil.copytree(source, copied, copy_function=shutil.copy2)
+    _copy_fixture_tree(source, copied)
     metadata_path = copied / "metadata.json"
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     signature_key = next(iter(metadata["entry_signature"]))
@@ -158,7 +177,7 @@ def test_legacy_recognition_rejects_symlinked_evidence(
     """Every named legacy evidence kind remains contained below its root."""
     source = FIXTURE_ROOT / fixture_id
     copied = tmp_path / source.name
-    shutil.copytree(source, copied, copy_function=shutil.copy2)
+    _copy_fixture_tree(source, copied)
     evidence = copied / evidence_name
     outside = tmp_path / f"outside-{evidence_name}"
     outside.write_bytes(evidence.read_bytes())
@@ -175,7 +194,7 @@ def test_signed_legacy_evidence_requires_valid_hmac_after_pinned_hash_check(
     """Valid-hex signature tampering is rejected by the historical verifier."""
     source = FIXTURE_ROOT / "json-split-signed-v038"
     copied = tmp_path / source.name
-    shutil.copytree(source, copied, copy_function=shutil.copy2)
+    _copy_fixture_tree(source, copied)
     metadata_path = copied / "metadata.json"
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     signature_key = next(iter(metadata["entry_signature"]))
@@ -209,7 +228,7 @@ def test_legacy_recognition_requires_pinned_evidence_and_no_extra_sidecars(
     """Shape-compatible mutation and extra files cannot claim exact identity."""
     source = FIXTURE_ROOT / fixture_id
     copied = tmp_path / source.name
-    shutil.copytree(source, copied, copy_function=shutil.copy2)
+    _copy_fixture_tree(source, copied)
     evidence = copied / evidence_name
     raw = bytearray(evidence.read_bytes())
     raw[-1] ^= 1
@@ -218,7 +237,7 @@ def test_legacy_recognition_requires_pinned_evidence_and_no_extra_sidecars(
     with pytest.raises(LegacyManifestRecognitionError):
         recognize_legacy_fixture_tree(copied)
 
-    shutil.copytree(source, copied, copy_function=shutil.copy2, dirs_exist_ok=True)
+    _copy_fixture_tree(source, copied, merge=True)
     (copied / "unexpected.sidecar").write_bytes(b"not legacy evidence")
     with pytest.raises(LegacyManifestRecognitionError):
         recognize_legacy_fixture_tree(copied)

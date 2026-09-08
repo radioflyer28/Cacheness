@@ -15,8 +15,20 @@ from cacheness.error_handling import (
     CacheBlobRecoverableCleanupError,
 )
 from cacheness.storage.blob_store import BlobStore
+from cacheness.storage.composition import BackendRef, StoreTopology
 from cacheness.storage.coordination import KeyCoordinatorRegistry
 from _lifecycle_test_support import ReleaseGate
+
+
+def _store(root: Path) -> BlobStore:
+    """Create the supported local topology for progress and safety tests."""
+    return BlobStore(
+        StoreTopology(
+            payload=BackendRef(name="filesystem", options={"base_dir": root}),
+            authority=BackendRef(name="sqlite", options={"root": root}),
+        ),
+        cache_dir=root,
+    )
 
 
 LIFECYCLE_BASELINE_PATH = (
@@ -49,7 +61,7 @@ def _put_from_independent_process(
 ) -> None:
     """Exercise public admission from a fresh process, not a shared lock map."""
     started.set()
-    store = BlobStore(root, backend="json")
+    store = _store(root)
     try:
         store.put("post-snapshot", key="post-snapshot")
         completed.set()
@@ -67,7 +79,7 @@ def _put_from_ready_independent_process(
     errors: multiprocessing.queues.Queue,
 ) -> None:
     """Open independently before a scheduler race, then perform one public put."""
-    store = BlobStore(root, backend="json")
+    store = _store(root)
     try:
         ready.set()
         assert run.wait(timeout=15)
@@ -138,8 +150,8 @@ def test_key_registry_sorts_multi_key_acquisition_without_deadlock():
 def test_independent_write_write_race_has_one_cas_winner(tmp_path):
     """Independent stores prove CAS, not the local lock, selects the winner."""
     root = tmp_path / "write-write"
-    first = BlobStore(root, backend="json")
-    second = BlobStore(root, backend="json")
+    first = _store(root)
+    second = _store(root)
     first.initialize()
     barrier = threading.Barrier(2)
     results: list[str] = []
@@ -178,15 +190,15 @@ def test_independent_write_write_race_has_one_cas_winner(tmp_path):
 def test_independent_write_delete_race_has_one_cas_winner(tmp_path):
     """A write and delete from independent stores cannot both replace authority."""
     root = tmp_path / "write-delete"
-    seed = BlobStore(root, backend="json")
+    seed = _store(root)
     key = "same-key"
     try:
         seed.put("original", key=key)
     finally:
         seed.close()
 
-    writer = BlobStore(root, backend="json")
-    deleter = BlobStore(root, backend="json")
+    writer = _store(root)
+    deleter = _store(root)
     barrier = threading.Barrier(2)
     results: list[tuple[str, object]] = []
     errors: list[BaseException] = []
@@ -229,7 +241,7 @@ def test_independent_write_delete_race_has_one_cas_winner(tmp_path):
 
 def test_distinct_key_put_completes_while_another_key_is_pre_cas(tmp_path):
     """A per-key holder never serializes an unrelated ordinary write."""
-    store = BlobStore(tmp_path / "distinct", backend="json")
+    store = _store(tmp_path / "distinct")
     key_a_entered = threading.Event()
     release_key_a = threading.Event()
     key_b_finished = threading.Event()
@@ -271,7 +283,7 @@ def test_distinct_key_put_completes_while_another_key_is_pre_cas(tmp_path):
 
 def test_clear_and_delete_converge_after_an_exact_snapshot(tmp_path: Path) -> None:
     """A delete racing a paused clear consumes only the snapshot generation."""
-    store = BlobStore(tmp_path / "clear-delete", backend="json")
+    store = _store(tmp_path / "clear-delete")
     gate = ReleaseGate()
     clear_result: list[int] = []
     errors: list[BaseException] = []
@@ -315,7 +327,7 @@ def test_reconciliation_and_mutation_converge_on_distinct_indexed_work(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Reconciliation may retire old debt while a later mutation is paused."""
-    store = BlobStore(tmp_path / "reconcile-mutation", backend="json")
+    store = _store(tmp_path / "reconcile-mutation")
     gate = ReleaseGate()
     errors: list[BaseException] = []
 
@@ -362,7 +374,7 @@ def test_reconciliation_and_mutation_converge_on_distinct_indexed_work(
 
 def _retired_scheduler_clear_snapshot_does_not_delete_a_post_snapshot_key(tmp_path):
     """Clear's finite target inventory excludes a key committed after snapshot."""
-    store = BlobStore(tmp_path / "clear-post-snapshot", backend="json")
+    store = _store(tmp_path / "clear-post-snapshot")
     snapshot_complete = threading.Event()
     release_clear = threading.Event()
     post_snapshot_done = threading.Event()
@@ -413,7 +425,7 @@ def test_distinct_key_put_completes_during_paused_authority_promotion(
 ) -> None:
     """A paused key's promotion cannot serialize another key's payload work."""
     root = tmp_path / "authority-promotion"
-    store = BlobStore(root, backend="json")
+    store = _store(root)
     entered = threading.Event()
     release = threading.Event()
     second_done = threading.Event()
@@ -455,7 +467,7 @@ def test_distinct_key_put_completes_during_paused_authority_promotion(
         _join(second)
         store.close()
 
-    reopened = BlobStore(root, backend="json")
+    reopened = _store(root)
     try:
         assert reopened.get("key-a") == "value-a"
         assert reopened.get("key-b") == "value-b"
@@ -468,7 +480,7 @@ def test_independent_process_put_completes_during_paused_authority_promotion(
 ) -> None:
     """SQLite-only promotion does not hold a store lease across payload work."""
     root = tmp_path / "authority-process-promotion"
-    store = BlobStore(root, backend="json")
+    store = _store(root)
     store.put("seed", key="seed-key")
     entered = threading.Event()
     release = threading.Event()
@@ -519,7 +531,7 @@ def test_independent_process_put_completes_during_paused_authority_promotion(
         child.join(timeout=15)
         store.close()
 
-    reopened = BlobStore(root, backend="json")
+    reopened = _store(root)
     try:
         assert reopened.get("parent-key") == "parent"
         assert reopened.get("child-key") == "child"
@@ -530,7 +542,7 @@ def test_independent_process_put_completes_during_paused_authority_promotion(
 def _retired_scheduler_live_clear_transition_lease_preserves_creator_return_count(tmp_path: Path) -> None:
     """Constructor recovery waits for a live clearer after snapshot admission ends."""
     root = tmp_path / "live-clear-transition-lease"
-    owner = BlobStore(root, backend="json")
+    owner = _store(root)
     snapshot_released = threading.Event()
     allow_creator_continue = threading.Event()
     constructor_finished = threading.Event()
@@ -551,7 +563,7 @@ def _retired_scheduler_live_clear_transition_lease_preserves_creator_return_coun
     def reopen_during_live_clear() -> None:
         reopened: BlobStore | None = None
         try:
-            reopened = BlobStore(root, backend="json")
+            reopened = _store(root)
         except BaseException as exc:  # pragma: no cover - asserted by parent.
             errors.append(exc)
         finally:
@@ -586,7 +598,7 @@ def _retired_scheduler_live_clear_transition_lease_preserves_creator_return_coun
 def _retired_scheduler_clear_snapshot_excludes_a_later_independent_process_write(tmp_path):
     """Cross-process admission holds the exact clear snapshot stable."""
     root = tmp_path / "cross-process-clear-admission"
-    store = BlobStore(root, backend="json")
+    store = _store(root)
     snapshot_complete = threading.Event()
     release_snapshot = threading.Event()
     clear_errors: list[BaseException] = []
@@ -643,8 +655,8 @@ def _authority_exists_reacquires_once_only_after_an_independent_generation_chang
 ):
     """Existence checks use M1/snapshot/M2 rather than a stale path assertion."""
     root = tmp_path / "exists-generation-retry"
-    reader = BlobStore(root, backend="json")
-    writer = BlobStore(root, backend="json")
+    reader = _store(root)
+    writer = _store(root)
     key = "same-key"
     try:
         reader.put("old", key=key)
@@ -677,8 +689,8 @@ def test_read_write_retry_once_when_an_independent_writer_commits_new_generation
 ):
     """A read discards its first snapshot when M2 proves a newer commit."""
     root = tmp_path / "read-write"
-    reader = BlobStore(root, backend="json")
-    writer = BlobStore(root, backend="json")
+    reader = _store(root)
+    writer = _store(root)
     key = "race-key"
     snapshots = 0
     authority_reads = 0
@@ -720,8 +732,8 @@ def test_read_write_retry_once_when_an_independent_writer_commits_new_generation
 def test_read_delete_race_retries_to_authoritative_absence(tmp_path):
     """A delete after M1 is observed as tombstoned absence, never a stale read."""
     root = tmp_path / "read-delete"
-    reader = BlobStore(root, backend="json")
-    deleter = BlobStore(root, backend="json")
+    reader = _store(root)
+    deleter = _store(root)
     key = "race-key"
     snapshots = 0
     try:

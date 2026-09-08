@@ -18,7 +18,6 @@ from typing import Any
 import pytest
 
 from cacheness.config import CacheConfig
-from cacheness.core import UnifiedCache
 from cacheness.error_handling import (
     CacheBlobBackendError,
     CacheBlobLifecycleConflictError,
@@ -28,9 +27,10 @@ from cacheness.error_handling import (
     CacheUnsafePathError,
 )
 from cacheness.storage.blob_store import BlobStore
+from cacheness.storage.composition import BackendRef, StoreTopology
 from cacheness.storage.backends.blob_backends import FilesystemBlobBackend
 from cacheness.storage.integrity import sign_hmac_sha256
-from cacheness.storage.manifest import BlobManifestV1
+from cacheness.storage.manifest import BlobManifest
 from cacheness.storage import path_security
 from cacheness.storage.path_security import (
     ManagedFileOps,
@@ -39,6 +39,17 @@ from cacheness.storage.path_security import (
     resolve_storage_root,
     validate_blob_id,
 )
+
+
+def _store(root: Path) -> BlobStore:
+    """Create the qualified topology for direct containment regressions."""
+    return BlobStore(
+        StoreTopology(
+            payload=BackendRef(name="filesystem", options={"base_dir": root}),
+            authority=BackendRef(name="sqlite", options={"root": root}),
+        ),
+        cache_dir=root,
+    )
 
 
 @pytest.mark.parametrize(
@@ -626,7 +637,7 @@ def test_blob_store_keeps_logical_key_while_handlers_only_see_private_paths(tmp_
     """BlobStore keeps the public key exact and never passes cache-root paths to handlers."""
     root = tmp_path / "blob-root"
     handler = _InstrumentedHandler()
-    store = BlobStore(root)
+    store = _store(root)
     store.handlers = _SingleHandlerRegistry(handler)
     logical_key = "../tenant/key with spaces"
 
@@ -658,7 +669,7 @@ def test_blob_store_first_write_authority_conflict_removes_candidate(
     handlers = _format_handlers()
     registry = _SwitchingHandlerRegistry(*handlers)
     registry.current = handlers[handler_index]
-    store = BlobStore(root)
+    store = _store(root)
     store.handlers = registry
 
     def reject_authority_promotion(*_args: Any, **_kwargs: Any) -> None:
@@ -689,7 +700,7 @@ def test_blob_store_cross_format_authority_conflict_preserves_prior_evidence(
     root = tmp_path / "blob-root"
     old_handler, replacement_handler = _format_handlers()
     registry = _SwitchingHandlerRegistry(old_handler, replacement_handler)
-    store = BlobStore(root)
+    store = _store(root)
     store.handlers = registry
     key = "cross-format"
     initial_metadata = {
@@ -748,7 +759,7 @@ def test_blob_store_candidate_cleanup_failure_is_explicit_and_chained(
     """A CAS-loser candidate remains recoverable when cleanup cannot be proved."""
     root = tmp_path / "blob-root"
     handler, _ = _format_handlers()
-    store = BlobStore(root)
+    store = _store(root)
     store.handlers = _SwitchingHandlerRegistry(handler)
     cleanup_attempts: list[Path] = []
 
@@ -795,7 +806,7 @@ def test_blob_store_post_commit_prior_cleanup_keeps_new_metadata_authoritative(
     root = tmp_path / "blob-root"
     old_handler, replacement_handler = _format_handlers()
     registry = _SwitchingHandlerRegistry(old_handler, replacement_handler)
-    store = BlobStore(root)
+    store = _store(root)
     store.handlers = registry
     key = "post-commit"
 
@@ -839,7 +850,7 @@ def test_blob_store_clear_removes_guarded_payloads_before_metadata(tmp_path):
     """A successful clear leaves neither reachable metadata nor orphan payload bytes."""
     root = tmp_path / "blob-root"
     handler = _InstrumentedHandler()
-    store = BlobStore(root)
+    store = _store(root)
     store.handlers = _SingleHandlerRegistry(handler)
 
     try:
@@ -854,7 +865,7 @@ def test_blob_store_clear_removes_guarded_payloads_before_metadata(tmp_path):
         assert store.clear() == 2
 
         assert all(not path.exists() for path in payload_paths)
-        assert store.backend.list_entries() == []
+        assert store.lifecycle_authority.list_entries() == ()
         assert store.get(first_key) is None
         assert store.get(second_key) is None
     finally:
@@ -868,7 +879,7 @@ def test_blob_store_clear_keeps_tombstone_authority_when_reclamation_fails(
     """A post-authority clear failure retains signed recovery evidence to converge."""
     root = tmp_path / "blob-root"
     handler = _InstrumentedHandler()
-    store = BlobStore(root)
+    store = _store(root)
     store.handlers = _SingleHandlerRegistry(handler)
 
     failed_key: str | None = None
@@ -903,7 +914,7 @@ def test_blob_store_clear_keeps_tombstone_authority_when_reclamation_fails(
         failed_key = keys[failing_payload_delete - 1]
         entry = store.lifecycle_authority.read_entry(failed_key)
         assert entry is not None
-        tombstone = BlobManifestV1.from_canonical_bytes(entry.manifest)
+        tombstone = BlobManifest.from_canonical_bytes(entry.manifest)
         assert tombstone.state == "tombstoned"
         assert tombstone.signature
         assert store.get(failed_key) is None
@@ -913,7 +924,7 @@ def test_blob_store_clear_keeps_tombstone_authority_when_reclamation_fails(
         store.close()
 
     assert failed_key is not None
-    reopened = BlobStore(root)
+    reopened = _store(root)
     reopened.handlers = _SingleHandlerRegistry(_InstrumentedHandler())
     try:
         assert reopened.reconcile(apply=True).applied is True
@@ -929,13 +940,11 @@ def test_blob_store_clear_keeps_tombstone_authority_when_reclamation_fails(
         reopened.close()
 
 
-def test_blob_store_clear_does_not_use_metadata_bulk_clear_as_authority(
-    tmp_path, monkeypatch
-):
-    """Current clear commits per-key tombstones rather than bulk metadata deletion."""
+def test_blob_store_clear_commits_authority_tombstones(tmp_path):
+    """Current clear removes each entry through the selected authority lifecycle."""
     root = tmp_path / "blob-root"
     handler = _InstrumentedHandler()
-    store = BlobStore(root)
+    store = _store(root)
     store.handlers = _SingleHandlerRegistry(handler)
 
     try:
@@ -947,15 +956,9 @@ def test_blob_store_clear_does_not_use_metadata_bulk_clear_as_authority(
             for entry in entries_before
             if entry is not None
         ]
-        def forbid_metadata_bulk_clear() -> int:
-            raise AssertionError("clear must not use the retired metadata bulk path")
-
-        monkeypatch.setattr(store.backend, "clear_all", forbid_metadata_bulk_clear)
-
         assert store.clear() == len(keys)
         assert all(store.get(key) is None for key in keys)
         assert all(not path.exists() for path in payload_paths)
-        assert store.backend.list_entries() == []
         assert store.lifecycle_authority.list_entries() == ()
     finally:
         store.close()
@@ -967,7 +970,7 @@ def test_blob_store_clear_pre_authority_fault_preserves_committed_payload(
     """A pre-promotion clear fault aborts without revoking the committed entry."""
     root = tmp_path / "blob-root"
     handler = _InstrumentedHandler()
-    store = BlobStore(root)
+    store = _store(root)
     store.handlers = _SingleHandlerRegistry(handler)
 
     try:
@@ -997,7 +1000,7 @@ def test_blob_store_clear_pre_authority_fault_preserves_committed_payload(
     finally:
         store.close()
 
-    reopened = BlobStore(root)
+    reopened = _store(root)
     reopened.handlers = _SingleHandlerRegistry(_InstrumentedHandler())
     try:
         assert reopened.get(key) == "payload"
@@ -1012,7 +1015,7 @@ def test_blob_store_clear_records_tombstone_before_current_payload_cleanup_fails
     """A clear records signed absence before a post-authority cleanup failure."""
     root = tmp_path / "blob-root"
     handler = _InstrumentedHandler()
-    store = BlobStore(root)
+    store = _store(root)
     store.handlers = _SingleHandlerRegistry(handler)
 
     interrupted_key: str | None = None
@@ -1032,10 +1035,10 @@ def test_blob_store_clear_records_tombstone_before_current_payload_cleanup_fails
                 entry
                 for entry in entries
                 if entry.key in keys
-                and BlobManifestV1.from_canonical_bytes(entry.manifest).state
+                and BlobManifest.from_canonical_bytes(entry.manifest).state
                 == "tombstoned"
             )
-            tombstone = BlobManifestV1.from_canonical_bytes(tombstone_entry.manifest)
+            tombstone = BlobManifest.from_canonical_bytes(tombstone_entry.manifest)
             assert tombstone.state == "tombstoned"
             assert tombstone.signature
             interrupted_key = tombstone_entry.key
@@ -1055,7 +1058,7 @@ def test_blob_store_clear_records_tombstone_before_current_payload_cleanup_fails
     finally:
         store.close()
 
-    reopened = BlobStore(root)
+    reopened = _store(root)
     reopened.handlers = _SingleHandlerRegistry(_InstrumentedHandler())
     try:
         assert reopened.reconcile(apply=True).applied is True
@@ -1068,15 +1071,13 @@ def test_blob_store_clear_records_tombstone_before_current_payload_cleanup_fails
         reopened.close()
 
 
-def test_persisted_locator_raises_before_deserialization(
-    tmp_path, monkeypatch, rewrite_authority_manifest
-):
+def test_persisted_locator_raises_before_deserialization(tmp_path, monkeypatch):
     """Unsafe persisted locators remain typed errors, not reads or cache misses."""
     outside = tmp_path / "outside"
     outside.write_text("outside", encoding="utf-8")
 
     blob_handler = _InstrumentedHandler()
-    store = BlobStore(tmp_path / "blobs")
+    store = _store(tmp_path / "blobs")
     store.handlers = _SingleHandlerRegistry(blob_handler)
     try:
         key = store.put("inside", key="safe")
@@ -1085,10 +1086,10 @@ def test_persisted_locator_raises_before_deserialization(
 
         # Inject a re-signed authority entry rather than a projection.  Locator
         # containment must reject it before a handler sees any payload bytes.
-        manifest_data = BlobManifestV1.from_canonical_bytes(entry.manifest).to_mapping()
+        manifest_data = BlobManifest.from_canonical_bytes(entry.manifest).to_mapping()
         manifest_data["locator"] = str(outside)
         manifest_data.pop("signature")
-        unsigned_manifest = BlobManifestV1(**manifest_data)
+        unsigned_manifest = BlobManifest.from_mapping({**manifest_data, "signature": ""})
         tampered_manifest = unsigned_manifest.with_signature(
             sign_hmac_sha256(
                 unsigned_manifest.signing_bytes(), store._authority_manifest_key()
@@ -1117,54 +1118,28 @@ def test_persisted_locator_raises_before_deserialization(
     finally:
         store.close()
 
-    cache_handler = _InstrumentedHandler()
-    config = CacheConfig(
-        cache_dir=str(tmp_path / "cache"),
-        metadata_backend="memory",
-        cleanup_on_init=False,
-        verify_cache_integrity=False,
-    )
-    cache = UnifiedCache(config)
-    cache.handlers = _SingleHandlerRegistry(cache_handler)
-    key = cache.put("inside", identity="safe")
-    entry = cache.metadata_backend.get_entry(key)
-    assert entry is not None
-    rewrite_authority_manifest(
-        cache._cache_blob_store, key, lambda fields: fields.update(locator=str(outside))
-    )
-
-    with pytest.raises(CacheUnsafePathError):
-        cache.get(cache_key=key)
-    assert cache_handler.get_paths == []
-    assert outside.read_text(encoding="utf-8") == "outside"
-
-
-def test_unified_cache_encodes_hostile_prefix_without_mutating_outside_target(tmp_path):
-    """An authored prefix remains metadata while only its encoded physical name is used."""
+def test_blob_store_encodes_hostile_key_without_mutating_outside_target(tmp_path):
+    """An authored key remains logical while only an encoded name reaches storage."""
     root = tmp_path / "cache"
     handler = _InstrumentedHandler()
-    cache = UnifiedCache(
-        CacheConfig(
-            cache_dir=str(root),
-            metadata_backend="memory",
-            cleanup_on_init=False,
-        )
-    )
-    cache.handlers = _SingleHandlerRegistry(handler)
-    prefix = "../outside prefix"
+    store = _store(root)
+    store.handlers = _SingleHandlerRegistry(handler)
+    key = "../outside prefix"
 
-    key = cache.put("payload", prefix=prefix, identity="prefix")
-    entry = cache.metadata_backend.get_entry(key)
+    try:
+        assert store.put("payload", key=key) == key
+        entry = store.get_metadata(key)
 
-    assert entry is not None
-    assert entry["prefix"] == prefix
-    actual_path = Path(entry["metadata"]["actual_path"])
-    assert _is_descendant(actual_path, root)
-    assert prefix not in str(actual_path)
-    assert cache.get(cache_key=key) == "payload"
-    assert all(not _is_descendant(path, root) for path in handler.put_paths)
-    assert all(not _is_descendant(path, root) for path in handler.get_paths)
-    assert all(handler.get_paths_alive)
+        assert entry is not None
+        actual_path = root / entry["metadata"]["actual_path"]
+        assert _is_descendant(actual_path, root)
+        assert key not in str(actual_path)
+        assert store.get(key) == "payload"
+        assert all(not _is_descendant(path, root) for path in handler.put_paths)
+        assert all(not _is_descendant(path, root) for path in handler.get_paths)
+        assert all(handler.get_paths_alive)
+    finally:
+        store.close()
 
 
 def test_guarded_handler_io_copies_one_private_snapshot_without_deserializing(tmp_path):
@@ -1508,110 +1483,25 @@ def test_guarded_handler_io_rejects_stage_ancestor_swapped_after_validation(
         io.close()
 
 
-def _instrumented_cache(tmp_path, *, delete_invalid_signatures: bool = True):
-    """Build a cache whose handler makes guarded ordering observable."""
-    root = tmp_path / "cache"
-    handler = _InstrumentedHandler()
-    cache = UnifiedCache(
-        CacheConfig(
-            cache_dir=str(root),
-            metadata_backend="memory",
-            cleanup_on_init=False,
-            delete_invalid_signatures=delete_invalid_signatures,
-        )
-    )
-    cache.handlers = _SingleHandlerRegistry(handler)
-    return cache, handler
-
-
-def test_high_level_handler_io_verifies_private_snapshot_before_handler(tmp_path, monkeypatch):
-    """Digest and signature verification precede deserialization on one snapshot."""
-    cache, handler = _instrumented_cache(tmp_path)
-    key = cache.put("payload", identity="ordered")
-    events: list[str] = []
-    import cacheness.storage.lifecycle as lifecycle_module
-    original_hash = lifecycle_module.sha256_and_size
-    original_verify = cache.signer.verify_entry
-
-    def record_hash(path: Path):
-        events.append("hash")
-        assert not _is_descendant(path, cache.cache_dir)
-        return original_hash(path)
-
-    def record_verify(entry_data: dict[str, Any], signature: str):
-        events.append("signature")
-        return original_verify(entry_data, signature)
-
-    monkeypatch.setattr(lifecycle_module, "sha256_and_size", record_hash)
-    cache.signer.verify_entry = record_verify
-
-    assert cache.get(cache_key=key) == "payload"
-    assert events == ["hash", "signature"]
-    assert handler.events == ["handler"]
-    assert handler.get_paths_alive == [True]
-
-
-@pytest.mark.parametrize("rejection", ["hash", "signature", "legacy", "unsigned"])
-def test_high_level_handler_io_rejects_untrusted_entries_before_deserialization(
-    tmp_path, rejection, rewrite_authority_manifest
-):
-    """Bad integrity/current-or-legacy signatures never reach a handler."""
-    cache, handler = _instrumented_cache(tmp_path, delete_invalid_signatures=False)
-    key = cache.put("payload", identity=rejection)
-    entry = cache.metadata_backend.get_entry(key)
-    assert entry is not None
-    metadata = entry["metadata"]
-
-    if rejection == "hash":
-        metadata["file_hash"] = "not-the-payload-hash"
-    elif rejection == "signature":
-        metadata["entry_signature"] = "not-a-valid-signature"
-    elif rejection == "legacy":
-        metadata.pop("entry_signature")
-        metadata["legacy_entry_signature"] = "not-a-valid-legacy-signature"
-    else:
-        metadata.pop("entry_signature")
-        cache.config.security.allow_unsigned_entries = False
-
-    def change(fields):
-        user = fields["user_metadata"]
-        if rejection == "hash":
-            user["file_hash"] = "not-the-payload-hash"
-        elif rejection == "signature":
-            user["entry_signature"] = "not-a-valid-signature"
-        else:
-            user.pop("entry_signature")
-            if rejection == "legacy":
-                user["legacy_entry_signature"] = "not-a-valid-legacy-signature"
-
-    rewrite_authority_manifest(cache._cache_blob_store, key, change)
-
-    assert cache.get(cache_key=key) is None
-    assert handler.events == []
-    assert cache.metadata_backend.get_entry(key) is entry
-
-
-def test_high_level_locator_preflight_blocks_multi_entry_mutation(
-    tmp_path, monkeypatch, rewrite_authority_manifest
-):
+def test_locator_preflight_blocks_multi_entry_mutation(tmp_path, monkeypatch):
     """Unsafe signed authority locators fail closed before multi-entry mutation."""
     outside = tmp_path / "outside"
     outside.write_text("outside", encoding="utf-8")
 
     blob_handler = _InstrumentedHandler()
-    store = BlobStore(tmp_path / "blobs")
+    store = _store(tmp_path / "blobs")
     store.handlers = _SingleHandlerRegistry(blob_handler)
     try:
         safe_key = store.put("safe", key="safe")
         unsafe_key = store.put("unsafe", key="unsafe")
         unsafe_entry = store.lifecycle_authority.read_entry(unsafe_key)
         assert unsafe_entry is not None
-        manifest_data = BlobManifestV1.from_canonical_bytes(
+        manifest_data = BlobManifest.from_canonical_bytes(
             unsafe_entry.manifest
         ).to_mapping()
         manifest_data["locator"] = str(outside)
         manifest_data.pop("signature")
-        unsigned_manifest = BlobManifestV1(**manifest_data)
+        unsigned_manifest = BlobManifest.from_mapping({**manifest_data, "signature": ""})
         tampered_raw = unsigned_manifest.with_signature(
             sign_hmac_sha256(
                 unsigned_manifest.signing_bytes(), store._authority_manifest_key()
@@ -1653,29 +1543,3 @@ def test_high_level_locator_preflight_blocks_multi_entry_mutation(
         assert outside.read_text(encoding="utf-8") == "outside"
     finally:
         store.close()
-
-    cache, cache_handler = _instrumented_cache(tmp_path / "unified")
-    safe_key = cache.put("safe", identity="safe")
-    unsafe_key = cache.put("unsafe", identity="unsafe")
-    unsafe_entry = cache.metadata_backend.get_entry(unsafe_key)
-    assert unsafe_entry is not None
-    rewrite_authority_manifest(
-        cache._cache_blob_store, unsafe_key,
-        lambda fields: fields.update(locator=str(outside)),
-    )
-
-    stats_before = cache.metadata_backend.get_stats()
-    with pytest.raises(CacheUnsafePathError):
-        cache.list_entries()
-    with pytest.raises(CacheUnsafePathError):
-        cache.clear_all()
-    with pytest.raises(CacheUnsafePathError):
-        cache._cleanup_expired()
-    with pytest.raises(CacheUnsafePathError):
-        cache._enforce_size_limit()
-    with pytest.raises(CacheUnsafePathError):
-        cache.get(cache_key=unsafe_key)
-    assert cache.metadata_backend.get_stats() == stats_before
-    assert cache.get(cache_key=safe_key) == "safe"
-    assert cache_handler.events == ["handler"]
-    assert outside.read_text(encoding="utf-8") == "outside"

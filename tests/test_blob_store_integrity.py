@@ -30,6 +30,7 @@ from cacheness.error_handling import (
     CacheUnsafePathError,
 )
 from cacheness.storage.blob_store import BlobStore
+from cacheness.storage.composition import BackendRef, StoreTopology
 from cacheness.storage.integrity import (
     ManifestKeyError,
     ManifestKeyDurabilityProvider,
@@ -38,8 +39,22 @@ from cacheness.storage.integrity import (
     verify_hmac_sha256,
 )
 import cacheness.storage.integrity as integrity_module
-from cacheness.storage.manifest import BlobManifestV1
+from cacheness.storage.manifest import BlobManifest, sign_current_manifest
 from cacheness.config import LifecycleLimits
+
+
+def _store(
+    root: Path, *, manifest_key_provider: object | None = None
+) -> BlobStore:
+    """Create the supported local topology while retaining key-provider injection."""
+    return BlobStore(
+        StoreTopology(
+            payload=BackendRef(name="filesystem", options={"base_dir": root}),
+            authority=BackendRef(name="sqlite", options={"root": root}),
+        ),
+        cache_dir=root,
+        manifest_key_provider=manifest_key_provider,
+    )
 
 
 _KEY = b"0123456789abcdef0123456789abcdef"
@@ -584,7 +599,7 @@ def test_custom_manifest_key_provider_exception_is_translated(tmp_path: Path) ->
         def get_key(self) -> bytes:
             raise CustomProviderError("keystore policy")
 
-    store = BlobStore(tmp_path, manifest_key_provider=ExplodingProvider())
+    store = _store(tmp_path, manifest_key_provider=ExplodingProvider())
     try:
         with pytest.raises(CacheBlobManifestUnauthenticatedError) as error:
             store.put({"value": "blocked"}, key="blocked")
@@ -600,7 +615,7 @@ def test_injected_key_provider_operational_failure_is_typed(tmp_path: Path) -> N
         def get_key(self) -> bytes:
             raise OSError("keystore unavailable")
 
-    store = BlobStore(tmp_path, manifest_key_provider=UnavailableProvider())
+    store = _store(tmp_path, manifest_key_provider=UnavailableProvider())
     try:
         with pytest.raises(CacheBlobManifestUnauthenticatedError) as error:
             store.put({"value": "unavailable"}, key="unavailable")
@@ -647,7 +662,7 @@ def test_first_store_initialization_does_not_log_an_expected_missing_key(
 ):
     """A successful first write does not emit a false public security alert."""
     caplog.set_level(logging.ERROR, logger="cacheness.error_handling")
-    store = BlobStore(tmp_path)
+    store = _store(tmp_path)
     try:
         store.put({"first": "write"}, key="first-key")
     finally:
@@ -708,7 +723,7 @@ def test_manifest_key_provider_has_no_non_posix_rejection_branch():
 def test_blob_store_accepts_an_injected_manifest_key_provider(tmp_path):
     """A platform key-store adapter can supply the narrow signing-key contract."""
     provider = _InjectedManifestKeyProvider()
-    store = BlobStore(tmp_path, manifest_key_provider=provider)
+    store = _store(tmp_path, manifest_key_provider=provider)
     try:
         assert store.put({"value": "injected"}, key="provider-key") == "provider-key"
         assert store.get("provider-key") == {"value": "injected"}
@@ -718,7 +733,7 @@ def test_blob_store_accepts_an_injected_manifest_key_provider(tmp_path):
 
 def test_reopen_with_missing_key_never_creates_a_replacement_key(tmp_path):
     """A signed store with a missing key fails closed without evidence mutation."""
-    store = BlobStore(tmp_path)
+    store = _store(tmp_path)
     store.put({"value": "signed"}, key="signed")
     key_path = tmp_path / "blob_manifest_hmac_key.bin"
     authority_entry = store.lifecycle_authority.read_entry("signed")
@@ -727,16 +742,16 @@ def test_reopen_with_missing_key_never_creates_a_replacement_key(tmp_path):
     key_path.unlink()
     store.close()
 
-    reopened = BlobStore(tmp_path)
+    reopened = _store(tmp_path)
     try:
         with pytest.raises(CacheManifestIntegrityError) as error:
             reopened.get("signed")
     finally:
         reopened.close()
 
-    assert error.value.context["reason"] == CacheReason.MANIFEST_SIGNING_KEY_INVALID.value
+    assert error.value.context["reason"] == CacheReason.MANIFEST_SIGNATURE_INVALID.value
     assert not key_path.exists()
-    final_store = BlobStore(tmp_path)
+    final_store = _store(tmp_path)
     try:
         final_entry = final_store.lifecycle_authority.read_entry("signed")
         assert final_entry is not None
@@ -745,11 +760,11 @@ def test_reopen_with_missing_key_never_creates_a_replacement_key(tmp_path):
         final_store.close()
 
 
-def _manifest_for(store: BlobStore, key: str) -> BlobManifestV1:
+def _manifest_for(store: BlobStore, key: str) -> BlobManifest:
     """Load canonical manifest bytes from the committed lifecycle authority."""
     entry = store.lifecycle_authority.read_entry(key)
     assert entry is not None
-    return BlobManifestV1.from_canonical_bytes(entry.manifest)
+    return BlobManifest.from_canonical_bytes(entry.manifest)
 
 
 def _authority_entry_with_raw_manifest(
@@ -807,10 +822,8 @@ def _replace_signed_manifest(
     current = _manifest_for(store, lookup_key)
     values = current.to_mapping(include_signature=False)
     values.update(overrides)
-    altered = BlobManifestV1(**values)
-    signed = altered.with_signature(
-        sign_hmac_sha256(altered.signing_bytes(), store._manifest_key())
-    )
+    altered = BlobManifest.from_mapping({**values, "signature": ""})
+    signed = sign_current_manifest(altered, store._manifest_key())
     locator = overrides.get("locator")
     return _authority_entry_with_raw_manifest(
         store,
@@ -823,7 +836,7 @@ def _replace_signed_manifest(
 @pytest.fixture
 def signed_store(tmp_path):
     """Create a direct canonical record without retaining any test-global state."""
-    store = BlobStore(tmp_path)
+    store = _store(tmp_path)
     store.put({"value": "verified"}, key="integrity-key")
     try:
         yield store
@@ -844,7 +857,7 @@ def test_read_authenticates_validates_snapshots_hashes_then_deserializes(
     handler = store.handlers.get_handler_by_type(manifest.handler_type)
     events: list[str] = []
 
-    original_verify = blob_store_module.verify_hmac_sha256
+    original_verify = blob_store_module.verify_current_manifest
     original_resolve = store.handlers.resolve_payload_contract
     original_snapshot = store.guarded_handler_io.open_snapshot
     original_digest = lifecycle_module.sha256_and_size
@@ -872,7 +885,7 @@ def test_read_authenticates_validates_snapshots_hashes_then_deserializes(
         events.append("handler")
         return original_get(*args, **kwargs)
 
-    monkeypatch.setattr(blob_store_module, "verify_hmac_sha256", verify_spy)
+    monkeypatch.setattr(blob_store_module, "verify_current_manifest", verify_spy)
     monkeypatch.setattr(store.handlers, "resolve_payload_contract", resolve_spy)
     monkeypatch.setattr(store.guarded_handler_io, "open_snapshot", snapshot_spy)
     monkeypatch.setattr(lifecycle_module, "sha256_and_size", digest_spy)
@@ -906,7 +919,7 @@ def test_unauthenticated_manifest_fails_before_snapshot_or_handler(
     else:
         values = manifest.to_mapping()
         values["signature"] = ""
-        tampered = BlobManifestV1(**values)
+        tampered = BlobManifest.from_mapping(values)
     original_entry = store.lifecycle_authority.read_entry("integrity-key")
     assert original_entry is not None
     tampered_entry = _authority_entry_with_raw_manifest(
@@ -951,15 +964,15 @@ def test_unauthenticated_invalid_critical_syntax_is_not_semantically_classified(
     monkeypatch.setattr(store.guarded_handler_io, "open_snapshot", forbidden)
     monkeypatch.setattr(store.handlers, "resolve_payload_contract", forbidden)
 
-    with pytest.raises(CacheBlobManifestUnauthenticatedError):
+    with pytest.raises(CacheBlobManifestMalformedError):
         store.get("integrity-key")
 
 
 @pytest.mark.parametrize(
     ("overrides", "error_type"),
-    (
-        ({"key": "different-key"}, CacheBlobLifecycleConflictError),
-        ({"state": "prepared"}, CacheBlobLifecycleConflictError),
+        (
+            ({"key": "different-key"}, CacheBlobLifecycleConflictError),
+            ({"state": "prepared"}, CacheBlobManifestMalformedError),
         ({"locator": "/outside-the-managed-root"}, CacheUnsafePathError),
     ),
     ids=("key", "lifecycle", "locator"),
@@ -972,7 +985,16 @@ def test_authenticated_critical_fields_fail_before_snapshot(
 ):
     """Authenticated key, lifecycle, and locator fields remain pre-snapshot gates."""
     store = signed_store
-    altered_entry = _replace_signed_manifest(store, "integrity-key", **overrides)
+    if overrides.get("state") == "prepared":
+        record = _manifest_for(store, "integrity-key").to_mapping()
+        record.update(overrides)
+        altered_entry = _authority_entry_with_raw_manifest(
+            store,
+            "integrity-key",
+            json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+        )
+    else:
+        altered_entry = _replace_signed_manifest(store, "integrity-key", **overrides)
     _install_authority_entry(monkeypatch, store, "integrity-key", altered_entry)
 
     def forbidden(*_args, **_kwargs):

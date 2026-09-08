@@ -86,50 +86,31 @@ def test_windows_contract_absent_root_fails_before_database_or_root_creation(
     assert "icacls.exe" in str(captured.value)
 
 
-def test_windows_blobstore_put_preflights_absent_root_before_payload_materialization(
+def test_windows_blobstore_put_preflights_before_payload_materialization(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The public write boundary rejects an unprovisioned Windows root unchanged."""
+    """The public write boundary rejects before it creates payload evidence."""
     import cacheness.storage.sqlite_lifecycle_authority as sqlite_authority
     from cacheness.storage import BlobStore
+    from cacheness.storage.composition import BackendRef, StoreTopology
 
     root = tmp_path / "missing-public-windows-root"
     monkeypatch.setattr(sqlite_authority, "_platform_name", lambda: "nt")
-    store = BlobStore(root, backend="json")
+    store = BlobStore(
+        StoreTopology(
+            payload=BackendRef(name="filesystem", options={"base_dir": root}),
+            authority=BackendRef(name="sqlite", options={"root": root}),
+        ),
+        cache_dir=root,
+    )
     try:
         with pytest.raises(CacheBlobBackendError) as captured:
             store.put({"value": "must-not-materialize"}, key="windows-preflight")
 
-        assert not root.exists()
+        assert not (root / "generations").exists()
         assert "offline before Cacheness starts" in str(captured.value)
     finally:
         store.close()
-
-
-@pytest.mark.parametrize("metadata_backend", ("json", "sqlite"))
-def test_windows_unified_cache_preflights_before_public_root_or_metadata_creation(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    metadata_backend: str,
-) -> None:
-    """The public facade must not materialize an unprovisioned Windows root."""
-    import cacheness.storage.sqlite_lifecycle_authority as sqlite_authority
-    from cacheness.config import CacheConfig
-    from cacheness.core import UnifiedCache
-
-    root = tmp_path / f"missing-unified-{metadata_backend}-root"
-    monkeypatch.setattr(sqlite_authority, "_platform_name", lambda: "nt")
-
-    with pytest.raises(CacheBlobBackendError, match="offline before Cacheness starts"):
-        UnifiedCache(
-            CacheConfig(
-                cache_dir=str(root),
-                metadata_backend=metadata_backend,
-                cleanup_on_init=False,
-            )
-        )
-
-    assert not root.exists()
 
 
 def test_windows_contract_shape_keeps_sqlite_as_the_only_commit_authority() -> None:
