@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 04
 current_phase_name: metadata-composition-and-topology-contracts
 status: planned
-stopped_at: Completed 04-12-PLAN.md
-last_updated: "2026-09-08T07:12:11.276Z"
+stopped_at: Completed 04-13-PLAN.md
+last_updated: "2026-09-08T07:38:07.096Z"
 last_activity: 2026-09-08
 last_activity_desc: Phase 04 execution started
-state_head: 5503f1c9ae8b4fc14f92b7b970fcb6bb8f0ca865
+state_head: cb5f1675ae9e6ec033ed1a528b04f2c37999e44b
 progress:
   total_phases: 8
-  completed_phases: 3
+  completed_phases: 2
   total_plans: 60
-  completed_plans: 58
+  completed_plans: 59
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-09-06)
 ## Current Position
 
 Phase: 04 (metadata-composition-and-topology-contracts) — READY TO EXECUTE
-Plan: 12 of 13
+Plan: 13 of 13
 Status: Ready to execute
 Last activity: 2026-09-08 — Phase 04 gap-closure plans verified
 
@@ -139,6 +139,7 @@ Phase 03 rows in this historical table include superseded attempts and do not de
 | Phase 04 P10 | 13m 10s | 2 tasks | 9 files |
 | Phase 04 P11 | 22m | 2 tasks | 5 files |
 | Phase 04 P12 | 40m | 2 tasks | 9 files |
+| Phase 04 P13 | 120m | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -297,6 +298,8 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 04]: Catalog cursors enforce closed-envelope byte and field limits before decode, JSON, HMAC, manifest loading, or authority dispatch.
 - [Phase 04]: RoleRegistry is the sole registry consumer contract; retired process-global blob selectors remain absent.
 - [Phase 04]: Mocked S3 registration proves only local factory construction and option forwarding; Phase 5 owns topology qualification.
+- [Phase 04]: Phase 4 release evidence derives PHASE4_MATRIX only from a 41-path marker-bounded owned list; deferred pandas SQL-cache collection is diagnostic-only and non-green.
+- [Phase 04]: Ruff qualification inventory may add only individually clean declared Plan 04 paths; frozen existing findings and fingerprints remain unchanged.
 
 ### Pending Todos
 
@@ -322,6 +325,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-08T07:12:11.218Z
-Stopped at: Completed 04-12-PLAN.md
-Resume file: 04-13-PLAN.md
+Last session: 2026-09-08T07:38:07.039Z
+Stopped at: Completed 04-13-PLAN.md
+Resume file: None
