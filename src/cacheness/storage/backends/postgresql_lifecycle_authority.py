@@ -745,8 +745,8 @@ class PostgresqlLifecycleAuthority:
         """Reconstruct an idempotent receipt from immutable operation evidence."""
         cursor.execute(
             sql.SQL(
-                "SELECT key, generation, locator, manifest, verified_digest, "
-                "promoted_lineage, promoted_revision FROM {} "
+                "SELECT key, generation, locator, manifest, promoted_lineage, "
+                "promoted_revision FROM {} "
                 "WHERE operation_id = %s AND state = 'promoted'"
             ).format(self._table("mutations")),
             (operation_id,),
@@ -755,8 +755,10 @@ class PostgresqlLifecycleAuthority:
         if row is None:
             raise CacheBlobLifecycleConflictError("Mutation is not promoted")
         try:
+            manifest = bytes(row[3])
+            manifest_digest = hashlib.sha256(manifest).hexdigest()
             entry = self._entry_from_row(
-                (row[0], row[1], row[2], row[3], row[4], row[5], row[6]),
+                (row[0], row[1], row[2], manifest, manifest_digest, row[4], row[5]),
                 stage="promote_mutation",
             )
         except (TypeError, ValueError) as error:

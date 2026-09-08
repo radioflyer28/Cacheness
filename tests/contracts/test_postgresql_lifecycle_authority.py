@@ -409,7 +409,8 @@ def test_promotion_marks_fresh_lineage_before_matching_absence() -> None:
 
     spec = _spec()
     prepared = PreparedMutation(spec.operation_id, spec)
-    digest = hashlib.sha256(spec.manifest).hexdigest()
+    payload_digest = hashlib.sha256(b"verified payload bytes").hexdigest()
+    manifest_digest = hashlib.sha256(spec.manifest).hexdigest()
     mutation_row = (
         spec.key,
         spec.generation,
@@ -419,7 +420,7 @@ def test_promotion_marks_fresh_lineage_before_matching_absence() -> None:
         None,
         None,
         spec.manifest,
-        digest,
+        payload_digest,
         len(spec.manifest),
         "prepared",
     )
@@ -439,7 +440,6 @@ def test_promotion_marks_fresh_lineage_before_matching_absence() -> None:
                 spec.generation,
                 spec.candidate_locator,
                 spec.manifest,
-                digest,
                 1,
                 1,
             ),
@@ -447,9 +447,12 @@ def test_promotion_marks_fresh_lineage_before_matching_absence() -> None:
         ]]
     )
 
-    PostgresqlLifecycleAuthority(factory, schema="phase5_authority").promote_mutation(
+    result = PostgresqlLifecycleAuthority(factory, schema="phase5_authority").promote_mutation(
         prepared
     )
+
+    assert result.entry.expectation.manifest_digest == manifest_digest
+    assert result.entry.expectation.manifest_digest != payload_digest
 
     statements = [_query_text(query) for query, _ in factory.connections[0].executions]
     lineage_insert = next(statement for statement in statements if "entry_lineage" in statement)
@@ -463,7 +466,7 @@ def test_promotion_marks_fresh_lineage_before_matching_absence() -> None:
     replay_query = next(
         statement
         for statement in statements
-        if "select key, generation, locator, manifest, verified_digest" in statement
+        if "select key, generation, locator, manifest, promoted_lineage" in statement
         and "state = 'promoted'" in statement
     )
     assert "join" not in replay_query
@@ -561,14 +564,14 @@ def test_uncertain_promotion_reopens_a_fresh_lease_for_exact_operation_state() -
 
     spec = _spec()
     prepared = PreparedMutation(spec.operation_id, spec)
-    digest = hashlib.sha256(spec.manifest).hexdigest()
+    payload_digest = hashlib.sha256(b"verified payload bytes").hexdigest()
     prepared_row = (
         spec.key, spec.generation, spec.candidate_locator, None, None, None, None,
-        spec.manifest, digest, len(spec.manifest), "prepared",
+        spec.manifest, payload_digest, len(spec.manifest), "prepared",
     )
     promoted_row = prepared_row[:-1] + ("promoted",)
     promotion_receipt_row = (
-        spec.key, spec.generation, spec.candidate_locator, spec.manifest, digest, 1, 1,
+        spec.key, spec.generation, spec.candidate_locator, spec.manifest, 1, 1,
     )
     factory = _Factory(
         scripts=[[

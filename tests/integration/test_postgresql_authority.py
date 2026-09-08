@@ -70,11 +70,12 @@ def _prepared_mutation(
             manifest=manifest,
         )
     )
+    payload_bytes = b"verification evidence is distinct from the manifest"
     authority.record_verification(
         prepared,
         VerificationProof(
-            digest=hashlib.sha256(manifest).hexdigest(),
-            byte_size=len(manifest),
+            digest=hashlib.sha256(payload_bytes).hexdigest(),
+            byte_size=len(payload_bytes),
             manifest=manifest,
         ),
     )
