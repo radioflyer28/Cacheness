@@ -27,8 +27,6 @@ class TestCacheConfig:
         assert config.compression.npz_compression is True
         assert config.metadata.enable_metadata is True
         assert config.storage.cleanup_on_init is True
-        assert config.metadata.metadata_backend == "auto"
-        assert config.metadata.sqlite_db_file == "cache_metadata.db"
         assert config.compression.pickle_compression_codec == "zstd"
         assert config.compression.pickle_compression_level == 5
         assert config.compression.use_blosc2_arrays is True
@@ -53,7 +51,7 @@ class TestCacheConfig:
             cache_dir=str(test_cache_dir), max_cache_size_mb=1000, cleanup_on_init=False
         )
         metadata_config = CacheMetadataConfig(
-            default_ttl_hours=48, enable_metadata=False, metadata_backend="json"
+            default_ttl_hours=48, enable_metadata=False
         )
         compression_config = CompressionConfig(
             parquet_compression="gzip", npz_compression=False
@@ -77,7 +75,6 @@ class TestCacheConfig:
         assert config.compression.npz_compression is False
         assert config.metadata.enable_metadata is False
         assert config.storage.cleanup_on_init is False
-        assert config.metadata.metadata_backend == "json"
         assert (
             config.metadata.store_cache_key_params is False
         )  # New default for performance (was True)
@@ -104,9 +101,7 @@ class TestCacheness:
         )
 
         storage_config = CacheStorageConfig(cache_dir=str(temp_cache_dir))
-        metadata_config = CacheMetadataConfig(
-            metadata_backend="json"
-        )  # Use JSON to avoid SQLite dependencies
+        metadata_config = CacheMetadataConfig()
         compression_config = CompressionConfig(
             use_blosc2_arrays=False
         )  # Disable blosc2 for testing
@@ -130,7 +125,7 @@ class TestCacheness:
         """Test cache initialization."""
         assert cache.config == test_config
         assert cache.handlers is not None
-        assert cache.metadata_backend is not None
+        assert cache._cache_blob_store is not None
         assert cache.config.storage.cache_dir in str(cache.config.storage.cache_dir)
 
     def test_put_and_get_simple_object(self, cache):
@@ -434,7 +429,7 @@ class TestCacheness:
         storage_config = CacheStorageConfig(
             cache_dir=str(temp_cache_dir), cleanup_on_init=True
         )
-        metadata_config = CacheMetadataConfig(metadata_backend="json")
+        metadata_config = CacheMetadataConfig()
         compression_config = CompressionConfig()
         serialization_config = SerializationConfig()
         handler_config = HandlerConfig()
@@ -497,10 +492,15 @@ class TestCacheness:
         utc_time = datetime.now(timezone.utc) - timedelta(hours=2)  # 2 hours ago
         timestamp_iso = utc_time.isoformat()
         
-        # Mock the metadata backend to return our test entry
+        # The cache reads an authority snapshot; inject only its rendered
+        # policy entry instead of restoring a metadata-backend test seam.
         mock_entry = {"created_at": timestamp_iso, "description": "timezone test"}
         
-        with patch.object(cache.metadata_backend, 'get_entry', return_value=mock_entry):
+        with patch.object(
+            cache,
+            "_authority_snapshot_entry",
+            return_value=(object(), mock_entry),
+        ):
             # Should be expired (created 2 hours ago, checking with 1 hour TTL)
             assert cache._is_expired("test_key", ttl_hours=1) is True
             
@@ -574,7 +574,6 @@ class TestMemoryCacheConfig:
         """Test memory cache configuration with parameter names."""
         config = CacheConfig(
             cache_dir="/tmp/test_memory_cache",
-            metadata_backend="sqlite",
             enable_memory_cache=True,
             memory_cache_type="lru",
             memory_cache_maxsize=500,
@@ -608,7 +607,6 @@ class TestMemoryCacheConfig:
             # Create cache with memory cache layer enabled
             config = CacheConfig(
                 cache_dir=temp_dir,
-                metadata_backend="sqlite",
                 enable_memory_cache=True,
                 memory_cache_type="lru",
                 memory_cache_maxsize=10,
@@ -626,14 +624,11 @@ class TestMemoryCacheConfig:
             result = cache.get(test_key="memory_cache_test")
             assert result == test_data
             
-            # Check if memory cache statistics are available (should be CachedMetadataBackend)
-            from cacheness.metadata import CachedMetadataBackend
-            if isinstance(cache.metadata_backend, CachedMetadataBackend):
-                stats = cache.metadata_backend.get_cache_stats()
-                assert 'memory_cache_enabled' in stats
-                assert stats['memory_cache_enabled'] is True
-                assert stats['memory_cache_type'] == 'lru'
-                assert stats['memory_cache_maxsize'] == 10
+            # Cache policy stats are public; no metadata-wrapper type is part
+            # of the BlobStore composition contract.
+            stats = cache.get_stats()
+            assert stats["cache_hits"] >= 1
+            assert stats["total_entries"] == 1
             
             cache.close()
 

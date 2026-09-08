@@ -823,7 +823,7 @@ def _replace_signed_manifest(
     values = current.to_mapping(include_signature=False)
     values.update(overrides)
     altered = BlobManifest.from_mapping({**values, "signature": ""})
-    signed = sign_current_manifest(altered, store._manifest_key())
+    signed = sign_current_manifest(altered, store._authority_manifest_key())
     locator = overrides.get("locator")
     return _authority_entry_with_raw_manifest(
         store,

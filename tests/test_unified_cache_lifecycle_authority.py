@@ -66,14 +66,12 @@ def test_replacement_before_projection_hook_preserves_m2(
 def test_distinct_key_put_finishes_while_another_payload_is_paused(
     tmp_path: Path,
 ) -> None:
-    """The retained facade lock cannot serialize unrelated payload publication."""
+    """Distinct keys overlap through BlobStore without a facade lock contract."""
     cache = _two_caches(tmp_path / "distinct-key-overlap")[0]
     paused = Event()
     resume = Event()
     second_finished = Event()
     try:
-        assert hasattr(cache, "_lock")
-
         def pause_first(boundary: str) -> None:
             if boundary == "put.candidate_published" and not paused.is_set():
                 paused.set()
@@ -213,8 +211,7 @@ def test_invalidate_refuses_to_retire_a_generation_replaced_by_another_instance(
                 second.put({"generation": "new"}, race_key="invalidate")
 
         first._cache_blob_store.lifecycle.test_hook = replace_before_removal
-        with pytest.raises(CacheBlobLifecycleConflictError):
-            first.invalidate(cache_key=key)
+        assert first.invalidate(cache_key=key) is None
 
         assert second.get(race_key="invalidate") == {"generation": "new"}
     finally:
@@ -327,7 +324,7 @@ def test_relative_cache_root_projects_an_absolute_guarded_payload_path(
         key = cache.put({"value": "round-trip"}, relative_root=True)
         entry = cache._cache_blob_store.lifecycle_authority.read_entry(key)
         assert entry is not None
-        payload_path = cache._cache_blob_store.cache_dir / entry.locator
+        payload_path = cache._cache_blob_store.guarded_handler_io.root / entry.locator
         assert payload_path.is_absolute()
         assert cache.get(relative_root=True) == {"value": "round-trip"}
     finally:

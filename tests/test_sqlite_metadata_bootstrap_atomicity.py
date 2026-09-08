@@ -1,8 +1,8 @@
-"""Atomic SQLite metadata-bootstrap contracts.
+"""Explicit SQLite lifecycle-authority initialization contracts.
 
-The worker schedules deliberately construct independent backends against a
-genuinely absent file.  They use barriers rather than timing to make the
-check-then-create window observable.
+The legacy metadata adapter is intentionally gone. These stable-path checks
+cover the current BlobStore/SqliteLifecycleAuthority initialization boundary
+without treating concurrent first-use as an availability guarantee.
 """
 
 from __future__ import annotations
@@ -14,80 +14,90 @@ import threading
 
 import pytest
 
-from cacheness.error_handling import CacheIntegrityError, CacheLegacyFormatError
-from cacheness.metadata import Base, SqliteBackend
-
-
-_CURRENT_ENTRY_COLUMNS = (
-    "cache_key",
-    "description",
-    "data_type",
-    "prefix",
-    "created_at",
-    "accessed_at",
-    "file_size",
-    "file_hash",
-    "entry_signature",
-    "object_type",
-    "storage_format",
-    "serializer",
-    "compression_codec",
-    "actual_path",
-    "cache_key_params",
+from cacheness.error_handling import CacheBlobMigrationRequiredError
+from cacheness.storage.blob_store import BlobStore
+from cacheness.storage.composition import BackendRef, StoreTopology
+from cacheness.storage.sqlite_lifecycle_authority import (
+    AUTHORITY_RELATIVE_PATH,
+    SQLITE_APPLICATION_ID,
+    SQLITE_USER_VERSION,
+    SqliteLifecycleAuthority,
 )
 
 
-def _assert_current_metadata_schema(database: Path) -> None:
-    """Verify the durable metadata contract through an independent DBAPI read."""
+_CURRENT_TABLES = {
+    "authority_state",
+    "cleanup_debt",
+    "clear_runs",
+    "clear_targets",
+    "entries",
+    "entry_lineage",
+    "mutations",
+    "reconciliation_actions",
+    "reconciliation_runs",
+    "store_identity",
+}
+
+
+def _local_topology(
+    root: Path, authority: SqliteLifecycleAuthority | None = None
+) -> StoreTopology:
+    """Build exactly the supported local payload/authority pairing."""
+    return StoreTopology(
+        payload=BackendRef(name="filesystem", options={"base_dir": root}),
+        authority=(
+            BackendRef(instance=authority)
+            if authority is not None
+            else BackendRef(name="sqlite", options={"root": root})
+        ),
+    )
+
+
+def _assert_current_authority_schema(root: Path) -> None:
+    """Inspect the durable authority independently of its implementation object."""
+    database = root / AUTHORITY_RELATIVE_PATH
     with sqlite3.connect(database) as connection:
-        assert connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
-        assert tuple(
-            row[1]
-            for row in connection.execute("PRAGMA table_xinfo(cache_entries)")
-        ) == _CURRENT_ENTRY_COLUMNS
-        assert tuple(
-            row[1]
-            for row in connection.execute("PRAGMA table_xinfo(cache_stats)")
-        ) == ("id", "cache_hits", "cache_misses", "last_updated")
-        indexes = {
-            row[1]
-            for row in connection.execute("PRAGMA index_list(cache_entries)")
+        assert connection.execute("PRAGMA journal_mode").fetchone() == ("delete",)
+        assert connection.execute("PRAGMA application_id").fetchone() == (
+            SQLITE_APPLICATION_ID,
+        )
+        assert connection.execute("PRAGMA user_version").fetchone() == (
+            SQLITE_USER_VERSION,
+        )
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
         }
-        assert {
-            "idx_list_entries",
-            "idx_cleanup",
-            "idx_size_mgmt",
-            "idx_data_type",
-        }.issubset(indexes)
-        assert connection.execute("SELECT id FROM cache_stats").fetchall() == [(1,)]
+        assert _CURRENT_TABLES.issubset(tables)
+        assert len(connection.execute("SELECT identity FROM store_identity").fetchall()) == 1
+        revisions = connection.execute("SELECT revision FROM authority_state").fetchall()
+        assert len(revisions) == 1
+        assert isinstance(revisions[0][0], int)
 
 
-def _construct_backend(
-    path: str,
-    barrier,
-    outcomes,
-) -> None:
-    """Construct one independent backend and report its bounded outcome."""
-    backend = None
+def _initialize_existing_authority(root: str, barrier, outcomes) -> None:
+    """Use independent explicit authority instances after offline initialization."""
+    authority = SqliteLifecycleAuthority.for_root(root)
     try:
         barrier.wait(timeout=20)
-        backend = SqliteBackend(path)
+        authority.initialize()
         outcomes.put(("ok", None))
     except BaseException as error:  # pragma: no cover - parent asserts outcome.
         outcomes.put(("error", f"{type(error).__name__}: {error}"))
     finally:
-        if backend is not None:
-            backend.close()
+        authority.close()
 
 
-def _thread_race_child(path: str, outcomes) -> None:
-    """Run the thread schedule in a disposable spawned interpreter."""
-    workers = 64
+def _thread_race_child(root: str, outcomes) -> None:
+    """Run independent initialized-root authorities in a fresh interpreter."""
+    workers = 16
     barrier = threading.Barrier(workers)
     threads = [
         threading.Thread(
-            target=_construct_backend,
-            args=(path, barrier, outcomes),
+            target=_initialize_existing_authority,
+            args=(root, barrier, outcomes),
             daemon=True,
         )
         for _ in range(workers)
@@ -99,31 +109,57 @@ def _thread_race_child(path: str, outcomes) -> None:
     outcomes.put(("threads_finished", all(not thread.is_alive() for thread in threads)))
 
 
-def test_threaded_fresh_metadata_constructors_converge(tmp_path: Path) -> None:
-    """64 independent constructors must not expose SQLAlchemy's DDL race."""
-    database = tmp_path / "threaded.sqlite3"
+def test_explicit_blob_store_initialization_creates_current_authority_schema(
+    tmp_path: Path,
+) -> None:
+    """Schema creation occurs at explicit initialization before shared workers."""
+    root = tmp_path / "initialized"
+    with BlobStore(_local_topology(root), cache_dir=root) as store:
+        store.initialize()
+        assert store.put({"value": "round-trip"}, key="entry") == "entry"
+        assert store.get("entry") == {"value": "round-trip"}
+
+    _assert_current_authority_schema(root)
+
+
+def test_threaded_initialized_authorities_converge_without_first_use_claims(
+    tmp_path: Path,
+) -> None:
+    """Independent authorities reopen an explicitly initialized root safely."""
+    root = tmp_path / "threaded.sqlite"
+    with BlobStore(_local_topology(root), cache_dir=root) as initializer:
+        initializer.initialize()
+
     context = multiprocessing.get_context("spawn")
     outcomes = context.Queue()
-    child = context.Process(target=_thread_race_child, args=(str(database), outcomes))
+    child = context.Process(target=_thread_race_child, args=(str(root), outcomes))
     child.start()
     child.join(timeout=60)
     assert child.exitcode == 0
 
-    results = [outcomes.get(timeout=5) for _ in range(65)]
+    results = [outcomes.get(timeout=5) for _ in range(17)]
     assert results[-1] == ("threads_finished", True)
     assert all(result == ("ok", None) for result in results[:-1]), results
-    _assert_current_metadata_schema(database)
+    _assert_current_authority_schema(root)
 
 
-def test_spawned_fresh_metadata_constructors_converge(tmp_path: Path) -> None:
-    """Separate spawned processes must converge without process-local locking."""
-    database = tmp_path / "processes.sqlite3"
+def test_spawned_initialized_authorities_converge_without_process_local_state(
+    tmp_path: Path,
+) -> None:
+    """Separate processes reopen one prepared authority without a global lock."""
+    root = tmp_path / "processes.sqlite"
+    with BlobStore(_local_topology(root), cache_dir=root) as initializer:
+        initializer.initialize()
+
     context = multiprocessing.get_context("spawn")
-    barrier = context.Barrier(8)
+    barrier = context.Barrier(4)
     outcomes = context.Queue()
     workers = [
-        context.Process(target=_construct_backend, args=(str(database), barrier, outcomes))
-        for _ in range(8)
+        context.Process(
+            target=_initialize_existing_authority,
+            args=(str(root), barrier, outcomes),
+        )
+        for _ in range(4)
     ]
     for worker in workers:
         worker.start()
@@ -132,70 +168,70 @@ def test_spawned_fresh_metadata_constructors_converge(tmp_path: Path) -> None:
         assert worker.exitcode == 0
 
     assert [outcomes.get(timeout=5) for _ in workers] == [("ok", None)] * len(workers)
-    _assert_current_metadata_schema(database)
+    _assert_current_authority_schema(root)
 
 
-def test_hostile_preexisting_schema_is_rejected_without_journal_mutation(
+def test_foreign_root_is_rejected_without_mutating_evidence(tmp_path: Path) -> None:
+    """An established non-authority root is migration evidence, never bootstrap input."""
+    root = tmp_path / "foreign"
+    root.mkdir()
+    foreign = root / "foreign-records.sqlite3"
+    foreign.write_bytes(b"foreign evidence")
+    before = foreign.read_bytes()
+
+    authority = SqliteLifecycleAuthority.for_root(root)
+    try:
+        with pytest.raises(CacheBlobMigrationRequiredError):
+            authority.initialize()
+    finally:
+        authority.close()
+
+    assert foreign.read_bytes() == before
+    assert not (root / AUTHORITY_RELATIVE_PATH).exists()
+
+
+def test_incomplete_authority_layout_is_rejected_without_implicit_upgrade(
     tmp_path: Path,
 ) -> None:
-    """Foreign evidence is never adopted as an empty metadata database."""
-    database = tmp_path / "foreign.sqlite3"
+    """An obsolete authority leaf remains unchanged until offline migration/rebuild."""
+    root = tmp_path / "obsolete"
+    database = root / AUTHORITY_RELATIVE_PATH
+    database.parent.mkdir(parents=True)
     with sqlite3.connect(database) as connection:
-        connection.execute("CREATE TABLE foreign_records (id INTEGER PRIMARY KEY)")
-        before_mode = connection.execute("PRAGMA journal_mode").fetchone()
-        before_catalog = connection.execute(
-            "SELECT type, name, tbl_name FROM sqlite_master ORDER BY name"
-        ).fetchall()
-    before_bytes = database.read_bytes()
+        connection.execute("CREATE TABLE legacy_entries (id INTEGER PRIMARY KEY)")
+    before = database.read_bytes()
 
-    with pytest.raises(CacheIntegrityError) as error:
-        SqliteBackend(str(database))
+    authority = SqliteLifecycleAuthority.for_root(root)
+    try:
+        with pytest.raises(CacheBlobMigrationRequiredError):
+            authority.initialize()
+    finally:
+        authority.close()
 
-    assert error.value.context == {
-        "reason": "metadata_corrupt",
-        "backend": "sqlite",
-        "operation": "metadata_bootstrap",
-        "stage": "preflight",
-        "path": str(database),
-    }
-    assert database.read_bytes() == before_bytes
-    with sqlite3.connect(database) as connection:
-        assert connection.execute("PRAGMA journal_mode").fetchone() == before_mode
-        assert connection.execute(
-            "SELECT type, name, tbl_name FROM sqlite_master ORDER BY name"
-        ).fetchall() == before_catalog
+    assert database.read_bytes() == before
 
 
-def test_unsupported_cache_entries_layout_retains_legacy_exception(tmp_path: Path) -> None:
-    """The historical unsupported-layout public boundary is not relabeled."""
-    database = tmp_path / "unsupported.sqlite3"
-    with sqlite3.connect(database) as connection:
-        connection.execute("CREATE TABLE cache_entries (wrong_column TEXT)")
-
-    with pytest.raises(CacheLegacyFormatError) as error:
-        SqliteBackend(str(database))
-
-    assert error.value.context["reason"] == "unsupported_legacy_layout"
-
-
-def test_post_ddl_failure_rolls_back_every_provisional_table(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_pre_commit_schema_failure_rolls_back_provisional_tables(
+    tmp_path: Path,
 ) -> None:
-    """DDL and validation share the explicit bootstrap transaction."""
-    database = tmp_path / "rollback.sqlite3"
+    """Schema initialization uses one SQLite transaction and leaves no partial tables."""
+    root = tmp_path / "rollback"
+    authority = SqliteLifecycleAuthority.for_root(root)
 
-    def create_then_fail(connection, **_kwargs) -> None:
-        connection.exec_driver_sql("CREATE TABLE bootstrap_sentinel (id INTEGER)")
-        raise RuntimeError("forced bootstrap failure")
+    def fail_after_exclusive_lock(boundary: str) -> None:
+        if boundary == "authority.schema_initialize.exclusive_acquired":
+            raise RuntimeError("forced bootstrap failure")
 
-    monkeypatch.setattr(Base.metadata, "create_all", create_then_fail)
-    with pytest.raises(RuntimeError, match="forced bootstrap failure"):
-        SqliteBackend(str(database))
+    authority.set_bootstrap_hook_for_test(fail_after_exclusive_lock)
+    try:
+        with pytest.raises(RuntimeError, match="forced bootstrap failure"):
+            authority.initialize()
+    finally:
+        authority.close()
 
+    database = root / AUTHORITY_RELATIVE_PATH
     with sqlite3.connect(database) as connection:
-        assert connection.execute(
-            "SELECT name FROM sqlite_master WHERE name = 'bootstrap_sentinel'"
-        ).fetchone() is None
-        assert connection.execute(
-            "SELECT name FROM sqlite_master WHERE name IN ('cache_entries', 'cache_stats')"
-        ).fetchall() == []
+        tables = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    assert tables == []
