@@ -1,4 +1,4 @@
-"""PostgreSQL optional-dependency and derived-projection contracts."""
+"""PostgreSQL optional-dependency and lifecycle-authority contracts."""
 
 from __future__ import annotations
 
@@ -12,13 +12,13 @@ from cacheness.storage.composition import (
 )
 
 
-def test_postgresql_is_declared_as_a_derived_projection_not_an_authority() -> None:
-    """PostgreSQL cannot grant canonical query or promotion authority."""
+def test_postgresql_is_declared_as_a_lifecycle_authority_not_a_projection() -> None:
+    """PostgreSQL may authorize canonical query and promotion transitions."""
     role = resolve_metadata_role("postgresql")
 
-    assert role.kind == BackendRole.PROJECTION.value
-    assert role.authorizes("promote_catalog") is False
-    assert role.authorizes("query_complete") is False
+    assert role.kind == BackendRole.AUTHORITY.value
+    assert role.authorizes("promote_catalog") is True
+    assert role.authorizes("query_complete") is True
 
 
 def test_postgresql_lifecycle_authority_is_registered_but_projection_is_not() -> None:

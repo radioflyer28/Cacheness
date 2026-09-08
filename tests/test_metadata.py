@@ -18,7 +18,7 @@ from cacheness.storage.composition import (
         ("memory", BackendRole.AUTHORITY),
         ("sqlite", BackendRole.AUTHORITY),
         ("json", BackendRole.PROJECTION),
-        ("postgresql", BackendRole.PROJECTION),
+        ("postgresql", BackendRole.AUTHORITY),
     ),
 )
 def test_metadata_implementation_roles_are_explicit_and_backend_independent(

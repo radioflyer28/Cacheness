@@ -24,7 +24,7 @@ def _composition():
         ("memory", "authority"),
         ("sqlite", "authority"),
         ("json", "projection"),
-        ("postgresql", "projection"),
+        ("postgresql", "authority"),
     ],
 )
 def test_metadata_family_role_is_explicit(implementation: str, expected_role: str) -> None:

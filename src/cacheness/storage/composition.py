@@ -834,12 +834,12 @@ class StoreTopology:
 
 
 def resolve_metadata_role(implementation: str) -> MetadataRole:
-    """Return the explicit Phase 4 metadata role for a named family."""
+    """Return the current explicit metadata role for a named family."""
     roles = {
         "memory": MetadataRole(BackendRole.AUTHORITY.value),
         "sqlite": MetadataRole(BackendRole.AUTHORITY.value),
         "json": MetadataRole(BackendRole.PROJECTION.value),
-        "postgresql": MetadataRole(BackendRole.PROJECTION.value),
+        "postgresql": MetadataRole(BackendRole.AUTHORITY.value),
     }
     try:
         return roles[implementation]
