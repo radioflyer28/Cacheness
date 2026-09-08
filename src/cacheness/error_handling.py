@@ -62,6 +62,11 @@ class CacheReason(str, Enum):
     BLOB_LIFECYCLE_TIMEOUT = "blob_lifecycle_timeout"
     BLOB_LOCK_RELEASE_FAILURE = "blob_lock_release_failure"
     METADATA_CORRUPT = "metadata_corrupt"
+    CATALOG_VALIDATION_FAILED = "catalog_validation_failed"
+    CATALOG_QUERY_INVALID = "catalog_query_invalid"
+    CATALOG_CURSOR_INVALID = "catalog_cursor_invalid"
+    CATALOG_CURSOR_STALE = "catalog_cursor_stale"
+    MIGRATION_OR_REBUILD_REQUIRED = "migration_or_rebuild_required"
 
 
 class CacheError(Exception):
@@ -145,6 +150,73 @@ class CacheQueryValidationError(CacheMetadataError):
         context: Optional[Dict[str, Any]] = None,
         *,
         reason: CacheReason,
+    ):
+        super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheCatalogValidationError(CacheMetadataError):
+    """Raised when native catalog metadata violates its declared schema."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.CATALOG_VALIDATION_FAILED,
+    ):
+        super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheCatalogQueryValidationError(CacheMetadataError):
+    """Raised before an invalid portable catalog query reaches an authority."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.CATALOG_QUERY_INVALID,
+    ):
+        super().__init__(message, _context_with_reason(context, reason))
+
+
+class CacheCatalogCursorError(CacheCatalogQueryValidationError):
+    """Raised when an opaque catalog cursor is malformed or mismatched."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.CATALOG_CURSOR_INVALID,
+    ):
+        super().__init__(message, context, reason=reason)
+
+
+class CacheCatalogStaleCursorError(CacheCatalogCursorError):
+    """Raised when a cursor cannot resume the authority snapshot it names."""
+
+    retryable = True
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.CATALOG_CURSOR_STALE,
+    ):
+        super().__init__(message, context, reason=reason)
+
+
+class CacheMigrationOrRebuildRequiredError(CacheStorageError):
+    """Raised for a layout that Phase 4 may classify but must not mutate."""
+
+    def __init__(
+        self,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+        *,
+        reason: CacheReason = CacheReason.MIGRATION_OR_REBUILD_REQUIRED,
     ):
         super().__init__(message, _context_with_reason(context, reason))
 

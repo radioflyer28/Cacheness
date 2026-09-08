@@ -57,6 +57,24 @@ from .security import CacheEntrySigner
 
 # Import BlobStore
 from .blob_store import BlobStore
+from .catalog import (
+    CatalogCursor,
+    CatalogCursorError,
+    CatalogEntry,
+    CatalogField,
+    CatalogPage,
+    CatalogPredicate,
+    CatalogQuery,
+    CatalogQueryValidationError,
+    CatalogSchema,
+    CatalogStaleCursorError,
+    CatalogValidationError,
+    STORE_FORMAT_VERSION,
+    evaluate_predicates,
+    require_current_revision,
+    validate_catalog_mapping,
+    validate_catalog_query,
+)
 from .read_contract import BlobEntry, BlobEntryInfo
 from .manifest import BlobManifestV1
 from .reconciliation import (
@@ -98,6 +116,22 @@ except ImportError:
 __all__ = [
     # Main API
     "BlobStore",
+    "CatalogCursor",
+    "CatalogCursorError",
+    "CatalogEntry",
+    "CatalogField",
+    "CatalogPage",
+    "CatalogPredicate",
+    "CatalogQuery",
+    "CatalogQueryValidationError",
+    "CatalogSchema",
+    "CatalogStaleCursorError",
+    "CatalogValidationError",
+    "STORE_FORMAT_VERSION",
+    "evaluate_predicates",
+    "require_current_revision",
+    "validate_catalog_mapping",
+    "validate_catalog_query",
     "BlobEntry",
     "BlobEntryInfo",
     "BlobManifestV1",
