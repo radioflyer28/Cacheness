@@ -117,3 +117,29 @@ def test_rebuild_mode_is_capability_qualified_not_a_universal_online_claim() -> 
     assert projections.validate_rebuild_mode({"offline_rebuild": True}, requested="offline") is None
     with pytest.raises(projections.ProjectionCapabilityError):
         projections.validate_rebuild_mode({"online_rebuild": False}, requested="online")
+
+
+def test_checkpoint_binds_the_complete_canonical_snapshot_identity() -> None:
+    projections = _projections()
+
+    checkpoint = projections.ProjectionCheckpoint(
+        source_store_id="store-a",
+        store_epoch=1,
+        schema_id="application",
+        schema_fingerprint="schema-fingerprint",
+        query_fingerprint="query-fingerprint",
+        revision=4,
+        cursor="cursor-a",
+    )
+
+    assert checkpoint.source_store_id == "store-a"
+    assert checkpoint.revision == 4
+    with pytest.raises(projections.ProjectionCheckpointError):
+        checkpoint.assert_matches(
+            source_store_id="store-a",
+            store_epoch=1,
+            schema_id="application",
+            schema_fingerprint="schema-fingerprint",
+            query_fingerprint="query-fingerprint",
+            revision=5,
+        )
