@@ -53,7 +53,7 @@ def test_authority_role_exposes_only_narrow_catalog_transaction_primitives() -> 
     assert authority.authorizes("payload_cleanup") is False
 
 
-def test_role_registry_resolves_builtins_and_registered_implementations_identically() -> None:
+def test_role_registry_resolves_builtins_and_registered_implementations_identically(tmp_path) -> None:
     composition = _composition()
     registry = composition.RoleRegistry()
     registry.register("projection", "recording", lambda: {"role": "projection"})
@@ -62,6 +62,10 @@ def test_role_registry_resolves_builtins_and_registered_implementations_identica
     builtin = registry.resolve("projection", "json")
 
     assert registered.role == builtin.role == "projection"
+    sink = builtin.construct({"metadata_file": tmp_path / "derived.json"})
+    assert isinstance(sink, composition.ProjectionSink)
+    assert registry.capabilities("projection", "json").projection_refresh is True
+    assert registry.capabilities("projection", "json").projection_rebuild is False
 
 
 def test_duplicate_metadata_abc_and_factory_inheritance_are_not_a_role_contract() -> None:

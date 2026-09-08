@@ -324,3 +324,115 @@ def test_receipt_outcomes_are_named_and_immutable() -> None:
     assert attributed.projection_outcomes["external-index"] is outcome
     with pytest.raises(TypeError):
         attributed.projection_outcomes["other"] = object()
+
+
+def test_builtin_json_projection_constructs_as_a_projection_sink(tmp_path):
+    """The advertised JSON projection is structurally usable by composition."""
+    from cacheness.storage.composition import (
+        BackendRole,
+        ProjectionSink,
+        RoleRegistry,
+    )
+
+    sink = RoleRegistry().resolve(BackendRole.PROJECTION, "json").construct(
+        {"metadata_file": tmp_path / "projection.json"}
+    )
+
+    assert isinstance(sink, ProjectionSink)
+
+
+def test_json_projection_applies_reopens_and_resolves_through_topology(tmp_path) -> None:
+    """The built-in JSON name is a real derived sink on the one registry path."""
+    from cacheness.metadata import JsonProjection
+    from cacheness.storage.catalog import CatalogEntry, CatalogPage
+    from cacheness.storage.composition import BackendRef, StoreTopology
+    from cacheness.storage.projections import ProjectionController
+
+    class Source:
+        def query_catalog(self, cursor):
+            assert cursor is None
+            return CatalogPage(
+                (CatalogEntry("entry", "generation", {"kind": "derived"}),),
+                revision=7,
+                cursor=None,
+                exhausted=True,
+            )
+
+    metadata_file = tmp_path / "derived.json"
+    topology = StoreTopology(
+        BackendRef(name="memory"),
+        BackendRef(name="memory"),
+        (BackendRef(name="json", options={"metadata_file": metadata_file}),),
+    ).resolve()
+    try:
+        sink = topology.projections[0]
+        result = ProjectionController(
+            Source(),
+            sink,
+            page_size=1,
+            source_store_id="store",
+            schema_id="catalog",
+            schema_fingerprint="catalog",
+            query_fingerprint="all",
+        ).pull()
+    finally:
+        topology.close()
+
+    assert result.exhausted is True
+    assert result.checkpoint is not None
+    assert result.checkpoint.complete is True
+    reopened = JsonProjection(metadata_file)
+    assert reopened.load_projection_checkpoint() == result.checkpoint
+    assert reopened.projected_entries() == (
+        CatalogEntry("entry", "generation", {"kind": "derived"}),
+    )
+
+
+def test_json_projection_replays_a_pending_batch_after_checkpoint_failure(tmp_path) -> None:
+    """A persisted pending batch remains idempotent across a fresh sink instance."""
+    from cacheness.metadata import JsonProjection
+    from cacheness.storage.catalog import CatalogEntry, CatalogPage
+    from cacheness.storage.projections import ProjectionController
+
+    class Source:
+        def query_catalog(self, cursor):
+            assert cursor is None
+            return CatalogPage(
+                (CatalogEntry("entry", "generation", {"kind": "derived"}),),
+                revision=7,
+                cursor=None,
+                exhausted=True,
+            )
+
+    class CheckpointFailure(JsonProjection):
+        def save_projection_checkpoint(self, checkpoint):
+            raise OSError("simulated interruption after apply")
+
+    metadata_file = tmp_path / "derived.json"
+    controller_args = {
+        "page_size": 1,
+        "source_store_id": "store",
+        "schema_id": "catalog",
+        "schema_fingerprint": "catalog",
+        "query_fingerprint": "all",
+    }
+    with pytest.raises(OSError, match="simulated interruption"):
+        ProjectionController(Source(), CheckpointFailure(metadata_file), **controller_args).pull()
+
+    result = ProjectionController(Source(), JsonProjection(metadata_file), **controller_args).pull()
+
+    assert result.exhausted is True
+    assert JsonProjection(metadata_file).projected_entries() == (
+        CatalogEntry("entry", "generation", {"kind": "derived"}),
+    )
+
+
+def test_json_projection_rejects_incompatible_derived_documents(tmp_path) -> None:
+    """Malformed derived state fails locally without a canonical fallback."""
+    from cacheness.metadata import JsonProjection, JsonProjectionError
+
+    metadata_file = tmp_path / "derived.json"
+    metadata_file.write_text('{"format_version": 999}', encoding="utf-8")
+
+    with pytest.raises(JsonProjectionError, match="incompatible shape"):
+        JsonProjection(metadata_file).load_projection_checkpoint()

@@ -352,9 +352,9 @@ class RoleRegistry:
         self._register_builtin_participants()
 
     def _register_builtin_participants(self) -> None:
-        # Built-ins take the same path as application registrations.  JSON and
-        # PostgreSQL are deliberately metadata projections, never Phase 4
-        # lifecycle authorities.
+        # Built-ins take the same path as application registrations. JSON is a
+        # derived-only projection; PostgreSQL is classified as derived but not
+        # constructible until Phase 5 qualifies a real ProjectionSink.
         self.register(BackendRole.PAYLOAD.value, "memory", InMemoryBlobBackend)
         self.register(
             BackendRole.PAYLOAD.value,
@@ -393,13 +393,7 @@ class RoleRegistry:
             BackendRole.PROJECTION.value,
             "json",
             _construct_json_projection,
-            capabilities={},
-        )
-        self.register(
-            BackendRole.PROJECTION.value,
-            "postgresql",
-            _construct_postgresql_projection,
-            capabilities={},
+            capabilities={"projection_refresh": True},
         )
 
     def register(
@@ -499,13 +493,6 @@ def _construct_json_projection(*, metadata_file: str | Path, **options: object) 
     from cacheness.metadata import JsonProjection
 
     return JsonProjection(Path(metadata_file), **options)
-
-
-def _construct_postgresql_projection(**options: object) -> object:
-    """Build PostgreSQL only as a deferred derived-projection participant."""
-    from .backends.postgresql_backend import PostgresBackend
-
-    return PostgresBackend(**options)
 
 
 @dataclass(frozen=True)
