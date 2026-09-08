@@ -102,7 +102,7 @@ def test_evidence_serializer_rejects_secret_fragments_and_non_allowlisted_fields
         missing_configuration=[],
         run_namespace="phase5-sentinel-run",
         aws_identity=runner.AwsServiceIdentity(region="us-east-1", provider="standard"),
-        result="failure",
+        result="failed",
         cleanup_status="CLEAN",
     )
 
