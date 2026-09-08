@@ -35,6 +35,14 @@ checkpoint, so an interruption can safely replay the same page. Projection
 state is derived work: it is not consulted for BlobStore reads, cleanup, or
 lifecycle recovery.
 
+The Phase 4 built-in projection inventory contains only **JSON**. Its
+`JsonProjection` is derived-only and supports caller-invoked bounded
+refresh/checkpoint delivery through `ProjectionSink`; it does not advertise
+isolated rebuild publication. PostgreSQL remains classified as a derived
+projection family, but has no constructible registration until Phase 5
+qualifies an actual sink. Neither JSON nor PostgreSQL can authorize canonical
+membership, reads, deletes, cleanup, repair, or query completeness.
+
 ## Declared catalog values
 
 `BlobStore` stores application catalog values in the authenticated descriptor.

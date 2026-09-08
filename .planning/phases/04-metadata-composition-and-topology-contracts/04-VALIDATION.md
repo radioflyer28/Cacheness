@@ -62,6 +62,7 @@ full-tree collection result and can never be passed to the matrix runner.
 - tests/test_phase3_local_workflows.py
 - tests/test_phase3_scheduler_retirement.py
 - tests/test_phase3_windows_contract.py
+- tests/test_phase4_cutover_verifier.py
 - tests/test_postgresql_backend.py
 - tests/test_projection_mutation_contract.py
 - tests/test_projection_sql_atomicity.py
@@ -128,6 +129,38 @@ by Plans 04-09 through 04-13 that were absent from the original Plan 04-01
 through 04-08 inventory. They were individually confirmed Ruff-clean before
 being added as clean `new_paths`; no existing diagnostic fingerprint was
 refreshed, removed, or forgiven.
+
+## 04-14 Release Evidence — 2026-09-08
+
+The exact required commands were rerun after the final projection and
+consumer-audit fixes. The owned matrix now contains 42 modules, including the
+table-driven AST source fixtures. No selection, ignore, deselect, xfail, or
+test deletion was used.
+
+| Interpreter | Audit and AST fixtures | Owned matrix | Full-tree collection diagnostic | Ruff delta |
+| --- | --- | --- | --- | --- |
+| CPython 3.11.16 | ✅ repository audit pass; 15 adversarial source fixtures pass | ✅ 607 passed, 6 skipped in 13.55s across 42 modules | Classified deferred diagnostic: exactly `test_sql_cache.py`, `test_sql_cache_documentation.py`, and `test_sql_cache_failure_contract.py` fail collection only because pandas is absent; explicitly not green | ✅ pass |
+| CPython 3.13.15 | ✅ repository audit pass; 15 adversarial source fixtures pass | ✅ 607 passed, 6 skipped in 12.46s across 42 modules | Classified deferred diagnostic: exactly `test_sql_cache.py`, `test_sql_cache_documentation.py`, and `test_sql_cache_failure_contract.py` fail collection only because pandas is absent; explicitly not green | ✅ pass |
+
+`JsonProjection` is the only constructible built-in projection in Phase 4. It
+implements bounded `ProjectionSink` apply/checkpoint delivery and reports only
+`projection_refresh`; its replay-safe JSON state remains derived-only.
+`resolve_metadata_role("postgresql")` continues to classify PostgreSQL as a
+derived projection, while named `RoleRegistry` resolution now fails typed until
+Phase 5 qualifies a real sink. Neither projection family can authorize
+canonical membership, reads, deletes, cleanup, repair, or query completeness.
+
+The untracked repository-root `metadata.py` was a confirmed stale 42-line
+near-copy of the earlier JSON placeholder and was deliberately removed. It was
+not migration tooling and was not moved, imported, or retained as a
+compatibility module; `src/cacheness/metadata.py` is the sole package
+implementation. Explicit store/schema format detection and the Phase 7 offline
+migration/rebuild boundary remain unchanged.
+
+The frozen Ruff inventory now records
+`tests/test_phase4_cutover_verifier.py` as a clean new path and records the
+deliberately removed root `metadata.py` within the declared Phase 4 scope. No
+existing diagnostic fingerprint was refreshed, removed, or forgiven.
 
 ## Explicit Non-Claims
 

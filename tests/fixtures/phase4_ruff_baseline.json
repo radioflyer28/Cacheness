@@ -375,12 +375,14 @@
     "tools/verify_phase4_ruff_delta.py"
   ],
   "expected_retired_paths": [
+    "metadata.py",
     "src/cacheness/custom_metadata.py",
     "src/cacheness/storage/backends/base.py",
     "src/cacheness/storage/manifest_repository.py"
   ],
   "new_paths": [
     "examples/custom_metadata_demo.py",
+    "metadata.py",
     "src/cacheness/storage/backends/s3_backend.py",
     "src/cacheness/storage/catalog.py",
     "src/cacheness/storage/composition.py",
@@ -394,6 +396,7 @@
     "tests/test_core.py",
     "tests/test_metadata_role_contract.py",
     "tests/test_phase3_gap_acceptance.py",
+    "tests/test_phase4_cutover_verifier.py",
     "tests/test_s3_blob_backend.py",
     "tests/test_sqlite_metadata_bootstrap_atomicity.py",
     "tests/test_stored_compatibility.py",
