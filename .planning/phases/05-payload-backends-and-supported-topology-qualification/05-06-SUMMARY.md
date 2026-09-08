@@ -16,9 +16,9 @@ provides:
   - common lifecycle contracts for memory, SQLite/filesystem, and PostgreSQL/S3 profiles
 affects: [phase-05-07, phase-05-08, phase-07-migration-rebuild]
 actuals:
-  tokens: 11992
-  tasks: 2
-  commits: 5
+  tokens: 13566
+  tasks: 3
+  commits: 6
 tech-stack:
   added: []
   patterns:
@@ -36,6 +36,9 @@ key-files:
     - src/cacheness/storage/backends/__init__.py
     - src/cacheness/storage/__init__.py
     - tests/test_supported_topologies.py
+    - tests/test_lifecycle_authority_contract.py
+    - tests/test_metadata_backend_registry.py
+    - tests/test_postgresql_backend.py
 key-decisions:
   - "Remote participant construction is lazy and identity-based; registry availability is separate from immutable profile qualification."
   - "PostgreSQL/S3 uses an application-supplied shared manifest key and never creates a host-local default key."
@@ -61,7 +64,14 @@ coverage:
         ref: "tests/contracts/test_topology_lifecycle.py"
         status: pass
     human_judgment: false
-duration: 11min
+  - id: D3
+    description: "The Phase 4 owned matrix reflects the qualified PostgreSQL authority and current bounded reconciliation report shape."
+    verification:
+      - kind: integration
+        ref: "tools/verify_phase4_cutover.py"
+        status: pass
+    human_judgment: false
+duration: 39min
 completed: 2026-09-08
 status: complete
 ---
@@ -72,11 +82,11 @@ status: complete
 
 ## Performance
 
-- **Duration:** 11 min
+- **Duration:** 39 min
 - **Started:** 2026-09-08T09:56:00-04:00
-- **Completed:** 2026-09-08T10:07:13-04:00
-- **Tasks:** 2
-- **Files modified:** 8
+- **Completed:** 2026-09-08T10:34:29-04:00
+- **Tasks:** 3
+- **Files modified:** 11
 
 ## Accomplishments
 
@@ -85,6 +95,7 @@ status: complete
 - Added `BlobStore.list_page()` for authority-authenticated, cursor-bounded remote catalog access; remote `list()` refuses before it could reach `list_entries()`.
 - Added a single S3 inventory page to reconciliation as signed, bounded evidence. Unattributed objects are `REPORT_ONLY` findings and never become catalog, visibility, revocation, or deletion authority.
 - Proved all three exact profiles use `AuthorityLifecycleEngine`, including a PostgreSQL spy that fails if an unbounded authority listing is attempted.
+- Repaired the stale Phase 4 owned-matrix expectations so they characterize the current report cursor and qualified PostgreSQL authority registration rather than retired compatibility assumptions.
 
 ## Task Commits
 
@@ -97,6 +108,8 @@ Each TDD task was committed atomically:
    - `3c08cfe` (`test`): add the red bounded remote lifecycle contract.
    - `53190c1` (`feat`): bound remote topology workflows and report-only inventory evidence.
    - `1aea67a` (`test`): cover exact local profile engine ownership.
+3. **Post-wave integration repair: Align stale Phase 4 ownership assertions**
+   - `fabebf3` (`test`): assert the current inventory cursor field and PostgreSQL authority registration without registering a projection.
 
 ## Files Created/Modified
 
@@ -108,6 +121,9 @@ Each TDD task was committed atomically:
 - `src/cacheness/storage/__init__.py` - conditionally exposes remote participant classes when their optional dependencies exist.
 - `tests/test_supported_topologies.py` - verifies remote composition and exact local engine ownership.
 - `tests/contracts/test_topology_lifecycle.py` - verifies cursor-bound remote workflows, signed continuation, and report-only inventory treatment.
+- `tests/test_lifecycle_authority_contract.py` - asserts the current exact `inventory_cursor` dictionary field.
+- `tests/test_metadata_backend_registry.py` - asserts PostgreSQL resolves as the qualified lifecycle authority and not a projection.
+- `tests/test_postgresql_backend.py` - keeps the derived metadata classification separate while asserting authority registration and unavailable projection construction.
 
 ## Decisions Made
 
@@ -125,6 +141,8 @@ Each TDD task was committed atomically:
 - `uv run --frozen --extra cloud ruff check src/cacheness/storage/composition.py src/cacheness/storage/blob_store.py src/cacheness/storage/lifecycle.py src/cacheness/storage/reconciliation.py src/cacheness/storage/backends/__init__.py src/cacheness/storage/__init__.py tests/test_supported_topologies.py tests/contracts/test_topology_lifecycle.py` — passed.
 - `python -m py_compile` passed for every modified storage module; `git diff --check a15bc07..HEAD` passed.
 - Architecture scan confirms the S3 adapter declares no lifecycle-authority transition calls; the only `list_entries()` locations are locally guarded and the remote contract spy proves they are unreachable for PostgreSQL/S3.
+- `uv run --frozen --extra cloud python tools/verify_phase4_cutover.py` — passed (593 tests, 3 expected skips); its full-tree collection diagnostic completed without collection errors.
+- The focused Phase 5 suite plus the three repaired ownership-contract modules passed; Ruff passed for each repaired test file.
 
 ## Deviations from Plan
 
@@ -149,7 +167,17 @@ Each TDD task was committed atomically:
 - **Verification:** Remote contract proves two separately resumed bounded pages, no unbounded authority listing, and only `REPORT_ONLY` handling for unknown objects.
 - **Committed in:** `53190c1`.
 
-**Total deviations:** 1 automatic blocking fix and 1 explicitly approved minimal scope extension.
+### Post-wave Integration Repair
+
+**3. Updated Phase 4 owned-matrix assertions for the shipped qualified profile.**
+- **Found during:** Post-wave Phase 4 cutover verification.
+- **Issue:** Three tests still asserted the retired reconciliation dictionary shape and PostgreSQL's former unregistered-authority state.
+- **Fix:** Asserted the exact `inventory_cursor` report field; asserted the built-in PostgreSQL lifecycle authority registration; and preserved that no PostgreSQL projection participant is registered. No lifecycle implementation or compatibility shim changed.
+- **Files modified:** `tests/test_lifecycle_authority_contract.py`, `tests/test_metadata_backend_registry.py`, `tests/test_postgresql_backend.py`.
+- **Verification:** The exact Phase 4 cutover verifier passed with 593 tests and 3 expected skips; focused Phase 5 contracts and Ruff also passed.
+- **Committed in:** `fabebf3`.
+
+**Total deviations:** 1 automatic blocking fix, 1 explicitly approved minimal scope extension, and 1 post-wave assertion repair.
 
 ## Known Stubs
 
@@ -170,8 +198,8 @@ None. Applications selecting PostgreSQL/S3 must provide their normal optional de
 
 ## Self-Check: PASSED
 
-- Confirmed the eight changed source/test files and this summary exist.
-- Confirmed commits `2214133`, `107f182`, `3c08cfe`, `53190c1`, and `1aea67a` exist in repository history.
+- Confirmed the eleven changed source/test files and this summary exist.
+- Confirmed commits `2214133`, `107f182`, `3c08cfe`, `53190c1`, `1aea67a`, and `fabebf3` exist in repository history.
 
 ---
 *Phase: 05-payload-backends-and-supported-topology-qualification*
