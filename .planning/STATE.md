@@ -1,18 +1,18 @@
 ---
 gsd_state_version: 1.0
 milestone: v1.0
-current_phase: 03
-current_phase_name: Atomic Lifecycle and Recovery Engine
-status: phase_complete
-stopped_at: Phase 4 context gathered
-last_updated: "2026-09-07T21:12:59.386Z"
+current_phase: 04
+current_phase_name: Metadata Composition and Topology Contracts
+status: planned
+stopped_at: Phase 4 planned and checker-approved
+last_updated: "2026-09-08T00:44:14.089Z"
 last_activity: 2026-09-07
-last_activity_desc: Phase 4 planning reset to remove pre-production compatibility paths while retaining future migration tooling
+last_activity_desc: Phase 4 plan checker passed 8 plans and 17 tasks after the pre-production compatibility reset
 state_head: 25d98a0f4180b17853e1c351a54d10c0a46c2b23
 progress:
   total_phases: 8
-  completed_phases: 2
-  total_plans: 47
+  completed_phases: 3
+  total_plans: 54
   completed_plans: 46
 milestone_name: milestone
 ---
@@ -24,14 +24,14 @@ milestone_name: milestone
 See: .planning/PROJECT.md (updated 2026-09-06)
 
 **Core value:** Applications can store and retrieve data reliably through one backend-neutral lifecycle, with caching policy layered above storage without compromising integrity or cleanup correctness.
-**Current focus:** Phase 03 — Atomic Lifecycle and Recovery Engine
+**Current focus:** Phase 04 — Metadata Composition and Topology Contracts
 
 ## Current Position
 
-Phase: 03 (Atomic Lifecycle and Recovery Engine) — DIRECTLY QUALIFIED
-Plan: 24 of 24 canonical complete (03-19 superseded); next Phase 4 design
-Status: Completed 03-21 through 03-25 directly, with user-approved initialization and derived-state failure contracts
-Last activity: 2026-09-06 — Qualified 5282dca; production code is c37f418. Full Python 3.11 suite, named gates, Python 3.13 focused suite, Ruff and benchmark pass. See docs/phase3-direct-implementation-2026-09-06.md and 03-25-SUMMARY.md.
+Phase: 04 (Metadata Composition and Topology Contracts) — PLANNED
+Plan: 0 of 8 complete; Waves 0–7 checker-approved
+Status: Ready to execute the clean pre-production cutover plan
+Last activity: 2026-09-07 — Phase 4 planning passed after reducing the design from 24 draft tasks to 17 focused tasks, removing runtime compatibility adapters, Phase 6 cache-policy work, normalized catalog mirrors, and premature physical indexes while retaining version detection and future migration tooling.
 
 The user explicitly bypassed GSD execute/review/checker. The older
 03-VERIFICATION.md remains historical gaps_found evidence, not the current
@@ -54,8 +54,9 @@ Progress: [████░░░░░░] 3 of 8 phases complete
 
 Phase numbering, order, dependencies, requirement ownership, and milestone scope
 are unchanged. This was a documentation alignment, not another implementation or
-qualification run. Phase 4 context was subsequently created on 2026-09-07; Phases
-4–8 still have no plans, and Phases 5–8 still have no phase directories.
+qualification run. Phase 4 context and eight checker-approved plans were
+subsequently created on 2026-09-07; Phases 5–8 still have no plans or phase
+directories.
 GSD's raw disk count still includes superseded 03-19 and may call Phase 3 partial;
 the canonical 24/24 disposition and direct qualification ledger remain controlling.
 Do not fabricate a 03-19 completion or reopen the closed gaps to repair that count.
@@ -73,7 +74,7 @@ delivers explicit offline migration/rebuild tooling for future released versions
 *Updated after each plan completion*
 **Per-Plan Metrics:**
 
-Phase 03 rows in this historical table include superseded attempts and do not define current completion. Authoritative milestone progress is 46 of 46 currently planned canonical plans: Phase 1 has 15, Phase 2 has 7, and Phase 3 has 24 complete. The last five were implemented directly in one bounded pass. Later phases remain unplanned. Plan 03-19 is excluded.
+Phase 03 rows in this historical table include superseded attempts and do not define current completion. Authoritative milestone progress is 46 of 54 currently planned canonical plans: Phase 1 has 15 complete, Phase 2 has 7 complete, Phase 3 has 24 complete, and Phase 4 has 8 planned. The last five Phase 3 plans were implemented directly in one bounded pass. Phases 5–8 remain unplanned. Plan 03-19 is excluded.
 
 | Plan | Duration | Tasks | Files |
 |------|----------|-------|-------|
@@ -258,7 +259,7 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ### Pending Todos
 
-- Begin Phase 4 catalog customization and narrow the transactional adapter interface before backend expansion.
+- Execute Phase 4's eight checker-approved plans, beginning with Wave 0 catalog and composition contracts.
 - Apply ADR 0001 and the direct implementation guide; the user approved both 03-22/24 compatibility checkpoints with “proceed.”
 - Do not restart closed 03-21 through 03-25 gaps or an automated race-fix loop from historical review/verification artifacts.
 
@@ -280,6 +281,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-07T21:12:59.275Z
-Stopped at: Phase 4 context gathered
+Last session: 2026-09-08T00:44:14.089Z
+Stopped at: Phase 4 planned and checker-approved
 Resume file: .planning/phases/04-metadata-composition-and-topology-contracts/04-CONTEXT.md

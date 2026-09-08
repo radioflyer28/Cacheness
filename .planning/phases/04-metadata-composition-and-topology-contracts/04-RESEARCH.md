@@ -133,7 +133,7 @@ Do not parallelize slices 2 and 3 against the same authority/configuration files
 | Library / facility | Version | Purpose | Why Standard |
 |--------------------|---------|---------|--------------|
 | Python standard library | `>=3.11` | frozen value objects, protocols, enums, hashing/HMAC, JSON, SQLite | No new runtime dependency is needed; the repository already requires Python `>=3.11`. [VERIFIED: pyproject.toml:9] |
-| `sqlite3` | runtime bundled; local probe `3.43.1` | qualified local catalog authority and atomic catalog rows/indexes | The existing SQLite authority uses bounded `BEGIN IMMEDIATE` transactions and is the Phase 3 canonical local authority. [VERIFIED: src/cacheness/storage/sqlite_lifecycle_authority.py:1030-1105] |
+| `sqlite3` | runtime bundled; local probe `3.43.1` | qualified local catalog authority and bounded canonical descriptor scans | The existing SQLite authority uses bounded `BEGIN IMMEDIATE` transactions and is the Phase 3 canonical local authority. [VERIFIED: src/cacheness/storage/sqlite_lifecycle_authority.py:1030-1105] |
 | Existing manifest/HMAC code | manifest schema `1`, payload format `1`, signature algorithm `"hmac-sha256"`, digest `"sha256"` | authenticate descriptor plus application metadata and cursor envelopes | Reuse the established integrity boundary and key provider; do not introduce an independent cursor secret. [VERIFIED: src/cacheness/storage/manifest.py:22-32] |
 | pytest | `>=8.4.1` | authority-contract, fault-injection, composition, cutover, and version-rejection tests | Declared dev framework and existing tests already exercise transition rollback/uncertain commit. Historical compatibility tests are evidence, not mandatory API-retention gates. [VERIFIED: pyproject.toml:71-91; tests/test_lifecycle_authority_contract.py:311-508; .planning/phases/04-metadata-composition-and-topology-contracts/04-VALIDATION.md:62-67] |
 
@@ -150,7 +150,7 @@ Do not parallelize slices 2 and 3 against the same authority/configuration files
 | Instead of | Could Use | Tradeoff |
 |------------|-----------|----------|
 | Native Cacheness schema | Pydantic/dataclasses/SQLAlchemy models | Locked out as the canonical API; adapters may be added later. |
-| Normalized typed catalog rows | SQLite JSON expression indexes | JSON expression indexes are backend-specific and require query expressions to match the indexed expression; normalized typed rows make the portable type contract explicit. [CITED: https://www.sqlite.org/expridx.html] |
+| Canonical signed descriptor scans | Normalized rows or SQLite JSON expression indexes | Phase 4 needs one correctness source, not a second consistency surface. Preserve declared index intent in the schema, expose acceleration as unsupported, and add derived acceleration only after measured evidence identifies a need. [ASSUMED; resolved during planning] |
 | Revision-bound keyset cursor | Long-lived read transaction or offset | A long-lived connection burdens callers; offset work grows with the offset. Keyset plus revision makes resumability explicit. [CITED: https://www.sqlite.org/rowvalue.html] |
 | Pull/checkpoint projection | Synchronous callback/event authority | Callbacks cannot be the correctness source and would create a second commit dependency. |
 | One clean composition API | Adapters for every old constructor/factory/backend overload | Pre-production reset makes deletion safer and smaller; retaining shims would preserve the ambiguity Phase 4 exists to remove. [VERIFIED: .planning/phases/04-metadata-composition-and-topology-contracts/04-CONTEXT.md:43-58] |
@@ -227,7 +227,7 @@ Default semantics should be explicit: materialize defaults on new-format writes,
 
 Add semantic operations such as `catalog_page(query, cursor, limit)` and schema/capability inspection to the authority, plus declared values carried as part of the existing mutation/promotion data. Do not expose `sqlite3.Connection` or reproduce `prepare/record/promote/cleanup` on a catalog adapter. [ASSUMED]
 
-SQLite should store typed catalog values and rebuildable index state in authority-owned tables keyed by `(entry_key, generation, field_name)` and update them inside `promote_mutation()`'s existing transaction. [ASSUMED] The current promotion transaction's exact visibility state includes `entries`, `entry_lineage`, mutation state, cleanup debt, and `authority_state.revision`; placing catalog writes afterward would create a second visibility switch. [VERIFIED: src/cacheness/storage/sqlite_lifecycle_authority.py:1222-1298]
+SQLite should keep schema identity, declared values, stored presence, and index intent in the canonical signed descriptor state already promoted by the authority transaction. Portable Phase 4 queries use bounded canonical scans and authenticate results before exposure. Normalized rows and physical secondary indexes are deferred because they would duplicate authoritative state without a Phase 4 consumer. [ASSUMED; resolved during planning] The current promotion transaction's exact visibility state includes `entries`, `entry_lineage`, mutation state, cleanup debt, and `authority_state.revision`; a future accelerator must remain derived and must not become a second visibility switch. [VERIFIED: src/cacheness/storage/sqlite_lifecycle_authority.py:1222-1298]
 
 The new supported manifest/catalog format should make authoritative application metadata and schema identity explicit authenticated state. Typed rows are query acceleration and must be rebuildable/corroborated from that authenticated descriptor; a query result is exposed only after the selected `EntrySnapshot.manifest` authenticates and agrees. [ASSUMED] The current exact v1 shape is useful evidence for a bounded/versioned parser, but the pre-production reset permits replacing it rather than designing the new catalog around its top-level field constraint. [VERIFIED: src/cacheness/storage/manifest.py:34-53,238-257,388-395; .planning/phases/04-metadata-composition-and-topology-contracts/04-CONTEXT.md:55-58]
 
@@ -474,29 +474,35 @@ Use bound parameters only. The authority must additionally check the cursor's au
 |---|-------|---------|---------------|
 | A1 | Initial declared scalar set is string, signed-64 integer, boolean, nullable, with missing separate; no float/nested declared field. | Native Schema | Public API/schema migration cost. |
 | A2 | Defaults materialize only on new-format writes; reads of earlier supported additive schema versions expose stored missing separately from effective value. | Native Schema | Query/default semantics could surprise users. |
-| A3 | Typed authoritative values use normalized rows keyed by key/generation/field and join promotion. | Authority Seam | SQLite layout and migration scope. |
+| A3 | Typed catalog values, presence, schema identity, and index intent remain in canonical signed descriptors; Phase 4 queries use bounded authenticated scans and advertise physical acceleration as unsupported. | Authority Seam | Avoids a second consistency surface; acceleration can be added later as a derived rebuildable projection. |
 | A4 | Cursor is HMAC-authenticated and binds store/schema/query/revision/last identity. | Query | Retry and key-management semantics. |
 | A5 | Any authority revision change invalidates a resumed portable cursor. | Query | High-write workloads restart more often; alternative is durable query snapshot state. |
 | A6 | The new supported manifest/catalog format uses an identifier distinguishable from the development v1 layout. | Cutover | Reusing an ambiguous version could accidentally adopt unsupported data. |
 | A7 | A new commit-result type carries exact generation/expectation and projection status; `BlobEntryInfo` need not survive. | Projection | Public API naming remains a planning decision. |
 | A8 | Role registry uses structural protocols/descriptors rather than one existing nominal MetadataBackend ABC. | Composition | Extension API migration. |
 
-## Open Questions
+## Resolved Planning Decisions
 
-1. **First supported catalog/manifest version number**
-   - What we know: current development authority/manifest versions are `1`, but they are explicitly not a runtime compatibility constraint. [VERIFIED: src/cacheness/storage/sqlite_lifecycle_authority.py:53-66; src/cacheness/storage/manifest.py:22-53; .planning/phases/04-metadata-composition-and-topology-contracts/04-CONTEXT.md:55-58]
-   - What's unclear: whether the clean format should start at a new major number or reset an unreleased identifier.
-   - Recommendation: use a new distinguishable identifier and reject the development layout before mutation; never reuse an ambiguous on-disk version. [ASSUMED]
+1. **First supported catalog/manifest version number — resolved:** use
+   `STORE_FORMAT_VERSION = 2` as an explicit collision-avoidance marker for the
+   unsupported development format-1 layout. Store epoch, manifest-schema
+   version, SQLite `user_version`, and handler payload-format versions remain
+   independently meaningful and do not all become `2` merely for symmetry.
+   Existing format-1 evidence is classified before mutation and returns typed
+   migration/rebuild-required evidence. [ASSUMED; approved during planning]
 
-2. **Default query semantics**
-   - What we know: within the new supported format, fields absent from entries written under earlier additive schema versions must remain readable with explicit missing/default semantics.
-   - What's unclear: whether equality with a default should match those absent stored values.
-   - Recommendation: portable predicates operate on stored values; expose an explicit effective-value projection if needed, but do not make `exists()` true for absent data. [ASSUMED]
+2. **Default query semantics — resolved:** materialize declared defaults on new
+   writes. Portable predicates operate on stored presence and stored values, so
+   an absent field does not equal its schema default and `exists()` remains
+   false. Reads may expose stored-missing separately from the effective default
+   for future additive schema revisions; Phase 4 does not add a second
+   effective-value query language. [ASSUMED; approved during planning]
 
-3. **New commit-result shape**
-   - What we know: projection status, exact generation/expectation, and committed-partial evidence are semantic requirements; current `BlobEntryInfo` is only implementation evidence. [VERIFIED: src/cacheness/storage/read_contract.py:30-42; .planning/phases/04-metadata-composition-and-topology-contracts/04-CONTEXT.md:52-58]
-   - What's unclear: one result object versus a commit receipt plus projection report.
-   - Recommendation: define one new immutable commit result containing canonical receipt and projection summary; explicit refresh errors retain that object plus remaining work. [ASSUMED]
+3. **New commit-result shape — resolved:** define one frozen `BlobReceipt`
+   semantic result containing the canonical generation/expectation and the
+   projection-delivery summary. Committed-partial failures retain that same
+   receipt plus remaining work. Do not preserve or alias the development
+   `BlobEntryInfo` return shape. [ASSUMED; approved during planning]
 
 ## Environment Availability
 

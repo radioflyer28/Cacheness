@@ -237,7 +237,40 @@ For Phases 4–8, every lifecycle change must name its supported topology, trans
   5. Direct BlobStore users can define application metadata, validate/query supported fields, update attributes and reopen current-layout stores without implementing a lifecycle backend. Authoritative attributes commit with the descriptor; external ORM links/indexes are explicitly derived. Pre-Phase-4 development layouts need not reopen through runtime shims and instead fail with explicit migration/rebuild-required evidence; no unchosen schema framework is implied.
   6. Catalog and derived-index APIs state their consistency and failure behavior. Preserve committed receipts, exact expectations, non-destructive corruption handling and explicit partial outcomes; any index reconstruction is an explicit derived operation, not a prerequisite for canonical reads or cleanup.
 
-**Plans**: TBD
+**Plans**: 8 plans
+
+Plans:
+**Wave 0**
+
+- [ ] 04-01-PLAN.md — Freeze Wave 0 catalog, composition, role, projection, format-rejection, and Ruff-delta contracts.
+
+**Wave 1** *(blocked on Wave 0 completion)*
+
+- [ ] 04-02-PLAN.md — Define the native catalog/query vocabulary, independent version dimensions, format 2, and BlobReceipt.
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 04-03-PLAN.md — Implement one role-aware StoreTopology resolver with explicit ownership, capabilities, and a memory tracer.
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 04-04-PLAN.md — Integrate signed catalog state and bounded revision-bound scans with memory and initialized SQLite authorities.
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [ ] 04-05-PLAN.md — Add bounded derived projections, checkpoints, committed-partial receipts, refresh, and isolated rebuild contracts.
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [ ] 04-06-PLAN.md — Rewrite the first bounded set of lifecycle and security consumers onto StoreTopology and BlobReceipt.
+
+**Wave 6** *(blocked on Wave 5 completion)*
+
+- [ ] 04-07-PLAN.md — Prepare remaining mixed-scope and legacy-symbol tests without deleting unrelated coverage.
+
+**Wave 7** *(blocked on Wave 6 completion)*
+
+- [ ] 04-08-PLAN.md — Atomically remove obsolete source/public surfaces and run the Python 3.11/3.13 release matrix.
 
 ### Phase 5: Payload Backends and Supported Topology Qualification
 
