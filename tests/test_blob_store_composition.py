@@ -10,6 +10,8 @@ import sqlite3
 
 import pytest
 
+from cacheness.storage.memory_lifecycle_authority import InMemoryLifecycleAuthority
+
 
 COMPOSITION_MODULE = "cacheness.storage.composition"
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -38,8 +40,17 @@ class _Payload(_ClosableParticipant):
         return object()
 
 
-class _Authority(_ClosableParticipant):
-    capabilities = {"transactional": True, "compare_and_swap": True, "portable_query": True}
+class _Authority(InMemoryLifecycleAuthority):
+    def __init__(self, close_order: list[str] | None = None) -> None:
+        super().__init__()
+        self.close_calls = 0
+        self._close_order = close_order
+
+    def close(self) -> None:
+        self.close_calls += 1
+        if self._close_order is not None:
+            self._close_order.append("authority")
+        super().close()
 
 
 def test_one_topology_keeps_exact_injected_instances_and_caller_ownership() -> None:
@@ -220,6 +231,78 @@ def test_failed_construction_closes_only_resources_owned_by_the_store() -> None:
 
     assert payload.close_calls == 1
     assert authority.close_calls == 0
+
+
+def test_invalid_owned_duplicate_is_unwound_once_before_role_validation() -> None:
+    composition = _composition()
+    invalid = _ClosableParticipant()
+
+    with pytest.raises(composition.CompositionValidationError):
+        composition.StoreTopology(
+            payload=composition.BackendRef(instance=invalid, transfer_ownership=True),
+            authority=composition.BackendRef(instance=invalid, transfer_ownership=True),
+        ).resolve()
+
+    assert invalid.close_calls == 1
+
+
+def test_invalid_caller_owned_participant_is_never_closed() -> None:
+    composition = _composition()
+    invalid = _ClosableParticipant()
+
+    with pytest.raises(composition.CompositionValidationError):
+        composition.StoreTopology(payload=invalid, authority=_Authority()).resolve()
+
+    assert invalid.close_calls == 0
+
+
+def test_named_invalid_factory_result_is_recorded_before_validation() -> None:
+    composition = _composition()
+    invalid = _ClosableParticipant()
+    registry = composition.RoleRegistry()
+    registry.register("payload", "invalid", lambda: invalid)
+
+    with pytest.raises(composition.CompositionValidationError):
+        composition.StoreTopology(
+            payload=composition.BackendRef(name="invalid"),
+            authority=_Authority(),
+            role_registry=registry,
+        ).resolve()
+
+    assert invalid.close_calls == 1
+
+
+def test_invalid_owned_projection_unwinds_all_participants_in_reverse_order() -> None:
+    composition = _composition()
+    close_order: list[str] = []
+
+    class OrderedPayload(_Payload):
+        def close(self) -> None:
+            close_order.append("payload")
+
+    class OrderedProjection(_ClosableParticipant):
+        def close(self) -> None:
+            super().close()
+            close_order.append("projection")
+
+    payload = OrderedPayload()
+    authority = _Authority(close_order)
+    projection = OrderedProjection()
+
+    with pytest.raises(composition.CompositionValidationError):
+        composition.StoreTopology(
+            payload=composition.BackendRef(instance=payload, transfer_ownership=True),
+            authority=composition.BackendRef(instance=authority, transfer_ownership=True),
+            projections=(
+                composition.BackendRef(
+                    instance=projection,
+                    transfer_ownership=True,
+                ),
+            ),
+        ).resolve()
+
+    assert close_order == ["projection", "authority", "payload"]
+    assert projection.close_calls == 1
 
 
 def test_legacy_selectors_factories_and_constructor_overload_are_absent() -> None:

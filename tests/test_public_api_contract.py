@@ -39,6 +39,22 @@ class TestPublicExports:
 
         assert retired.isdisjoint(cacheness.__all__)
 
+    def test_role_registry_is_the_only_public_blob_selection_surface(self):
+        retired = {
+            "register_blob_backend",
+            "unregister_blob_backend",
+            "get_blob_backend",
+            "list_blob_backends",
+            "BlobBackend",
+            "FilesystemBlobBackend",
+            "InMemoryBlobBackend",
+        }
+
+        assert retired.isdisjoint(cacheness.__all__)
+        assert {"RoleRegistry", "StoreTopology"}.issubset(cacheness.__all__)
+        assert cacheness.RoleRegistry is not None
+        assert cacheness.StoreTopology is not None
+
     def test_documented_constructor_decorator_and_registry_signatures(self):
         assert "cache_dir" in inspect.signature(cacheness.CacheConfig).parameters
         assert "handler" in inspect.signature(cacheness.register_handler).parameters

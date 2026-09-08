@@ -51,7 +51,17 @@ class _Authority:
 
 
 class _Projection:
+    projection_name = "test-projection"
     capabilities = {"derived_only": True, "online_rebuild": False, "offline_rebuild": True}
+
+    def apply_projection_batch(self, batch: object) -> None:
+        del batch
+
+    def save_projection_checkpoint(self, checkpoint: object) -> None:
+        del checkpoint
+
+    def load_projection_checkpoint(self) -> None:
+        return None
 
 
 def test_memory_topology_is_explicitly_ephemeral_and_same_process_only() -> None:
@@ -101,10 +111,10 @@ def test_impossible_minimum_capability_rejects_before_payload_staging(
     assert payload.stage_calls == 0
 
 
-def test_projection_can_never_satisfy_authority_capability_minima() -> None:
+def test_projection_role_is_rejected_before_authority_capability_checks() -> None:
     composition = _composition()
 
-    with pytest.raises(composition.CapabilityRequirementError):
+    with pytest.raises(composition.CompositionValidationError):
         composition.StoreTopology(
             payload=_Payload(), authority=_Projection(), minimum_capabilities={"portable_query": True}
         ).resolve()
