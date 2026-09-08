@@ -312,7 +312,7 @@ Plans:
   4. AWS S3 is the authoritative remote-object test target for conditional operations, checksums, streaming, pagination, retries, and cleanup; compatible services are claimed only where explicitly verified.
   5. Shared-store tests initialize before workers and account for success, exact conflict and declared typed retryable outcomes separately from integrity failures. PostgreSQL transactions do not encompass S3/filesystem effects; partial external effects remain attributable recovery work, not a reason for another coordinator.
 
-**Plans**: 4/10 plans executed
+**Plans**: 5/10 plans executed
 
 Plans:
 **Wave 1**
@@ -327,7 +327,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 05-05-PLAN.md — Complete bounded PostgreSQL authority workflows and typed progress contracts.
+- [x] 05-05-PLAN.md — Complete bounded PostgreSQL authority workflows and typed progress contracts.
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
@@ -403,7 +403,7 @@ Plans:
 | 2. Canonical Storage and Integrity Contract | 7/7 | Complete    | 2026-08-30 |
 | 3. Atomic Lifecycle and Recovery Engine | 24/24 | Complete — direct qualification | 2026-09-06 |
 | 4. Metadata Composition and Topology Contracts | 14/14 | Complete    | 2026-09-08 |
-| 5. Payload Backends and Supported Topology Qualification | 4/10 | In Progress|  |
+| 5. Payload Backends and Supported Topology Qualification | 5/10 | In Progress|  |
 | 6. UnifiedCache Policy Composition | 0/TBD | Not started | - |
 | 7. Explicit Migration and Rebuild Cutover | 0/TBD | Not started | - |
 | 8. Production Gates and Performance Stabilization | 0/TBD | Not started | - |
