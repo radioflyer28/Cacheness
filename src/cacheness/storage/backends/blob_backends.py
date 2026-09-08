@@ -1,42 +1,8 @@
-"""
-Blob Storage Backends
-=====================
+"""Payload backend interfaces and built-in implementations.
 
-Abstract interface and registry for blob storage backends.
-
-Blob backends handle the actual data storage, separate from metadata backends.
-This separation allows combinations like:
-- SQLite metadata + Filesystem blobs (default)
-- PostgreSQL metadata + S3 blobs (distributed team cache)
-- In-memory metadata + S3 blobs (serverless/testing)
-
-Usage:
-    from cacheness.storage.backends.blob_backends import (
-        BlobBackend,
-        FilesystemBlobBackend,
-        register_blob_backend,
-        get_blob_backend,
-        list_blob_backends,
-    )
-    
-    # Use built-in filesystem backend
-    backend = get_blob_backend("filesystem", base_dir="./cache")
-    blob_path = backend.write_blob("my_key", data_bytes)
-    data = backend.read_blob(blob_path)
-    
-    # Register custom backend (e.g., S3)
-    class S3BlobBackend(BlobBackend):
-        def __init__(self, bucket: str, region: str = "us-east-1"):
-            self.bucket = bucket
-            self.region = region
-            # ... initialize S3 client
-        
-        def write_blob(self, blob_id: str, data: bytes) -> str:
-            # Upload to S3, return s3://bucket/key URL
-            ...
-    
-    register_blob_backend("s3", S3BlobBackend)
-    backend = get_blob_backend("s3", bucket="my-cache", region="us-west-2")
+Application selection happens through a :class:`RoleRegistry` carried by
+``StoreTopology``. This module deliberately contains no global selector: a
+payload participant only supplies storage primitives to the composed store.
 """
 
 import logging
@@ -46,7 +12,7 @@ from io import BytesIO
 import os
 from pathlib import Path
 import tempfile
-from typing import BinaryIO, Dict, List, Type, Union
+from typing import BinaryIO, Dict, Union
 
 from cacheness.interfaces import GuardedReadSnapshot
 from cacheness.storage.guarded_handler_io import GuardedHandlerIO
@@ -459,194 +425,9 @@ class InMemoryHandlerIO:
             raise RuntimeError("In-memory handler adapter is closed")
 
 
-# =============================================================================
-# Blob Backend Registry
-# =============================================================================
-
-# Registry storage: name -> (backend_class, is_builtin)
-_blob_backend_registry: Dict[str, Type[BlobBackend]] = {}
-_builtin_blob_backends = {"filesystem", "memory"}
-
-
-def _initialize_builtin_blob_backends():
-    """Initialize registry with built-in backends."""
-    global _blob_backend_registry
-    _blob_backend_registry["filesystem"] = FilesystemBlobBackend
-    _blob_backend_registry["memory"] = InMemoryBlobBackend
-
-
-# Initialize on module load
-_initialize_builtin_blob_backends()
-
-
-def register_blob_backend(
-    name: str,
-    backend_class: Type[BlobBackend],
-    force: bool = False
-) -> None:
-    """
-    Register a custom blob storage backend.
-    
-    Args:
-        name: Unique name for the backend (e.g., "s3", "azure", "gcs")
-        backend_class: Class that implements BlobBackend interface
-        force: If True, overwrite existing registration
-        
-    Raises:
-        ValueError: If name already registered and force=False
-        ValueError: If backend_class doesn't inherit from BlobBackend
-        
-    Example:
-        >>> class S3BlobBackend(BlobBackend):
-        ...     def __init__(self, bucket: str, region: str = "us-east-1"):
-        ...         self.bucket = bucket
-        ...         self.region = region
-        ...     
-        ...     def write_blob(self, blob_id: str, data: bytes) -> str:
-        ...         # Upload to S3
-        ...         return f"s3://{self.bucket}/{blob_id}"
-        ...     
-        ...     # ... implement other methods
-        >>> 
-        >>> register_blob_backend("s3", S3BlobBackend)
-    """
-    # Validate backend class
-    if not isinstance(backend_class, type):
-        raise ValueError(f"backend_class must be a class, got {type(backend_class)}")
-    
-    if not issubclass(backend_class, BlobBackend):
-        raise ValueError(
-            f"Backend class {backend_class.__name__} must inherit from BlobBackend"
-        )
-    
-    # Check for duplicate registration
-    if name in _blob_backend_registry and not force:
-        raise ValueError(
-            f"Blob backend '{name}' already registered. "
-            f"Use force=True to overwrite or unregister_blob_backend() first."
-        )
-    
-    _blob_backend_registry[name] = backend_class
-    logger.info(f"Registered blob backend '{name}' ({backend_class.__name__})")
-
-
-def unregister_blob_backend(name: str) -> bool:
-    """
-    Unregister a blob storage backend.
-    
-    Args:
-        name: Name of the backend to unregister
-        
-    Returns:
-        True if backend was unregistered, False if not found
-        
-    Note:
-        Built-in backends (filesystem, memory) can be unregistered but
-        will be re-registered on module reload.
-    """
-    if name in _blob_backend_registry:
-        del _blob_backend_registry[name]
-        logger.info(f"Unregistered blob backend '{name}'")
-        return True
-    
-    logger.warning(f"Blob backend '{name}' not found for unregistration")
-    return False
-
-
-def get_blob_backend(name: str, **options) -> BlobBackend:
-    """
-    Get a blob backend instance by name.
-    
-    Args:
-        name: Name of the registered backend
-        **options: Backend-specific configuration options
-        
-    Returns:
-        Configured BlobBackend instance
-        
-    Raises:
-        ValueError: If backend name not registered
-        
-    Example:
-        >>> # Get filesystem backend
-        >>> backend = get_blob_backend("filesystem", base_dir="./cache")
-        >>> 
-        >>> # Get custom S3 backend
-        >>> backend = get_blob_backend("s3", bucket="my-cache", region="us-west-2")
-    """
-    if name not in _blob_backend_registry:
-        available = list(_blob_backend_registry.keys())
-        raise ValueError(
-            f"Unknown blob backend: '{name}'. "
-            f"Available backends: {available}"
-        )
-    
-    backend_class = _blob_backend_registry[name]
-    
-    try:
-        return backend_class(**options)
-    except TypeError as e:
-        raise ValueError(
-            f"Failed to create blob backend '{name}' with options {options}: {e}"
-        )
-
-
-def list_blob_backends() -> List[Dict[str, any]]:
-    """
-    List all registered blob backends.
-    
-    Returns:
-        List of dictionaries with backend info:
-        - name: Backend name
-        - class: Backend class name
-        - is_builtin: Whether it's a built-in backend
-        
-    Example:
-        >>> backends = list_blob_backends()
-        >>> for b in backends:
-        ...     print(f"{b['name']}: {b['class']} (builtin={b['is_builtin']})")
-        filesystem: FilesystemBlobBackend (builtin=True)
-        memory: InMemoryBlobBackend (builtin=True)
-    """
-    result = []
-    
-    # Add builtin backends first
-    for name in sorted(_builtin_blob_backends):
-        if name in _blob_backend_registry:
-            backend_class = _blob_backend_registry[name]
-            result.append({
-                "name": name,
-                "class": backend_class.__name__,
-                "is_builtin": True,
-            })
-    
-    # Add custom backends
-    for name in sorted(_blob_backend_registry.keys()):
-        if name not in _builtin_blob_backends:
-            backend_class = _blob_backend_registry[name]
-            result.append({
-                "name": name,
-                "class": backend_class.__name__,
-                "is_builtin": False,
-            })
-    
-    return result
-
-
-# =============================================================================
-# Module Exports
-# =============================================================================
-
 __all__ = [
-    # Base class
     "BlobBackend",
-    # Built-in implementations
     "FilesystemBlobBackend",
     "InMemoryBlobBackend",
     "InMemoryHandlerIO",
-    # Registry functions
-    "register_blob_backend",
-    "unregister_blob_backend",
-    "get_blob_backend",
-    "list_blob_backends",
 ]

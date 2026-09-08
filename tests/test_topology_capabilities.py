@@ -136,7 +136,8 @@ def test_unmet_minimum_rejects_named_factory_before_it_can_perform_io() -> None:
             payload=composition.BackendRef(name="side-effecting"),
             authority=_Authority(),
             minimum_capabilities={"durable": True},
-        ).resolve(registry)
+            role_registry=registry,
+        ).resolve()
 
     assert factory_calls == []
 

@@ -76,7 +76,8 @@ def test_registered_names_and_builtins_use_the_same_role_registry_path() -> None
     resolved = composition.StoreTopology(
         payload=composition.BackendRef(name="fake"),
         authority=composition.BackendRef(name="fake"),
-    ).resolve(registry)
+        role_registry=registry,
+    ).resolve()
 
     assert isinstance(resolved.payload, _Payload)
     assert isinstance(resolved.authority, _Authority)

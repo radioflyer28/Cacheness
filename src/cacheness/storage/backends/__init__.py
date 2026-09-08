@@ -17,10 +17,6 @@ from .blob_backends import (
     BlobBackend,
     FilesystemBlobBackend,
     InMemoryBlobBackend,
-    get_blob_backend,
-    list_blob_backends,
-    register_blob_backend,
-    unregister_blob_backend,
 )
 
 try:
@@ -33,10 +29,6 @@ __all__ = [
     "BlobBackend",
     "FilesystemBlobBackend",
     "InMemoryBlobBackend",
-    "register_blob_backend",
-    "unregister_blob_backend",
-    "get_blob_backend",
-    "list_blob_backends",
     "BackendRef",
     "BackendRole",
     "CompositionValidationError",

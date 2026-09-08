@@ -515,6 +515,7 @@ class StoreTopology:
     payload: BackendRef | object
     authority: BackendRef | object
     projections: tuple[BackendRef | object, ...] = ()
+    role_registry: RoleRegistry = field(default_factory=RoleRegistry)
     minimum_capabilities: CapabilityMinimum | Mapping[str, object] = field(
         default_factory=CapabilityMinimum
     )
@@ -527,14 +528,16 @@ class StoreTopology:
             "projections",
             tuple(_as_ref(projection) for projection in self.projections),
         )
+        if not isinstance(self.role_registry, RoleRegistry):
+            raise CompositionValidationError("role_registry must be a RoleRegistry")
         minimum = self.minimum_capabilities
         if not isinstance(minimum, CapabilityMinimum):
             minimum = CapabilityMinimum(minimum)
         object.__setattr__(self, "minimum_capabilities", minimum)
 
-    def resolve(self, registry: RoleRegistry | None = None) -> ResolvedTopology:
+    def resolve(self) -> ResolvedTopology:
         """Resolve each role once and unwind only owned participants on failure."""
-        active_registry = RoleRegistry() if registry is None else registry
+        active_registry = self.role_registry
         if self.minimum_capabilities.requirements:
             try:
                 self.minimum_capabilities.require(
@@ -594,9 +597,9 @@ class StoreTopology:
                 if callable(close):
                     close()
 
-    def capability_report(self, registry: RoleRegistry | None = None) -> TopologyCapabilities:
+    def capability_report(self) -> TopologyCapabilities:
         """Return the resolved topology's capability report without retaining it."""
-        resolved = self.resolve(registry)
+        resolved = self.resolve()
         try:
             return resolved.capabilities
         finally:
