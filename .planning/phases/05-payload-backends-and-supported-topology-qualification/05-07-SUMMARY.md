@@ -39,7 +39,8 @@ key-decisions:
 patterns-established:
   - "Live qualification uses external configuration names, never repository-persisted credentials or endpoint overrides."
   - "Evidence includes sanitized provenance and terminal classes only; test output, DSNs, payloads, inventory, and signing material are excluded."
-requirements-completed: [BACK-05]
+requirements-completed: []
+requirements-progressed: [BACK-05]
 coverage:
   - id: D1
     description: "The canonical runner emits strict UNAVAILABLE, NOT_QUALIFIED, or QUALIFIED evidence and fails closed on absent, skipped, deselected, or incomplete live execution."
@@ -146,12 +147,12 @@ None.
 
 ## User Setup Required
 
-Plan 05-10 must provide `CACHENESS_TEST_POSTGRES_DSN`, `CACHENESS_TEST_S3_BUCKET`, and `CACHENESS_TEST_MANIFEST_KEY_B64` through the external environment, plus standard AWS credentials. No credential, DSN, payload, or signing key is stored in this repository. Until that exact run returns `QUALIFIED`, BACK-05 remains an open release-evidence gate.
+Phase 8 must provide `CACHENESS_TEST_POSTGRES_DSN`, `CACHENESS_TEST_S3_BUCKET`, and `CACHENESS_TEST_MANIFEST_KEY_B64` through the external environment, plus standard AWS credentials. No credential, DSN, payload, or signing key is stored in this repository. Until that exact run returns `QUALIFIED`, BACK-05 remains an open release-evidence gate; superseded Plan 05-10 preserves the transferred command and acceptance contract.
 
 ## Next Phase Readiness
 
 - Plan 05-08 can import the fixture module to exercise genuine PostgreSQL, Amazon S3, and two-client remote topology behavior.
-- Plan 05-10 has a deterministic release gate; `UNAVAILABLE` and `NOT_QUALIFIED` are intentional non-passing outputs rather than reasons to weaken topology claims.
+- Phase 8 inherits the deterministic release gate from superseded Plan 05-10; `UNAVAILABLE` and `NOT_QUALIFIED` are intentional non-passing outputs rather than reasons to weaken topology claims.
 
 ## Self-Check: PASSED
 

@@ -35,7 +35,8 @@ key-decisions:
 patterns-established:
   - "Use bounded transaction-local statement and lock timeouts, returning typed retryable outcomes rather than a distributed coordination layer."
   - "Classify ambiguous promotion by opening a fresh lease and reading the exact operation identity."
-requirements-completed: [BACK-04, BACK-05]
+requirements-completed: [BACK-04]
+requirements-progressed: [BACK-05]
 coverage:
   - id: D1
     description: "Explicit PostgreSQL authority initialization and non-mutating reopen validation"
@@ -136,7 +137,7 @@ None - no live service configuration is required for this driver-boundary plan. 
 ## Next Phase Readiness
 
 - Plan 05-05 can implement the remaining bounded catalog, clear, reconciliation, tombstone, debt retirement, and projection operations against this persisted authority schema.
-- Plans 05-07 through 05-10 still require externally supplied real PostgreSQL and Amazon S3 resources before BACK-05 can be qualified as a supported topology claim.
+- Phase 8 still requires externally supplied real PostgreSQL and Amazon S3 resources before BACK-05 can be qualified as a supported release topology claim; superseded Plan 05-10 preserves the transferred gate specification.
 
 ## Self-Check: PASSED
 

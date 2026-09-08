@@ -1,15 +1,19 @@
 ---
 phase: 05
 slug: payload-backends-and-supported-topology-qualification
-status: planned
+status: complete
 nyquist_compliant: true
-wave_0_complete: false
+wave_0_complete: true
 created: 2026-09-08
+updated: 2026-09-08
 ---
 
-# Phase 05 — Validation Strategy
+# Phase 05 — Validation Report
 
-> Per-phase validation contract for feedback sampling during execution.
+> Executed deterministic validation map for the 19 canonical tasks in Plans
+> 05-01 through 05-09. Under approved boundary adjustment D-23, Phase 5 owns
+> BACK-01 and BACK-04 only. The superseded Plan 05-10 real-service gate remains
+> non-passing `UNAVAILABLE` evidence carried intact to Phase 8 for BACK-05.
 
 ## Test Infrastructure
 
@@ -17,67 +21,84 @@ created: 2026-09-08
 |----------|-------|
 | **Framework** | pytest 8.4.1 |
 | **Config file** | `pyproject.toml` |
-| **Quick run command** | `.venv/bin/pytest -q tests/contracts/test_payload_generation_io.py tests/test_supported_topologies.py -x` |
-| **Full suite command** | `.venv/bin/pytest -q -o log_cli=false` |
-| **Estimated runtime** | Quick contract target under 30 seconds; full-suite baseline measured during execution |
-
-## Sampling Rate
-
-- **After every task commit:** Run the narrowest affected contract module, including `.venv/bin/pytest -q tests/contracts/test_payload_generation_io.py tests/test_supported_topologies.py -x` once those files exist.
-- **After every plan wave:** Run the complete Phase 5 contract/fault suite plus `.venv/bin/pytest -q -o log_cli=false`.
-- **Before `$gsd-verify-work`:** The local suite and real-service qualification runner must be green. `UNAVAILABLE` and `NOT_QUALIFIED` leave BACK-05 open.
-- **Max feedback latency:** 30 seconds for quick local contract sampling; live-service qualification is a separate bounded gate.
+| **Focused runner** | `uv run --frozen [--extra postgresql|cloud] pytest ... -x -o log_cli=false` |
+| **Consolidated deterministic command** | `uv run --frozen --extra cloud pytest -q tests/test_supported_topologies.py tests/test_topology_capabilities.py tests/contracts/test_payload_generation_io.py tests/test_s3_blob_backend.py tests/contracts/test_s3_generation_io.py tests/contracts/test_postgresql_lifecycle_authority.py tests/contracts/test_lifecycle_authority.py tests/test_lifecycle_authority_contract.py tests/test_payload_faults.py tests/contracts/test_topology_lifecycle.py tests/test_blob_store_composition.py tests/qualification/test_live_evidence.py tests/test_phase5_contract_verifier.py -x -o log_cli=false` |
+| **Architecture gate** | `uv run --frozen --extra cloud python tools/verify_phase5_contracts.py` |
+| **Executed result** | 174/174 deterministic tests passed; 10/10 live cases collected; architecture gate passed |
 
 ## Per-Task Verification Map
 
-| Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
-|---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
-| 05-01-01 | 05-01 | 1 | BACK-04 | T-05-01..04 | Explicit memory profile tracer; qualification distinct from construction | integration | `uv run --frozen pytest -q tests/test_supported_topologies.py -x -o log_cli=false` | ❌ planned | ⬜ pending |
-| 05-01-02 | 05-01 | 1 | BACK-04 | T-05-01..04 | Empty, adjacent, Cartesian, and order cases reject before I/O | unit | `uv run --frozen pytest -q tests/test_supported_topologies.py tests/test_topology_capabilities.py -x -o log_cli=false` | ❌ planned | ⬜ pending |
-| 05-02-01 | 05-02 | 2 | BACK-01 | T-05-05..08 | Complete memory/filesystem generation-I/O contract | contract | `uv run --frozen pytest -q tests/contracts/test_payload_generation_io.py -x -o log_cli=false` | ❌ planned | ⬜ pending |
-| 05-02-02 | 05-02 | 2 | BACK-01, BACK-04 | T-05-05..08 | Deterministic integrity/recovery/progress fault taxonomy | fault | `uv run --frozen pytest -q tests/test_payload_faults.py tests/contracts/test_payload_generation_io.py -x -o log_cli=false` | ❌ planned | ⬜ pending |
-| 05-03-01 | 05-03 | 2 | BACK-01 | T-05-09..13 | Conditional S3 publish and contained verified read | contract | `uv run --frozen pytest -q tests/contracts/test_s3_generation_io.py -x -o log_cli=false` | ❌ planned | ⬜ pending |
-| 05-03-02 | 05-03 | 2 | BACK-01 | T-05-09..13 | Multipart/ambiguity bounds and exact verification | fault contract | `uv run --frozen pytest -q tests/contracts/test_s3_generation_io.py -x -o log_cli=false` | ❌ planned | ⬜ pending |
-| 05-03-03 | 05-03 | 2 | BACK-01 | T-05-09..13 | Bounded inventory and exact deletion/absence proof | contract | `uv run --frozen pytest -q tests/test_s3_blob_backend.py tests/contracts/test_s3_generation_io.py -x -o log_cli=false` | partial existing | ⬜ pending |
-| 05-04-01 | 05-04 | 2 | BACK-04, BACK-05 | T-05-14..18 | Explicit PostgreSQL schema/version initialization | driver contract | `uv run --frozen --extra postgresql pytest -q tests/contracts/test_postgresql_lifecycle_authority.py -x -o log_cli=false` | ❌ planned | ⬜ pending |
-| 05-04-02 | 05-04 | 2 | BACK-04, BACK-05 | T-05-14..18 | Exact transactional prepare/verify/promote/abort CAS | driver contract | `uv run --frozen --extra postgresql pytest -q tests/contracts/test_postgresql_lifecycle_authority.py tests/test_lifecycle_authority_contract.py -x -o log_cli=false` | ❌ planned | ⬜ pending |
-| 05-05-01 | 05-05 | 3 | BACK-04, BACK-05 | T-05-19..23 | Bounded catalog/debt/clear/reconciliation workflows | driver contract | `uv run --frozen --extra postgresql pytest -q tests/contracts/test_postgresql_lifecycle_authority.py -x -o log_cli=false` | ❌ planned | ⬜ pending |
-| 05-05-02 | 05-05 | 3 | BACK-04, BACK-05 | T-05-19..23 | Tier-aware semantic contract and typed SQLSTATE outcomes | contract | `uv run --frozen --extra postgresql pytest -q tests/contracts/test_lifecycle_authority.py tests/contracts/test_postgresql_lifecycle_authority.py tests/test_lifecycle_authority_contract.py -x -o log_cli=false` | ❌ planned | ⬜ pending |
-| 05-06-01 | 05-06 | 4 | BACK-01, BACK-04 | T-05-24..28 | Remote profile uses the one composition root/engine | integration | `uv run --frozen --extra cloud pytest -q tests/test_supported_topologies.py tests/test_blob_store_composition.py -x -o log_cli=false` | partial existing | ⬜ pending |
-| 05-06-02 | 05-06 | 4 | BACK-01, BACK-04 | T-05-24..28 | Common topology recovery and bounded non-authoritative inventory | contract + fault | `uv run --frozen --extra cloud pytest -q tests/contracts/test_topology_lifecycle.py tests/test_payload_faults.py -x -o log_cli=false` | ❌ planned | ⬜ pending |
-| 05-07-01 | 05-07 | 4 | BACK-05 | T-05-29..33 | Sanitized non-passing unavailable/failure evidence | runner contract | `uv run --frozen --extra cloud pytest -q tests/qualification/test_live_evidence.py -x -o log_cli=false` | ❌ planned | ⬜ pending |
-| 05-07-02 | 05-07 | 4 | BACK-05 | T-05-29..33 | Exact-run service ownership and bounded cleanup | fixture contract | `uv run --frozen --extra cloud pytest -q tests/qualification/test_live_evidence.py -x -o log_cli=false` | ❌ planned | ⬜ pending |
-| 05-08-01 | 05-08 | 5 | BACK-04, BACK-05 | T-05-34..38 | Genuine PostgreSQL and AWS S3 service matrices | live collection | `uv run --frozen --extra cloud pytest --collect-only -q tests/integration/test_postgresql_authority.py tests/integration/test_s3_generation.py -o log_cli=false` | ❌ planned | ⬜ pending |
-| 05-08-02 | 05-08 | 5 | BACK-04, BACK-05 | T-05-34..38 | Two independent remote clients and recovery | live collection | `uv run --frozen --extra cloud pytest --collect-only -q tests/integration/test_remote_topology.py -o log_cli=false` | ❌ planned | ⬜ pending |
-| 05-09-01 | 05-09 | 6 | BACK-01, BACK-04, BACK-05 | T-05-39..43 | Exact docs/runtime/API coverage matrix | documentation contract | `uv run --frozen --extra cloud pytest -q tests/test_phase5_contract_verifier.py tests/test_supported_topologies.py -x -o log_cli=false` | ❌ planned | ⬜ pending |
-| 05-09-02 | 05-09 | 6 | BACK-01, BACK-04, BACK-05 | T-05-39..43 | Local architecture verifier cannot spoof live status | verifier | `uv run --frozen --extra cloud pytest -q tests/test_phase5_contract_verifier.py -x -o log_cli=false && uv run --frozen --extra cloud python tools/verify_phase5_contracts.py` | ❌ planned | ⬜ pending |
-| 05-10-01 | 05-10 | 7 | BACK-05 | T-05-44..48 | Real-service zero-skip QUALIFIED evidence and cleanup | live qualification | `uv run --frozen --extra cloud python tools/run_phase5_qualification.py --output .planning/phases/05-payload-backends-and-supported-topology-qualification/05-LIVE-QUALIFICATION.json` | ❌ external gate | ⬜ pending |
+| Task ID | Plan | Wave | Requirement | Threat Ref | Observable behavior | Test Type | Automated Command | File Exists | Status |
+|---------|------|------|-------------|------------|---------------------|-----------|-------------------|-------------|--------|
+| 05-01-01 | 05-01 | 1 | BACK-04 | T-05-01..04 | The memory/memory profile resolves before a real public BlobStore round trip and uses `AuthorityLifecycleEngine` | integration | `uv run --frozen pytest -q tests/test_supported_topologies.py tests/test_topology_capabilities.py -x -o log_cli=false` | ✅ | ✅ green |
+| 05-01-02 | 05-01 | 1 | BACK-04 | T-05-01..04 | Empty, adjacent, Cartesian, duplicate and order-varied declarations reject before participant construction or I/O | unit | `uv run --frozen pytest -q tests/test_supported_topologies.py tests/test_topology_capabilities.py -x -o log_cli=false` | ✅ | ✅ green |
+| 05-02-01 | 05-02 | 2 | BACK-01 | T-05-05..08 | Memory and filesystem participants publish immutable generations, return verified private snapshots and delete exact generations idempotently | contract | `uv run --frozen pytest -q tests/test_payload_faults.py tests/contracts/test_payload_generation_io.py -x -o log_cli=false` | ✅ | ✅ green |
+| 05-02-02 | 05-02 | 2 | BACK-01, BACK-04 | T-05-05..08 | Deterministic stage/publish/promote/delete faults preserve one complete generation and attributable recovery evidence | fault | `uv run --frozen pytest -q tests/test_payload_faults.py tests/contracts/test_payload_generation_io.py -x -o log_cli=false` | ✅ | ✅ green |
+| 05-03-01 | 05-03 | 2 | BACK-01 | T-05-09..13 | S3 conditionally publishes one immutable generation and streams it into a contained verified snapshot | contract | `uv run --frozen --extra cloud pytest -q tests/test_s3_blob_backend.py tests/contracts/test_s3_generation_io.py -x -o log_cli=false` | ✅ | ✅ green |
+| 05-03-02 | 05-03 | 2 | BACK-01 | T-05-09..13 | Multipart work and retries are bounded; ambiguous acceptance is classified by exact-key digest and size | fault contract | `uv run --frozen --extra cloud pytest -q tests/test_s3_blob_backend.py tests/contracts/test_s3_generation_io.py -x -o log_cli=false` | ✅ | ✅ green |
+| 05-03-03 | 05-03 | 2 | BACK-01 | T-05-09..13 | Inventory is one bounded continuation page and delete succeeds only after exact absence proof | contract | `uv run --frozen --extra cloud pytest -q tests/test_s3_blob_backend.py tests/contracts/test_s3_generation_io.py -x -o log_cli=false` | ✅ | ✅ green |
+| 05-04-01 | 05-04 | 2 | BACK-04 | T-05-14..18 | PostgreSQL construction is non-materializing; explicit initialization is versioned and incompatible layouts fail unchanged | driver contract | `uv run --frozen --extra postgresql pytest -q tests/contracts/test_postgresql_lifecycle_authority.py tests/test_lifecycle_authority_contract.py -x -o log_cli=false` | ✅ | ✅ green |
+| 05-04-02 | 05-04 | 2 | BACK-04 | T-05-14..18 | Prepare, verification, promotion and abort use exact transactional CAS with durable intent/debt and no payload effects | driver contract | `uv run --frozen --extra postgresql pytest -q tests/contracts/test_postgresql_lifecycle_authority.py tests/test_lifecycle_authority_contract.py -x -o log_cli=false` | ✅ | ✅ green |
+| 05-05-01 | 05-05 | 3 | BACK-04 | T-05-19..23 | PostgreSQL catalog, cleanup, clear and reconciliation workflows page under explicit bounds and resume from authority state | driver contract | `uv run --frozen --extra postgresql pytest -q tests/contracts/test_lifecycle_authority.py tests/contracts/test_postgresql_lifecycle_authority.py tests/test_lifecycle_authority_contract.py -x -o log_cli=false` | ✅ | ✅ green |
+| 05-05-02 | 05-05 | 3 | BACK-04 | T-05-19..23 | Memory, SQLite and PostgreSQL preserve common safety while exact conflicts and typed retryable progress failures remain distinct | contract | `uv run --frozen --extra postgresql pytest -q tests/contracts/test_lifecycle_authority.py tests/contracts/test_postgresql_lifecycle_authority.py tests/test_lifecycle_authority_contract.py -x -o log_cli=false` | ✅ | ✅ green |
+| 05-06-01 | 05-06 | 4 | BACK-01, BACK-04 | T-05-24..28 | Each exact profile constructs through one composition root and owns exactly one `AuthorityLifecycleEngine` | integration | `uv run --frozen --extra cloud pytest -q tests/test_supported_topologies.py tests/test_blob_store_composition.py tests/contracts/test_topology_lifecycle.py tests/test_payload_faults.py -x -o log_cli=false` | ✅ | ✅ green |
+| 05-06-02 | 05-06 | 4 | BACK-01, BACK-04 | T-05-24..28 | Remote catalog and inventory work is bounded; unattributed S3 observations remain signed report-only evidence | contract + fault | `uv run --frozen --extra cloud pytest -q tests/test_supported_topologies.py tests/test_blob_store_composition.py tests/contracts/test_topology_lifecycle.py tests/test_payload_faults.py -x -o log_cli=false` | ✅ | ✅ green |
+| 05-07-01 | 05-07 | 4 | BACK-04 | T-05-29..33 | Missing, skipped, failed or contradictory live inputs produce sanitized non-passing evidence; only a complete genuine run can qualify | runner contract | `uv run --frozen --extra cloud pytest -q tests/qualification/test_live_evidence.py -x -o log_cli=false` | ✅ | ✅ green |
+| 05-07-02 | 05-07 | 4 | BACK-04 | T-05-29..33 | Qualification cleanup is bounded to an exact marked run namespace and shared signing bytes remain memory-only | fixture contract | `uv run --frozen --extra cloud pytest -q tests/qualification/test_live_evidence.py -x -o log_cli=false` | ✅ | ✅ green |
+| 05-08-01 | 05-08 | 5 | BACK-04 | T-05-34..38 | The frozen real PostgreSQL and Amazon-S3 suites collect all seven service-specific cases without emulator substitution | live-suite collection | `uv run --frozen --extra cloud pytest --collect-only -q tests/integration/test_postgresql_authority.py tests/integration/test_s3_generation.py tests/integration/test_remote_topology.py -m 'live_postgresql or live_aws_s3 or live_remote' -o log_cli=false` | ✅ | ✅ green |
+| 05-08-02 | 05-08 | 5 | BACK-04 | T-05-34..38 | The frozen independent-client suite collects all three cross-client lifecycle/recovery cases | live-suite collection | `uv run --frozen --extra cloud pytest --collect-only -q tests/integration/test_postgresql_authority.py tests/integration/test_s3_generation.py tests/integration/test_remote_topology.py -m 'live_postgresql or live_aws_s3 or live_remote' -o log_cli=false` | ✅ | ✅ green |
+| 05-09-01 | 05-09 | 6 | BACK-01, BACK-04 | T-05-39..43 | Marker-bounded docs and API coverage match the exact immutable three-profile runtime catalog | documentation contract | `uv run --frozen --extra cloud pytest -q tests/test_phase5_contract_verifier.py tests/test_supported_topologies.py -x -o log_cli=false` | ✅ | ✅ green |
+| 05-09-02 | 05-09 | 6 | BACK-01, BACK-04 | T-05-39..43 | The fixed AST/source verifier rejects forbidden lifecycle duplication and cannot promote local success into live qualification | verifier | `uv run --frozen --extra cloud python tools/verify_phase5_contracts.py` | ✅ | ✅ green |
 
-*Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
+## Executed Evidence
 
-## Wave 0 Requirements
+| Scope | Result |
+|-------|--------|
+| Plan 05-01 topology catalog/rejection | 23 passed |
+| Plan 05-02 payload/fault contracts | 22 passed |
+| Plan 05-03 S3 generation contract | 11 passed |
+| Plan 05-04 PostgreSQL initialization/CAS | 42 passed |
+| Plan 05-05 complete authority/progress contract | 51 passed |
+| Plan 05-06 composition/topology lifecycle | 51 passed |
+| Plan 05-07 evidence/fixture contract | 24 passed |
+| Plan 05-08 frozen live-suite definition | 10 collected (3 PostgreSQL, 4 Amazon S3, 3 remote-client) |
+| Plan 05-09 docs/runtime and architecture gate | 32 passed; all verifier classes PASS |
+| Consolidated deterministic inventory | 174 passed |
 
-- [ ] Plan 05-02 creates the reusable local payload-generation contract; Plan 05-03 adds S3.
-- [ ] Plan 05-05 creates the tier-aware memory/SQLite/PostgreSQL authority contract.
-- [ ] Plan 05-01 creates the exact matrix and negative cross-pair/edge tests.
-- [ ] Plan 05-03 creates deterministic S3 ambiguity/multipart/pagination/delete coverage.
-- [ ] Plan 05-07 creates unique run-owned PostgreSQL and AWS S3 fixtures with bounded cleanup.
-- [ ] Plan 05-08 creates the combined independent-client/shared-signer suite.
-- [ ] Plan 05-07 creates the sanitized non-passing evidence writer and strict markers.
-- [ ] Plan 05-10 executes the non-substitutable real-service gate; absence remains open.
+The architecture gate reported:
+
+- topology declaration contract: PASS;
+- one-engine architecture contract: PASS;
+- local integrity/recovery/progress contracts: PASS;
+- performance boundary: PASS because no correctness deadline is evaluated;
+- live qualification evidence: `UNAVAILABLE` (read-only and non-passing).
+
+## Phase 8 Carry-Forward — Not a Phase 5 Gap
+
+- Plan 05-10 is superseded and excluded from the 19 canonical Phase 5 tasks.
+- BACK-05 remains incomplete and owned by Phase 8.
+- The unchanged command carried forward is:
+  `uv run --frozen --extra cloud python tools/run_phase5_qualification.py --output .planning/phases/05-payload-backends-and-supported-topology-qualification/05-LIVE-QUALIFICATION.json`.
+- Phase 8 may close BACK-05 only when that command returns zero with
+  schema-valid `QUALIFIED` evidence from real PostgreSQL and Amazon S3 and exact
+  cleanup. Current `UNAVAILABLE` evidence is not a pass.
 
 ## Manual-Only Verifications
 
-None. Live services require external configuration, but qualification remains an automated rerunnable gate and must not be converted into a manual approval.
+None. The future BACK-05 service qualification remains automated and
+non-substitutable; it is not a Phase 5 manual check.
 
 ## Validation Sign-Off
 
-- [x] All 20 tasks have explicit `<automated>` verification; real-service execution remains the Plan 05-10 external precondition.
-- [ ] Sampling continuity: no 3 consecutive tasks without automated verification.
-- [x] Planned contract/fixture files cover every missing test reference and are ordered before their consumers.
-- [ ] No watch-mode flags.
-- [ ] Quick feedback latency target is under 30 seconds.
-- [x] Real-service absence remains visibly non-passing.
-- [x] `nyquist_compliant: true` set after the complete 20-task map.
+- [x] Exactly 19 canonical tasks from Plans 05-01 through 05-09 are mapped.
+- [x] Every mapped task has an executed automated behavioral check.
+- [x] All referenced files exist.
+- [x] 174 deterministic tests pass and all 10 frozen live cases collect.
+- [x] Sampling continuity has no three consecutive tasks without automated verification.
+- [x] No watch-mode flags are present.
+- [x] Focused feedback commands complete well below the 30-second target on this host.
+- [x] Integrity, recovery, progress and performance remain separate.
+- [x] No live-service absence, collection-only result or mock/emulator result is counted as BACK-05 qualification.
+- [x] No implementation files were changed by this Nyquist audit.
 
-**Approval:** plan structure mapped; execution evidence pending
+**Approval:** 19/19 deterministic task gaps filled; BACK-01/BACK-04 Phase 5 validation green. BACK-05 remains a Phase 8 obligation.

@@ -146,11 +146,11 @@ None.
 
 ## User Setup Required
 
-No setup is required for this local plan. The separate remote qualification gate still requires externally supplied real PostgreSQL, Amazon S3, standard AWS credentials, and a shared manifest key. The local evidence report is currently `absent`; therefore this plan does not qualify the remote profile and BACK-05 remains open for Plan 05-10.
+No setup is required for this local plan. The separate remote qualification gate still requires externally supplied real PostgreSQL, Amazon S3, standard AWS credentials, and a shared manifest key. The local evidence remains non-passing; therefore this plan does not qualify the remote profile and BACK-05 remains open for Phase 8 under the superseded Plan 05-10 contract.
 
 ## Next Phase Readiness
 
-- Plan 05-10 can run the fixed real-service suite and then rerun this local verifier without changing the immutable topology contract.
+- Phase 8 can run the fixed real-service suite inherited from superseded Plan 05-10 and then rerun this local verifier without changing the immutable topology contract.
 - Phase 8 can reuse the exact contract and live-suite inventory while adding its separate platform/install/performance evidence.
 
 ## Self-Check: PASSED

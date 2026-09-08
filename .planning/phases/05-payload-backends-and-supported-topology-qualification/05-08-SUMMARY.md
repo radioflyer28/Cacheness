@@ -36,7 +36,8 @@ key-decisions:
 patterns-established:
   - "Two remote BlobStore clients must construct separate S3 clients, authority instances, and signer providers before sharing only PostgreSQL/S3 state."
   - "Live cleanup/recovery verifies canonical authority state and debt, never a cross-resource transaction or inventory-derived membership."
-requirements-completed: [BACK-04, BACK-05]
+requirements-completed: [BACK-04]
+requirements-progressed: [BACK-05]
 coverage:
   - id: D1
     description: Real PostgreSQL authority suite specifies explicit initialization, exact CAS, debt, cross-connection contention, typed timeout, and bounded reconciliation work.
@@ -126,11 +127,11 @@ None.
 
 ## User Setup Required
 
-Plan 05-10 still needs externally supplied `CACHENESS_TEST_POSTGRES_DSN`, `CACHENESS_TEST_S3_BUCKET`, `CACHENESS_TEST_MANIFEST_KEY_B64`, and standard AWS credentials. Until the fixed runner returns `QUALIFIED`, BACK-05 remains open; no service substitute or skipped case changes that.
+Phase 8 still needs externally supplied `CACHENESS_TEST_POSTGRES_DSN`, `CACHENESS_TEST_S3_BUCKET`, `CACHENESS_TEST_MANIFEST_KEY_B64`, and standard AWS credentials. Until the fixed runner returns `QUALIFIED`, BACK-05 remains open; no service substitute or skipped case changes that. Superseded Plan 05-10 preserves the exact transferred gate.
 
 ## Next Phase Readiness
 
-- Plan 05-10 can run the complete fixed ten-case suite through the existing fail-closed qualification command.
+- Phase 8 can run the complete fixed ten-case suite through the existing fail-closed qualification command inherited from superseded Plan 05-10.
 - The suite leaves lifecycle ownership unchanged: PostgreSQL promotion remains visibility, while S3 effects reconcile through durable intent and cleanup debt rather than cross-resource ACID.
 
 ## Self-Check: PASSED

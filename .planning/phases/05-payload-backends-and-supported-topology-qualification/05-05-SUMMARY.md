@@ -34,7 +34,8 @@ key-decisions:
 patterns-established:
   - "Use immutable revision cutoffs plus captured entry bytes for restartable remote clears without S3 membership authority."
   - "Expose contention as exact conflict or one typed retryable progress outcome with cause and operation/stage metadata."
-requirements-completed: [BACK-04, BACK-05]
+requirements-completed: [BACK-04]
+requirements-progressed: [BACK-05]
 coverage:
   - id: D1
     description: "PostgreSQL implements bounded cleanup, clear, reconciliation, catalog, deletion, and projection-revision authority primitives."
@@ -128,7 +129,7 @@ None for these deterministic driver-boundary contracts. Real PostgreSQL and AWS 
 ## Next Phase Readiness
 
 - PostgreSQL now supplies all semantic authority primitives needed by the shared BlobStore engine without absorbing payload I/O.
-- Plans 05-07 through 05-10 still need externally supplied real PostgreSQL and Amazon S3 resources before the multi-host profile can be claimed as qualified.
+- Phase 8 still needs externally supplied real PostgreSQL and Amazon S3 resources before the multi-host candidate can be claimed as release-qualified; superseded Plan 05-10 preserves the transferred gate specification.
 
 ## Self-Check: PASSED
 
