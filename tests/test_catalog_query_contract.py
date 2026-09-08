@@ -472,6 +472,8 @@ def test_public_catalog_put_update_query_and_reopen(
     if authority_name == "memory":
         payload = InMemoryBlobBackend()
         authority = InMemoryLifecycleAuthority()
+        payload.qualification_identity = "memory"
+        authority.qualification_identity = "memory"
         topology = StoreTopology(
             payload=BackendRef(instance=payload), authority=BackendRef(instance=authority)
         )

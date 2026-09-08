@@ -35,6 +35,8 @@ def _sqlite_topology(
     root: str | Path, authority: SqliteLifecycleAuthority | None = None
 ) -> StoreTopology:
     """Build the one supported local filesystem-plus-SQLite composition."""
+    if authority is not None:
+        authority.qualification_identity = "sqlite"
     return StoreTopology(
         payload=BackendRef(name="filesystem", options={"base_dir": root}),
         authority=(

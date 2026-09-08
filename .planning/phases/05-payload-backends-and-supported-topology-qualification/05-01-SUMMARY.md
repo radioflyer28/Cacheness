@@ -12,9 +12,9 @@ provides:
   - Read-only qualification reports separate from capability constructibility
 affects: [05-02, 05-03, 05-04, 05-05, 05-06, 05-07, 05-08, 05-09]
 actuals:
-  tokens: 5172
+  tokens: 7250
   tasks: 2
-  commits: 4
+  commits: 5
 tech-stack:
   added: []
   patterns:
@@ -25,6 +25,10 @@ key-files:
     - tests/test_supported_topologies.py
   modified:
     - src/cacheness/storage/composition.py
+    - tests/test_blob_store_composition.py
+    - tests/test_catalog_projection.py
+    - tests/test_catalog_query_contract.py
+    - tests/test_sqlite_bootstrap_concurrency.py
 key-decisions:
   - "Built-in support is exactly memory/memory, SQLite/filesystem, and PostgreSQL/S3; registration never implies a supported pairing."
   - "Profile records contain immutable requirements only; observed live-service status remains external release evidence."
@@ -65,7 +69,7 @@ status: complete
 - **Started:** 2026-09-08T11:31:37Z
 - **Completed:** 2026-09-08T11:37:26Z
 - **Tasks:** 2
-- **Files modified:** 2
+- **Files modified:** 6
 
 ## Accomplishments
 
@@ -73,6 +77,7 @@ status: complete
 - Made `StoreTopology.resolve()` reject all unqualified pairs before named factories can construct participants or perform I/O.
 - Proved the named memory profile completes a real public `BlobStore` put/get through `AuthorityLifecycleEngine`; corrected SQLite's canonical-query capability declaration.
 - Added the exact rejection matrix for cross-pairs, empty or incomplete descriptors, duplicate projections, and registration/projection-order independence.
+- Updated current Phase 4 composition fixtures to declare memory, filesystem, or SQLite identity explicitly where they inject a production participant.
 
 ## Task Commits
 
@@ -107,7 +112,16 @@ status: complete
 - **Verification:** `tests/test_topology_capabilities.py` passes with the supported-topology matrix.
 - **Committed in:** `6daa8b1`
 
-**Total deviations:** 1 auto-fixed (Rule 1)
+**2. [Rule 1 - Bug] Repaired current supported-contract fixtures after strict identity enforcement**
+
+- **Found during:** Post-wave Phase 4 cutover matrix verification
+- **Issue:** Current Phase 4 tests injected valid memory, filesystem, and SQLite participants without the newly required explicit qualification identity, masking their intended supported topology.
+- **Fix:** Declared the matching support identity in current test fixtures; registry-only application names now assert pre-construction rejection rather than creating an unsupported alias.
+- **Files modified:** `tests/test_blob_store_composition.py`, `tests/test_catalog_projection.py`, `tests/test_catalog_query_contract.py`, `tests/test_sqlite_bootstrap_concurrency.py`
+- **Verification:** `uv run --frozen python tools/verify_phase4_cutover.py` reports 610 passed, 3 skipped.
+- **Committed in:** pending 05-01 post-wave repair commit
+
+**Total deviations:** 2 auto-fixed (Rule 1)
 
 ## Issues Encountered
 

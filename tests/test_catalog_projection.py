@@ -221,13 +221,11 @@ def test_post_commit_projection_failure_preserves_the_authority_receipt() -> Non
         def load_projection_checkpoint(self) -> None:
             return None
 
-    store = BlobStore(
-        StoreTopology(
-            InMemoryBlobBackend(),
-            InMemoryLifecycleAuthority(),
-            (FailingSink(),),
-        )
-    )
+    payload = InMemoryBlobBackend()
+    authority = InMemoryLifecycleAuthority()
+    payload.qualification_identity = "memory"
+    authority.qualification_identity = "memory"
+    store = BlobStore(StoreTopology(payload, authority, (FailingSink(),)))
     store.initialize()
 
     receipt = store.put_entry({"value": 1}, key="committed-key")
@@ -279,12 +277,12 @@ def test_named_rebuild_uses_its_own_sink_capabilities(tmp_path) -> None:
 
     capable = _RebuildSink("capable", can_rebuild=True)
     incapable = _RebuildSink("incapable", can_rebuild=False)
+    payload = InMemoryBlobBackend()
+    authority = InMemoryLifecycleAuthority()
+    payload.qualification_identity = "memory"
+    authority.qualification_identity = "memory"
     store = BlobStore(
-        StoreTopology(
-            InMemoryBlobBackend(),
-            InMemoryLifecycleAuthority(),
-            (capable, incapable),
-        ),
+        StoreTopology(payload, authority, (capable, incapable)),
         cache_dir=tmp_path,
     )
     try:

@@ -33,6 +33,7 @@ class _ClosableParticipant:
 
 
 class _Payload(_ClosableParticipant):
+    qualification_identity = "memory"
     capabilities = {"immutable_generations": True, "streaming": True, "listing": True}
 
     def materialize_handler_io(self) -> object:
@@ -41,6 +42,8 @@ class _Payload(_ClosableParticipant):
 
 
 class _Authority(InMemoryLifecycleAuthority):
+    qualification_identity = "memory"
+
     def __init__(self, close_order: list[str] | None = None) -> None:
         super().__init__()
         self.close_calls = 0
@@ -78,24 +81,22 @@ def test_name_and_instance_or_options_and_instance_fail_before_initialization() 
         composition.BackendRef(instance=payload, options={"root": "unused"})
 
 
-def test_registered_names_and_builtins_use_the_same_role_registry_path() -> None:
+def test_registered_unqualified_names_do_not_become_supported_topologies() -> None:
     composition = _composition()
     registry = composition.RoleRegistry()
     registry.register("payload", "fake", _Payload)
     registry.register("authority", "fake", _Authority)
 
-    resolved = composition.StoreTopology(
-        payload=composition.BackendRef(name="fake"),
-        authority=composition.BackendRef(name="fake"),
-        role_registry=registry,
-    ).resolve()
-
-    assert isinstance(resolved.payload, _Payload)
-    assert isinstance(resolved.authority, _Authority)
+    with pytest.raises(composition.CompositionValidationError, match="Unsupported topology pairing"):
+        composition.StoreTopology(
+            payload=composition.BackendRef(name="fake"),
+            authority=composition.BackendRef(name="fake"),
+            role_registry=registry,
+        ).resolve()
 
 
-def test_blob_store_resolves_application_roles_from_its_topology_registry() -> None:
-    """Named application roles use the same topology path as built-ins."""
+def test_blob_store_rejects_unqualified_application_roles_from_its_topology_registry() -> None:
+    """Constructibility through a registry never creates a support profile."""
     from cacheness.storage.backends.blob_backends import InMemoryBlobBackend
     from cacheness.storage.blob_store import BlobStore
     from cacheness.storage.catalog import CatalogField, CatalogQuery, CatalogSchema
@@ -165,21 +166,10 @@ def test_blob_store_resolves_application_roles_from_its_topology_registry() -> N
         role_registry=registry,
     )
 
-    with BlobStore(topology) as store:
-        receipt = store.put_entry(
-            {"answer": 42},
-            key="application-role-entry",
-            catalog_schema=schema,
-            catalog_values={"rank": 3},
-        )
-        page = store.query_catalog(CatalogQuery(), schema=schema)
+    with pytest.raises(composition.CompositionValidationError, match="Unsupported topology pairing"):
+        BlobStore(topology)
 
-        assert store.payload_backend is constructed["payload"]
-        assert store.lifecycle_authority is constructed["authority"]
-        assert store.projections == (constructed["projection"],)
-        assert receipt.key == "application-role-entry"
-        assert [entry.key for entry in page.entries] == [receipt.key]
-        assert constructed["projection"].batches
+    assert constructed == {}
 
 
 def test_named_options_are_isolated_per_construction() -> None:
@@ -256,20 +246,20 @@ def test_invalid_caller_owned_participant_is_never_closed() -> None:
     assert invalid.close_calls == 0
 
 
-def test_named_invalid_factory_result_is_recorded_before_validation() -> None:
+def test_unqualified_named_factory_is_not_constructed_before_validation() -> None:
     composition = _composition()
     invalid = _ClosableParticipant()
     registry = composition.RoleRegistry()
     registry.register("payload", "invalid", lambda: invalid)
 
-    with pytest.raises(composition.CompositionValidationError):
+    with pytest.raises(composition.CompositionValidationError, match="Unsupported topology pairing"):
         composition.StoreTopology(
             payload=composition.BackendRef(name="invalid"),
             authority=_Authority(),
             role_registry=registry,
         ).resolve()
 
-    assert invalid.close_calls == 1
+    assert invalid.close_calls == 0
 
 
 def test_invalid_owned_projection_unwinds_all_participants_in_reverse_order() -> None:
@@ -370,6 +360,8 @@ def test_memory_tracer_keeps_exact_injected_instances_caller_owned(tmp_path: Pat
     composition = _composition()
     payload = InMemoryBlobBackend()
     authority = InMemoryLifecycleAuthority()
+    payload.qualification_identity = "memory"
+    authority.qualification_identity = "memory"
     store = BlobStore(
         composition.StoreTopology(payload=payload, authority=authority),
         cache_dir=tmp_path / "injected-memory-store",
@@ -443,6 +435,7 @@ def test_selected_filesystem_participant_supplies_generation_io_at_its_own_root(
     root_a = tmp_path / "selected-payload"
     root_b = tmp_path / "unselected-cache-dir"
     payload = FilesystemBlobBackend(root_a)
+    payload.qualification_identity = "filesystem"
     schema = CatalogSchema(
         fields=(CatalogField("rank", "integer", default=0, queryable=True),),
         schema_id="participant-root",
