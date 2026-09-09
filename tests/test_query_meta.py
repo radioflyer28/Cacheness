@@ -1,871 +1,339 @@
-#!/usr/bin/env python3
-"""
-Unit tests for query_meta() method
-==================================
+"""Public catalog-query regressions for the BlobStore cutover.
 
-Tests the new query_meta() functionality that allows querying cache entries
-based on their stored cache_key_params using SQLite JSON1 extension.
+The catalog is the signed BlobStore descriptor surface. These tests deliberately
+do not select a metadata backend or inspect a derived metadata row.
 """
 
-import tempfile
+from __future__ import annotations
+
 import math
-import sys
-import pytest
-from pathlib import Path
+from collections.abc import Iterator
 
-from cacheness.core import UnifiedCache
-from cacheness.config import CacheConfig
-from cacheness.error_handling import CacheQueryValidationError, CacheReason
+import pytest
+
+from cacheness.error_handling import CacheBlobBackendError
+from cacheness.storage import (
+    BackendRef,
+    BlobStore,
+    CatalogField,
+    CatalogPredicate,
+    CatalogQuery,
+    CatalogQueryValidationError,
+    CatalogSchema,
+    StoreTopology,
+)
+from cacheness.storage.catalog import MAX_SIGNED_64, MIN_SIGNED_64
+
+
+def _memory_topology() -> StoreTopology:
+    """Return the qualified same-process topology for catalog regressions."""
+
+    return StoreTopology(
+        payload=BackendRef(name="memory"),
+        authority=BackendRef(name="memory"),
+    )
+
+
+def _schema() -> CatalogSchema:
+    """Declare the exact scalar fields exercised through public queries."""
+
+    return CatalogSchema(
+        schema_id="query-meta-regression",
+        fields=(
+            CatalogField("experiment", "string", queryable=True),
+            CatalogField("model_type", "string", queryable=True),
+            CatalogField("version", "string", queryable=True),
+            CatalogField("score", "integer", queryable=True),
+            CatalogField("active", "boolean", queryable=True),
+            CatalogField("note", "string", nullable=True, queryable=True),
+        ),
+    )
 
 
 @pytest.fixture
-def temp_cache():
-    """Fixture to create a temporary cache for testing query_meta functionality."""
-    temp_dir = tempfile.mkdtemp()
-    cache_dir = Path(temp_dir) / "cache"
-    
+def catalog_store(tmp_path) -> Iterator[BlobStore]:
+    """Yield one explicitly initialized caller-owned canonical store."""
+
+    store = BlobStore(_memory_topology(), cache_dir=tmp_path)
+    store.initialize()
     try:
-        # Create cache with parameter storage enabled
-        config = CacheConfig(
-            cache_dir=str(cache_dir),
-            metadata_backend="sqlite",
-            store_cache_key_params=True,  # Required for query_meta
-        )
-        cache = UnifiedCache(config)
-        yield cache
-        cache.close()
+        yield store
     finally:
-        import shutil
-        if Path(temp_dir).exists():
-            shutil.rmtree(temp_dir)
+        store.close()
 
 
-class TestQueryMeta:
-    """Test suite for query_meta() method."""
+def _put(store: BlobStore, key: str, values: dict[str, object]):
+    """Commit one catalog-described value without a cache-policy wrapper."""
 
-    def test_query_meta_basic_functionality(self, temp_cache):
-        """Test basic query_meta functionality with simple parameters."""
-        cache = temp_cache
-        
-        # Store test data with various parameters
-        cache.put("model_1", experiment="exp_001", model_type="xgboost", accuracy=0.95)
-        cache.put("model_2", experiment="exp_002", model_type="cnn", accuracy=0.88)
-        cache.put("model_3", experiment="exp_003", model_type="random_forest", accuracy=0.92)
-        
-        # Test query with no filters (all entries)
-        all_entries = cache.query_meta()
-        assert all_entries is not None
-        assert len(all_entries) == 3
-        
-        # Verify structure of returned entries
-        entry = all_entries[0]
-        assert 'cache_key' in entry
-        assert 'description' in entry
-        assert 'data_type' in entry
-        assert 'created_at' in entry
-        assert 'accessed_at' in entry
-        assert 'file_size' in entry
-        assert 'cache_key_params' in entry
-        
-        # Verify cache_key_params structure
-        params = entry['cache_key_params']
-        assert 'experiment' in params
-        assert 'model_type' in params
-        assert 'accuracy' in params
+    return store.put_entry(
+        {"key": key},
+        key=key,
+        catalog_schema=_schema(),
+        catalog_values=values,
+    )
 
-    def test_query_meta_string_filters(self, temp_cache):
-        """Test query_meta with string parameter filters."""
-        cache = temp_cache
-        
-        # Store test data
-        cache.put("model_1", experiment="exp_001", model_type="xgboost", version="v1")
-        cache.put("model_2", experiment="exp_002", model_type="cnn", version="v1")
-        cache.put("model_3", experiment="exp_003", model_type="xgboost", version="v2")
-        
-        # Query by model_type
-        xgb_entries = cache.query_meta(model_type="xgboost")
-        assert xgb_entries is not None
-        assert len(xgb_entries) == 2
-        
-        for entry in xgb_entries:
-            params = entry['cache_key_params']
-            assert params['model_type'] == "str:xgboost"
-        
-        # Query by experiment
-        exp_entries = cache.query_meta(experiment="exp_001")
-        assert exp_entries is not None
-        assert len(exp_entries) == 1
-        assert exp_entries[0]['cache_key_params']['experiment'] == "str:exp_001"
-        
-        # Query by version
-        v1_entries = cache.query_meta(version="v1")
-        assert v1_entries is not None
-        assert len(v1_entries) == 2
 
-    def test_query_meta_numeric_filters(self, temp_cache):
-        """Test query_meta with numeric parameter filters."""
-        cache = temp_cache
-        
-        # Store test data with numeric parameters
-        cache.put("model_1", experiment="exp_001", accuracy=0.95, epochs=100)
-        cache.put("model_2", experiment="exp_002", accuracy=0.88, epochs=50)
-        cache.put("model_3", experiment="exp_003", accuracy=0.92, epochs=75)
-        
-        # Raw numeric filters use a threshold comparison.
-        high_acc = cache.query_meta(accuracy=0.95)
-        assert high_acc is not None
-        assert len(high_acc) == 1
-        assert high_acc[0]['cache_key_params']['accuracy'] == "float:0.95"
-        
-        # Query by epochs (should work with >= comparison)
-        many_epochs = cache.query_meta(epochs=75)
-        assert many_epochs is not None
-        # Should find entries with epochs >= 75 (entries with 75 and 100)
-        assert len(many_epochs) == 2
+def _query(
+    store: BlobStore,
+    *predicates: CatalogPredicate,
+    cursor: str | None = None,
+    limit: int = 10,
+    work_cap: int = 20,
+):
+    """Run one finite, explicitly bounded catalog page."""
 
-    @pytest.mark.parametrize("endpoint", (-(2**63), 2**63 - 1))
-    def test_query_meta_binds_signed_64_bit_integer_endpoints(
-        self, temp_cache, endpoint
-    ):
-        """SQLite-safe integer endpoints remain valid numeric thresholds."""
-        temp_cache.put("endpoint", score=endpoint)
+    query = CatalogQuery(
+        predicates=predicates,
+        page_size=limit,
+        cursor=cursor,
+    )
+    return store.query_catalog(
+        query,
+        schema=_schema(),
+        cursor=cursor,
+        limit=limit,
+        work_cap=work_cap,
+    )
 
-        entries = temp_cache.query_meta(score=endpoint)
 
-        assert entries is not None
-        assert [entry["cache_key_params"]["score"] for entry in entries] == [
-            f"int:{endpoint}"
-        ]
+def test_catalog_query_returns_committed_descriptor_values(catalog_store: BlobStore) -> None:
+    """An unfiltered finite page returns only direct committed catalog values."""
 
-    def test_query_meta_mixes_signed_64_bit_and_float_thresholds(self, temp_cache):
-        """Valid integer endpoints and finite floats retain threshold semantics."""
-        minimum = -(2**63)
-        maximum = 2**63 - 1
-        temp_cache.put("minimum", score=minimum, ratio=1.0)
-        temp_cache.put("maximum", score=maximum, ratio=2.0)
+    _put(
+        catalog_store,
+        "model-1",
+        {"experiment": "exp-001", "model_type": "xgboost", "score": 95},
+    )
+    _put(
+        catalog_store,
+        "model-2",
+        {"experiment": "exp-002", "model_type": "cnn", "score": 88},
+    )
 
-        entries = temp_cache.query_meta(score=minimum, ratio=1.5)
+    page = _query(catalog_store, limit=10, work_cap=10)
 
-        assert entries is not None
-        assert [entry["cache_key_params"]["score"] for entry in entries] == [
-            f"int:{maximum}"
-        ]
+    assert [(entry.key, dict(entry.values)) for entry in page.entries] == [
+        (
+            "model-1",
+            {"experiment": "exp-001", "model_type": "xgboost", "score": 95},
+        ),
+        (
+            "model-2",
+            {"experiment": "exp-002", "model_type": "cnn", "score": 88},
+        ),
+    ]
+    assert page.exhausted is True
+    assert page.cursor is None
 
-    def test_query_meta_raw_filter_types_preserve_comparison_semantics(self, temp_cache):
-        """Raw strings and bools are exact while raw numeric values are thresholds."""
-        cache = temp_cache
-        cache.put("negative", model="linear", score=-3, active=True)
-        cache.put("decimal", model="linear-v2", score=1.5, active=False)
-        cache.put("integer", model="linear", score=3, active=True)
 
-        assert len(cache.query_meta(score=-3)) == 3
-        assert len(cache.query_meta(score=1.5)) == 2
-        assert len(cache.query_meta(model="linear")) == 2
-        assert len(cache.query_meta(active=True)) == 2
+def test_catalog_query_preserves_exact_scalar_and_threshold_semantics(
+    catalog_store: BlobStore,
+) -> None:
+    """Strings are exact while declared signed integers use explicit operators."""
 
-    def test_query_meta_numeric_filters_exclude_nonnumeric_serialized_values(
-        self, temp_cache
-    ):
-        """SQLite numeric casts must not turn strings such as ``str:oops`` into zero."""
-        cache = temp_cache
-        cache.put("string", score="oops")
-        cache.put("below-threshold", score=-2)
-        cache.put("above-threshold", score=1.5)
+    _put(
+        catalog_store,
+        "one",
+        {"model_type": "xgboost", "version": "v1", "score": 50},
+    )
+    _put(
+        catalog_store,
+        "two",
+        {"model_type": "cnn", "version": "v1", "score": 75},
+    )
+    _put(
+        catalog_store,
+        "three",
+        {"model_type": "xgboost", "version": "v2", "score": 100},
+    )
 
-        entries = cache.query_meta(score=-1)
+    exact = _query(
+        catalog_store,
+        CatalogPredicate("model_type", "eq", "xgboost"),
+    )
+    threshold = _query(
+        catalog_store,
+        CatalogPredicate("score", "gte", 75),
+    )
 
-        assert entries is not None
-        assert [entry["cache_key_params"]["score"] for entry in entries] == [
-            "float:1.5"
-        ]
+    assert [entry.key for entry in exact.entries] == ["one", "three"]
+    assert [entry.key for entry in threshold.entries] == ["three", "two"]
 
-    def test_query_meta_numeric_filters_only_compare_finite_json_numbers(
-        self, temp_cache
-    ):
-        """Special float spellings never enter finite numeric threshold results."""
-        cache = temp_cache
-        finite_scores = (
-            -sys.float_info.max,
-            -0.0,
-            1.25e-200,
-            sys.float_info.max,
+
+@pytest.mark.parametrize("endpoint", (MIN_SIGNED_64, MAX_SIGNED_64))
+def test_catalog_query_accepts_signed_64_bit_endpoints(
+    catalog_store: BlobStore, endpoint: int
+) -> None:
+    """Both portable integer endpoints remain valid finite catalog values."""
+
+    _put(catalog_store, "endpoint", {"score": endpoint})
+
+    page = _query(catalog_store, CatalogPredicate("score", "eq", endpoint))
+
+    assert [(entry.key, entry.values["score"]) for entry in page.entries] == [
+        ("endpoint", endpoint)
+    ]
+
+
+def test_catalog_query_and_composes_mixed_predicates(catalog_store: BlobStore) -> None:
+    """Multiple declared predicates keep portable AND semantics."""
+
+    _put(catalog_store, "matching", {"model_type": "xgboost", "active": True})
+    _put(catalog_store, "wrong-active", {"model_type": "xgboost", "active": False})
+    _put(catalog_store, "wrong-model", {"model_type": "cnn", "active": True})
+
+    page = _query(
+        catalog_store,
+        CatalogPredicate("model_type", "eq", "xgboost"),
+        CatalogPredicate("active", "eq", True),
+    )
+
+    assert [entry.key for entry in page.entries] == ["matching"]
+
+
+def test_catalog_query_distinguishes_no_match_null_and_absence(
+    catalog_store: BlobStore,
+) -> None:
+    """Presence remains distinct from an explicit null in signed descriptors."""
+
+    _put(catalog_store, "present-null", {"note": None})
+    _put(catalog_store, "absent-note", {"experiment": "exp-001"})
+
+    assert _query(
+        catalog_store,
+        CatalogPredicate("experiment", "eq", "does-not-exist"),
+    ).entries == ()
+    assert [entry.key for entry in _query(
+        catalog_store,
+        CatalogPredicate("note", "eq", None),
+    ).entries] == ["present-null"]
+    assert [entry.key for entry in _query(
+        catalog_store,
+        CatalogPredicate("note", "exists", False),
+    ).entries] == ["absent-note"]
+
+
+def test_catalog_query_handles_unicode_without_string_interpretation(
+    catalog_store: BlobStore,
+) -> None:
+    """Unicode is a typed catalog scalar rather than executable query text."""
+
+    _put(catalog_store, "unicode", {"experiment": "München 🧪"})
+
+    page = _query(
+        catalog_store,
+        CatalogPredicate("experiment", "eq", "München 🧪"),
+    )
+
+    assert [entry.key for entry in page.entries] == ["unicode"]
+
+
+def test_catalog_query_is_bounded_and_resumes_with_authority_cursor(
+    catalog_store: BlobStore,
+) -> None:
+    """Pages remain finite and the opaque continuation is the only resume state."""
+
+    for key in ("a", "b", "c"):
+        _put(catalog_store, key, {"experiment": "paged"})
+
+    first = _query(catalog_store, limit=1, work_cap=1)
+    second = _query(
+        catalog_store,
+        cursor=first.cursor,
+        limit=1,
+        work_cap=1,
+    )
+    third = _query(
+        catalog_store,
+        cursor=second.cursor,
+        limit=1,
+        work_cap=1,
+    )
+
+    assert [entry.key for entry in first.entries + second.entries + third.entries] == [
+        "a",
+        "b",
+        "c",
+    ]
+    assert first.cursor is not None
+    assert second.cursor is not None
+    assert third.exhausted is True
+    assert third.cursor is None
+
+
+def test_catalog_query_excludes_deleted_entry_from_current_membership(
+    catalog_store: BlobStore,
+) -> None:
+    """Exact lifecycle removal leaves no separate metadata-query membership."""
+
+    receipt = _put(catalog_store, "removed", {"experiment": "gone"})
+
+    assert catalog_store.delete(receipt.key, expected=receipt.expectation) is True
+    assert _query(
+        catalog_store,
+        CatalogPredicate("experiment", "eq", "gone"),
+    ).entries == ()
+
+
+def test_catalog_query_reopens_on_supported_sqlite_filesystem_topology(tmp_path) -> None:
+    """Catalog descriptors survive a direct-store reopen without a cache facade."""
+
+    root = tmp_path / "reopen"
+    topology = StoreTopology(
+        payload=BackendRef(name="filesystem", options={"base_dir": root}),
+        authority=BackendRef(name="sqlite", options={"root": root}),
+    )
+
+    class SharedManifestKey:
+        key = b"q" * 32
+
+        def get_key(self) -> bytes:
+            return self.key
+
+        def get_or_initialize_new_store(self) -> bytes:
+            return self.key
+
+        def initialize_new_store(self) -> bytes:
+            return self.key
+
+    first = BlobStore(topology, cache_dir=root, manifest_key_provider=SharedManifestKey())
+    try:
+        first.initialize()
+        _put(first, "persisted", {"experiment": "reopen"})
+    finally:
+        first.close()
+
+    reopened = BlobStore(topology, cache_dir=root, manifest_key_provider=SharedManifestKey())
+    try:
+        page = _query(
+            reopened,
+            CatalogPredicate("experiment", "eq", "reopen"),
         )
-        for index, score in enumerate(finite_scores):
-            cache.put(f"finite-{index}", score=score)
-        for index, score in enumerate((math.nan, math.inf, -math.inf)):
-            cache.put(f"non-finite-{index}", score=score)
+    finally:
+        reopened.close()
 
-        all_finite = {
-            f"float:{score}" for score in finite_scores
-        }
-        assert {
-            entry["cache_key_params"]["score"]
-            for entry in cache.query_meta(score=-sys.float_info.max)
-        } == all_finite
-        assert {
-            entry["cache_key_params"]["score"]
-            for entry in cache.query_meta(score=0.0)
-        } == {
-            "float:-0.0",
-            "float:1.25e-200",
-            f"float:{sys.float_info.max}",
-        }
-        assert [
-            entry["cache_key_params"]["score"]
-            for entry in cache.query_meta(score=sys.float_info.max)
-        ] == [f"float:{sys.float_info.max}"]
-
-    @pytest.mark.parametrize("value", (math.nan, math.inf, -math.inf))
-    def test_query_meta_rejects_nonfinite_numeric_thresholds(self, temp_cache, value):
-        """NaN and infinity have no stable ordered metadata-query semantics."""
-        with pytest.raises(CacheQueryValidationError) as error:
-            temp_cache.query_meta(score=value)
-
-        assert error.value.context == {
-            "field": "score",
-            "value": repr(value),
-            "reason": CacheReason.INVALID_QUERY_VALUE.value,
-        }
-
-    def test_query_meta_multiple_filters(self, temp_cache):
-        """Test query_meta with multiple parameter filters."""
-        cache = temp_cache
-        
-        # Store test data
-        cache.put("model_1", experiment="exp_001", model_type="xgboost", accuracy=0.95, active=True)
-        cache.put("model_2", experiment="exp_002", model_type="cnn", accuracy=0.88, active=True)
-        cache.put("model_3", experiment="exp_003", model_type="xgboost", accuracy=0.85, active=False)
-        
-        # Query with multiple filters
-        filtered_entries = cache.query_meta(
-            model_type="xgboost",
-            active=True,
-        )
-        assert filtered_entries is not None
-        # Should find only the first entry (xgboost + active=True)
-        assert len(filtered_entries) == 1
-        params = filtered_entries[0]['cache_key_params']
-        assert params['model_type'] == "str:xgboost"
-        assert params['active'] == "bool:True"
-
-    def test_query_meta_no_matches(self, temp_cache):
-        """Test query_meta when no entries match the filters."""
-        # Store test data
-        temp_cache.put("model_1", experiment="exp_001", model_type="xgboost")
-        temp_cache.put("model_2", experiment="exp_002", model_type="cnn")
-        
-        # Query for non-existent values
-        no_matches = temp_cache.query_meta(model_type="str:nonexistent")
-        assert no_matches is not None
-        assert len(no_matches) == 0
-        
-        # Query for non-existent parameter
-        no_param = temp_cache.query_meta(nonexistent_param="str:value")
-        assert no_param is not None
-        assert len(no_param) == 0
-
-    def test_query_meta_complex_parameters(self, temp_cache):
-        """Test query_meta with complex parameter types."""
-        from pathlib import Path
-        
-        # Store data with complex parameters
-        test_path = Path("/tmp/test.txt")
-        temp_cache.put(
-            "complex_data", 
-            experiment="exp_001",
-            model_path=test_path,
-            config={"lr": 0.001, "epochs": 100},
-            tags=["ml", "experiment"]
-        )
-        
-        # Query should work even with complex serialized parameters
-        all_entries = temp_cache.query_meta()
-        assert all_entries is not None
-        assert len(all_entries) == 1
-        
-        # Verify complex parameters are serialized properly
-        params = all_entries[0]['cache_key_params']
-        assert 'experiment' in params
-        assert 'model_path' in params
-        assert 'config' in params
-        assert 'tags' in params
-
-    def test_query_meta_without_sqlite_backend(self, temp_cache):
-        """Test query_meta fails gracefully with non-SQLite backends."""
-        import tempfile
-        import shutil
-        
-        temp_dir = tempfile.mkdtemp()
-        try:
-            cache_dir = Path(temp_dir) / "cache"
-            # Create cache with JSON backend
-            json_config = CacheConfig(
-                cache_dir=str(cache_dir / "json"),
-                metadata_backend="json",
-                store_cache_key_params=True,
-            )
-            json_cache = UnifiedCache(json_config)
-            
-            # Store some data
-            json_cache.put("test_data", experiment="exp_001")
-            
-            # query_meta should return None with warning
-            result = json_cache.query_meta(experiment="exp_001")
-            assert result is None
-        finally:
-            shutil.rmtree(temp_dir)
-
-    def test_query_meta_without_param_storage(self, temp_cache):
-        """Test query_meta fails gracefully when store_cache_key_params=False."""
-        import tempfile
-        import shutil
-        
-        temp_dir = tempfile.mkdtemp()
-        try:
-            cache_dir = Path(temp_dir) / "cache"
-            # Create cache without parameter storage
-            no_params_config = CacheConfig(
-                cache_dir=str(cache_dir / "no_params"),
-                metadata_backend="sqlite",
-                store_cache_key_params=False,  # Disabled
-            )
-            no_params_cache = UnifiedCache(no_params_config)
-            
-            # Store some data
-            no_params_cache.put("test_data", experiment="exp_001")
-            
-            # query_meta should return None with warning
-            result = no_params_cache.query_meta(experiment="exp_001")
-            assert result is None
-            
-            no_params_cache.close()
-        finally:
-            shutil.rmtree(temp_dir)
-
-    def test_query_meta_empty_cache(self, temp_cache):
-        """Test query_meta with empty cache."""
-        # Query empty cache
-        result = temp_cache.query_meta()
-        assert result is not None
-        assert len(result) == 0
-        
-        # Query with filters on empty cache
-        filtered = temp_cache.query_meta(experiment="exp_001")
-        assert filtered is not None
-        assert len(filtered) == 0
-
-    def test_query_meta_order_by_created_at(self, temp_cache):
-        """Test that query_meta returns entries ordered by created_at DESC."""
-        import time
-        
-        # Store entries with small delays to ensure different timestamps
-        temp_cache.put("model_1", experiment="exp_001", order=1)
-        time.sleep(0.01)  # Small delay
-        temp_cache.put("model_2", experiment="exp_002", order=2)
-        time.sleep(0.01)  # Small delay
-        temp_cache.put("model_3", experiment="exp_003", order=3)
-        
-        # Get all entries
-        entries = temp_cache.query_meta()
-        assert entries is not None
-        assert len(entries) == 3
-        
-        # Verify ordering (most recent first)
-        timestamps = [entry['created_at'] for entry in entries]
-        # Should be in descending order (newest first)
-        assert timestamps == sorted(timestamps, reverse=True)
-
-    def test_query_meta_with_different_data_types(self, temp_cache):
-        """Test query_meta with various cached data types."""
-        import numpy as np
-        import pandas as pd
-        
-        # Store different data types
-        temp_cache.put("string_data", data_type="string", format="text")
-        temp_cache.put(
-            np.array([1, 2, 3]), 
-            data_type="numpy", 
-            format="array"
-        )
-        temp_cache.put(
-            pd.DataFrame({'a': [1, 2], 'b': [3, 4]}), 
-            data_type="pandas", 
-            format="dataframe"
-        )
-        
-        # Query by data type parameter
-        string_entries = temp_cache.query_meta(data_type="str:string")
-        assert string_entries is not None
-        assert len(string_entries) == 1
-        
-        # Query all entries
-        all_entries = temp_cache.query_meta()
-        assert all_entries is not None
-        assert len(all_entries) == 3
-        
-        # Verify different data_type field values
-        data_types = {entry['data_type'] for entry in all_entries}
-        assert 'object' in data_types  # String data (stored as object)
-        assert 'array' in data_types  # NumPy array
-        assert 'pandas_dataframe' in data_types  # Pandas DataFrame
-
-    def test_query_meta_json_parsing_error_handling(self, temp_cache):
-        """Test query_meta handles JSON parsing errors gracefully."""
-        # This test verifies the error handling in the JSON parsing section
-        # Store normal data first
-        temp_cache.put("test_data", experiment="exp_001")
-        
-        # Get entries (should work normally)
-        entries = temp_cache.query_meta()
-        assert entries is not None
-        assert len(entries) == 1
-        
-        # Verify that if JSON parsing fails, it falls back to empty dict
-        entry = entries[0]
-        assert 'cache_key_params' in entry
-        assert isinstance(entry['cache_key_params'], dict)
-
-    def test_query_meta_sql_injection_protection(self, temp_cache):
-        """Test that query_meta is protected against SQL injection attempts."""
-        # Store normal data
-        temp_cache.put("test_data", experiment="exp_001", value="normal")
-        
-        # Attempt SQL injection in filter values
-        malicious_filters = [
-            "'; DROP TABLE cache_entries; --",
-            "' OR '1'='1",
-            "'; DELETE FROM cache_entries; --",
-            "' UNION SELECT * FROM cache_entries --"
-        ]
-        
-        for malicious_value in malicious_filters:
-            # Should not crash or cause SQL injection
-            result = temp_cache.query_meta(experiment=malicious_value)
-            assert result is not None
-            assert len(result) == 0  # Should find no matches
-        
-        # Verify original data is still there
-        normal_result = temp_cache.query_meta(experiment="str:exp_001")
-        assert normal_result is not None
-        assert len(normal_result) == 1
-
-    def test_query_meta_with_none_values(self, temp_cache):
-        """Test query_meta behavior with None values in parameters."""
-        # Store data where some parameters might be None
-        temp_cache.put("test_data", experiment="exp_001", optional_param=None, required_param="value")
-        
-        # Query should work for non-None parameters
-        result = temp_cache.query_meta(required_param="str:value")
-        assert result is not None
-        assert len(result) == 1
-        
-        # Querying for None values should not match
-        none_result = temp_cache.query_meta(optional_param=None)
-        assert none_result is not None
-        assert len(none_result) == 0  # None values are not stored/queryable
-
-    def test_query_meta_performance_with_many_entries(self, temp_cache):
-        """Test query_meta performance with a larger number of entries."""
-        # Store many entries
-        num_entries = 100
-        for i in range(num_entries):
-            temp_cache.put(
-                f"data_{i}",
-                experiment=f"exp_{i:03d}",
-                batch=i // 10,  # Group into batches of 10
-                index=i
-            )
-        
-        # Query all entries
-        all_entries = temp_cache.query_meta()
-        assert all_entries is not None
-        assert len(all_entries) == num_entries
-        
-        # Query specific batch
-        batch_5 = temp_cache.query_meta(batch="int:5")
-        assert batch_5 is not None
-        assert len(batch_5) == 10  # Should find 10 entries in batch 5
-        
-        # Query specific experiment
-        specific_exp = temp_cache.query_meta(experiment="str:exp_050")
-        assert specific_exp is not None
-        assert len(specific_exp) == 1
-
-    def test_query_meta_datetime_handling(self, temp_cache):
-        """Test that query_meta properly handles datetime fields."""
-        # Store some data
-        temp_cache.put("test_data", experiment="exp_001")
-        
-        # Get entries and verify datetime fields
-        entries = temp_cache.query_meta()
-        assert entries is not None
-        assert len(entries) == 1
-        
-        entry = entries[0]
-        
-        # Verify datetime fields are properly formatted
-        assert 'created_at' in entry
-        assert 'accessed_at' in entry
-        
-        # Should be ISO format strings
-        created_at = entry['created_at']
-        accessed_at = entry['accessed_at']
-        
-        assert isinstance(created_at, str)
-        assert isinstance(accessed_at, str)
-        
-        # Should be parseable as datetime
-        from datetime import datetime
-        datetime.fromisoformat(created_at)
-        datetime.fromisoformat(accessed_at)
+    assert [entry.key for entry in page.entries] == ["persisted"]
 
 
-class TestQueryMetaIntegration:
-    """Integration tests for query_meta with other cache features."""
+@pytest.mark.parametrize("value", (math.nan, math.inf, -math.inf, 1.5))
+def test_catalog_query_rejects_non_integer_numeric_values_before_dispatch(
+    catalog_store: BlobStore, value: float
+) -> None:
+    """The integer schema rejects non-finite and non-exact scalar thresholds."""
 
-    @pytest.fixture(autouse=True)
-    def setup_integration_cache(self):
-        """Set up each test with a fresh cache instance."""
-        self.temp_dir = tempfile.mkdtemp()
-        self.cache_dir = Path(self.temp_dir) / "cache"
-        
-        self.config = CacheConfig(
-            cache_dir=str(self.cache_dir),
-            metadata_backend="sqlite",
-            store_cache_key_params=True,
-        )
-        self.cache = UnifiedCache(self.config)
-        
-        yield
-        
-        # Clean up after each test
-        self.cache.close()
-        import shutil
-        if Path(self.temp_dir).exists():
-            shutil.rmtree(self.temp_dir)
+    with pytest.raises(CatalogQueryValidationError):
+        _query(catalog_store, CatalogPredicate("score", "gte", value))
 
-    def test_query_meta_with_ttl_expired_entries(self, temp_cache):
-        """Test query_meta with TTL-expired entries."""
-        # Store data with very short TTL
-        temp_cache.put("test_data", experiment="exp_001", description="Short TTL test")
-        
-        # Query should find the entry
-        entries = temp_cache.query_meta(experiment="str:exp_001")
-        assert entries is not None
-        assert len(entries) == 1
-        
-        # Note: query_meta queries the database directly, so it will find
-        # entries even if they're TTL-expired (unlike cache.get())
-        # This is expected behavior for metadata querying
 
-    def test_query_meta_with_invalidated_entries(self, temp_cache):
-        """Test query_meta after entries are invalidated."""
-        # Store and then invalidate data
-        cache_key = temp_cache.put("test_data", experiment="exp_001")
-        
-        # Verify entry exists
-        entries = temp_cache.query_meta(experiment="str:exp_001")
-        assert entries is not None
-        assert len(entries) == 1
-        
-        # Invalidate the entry
-        temp_cache.invalidate(cache_key=cache_key)
-        
-        # Query should no longer find the entry
-        entries_after = temp_cache.query_meta(experiment="str:exp_001")
-        assert entries_after is not None
-        assert len(entries_after) == 0
+def test_catalog_query_preserves_typed_backend_failure(
+    catalog_store: BlobStore, monkeypatch
+) -> None:
+    """Direct backend failures remain direct typed failures, never a false miss."""
 
-    def test_query_meta_with_clear_all(self, temp_cache):
-        """Test query_meta after clearing all cache."""
-        # Store multiple entries
-        temp_cache.put("data_1", experiment="exp_001")
-        temp_cache.put("data_2", experiment="exp_002")
-        
-        # Verify entries exist
-        entries = temp_cache.query_meta()
-        assert entries is not None
-        assert len(entries) == 2
-        
-        # Clear all cache
-        temp_cache.clear_all()
-        
-        # Query should find no entries
-        entries_after = temp_cache.query_meta()
-        assert entries_after is not None
-        assert len(entries_after) == 0
+    def unavailable(*_args: object, **_kwargs: object) -> None:
+        raise CacheBlobBackendError("catalog unavailable")
 
-    def test_query_meta_with_cache_stats(self, temp_cache):
-        """Test query_meta integration with cache statistics."""
-        # Store some data
-        temp_cache.put("data_1", experiment="exp_001")
-        temp_cache.put("data_2", experiment="exp_002")
-        
-        # Get stats
-        stats = temp_cache.get_stats()
-        assert stats['total_entries'] == 2
-        
-        # Query entries
-        entries = temp_cache.query_meta()
-        assert entries is not None
-        assert len(entries) == 2
-        
-        # Stats should match query results
-        assert stats['total_entries'] == len(entries)
+    monkeypatch.setattr(catalog_store.lifecycle_authority, "catalog_page", unavailable)
 
-    def test_query_meta_concurrent_access(self, temp_cache):
-        """Test query_meta with concurrent cache operations."""
-        temp_cache.initialize()
-        import threading
-        import time
-        
-        results = []
-        errors = []
-        
-        def worker(worker_id):
-            try:
-                # Each worker stores and queries data
-                temp_cache.put(f"data_{worker_id}", worker_id=worker_id, experiment="concurrent_test")
-                time.sleep(0.01)  # Small delay
-                
-                # Query data
-                entries = temp_cache.query_meta(experiment="str:concurrent_test")
-                results.append((worker_id, len(entries) if entries else 0))
-            except Exception as e:
-                errors.append((worker_id, str(e)))
-        
-        # Run multiple workers concurrently
-        threads = []
-        for i in range(5):
-            t = threading.Thread(target=worker, args=(i,))
-            threads.append(t)
-            t.start()
-        
-        # Wait for all threads to complete
-        for t in threads:
-            t.join()
-        
-        # Check results
-        assert len(errors) == 0, f"Errors occurred: {errors}"
-        assert len(results) == 5
-        
-        # Final verification
-        final_entries = temp_cache.query_meta(experiment="str:concurrent_test")
-        assert final_entries is not None
-        assert len(final_entries) == 5
-
-    def test_query_meta_database_corruption_handling(self, temp_cache):
-        """Test query_meta handles database corruption gracefully."""
-        # Store some data first
-        temp_cache.put("test_data", experiment="exp_001")
-        
-        # Verify it works normally
-        entries = temp_cache.query_meta(experiment="str:exp_001")
-        assert entries is not None
-        assert len(entries) == 1
-        
-        # Caller field names are syntax, not recoverable query failures.
-        with pytest.raises(CacheQueryValidationError) as error:
-            temp_cache.query_meta(**{"": "test"})
-
-        assert error.value.context == {
-            "field": "",
-            "reason": CacheReason.INVALID_QUERY_FIELD.value,
-        }
-
-    def test_query_meta_memory_stress(self, temp_cache):
-        """Test query_meta behavior under memory stress conditions."""
-        # Store entries with very large parameter values
-        large_data = "x" * 10000  # 10KB string
-        
-        for i in range(10):
-            temp_cache.put(
-                f"data_{i}",
-                experiment=f"exp_{i:03d}",
-                large_param=large_data,
-                index=i
-            )
-        
-        # Query should still work with large data
-        entries = temp_cache.query_meta()
-        assert entries is not None
-        assert len(entries) == 10
-        
-        # Verify large parameters are handled correctly
-        for entry in entries:
-            params = entry.get('cache_key_params', {})
-            assert 'large_param' in params
-
-    def test_query_meta_invalid_json_in_database(self, temp_cache):
-        """Test query_meta handles invalid JSON in cache_key_params column."""
-        # This test simulates what happens if the JSON in the database gets corrupted
-        # We can't easily corrupt the database directly, but we can test the JSON parsing path
-        
-        # Store normal data first
-        temp_cache.put("test_data", experiment="exp_001")
-        
-        # Query should work
-        entries = temp_cache.query_meta()
-        assert entries is not None
-        assert len(entries) == 1
-        
-        # The error handling for JSON parsing is in the query_meta method
-        # If JSON parsing fails, it should fall back to empty dict
-        entry = entries[0]
-        assert 'cache_key_params' in entry
-        assert isinstance(entry['cache_key_params'], dict)
-
-    def test_query_meta_session_errors(self, temp_cache):
-        """Test query_meta handles database session errors."""
-        # Store some data
-        temp_cache.put("test_data", experiment="exp_001")
-        
-        # Test that if the metadata_backend doesn't have SessionLocal, it fails gracefully
-        original_session_local = getattr(temp_cache.metadata_backend, 'SessionLocal', None)
-        
-        try:
-            # Temporarily remove SessionLocal to simulate error condition
-            if hasattr(temp_cache.metadata_backend, 'SessionLocal'):
-                delattr(temp_cache.metadata_backend, 'SessionLocal')
-            
-            result = temp_cache.query_meta(experiment="str:exp_001")
-            assert result is None  # Should return None gracefully
-            
-        finally:
-            # Restore SessionLocal
-            if original_session_local:
-                setattr(temp_cache.metadata_backend, 'SessionLocal', original_session_local)
-
-    def test_query_meta_unicode_and_special_characters(self, temp_cache):
-        """Test query_meta with unicode and special characters."""
-        # Test with unicode characters
-        unicode_data = {
-            "experiment": "测试实验",  # Chinese characters
-            "model": "модель",      # Cyrillic characters  
-            "description": "café naïve résumé",  # Accented characters
-            "emoji": "🚀🎉💡",      # Emoji
-            "special": "quote\"escape'test",  # Quotes and special chars
-            "newlines": "line1\nline2\ttab",   # Newlines and tabs
-        }
-        
-        temp_cache.put("unicode_test", **unicode_data)
-        
-        # Query should handle unicode properly
-        entries = temp_cache.query_meta()
-        assert entries is not None
-        assert len(entries) == 1
-        
-        # Verify unicode is preserved
-        params = entries[0]['cache_key_params']
-        # Check that some unicode made it through (may be serialized with type prefixes)
-        assert any("测试" in str(v) for v in params.values())
-
-    def test_query_meta_extremely_long_parameter_names(self, temp_cache):
-        """Test query_meta with extremely long parameter names and values."""
-        # Test with very long parameter names and values
-        long_name = "a" * 1000  # 1000 character parameter name
-        long_value = "b" * 5000  # 5000 character value
-        
-        params = {
-            long_name: long_value,
-            "normal_param": "normal_value"
-        }
-        
-        temp_cache.put("long_param_test", **params)
-        
-        # Query should handle long parameters
-        entries = temp_cache.query_meta()
-        assert entries is not None
-        assert len(entries) == 1
-        
-        # Should be able to query by normal parameter
-        normal_entries = temp_cache.query_meta(normal_param="str:normal_value")
-        assert normal_entries is not None
-        assert len(normal_entries) == 1
-
-    def test_query_meta_sql_edge_cases(self, temp_cache):
-        """Test query_meta with SQL edge cases and special parameter values."""
-        # Test with parameter values that could cause SQL issues
-        edge_case_params = [
-            {"param": ""},  # Empty string
-            {"param": " "},  # Space only
-            {"param": "NULL"},  # SQL NULL keyword
-            {"param": "SELECT * FROM cache_entries"},  # SQL command
-            {"param": "--comment"},  # SQL comment
-            {"param": "/*comment*/"},  # SQL block comment
-            {"param": "\x00"},  # Null byte
-            {"param": "\r\n"},  # Windows line endings
-        ]
-        
-        # Store entries with edge case parameters
-        for i, params in enumerate(edge_case_params):
-            temp_cache.put(f"edge_case_{i}", index=i, **params)
-        
-        # Query all entries should work
-        all_entries = temp_cache.query_meta()
-        assert all_entries is not None
-        assert len(all_entries) == len(edge_case_params)
-        
-        # Query with specific edge case values should work safely
-        for i, params in enumerate(edge_case_params):
-            key, value = list(params.items())[0]
-            result = temp_cache.query_meta(**{key: f"str:{value}"})
-            assert result is not None
-            # Should find exactly one match or none (depending on serialization)
-            assert len(result) <= 1
-
-    def test_query_meta_parameter_type_edge_cases(self, temp_cache):
-        """Test query_meta with unusual parameter types."""
-        # Test with various Python types that might cause serialization issues
-        from decimal import Decimal
-        from datetime import datetime, date
-        
-        edge_types = {
-            "decimal_param": Decimal("123.456"),
-            "datetime_param": datetime.now(),
-            "date_param": date.today(),
-            "bool_param": True,
-            "none_param": None,
-            "complex_param": complex(1, 2),
-            "bytes_param": b"binary_data",
-        }
-        
-        temp_cache.put("type_test", **edge_types)
-        
-        # Query should handle type serialization
-        entries = temp_cache.query_meta()
-        assert entries is not None
-        assert len(entries) == 1
-        
-        # Verify parameters are serialized (may have type prefixes)
-        params = entries[0]['cache_key_params']
-        assert isinstance(params, dict)
-        assert len(params) > 0  # Should have some parameters
-
-    def test_query_meta_filter_injection_edge_cases(self, temp_cache):
-        """Test query_meta with filter values that could cause injection."""
-        # Store normal data
-        temp_cache.put("test_data", experiment="exp_001", value="normal")
-        
-        # Test filter values that could potentially cause issues
-        injection_attempts = [
-            {"experiment": "'; DROP TABLE cache_entries; SELECT '"},
-            {"experiment": "' OR 1=1 OR '"},
-            {"experiment": "' UNION SELECT password FROM users WHERE '"},
-            {"experiment": "\"; DELETE FROM cache_entries; --"},
-            {"experiment": "' AND (SELECT COUNT(*) FROM cache_entries) > 0 AND '"},
-            {"value": "'; UPDATE cache_entries SET cache_key_params = 'hacked'; --"},
-        ]
-        
-        for injection_filter in injection_attempts:
-            # Should not cause SQL injection or crashes
-            result = temp_cache.query_meta(**injection_filter)
-            assert result is not None
-            assert isinstance(result, list)
-            # Should not find matches (since values don't exist)
-            assert len(result) == 0
-        
-        # Verify original data is still there and unchanged
-        original_data = temp_cache.query_meta(experiment="str:exp_001")
-        assert original_data is not None
-        assert len(original_data) == 1
+    with pytest.raises(CacheBlobBackendError, match="catalog unavailable"):
+        _query(catalog_store)
