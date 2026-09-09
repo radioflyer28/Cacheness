@@ -12,9 +12,9 @@ provides:
   - Function-scoped bounded invalidation backed by canonical BlobStore truth.
 affects: [06-05-topology-policy, 06-06-public-cutover, cache-policy-api]
 actuals:
-  tokens: 14538
+  tokens: 14761
   tasks: 2
-  commits: 4
+  commits: 5
 tech-stack:
   added: []
   patterns:
@@ -75,7 +75,7 @@ coverage:
         ref: tests/test_phase6_decorator_contract.py#test_explicit_decorator_module_has_no_implicit_lifecycle_owner
         status: pass
     human_judgment: false
-duration: 10 min
+duration: 15 min
 completed: 2026-09-09
 status: complete
 ---
@@ -86,9 +86,9 @@ status: complete
 
 ## Performance
 
-- **Duration:** 10 min
+- **Duration:** 15 min
 - **Started:** 2026-09-09T03:04:59Z
-- **Completed:** 2026-09-09T03:15:24Z
+- **Completed:** 2026-09-09T03:19:38Z
 - **Tasks:** 2
 - **Files modified:** 5
 
@@ -98,11 +98,12 @@ status: complete
 - Persisted each decorated function's stable qualified namespace as authenticated, queryable catalog data and reused bounded exact removal for `cache_clear`.
 - Replaced implicit decorator construction, cleanup registries, aliases, and broad error suppression with an explicit cache plus immutable recompute outcomes.
 - Added proof for None hits, function isolation, canonical argument normalization, typed failure preservation, explicit fallback diagnostics, and replacement-safe clearing.
+- Reused the one pre-call policy key for the post-call write, so user-code mutation of a mutable argument cannot move the committed result to a different key.
 
 ## Verification
 
 - `uv run --frozen pytest -q tests/test_phase6_decorator_contract.py tests/test_phase6_removal_contract.py -o log_cli=false` — 18 passed.
-- `uv run --frozen pytest -q tests/test_decorators.py tests/test_cache_key_consistency.py tests/test_phase6_decorator_contract.py tests/test_phase6_removal_contract.py -o log_cli=false` — 41 passed; one pre-existing pytest collection warning for `TestDataClassForConsistency`.
+- `uv run --frozen pytest -q tests/test_decorators.py tests/test_cache_key_consistency.py tests/test_phase6_decorator_contract.py tests/test_phase6_removal_contract.py -o log_cli=false` — 42 passed; one pre-existing pytest collection warning for `TestDataClassForConsistency`.
 - `uv run --frozen ruff check src/cacheness/core.py src/cacheness/decorators.py tests/test_decorators.py tests/test_cache_key_consistency.py tests/test_phase6_decorator_contract.py tests/test_phase6_removal_contract.py` — passed.
 
 ## Task Commits
@@ -112,6 +113,7 @@ status: complete
    - `d9e6d89` — feat(06-04): add explicit function cache policy
 2. **Task 2: Enforce outcome-aware recomputation and truthful function clearing**
    - `d45a1ac` — test(06-04): cover decorator outcomes and clearing
+   - `0233b2e` — fix(06-04): retain pre-call decorator cache keys
 
 ## Files Created/Modified
 
@@ -138,11 +140,19 @@ status: complete
 - **Verification:** Canonical decorator, key-normalization, and bounded-removal suite passed (41 tests).
 - **Committed in:** `3532e11`.
 
+**2. [Rule 1 - Bug] Retained the pre-call function key across user-code mutation**
+- **Found during:** Final plan verification.
+- **Issue:** `put_call` recomputed normalized arguments after user code returned, allowing a mutable argument to change the committed key from the key already observed by the lookup.
+- **Fix:** Captured the policy-owned namespace/key before lookup and reused it for the subsequent write; no storage operation or lifecycle coordination moved into the decorator.
+- **Files modified:** `src/cacheness/core.py`, `src/cacheness/decorators.py`, `tests/test_phase6_decorator_contract.py`.
+- **Verification:** The mutable-argument regression and the complete 42-test decorator/removal suite passed.
+- **Committed in:** `0233b2e`.
+
 ### TDD Sequencing Note
 
 Task 2's newly added outcome and clear tests passed immediately because Task 1's shared decorator boundary necessarily implemented the explicit immutable recompute policy and `invalidate_function` link. The test coverage was committed without artificial production churn.
 
-**Total deviations:** 1 auto-fixed blocking regression migration.
+**Total deviations:** 2 auto-fixed issues (1 blocking regression migration, 1 correctness bug).
 **Impact on plan:** The approved pre-production cutover remains explicit-only; no compatibility adapter, lifecycle owner, lock, queue, or storage coordinator was added.
 
 ## Issues Encountered
@@ -165,7 +175,7 @@ None - no external service configuration required.
 ## Self-Check: PASSED
 
 - Confirmed all five implementation/test artifacts and the summary exist on disk.
-- Confirmed task commits `cd272de`, `d9e6d89`, `d45a1ac`, and `3532e11` exist in Git history.
+- Confirmed task commits `cd272de`, `d9e6d89`, `d45a1ac`, `3532e11`, and `0233b2e` exist in Git history.
 
 ---
 *Phase: 06-unifiedcache-policy-composition*
