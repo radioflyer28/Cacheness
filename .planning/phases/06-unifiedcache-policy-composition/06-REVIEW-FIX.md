@@ -1,122 +1,174 @@
 ---
 phase: 06
-fixed_at: 2026-09-09T05:19:35Z
+fixed_at: 2026-09-09T06:20:42Z
 review_path: .planning/phases/06-unifiedcache-policy-composition/06-REVIEW.md
-iteration: 1
-findings_in_scope: 7
-fixed: 7
+iteration: 3
+findings_in_scope: 2
+fixed: 2
 skipped: 0
 status: all_fixed
 ---
 
 # Phase 6: Code Review Fix Report
 
-**Fixed at:** 2026-09-09T05:19:35Z  
+**Fixed at:** 2026-09-09T06:20:42Z
 **Source review:** `.planning/phases/06-unifiedcache-policy-composition/06-REVIEW.md`  
-**Iteration:** 1
+**Current iteration:** 3
 
-## Summary
+## Cumulative Summary
 
-- Findings in scope: 7
-- Fixed: 7
-- Skipped: 0
+| Iteration | Findings in scope | Fixed | Skipped |
+| --- | ---: | ---: | ---: |
+| 1 | 7 | 7 | 0 |
+| 2 | 4 | 4 | 0 |
+| 3 | 2 | 2 | 0 |
 
-## Fixed Issues
+Iteration 1 resolved the prior policy/configuration and warning findings.
+Iteration 2 resolves the four critical findings in the current review without
+adding a lifecycle lock, queue, coordinator, background loop, timing guarantee,
+or a second lifecycle authority.
 
-### CR-01: Stale removal cursor continuation can strand unfinished removal work
+Iteration 3 resolves the remaining two warnings without changing storage
+lifecycle authority, concurrency behavior, or topology guarantees.
 
-**Status:** Fixed — requires human verification  
-**Files modified:** `src/cacheness/core.py`, `tests/test_phase6_removal_contract.py`  
-**Commit:** `6be21e1`
+## Fixed Issues — Iteration 3
 
-The facade now returns an explicit restart continuation after a bounded removal
-page or stale authority cursor. Resumption begins a fresh bounded scan rather
-than attempting to drain a stale page cursor.
+### WR-01: Requirement labels can report PASS while architecture verification failed
 
-### CR-02: Injected BlobStore handler registry is overwritten by UnifiedCache
+**Status:** Fixed — requires human verification
+**Files modified:** `tools/verify_phase6_contracts.py`, `tests/test_phase6_contract_verifier.py`
+**Commit:** `23ad759`
 
-**Files modified:** `src/cacheness/core.py`, `tests/contracts/test_phase6_topology_policy.py`  
-**Commit:** `bf2f5ee`
+Static verifier diagnostics now map explicitly to the Phase 6 requirement
+labels they invalidate. Unreadable static evidence marks every CACH label as
+incomplete rather than rendering a partial PASS. The new self-test injects a
+second lifecycle engine diagnostic and proves `CACH-01` renders `see
+diagnostics`, never `PASS`.
 
-Injected stores retain their handler registry and `UnifiedCache` uses that
-registry. Newly composed stores still receive the cache-owned registry.
+### WR-02: Canonical persisted configuration still advertises runtime-inert options
 
-### CR-03: Close after a durable commit hides the write receipt
+**Files modified:** `src/cacheness/config.py`, `tests/test_config_validation.py`, `tests/test_phase6_public_api_contract.py`
+**Commit:** `409c704`
 
-**Status:** Fixed — requires human verification  
-**Files modified:** `src/cacheness/core.py`, `tests/test_phase3_local_workflows.py`, `tests/test_phase6_policy_contract.py`  
-**Commits:** `877784d`, `a21843d`
+The canonical nested configuration no longer accepts `create_cache_dir`,
+`temp_dir`, `enable_metadata`, or the inert memory-cache options. Their
+validation and logging paths were removed with the fields; no alias,
+compatibility property, or silent loader conversion remains. Direct tests now
+validate a live compression field and assert every removed option is rejected.
 
-Post-commit maintenance uses the internal maintenance start path, so a close
-race yields typed, retryable incomplete maintenance while preserving the durable
-receipt. The policy contract test now targets that canonical internal seam.
+## Fixed Issues — Iteration 2
 
-### CR-04: Configuration serializers omit CachePolicy
+### CR-01: Bounded TTL cleanup still returns a cursor invalidated by its own deletion
 
-**Files modified:** `src/cacheness/config.py`, `tests/test_phase6_public_api_contract.py`  
-**Commit:** `29978fb`
+**Status:** Fixed — requires human verification
+**Files modified:** `src/cacheness/core.py`, `tests/test_phase6_removal_contract.py`
+**Commit:** `da29f78` (see execution incident below)
 
-JSON and YAML configuration serializers now persist `CachePolicyConfig`; both
-formats round-trip policy values including an infinite TTL.
+`_cleanup_expired()` now consumes the cache-policy restart token as a fresh
+scan, translates stale authority cursors into typed restart evidence, and never
+returns a post-delete authority cursor. The new three-page regression follows
+each continuation to completion.
 
-### WR-01: Strict projection verifier can falsely render a failing check as PASS
+### CR-02: Close-after-commit still ignores facade closure for an injected store
 
-**Files modified:** `tools/verify_phase6_contracts.py`, `tests/test_phase6_contract_verifier.py`  
-**Commit:** `335265e`
+**Status:** Fixed — requires human verification
+**Files modified:** `src/cacheness/core.py`, `tests/test_phase6_policy_contract.py`
+**Commit:** `164bf63`
 
-The strict projection check shares one label constant between execution and
-rendering, and its self-test proves a failing result exits nonzero and is not
-rendered as PASS.
+The internal post-commit maintenance boundary detects an already-closed cache
+facade before policy I/O and returns typed, retryable closed maintenance. The
+receipt remains valid and the caller-owned injected `BlobStore` stays usable.
 
-### WR-02: Decorator/key regressions use removed flat configuration API
+### CR-03: Direct BlobStore construction discards configured handler policy
 
-**Files modified:** `tests/test_decorators.py`, `tests/test_cache_key_consistency.py`, `tools/verify_phase6_contracts.py`, `tests/test_phase6_contract_verifier.py`  
-**Commit:** `dc3e38f`
+**Files modified:** `src/cacheness/storage/blob_store.py`, `tests/contracts/test_phase6_topology_policy.py`
+**Commit:** `a6a087e`
 
-The regressions use nested `CacheStorageConfig` and their canonical paths. They
-are included in the verifier's retained regression manifest.
+Direct stores now construct `HandlerRegistry(self.config)`. Direct and injected
+composition tests prove that disabled handlers remain unavailable and the
+caller-selected handler priority is retained by `UnifiedCache`.
 
-### WR-03: Obsolete nested size and TTL configuration compete with policy
+### CR-04: The public cutover leaves current test modules uncollectable
 
-**Files modified:** `src/cacheness/config.py`, `tests/test_config_validation.py`, `tests/test_phase6_public_api_contract.py`  
-**Commit:** `2b3e4f1`
+**Files modified:** fifteen current test modules, including the fourteen
+reviewed stale modules and `tests/test_pandas_compatibility.py` revealed once
+the optional dataframes group was installed
+**Commit:** `f8d56c6`
 
-Removed unconsumed storage/metadata policy toggles and their validation. TTL and
-authoritative-size settings are accepted only through `CachePolicyConfig`, and
-configuration round-trip coverage was updated accordingly.
+All modules now use nested `CacheConfig`, explicit `StoreTopology`/`BlobStore`,
+`UnifiedCache`, typed policy results, and the explicit `cached(cache=...)`
+decorator. Compatibility-only assertions for removed aliases, flat/blob config,
+factories, and legacy metadata APIs were removed; the retained coverage exercises
+key serialization, handler selection/priority, integrity outcomes, Pandas
+round-trips, policy invalidation, and topology ownership.
 
-## Verification
+## Prior Iteration — Archived Summary
+
+Iteration 1 fixed seven findings: stale policy removal continuation (`6be21e1`),
+injected handler-registry ownership (`bf2f5ee`), post-commit maintenance receipt
+preservation (`877784d`, `a21843d`), policy config serialization (`29978fb`),
+strict-projection verifier rendering (`335265e`), canonical decorator/key
+regressions (`dc3e38f`), and retirement of obsolete nested size/TTL settings
+(`2b3e4f1`).
+
+## Verification — Iteration 2
 
 All verification ran in the **main checkout** at
-`/Users/akriz/code/cacheness` (the parent workflow explicitly requested no
-isolated worktree).
+`/Users/akriz/code/cacheness`; `.planning/config.json` sets
+`workflow.use_worktrees=false`.
 
-- Focused checks passed for every finding, including stale-removal restart,
-  injected custom-handler retention, post-close receipt preservation, policy
-  JSON/YAML round-trips, strict-projection rendering, and canonical
-  decorator/key regressions.
-- Consolidated Phase 6 and directly affected regressions passed:
-  `tests/test_phase6_lookup_contract.py`, `tests/test_phase6_removal_contract.py`,
-  `tests/test_phase6_statistics.py`, `tests/test_phase6_decorator_contract.py`,
-  `tests/test_phase6_public_api_contract.py`, `tests/test_phase6_policy_contract.py`,
-  `tests/contracts/test_phase6_topology_policy.py`,
-  `tests/test_phase6_contract_verifier.py`, `tests/test_phase6_examples.py`,
-  `tests/test_decorators.py`, `tests/test_cache_key_consistency.py`, and
-  `tests/test_phase3_local_workflows.py`. One Pandas-dependent key-consistency
-  test was skipped because Pandas is not installed.
-- `uv run --frozen ruff check` over every touched source and test path passed.
-- `uv run --frozen python tools/verify_phase6_contracts.py --repo-root .`
-  passed CACH-01 through CACH-06, canonical decorator/key regressions, and
-  strict projection rejection. It exited 1 only for CACH-07 because
-  `tests/test_sql_cache.py` cannot collect without the unavailable optional
-  Pandas dependency; this is unrelated to these seven findings.
-- The legacy `tests/test_config_validation.py` module still has an unrelated
-  pre-existing collection failure from importing removed `CacheBlobConfig`.
-  The WR-03 behavior was verified instead through the canonical public API
-  contract test and a focused runtime configuration check.
+- Mandatory Tier 1 re-reads and Python AST parsing passed for every edited
+  source and test module.
+- Focused tests passed: the four direct critical-finding scopes passed, the
+  fourteen migrated modules passed (`53 passed`), and the newly exposed Pandas
+  compatibility scope passed (`2 passed`) with the complete local groups.
+- Targeted Ruff checks passed for every touched source/test path.
+- Complete local-group collection passed with
+  `uv run --group dev --group recommended --group sql --group dataframes pytest --collect-only -q`.
+  It reports only the existing non-fatal dataclass collection warning.
+- `uv run --group dev --group recommended --group sql --group dataframes python tools/verify_phase6_contracts.py --repo-root .`
+  passed CACH-01 through CACH-07, canonical decorator/key regressions, strict
+  projection rejection, and retained Phase 3-5 lifecycle contracts. Remote
+  evidence remains a mocked candidate; BACK-05 is still Phase 8 work.
+- Repository-wide `ruff check src tests` reports 33 pre-existing findings in
+  untouched paths (for example `file_hashing.py`, compatibility handler barrels,
+  and older tests). No finding is in an Iteration 2 edited file.
+
+## Verification — Iteration 3
+
+All verification ran in the **main checkout** at
+`/Users/akriz/code/cacheness`; `.planning/config.json` sets
+`workflow.use_worktrees=false`.
+
+- Mandatory Tier 1 re-reads, `git diff --check`, and Python AST parsing passed
+  for all five edited source and test modules.
+- Focused warning tests passed: `15 passed` for the verifier self-test module,
+  and `37 passed` for the configuration-validation and public API modules.
+- The 27-module Phase 6 reviewed test scope passed. It emitted only the
+  existing non-fatal dataclass collection warning in
+  `tests/test_cache_key_consistency.py`.
+- Complete local-group collection passed with
+  `uv run --group dev --group recommended --group sql --group dataframes pytest --collect-only -q`.
+  It emitted the same existing non-fatal dataclass collection warning.
+- The fully provisioned Phase 6 verifier passed CACH-01 through CACH-07,
+  canonical decorator/key regressions, strict-projection rejection, and retained
+  Phase 3-5 lifecycle contracts. Remote evidence remains a mocked candidate;
+  BACK-05 remains Phase 8 work.
+- Scoped Ruff passed for all Phase 6 production, verifier, and contract-test
+  files, including every Iteration 3 edited path.
+
+## Execution Incident
+
+The first commit helper invocation used a shared Git index that already
+contained unrelated staged planning artifacts. Its resulting CR-01 commit,
+`da29f78`, contains 66 files rather than only the two CR-01 paths. No unrelated
+file was reverted or altered to repair that history. Per coordinator direction,
+the commit is preserved pending explicit user authorization for any history
+rewrite. Every subsequent Iteration 2 commit used exact-path staging and
+file-only commits.
 
 ---
 
-_Fixed: 2026-09-09T05:19:35Z_  
+_Fixed: 2026-09-09T06:20:42Z_
 _Fixer: the agent (gsd-code-fixer)_  
-_Iteration: 1_
+_Iteration: 3_

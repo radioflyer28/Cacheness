@@ -1,8 +1,8 @@
 ---
 phase: 06-unifiedcache-policy-composition
-reviewed: 2026-09-09T05:29:03Z
+reviewed: 2026-09-09T06:05:11Z
 depth: standard
-files_reviewed: 25
+files_reviewed: 39
 files_reviewed_list:
   - src/cacheness/__init__.py
   - src/cacheness/cache_policy.py
@@ -29,144 +29,110 @@ files_reviewed_list:
   - tests/test_cache_key_consistency.py
   - tests/test_phase3_local_workflows.py
   - tests/test_config_validation.py
+  - tests/test_backend_compatibility.py
+  - tests/test_cache_integrity.py
+  - tests/test_config_options.py
+  - tests/test_configurable_serialization.py
+  - tests/test_core.py
+  - tests/test_cross_system_compatibility.py
+  - tests/test_directory_sharding.py
+  - tests/test_handler_registration.py
+  - tests/test_integration.py
+  - tests/test_pandas_compatibility.py
+  - tests/test_path_hashing.py
+  - tests/test_serialization.py
+  - tests/test_unified_cache_adversarial_lifecycle.py
+  - tests/test_unified_cache_lifecycle_authority.py
 findings:
-  critical: 4
-  warning: 0
+  critical: 0
+  warning: 2
   info: 0
-  total: 4
+  total: 2
 status: issues_found
 ---
 
 # Phase 6: Code Review Report
 
-**Reviewed:** 2026-09-09T05:29:03Z
+**Reviewed:** 2026-09-09T06:05:11Z
 **Depth:** standard
-**Files Reviewed:** 25
+**Files Reviewed:** 39
 **Status:** issues_found
 
 ## Summary
 
-Fix iteration 1 fully resolves prior CR-04 and WR-01 through WR-03, and the
-public predicate/global/function continuation and custom injected-handler cases
-from prior CR-01/CR-02 now behave correctly. Prior CR-03 is resolved for a
-cache-owned store, but the same close-after-commit boundary remains incorrect
-for a caller-owned injected store. The stale-cursor defect also remains in the
-bounded TTL cleanup path, direct `BlobStore` construction still discards its
-configured handler policy, and the Phase 6 cutover leaves the required full
-suite unable to collect because current repository tests still import removed
-development APIs.
+Fix iteration 2 resolves all four prior blockers. Bounded TTL cleanup now uses
+the same restart-token convergence rule as predicate, global, and
+function-scoped invalidation; injected and cache-owned close-after-commit paths
+retain the canonical receipt and report typed incomplete maintenance; direct
+and injected stores retain their configured handler registry; and all fifteen
+migrated cutover modules collect and pass without restoring removed APIs.
 
-The focused Phase 6 and directly affected regression scope passes when the
-uncollectable `tests/test_config_validation.py` module is excluded (one
-Pandas-dependent test skips). Scoped Ruff and the verifier self-tests pass. The
-fixed verifier reports CACH-01 through CACH-06, canonical decorator/key
-regressions, and strict projection rejection as PASS; its only fixed-manifest
-failure is the missing-`pandas` CACH-07 gate, which remains Phase 8 environment
-qualification. Repository-wide collection has 17 errors: three are that
-missing optional package, while fourteen are stale cutover imports or tests and
-are Phase 6 gaps.
+The complete local dependency-group collection passes, the 39-file focused and
+migrated test scope passes, the Phase 6 verifier passes CACH-01 through CACH-07
+plus the strict-projection and retained-lifecycle gates, and scoped Ruff passes
+for every reviewed Python file. PostgreSQL/S3 live evidence, native Windows,
+and the supported-Python/platform matrix remain Phase 8 qualifications. The
+broader repository run still contains pre-existing/live-fixture failures in
+unreviewed paths; those are not attributed to these fixes or reported below.
 
-All recommended fixes preserve ADR 0001. They require no lock, queue,
-coordinator, readiness mechanism, compatibility restoration, cross-resource
-ACID claim, or timing/progress guarantee.
+Two quality defects remain. The verifier's human-readable per-requirement
+labels are not derived from all checks supporting those requirements, and the
+canonical nested configuration persists several options that no runtime path
+consumes. Neither finding calls for a lock, queue, coordinator, readiness
+mechanism, compatibility restoration, cross-resource ACID claim, or timing
+guarantee.
 
 ## Narrative Findings (AI reviewer)
 
-## Critical Issues
+## Warnings
 
-### CR-01: Bounded TTL cleanup still returns a cursor invalidated by its own deletion
+### WR-01: Requirement labels can report PASS while architecture verification failed
 
-**Classification:** BLOCKER
+**Classification:** WARNING
 
-**File:** `src/cacheness/core.py:417-445`
+**File:** `tools/verify_phase6_contracts.py:396-410`
 
-**Issue:** Fix `6be21e1` restarts public predicate/global/function invalidation,
-but `_cleanup_expired()` still returns `page.cursor` after deleting an expired
-entry from that page. The successful delete advances the catalog revision, so
-passing the reported continuation into the next bounded cleanup raises
-`CacheCatalogStaleCursorError` instead of making progress. A memory/memory
-reproduction with three expired entries and `page_size=work_cap=1` removes one
-entry, returns `complete=False` with an authority cursor, then fails on the
-second call. This violates the Phase 6 requirement that TTL cleanup share the
-bounded resumable removal semantics.
+**Issue:** `main()` decides each CACH/regression label only by looking for an
+error string that starts with that label. Static composition, AST, manifest,
+and documentation failures are emitted without a requirement prefix. For
+example, if verification reports `second lifecycle engine:
+AlternateLifecycleEngine`, the command exits nonzero and prints the final
+diagnostic, but still prints `CACH-01: PASS`, `CACH-02: PASS`, and every other
+requirement as PASS. The strict-projection self-test fixed the same false-label
+shape for one check, but there is no equivalent coverage for architecture,
+manifest, or contract-text errors. This makes the human-readable evidence
+internally contradictory even though the process exit status remains
+fail-closed.
 
-**Fix:** Apply the same restart-continuation rule used by
-`invalidate_where()`: consume the cache-policy restart token as a fresh scan,
-translate stale authority cursors to typed restart evidence, and replace a
-post-delete non-exhausted authority cursor with the restart token. Add a
-three-page `_cleanup_expired()` regression that follows every returned
-continuation to completion.
+**Fix:** Return structured check results (or explicitly map every static check
+to its affected requirement labels) and render `PASS` only when all evidence
+assigned to that label succeeded. Add a `main()` self-test that injects an
+architecture failure and asserts the affected CACH label says `see diagnostics`
+and never `PASS`.
 
-### CR-02: Close-after-commit still ignores facade closure for an injected store
+### WR-02: Canonical persisted configuration still advertises runtime-inert options
 
-**Classification:** BLOCKER
+**Classification:** WARNING
 
-**File:** `src/cacheness/core.py:789-803`
+**File:** `src/cacheness/config.py:41-69`
 
-**Issue:** `_start_size_maintenance()` bypasses the facade close guard and relies
-on the underlying store to raise `CacheBlobStoreClosedError`. That works for the
-cache-owned topology tested by `test_close_after_commit_has_declared_derived_outcome`,
-because `cache.close()` closes that store. It does not work for a caller-owned
-injected `BlobStore`, which correctly remains open. If `put_entry()` commits and
-then closes the facade, `cache.put()` continues catalog maintenance on the open
-store and returns an ordinary continuation with `cause=None`, rather than the
-typed close restart promised by the fix. The receipt is retained, but the
-derived result does not truthfully report the concurrent facade close.
+**Issue:** The Phase 6 cutover removed the duplicate TTL and size knobs, but
+the same canonical nested configuration still exposes and round-trips options
+with no runtime consumer. Repository-wide source tracing finds
+`create_cache_dir`, `temp_dir`, `enable_metadata`, `enable_memory_cache`,
+`memory_cache_stats`, and the memory-cache sizing/TTL settings only in their
+declarations, validation, logging, and serialization. They do not change
+`BlobStore` or `UnifiedCache` behavior. Saving and loading them therefore makes
+unsupported behavior look like a durable, supported contract, contrary to the
+cutover's one ownership-aligned configuration vocabulary.
 
-**Fix:** At the internal post-commit boundary, check the facade's closed state
-and return `_maintenance_restart(CacheBlobStoreClosedError("Cache is closed"))`
-before policy I/O. Keep the receipt unchanged. Add the same deterministic
-commit-then-close test for an injected, caller-owned store and assert that the
-store remains usable afterward.
-
-### CR-03: Direct BlobStore construction discards configured handler policy
-
-**Classification:** BLOCKER
-
-**File:** `src/cacheness/storage/blob_store.py:206-217`
-
-**Issue:** `BlobStore` retains the supplied `CacheConfig` as `self.config`, but
-constructs `HandlerRegistry()` without it. Consequently handler enablement,
-priority, and trusted-object-array policy do not describe the direct store. A
-reproduction using a config that disables every built-in handler still creates
-an `array` and `object` registry and successfully pickles a dictionary. The
-topology-created `UnifiedCache` masks this by replacing the registry, and the
-new injected-store regression masks it by manually registering a custom
-handler, so prior CR-02's identity test does not cover normal config-driven
-injection.
-
-**Fix:** Construct `HandlerRegistry(self.config)` inside `BlobStore` and let
-`UnifiedCache` preserve that registry for injected stores. Add direct-store and
-injected-cache tests proving disabled handlers remain unavailable and an
-explicit priority order is retained.
-
-### CR-04: The public cutover leaves fourteen current test modules uncollectable
-
-**Classification:** BLOCKER
-
-**File:** `tests/test_config_validation.py:13-26`
-
-**Issue:** This directly modified regression module still imports removed
-`CacheBlobConfig` and `create_cache_config`, then spends most of the file
-asserting the removed flat/blob/factory compatibility surface. It therefore
-cannot collect. Repository-wide `pytest --collect-only` reports fourteen
-cutover-related collection errors (including this module, legacy `cacheness`
-alias users, and removed top-level handler/config exports) plus three separate
-missing-`pandas` errors. The latter are Phase 8 environment qualification; the
-fourteen stale API errors are Phase 6's required current-suite cutover gap and
-prevent retained integrity/serialization tests from running at all. Updating
-two assertions for WR-03 did not make this changed test file executable.
-
-**Fix:** Migrate the fourteen stale modules to the canonical nested
-`CacheConfig`, explicit `StoreTopology`/`BlobStore`, `UnifiedCache`, typed result,
-and explicit decorator APIs, deleting only assertions whose sole purpose was
-compatibility. Do not restore removed names. At minimum, fully migrate
-`tests/test_config_validation.py` in the same change that edits its policy
-assertions, then require repository-wide collection to fail only for explicitly
-qualified optional-package gates.
+**Fix:** Remove runtime-inert fields from the pre-production canonical config,
+or connect each retained field to its actual owning runtime boundary and add a
+behavioral round-trip test proving that the loaded value changes that behavior.
+Do not preserve the retired names through aliases or compatibility properties.
 
 ---
 
-_Reviewed: 2026-09-09T05:29:03Z_
+_Reviewed: 2026-09-09T06:05:11Z_
 _Reviewer: the agent (gsd-code-reviewer)_
 _Depth: standard_
