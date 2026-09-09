@@ -14,7 +14,14 @@ from cacheness.storage.migration import (
 )
 
 
-def _memory_store(root: Path) -> BlobStore:
+class _SharedMemoryKeyProvider:
+    """Test-only provider proving cutover preserves provider-backed signing identity."""
+
+    def get_key(self) -> bytes:
+        return b"m" * 32
+
+
+def _memory_store(root: Path, key_provider: _SharedMemoryKeyProvider) -> BlobStore:
     """Create an initialized, explicitly same-process store for tracer tests."""
     store = BlobStore(
         StoreTopology(
@@ -22,6 +29,7 @@ def _memory_store(root: Path) -> BlobStore:
             authority=BackendRef(name="memory"),
         ),
         cache_dir=root,
+        manifest_key_provider=key_provider,
     )
     store.initialize()
     return store
@@ -47,8 +55,9 @@ def _service(
 
 def test_memory_tracer_requires_explicit_whole_store_activation(tmp_path: Path) -> None:
     """A verified candidate stays invisible until the operator activates it."""
-    source = _memory_store(tmp_path / "source")
-    destination = _memory_store(tmp_path / "destination")
+    key_provider = _SharedMemoryKeyProvider()
+    source = _memory_store(tmp_path / "source", key_provider)
+    destination = _memory_store(tmp_path / "destination", key_provider)
     try:
         source.put_entry({"answer": 42}, key="entry")
         service = _service(source, destination, tmp_path / "maintenance")
@@ -82,8 +91,9 @@ def test_memory_tracer_requires_explicit_whole_store_activation(tmp_path: Path) 
 
 def test_candidate_and_evidence_never_authorize_activation(tmp_path: Path) -> None:
     """A candidate cannot become visible merely because stage evidence exists."""
-    source = _memory_store(tmp_path / "source")
-    destination = _memory_store(tmp_path / "destination")
+    key_provider = _SharedMemoryKeyProvider()
+    source = _memory_store(tmp_path / "source", key_provider)
+    destination = _memory_store(tmp_path / "destination", key_provider)
     try:
         source.put_entry({"answer": 42}, key="entry")
         service = _service(source, destination, tmp_path / "maintenance")
@@ -104,8 +114,9 @@ def test_maintenance_request_requires_stopped_workers_and_separate_work_dir(
     tmp_path: Path,
 ) -> None:
     """Operator input cannot turn an ordinary store root into maintenance evidence."""
-    source = _memory_store(tmp_path / "source")
-    destination = _memory_store(tmp_path / "destination")
+    key_provider = _SharedMemoryKeyProvider()
+    source = _memory_store(tmp_path / "source", key_provider)
+    destination = _memory_store(tmp_path / "destination", key_provider)
     try:
         with pytest.raises(ValueError, match="stopped-worker"):
             OfflineMigrationService(

@@ -28,6 +28,15 @@ from .lifecycle_authority import (
     ReconciliationWork,
     VerificationProof,
 )
+from .migration_authority import (
+    ActivationReceipt,
+    AuthorityIdentitySnapshot,
+    AuthorityInventoryEntry,
+    AuthorityInventoryPage,
+    VerifiedCandidateReceipt,
+    candidate_digest,
+)
+from .manifest import BlobManifest
 from .catalog import (
     CatalogCursor,
     CatalogPage,
@@ -273,6 +282,140 @@ class InMemoryLifecycleAuthority:
         self._require_open()
         with self._lock:
             return tuple(self._copy(entry) for _, entry in sorted(self._entries.items()))
+
+    # The methods below are intentionally not part of LifecycleAuthority.
+    # They are an explicit, whole-store maintenance seam used only by the
+    # offline migration service. Normal reads/writes cannot reach them.
+    def migration_identity(self) -> AuthorityIdentitySnapshot:
+        """Return the current memory authority identity and exact revision."""
+        self._require_open()
+        with self._lock:
+            return AuthorityIdentitySnapshot(
+                store_id=self._catalog_store_id,
+                revision=self._revision,
+                authority_kind="memory",
+            )
+
+    def migration_inventory(
+        self, *, expected_revision: int | None = None
+    ) -> AuthorityInventoryPage:
+        """Expose a bounded immutable source inventory at one exact revision."""
+        self._require_open()
+        with self._lock:
+            if expected_revision is not None and expected_revision != self._revision:
+                raise CacheBlobLifecycleConflictError(
+                    "Migration source revision changed; reinspection is required"
+                )
+            entries: list[AuthorityInventoryEntry] = []
+            for snapshot in self.list_entries():
+                manifest = BlobManifest.from_canonical_bytes(snapshot.manifest)
+                entries.append(
+                    AuthorityInventoryEntry(
+                        key=snapshot.key,
+                        generation=snapshot.generation,
+                        locator=snapshot.locator,
+                        manifest=bytes(snapshot.manifest),
+                        payload_digest=manifest.digest,
+                        byte_size=manifest.byte_size,
+                    )
+                )
+            identity = AuthorityIdentitySnapshot(
+                store_id=self._catalog_store_id,
+                revision=self._revision,
+                authority_kind="memory",
+            )
+            frozen_entries = tuple(entries)
+            return AuthorityInventoryPage(
+                identity=identity,
+                entries=frozen_entries,
+                total_entries=len(frozen_entries),
+                total_bytes=sum(entry.byte_size for entry in frozen_entries),
+            )
+
+    def activate_verified_candidate(
+        self,
+        *,
+        receipt: VerifiedCandidateReceipt,
+        entries: tuple[AuthorityInventoryEntry, ...],
+    ) -> ActivationReceipt:
+        """Publish one complete verified candidate as the only visibility change.
+
+        The memory authority has one in-process transactional boundary: either
+        every candidate descriptor becomes current together, or no descriptor
+        changes. Candidate bytes and maintenance evidence remain external,
+        non-authoritative effects until this method returns.
+        """
+
+        def activate() -> ActivationReceipt:
+            identity = AuthorityIdentitySnapshot(
+                store_id=self._catalog_store_id,
+                revision=self._revision,
+                authority_kind="memory",
+            )
+            if receipt.destination_identity != identity:
+                raise CacheBlobLifecycleConflictError(
+                    "Migration destination identity or revision changed before activation"
+                )
+            if receipt.destination_revision != self._revision:
+                raise CacheBlobLifecycleConflictError(
+                    "Migration destination revision changed before activation"
+                )
+            if len(entries) != receipt.entry_count:
+                raise CacheBlobLifecycleConflictError(
+                    "Migration candidate entry count disagrees with verified receipt"
+                )
+            if sum(entry.byte_size for entry in entries) != receipt.byte_count:
+                raise CacheBlobLifecycleConflictError(
+                    "Migration candidate byte count disagrees with verified receipt"
+                )
+            if candidate_digest(entries) != receipt.candidate_digest:
+                raise CacheBlobLifecycleConflictError(
+                    "Migration candidate digest disagrees with verified receipt"
+                )
+            if self._entries:
+                raise CacheBlobLifecycleConflictError(
+                    "Migration destination must be empty before first cutover activation"
+                )
+            if len({entry.key for entry in entries}) != len(entries):
+                raise CacheBlobLifecycleConflictError("Migration candidate contains duplicate keys")
+
+            next_revision = self._revision + 1
+            activated: dict[str, EntrySnapshot] = {}
+            for candidate in entries:
+                manifest = BlobManifest.from_canonical_bytes(candidate.manifest)
+                if (
+                    manifest.key != candidate.key
+                    or manifest.generation != candidate.generation
+                    or manifest.locator != candidate.locator
+                    or manifest.digest != candidate.payload_digest
+                    or manifest.byte_size != candidate.byte_size
+                ):
+                    raise CacheBlobLifecycleConflictError(
+                        "Migration candidate descriptor does not corroborate its receipt"
+                    )
+                lineage = self._lineages.get(candidate.key, 0) + 1
+                self._lineages[candidate.key] = lineage
+                activated[candidate.key] = EntrySnapshot(
+                    key=candidate.key,
+                    generation=candidate.generation,
+                    locator=candidate.locator,
+                    manifest=bytes(candidate.manifest),
+                    expectation=EntryExpectation(
+                        lineage=lineage,
+                        revision=next_revision,
+                        generation=candidate.generation,
+                        manifest_digest=hashlib.sha256(candidate.manifest).hexdigest(),
+                    ),
+                )
+            self._entries = activated
+            self._revision = next_revision
+            self._projection_dirty = True
+            return ActivationReceipt(
+                candidate_receipt=receipt,
+                activation_revision=self._revision,
+            )
+
+        return self._transition(activate)
 
     def catalog_page(
         self,
