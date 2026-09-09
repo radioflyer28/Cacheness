@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 06
 current_phase_name: UnifiedCache Policy Composition
 status: executing
-stopped_at: Completed 06-05-PLAN.md
-last_updated: "2026-09-09T03:36:56.608Z"
+stopped_at: Completed 06-06-PLAN.md
+last_updated: "2026-09-09T03:56:47.684Z"
 last_activity: 2026-09-09
 last_activity_desc: Phase 06 execution started
-state_head: 394575929245933a258f5f21c736d57342e93b44
+state_head: 679b50e2287d0d1dc8624cfb9ef7a7dc736dbd7d
 progress:
   total_phases: 8
   completed_phases: 4
   total_plans: 78
-  completed_plans: 74
+  completed_plans: 75
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-09-06)
 ## Current Position
 
 Phase: 06 (UnifiedCache Policy Composition) — EXECUTING
-Plan: 6 of 8
+Plan: 7 of 8
 Status: Ready to execute
 Last activity: 2026-09-08 — Phase 06 execution started
 
@@ -157,6 +157,7 @@ Phase 03 rows in this historical table include superseded attempts and do not de
 | Phase 06 P03 | 14 min | 2 tasks | 7 files |
 | Phase 06 P04 | 10 min | 2 tasks | 5 files |
 | Phase 06 P05 | 5min | 2 tasks | 2 files |
+| Phase 06 P06 | 13min | 2 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -329,6 +330,8 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 06]: Function cache_clear delegates to bounded exact-generation invalidation and returns the canonical CacheRemovalReport.
 - [Phase 06]: UnifiedCache lifecycle ownership follows constructor form: injected BlobStores are caller-owned while StoreTopology creates the one cache-owned store.
 - [Phase 06]: Closing UnifiedCache rejects cache policy observers without delegating close to caller-owned BlobStores or coordinating topology participants.
+- [Phase 06]: Removed cache singleton/factory/raw-result compatibility paths; callers use explicit UnifiedCache ownership.
+- [Phase 06]: Unsupported store/version layouts remain typed offline migration-or-rebuild failures; no implicit upgrade.
 
 ### Pending Todos
 
@@ -358,6 +361,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-09T03:36:56.492Z
-Stopped at: Completed 06-05-PLAN.md
+Last session: 2026-09-09T03:56:47.555Z
+Stopped at: Completed 06-06-PLAN.md
 Resume file: None
