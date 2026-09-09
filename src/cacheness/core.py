@@ -17,7 +17,15 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from .cache_policy import CacheLookupResult, CacheOutcome, CacheStatistics, _CacheOutcomeRecorder
+from .cache_policy import (
+    CacheLookupResult,
+    CacheOutcome,
+    CacheRemovalReport,
+    CacheStatistics,
+    _CacheOutcomeRecorder,
+    _CacheRemovalCandidate,
+    execute_exact_removals,
+)
 from .config import CacheConfig, _DEFAULT_TTL, create_cache_config
 from .error_handling import (
     CacheBlobBackendError,
@@ -33,12 +41,32 @@ from .error_handling import (
 from .handlers import HandlerRegistry
 from .serialization import create_unified_cache_key
 from .storage.blob_store import BlobStore
+from .storage.catalog import (
+    DEFAULT_PAGE_SIZE,
+    CatalogEntry,
+    CatalogField,
+    CatalogSchema,
+)
 from .storage.composition import StoreTopology
 from .storage.path_security import encode_physical_name
 from .storage.read_contract import CacheReadFailureCategory, classify_cache_read_failure
 
 
 logger = logging.getLogger(__name__)
+
+
+_CACHE_POLICY_SCHEMA = CatalogSchema(
+    fields=(
+        CatalogField("cache_namespace", "string", required=True, queryable=True),
+        CatalogField("cache_prefix", "string", required=True, queryable=True),
+        CatalogField("function_namespace", "string", queryable=True),
+    ),
+    schema_id="cacheness-cache-policy",
+    revision=1,
+)
+_CACHE_NAMESPACE = "unified-cache"
+_REMOVAL_PAGE_SIZE = DEFAULT_PAGE_SIZE
+_REMOVAL_WORK_CAP = DEFAULT_PAGE_SIZE
 
 
 def _clear_coordinated(method: Callable) -> Callable:
@@ -166,6 +194,106 @@ class UnifiedCache:
             "description": metadata.get("description", ""),
         }
 
+    @staticmethod
+    def _raise_malformed_policy_facts(message: str) -> None:
+        """Raise one typed fail-closed result for unauthenticated policy input."""
+
+        raise CacheBlobIntegrityError(message)
+
+    def _policy_entry_from_snapshot(self, snapshot: Any) -> dict[str, Any]:
+        """Validate the authenticated intrinsic facts needed for cache policy."""
+
+        raw = self._plain_value(snapshot.metadata)
+        if not isinstance(raw, dict):
+            self._raise_malformed_policy_facts("Cache policy snapshot metadata is invalid")
+        file_size = raw.get("file_size")
+        created_at = raw.get("created_at")
+        catalog = raw.get("catalog")
+        if (
+            not isinstance(file_size, int)
+            or isinstance(file_size, bool)
+            or file_size < 0
+            or not isinstance(created_at, str)
+            or not created_at
+            or not isinstance(catalog, dict)
+            or catalog.get("schema_id") != _CACHE_POLICY_SCHEMA.schema_id
+            or catalog.get("schema_revision") != _CACHE_POLICY_SCHEMA.revision
+            or catalog.get("schema_fingerprint") != _CACHE_POLICY_SCHEMA.fingerprint
+        ):
+            self._raise_malformed_policy_facts(
+                "Cache policy requires authenticated intrinsic catalog facts"
+            )
+        try:
+            datetime.fromisoformat(created_at)
+            values = _CACHE_POLICY_SCHEMA.read_mapping(catalog.get("values", {}))
+        except (TypeError, ValueError) as error:
+            raise CacheBlobIntegrityError(
+                "Cache policy intrinsic catalog facts are malformed"
+            ) from error
+        if values.get("cache_namespace") != _CACHE_NAMESPACE:
+            self._raise_malformed_policy_facts("Cache policy namespace is invalid")
+        return self._cache_entry(snapshot)
+
+    @staticmethod
+    def _candidate_from_snapshot(snapshot: Any) -> _CacheRemovalCandidate:
+        """Retain the exact expectation from one authenticated entry snapshot."""
+
+        return _CacheRemovalCandidate(snapshot.key, snapshot.expectation)
+
+    def _candidate_from_catalog_entry(
+        self, entry: CatalogEntry
+    ) -> _CacheRemovalCandidate:
+        """Reject incomplete catalog policy facts before lifecycle mutation."""
+
+        if (
+            entry.expectation is None
+            or entry.byte_size is None
+            or entry.created_at is None
+            or entry.schema_id != _CACHE_POLICY_SCHEMA.schema_id
+            or entry.schema_revision != _CACHE_POLICY_SCHEMA.revision
+        ):
+            self._raise_malformed_policy_facts(
+                "Catalog entry lacks authenticated cache-policy facts"
+            )
+        try:
+            datetime.fromisoformat(entry.created_at)
+        except ValueError as error:
+            raise CacheBlobIntegrityError(
+                "Catalog entry creation time is malformed"
+            ) from error
+        return _CacheRemovalCandidate(entry.key, entry.expectation)
+
+    def _remove_exact_candidates(
+        self,
+        candidates: tuple[_CacheRemovalCandidate, ...],
+        *,
+        complete: bool = True,
+        continuation: str | None = None,
+    ) -> CacheRemovalReport:
+        """Delegate every exact cache-policy removal to BlobStore.delete."""
+
+        return execute_exact_removals(
+            candidates,
+            delete=lambda candidate: self._cache_blob_store.delete(
+                candidate.key, expected=candidate.expectation
+            ),
+            complete=complete,
+            continuation=continuation,
+        )
+
+    @staticmethod
+    def _is_expired_at(created_at: str, ttl_hours: object) -> bool:
+        """Evaluate one validated cache-policy timestamp without storage I/O."""
+
+        if ttl_hours is None:
+            return False
+        if not isinstance(ttl_hours, (int, float)) or isinstance(ttl_hours, bool):
+            raise TypeError("ttl_hours must be a number, None, or the default sentinel")
+        created = datetime.fromisoformat(created_at)
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        return datetime.now(timezone.utc) > created + timedelta(hours=ttl_hours)
+
     def _authority_snapshot_entry(
         self, cache_key: str
     ) -> tuple[Any | None, dict[str, Any] | None]:
@@ -198,27 +326,23 @@ class UnifiedCache:
         if not isinstance(ttl, (int, float)) or isinstance(ttl, bool):
             raise TypeError("ttl_hours must be a number, None, or the default sentinel")
         created_at = entry.get("created_at")
-        if isinstance(created_at, str):
-            created = datetime.fromisoformat(created_at)
-        elif isinstance(created_at, datetime):
-            created = created_at
-        else:
+        if isinstance(created_at, datetime):
+            created_at = created_at.isoformat()
+        if not isinstance(created_at, str) or not created_at:
             return True
-        if created.tzinfo is None:
-            created = created.replace(tzinfo=timezone.utc)
-        return datetime.now(timezone.utc) > created + timedelta(hours=ttl)
+        return self._is_expired_at(created_at, ttl)
 
     def _retire_exact_authority_snapshot(
         self, cache_key: str, snapshot: Any | None
     ) -> bool:
         """Delete only the observed generation, never a replacement by key alone."""
 
-        expected = snapshot.expectation if snapshot is not None else None
-        try:
-            return self._cache_blob_store.delete(cache_key, expected=expected)
-        except CacheBlobLifecycleConflictError:
-            logger.debug("Cache generation changed before policy cleanup: %s", cache_key)
+        if snapshot is None:
             return False
+        report = self._remove_exact_candidates(
+            (self._candidate_from_snapshot(snapshot),)
+        )
+        return report.removed == 1
 
     def _cleanup_expired(self) -> None:
         """Apply TTL cleanup through exact BlobStore generation observations."""
@@ -284,7 +408,16 @@ class UnifiedCache:
         if self.config.metadata.store_cache_key_params:
             metadata["cache_key_params"] = self._canonical_cache_key_params(kwargs)
         self._cache_blob_store.handlers = self.handlers
-        self._cache_blob_store.put_entry(data, key=cache_key, metadata=metadata)
+        self._cache_blob_store.put_entry(
+            data,
+            key=cache_key,
+            metadata=metadata,
+            catalog_schema=_CACHE_POLICY_SCHEMA,
+            catalog_values={
+                "cache_namespace": _CACHE_NAMESPACE,
+                "cache_prefix": prefix,
+            },
+        )
         if not self._closed:
             try:
                 self._enforce_size_limit()
@@ -357,10 +490,14 @@ class UnifiedCache:
                 if snapshot is None:
                     result = CacheLookupResult(CacheOutcome.ABSENT)
                 else:
-                    entry = self._cache_entry(snapshot)
+                    entry = self._policy_entry_from_snapshot(snapshot)
                     if self._is_expired(cache_key, ttl_hours, entry):
-                        self._retire_exact_authority_snapshot(cache_key, snapshot)
-                        result = CacheLookupResult(CacheOutcome.EXPIRED)
+                        removal = self._remove_exact_candidates(
+                            (self._candidate_from_snapshot(snapshot),)
+                        )
+                        result = CacheLookupResult(
+                            CacheOutcome.EXPIRED, removal=removal
+                        )
                     else:
                         result = CacheLookupResult(CacheOutcome.HIT, value=snapshot.read())
         except (

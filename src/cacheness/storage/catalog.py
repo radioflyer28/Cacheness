@@ -661,10 +661,41 @@ class CatalogEntry:
     key: str
     generation: str
     values: Mapping[str, Any]
+    expectation: Any | None = None
+    byte_size: int | None = None
+    created_at: str | None = None
+    schema_id: str | None = None
+    schema_revision: int | None = None
 
     def __post_init__(self) -> None:
         if any(not isinstance(value, str) or not value for value in (self.key, self.generation)):
             raise CatalogValidationError("Catalog entry identity must be non-empty strings")
+        if self.expectation is not None and (
+            getattr(self.expectation, "generation", None) != self.generation
+        ):
+            raise CatalogValidationError(
+                "Catalog entry expectation must corroborate its generation"
+            )
+        if self.byte_size is not None and (
+            not isinstance(self.byte_size, int)
+            or isinstance(self.byte_size, bool)
+            or self.byte_size < 0
+        ):
+            raise CatalogValidationError("Catalog entry byte size is invalid")
+        if self.created_at is not None and (
+            not isinstance(self.created_at, str) or not self.created_at
+        ):
+            raise CatalogValidationError("Catalog entry creation time is invalid")
+        if self.schema_id is not None and (
+            not isinstance(self.schema_id, str) or not self.schema_id
+        ):
+            raise CatalogValidationError("Catalog entry schema identifier is invalid")
+        if self.schema_revision is not None and (
+            not isinstance(self.schema_revision, int)
+            or isinstance(self.schema_revision, bool)
+            or self.schema_revision < 1
+        ):
+            raise CatalogValidationError("Catalog entry schema revision is invalid")
         validated = validate_catalog_mapping(self.values, schema=None)
         object.__setattr__(self, "values", _freeze_value(validated))
 
@@ -757,7 +788,18 @@ def page_from_canonical_scan(
             for name in manifest.catalog_presence
         }
         if evaluate_predicates(query.predicates, stored_values, schema=schema):
-            entries.append(CatalogEntry(identity[0], identity[1], stored_values))
+            entries.append(
+                CatalogEntry(
+                    identity[0],
+                    identity[1],
+                    stored_values,
+                    expectation=snapshot.expectation,
+                    byte_size=manifest.byte_size,
+                    created_at=manifest.created_at,
+                    schema_id=manifest.catalog_schema_id,
+                    schema_revision=manifest.catalog_schema_revision,
+                )
+            )
             if len(entries) == limit:
                 stopped_for_limit = True
                 break

@@ -592,8 +592,8 @@ class BlobStore:
 
         The authority is the sole membership catalog.  It keyset-enumerates
         current descriptor bytes; this facade authenticates each descriptor
-        before applying native predicates, without creating a metadata mirror
-        or claiming an acceleration index.
+        before applying native predicates and exposes their exact expectations,
+        without creating a metadata mirror or claiming an acceleration index.
         """
         if not isinstance(query, CatalogQuery):
             # Keep the error type and input validation boundary in catalog.py.
