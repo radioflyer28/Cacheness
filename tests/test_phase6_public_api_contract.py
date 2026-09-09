@@ -301,6 +301,29 @@ def test_cache_policy_limits_have_no_competing_nested_configuration() -> None:
     assert policy.max_authoritative_bytes == 1
 
 
+@pytest.mark.parametrize(
+    ("config_type", "retired_name"),
+    (
+        (CacheStorageConfig, "create_cache_dir"),
+        (CacheStorageConfig, "temp_dir"),
+        (CacheMetadataConfig, "enable_metadata"),
+        (CacheMetadataConfig, "enable_memory_cache"),
+        (CacheMetadataConfig, "memory_cache_type"),
+        (CacheMetadataConfig, "memory_cache_maxsize"),
+        (CacheMetadataConfig, "memory_cache_ttl_seconds"),
+        (CacheMetadataConfig, "memory_cache_stats"),
+    ),
+)
+def test_runtime_inert_configuration_options_are_removed(
+    config_type: type, retired_name: str
+) -> None:
+    """The pre-production cutover rejects configuration with no runtime owner."""
+
+    assert retired_name not in inspect.signature(config_type).parameters
+    with pytest.raises(TypeError):
+        config_type(**{retired_name: object()})
+
+
 def test_explicit_version_dimensions_reject_unsupported_store_layouts() -> None:
     """Current records retain version facts and refuse implicit layout upgrades."""
 

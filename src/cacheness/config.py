@@ -39,8 +39,6 @@ class CacheStorageConfig:
 
     cache_dir: str = "./cache"
     verify_cache_integrity: bool = True
-    create_cache_dir: bool = True  # Automatically create cache directory if it doesn't exist
-    temp_dir: Optional[str] = None  # Temporary directory for atomic writes (None = use cache_dir/tmp)
 
     def __post_init__(self):
         """Validate storage configuration."""
@@ -54,36 +52,15 @@ class CacheStorageConfig:
 class CacheMetadataConfig:
     """Metadata observer settings stored alongside canonical BlobStore entries."""
 
-    enable_metadata: bool = True
     verify_cache_integrity: bool = True
     store_cache_key_params: bool = (
         False  # Store cache key parameters in metadata for querying - DISABLED by default for performance
     )
     enable_cache_stats: bool = True  # Track cache hit/miss statistics
-    
-    # Memory cache layer (sits between application and disk-persistent backends)
-    enable_memory_cache: bool = False  # Enable in-memory caching of disk-stored metadata entries
-    memory_cache_type: str = "lru"  # "lru", "lfu", "fifo", "rr" (random replacement)
-    memory_cache_maxsize: int = 1000  # Maximum number of metadata entries to cache in memory
-    memory_cache_ttl_seconds: float = 300  # 5 minutes TTL for memory-cached entries
-    memory_cache_stats: bool = False  # Enable cache hit/miss statistics for memory cache layer
 
     def __post_init__(self):
         """Validate metadata observer configuration."""
-
-        # Validate memory cache layer configuration
-        if self.memory_cache_type not in ["lru", "lfu", "fifo", "rr"]:
-            raise ValueError(f"Invalid memory_cache_type: {self.memory_cache_type}")
-            
-        if self.memory_cache_maxsize <= 0:
-            raise ValueError("memory_cache_maxsize must be positive")
-            
-        if self.memory_cache_ttl_seconds <= 0:
-            raise ValueError("memory_cache_ttl_seconds must be positive")
-
         logger.debug(f"Store cache_key_params: {self.store_cache_key_params}")
-        if self.memory_cache_type and self.enable_memory_cache:
-            logger.debug(f"Memory cache layer: {self.memory_cache_type} (maxsize={self.memory_cache_maxsize}, ttl={self.memory_cache_ttl_seconds}s)")
 
 
 @dataclass(frozen=True)
@@ -664,29 +641,6 @@ def validate_config(config: CacheConfig) -> List["ConfigValidationError"]:
                 f"contains invalid fields: {invalid_fields}",
                 config.security.custom_signed_fields
             ))
-    
-    # Validate memory cache configuration
-    valid_cache_types = {"lru", "lfu", "fifo", "rr"}
-    if config.metadata.memory_cache_type not in valid_cache_types:
-        errors.append(ConfigValidationError(
-            "metadata.memory_cache_type",
-            f"must be one of {valid_cache_types}",
-            config.metadata.memory_cache_type
-        ))
-    
-    if config.metadata.memory_cache_maxsize <= 0:
-        errors.append(ConfigValidationError(
-            "metadata.memory_cache_maxsize",
-            "must be positive",
-            config.metadata.memory_cache_maxsize
-        ))
-    
-    if config.metadata.memory_cache_ttl_seconds <= 0:
-        errors.append(ConfigValidationError(
-            "metadata.memory_cache_ttl_seconds",
-            "must be positive",
-            config.metadata.memory_cache_ttl_seconds
-        ))
     
     return errors
 

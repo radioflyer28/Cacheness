@@ -54,18 +54,18 @@ def test_invalid_nested_values_are_rejected_at_their_owner(factory) -> None:
         factory()
 
 
-def test_validate_config_reports_mutated_storage_and_metadata_errors() -> None:
+def test_validate_config_reports_mutated_storage_and_compression_errors() -> None:
     """Validation remains useful for configurations changed after construction."""
 
     config = CacheConfig(metadata=CacheMetadataConfig())
     config.storage.cache_dir = 42
-    config.metadata.memory_cache_maxsize = 0
+    config.compression.pickle_compression_level = 20
 
     errors = validate_config(config)
 
     assert {error.field for error in errors} >= {
         "storage.cache_dir",
-        "metadata.memory_cache_maxsize",
+        "compression.pickle_compression_level",
     }
     with pytest.raises(ValueError, match="storage.cache_dir"):
         validate_config_strict(config)
