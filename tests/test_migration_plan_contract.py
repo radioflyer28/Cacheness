@@ -9,9 +9,17 @@ from cacheness.storage.migration import (
     CompatibilityIdentity,
     CompatibilityMatrix,
     CompatibilityOutcome,
+    MigrationDisposition,
+    MigrationEntryAssessment,
+    MigrationPlan,
+    MigrationPlanKind,
+    MigrationPlanState,
+    MigrationReason,
     ReleaseWindow,
     VersionEdge,
+    render_migration_report,
 )
+from cacheness.storage.migration_authority import AuthorityIdentitySnapshot, AuthorityInventoryEntry
 
 
 def _identity(
@@ -95,3 +103,57 @@ def test_matrix_rejects_ambiguous_or_out_of_window_edges() -> None:
                 ),
             ),
         )
+
+
+def test_canonical_plan_round_trips_and_human_report_uses_the_same_model() -> None:
+    """Machine and human migration output retain one identity, count, and reason set."""
+    source_contract = _identity("release-1")
+    destination_contract = _identity("release-2", payload_version=2)
+    edge = VersionEdge(
+        source_release="release-1",
+        destination_release="release-2",
+        dimension=CompatibilityDimension.PAYLOAD,
+        source_value=source_contract.value_for(CompatibilityDimension.PAYLOAD),
+        destination_value=destination_contract.value_for(CompatibilityDimension.PAYLOAD),
+    )
+    compatibility = CompatibilityMatrix(
+        ReleaseWindow(current_release="release-2", immediately_previous_release="release-1"),
+        edges=(edge,),
+    ).classify(source_contract, destination_contract)
+    entry = AuthorityInventoryEntry(
+        key="entry-a",
+        generation="generation-a",
+        locator="generations/opaque-a",
+        manifest=b"{}",
+        payload_digest="a" * 64,
+        byte_size=7,
+    )
+    plan = MigrationPlan.create(
+        run_id="bounded-plan",
+        source_identity=AuthorityIdentitySnapshot("source-store", 4, "sqlite"),
+        destination_identity=AuthorityIdentitySnapshot("destination-store", 2, "sqlite"),
+        entries=(
+            MigrationEntryAssessment(
+                entry=entry,
+                disposition=MigrationDisposition.MIGRATABLE,
+                reason=MigrationReason.DIRECTED_EDGE,
+                catalog_values={"unrecognized_application_field": "preserved"},
+            ),
+        ),
+        release_window=ReleaseWindow("release-2", "release-1"),
+        compatibility=compatibility,
+    )
+
+    encoded = plan.to_canonical_bytes()
+    decoded = MigrationPlan.from_canonical_bytes(encoded)
+    report = render_migration_report(plan)
+
+    assert decoded.to_canonical_bytes() == encoded
+    assert plan.plan_kind is MigrationPlanKind.MIGRATION
+    assert plan.state is MigrationPlanState.PLANNED
+    assert plan.totals.total_entries == 1
+    assert plan.totals.total_bytes == 7
+    assert plan.stopped_worker_acknowledgement_required is True
+    assert plan.digest in report
+    assert "source-store" in report
+    assert "directed_edge" in report
