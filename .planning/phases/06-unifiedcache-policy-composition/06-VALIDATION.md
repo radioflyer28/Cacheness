@@ -48,6 +48,12 @@ per-task map before execution completes.
 | CACH-06 | Canonical positive exports and removed negative surface are both enforced | public contract | `uv run --frozen pytest tests/test_phase6_public_api_contract.py tests/test_phase6_decorator_contract.py -q -o log_cli=false` | ❌ W0 | ⬜ pending |
 | CACH-07 regression | SqlCache remains a separate import and behavioral subsystem | regression | `uv run --frozen pytest tests/test_sql_cache.py -q -o log_cli=false` | ✅ | ⬜ pending |
 
+### Fixed Retained Regression Evidence
+
+| Source criterion | Exact test node | Acceptance evidence | File exists | Status |
+|------------------|-----------------|---------------------|-------------|--------|
+| ROADMAP Phase 6 SC-06 — strict malformed direct projection observations still reject malformed evidence | `tests/test_catalog_projection.py::test_json_projection_rejects_incompatible_derived_documents` | `uv run --frozen pytest tests/test_catalog_projection.py::test_json_projection_rejects_incompatible_derived_documents -q -o log_cli=false` exits zero with the named test passing; the test writes `{"format_version": 999}` and requires `load_projection_checkpoint()` to raise `JsonProjectionError` matching `incompatible shape`, proving the document is not admitted as an observation. Record the actual outcome here during Plan 08 and leave this row open on failure or skip. | ✅ | ⬜ pending |
+
 ## Required Adversarial Cases
 
 - Two identical decorated calls returning `None` execute the function once and
@@ -64,6 +70,10 @@ per-task map before execution completes.
   returns the actual removal report.
 - Statistics/projection failure cannot authorize deletion, change a successful
   BlobStore receipt, or revoke a canonical commit.
+- The fixed node
+  `tests/test_catalog_projection.py::test_json_projection_rejects_incompatible_derived_documents`
+  rejects an incompatible derived document; Plan 08 records its actual pass/fail
+  evidence and cannot substitute a broader file-level run for this named node.
 - A close race preserves a committed write and reports the declared typed
   partial/retryable outcome.
 - Removed aliases, factories, and alternate decorators are absent and no hidden

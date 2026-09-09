@@ -363,7 +363,38 @@ Plans:
   5. Statistics use one documented aggregate/result model that separately identifies absent, expired, corrupt, conflict, and backend-error outcomes; legacy counter shapes are not a compatibility requirement.
   6. Preserve optional-export warnings and typed committed-partial errors for explicitly requested external metadata, including post-engine cache close. Canonical corruption is non-destructive; strict direct projection observations still reject malformed evidence. Cached-None policy uses explicit entry presence rather than recreating storage reads.
 
-**Plans**: TBD
+**Plans**: 8 plans
+**Wave 1**
+
+- [ ] 06-01: Presence-bearing lookup and immutable statistics tracer
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 06-02: Bounded exact removal and invalidation reports
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 06-03: Bounded resumable size enforcement
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [ ] 06-04: Explicit function-cache decorator policy
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [ ] 06-05: BlobStore topology composition and ownership
+
+**Wave 6** *(blocked on Wave 5 completion)*
+
+- [ ] 06-06: Canonical public API and configuration cutover
+
+**Wave 7** *(blocked on Wave 6 completion)*
+
+- [ ] 06-07: Canonical cache-policy documentation and examples
+
+**Wave 8** *(blocked on Wave 7 completion)*
+
+- [ ] 06-08: Fixed Phase 6 contract verifier and validation ledger
 
 ### Phase 7: Explicit Migration and Rebuild Cutover
 

@@ -138,7 +138,7 @@ Phase 6 should be planned as a policy-layer cutover, not as another storage rewr
 
 The central implementation rule is: policy decides *which canonical entry* should be read or removed, while BlobStore and the existing `AuthorityLifecycleEngine` remain the only code allowed to sequence payload plus authoritative-catalog state. BlobStore read snapshots already bind verified content to the entry generation, and delete already accepts an exact `EntryExpectation`; policy must retain and use that expectation rather than re-resolving by key. [VERIFIED: src/cacheness/storage/read_contract.py:87-114] [VERIFIED: src/cacheness/storage/blob_store.py:535-540] Statistics, external metadata, and convenience projections remain derived observers and cannot authorize cleanup.
 
-The only architectural gap that needs an explicit Wave 0 decision is bounded size enforcement. Current catalog pages are stably ordered by key/generation and expose catalog values, but `CatalogEntry` does not expose the signed manifest's intrinsic `created_at` and `byte_size` even though those facts exist in the authenticated manifest. [VERIFIED: src/cacheness/storage/catalog.py:657-704] [VERIFIED: src/cacheness/storage/manifest.py:173-250] Add the narrowest BlobStore catalog-view enhancement needed to return authenticated descriptor facts plus the exact expectation, then implement eviction as bounded/resumable maintenance. It must report incomplete work rather than claiming a global oldest-entry or size-limit guarantee that the authority cannot prove in one bounded pass. This enhancement stays inside the existing authority and does not create a second index, coordinator, queue, or lock layer.
+The size-enforcement contract is resolved as bounded/resumable maintenance. Current catalog pages are stably ordered by key/generation and expose catalog values, but `CatalogEntry` does not expose the signed manifest's intrinsic `created_at` and `byte_size` even though those facts exist in the authenticated manifest. [VERIFIED: src/cacheness/storage/catalog.py:657-704] [VERIFIED: src/cacheness/storage/manifest.py:173-250] Add the narrowest BlobStore catalog-view enhancement needed to return authenticated descriptor facts plus the exact expectation. A finite quiescent inventory must converge across explicit bounded resumes; conflicts or authority revision churn return typed incomplete/retryable results. This contract makes no universal contender-success, perpetual-churn completion, exact LRU, or global-oldest promise. The enhancement stays inside the existing authority and does not create a second index, coordinator, queue, or lock layer.
 
 **Primary recommendation:** Cut over to one explicit `UnifiedCache` whose presence-bearing results and structured removal reports drive all policy and decorator behavior, while every canonical read/write/delete/query remains a BlobStore operation over the shared lifecycle engine.
 
@@ -536,24 +536,18 @@ All six exact value names appear verbatim in the locked D-05 quote above. [VERIF
 | A2 | Use class names `CacheOutcome`, `CacheLookupResult`, and `CacheStatistics`. | Patterns / Code Examples | Low; exact names are explicitly delegated to implementation discretion. |
 | A3 | Use method names `lookup_function`, `store_function_result`, and `invalidate_function`. | Code Examples | Low; public/internal naming can change without changing the required semantics. |
 | A4 | Extend the BlobStore catalog view so a candidate carries authenticated intrinsic facts and an exact expectation. | Summary / Removal pattern | Medium; an equally narrow existing-authority API may satisfy the same need, but policy must not fabricate authority evidence. |
-| A5 | Model size enforcement as bounded/resumable maintenance that reports incomplete work until the configured invariant can be proven. | Summary / Pitfalls | High; the planner must reconcile the exact public size-limit promise with current catalog ordering before locking tasks. |
+| A5 | Model size enforcement as bounded/resumable maintenance that reports incomplete work until the configured invariant can be proven. | Summary / Pitfalls | Resolved: explicit resumes converge only for a finite quiescent inventory; conflicts or revision churn remain typed incomplete/retryable outcomes. |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **What exact V1 size-limit completion promise is public?**
-   - What we know: D-12 requires deterministic bounded selection and forbids derived projections/statistics from authorizing deletion; current pages are key/generation ordered and omit intrinsic signed size/time facts. [VERIFIED: .planning/phases/06-unifiedcache-policy-composition/06-CONTEXT.md:83-89] [VERIFIED: src/cacheness/storage/catalog.py:657-704]
-   - What's unclear: whether one `put()` must synchronously prove the global byte limit or may return/record bounded maintenance still pending.
-   - Recommendation: make enforcement bounded and resumable, include completion/continuation in the removal report, and do not claim global-oldest/LRU completion until authoritative traversal proves it. If a strict synchronous global guarantee is required, first extend the *existing* authority contract—never a derived counter or new coordinator.
+   - **Resolution:** Per D-12, size enforcement is bounded and resumable. One `put()` performs at most one bounded maintenance step and may return incomplete work. Repeated caller-driven resumes must eventually enforce the configured byte limit only when the authoritative inventory is finite and quiescent. A conflict, stale continuation, unavailable authoritative fact, or authority revision churn returns a typed incomplete/retryable result with continuation or restart guidance. The contract does not promise universal contender success, completion under perpetual churn, exact LRU, or global-oldest selection.
 
 2. **Does an injected BlobStore remain caller-owned?**
-   - What we know: construction may select or receive one BlobStore and the application owns explicit initialization/close. [VERIFIED: .planning/phases/06-unifiedcache-policy-composition/06-CONTEXT.md:35-38] [VERIFIED: .planning/phases/06-unifiedcache-policy-composition/06-CONTEXT.md:97-111]
-   - What's unclear: whether `UnifiedCache.close()` closes an injected store or only a store it constructed.
-   - Recommendation: adopt the established composition ownership model: constructed stores are cache-owned; injected stores are caller-owned unless the one canonical constructor documents transfer of ownership. Add tests for both paths and do not add an ambiguous boolean compatibility flag.
+   - **Resolution:** Per D-02 and D-14, an injected `BlobStore` remains caller-owned and `UnifiedCache.close()` does not close it. A `BlobStore` created by `UnifiedCache` from the supplied `StoreTopology` is cache-owned and is initialized/closed exactly once by the cache. Ownership follows constructor form; there is no ownership boolean or implicit transfer.
 
 3. **Which non-hit outcomes may the decorator recompute by default?**
-   - What we know: absent and expired are normal misses; corrupt may be a non-destructive miss; conflict/backend errors cannot be silently relabeled, and suppression must be explicit. [VERIFIED: .planning/phases/06-unifiedcache-policy-composition/06-CONTEXT.md:56-60]
-   - What's unclear: whether corruption recomputes by default or requires opt-in suppression.
-   - Recommendation: default recomputation only for `absent` and `expired`; require an explicit decorator policy to recompute after `corrupt`, `conflict`, or `backend_error`, while always recording the actual outcome.
+   - **Resolution:** Per D-07 and D-15, default decorator recomputation is exactly `absent` and `expired`. Recomputing after `corrupt`, `conflict`, or `backend_error` requires an explicit policy, and the original outcome plus typed cause remains recorded and inspectable.
 
 ## Environment Availability
 
@@ -670,7 +664,7 @@ OWASP ASVS 5.0.0 is the latest stable ASVS release listed by the official projec
 
 ### Tertiary (LOW confidence)
 
-- None. Proposed names and the unresolved size-enforcement completion model are isolated in the Assumptions Log.
+- None. Proposed names remain isolated in the Assumptions Log; the size-enforcement completion model is resolved above.
 
 ## Metadata
 
@@ -679,7 +673,7 @@ OWASP ASVS 5.0.0 is the latest stable ASVS release listed by the official projec
 - Standard stack: HIGH — no new package; current Python/storage/test contracts were inspected directly, and stdlib patterns were checked against official Python documentation.
 - Architecture: HIGH — locked CONTEXT/ADR decisions align with directly inspected BlobStore, catalog, lifecycle, and current cache seams.
 - Pitfalls: HIGH — each material pitfall is grounded in current source/tests or a locked concurrency/integrity rule.
-- Size-enforcement completion model: MEDIUM — the missing catalog facts are verified, but the exact public synchronous-versus-resumable promise remains a planning decision.
+- Size-enforcement completion model: HIGH — bounded explicit-resume completion for a finite quiescent inventory and typed incomplete/retryable behavior under conflicts or revision churn are fixed by the resolved planning contract.
 
 **Research date:** 2026-09-08
 **Valid until:** 2026-10-08 for stable in-repo contracts; re-check immediately if Phases 3–5 storage contracts change.
