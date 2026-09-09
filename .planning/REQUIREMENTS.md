@@ -35,7 +35,7 @@ Phase 3 completion below is scoped to the qualified initialized local SQLite/fil
 - [x] **CACH-03**: Every invalidation path, including TTL, eviction, predicate, decorator, single-key, and global clear, removes the complete stored entry through the storage lifecycle.
 - [ ] **CACH-04**: A cached `None` value remains distinguishable from a cache miss.
 - [ ] **CACH-05**: Cache statistics distinguish absent, expired, corrupt, conflict, and backend-error outcomes through one documented aggregate/result model; legacy counter shapes need not be preserved.
-- [ ] **CACH-06**: The milestone publishes one coherent cache import, constructor, configuration, decorator, and result surface over `BlobStore`. Pre-production aliases and overlapping constructors may be removed instead of routed through compatibility adapters; explicit initialization, optional-export warnings, and requested-external-metadata committed-partial errors remain required semantic contracts.
+- [x] **CACH-06**: The milestone publishes one coherent cache import, constructor, configuration, decorator, and result surface over `BlobStore`. Pre-production aliases and overlapping constructors may be removed instead of routed through compatibility adapters; explicit initialization, optional-export warnings, and requested-external-metadata committed-partial errors remain required semantic contracts.
 - [x] **CACH-07**: `SqlCache` remains a separate subsystem and retains representative import and behavioral regression coverage.
 
 ### Security and Integrity
@@ -125,7 +125,7 @@ topology.
 | CACH-03 | Phase 6 | Complete |
 | CACH-04 | Phase 6 | Pending |
 | CACH-05 | Phase 6 | Pending |
-| CACH-06 | Phase 6 | Pending |
+| CACH-06 | Phase 6 | Complete |
 | CACH-07 | Phase 1 | Complete |
 | SECU-01 | Phase 1 | Complete |
 | SECU-02 | Phase 1 | Complete |

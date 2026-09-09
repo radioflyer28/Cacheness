@@ -363,11 +363,11 @@ Plans:
   5. Statistics use one documented aggregate/result model that separately identifies absent, expired, corrupt, conflict, and backend-error outcomes; legacy counter shapes are not a compatibility requirement.
   6. Preserve optional-export warnings and typed committed-partial errors for explicitly requested external metadata, including post-engine cache close. Canonical corruption is non-destructive; strict direct projection observations still reject malformed evidence. Cached-None policy uses explicit entry presence rather than recreating storage reads.
 
-**Plans**: 2/8 plans executed
+**Plans**: 3/8 plans executed
 
 - [x] 06-01-PLAN.md
 - [x] 06-02-PLAN.md
-- [ ] 06-03-PLAN.md
+- [x] 06-03-PLAN.md
 - [ ] 06-04-PLAN.md
 - [ ] 06-05-PLAN.md
 - [ ] 06-06-PLAN.md
@@ -380,7 +380,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 06-02: Bounded exact removal and invalidation reports
+- [x] 06-02: Bounded exact removal and invalidation reports
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
@@ -446,7 +446,7 @@ Plans:
 | 3. Atomic Lifecycle and Recovery Engine | 24/24 | Complete — direct qualification | 2026-09-06 |
 | 4. Metadata Composition and Topology Contracts | 14/14 | Complete    | 2026-09-08 |
 | 5. Payload Backends and Supported Topology Qualification | 9/9 | Complete    | 2026-09-08 |
-| 6. UnifiedCache Policy Composition | 2/8 | In Progress|  |
+| 6. UnifiedCache Policy Composition | 3/8 | In Progress|  |
 | 7. Explicit Migration and Rebuild Cutover | 0/TBD | Not started | - |
 | 8. Production Gates and Performance Stabilization | 0/TBD | Not started | - |
 

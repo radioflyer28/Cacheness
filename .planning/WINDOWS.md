@@ -2,9 +2,9 @@
 schema_version: 1
 open_count: 3
 waived_count: 0
-fixed_count: 35
-total_count: 38
-last_updated: 2026-09-09T02:38:50.398Z
+fixed_count: 36
+total_count: 39
+last_updated: 2026-09-09T03:02:36.292Z
 ---
 
 # Broken Windows Ledger
@@ -53,6 +53,7 @@ last_updated: 2026-09-09T02:38:50.398Z
 | 36 | 05 | deviation | src/cacheness/storage/backends/postgresql_lifecycle_authority.py |  | Partial PostgreSQL authority layouts fail before initialization DDL | fixed |  | 2026-09-08T12:35:45.234Z | 2026-09-08T12:35:52.483Z |
 | 37 | 05 | deviation | src/cacheness/storage/backends/postgresql_lifecycle_authority.py |  | Caller-owned PostgreSQL pool leases receive transition failure on release | fixed |  | 2026-09-08T13:30:59.584Z | 2026-09-08T13:31:07.163Z |
 | 38 | 06 | unmet-truth | tests/test_unified_cache_lifecycle_authority.py |  | Legacy lifecycle helpers still invoke removed implicit cacheness(config) construction before removal-report assertions. | open |  | 2026-09-09T02:38:50.398Z |  |
+| 39 | 06 | deviation | tests/test_phase6_lookup_contract.py |  | Migrated direct Phase 6 callers to CachePutResult.receipt.key after the approved pre-production result cutover. | fixed |  | 2026-09-09T03:02:19.682Z | 2026-09-09T03:02:36.292Z |
 
 ````json
 [
@@ -511,6 +512,18 @@ last_updated: 2026-09-09T02:38:50.398Z
     "reason": "",
     "recorded_at": "2026-09-09T02:38:50.398Z",
     "resolved_at": null
+  },
+  {
+    "id": 39,
+    "kind": "deviation",
+    "phase": "06",
+    "file": "tests/test_phase6_lookup_contract.py",
+    "line": null,
+    "description": "Migrated direct Phase 6 callers to CachePutResult.receipt.key after the approved pre-production result cutover.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-09-09T03:02:19.682Z",
+    "resolved_at": "2026-09-09T03:02:36.292Z"
   }
 ]
 ````
