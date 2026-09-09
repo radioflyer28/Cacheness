@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 06
 current_phase_name: UnifiedCache Policy Composition
 status: executing
-stopped_at: Completed 06-01-PLAN.md
-last_updated: "2026-09-09T02:17:42.703Z"
+stopped_at: Completed 06-02-PLAN.md
+last_updated: "2026-09-09T02:39:04.164Z"
 last_activity: 2026-09-09
 last_activity_desc: Phase 06 execution started
-state_head: 12f8ed92bc03b57115604fb9f2fb37031d74ce35
+state_head: 47bf4037e6984e66b32e44415e284afd8066ec05
 progress:
   total_phases: 8
   completed_phases: 4
   total_plans: 78
-  completed_plans: 70
+  completed_plans: 71
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-09-06)
 ## Current Position
 
 Phase: 06 (UnifiedCache Policy Composition) — EXECUTING
-Plan: 2 of 8
+Plan: 3 of 8
 Status: Ready to execute
 Last activity: 2026-09-08 — Phase 06 execution started
 
@@ -153,6 +153,7 @@ Phase 03 rows in this historical table include superseded attempts and do not de
 | Phase 04 P12 | 40m | 2 tasks | 9 files |
 | Phase 04 P13 | 120m | 2 tasks | 8 files |
 | Phase 06 P01 | 11 min | 2 tasks | 4 files |
+| Phase 06 P02 | 13 min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -315,6 +316,8 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 04]: Ruff qualification inventory may add only individually clean declared Plan 04 paths; frozen existing findings and fingerprints remain unchanged.
 - [Phase 06]: Cache policy maps only declared BlobStore read failures to public outcomes and preserves the original typed cause.
 - [Phase 06]: CacheStatistics is a frozen derived observer over six outcomes and performs no catalog or lifecycle work.
+- [Phase 06]: Cache removal reports preserve exact-generation conflict and stale-cursor retryability without cache-side lifecycle coordination.
+- [Phase 06]: Cache policy catalog entries persist authenticated namespace/prefix facts and exact expectations.
 
 ### Pending Todos
 
@@ -344,6 +347,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-09T02:17:42.598Z
-Stopped at: Completed 06-01-PLAN.md
+Last session: 2026-09-09T02:39:04.058Z
+Stopped at: Completed 06-02-PLAN.md
 Resume file: None

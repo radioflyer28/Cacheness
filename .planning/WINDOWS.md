@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 2
+open_count: 3
 waived_count: 0
 fixed_count: 35
-total_count: 37
-last_updated: 2026-09-08T13:31:07.163Z
+total_count: 38
+last_updated: 2026-09-09T02:38:50.398Z
 ---
 
 # Broken Windows Ledger
@@ -52,6 +52,7 @@ last_updated: 2026-09-08T13:31:07.163Z
 | 35 | 05 | deviation | src/cacheness/storage/backends/postgresql_lifecycle_authority.py |  | Fresh lineage sentinel remapping preserves initial absent create CAS | fixed |  | 2026-09-08T12:33:24.402Z | 2026-09-08T12:33:47.339Z |
 | 36 | 05 | deviation | src/cacheness/storage/backends/postgresql_lifecycle_authority.py |  | Partial PostgreSQL authority layouts fail before initialization DDL | fixed |  | 2026-09-08T12:35:45.234Z | 2026-09-08T12:35:52.483Z |
 | 37 | 05 | deviation | src/cacheness/storage/backends/postgresql_lifecycle_authority.py |  | Caller-owned PostgreSQL pool leases receive transition failure on release | fixed |  | 2026-09-08T13:30:59.584Z | 2026-09-08T13:31:07.163Z |
+| 38 | 06 | unmet-truth | tests/test_unified_cache_lifecycle_authority.py |  | Legacy lifecycle helpers still invoke removed implicit cacheness(config) construction before removal-report assertions. | open |  | 2026-09-09T02:38:50.398Z |  |
 
 ````json
 [
@@ -498,6 +499,18 @@ last_updated: 2026-09-08T13:31:07.163Z
     "reason": "",
     "recorded_at": "2026-09-08T13:30:59.584Z",
     "resolved_at": "2026-09-08T13:31:07.163Z"
+  },
+  {
+    "id": 38,
+    "kind": "unmet-truth",
+    "phase": "06",
+    "file": "tests/test_unified_cache_lifecycle_authority.py",
+    "line": null,
+    "description": "Legacy lifecycle helpers still invoke removed implicit cacheness(config) construction before removal-report assertions.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-09T02:38:50.398Z",
+    "resolved_at": null
   }
 ]
 ````
