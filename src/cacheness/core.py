@@ -784,6 +784,17 @@ class UnifiedCache:
     def maintain_size(self) -> CacheMaintenanceResult:
         """Start one bounded size-maintenance step from canonical catalog order."""
 
+        return self._start_size_maintenance()
+
+    def _start_size_maintenance(self) -> CacheMaintenanceResult:
+        """Run one maintenance step without changing a completed put receipt.
+
+        This private path is used only after ``BlobStore.put_entry`` has
+        committed.  It intentionally bypasses the facade close guard so the
+        existing maintenance result boundary can report a concurrent close as
+        typed, retryable incomplete work rather than hiding the receipt.
+        """
+
         state = self._seal_maintenance_state(
             phase=CacheMaintenancePhase.INVENTORY,
             authority_revision=None,
@@ -834,7 +845,7 @@ class UnifiedCache:
             catalog_schema=_CACHE_POLICY_SCHEMA,
             catalog_values=catalog_values,
         )
-        maintenance = self.maintain_size()
+        maintenance = self._start_size_maintenance()
         return CachePutResult(receipt=receipt, maintenance=maintenance)
 
     @_clear_coordinated

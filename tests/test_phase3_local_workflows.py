@@ -7,7 +7,7 @@ import time
 import pytest
 
 from cacheness import CacheConfig
-from cacheness.cache_policy import CacheOutcome
+from cacheness.cache_policy import CacheOutcome, CachePutResult
 from cacheness.config import CacheStorageConfig, LifecycleLimits
 from cacheness.core import UnifiedCache
 from cacheness.error_handling import (
@@ -233,8 +233,14 @@ def test_close_after_commit_has_declared_derived_outcome(tmp_path, monkeypatch):
         return receipt
 
     monkeypatch.setattr(cache._cache_blob_store, "put_entry", commit_then_close)
-    with pytest.raises(CacheBlobStoreClosedError):
-        cache.put("committed", identity="close")
+    result = cache.put("committed", identity="close")
+
+    assert isinstance(result, CachePutResult)
+    assert result.receipt.key
+    assert result.maintenance.complete is False
+    assert result.maintenance.retryable is True
+    assert isinstance(result.maintenance.cause, CacheBlobStoreClosedError)
+
     reopened = UnifiedCache(config, store=_cache_topology(tmp_path))
     reopened.initialize()
     try:
