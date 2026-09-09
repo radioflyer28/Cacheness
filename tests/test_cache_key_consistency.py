@@ -10,18 +10,32 @@ the same cache key, maximizing cache hit reliability.
 import tempfile
 import numpy as np
 import pytest
+from importlib.util import find_spec
 from pathlib import Path
 from datetime import datetime, timezone
 from dataclasses import dataclass
 
-try:
-    import pandas as pd
-    PANDAS_AVAILABLE = True
-except ImportError:
-    PANDAS_AVAILABLE = False
-
-from cacheness import cacheness, cached, CacheConfig
+from cacheness import CacheConfig, cached
+from cacheness.core import UnifiedCache
 from cacheness.serialization import create_unified_cache_key
+from cacheness.storage.composition import BackendRef, StoreTopology
+
+
+PANDAS_AVAILABLE = find_spec("pandas") is not None
+
+
+def _memory_cache(cache_dir) -> UnifiedCache:
+    """Create one initialized explicit cache for decorator-key tests."""
+
+    cache = UnifiedCache(
+        CacheConfig(cache_dir=cache_dir),
+        store=StoreTopology(
+            payload=BackendRef(name="memory"),
+            authority=BackendRef(name="memory"),
+        ),
+    )
+    cache.initialize()
+    return cache
 
 
 @dataclass
@@ -211,8 +225,6 @@ class TestCacheKeyConsistency:
         str1_nfc = unicodedata.normalize('NFC', str1)
         str2_nfc = unicodedata.normalize('NFC', str2)
         
-        key1 = create_unified_cache_key({"text": str1})
-        key2 = create_unified_cache_key({"text": str2})
         key1_nfc = create_unified_cache_key({"text": str1_nfc})
         key2_nfc = create_unified_cache_key({"text": str2_nfc})
         
@@ -223,11 +235,11 @@ class TestCacheKeyConsistency:
         """Test that decorated functions produce consistent cache keys for equivalent calls."""
         with tempfile.TemporaryDirectory() as temp_dir:
             config = CacheConfig(cache_dir=temp_dir)
-            cache = cacheness(config)
+            cache = _memory_cache(config.cache_dir)
 
             call_count = 0
 
-            @cached(cache_instance=cache)
+            @cached(cache=cache)
             def test_function(a, b, c=10):
                 nonlocal call_count
                 call_count += 1
@@ -243,18 +255,7 @@ class TestCacheKeyConsistency:
             # All should return same result
             assert result1 == result2 == result3 == result4 == 13
             
-            # All should hit cache after first call (currently FAILS due to inconsistent keys)
-            # Note: This is the cache key consistency issue we need to fix
-            expected_calls = 1  # Should only call function once if keys are consistent
-            actual_calls = call_count
-            
-            if actual_calls != expected_calls:
-                print(f"Cache key consistency issue: function called {actual_calls} times instead of {expected_calls}")
-                print("This indicates that logically equivalent function calls are producing different cache keys")
-            
-            # For now, we'll document this as a known issue rather than asserting
-            # TODO: Fix cache key generation to handle positional vs keyword parameter consistency
-            # assert call_count == 1  # This should pass once the issue is fixed
+            assert call_count == 1
             
             cache.close()
 
@@ -265,8 +266,8 @@ class TestCacheKeyConsistency:
             
             config1 = CacheConfig(cache_dir=temp_dir1)
             config2 = CacheConfig(cache_dir=temp_dir2)
-            cache1 = cacheness(config1)
-            cache2 = cacheness(config2)
+            cache1 = _memory_cache(config1.cache_dir)
+            cache2 = _memory_cache(config2.cache_dir)
             
             params = {"test": "value", "number": 42, "array": np.array([1, 2, 3])}
             
