@@ -30,6 +30,7 @@ from cacheness import (
     cached,
 )
 from cacheness.config import (
+    CacheMetadataConfig,
     CacheStorageConfig,
     load_config_from_json,
     load_config_from_yaml,
@@ -282,6 +283,22 @@ def test_removed_cache_compatibility_methods_and_flat_config_are_absent() -> Non
 
     with pytest.raises(TypeError):
         CacheConfig(cache_dir="deprecated")
+
+
+def test_cache_policy_limits_have_no_competing_nested_configuration() -> None:
+    """TTL and size limits are accepted only by the policy configuration."""
+
+    assert "max_cache_size_mb" not in inspect.signature(CacheStorageConfig).parameters
+    assert "default_ttl_hours" not in inspect.signature(CacheMetadataConfig).parameters
+
+    with pytest.raises(TypeError):
+        CacheStorageConfig(max_cache_size_mb=1)
+    with pytest.raises(TypeError):
+        CacheMetadataConfig(default_ttl_hours=1)
+
+    policy = CachePolicyConfig(default_ttl_hours=1, max_authoritative_bytes=1)
+    assert policy.default_ttl_hours == 1
+    assert policy.max_authoritative_bytes == 1
 
 
 def test_explicit_version_dimensions_reject_unsupported_store_layouts() -> None:

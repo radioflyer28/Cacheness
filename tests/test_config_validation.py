@@ -13,6 +13,8 @@ from pathlib import Path
 from cacheness.config import (
     CacheConfig,
     CacheBlobConfig,
+    CacheMetadataConfig,
+    CacheStorageConfig,
     LifecycleLimits,
     ConfigValidationError,
     validate_config,
@@ -207,21 +209,17 @@ class TestValidateConfig:
         assert errors[0].field == "storage.cache_dir"
         assert "must be a string" in errors[0].message
     
-    def test_invalid_max_cache_size(self):
-        """Test validation of max_cache_size_mb."""
-        config = CacheConfig()
-        config.storage.max_cache_size_mb = -100
-        
-        errors = validate_config(config)
-        assert any(e.field == "storage.max_cache_size_mb" for e in errors)
+    def test_retired_storage_size_setting_is_rejected(self):
+        """Size limits belong to CachePolicyConfig, not storage configuration."""
+
+        with pytest.raises(TypeError):
+            CacheStorageConfig(max_cache_size_mb=100)
     
-    def test_invalid_default_ttl(self):
-        """Test validation of default_ttl_hours."""
-        config = CacheConfig()
-        config.metadata.default_ttl_hours = -5
-        
-        errors = validate_config(config)
-        assert any(e.field == "metadata.default_ttl_hours" for e in errors)
+    def test_retired_metadata_ttl_setting_is_rejected(self):
+        """TTL belongs to CachePolicyConfig, not metadata observers."""
+
+        with pytest.raises(TypeError):
+            CacheMetadataConfig(default_ttl_hours=5)
     
     def test_invalid_blob_backend_options_type(self):
         """Test validation of blob_backend_options type."""
@@ -282,8 +280,8 @@ class TestValidateConfig:
     def test_multiple_errors(self):
         """Test that multiple errors are collected."""
         config = CacheConfig()
-        config.storage.max_cache_size_mb = -100
-        config.metadata.default_ttl_hours = -5
+        config.storage.cache_dir = 123
+        config.metadata.memory_cache_type = "invalid"
         config.compression.pickle_compression_level = 100
         
         errors = validate_config(config)
@@ -300,7 +298,7 @@ class TestValidateConfigStrict:
     def test_invalid_config_raises_valueerror(self):
         """Test that invalid config raises ValueError."""
         config = CacheConfig()
-        config.storage.max_cache_size_mb = -100
+        config.storage.cache_dir = 123
         
         with pytest.raises(ValueError, match="Invalid configuration"):
             validate_config_strict(config)
@@ -308,12 +306,12 @@ class TestValidateConfigStrict:
     def test_error_message_contains_details(self):
         """Test that error message contains field details."""
         config = CacheConfig()
-        config.storage.max_cache_size_mb = -100
+        config.storage.cache_dir = 123
         
         with pytest.raises(ValueError) as exc_info:
             validate_config_strict(config)
         
-        assert "storage.max_cache_size_mb" in str(exc_info.value)
+        assert "storage.cache_dir" in str(exc_info.value)
 
 
 class TestConfigValidationError:

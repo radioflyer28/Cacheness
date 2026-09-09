@@ -38,37 +38,28 @@ class CacheStorageConfig:
     """Configuration for cache storage and directory management."""
 
     cache_dir: str = "./cache"
-    max_cache_size_mb: Optional[int] = 2000  # Match test expectation
-    cleanup_on_init: bool = True  # Match test expectation
     verify_cache_integrity: bool = True
     create_cache_dir: bool = True  # Automatically create cache directory if it doesn't exist
     temp_dir: Optional[str] = None  # Temporary directory for atomic writes (None = use cache_dir/tmp)
 
     def __post_init__(self):
         """Validate storage configuration."""
-        if self.max_cache_size_mb is not None and self.max_cache_size_mb <= 0:
-            raise ValueError("max_cache_size_mb must be positive")
-
         # Preserve the authored path for configuration serialization. Filesystem
         # boundaries resolve it when performing runtime storage operations.
 
-        logger.debug(
-            f"Storage configured: dir={self.cache_dir}, max_size={self.max_cache_size_mb}MB"
-        )
+        logger.debug(f"Storage configured: dir={self.cache_dir}")
 
 
 @dataclass
 class CacheMetadataConfig:
-    """Cache-policy settings stored alongside canonical BlobStore entries."""
+    """Metadata observer settings stored alongside canonical BlobStore entries."""
 
     enable_metadata: bool = True
-    default_ttl_hours: float = 24
     verify_cache_integrity: bool = True
     store_cache_key_params: bool = (
         False  # Store cache key parameters in metadata for querying - DISABLED by default for performance
     )
     enable_cache_stats: bool = True  # Track cache hit/miss statistics
-    auto_cleanup_expired: bool = True  # Automatically clean up expired entries
     
     # Memory cache layer (sits between application and disk-persistent backends)
     enable_memory_cache: bool = False  # Enable in-memory caching of disk-stored metadata entries
@@ -78,11 +69,8 @@ class CacheMetadataConfig:
     memory_cache_stats: bool = False  # Enable cache hit/miss statistics for memory cache layer
 
     def __post_init__(self):
-        """Validate cache-policy configuration."""
-        
-        if self.default_ttl_hours is not None and self.default_ttl_hours <= 0:
-            raise ValueError("default_ttl_hours must be positive")
-        
+        """Validate metadata observer configuration."""
+
         # Validate memory cache layer configuration
         if self.memory_cache_type not in ["lru", "lfu", "fifo", "rr"]:
             raise ValueError(f"Invalid memory_cache_type: {self.memory_cache_type}")
@@ -595,31 +583,6 @@ def validate_config(config: CacheConfig) -> List["ConfigValidationError"]:
             "storage.cache_dir", "must be a string or Path", config.storage.cache_dir
         ))
     
-    if config.storage.max_cache_size_mb is not None:
-        if not isinstance(config.storage.max_cache_size_mb, (int, float)):
-            errors.append(ConfigValidationError(
-                "storage.max_cache_size_mb", "must be a number or None",
-                config.storage.max_cache_size_mb
-            ))
-        elif config.storage.max_cache_size_mb <= 0:
-            errors.append(ConfigValidationError(
-                "storage.max_cache_size_mb", "must be positive",
-                config.storage.max_cache_size_mb
-            ))
-    
-    # Validate cache-policy configuration
-    if config.metadata.default_ttl_hours is not None:
-        if not isinstance(config.metadata.default_ttl_hours, (int, float)):
-            errors.append(ConfigValidationError(
-                "metadata.default_ttl_hours", "must be a number or None",
-                config.metadata.default_ttl_hours
-            ))
-        elif config.metadata.default_ttl_hours <= 0:
-            errors.append(ConfigValidationError(
-                "metadata.default_ttl_hours", "must be positive",
-                config.metadata.default_ttl_hours
-            ))
-
     if not isinstance(config.policy, CachePolicyConfig):
         errors.append(ConfigValidationError("policy", "must be a CachePolicyConfig"))
     else:
