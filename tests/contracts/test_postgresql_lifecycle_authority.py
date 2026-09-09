@@ -10,6 +10,7 @@ import pytest
 
 from cacheness.error_handling import (
     CacheBlobLifecycleConflictError,
+    CacheBlobLifecycleTimeoutError,
     CacheBlobMigrationRequiredError,
 )
 from cacheness.storage.lifecycle_authority import (
@@ -679,6 +680,104 @@ def test_inventory_attribution_uses_one_snapshot_consistent_bounded_query() -> N
     assert params == (list(locators), 11, list(locators), 13, list(locators))
     assert factory.connections[0].transaction_count == 1
     assert factory.connections[1].transaction_count == 1
+
+
+def test_inventory_pages_raw_rows_at_one_postgresql_revision_without_live_claims() -> None:
+    """Deterministic DB-API coverage only; Phase 8 owns live PostgreSQL and AWS S3 proof."""
+    from cacheness.storage.backends.postgresql_lifecycle_authority import (
+        POSTGRESQL_AUTHORITY_CAPABILITY,
+        POSTGRESQL_AUTHORITY_SCHEMA_VERSION,
+        PostgresqlLifecycleAuthority,
+    )
+
+    first_manifest = b"first-opaque-manifest"
+    second_manifest = b"second-opaque-manifest"
+    factory = _Factory(
+        scripts=[
+            [
+                (
+                    POSTGRESQL_AUTHORITY_SCHEMA_VERSION,
+                    "remote-store",
+                    POSTGRESQL_AUTHORITY_CAPABILITY,
+                    7,
+                ),
+                [
+                    (
+                        "entry-a",
+                        "generation-a",
+                        "generations/a.native",
+                        first_manifest,
+                        hashlib.sha256(first_manifest).hexdigest(),
+                        1,
+                        7,
+                    ),
+                    (
+                        "entry-b",
+                        "generation-b",
+                        "generations/b.native",
+                        second_manifest,
+                        hashlib.sha256(second_manifest).hexdigest(),
+                        2,
+                        7,
+                    ),
+                ],
+            ],
+            [
+                (
+                    POSTGRESQL_AUTHORITY_SCHEMA_VERSION,
+                    "remote-store",
+                    POSTGRESQL_AUTHORITY_CAPABILITY,
+                    8,
+                ),
+            ],
+        ]
+    )
+    authority = PostgresqlLifecycleAuthority(factory, schema="phase5_authority")
+
+    page = authority.inventory_page(limit=1, work_cap=1024)
+
+    assert page.identity.authority_kind == "postgresql"
+    assert page.identity.capability == POSTGRESQL_AUTHORITY_CAPABILITY
+    assert page.identity.schema_version == POSTGRESQL_AUTHORITY_SCHEMA_VERSION
+    assert tuple(entry.key for entry in page.entries) == ("entry-a",)
+    assert page.entries[0].manifest == first_manifest
+    assert page.exhausted is False
+    assert page.next_cursor is not None
+
+    with pytest.raises(CacheBlobLifecycleConflictError, match="reinspection"):
+        authority.inventory_page(cursor=page.next_cursor, limit=1, work_cap=1024)
+
+    page_query, page_params = factory.connections[0].executions[-1]
+    assert "order by key, generation" in _query_text(page_query)
+    assert page_params == (2,)
+
+
+@pytest.mark.parametrize("sqlstate", ("40001", "40P01", "55P03", "57014"))
+def test_inventory_preserves_retryable_postgresql_progress_causes(sqlstate: str) -> None:
+    """Inventory maps declared progress outcomes without skipping a failed row."""
+    from cacheness.storage.backends.postgresql_lifecycle_authority import (
+        PostgresqlLifecycleAuthority,
+    )
+
+    class DriverFailure(Exception):
+        pass
+
+    failure = DriverFailure("deterministic inventory failure")
+    failure.sqlstate = sqlstate
+    authority = PostgresqlLifecycleAuthority(
+        _Factory(scripts=[[failure]]), schema="phase5_authority"
+    )
+
+    with pytest.raises(CacheBlobLifecycleTimeoutError) as raised:
+        authority.inventory_page(limit=1, work_cap=1024)
+
+    assert raised.value.__cause__ is failure
+    assert raised.value.context["progress_outcome"] in {
+        "serialization",
+        "deadlock",
+        "lock_timeout",
+        "statement_timeout",
+    }
 
 
 def test_reconciliation_cursor_does_not_skip_unemitted_debt_rows() -> None:
