@@ -135,3 +135,24 @@ def test_document_checks_reject_inflated_lifecycle_guarantees() -> None:
         "cache contract turns benchmark into runtime correctness deadline",
     )
     assert verifier.audit_contract_text("Cache policy is topology-specific.") == ()
+
+
+def test_main_renders_a_failed_strict_projection_check_without_a_false_pass(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The human-readable strict-projection status uses its execution label."""
+
+    verifier = _load_verifier()
+    failure = f"{verifier.STRICT_PROJECTION_LABEL}: pytest exited 1"
+    monkeypatch.setattr(
+        verifier,
+        "verify_repository",
+        lambda _root: (False, (failure,)),
+    )
+
+    exit_code = verifier.main(["--repo-root", str(REPOSITORY_ROOT)])
+    output = capsys.readouterr()
+
+    assert exit_code == 1
+    assert f"{verifier.STRICT_PROJECTION_LABEL}: see diagnostics" in output.out
+    assert f"{verifier.STRICT_PROJECTION_LABEL}: PASS" not in output.out

@@ -22,6 +22,7 @@ import sys
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 PYTEST_TIMEOUT_SECONDS = 300
 REMOTE_EVIDENCE_LABEL = "mocked-candidate; BACK-05 remains Phase 8"
+STRICT_PROJECTION_LABEL = "SC-06 strict projection rejection"
 
 # This is the complete Phase 6 behavioral manifest.  Keep the incompatible
 # projection node exact: a file-level test invocation is not a substitute for
@@ -370,7 +371,7 @@ def verify_repository(root: Path) -> tuple[bool, tuple[str, ...]]:
             "tests/test_catalog_projection.py::"
             "test_json_projection_rejects_incompatible_derived_documents",
         ),
-        label="SC-06 strict incompatible projection rejection",
+        label=STRICT_PROJECTION_LABEL,
     )
     if not passed:
         errors.append(evidence)
@@ -397,10 +398,10 @@ def main(argv: list[str] | None = None) -> int:
         regression_passed = not any(error.startswith(f"{regression}:") for error in errors)
         print(f"{regression}: {'PASS' if regression_passed else 'see diagnostics'}")
     projection_passed = not any(
-        error.startswith("SC-06 strict projection rejection:") for error in errors
+        error.startswith(f"{STRICT_PROJECTION_LABEL}:") for error in errors
     )
     print(
-        "SC-06 strict projection rejection: "
+        f"{STRICT_PROJECTION_LABEL}: "
         + ("PASS" if projection_passed else "see diagnostics")
     )
     print(f"Remote evidence: {REMOTE_EVIDENCE_LABEL}")
