@@ -17,17 +17,16 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from .cache_policy import CacheLookupResult, CacheOutcome
 from .config import CacheConfig, _DEFAULT_TTL, create_cache_config
 from .error_handling import (
-    CacheBlobIntegrityError,
     CacheBlobLifecycleConflictError,
     CacheBlobStoreClosedError,
-    CacheUnsafePathError,
 )
 from .handlers import HandlerRegistry
 from .serialization import create_unified_cache_key
 from .storage.blob_store import BlobStore
-from .storage.composition import BackendRef, StoreTopology
+from .storage.composition import StoreTopology
 from .storage.path_security import encode_physical_name
 
 
@@ -70,52 +69,36 @@ class UnifiedCache:
     use this facade for policy only.
     """
 
-    def __init__(self, config: Optional[CacheConfig] = None) -> None:
-        self.config = config or CacheConfig()
+    def __init__(
+        self, config: CacheConfig, *, store: BlobStore | StoreTopology
+    ) -> None:
+        """Compose one caller-selected store for this cache policy instance."""
+
+        if not isinstance(config, CacheConfig):
+            raise TypeError("config must be a CacheConfig")
+        self.config = config
         self.cache_dir = Path(self.config.storage.cache_dir)
         self.handlers = HandlerRegistry(self.config)
         self._closed = False
         self._policy_stats = {"cache_hits": 0, "cache_misses": 0}
-        self._init_lifecycle_state()
-        self._cache_blob_store.lifecycle_authority.preflight_mutation()
-        if self.config.storage.cleanup_on_init:
-            self._cleanup_expired()
+        self._owns_store = isinstance(store, StoreTopology)
+        if isinstance(store, BlobStore):
+            self.store = store
+        elif isinstance(store, StoreTopology):
+            root = self.cache_dir / ".cacheness" / "blobstore"
+            self.store = BlobStore(store, cache_dir=root, config=self.config)
+        else:
+            raise TypeError("store must be a BlobStore or StoreTopology")
+        self._cache_blob_store = self.store
+        self._cache_blob_store.handlers = self.handlers
+        self.actual_backend = "-".join(
+            self._cache_blob_store.topology.qualified_profile.pair
+        )
         logger.info(
             "Unified cache initialized at %s using BlobStore topology %s",
             self.cache_dir,
             self.actual_backend,
         )
-
-    def _init_lifecycle_state(self) -> None:
-        """Compose the only storage engine used by this cache instance."""
-
-        root = self.cache_dir / ".cacheness" / "blobstore"
-        backend = self.config.blob.blob_backend
-        if backend == "memory":
-            topology = StoreTopology(
-                payload=BackendRef(name="memory"),
-                authority=BackendRef(name="memory"),
-            )
-            self.actual_backend = "memory"
-        elif backend == "filesystem":
-            topology = StoreTopology(
-                payload=BackendRef(name="filesystem", options={"base_dir": root}),
-                authority=BackendRef(
-                    name="sqlite",
-                    options={
-                        "root": root,
-                        "lifecycle_limits": self.config.lifecycle_limits,
-                    },
-                ),
-            )
-            self.actual_backend = "sqlite-local"
-        else:
-            raise ValueError(
-                "UnifiedCache supports only the memory and filesystem BlobStore "
-                "topologies"
-            )
-        self._cache_blob_store = BlobStore(topology, cache_dir=root, config=self.config)
-        self._cache_blob_store.handlers = self.handlers
 
     def initialize(self) -> None:
         """Initialize the internal store before sharing this cache with workers."""
@@ -310,38 +293,31 @@ class UnifiedCache:
             self._policy_stats["cache_hits"] += 1
 
     @_clear_read_coordinated
-    def get(
+    def lookup(
         self,
         cache_key: Optional[str] = None,
         ttl_hours: object = _DEFAULT_TTL,
         prefix: str = "",
         **kwargs: Any,
-    ) -> Optional[Any]:
-        """Read a non-expired authenticated entry, or return ``None`` on a miss."""
+    ) -> CacheLookupResult:
+        """Observe one BlobStore snapshot and return its policy outcome."""
 
         del prefix  # Public policy identity is not a physical path prefix.
         if cache_key is None:
             cache_key = self._create_cache_key(kwargs)
         self._cache_blob_store.handlers = self.handlers
-        try:
-            with self._cache_blob_store.open_entry(cache_key) as snapshot:
-                if snapshot is None:
-                    self._record_cache_miss()
-                    return None
-                entry = self._cache_entry(snapshot)
-                if self._is_expired(cache_key, ttl_hours, entry):
-                    self._retire_exact_authority_snapshot(cache_key, snapshot)
-                    self._record_cache_miss()
-                    return None
-                data = snapshot.read()
-        except CacheUnsafePathError:
-            raise
-        except CacheBlobIntegrityError as error:
-            logger.warning("Cache entry failed BlobStore integrity validation: %s", error)
-            self._record_cache_miss()
-            return None
+        with self._cache_blob_store.open_entry(cache_key) as snapshot:
+            if snapshot is None:
+                self._record_cache_miss()
+                return CacheLookupResult(CacheOutcome.ABSENT)
+            entry = self._cache_entry(snapshot)
+            if self._is_expired(cache_key, ttl_hours, entry):
+                self._retire_exact_authority_snapshot(cache_key, snapshot)
+                self._record_cache_miss()
+                return CacheLookupResult(CacheOutcome.EXPIRED)
+            data = snapshot.read()
         self._record_successful_read()
-        return data
+        return CacheLookupResult(CacheOutcome.HIT, value=data)
 
     @_clear_coordinated
     def invalidate(
@@ -414,7 +390,8 @@ class UnifiedCache:
         if self._closed:
             return
         self._closed = True
-        self._cache_blob_store.close()
+        if self._owns_store:
+            self._cache_blob_store.close()
 
     def __enter__(self) -> "UnifiedCache":
         return self
