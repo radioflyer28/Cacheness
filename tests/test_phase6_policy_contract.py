@@ -17,8 +17,9 @@ from cacheness.core import _CACHE_NAMESPACE, _CACHE_POLICY_SCHEMA, UnifiedCache
 from cacheness.error_handling import (
     CacheBlobBackendError,
     CacheBlobLifecycleConflictError,
+    CacheBlobStoreClosedError,
 )
-from cacheness.storage import BlobReceipt
+from cacheness.storage import BlobReceipt, BlobStore
 from cacheness.storage.catalog import CatalogQuery
 from cacheness.storage.composition import BackendRef, StoreTopology
 
@@ -261,6 +262,45 @@ def test_put_preserves_receipt_when_maintenance_reports_backend_failure(
         assert isinstance(result.maintenance.cause, CacheBlobBackendError)
     finally:
         cache.close()
+
+
+def test_put_reports_facade_close_after_commit_for_an_injected_store(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A caller-owned store remains usable after the facade closes post-commit."""
+
+    config = CacheConfig(
+        storage=CacheStorageConfig(cache_dir=tmp_path / "cache"),
+        policy=CachePolicyConfig(
+            max_authoritative_bytes=0,
+            catalog_page_size=1,
+            maintenance_work_cap=1,
+        ),
+    )
+    store = BlobStore(
+        _memory_topology(), cache_dir=tmp_path / "store", config=config
+    )
+    store.initialize()
+    cache = UnifiedCache(config, store=store)
+    original_put_entry = store.put_entry
+
+    def commit_then_close(*args, **kwargs):
+        receipt = original_put_entry(*args, **kwargs)
+        cache.close()
+        return receipt
+
+    monkeypatch.setattr(store, "put_entry", commit_then_close)
+    try:
+        value = {"payload": "committed-before-close"}
+        result = cache.put(value, request_id="injected-close-after-commit")
+
+        assert isinstance(result.receipt, BlobReceipt)
+        assert result.maintenance.complete is False
+        assert result.maintenance.retryable is True
+        assert isinstance(result.maintenance.cause, CacheBlobStoreClosedError)
+        assert store.get(result.receipt.key) == value
+    finally:
+        store.close()
 
 
 def test_failed_put_skips_size_maintenance(

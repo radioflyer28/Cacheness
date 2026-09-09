@@ -809,11 +809,15 @@ class UnifiedCache:
         """Run one maintenance step without changing a completed put receipt.
 
         This private path is used only after ``BlobStore.put_entry`` has
-        committed.  It intentionally bypasses the facade close guard so the
-        existing maintenance result boundary can report a concurrent close as
-        typed, retryable incomplete work rather than hiding the receipt.
+        committed.  A concurrent facade close leaves that receipt valid but
+        prevents policy work, which this boundary reports as typed, retryable
+        incomplete maintenance before any further storage I/O.
         """
 
+        if self._closed:
+            return self._maintenance_restart(
+                CacheBlobStoreClosedError("Cache is closed")
+            )
         state = self._seal_maintenance_state(
             phase=CacheMaintenancePhase.INVENTORY,
             authority_revision=None,
