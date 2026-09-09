@@ -8,7 +8,7 @@ from dataclasses import FrozenInstanceError
 import pytest
 
 from cacheness.cache_policy import CacheOutcome, CacheStatistics
-from cacheness.config import CacheConfig
+from cacheness.config import CacheConfig, CacheStorageConfig
 from cacheness.core import UnifiedCache
 from cacheness.error_handling import (
     CacheBlobBackendError,
@@ -30,7 +30,10 @@ def _memory_topology() -> StoreTopology:
 def _cache(tmp_path) -> UnifiedCache:
     """Create one initialized cache with no shared lifecycle state."""
 
-    cache = UnifiedCache(CacheConfig(cache_dir=tmp_path), store=_memory_topology())
+    cache = UnifiedCache(
+        CacheConfig(storage=CacheStorageConfig(cache_dir=tmp_path)),
+        store=_memory_topology(),
+    )
     cache.initialize()
     return cache
 

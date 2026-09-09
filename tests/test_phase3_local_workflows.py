@@ -7,10 +7,13 @@ import time
 import pytest
 
 from cacheness import CacheConfig
-from cacheness.config import LifecycleLimits
+from cacheness.cache_policy import CacheOutcome
+from cacheness.config import CacheStorageConfig, LifecycleLimits
 from cacheness.core import UnifiedCache
 from cacheness.error_handling import (
-    CacheBlobBackendError, CacheBlobLifecycleTimeoutError,
+    CacheBlobBackendError,
+    CacheBlobLifecycleTimeoutError,
+    CacheBlobStoreClosedError,
     CacheBlobMigrationRequiredError,
     CacheBlobRecoverableCleanupError,
 )
@@ -110,7 +113,12 @@ def test_memory_public_apply_reclaims_three_paged_debts(tmp_path, monkeypatch):
 
 
 def memory_config(root):
-    return CacheConfig(cache_dir=root)
+    return CacheConfig(storage=CacheStorageConfig(cache_dir=root))
+
+
+def _cache_topology(root):
+    """Build the persisted local topology for one explicit cache root."""
+    return _local_topology(root / ".cacheness" / "blobstore")
 
 
 def test_entry_snapshot_and_receipt_preserve_generation(tmp_path):
@@ -196,10 +204,17 @@ def test_cache_expiry_leaves_separate_blob_store_untouched(tmp_path):
         objects.put("durable", key="key", metadata={"label": "first"})
         objects.update_metadata("key", {"label": "second"})
         assert objects.get_metadata("key")["metadata"]["label"] == "second"
-        cache = UnifiedCache(CacheConfig(cache_dir=tmp_path / "cache"))
+        cache = UnifiedCache(
+            CacheConfig(storage=CacheStorageConfig(cache_dir=tmp_path / "cache")),
+            store=_memory_topology(),
+        )
+        cache.initialize()
         try:
-            key = cache.put("temporary", identity="key")
-            assert cache.get(key, ttl_hours=-1) is None
+            key = cache.put("temporary", identity="key").receipt.key
+            assert (
+                cache.lookup(cache_key=key, ttl_hours=-1).outcome
+                is CacheOutcome.EXPIRED
+            )
             cache.clear_all()
             assert objects.get("key") == "durable"
         finally:
@@ -207,7 +222,9 @@ def test_cache_expiry_leaves_separate_blob_store_untouched(tmp_path):
 
 
 def test_close_after_commit_has_declared_derived_outcome(tmp_path, monkeypatch):
-    cache = UnifiedCache(CacheConfig(cache_dir=tmp_path))
+    config = CacheConfig(storage=CacheStorageConfig(cache_dir=tmp_path))
+    cache = UnifiedCache(config, store=_cache_topology(tmp_path))
+    cache.initialize()
     put_entry = cache._cache_blob_store.put_entry
 
     def commit_then_close(*args, **kwargs):
@@ -216,9 +233,13 @@ def test_close_after_commit_has_declared_derived_outcome(tmp_path, monkeypatch):
         return receipt
 
     monkeypatch.setattr(cache._cache_blob_store, "put_entry", commit_then_close)
-    key = cache.put("committed", identity="close")
-    reopened = UnifiedCache(CacheConfig(cache_dir=tmp_path))
+    with pytest.raises(CacheBlobStoreClosedError):
+        cache.put("committed", identity="close")
+    reopened = UnifiedCache(config, store=_cache_topology(tmp_path))
+    reopened.initialize()
     try:
-        assert reopened.get(key) == "committed"
+        result = reopened.lookup(identity="close")
+        assert result.outcome is CacheOutcome.HIT
+        assert result.value == "committed"
     finally:
         reopened.close()
