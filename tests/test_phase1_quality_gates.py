@@ -22,7 +22,8 @@ VALIDATION_FILE = (
     / "01-VALIDATION.md"
 )
 HANDLERS_FILE = PROJECT_ROOT / "src" / "cacheness" / "handlers.py"
-CORE_FILE = PROJECT_ROOT / "src" / "cacheness" / "core.py"
+CATALOG_FILE = PROJECT_ROOT / "src" / "cacheness" / "storage" / "catalog.py"
+BLOB_STORE_FILE = PROJECT_ROOT / "src" / "cacheness" / "storage" / "blob_store.py"
 SQL_CACHE_FILE = PROJECT_ROOT / "src" / "cacheness" / "sql_cache.py"
 
 WAVE_ZERO_FILES = (
@@ -216,8 +217,8 @@ def test_ordinary_array_loading_cannot_enable_pickle() -> None:
     assert not _contains_permissive_numpy_load(array_get)
 
 
-def test_query_meta_has_no_caller_field_interpolation() -> None:
-    """The sentinel rejects caller-field SQL interpolation before production scan."""
+def test_catalog_query_boundary_has_no_caller_field_interpolation() -> None:
+    """The sentinel rejects caller-field interpolation at the live query boundary."""
     assert _contains_query_field_interpolation(ast.parse('query = f"$.{field}"'))
     assert _contains_query_field_interpolation(
         ast.parse('query = f"$.{request.field}"')
@@ -225,8 +226,10 @@ def test_query_meta_has_no_caller_field_interpolation() -> None:
     assert _contains_query_field_interpolation(
         ast.parse('query = f"$.{filters[field]}"')
     )
-    query_meta = _function_node(CORE_FILE, "query_meta")
-    assert not _contains_query_field_interpolation(query_meta)
+    catalog_validation = _function_node(CATALOG_FILE, "validate_catalog_query")
+    catalog_query = _method_node(BLOB_STORE_FILE, "BlobStore", "query_catalog")
+    assert not _contains_query_field_interpolation(catalog_validation)
+    assert not _contains_query_field_interpolation(catalog_query)
 
 
 def test_sql_cache_has_no_direct_print_failure_path() -> None:

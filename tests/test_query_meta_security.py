@@ -1,278 +1,210 @@
-"""Security contract for validated cache metadata query fields."""
+"""Security contracts for typed, bounded BlobStore catalog queries."""
 
 from __future__ import annotations
 
 import math
-from types import SimpleNamespace
 
 import pytest
 
-from cacheness.config import CacheConfig
-from cacheness.core import UnifiedCache
-from cacheness.error_handling import CacheQueryValidationError, CacheReason
-from cacheness.query_validation import (
-    to_sqlite_json_path,
-    validate_query_fields,
-    validate_query_numeric_filters,
+from cacheness.storage.blob_store import BlobStore
+from cacheness.storage.catalog import (
+    MAX_CURSOR_ENCODED_BYTES,
+    MAX_SIGNED_64,
+    MIN_SIGNED_64,
+    CatalogCursorError,
+    CatalogField,
+    CatalogPredicate,
+    CatalogQuery,
+    CatalogQueryValidationError,
+    CatalogSchema,
+    validate_catalog_query,
 )
+from cacheness.storage.composition import BackendRef, StoreTopology
 
 
-@pytest.mark.parametrize(
-    "field",
-    [
-        "experiment",
-        "_private",
-        "model_2.version",
-        ".".join(["segment"] * 16),
-        "a" * 255,
-    ],
-)
-def test_validated_query_fields_accept_bounded_identifier_paths(field: str) -> None:
-    """Supported identifiers retain exact nested-field compatibility."""
-    assert validate_query_fields({field: "value"}) == (field,)
-    assert to_sqlite_json_path(field) == f"$.{field}"
-
-
-@pytest.mark.parametrize(
-    "field",
-    [
-        "",
-        "a..b",
-        ".a",
-        "a.",
-        "a[0]",
-        "$.a",
-        "a\"b",
-        "a b",
-        "a;drop",
-        "a--comment",
-        "a/b",
-        "a\x00b",
-        ".".join(["a"] * 17),
-        "a" * 256,
-    ],
-)
-def test_validated_query_fields_reject_hostile_or_overbound_paths(field: str) -> None:
-    """Every caller-supplied field fails closed with its exact stable reason."""
-    with pytest.raises(CacheQueryValidationError) as error:
-        validate_query_fields({field: "value"})
-
-    assert error.value.context == {
-        "field": field,
-        "reason": CacheReason.INVALID_QUERY_FIELD.value,
-    }
-
-
-def test_empty_filter_mapping_is_distinct_from_an_empty_filter_key() -> None:
-    """Query-all is supported, but a supplied empty key is never silently ignored."""
-    assert validate_query_fields({}) == ()
-
-    with pytest.raises(CacheQueryValidationError) as error:
-        validate_query_fields({"": "value"})
-
-    assert error.value.context["field"] == ""
-
-
-class _SessionSpy:
-    """Record any database boundary access during field validation."""
-
-    def __init__(self) -> None:
-        self.session_calls = 0
-        self.execute_calls = 0
-
-    def __call__(self) -> _SessionSpy:
-        self.session_calls += 1
-        return self
-
-    def __enter__(self) -> _SessionSpy:
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback) -> bool:
-        return False
-
-    def execute(self, *args: object, **kwargs: object) -> list[object]:
-        self.execute_calls += 1
-        return []
-
-
-class _BoundaryAccessCache(UnifiedCache):
-    """Expose every query_meta state boundary for pre-session validation tests."""
-
-    def __init__(self) -> None:
-        self.actual_backend_calls = 0
-        self.config_calls = 0
-        self.metadata_backend_calls = 0
-        self.session_spy = _SessionSpy()
-
-    @property
-    def actual_backend(self) -> str:
-        self.actual_backend_calls += 1
-        return "sqlite"
-
-    @property
-    def config(self) -> SimpleNamespace:
-        self.config_calls += 1
-        return SimpleNamespace(
-            metadata=SimpleNamespace(store_cache_key_params=True)
-        )
-
-    @property
-    def metadata_backend(self) -> SimpleNamespace:
-        self.metadata_backend_calls += 1
-        return SimpleNamespace(SessionLocal=self.session_spy)
-
-
-def _sqlite_cache_with_session_spy(session_spy: _SessionSpy) -> UnifiedCache:
-    """Build only the query_meta dependencies needed to assert call ordering."""
-    cache = object.__new__(UnifiedCache)
-    cache.actual_backend = "sqlite"
-    cache.config = SimpleNamespace(
-        metadata=SimpleNamespace(store_cache_key_params=True)
+def _schema() -> CatalogSchema:
+    """Return the declared scalar boundary used by query validation tests."""
+    return CatalogSchema(
+        fields=(
+            CatalogField("first_safe", "string", queryable=True),
+            CatalogField("middle_safe", "string", queryable=True),
+            CatalogField("last_safe", "string", queryable=True),
+            CatalogField("score", "integer", queryable=True),
+            CatalogField("experiment", "string", queryable=True),
+        ),
+        schema_id="query-security",
     )
-    cache.metadata_backend = SimpleNamespace(SessionLocal=session_spy)
-    return cache
 
 
 @pytest.fixture
-def sqlite_query_cache(tmp_path):
-    """Create a SQLite cache whose metadata filter values are persisted."""
-    cache = UnifiedCache(
-        CacheConfig(
-            cache_dir=str(tmp_path / "cache"),
-            metadata_backend="sqlite",
-            store_cache_key_params=True,
-        )
+def catalog_store(tmp_path: pytest.TempPathFactory) -> BlobStore:
+    """Create one explicit caller-owned memory topology for boundary probes."""
+    store = BlobStore(
+        StoreTopology(
+            payload=BackendRef(name="memory"), authority=BackendRef(name="memory")
+        ),
+        cache_dir=tmp_path,
     )
     try:
-        yield cache
+        yield store
     finally:
-        cache.close()
+        store.close()
 
 
-class _RecordingSession:
-    """Delegate session execution while retaining the SQLAlchemy statement."""
+def _blocked_boundary(calls: list[str], name: str):
+    """Return a spy that fails if rejected input crosses a storage boundary."""
+    def blocked(*_args: object, **_kwargs: object) -> None:
+        calls.append(name)
+        raise AssertionError(f"rejected catalog query reached {name}")
 
-    def __init__(self, session: object, statements: list[object]) -> None:
-        self._session = session
-        self._statements = statements
-
-    def __enter__(self) -> _RecordingSession:
-        self._session.__enter__()
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback) -> bool:
-        return self._session.__exit__(exc_type, exc_value, traceback)
-
-    def execute(self, statement: object, *args: object, **kwargs: object):
-        self._statements.append(statement)
-        return self._session.execute(statement, *args, **kwargs)
+    return blocked
 
 
-def test_query_meta_binds_validated_paths_and_values(
-    sqlite_query_cache, monkeypatch
-) -> None:
-    """Caller paths and values stay in bound parameters, never SQL text."""
-    sqlite_query_cache.put("record", experiment="bound-value", score=1.5)
-    statements: list[object] = []
-    session_factory = sqlite_query_cache.metadata_backend.SessionLocal
-
-    def recording_session_factory() -> _RecordingSession:
-        return _RecordingSession(session_factory(), statements)
-
-    monkeypatch.setattr(
-        sqlite_query_cache.metadata_backend,
-        "SessionLocal",
-        recording_session_factory,
-    )
-
-    entries = sqlite_query_cache.query_meta(experiment="bound-value", score=1.5)
-
-    assert len(entries) == 1
-    statement = statements[-1]
-    compiled = statement.compile()
-    assert "$.experiment" not in str(compiled)
-    assert "$.score" not in str(compiled)
-    assert "bound-value" not in str(compiled)
-    assert compiled.params["query_meta_path_0"] == "$.experiment"
-    assert compiled.params["query_meta_value_0"] == "str:bound-value"
-    assert compiled.params["query_meta_path_1"] == "$.score"
-    assert compiled.params["query_meta_value_1"] == 1.5
-
-
-@pytest.mark.parametrize("position", ["first", "middle", "last"])
-def test_invalid_fields_fail_before_session_or_execute_at_every_mapping_position(
+@pytest.mark.parametrize("position", ("first", "middle", "last"))
+def test_hostile_fields_fail_before_authority_manifest_or_handler_io(
+    catalog_store: BlobStore,
+    monkeypatch: pytest.MonkeyPatch,
     position: str,
 ) -> None:
-    """All field names are validated before the SQLite session boundary opens."""
-    session_spy = _SessionSpy()
-    cache = _sqlite_cache_with_session_spy(session_spy)
-    invalid_field = "unsafe[0]"
-    safe_fields = [("first_safe", "first"), ("middle_safe", "middle")]
+    """Every predicate position is fully validated before any lifecycle access."""
+    calls: list[str] = []
+    monkeypatch.setattr(
+        catalog_store.lifecycle_authority,
+        "catalog_page",
+        _blocked_boundary(calls, "authority"),
+    )
+    monkeypatch.setattr(
+        catalog_store,
+        "_authenticated_authority_manifest",
+        _blocked_boundary(calls, "manifest"),
+    )
+    monkeypatch.setattr(
+        catalog_store.handlers,
+        "get_handler",
+        _blocked_boundary(calls, "handler"),
+    )
 
-    filters = dict(safe_fields)
-    insertion_index = {"first": 0, "middle": 1, "last": 2}[position]
-    filter_items = list(filters.items())
-    filter_items.insert(insertion_index, (invalid_field, "blocked"))
+    predicates = [
+        CatalogPredicate("first_safe", "eq", "first"),
+        CatalogPredicate("last_safe", "eq", "last"),
+    ]
+    predicates.insert(
+        {"first": 0, "middle": 1, "last": 2}[position],
+        CatalogPredicate("unsafe[0]", "eq", "blocked"),
+    )
 
-    with pytest.raises(CacheQueryValidationError) as error:
-        cache.query_meta(**dict(filter_items))
+    with pytest.raises(CatalogQueryValidationError):
+        catalog_store.query_catalog(
+            CatalogQuery(predicates=tuple(predicates)),
+            schema=_schema(),
+            limit=1,
+            work_cap=1,
+        )
 
-    assert error.value.context == {
-        "field": invalid_field,
-        "reason": CacheReason.INVALID_QUERY_FIELD.value,
-    }
-    assert session_spy.session_calls == 0
-    assert session_spy.execute_calls == 0
+    assert calls == []
+
+
+def test_empty_query_is_distinct_from_an_empty_caller_field() -> None:
+    """Query-all stays explicit while an empty predicate field fails closed."""
+    schema = _schema()
+    assert validate_catalog_query(CatalogQuery(), schema=schema) == CatalogQuery()
+
+    with pytest.raises(CatalogQueryValidationError):
+        validate_catalog_query(
+            CatalogQuery(predicates=(CatalogPredicate("", "eq", "value"),)),
+            schema=schema,
+        )
 
 
 @pytest.mark.parametrize("value", (math.nan, math.inf, -math.inf))
-def test_nonfinite_numeric_filters_fail_before_session_or_execute(value: float) -> None:
-    """Non-finite thresholds are rejected before reaching SQLite casts."""
-    session_spy = _SessionSpy()
-    cache = _sqlite_cache_with_session_spy(session_spy)
-
-    with pytest.raises(CacheQueryValidationError) as error:
-        cache.query_meta(score=value)
-
-    assert error.value.context == {
-        "field": "score",
-        "value": repr(value),
-        "reason": CacheReason.INVALID_QUERY_VALUE.value,
-    }
-    assert session_spy.session_calls == 0
-    assert session_spy.execute_calls == 0
+def test_nonfinite_numeric_values_fail_before_authority_dispatch(value: float) -> None:
+    """Non-finite values cannot cross the exact scalar validation boundary."""
+    with pytest.raises(CatalogQueryValidationError):
+        validate_catalog_query(
+            CatalogQuery(predicates=(CatalogPredicate("score", "eq", value),)),
+            schema=_schema(),
+        )
 
 
-@pytest.mark.parametrize("endpoint", (-(2**63), 2**63 - 1))
+@pytest.mark.parametrize("endpoint", (MIN_SIGNED_64, MAX_SIGNED_64))
 def test_signed_64_bit_numeric_endpoints_are_valid(endpoint: int) -> None:
-    """The SQLite signed-64 threshold domain includes both endpoint values."""
-    validate_query_numeric_filters({"score": endpoint, "active": True})
+    """The declared integer domain includes both finite signed-64 endpoints."""
+    query = CatalogQuery(predicates=(CatalogPredicate("score", "eq", endpoint),))
+    assert validate_catalog_query(query, schema=_schema()) is query
 
 
 @pytest.mark.parametrize(
-    "value",
-    (-(2**63) - 1, 2**63, -(10**100), 10**100),
+    "value", (MIN_SIGNED_64 - 1, MAX_SIGNED_64 + 1, -(10**100), 10**100)
 )
 @pytest.mark.parametrize("position", ("first", "middle", "last"))
-def test_out_of_domain_integers_fail_before_every_query_state_boundary(
+def test_out_of_domain_integers_fail_in_every_predicate_position(
     value: int, position: str
 ) -> None:
-    """Every unsafe Python integer is rejected before backend or session access."""
-    cache = _BoundaryAccessCache()
-    filter_items = [("before", "safe"), ("after", 1.5)]
-    insertion_index = {"first": 0, "middle": 1, "last": 2}[position]
-    filter_items.insert(insertion_index, ("score", value))
+    """Out-of-range integers fail during preflight without predicate reordering."""
+    predicates = [
+        CatalogPredicate("first_safe", "eq", "before"),
+        CatalogPredicate("last_safe", "eq", "after"),
+    ]
+    predicates.insert(
+        {"first": 0, "middle": 1, "last": 2}[position],
+        CatalogPredicate("score", "eq", value),
+    )
 
-    with pytest.raises(CacheQueryValidationError) as error:
-        cache.query_meta(**dict(filter_items))
+    with pytest.raises(CatalogQueryValidationError):
+        validate_catalog_query(CatalogQuery(predicates=tuple(predicates)), schema=_schema())
 
-    assert error.value.context == {
-        "field": "score",
-        "value": repr(value),
-        "reason": CacheReason.INVALID_QUERY_VALUE.value,
-    }
-    assert cache.actual_backend_calls == 0
-    assert cache.config_calls == 0
-    assert cache.metadata_backend_calls == 0
-    assert cache.session_spy.session_calls == 0
-    assert cache.session_spy.execute_calls == 0
+
+def test_multiple_predicates_retain_order_and_native_bound_values() -> None:
+    """Validation receives immutable typed predicates, not caller-built SQL text."""
+    query = CatalogQuery(
+        predicates=(
+            CatalogPredicate("experiment", "eq", "bound-value"),
+            CatalogPredicate("score", "gte", 3),
+        )
+    )
+
+    assert validate_catalog_query(query, schema=_schema()) is query
+    assert query.predicates == (
+        CatalogPredicate("experiment", "eq", "bound-value"),
+        CatalogPredicate("score", "gte", 3),
+    )
+
+
+def test_oversized_cursor_fails_before_decode_authority_manifest_or_handler_io(
+    catalog_store: BlobStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cursor envelopes reject excess input before any lifecycle or payload work."""
+    from cacheness.storage import catalog
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        catalog,
+        "base64",
+        type("Base64Spy", (), {"b64decode": _blocked_boundary(calls, "decode")})(),
+    )
+    monkeypatch.setattr(
+        catalog_store.lifecycle_authority,
+        "catalog_page",
+        _blocked_boundary(calls, "authority"),
+    )
+    monkeypatch.setattr(
+        catalog_store,
+        "_authenticated_authority_manifest",
+        _blocked_boundary(calls, "manifest"),
+    )
+    monkeypatch.setattr(
+        catalog_store.handlers,
+        "get_handler",
+        _blocked_boundary(calls, "handler"),
+    )
+
+    with pytest.raises(CatalogCursorError):
+        catalog_store.query_catalog(
+            CatalogQuery(),
+            schema=_schema(),
+            cursor="A" * (MAX_CURSOR_ENCODED_BYTES + 1),
+            limit=1,
+            work_cap=1,
+        )
+
+    assert calls == []
