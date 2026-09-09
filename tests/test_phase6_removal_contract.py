@@ -206,10 +206,10 @@ def test_empty_predicate_and_global_invalidation_report_complete_without_deletes
         cache.close()
 
 
-def test_predicate_removal_is_bounded_and_resumable_without_duplicate_success(
+def test_predicate_removal_restarts_fresh_bounded_scans_until_complete(
     tmp_path,
 ) -> None:
-    """One invocation observes at most its cap and returns an opaque cursor."""
+    """Removal never reuses a cursor invalidated by its own exact deletion."""
 
     cache = _cache(tmp_path)
     try:
@@ -227,13 +227,21 @@ def test_predicate_removal_is_bounded_and_resumable_without_duplicate_success(
         assert first.complete is False
         assert isinstance(first.continuation, str)
 
-        resumed = cache.invalidate_where(
+        second = cache.invalidate_where(
             query, cursor=first.continuation, page_size=1, work_cap=1
         )
+        third = cache.invalidate_where(
+            query, cursor=second.continuation, page_size=1, work_cap=1
+        )
 
-        assert resumed.removed == 0
-        assert resumed.complete is False
-        assert resumed.retryable == 1
+        assert second == CacheRemovalReport(
+            attempted=1,
+            removed=1,
+            complete=False,
+            continuation=first.continuation,
+        )
+        assert third == CacheRemovalReport(attempted=1, removed=1)
+        assert cache.invalidate_where(query, page_size=1, work_cap=1) == CacheRemovalReport()
     finally:
         cache.close()
 

@@ -86,6 +86,7 @@ _CACHE_POLICY_SCHEMA = CatalogSchema(
 _CACHE_NAMESPACE = "unified-cache"
 _REMOVAL_PAGE_SIZE = DEFAULT_PAGE_SIZE
 _REMOVAL_WORK_CAP = DEFAULT_PAGE_SIZE
+_RESTART_REMOVAL_CURSOR = "cache-policy:restart"
 
 
 def _clear_coordinated(method: Callable) -> Callable:
@@ -1014,29 +1015,40 @@ class UnifiedCache:
     ) -> CacheRemovalReport:
         """Remove one validated, bounded authoritative catalog page exactly."""
 
+        # Catalog cursors are revision-bound.  A successful exact deletion from
+        # this page advances that revision, so later work must begin a fresh
+        # bounded scan instead of reusing the cursor that described this page.
+        query_cursor = None if cursor == _RESTART_REMOVAL_CURSOR else cursor
         try:
             page = self._query_cache_catalog(
                 query,
-                cursor=cursor,
+                cursor=query_cursor,
                 page_size=page_size,
                 work_cap=work_cap,
             )
         except CatalogStaleCursorError:
-            if cursor is None:
+            if query_cursor is None:
                 raise
             return CacheRemovalReport(
                 retryable=1,
                 complete=False,
-                continuation=cursor,
+                continuation=_RESTART_REMOVAL_CURSOR,
             )
         candidates = tuple(
             self._candidate_from_catalog_entry(entry) for entry in page.entries
         )
-        return self._remove_exact_candidates(
+        report = self._remove_exact_candidates(
             candidates,
             complete=page.exhausted,
             continuation=page.cursor,
         )
+        if report.removed and not page.exhausted:
+            return replace(
+                report,
+                complete=False,
+                continuation=_RESTART_REMOVAL_CURSOR,
+            )
+        return report
 
     @_clear_coordinated
     def invalidate_function(
