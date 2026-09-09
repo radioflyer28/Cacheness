@@ -15,7 +15,8 @@ import hmac
 import json
 from pathlib import Path
 import re
-from typing import Iterable
+from types import MappingProxyType
+from typing import Iterable, Mapping
 
 from .manifest import BlobManifest, StoreVersionDimensions, sign_current_manifest, verify_current_manifest
 from .migration_authority import (
@@ -34,6 +35,295 @@ from .migration_evidence import (
 
 
 _RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+_MAX_COMPATIBILITY_TEXT_BYTES = 256
+
+
+class CompatibilityDimension(str, Enum):
+    """One independently persisted contract considered during migration planning."""
+
+    STORE_LAYOUT = "store_layout"
+    AUTHORITY = "authority"
+    MANIFEST_SCHEMA = "manifest_schema"
+    PAYLOAD = "payload"
+    CATALOG = "catalog"
+
+
+class CompatibilityOutcome(str, Enum):
+    """The fail-closed result for a compatibility dimension or complete plan."""
+
+    SUPPORTED = "supported"
+    REBUILD_ONLY = "rebuild_only"
+    BLOCKED = "blocked"
+    UNVERIFIABLE = "unverifiable"
+
+
+def _compatibility_text(value: object, field_name: str) -> str:
+    """Validate an opaque, non-secret compatibility identifier."""
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{field_name} must be a non-empty string")
+    if len(value.encode("utf-8")) > _MAX_COMPATIBILITY_TEXT_BYTES:
+        raise ValueError(f"{field_name} exceeds the byte bound")
+    if "*" in value:
+        raise ValueError(f"{field_name} cannot contain a wildcard")
+    return value
+
+
+def _compatibility_value(value: object, field_name: str, *, size: int) -> tuple[str, ...]:
+    """Freeze one exact dimension value without accepting broad matching patterns."""
+    if not isinstance(value, tuple) or len(value) != size:
+        raise ValueError(f"{field_name} must contain exactly {size} values")
+    return tuple(
+        _compatibility_text(item, f"{field_name}[{index}]")
+        for index, item in enumerate(value)
+    )
+
+
+@dataclass(frozen=True)
+class ReleaseWindow:
+    """The bounded direct-support promise for one released migration target."""
+
+    current_release: str
+    immediately_previous_release: str | None = None
+
+    def __post_init__(self) -> None:
+        _compatibility_text(self.current_release, "current_release")
+        if self.immediately_previous_release is not None:
+            _compatibility_text(self.immediately_previous_release, "immediately_previous_release")
+            if self.immediately_previous_release == self.current_release:
+                raise ValueError("immediately_previous_release must differ from current_release")
+
+    @classmethod
+    def first_release_baseline(cls) -> "ReleaseWindow":
+        """Return the current baseline without inventing an earlier release edge."""
+        return cls(current_release="current")
+
+    def supports_direct_source(self, release: str) -> bool:
+        """Return whether this release is in the only directly supported source window."""
+        return release in {self.current_release, self.immediately_previous_release}
+
+    def supports_direct_target(self, release: str) -> bool:
+        """Return whether this plan targets the published current release."""
+        return release == self.current_release
+
+
+@dataclass(frozen=True)
+class CompatibilityIdentity:
+    """The independent, redacted persisted-contract identity of one store entry."""
+
+    release: str
+    store_layout: tuple[str, ...]
+    authority: tuple[str, ...]
+    manifest_schema: tuple[str, ...]
+    payload: tuple[str, ...]
+    catalog: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "release", _compatibility_text(self.release, "release"))
+        object.__setattr__(
+            self,
+            "store_layout",
+            _compatibility_value(self.store_layout, "store_layout", size=4),
+        )
+        object.__setattr__(
+            self,
+            "authority",
+            _compatibility_value(self.authority, "authority", size=3),
+        )
+        object.__setattr__(
+            self,
+            "manifest_schema",
+            _compatibility_value(self.manifest_schema, "manifest_schema", size=2),
+        )
+        object.__setattr__(self, "payload", _compatibility_value(self.payload, "payload", size=3))
+        object.__setattr__(self, "catalog", _compatibility_value(self.catalog, "catalog", size=3))
+
+    def value_for(self, dimension: CompatibilityDimension) -> tuple[str, ...]:
+        """Return the exact value for one independently versioned contract."""
+        if not isinstance(dimension, CompatibilityDimension):
+            raise TypeError("dimension must be a CompatibilityDimension")
+        return {
+            CompatibilityDimension.STORE_LAYOUT: self.store_layout,
+            CompatibilityDimension.AUTHORITY: self.authority,
+            CompatibilityDimension.MANIFEST_SCHEMA: self.manifest_schema,
+            CompatibilityDimension.PAYLOAD: self.payload,
+            CompatibilityDimension.CATALOG: self.catalog,
+        }[dimension]
+
+
+@dataclass(frozen=True)
+class VersionEdge:
+    """One exact directed transition for one persisted compatibility dimension."""
+
+    source_release: str
+    destination_release: str
+    dimension: CompatibilityDimension
+    source_value: tuple[str, ...]
+    destination_value: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        _compatibility_text(self.source_release, "source_release")
+        _compatibility_text(self.destination_release, "destination_release")
+        if self.source_release == self.destination_release:
+            raise ValueError("version edges must connect distinct releases")
+        if not isinstance(self.dimension, CompatibilityDimension):
+            raise TypeError("dimension must be a CompatibilityDimension")
+        sizes = {
+            CompatibilityDimension.STORE_LAYOUT: 4,
+            CompatibilityDimension.AUTHORITY: 3,
+            CompatibilityDimension.MANIFEST_SCHEMA: 2,
+            CompatibilityDimension.PAYLOAD: 3,
+            CompatibilityDimension.CATALOG: 3,
+        }
+        size = sizes[self.dimension]
+        object.__setattr__(
+            self,
+            "source_value",
+            _compatibility_value(self.source_value, "source_value", size=size),
+        )
+        object.__setattr__(
+            self,
+            "destination_value",
+            _compatibility_value(self.destination_value, "destination_value", size=size),
+        )
+        if self.source_value == self.destination_value:
+            raise ValueError("version edges must change their declared dimension")
+
+
+@dataclass(frozen=True)
+class CompatibilityResult:
+    """Immutable complete compatibility result derived from one matrix evaluation."""
+
+    outcome: CompatibilityOutcome
+    dimension_outcomes: Mapping[CompatibilityDimension, CompatibilityOutcome]
+    reasons: Mapping[CompatibilityDimension, "MigrationReason"]
+    release_window_reason: "MigrationReason" | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.outcome, CompatibilityOutcome):
+            raise TypeError("outcome must be a CompatibilityOutcome")
+        expected = set(CompatibilityDimension)
+        if set(self.dimension_outcomes) != expected or set(self.reasons) != expected:
+            raise ValueError("compatibility results must classify every dimension")
+        if any(not isinstance(item, CompatibilityOutcome) for item in self.dimension_outcomes.values()):
+            raise TypeError("dimension_outcomes contains an invalid outcome")
+        if any(not isinstance(item, MigrationReason) for item in self.reasons.values()):
+            raise TypeError("reasons contains an invalid migration reason")
+        if self.release_window_reason is not None and not isinstance(
+            self.release_window_reason, MigrationReason
+        ):
+            raise TypeError("release_window_reason is invalid")
+        object.__setattr__(self, "dimension_outcomes", MappingProxyType(dict(self.dimension_outcomes)))
+        object.__setattr__(self, "reasons", MappingProxyType(dict(self.reasons)))
+
+
+class CompatibilityMatrix:
+    """Classify independent version contracts through exact bounded directed edges."""
+
+    def __init__(self, release_window: ReleaseWindow, *, edges: Iterable[VersionEdge] = ()) -> None:
+        if not isinstance(release_window, ReleaseWindow):
+            raise TypeError("release_window must be a ReleaseWindow")
+        frozen_edges = tuple(edges)
+        if not all(isinstance(edge, VersionEdge) for edge in frozen_edges):
+            raise TypeError("edges must contain VersionEdge values")
+        edge_index: dict[tuple[object, ...], VersionEdge] = {}
+        for edge in frozen_edges:
+            if not release_window.supports_direct_source(edge.source_release) or not release_window.supports_direct_target(
+                edge.destination_release
+            ):
+                raise ValueError("version edge lies outside the direct release window")
+            key = (
+                edge.source_release,
+                edge.destination_release,
+                edge.dimension,
+                edge.source_value,
+                edge.destination_value,
+            )
+            if key in edge_index:
+                raise ValueError("duplicate exact version edge")
+            edge_index[key] = edge
+        self.release_window = release_window
+        self.edges = frozen_edges
+        self._edge_index = MappingProxyType(edge_index)
+
+    @classmethod
+    def default(cls) -> "CompatibilityMatrix":
+        """Return the first-release bounded policy with no historical migration edge."""
+        return cls(ReleaseWindow.first_release_baseline())
+
+    def _has_edge(
+        self,
+        source: CompatibilityIdentity,
+        destination: CompatibilityIdentity,
+        dimension: CompatibilityDimension,
+    ) -> bool:
+        return (
+            source.release,
+            destination.release,
+            dimension,
+            source.value_for(dimension),
+            destination.value_for(dimension),
+        ) in self._edge_index
+
+    def classify(
+        self,
+        source: CompatibilityIdentity,
+        destination: CompatibilityIdentity,
+        *,
+        blocked_dimensions: Iterable[CompatibilityDimension] = (),
+        unverifiable_dimensions: Iterable[CompatibilityDimension] = (),
+    ) -> CompatibilityResult:
+        """Classify every dimension without inferring one contract from another."""
+        if not isinstance(source, CompatibilityIdentity) or not isinstance(
+            destination, CompatibilityIdentity
+        ):
+            raise TypeError("source and destination must be CompatibilityIdentity values")
+        blocked = frozenset(blocked_dimensions)
+        unverifiable = frozenset(unverifiable_dimensions)
+        if not blocked <= set(CompatibilityDimension) or not unverifiable <= set(
+            CompatibilityDimension
+        ):
+            raise TypeError("blocked and unverifiable dimensions must be CompatibilityDimension values")
+
+        outcomes: dict[CompatibilityDimension, CompatibilityOutcome] = {}
+        reasons: dict[CompatibilityDimension, MigrationReason] = {}
+        for dimension in CompatibilityDimension:
+            if dimension in unverifiable:
+                outcomes[dimension] = CompatibilityOutcome.UNVERIFIABLE
+                reasons[dimension] = MigrationReason.DIMENSION_UNVERIFIABLE
+            elif dimension in blocked:
+                outcomes[dimension] = CompatibilityOutcome.BLOCKED
+                reasons[dimension] = MigrationReason.DIMENSION_BLOCKED
+            elif source.value_for(dimension) == destination.value_for(dimension):
+                outcomes[dimension] = CompatibilityOutcome.SUPPORTED
+                reasons[dimension] = MigrationReason.COMPATIBLE_EDGE
+            elif self._has_edge(source, destination, dimension):
+                outcomes[dimension] = CompatibilityOutcome.SUPPORTED
+                reasons[dimension] = MigrationReason.DIRECTED_EDGE
+            else:
+                outcomes[dimension] = CompatibilityOutcome.REBUILD_ONLY
+                reasons[dimension] = MigrationReason.MISSING_DIRECTED_EDGE
+
+        release_window_reason = None
+        if not self.release_window.supports_direct_source(source.release) or not self.release_window.supports_direct_target(
+            destination.release
+        ):
+            release_window_reason = MigrationReason.RELEASE_WINDOW_UNSUPPORTED
+
+        present = set(outcomes.values())
+        if CompatibilityOutcome.UNVERIFIABLE in present:
+            outcome = CompatibilityOutcome.UNVERIFIABLE
+        elif CompatibilityOutcome.BLOCKED in present:
+            outcome = CompatibilityOutcome.BLOCKED
+        elif release_window_reason is not None or CompatibilityOutcome.REBUILD_ONLY in present:
+            outcome = CompatibilityOutcome.REBUILD_ONLY
+        else:
+            outcome = CompatibilityOutcome.SUPPORTED
+        return CompatibilityResult(
+            outcome=outcome,
+            dimension_outcomes=outcomes,
+            reasons=reasons,
+            release_window_reason=release_window_reason,
+        )
 
 
 class MigrationDisposition(str, Enum):
@@ -49,6 +339,11 @@ class MigrationReason(str, Enum):
     """Stable bounded reasons used by the structured plan model."""
 
     COMPATIBLE_EDGE = "compatible_edge"
+    DIRECTED_EDGE = "directed_edge"
+    MISSING_DIRECTED_EDGE = "missing_directed_edge"
+    RELEASE_WINDOW_UNSUPPORTED = "release_window_unsupported"
+    DIMENSION_BLOCKED = "dimension_blocked"
+    DIMENSION_UNVERIFIABLE = "dimension_unverifiable"
     UNSUPPORTED_DIMENSIONS = "unsupported_dimensions"
     MANIFEST_UNAUTHENTICATED = "manifest_unauthenticated"
 
@@ -539,6 +834,11 @@ class OfflineMigrationService:
 
 
 __all__ = [
+    "CompatibilityDimension",
+    "CompatibilityIdentity",
+    "CompatibilityMatrix",
+    "CompatibilityOutcome",
+    "CompatibilityResult",
     "MigrationCompatibilityEdge",
     "MigrationDisposition",
     "MigrationEntryAssessment",
@@ -546,4 +846,6 @@ __all__ = [
     "MigrationReason",
     "MigrationStepResult",
     "OfflineMigrationService",
+    "ReleaseWindow",
+    "VersionEdge",
 ]
