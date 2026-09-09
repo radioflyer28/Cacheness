@@ -2,6 +2,8 @@
 
 **Analysis Date:** 2026-08-29
 
+**Independent Review:** 2026-08-29 — conventions below distinguish intended style from what current tooling actually enforces
+
 ## Naming Patterns
 
 **Files:**
@@ -36,7 +38,12 @@
 **Linting:**
 - Run `uv run ruff check src tests`; Ruff is declared at `>=0.12.8` in the `dev` dependency group.
 - `pyproject.toml` sets Ruff `target-version = "py312"` and ignores `B008` and `C901`. The intended lint groups are documented in comments (`E`, `W`, `F`, `I`, `B`, `C4`, `UP`), but the `lint.select` setting is commented out, so do not assume import sorting or all optional rule groups are enforced.
-- The current source/test tree produces 123 findings under the active Ruff defaults, including unused imports, unused locals, late imports, and a small number of bare-except/lambda-style issues. New code should avoid adding to this baseline and should not use `# noqa` without a local reason.
+- The current source/test tree produces 123 findings under the active Ruff defaults; the complete repository produces 137 findings because examples, benchmarks, and `verify_platform.py` add another 14. Findings include unused imports/locals, redefinitions, late imports, bare `except`, and lambda assignment. New code should avoid adding to this baseline and should not use `# noqa` without a local reason.
+
+**Enforcement reality:**
+- Ruff is configured but no CI workflow runs it, and the active default rules already fail. Treat the style guidance as a target, not as a verified invariant of existing files.
+- `lint.select` is commented out in `pyproject.toml`; only Ruff's default rule set plus the two ignores is active. The comments listing `I`, `B`, `C4`, and `UP` do not enable those groups.
+- Formatting is not configured separately (`ruff format`, Black, or Prettier equivalent); line length 88 informs Ruff rules but does not prove the tree is formatter-clean.
 
 ## Import Organization
 
@@ -59,6 +66,7 @@ The grouping is visible in `src/cacheness/core.py` and most tests, but it is not
 - Preserve the original cause with `raise ... from e` when translating `OSError`, import, serialization, or backend failures. `with_error_handling` in `src/cacheness/error_handling.py` adds function/argument context and either reraises or returns a configured fallback.
 - Use `pytest.raises` with a specific exception and, where stable, `match=` in tests; see `tests/test_directory_sharding.py`, `tests/test_handler_registration.py`, and `tests/test_error_handling.py`.
 - Handle optional features explicitly: capability detection is represented by flags such as `SQLALCHEMY_AVAILABLE`, and unavailable optional paths should be skipped or produce a clear install-oriented error.
+- Do not copy the current broad-exception pattern into new boundaries. `src/cacheness/core.py`, `src/cacheness/handlers.py`, `src/cacheness/metadata.py`, and `src/cacheness/sql_cache.py` frequently catch `Exception`; several paths convert failures into misses, empty results, warnings, or partial data. New code should catch the narrow operational exception, preserve its cause, and make partial-success policy explicit.
 
 ## Logging
 
@@ -99,6 +107,7 @@ The grouping is visible in `src/cacheness/core.py` and most tests, but it is not
 **Exports:**
 - Expose the supported convenience API through `__all__` in `src/cacheness/__init__.py`; optional exports are added only when their dependencies/imports are available.
 - Keep registry functions and backend classes together with their registry implementation (`src/cacheness/storage/backends/__init__.py` and `src/cacheness/storage/backends/blob_backends.py`).
+- When an export is conditional, test the dependency itself rather than merely importing a helper function. `src/cacheness/__init__.py` currently reports YAML helpers as available even though PyYAML is only imported when the helper is called.
 
 **Barrel Files:**
 - Package `__init__.py` files act as deliberate barrels for public convenience imports: `src/cacheness/__init__.py` and `src/cacheness/storage/__init__.py` re-export core classes, handlers, metadata backends, and storage APIs.

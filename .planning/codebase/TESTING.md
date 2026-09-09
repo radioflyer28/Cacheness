@@ -2,6 +2,8 @@
 
 **Analysis Date:** 2026-08-29
 
+**Independent Review:** 2026-08-29 — the suite, lint gate, and coverage instrumentation were executed locally
+
 ## Test Framework
 
 **Runner:**
@@ -14,6 +16,7 @@
 **Run Commands:**
 ```bash
 uv run pytest                         # Run the complete configured suite
+uv run pytest -q -o log_cli=false    # Run with concise output despite configured live INFO logging
 uv run pytest tests/test_core.py -v   # Run one module verbosely
 uv run pytest tests/ -m "not slow"    # Exclude tests marked slow
 uv run pytest tests/ -k "test_cache" # Select tests by name expression
@@ -122,6 +125,7 @@ This fixture style is used in `tests/test_config_validation.py`, `tests/test_pos
 **Requirements:**
 - No minimum coverage threshold (`fail_under`) is configured or enforced.
 - Coverage targets the `cacheness` package and omits `*/tests/*` and `*/test_*` in `pyproject.toml`. Reports exclude `pragma: no cover`, `__repr__`, `AssertionError`, and `NotImplementedError` lines.
+- Measured on 2026-08-29 with the full suite (including its two failures), total statement coverage is 66% (5,122 statements, 1,724 missed). Lowest large-module coverage is `src/cacheness/storage/blob_store.py` 19%, `src/cacheness/storage/backends/postgresql_backend.py` 30%, `src/cacheness/compress_pickle.py` 44%, and `src/cacheness/sql_cache.py` 49%.
 
 **View Coverage:**
 ```bash
@@ -160,11 +164,20 @@ Use `pytest.raises` around the smallest operation that should fail and assert co
 
 **Optional Dependencies and Skips:**
 - Detect optional packages with a guarded import or `pytest.importorskip`, expose a module flag, and apply `@pytest.mark.skipif(..., reason=...)` to the affected test/class. Examples include `tests/test_postgresql_backend.py`, `tests/test_s3_blob_backend.py`, `tests/test_handlers.py`, and `tests/test_tensorflow_handler.py`.
-- The configured markers are `slow`, `integration`, and `optional_deps`, but existing tests predominantly use `skipif` and do not consistently apply the custom markers.
+- The configured markers are `slow`, `integration`, and `optional_deps`, but `rg` finds no use of any of those markers in `tests/`; selection by `-m` therefore does not partition the current suite. Existing optional coverage uses `skipif`/guarded imports instead.
 
 **Observed Baseline:**
 - On 2026-08-29, `uv run pytest -q` collected 777 tests: 749 passed, 26 skipped, and 2 failed in `tests/test_config_validation.py::TestYamlConfig` because relative YAML cache paths are normalized to absolute paths before comparison.
 - Collection emits a `PytestCollectionWarning` for `TestDataClassForConsistency` in `tests/test_cache_key_consistency.py` because the dataclass has an `__init__` constructor. TensorFlow tests include explicit skips because importing TensorFlow can freeze the process (`tests/test_tensorflow_handler.py`).
+
+## Independently Identified Test Gaps
+
+- **Minimal installation:** No test builds/installs the wheel with only `[project.dependencies]` and imports `cacheness`. Such a test would expose the undeclared eager NumPy dependency (`pyproject.toml`, `src/cacheness/handlers.py`, `src/cacheness/compress_pickle.py`).
+- **Backend injection and registry composition:** No test asserts that `UnifiedCache(metadata_backend=instance)` retains that exact instance, or that a name registered with `register_metadata_backend()` can be selected by `CacheConfig`. A runtime probe shows the supplied `InMemoryBackend` is replaced by auto-selected `SqliteBackend` (`src/cacheness/core.py:109-212`).
+- **High-level blob lifecycle:** Backend registries and backend classes have extensive tests, while the 408-line `BlobStore` implementation has 19% measured coverage and no dedicated `tests/test_blob_store.py`. Its nested metadata deletion/existence/clear defects are consequently missed.
+- **Same-key concurrency and atomic rollback:** Existing concurrency suites stress SQLite with many operations, mostly on distinct keys. They do not prove that concurrent writes to one payload key are atomic or that a metadata-write failure rolls back the already-written payload.
+- **Duplicate concurrency suite:** `tests/test_sqlite_concurrency_temp.py` nearly duplicates `tests/test_sqlite_concurrency.py`, with cleanup fixes as the main difference. Consolidate the fixed lifecycle into one suite to reduce runtime and prevent divergent expectations.
+- **Automation:** There is no checked-in CI workflow, so the 777-test suite, 66% coverage baseline, and 137 Ruff findings are not automatically gated on pull requests or supported Python versions.
 
 ---
 

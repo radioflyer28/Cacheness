@@ -2,6 +2,8 @@
 
 **Analysis Date:** 2026-08-29
 
+**Independent Review:** 2026-08-29 — verified directly against manifests, imports, the locked environment, and local quality-gate execution
+
 ## Languages
 
 **Primary:**
@@ -57,6 +59,21 @@
 - `tensorflow>=2.0.0` (locked 2.20.0) - optional, lazily loaded TensorFlow tensor handler; disabled by default (`src/cacheness/handlers.py`, `src/cacheness/config.py`)
 
 The optional dependency groups are declared in `pyproject.toml`: `recommended`, `dataframes`, `tensorflow`, `s3`, `postgresql`, and `cloud`. Core runtime dependencies are only `cachetools` and `xxhash`, although NumPy is imported eagerly by core handler modules.
+
+## Installability Reality Check
+
+**Declared base install versus import-time requirements:**
+- `pyproject.toml` declares only `cachetools` and `xxhash` as mandatory dependencies, but `src/cacheness/handlers.py` and `src/cacheness/compress_pickle.py` import NumPy unconditionally. Because `src/cacheness/__init__.py` imports `core.py` and `handlers.py`, a nominal base installation without the `recommended` or `dataframes` extras cannot import `cacheness` unless NumPy happens to be supplied transitively.
+- Treat NumPy as an undeclared runtime dependency in the current release. Either move it into `[project.dependencies]` or make the array/compression modules genuinely optional behind lazy imports.
+
+**Optional-feature detection:**
+- PyYAML is present in the current `uv.lock`, but is not a direct project or development dependency. The `try` block in `src/cacheness/__init__.py` imports YAML helper functions, not `yaml` itself, so `_has_yaml_config` can be true even when calling those helpers later raises `ImportError`.
+- SQLAlchemy, pandas, S3, PostgreSQL, and TensorFlow availability is mostly determined by guarded imports in their implementation modules. Keep packaging extras and those runtime checks synchronized; the current manifest/runtime split is part of the compatibility surface.
+
+**Verified development baseline:**
+- The checked environment resolves CPython 3.13, NumPy 2.3.2, SQLAlchemy 2.0.43, pytest 8.4.1, and Ruff 0.12.9 from `uv.lock`.
+- `uv run pytest -q -o log_cli=false` collects 777 tests: 749 pass, 26 skip, and 2 fail.
+- `uv run ruff check . --output-format concise` reports 137 findings repository-wide; no CI configuration currently enforces either gate.
 
 ## Configuration
 

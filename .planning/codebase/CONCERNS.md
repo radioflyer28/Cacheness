@@ -2,7 +2,21 @@
 
 **Analysis Date:** 2026-08-29
 
+**Independent Review:** 2026-08-29 — findings were re-validated with direct source tracing, runtime probes, pytest, Ruff, and coverage
+
 ## Tech Debt
+
+**Base-package dependency metadata is internally inconsistent:**
+- Issue: NumPy is listed only in optional groups, but is imported unconditionally by `src/cacheness/handlers.py` and `src/cacheness/compress_pickle.py`, both reached during `import cacheness`.
+- Files: `pyproject.toml`, `src/cacheness/__init__.py`, `src/cacheness/handlers.py:9`, `src/cacheness/compress_pickle.py:50`
+- Impact: A clean installation with only the two declared core dependencies can fail before any optional array feature is requested. Development succeeds because the lock/environment installs recommended dependencies, masking the packaging defect.
+- Fix approach: Declare NumPy as a core dependency or isolate every NumPy-dependent import/export behind a lazy optional boundary; add a wheel-level minimal-install smoke test.
+
+**Configured quality gates are not release gates:**
+- Issue: The repository has pytest, coverage, and Ruff configuration but no CI workflow. The independent baseline is 2 failed tests, 137 repository-wide Ruff findings, and 66% statement coverage with no `fail_under` threshold.
+- Files: `pyproject.toml`, `tests/`, `.planning/codebase/TESTING.md`
+- Impact: Regressions and compatibility failures can ship unless a maintainer happens to run the relevant local commands and interpret the existing failures.
+- Fix approach: Add a Python-version matrix that runs tests, a minimal-install import job, optional-backend jobs, Ruff, and an initially realistic coverage floor that increases over time.
 
 **Split storage abstractions:**
 - Issue: `CacheBlobConfig` and the filesystem/S3 blob backend registry exist, but `UnifiedCache` in `src/cacheness/core.py` writes directly through handlers and never constructs or uses a blob backend. `BlobStore` in `src/cacheness/storage/blob_store.py` has a separate storage path and does not accept a blob backend instance.
@@ -35,6 +49,18 @@
 - Fix approach: Separate metadata lifecycle, payload lifecycle, eviction, and compatibility adapters into small modules with one canonical entry shape.
 
 ## Known Bugs
+
+**Injected and registered custom metadata backends are bypassed:**
+- Symptoms: `UnifiedCache(metadata_backend=instance)` assigns the supplied backend and then overwrites it with JSON/memory/SQLite/PostgreSQL/auto selection. Likewise, a custom name registered through `register_metadata_backend()` is never resolved by `UnifiedCache`; an unrecognized config name falls into auto mode.
+- Files: `src/cacheness/core.py:109-212`, `src/cacheness/storage/backends/__init__.py:127-266`, `src/cacheness/metadata.py:1421-1514`
+- Trigger: Supply `InMemoryBackend()` with default config; the independent runtime probe returned `SqliteBackend False sqlite`, proving the active backend is not the supplied object.
+- Workaround: There is no reliable high-level injection path. Select one of the literal built-in config names, or use backend APIs directly outside `UnifiedCache`.
+
+**YAML capability reporting is a false positive:**
+- Symptoms: `src/cacheness/__init__.py` sets `_has_yaml_config=True` by importing helper functions whose module does not import PyYAML until invocation. The helpers may therefore be exported even though calling them raises an install-time `ImportError`.
+- Files: `src/cacheness/__init__.py:56-61`, `src/cacheness/config.py:1032-1144`, `pyproject.toml`
+- Trigger: Install without PyYAML, import `cacheness`, then call `load_config_from_yaml()` or `save_config_to_yaml()`.
+- Workaround: Install PyYAML explicitly; it is present in the current lock only transitively and is not a declared extra.
 
 **Size-limit enforcement crashes once the limit is exceeded:**
 - Symptoms: A `put()` that pushes the cache over `max_cache_size_mb` raises `AttributeError: '<backend>' object has no attribute 'cleanup_by_size'` after the payload and metadata have already been written.
@@ -189,6 +215,18 @@
 - Files: `src/cacheness/config.py:103-161`, `src/cacheness/core.py`, `src/cacheness/storage/backends/blob_backends.py`, `src/cacheness/storage/backends/s3_backend.py`
 
 ## Test Coverage Gaps
+
+**Minimal install and dependency extras:**
+- What's not tested: Building/installing the package with only mandatory dependencies and importing the public package, plus exercising each extra in isolation.
+- Files: `pyproject.toml`, `src/cacheness/__init__.py`, `src/cacheness/handlers.py`, `src/cacheness/compress_pickle.py`
+- Risk: Missing mandatory dependencies and misleading optional-feature flags remain hidden by the fully populated development environment.
+- Priority: High
+
+**Metadata backend injection and custom registry selection:**
+- What's not tested: Identity preservation for an injected backend and end-to-end selection of a registered custom backend name.
+- Files: `src/cacheness/core.py:109-212`, `tests/test_metadata_backend_registry.py`
+- Risk: A documented extensibility mechanism is unusable from the primary cache while registry unit tests still pass.
+- Priority: High
 
 **Eviction and orphan cleanup:**
 - What's not tested: An over-limit write that must evict entries, and deletion of payload files during TTL cleanup, invalidation, and size cleanup.

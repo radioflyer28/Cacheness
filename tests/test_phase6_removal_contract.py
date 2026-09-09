@@ -96,6 +96,39 @@ def test_expired_lookup_preserves_a_replacement_and_reports_conflict(
         cache.close()
 
 
+def test_expired_cleanup_restarts_after_each_deleted_catalog_page(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TTL cleanup never returns a cursor invalidated by its own delete."""
+
+    cache = _cache(tmp_path)
+    try:
+        keys = [
+            cache.put({"generation": index}, request_id=f"expired-{index}").receipt.key
+            for index in range(3)
+        ]
+        monkeypatch.setattr(cache, "_is_expired_at", lambda *_args: True)
+
+        reports = []
+        cursor = None
+        for _ in range(3):
+            report = cache._cleanup_expired(cursor=cursor, page_size=1, work_cap=1)
+            reports.append(report)
+            cursor = report.continuation
+
+        assert [report.removed for report in reports] == [1, 1, 1]
+        assert [report.complete for report in reports] == [False, False, True]
+        assert all(
+            report.continuation == "cache-policy:restart" for report in reports[:2]
+        )
+        assert reports[-1].continuation is None
+        assert all(
+            cache.lookup(cache_key=key).outcome is CacheOutcome.ABSENT for key in keys
+        )
+    finally:
+        cache.close()
+
+
 def test_malformed_expiry_facts_fail_closed_without_deletion(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

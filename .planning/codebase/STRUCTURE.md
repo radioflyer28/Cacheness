@@ -2,6 +2,8 @@
 
 **Analysis Date:** 2026-08-29
 
+**Independent Review:** 2026-08-29 — structure was assessed as a change-impact map in addition to a directory inventory
+
 ## Directory Layout
 
 ```text
@@ -141,6 +143,24 @@ cacheness/
 **Utilities:**
 - Shared helpers: Put cache-key logic in `src/cacheness/serialization.py`, file hashing in `src/cacheness/file_hashing.py`, compression in `src/cacheness/compress_pickle.py` or its storage re-export, error wrappers in `src/cacheness/error_handling.py`, and signing in `src/cacheness/security.py`.
 - Avoid placing generic helpers in `core.py`; keep the coordinator focused on orchestration.
+
+## Change Impact Map
+
+| Change | Canonical implementation | Required adjacent checks | Common trap |
+|---|---|---|---|
+| Key/value lifecycle | `src/cacheness/core.py` | `tests/test_core.py`, `tests/test_integration.py`, `tests/test_cache_integrity.py` | Updating metadata without deleting/rolling back payload files |
+| New configuration field | `src/cacheness/config.py` | `tests/test_config_validation.py`, `tests/test_config_options.py`, `docs/CONFIGURATION.md` | Adding a dataclass field that no runtime path reads |
+| New handler / data type | `src/cacheness/handlers.py` and `src/cacheness/interfaces.py` | `tests/test_handlers.py`, `tests/test_handler_registration.py`, compatibility exports | Implementing a second interface only in `storage/handlers/` instead of the canonical registry |
+| Metadata behavior | `src/cacheness/metadata.py` | `tests/test_metadata.py`, `tests/test_metadata_backend_registry.py`, concurrency tests | Assuming JSON, SQLite, memory, and PostgreSQL return the same entry shape |
+| Blob backend | `src/cacheness/storage/backends/` | registry, sharding, S3, and compatibility tests | Assuming registration wires the backend into `UnifiedCache` or `BlobStore` |
+| Direct object storage | `src/cacheness/storage/blob_store.py` | add dedicated BlobStore lifecycle tests | Reusing backend-level tests as evidence that `BlobStore.delete/exists/clear` work |
+| SQL pull-through behavior | `src/cacheness/sql_cache.py` | `tests/test_sql_cache.py`, `tests/test_query_meta.py`, documentation tests | Treating partial fetch failure as a cache miss instead of an incomplete result |
+| Public import/export | `src/cacheness/__init__.py` | minimal-install import smoke test and `__all__` assertions | Capability flags that test helper importability instead of dependency availability |
+
+**Duplicated or compatibility-oriented locations:**
+- `tests/test_sqlite_concurrency.py` and `tests/test_sqlite_concurrency_temp.py` contain near-duplicate suites; the latter mainly adds explicit cleanup. Consolidate them before expanding concurrency coverage so the same scenarios do not double collection and drift.
+- `src/cacheness/interfaces.py` defines handler abstractions while `src/cacheness/handlers.py` also owns a concrete registry; `src/cacheness/storage/handlers/__init__.py` is a compatibility barrel, not a second implementation home.
+- `src/cacheness/metadata.py` contains canonical JSON/SQLite/in-memory implementations, while `src/cacheness/storage/backends/__init__.py` adds registry semantics and `storage/backends/base.py` defines a separate storage-facing contract. Verify which contract a new backend must satisfy before choosing its location.
 
 ## Special Directories
 

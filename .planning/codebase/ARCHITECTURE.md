@@ -3,6 +3,8 @@
 
 **Analysis Date:** 2026-08-29
 
+**Independent Review:** 2026-08-29 — call paths and lifecycle boundaries were re-traced from source and runtime probes
+
 ## System Overview
 
 ```text
@@ -69,6 +71,32 @@
 - Optional dependencies are imported conditionally; handlers are enabled only when their libraries are available (`src/cacheness/handlers.py`, `src/cacheness/__init__.py`).
 - SQL caching uses an adapter contract for schema, query parsing, and external fetches, allowing builder methods to generate simple adapters (`src/cacheness/sql_cache.py`).
 - Compatibility re-exports preserve older import paths through `src/cacheness/storage/handlers/__init__.py` and `src/cacheness/storage/backends/__init__.py`.
+
+## Lifecycle Boundaries
+
+The repository exposes three adjacent products rather than one fully unified storage stack:
+
+```text
+UnifiedCache                 BlobStore                    SqlCache
+`core.py`                    `storage/blob_store.py`      `sql_cache.py`
+    │                              │                           │
+    ├─ HandlerRegistry            ├─ HandlerRegistry          ├─ SQLAlchemy Table
+    ├─ direct payload files       ├─ direct payload files     ├─ caller adapter
+    └─ metadata backend           └─ metadata backend          └─ database rows
+
+BlobBackend registry (`filesystem`, `memory`, optional `s3`)
+    └─ currently independent of both handler-backed payload paths
+```
+
+**Transaction boundary:**
+- `UnifiedCache.put()` writes a handler payload first, computes metadata/signature information, and then writes the metadata entry (`src/cacheness/core.py:811-922`). There is no rollback if metadata persistence fails, so payload and metadata are not one atomic transaction.
+- Reads perform the inverse lookup through metadata and then the recorded `actual_path`; integrity/signature failures can remove metadata without consistently removing the payload (`src/cacheness/core.py:924-1053`).
+- `BlobStore` repeats a similar two-step payload/metadata lifecycle independently (`src/cacheness/storage/blob_store.py:128-241`). It merges nested metadata during reads, but deletion/existence do not use the same normalization.
+
+**Dependency-injection boundary:**
+- Handler instances are genuinely selected through `HandlerRegistry`.
+- Metadata backend classes can be constructed through a registry, but `UnifiedCache` does not consult that registry. Even an explicitly injected backend instance is overwritten by the subsequent config-selection branch (`src/cacheness/core.py:109-212`).
+- Blob backends have a registry and implementations, but no high-level coordinator injects them into handler persistence. Treat these as incomplete composition seams, not interchangeable production strategies.
 
 ## Layers
 
@@ -201,10 +229,10 @@
 
 ## Architectural Constraints
 
-- **Threading:** `UnifiedCache` serializes its own coordination with a `threading.Lock`; JSON/in-memory metadata backends use locks, and SQLite/PostgreSQL rely on SQLAlchemy sessions/pools (`src/cacheness/core.py`, `src/cacheness/metadata.py`, `src/cacheness/storage/backends/postgresql_backend.py`).
+- **Threading:** `UnifiedCache` creates `self._lock` but does not acquire it in `put()`, `get()`, invalidation, or cleanup. JSON/in-memory metadata backends use their own locks, and SQLite/PostgreSQL rely on SQLAlchemy sessions/pools, so metadata operations have some local coordination while the payload-plus-metadata lifecycle is not serialized (`src/cacheness/core.py:82-103`, `src/cacheness/metadata.py`, `src/cacheness/storage/backends/postgresql_backend.py`).
 - **Global state:** `_global_cache` in `src/cacheness/core.py`, the decorator weak-reference list in `src/cacheness/decorators.py`, and handler/backend registries in `src/cacheness/handlers.py` and `src/cacheness/storage/backends/` are module-level mutable state.
 - **Circular imports:** Compatibility modules intentionally re-export parent implementations: `src/cacheness/storage/handlers/__init__.py` imports `cacheness.handlers`, while `src/cacheness/storage/backends/__init__.py` imports implementations from `cacheness.metadata`.
-- **Optional dependencies:** pandas, polars, SQLAlchemy, Blosc2, dill, TensorFlow, boto3, and database drivers are not required for the base install; code must preserve guarded imports and meaningful dependency errors (`src/cacheness/handlers.py`, `src/cacheness/sql_cache.py`, `src/cacheness/__init__.py`).
+- **Optional dependencies:** pandas, polars, SQLAlchemy, Blosc2, dill, TensorFlow, boto3, and database drivers are declared as optional and mostly guarded at runtime. NumPy is the exception: it is declared only in optional groups but imported eagerly by package-import paths, making it an effective undeclared base requirement (`pyproject.toml`, `src/cacheness/handlers.py`, `src/cacheness/compress_pickle.py`, `src/cacheness/__init__.py`).
 - **Filesystem payloads:** The primary `UnifiedCache` handler path writes directly under `CacheStorageConfig.cache_dir`; persisted metadata must retain `actual_path` because handler extensions can be dynamic (`src/cacheness/core.py`, `src/cacheness/handlers.py`).
 - **SQL schema ownership:** `SqlCache` mutates the supplied SQLAlchemy `Table` by appending cache columns before creating it (`src/cacheness/sql_cache.py:459-483`); callers must provide compatible primary keys and column definitions.
 

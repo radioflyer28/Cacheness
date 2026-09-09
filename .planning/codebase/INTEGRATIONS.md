@@ -2,6 +2,8 @@
 
 **Analysis Date:** 2026-08-29
 
+**Independent Review:** 2026-08-29 — integration claims were checked against the actual construction and call paths, not only the registered classes
+
 ## APIs & External Services
 
 **Object storage:**
@@ -37,6 +39,20 @@
 
 **Caching:**
 - In-process metadata cache - optional `cachetools.TTLCache` layer, controlled by `CacheMetadataConfig.enable_memory_cache`; no external Redis/Memcached integration is implemented (`src/cacheness/metadata.py`)
+
+## Integration Wiring Status
+
+| Integration surface | Implementation exists | Reached by `UnifiedCache` | Independent assessment |
+|---|---:|---:|---|
+| JSON / memory / SQLite metadata | Yes | Yes | Selected directly in `UnifiedCache._init_metadata_backend()` (`src/cacheness/core.py:109-212`) |
+| PostgreSQL metadata | Yes | Yes, by the literal `postgresql` config value | Requires SQLAlchemy, a driver, and `metadata_backend_options.connection_url` |
+| Registered custom metadata backend | Yes | No | `register_metadata_backend()` populates a registry, but `UnifiedCache` never queries it; unknown names fall into auto SQLite/JSON selection (`src/cacheness/storage/backends/__init__.py:127-266`, `src/cacheness/core.py:181-211`) |
+| Injected metadata backend instance | API exists | No in normal configurations | A supplied instance is assigned and then immediately overwritten by config-based selection; a runtime probe with `InMemoryBackend` produced `SqliteBackend False sqlite` (`src/cacheness/core.py:114-212`) |
+| Filesystem / memory blob registry | Yes | No | The blob registry is tested independently but is not used by `UnifiedCache` or `BlobStore` payload writes |
+| S3 blob backend | Yes | No | `S3BlobBackend` is usable directly after explicit registration, but `blob_backend="s3"` does not route main-cache or `BlobStore` payloads to it |
+| SQL pull-through cache | Yes | Separate subsystem | `SqlCache` talks to SQLAlchemy and caller adapters directly; it does not share `UnifiedCache` metadata or payload lifecycle |
+
+This distinction is operationally important: the repository contains more integration implementations than the public high-level cache actually composes. When documenting a backend as supported, specify whether it is direct-use only, registry-constructible, or end-to-end wired into `UnifiedCache`.
 
 ## Authentication & Identity
 

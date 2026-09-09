@@ -423,12 +423,25 @@ class UnifiedCache:
     ) -> CacheRemovalReport:
         """Select one bounded page of expired entries and exact-delete it."""
 
-        page = self._query_cache_catalog(
-            CatalogQuery(page_size=page_size),
-            cursor=cursor,
-            page_size=page_size,
-            work_cap=work_cap,
-        )
+        # Catalog cursors are revision-bound.  An exact deletion below advances
+        # that revision, so the cache-policy restart token deliberately starts
+        # a fresh bounded scan instead of presenting a cursor it invalidated.
+        query_cursor = None if cursor == _RESTART_REMOVAL_CURSOR else cursor
+        try:
+            page = self._query_cache_catalog(
+                CatalogQuery(page_size=page_size),
+                cursor=query_cursor,
+                page_size=page_size,
+                work_cap=work_cap,
+            )
+        except CatalogStaleCursorError:
+            if query_cursor is None:
+                raise
+            return CacheRemovalReport(
+                retryable=1,
+                complete=False,
+                continuation=_RESTART_REMOVAL_CURSOR,
+            )
         ttl = self.config.policy.default_ttl_hours
         candidates = tuple(
             self._candidate_from_catalog_entry(entry)
@@ -440,6 +453,12 @@ class UnifiedCache:
             complete=page.exhausted,
             continuation=page.cursor,
         )
+        if report.removed and not page.exhausted:
+            return replace(
+                report,
+                complete=False,
+                continuation=_RESTART_REMOVAL_CURSOR,
+            )
         if report.removed:
             logger.info("Cleaned up %s expired cache entries", report.removed)
         return report
