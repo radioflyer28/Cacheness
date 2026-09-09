@@ -264,28 +264,17 @@ class SecurityConfig:
         "cache_key_params"  # Optional field when store_cache_key_params=True
     }
 
-    # Entry signing for metadata integrity
+    # Entry-signing policy retained for handler-level trusted payload decisions.
     enable_entry_signing: bool = True
-    signing_key_file: str = "cache_signing_key.bin"
-    
+
     # Custom field selection (if not provided, uses default enhanced fields)
     custom_signed_fields: Optional[List[str]] = None
-    
-    # Key management options
-    use_in_memory_key: bool = False  # Use in-memory key (not persisted to disk)
-    
-    # Backward compatibility and key rotation
+
+    # Handler-level compatibility policy for signed cache entries.
     allow_unsigned_entries: bool = True  # Allow entries without signatures
-    signature_version: int = 1  # For future algorithm changes
-    
-    # Cleanup behavior for invalid signatures
-    delete_invalid_signatures: bool = True  # Automatically delete entries with invalid signatures
 
     def __post_init__(self):
         """Validate security configuration."""
-        if self.signature_version < 1:
-            raise ValueError("signature_version must be at least 1")
-        
         # Validate custom_signed_fields if provided
         if self.custom_signed_fields:
             invalid_fields = set(self.custom_signed_fields) - self.VALID_SIGNED_FIELDS
@@ -298,9 +287,7 @@ class SecurityConfig:
         logger.debug(
             f"Security configured: signing={self.enable_entry_signing}, "
             f"custom_fields={self.custom_signed_fields}, "
-            f"in_memory_key={self.use_in_memory_key}, "
-            f"allow_unsigned={self.allow_unsigned_entries}, "
-            f"delete_invalid={self.delete_invalid_signatures}"
+            f"allow_unsigned={self.allow_unsigned_entries}"
         )
 
 
@@ -626,13 +613,6 @@ def validate_config(config: CacheConfig) -> List["ConfigValidationError"]:
         ))
     
     # Validate security configuration
-    if config.security.signature_version < 1:
-        errors.append(ConfigValidationError(
-            "security.signature_version",
-            "must be at least 1",
-            config.security.signature_version
-        ))
-    
     if config.security.custom_signed_fields:
         invalid_fields = set(config.security.custom_signed_fields) - SecurityConfig.VALID_SIGNED_FIELDS
         if invalid_fields:

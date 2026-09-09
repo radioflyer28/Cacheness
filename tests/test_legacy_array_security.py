@@ -369,9 +369,7 @@ def test_trusted_object_array_opt_in_survives_json_and_yaml_round_trips(
     assert load_config_from_yaml(yaml_path).handlers.allow_trusted_object_arrays
 
 
-def _trusted_object_array_cache(
-    tmp_path: Path, *, delete_invalid_signatures: bool
-) -> UnifiedCache:
+def _trusted_object_array_cache(tmp_path: Path) -> UnifiedCache:
     """Create a real cache with every required trusted-object safeguard enabled."""
     cache = UnifiedCache(
         CacheConfig(
@@ -381,7 +379,6 @@ def _trusted_object_array_cache(
             security=SecurityConfig(
                 enable_entry_signing=True,
                 allow_unsigned_entries=False,
-                delete_invalid_signatures=delete_invalid_signatures,
             ),
         ),
         store=StoreTopology(
@@ -395,16 +392,12 @@ def _trusted_object_array_cache(
     return cache
 
 
-@pytest.mark.parametrize("delete_invalid_signatures", [True, False])
 def test_tampered_object_arrays_never_reach_object_handler_or_delete_evidence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    delete_invalid_signatures: bool,
 ) -> None:
     """A typed corrupt lookup leaves authenticated catalog evidence untouched."""
-    cache = _trusted_object_array_cache(
-        tmp_path, delete_invalid_signatures=delete_invalid_signatures
-    )
+    cache = _trusted_object_array_cache(tmp_path)
     try:
         written = cache.put(
             np.array([{"safe": True}], dtype=object), identity="tampered-object-array"

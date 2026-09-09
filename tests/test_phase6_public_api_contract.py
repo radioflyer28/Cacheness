@@ -32,6 +32,7 @@ from cacheness import (
 from cacheness.config import (
     CacheMetadataConfig,
     CacheStorageConfig,
+    SecurityConfig,
     load_config_from_json,
     load_config_from_yaml,
     save_config_to_json,
@@ -312,6 +313,10 @@ def test_cache_policy_limits_have_no_competing_nested_configuration() -> None:
         (CacheMetadataConfig, "memory_cache_maxsize"),
         (CacheMetadataConfig, "memory_cache_ttl_seconds"),
         (CacheMetadataConfig, "memory_cache_stats"),
+        (SecurityConfig, "signing_key_file"),
+        (SecurityConfig, "use_in_memory_key"),
+        (SecurityConfig, "signature_version"),
+        (SecurityConfig, "delete_invalid_signatures"),
     ),
 )
 def test_runtime_inert_configuration_options_are_removed(
