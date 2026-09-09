@@ -431,7 +431,7 @@ Plans:
   4. Incompatible formats and cross-backend moves offer an explicit, scoped, confirmed rebuild path rather than implicit deletion or a promise of universal physical migration.
   5. Define the supported source-version window explicitly; it may exclude pre-production development layouts. Distinguish catalog/payload migration from rebuilding derived indexes; a missing or stale index cannot require rewriting valid payloads or become a second cutover authority.
 
-**Plans**: 2/11 plans executed
+**Plans**: 3/11 plans executed
 
 Plans:
 
@@ -445,7 +445,7 @@ Plans:
 
 **Wave 2** *(blocked on the decision gates)*
 
-- [ ] 07-03-PLAN.md — Publish the independent compatibility matrix, release window, and canonical human/machine plan model.
+- [x] 07-03-PLAN.md — Publish the independent compatibility matrix, release window, and canonical human/machine plan model.
 
 **Wave 3** *(blocked on compatibility contracts)*
 
@@ -499,7 +499,7 @@ Plans:
 | 4. Metadata Composition and Topology Contracts | 14/14 | Complete    | 2026-09-08 |
 | 5. Payload Backends and Supported Topology Qualification | 9/9 | Complete    | 2026-09-08 |
 | 6. UnifiedCache Policy Composition | 11/11 | Complete    | 2026-09-09 |
-| 7. Explicit Migration and Rebuild Cutover | 2/11 | In Progress|  |
+| 7. Explicit Migration and Rebuild Cutover | 3/11 | In Progress|  |
 | 8. Production Gates and Performance Stabilization | 0/TBD | Not started | - |
 
 ## Backlog
