@@ -276,7 +276,76 @@ class _CutoverVisitor(ast.NodeVisitor):
         self.filename = PurePosixPath(filename).as_posix()
         self.findings: list[str] = []
         self._negative_depth = 0
-        self._known_cache_names: set[str] = {"cache", "unified_cache"}
+        self._cache_name_scopes: list[set[str]] = [set()]
+        self._cache_returning_helpers: set[str] = set()
+
+    @property
+    def _known_cache_names(self) -> set[str]:
+        """Return cache values proven in the current lexical scope."""
+        return self._cache_name_scopes[-1]
+
+    def _is_known_cache_value(
+        self, value: ast.AST | None, *, known_names: set[str] | None = None
+    ) -> bool:
+        """Recognize direct cache construction plus proven aliases and helpers."""
+        if value is None:
+            return False
+        names = self._known_cache_names if known_names is None else known_names
+        if isinstance(value, ast.Name):
+            return value.id in names
+        if not isinstance(value, ast.Call):
+            return False
+        if _call_name(value) == "UnifiedCache":
+            return True
+        return _call_name(value) in self._cache_returning_helpers
+
+    def _record_cache_assignment(
+        self, node: ast.Assign | ast.AnnAssign, value: ast.AST | None
+    ) -> None:
+        """Propagate aliases while clearing names reassigned to another value."""
+        names = _assignment_names(node)
+        if self._is_known_cache_value(value):
+            self._known_cache_names.update(names)
+        else:
+            self._known_cache_names.difference_update(names)
+
+    def _function_returns_known_cache(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef, names: set[str]
+    ) -> bool:
+        """Identify a fixture/helper that returns or yields a known cache value."""
+        return_annotation = _dotted_name(node.returns) if node.returns else None
+        if return_annotation and return_annotation.rsplit(".", 1)[-1] == "UnifiedCache":
+            return True
+        for candidate in ast.walk(node):
+            if isinstance(candidate, (ast.Return, ast.Yield, ast.YieldFrom)) and (
+                self._is_known_cache_value(candidate.value, known_names=names)
+            ):
+                return True
+        return False
+
+    def _visit_function(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef
+    ) -> None:
+        inherited_names = set(self._known_cache_names)
+        arguments = (
+            *node.args.posonlyargs,
+            *node.args.args,
+            *node.args.kwonlyargs,
+        )
+        for argument in arguments:
+            inherited_names.discard(argument.arg)
+            if argument.arg in self._cache_returning_helpers:
+                inherited_names.add(argument.arg)
+        if node.args.vararg is not None:
+            inherited_names.discard(node.args.vararg.arg)
+        if node.args.kwarg is not None:
+            inherited_names.discard(node.args.kwarg.arg)
+
+        self._cache_name_scopes.append(inherited_names)
+        self.generic_visit(node)
+        function_names = self._cache_name_scopes.pop()
+        if self._function_returns_known_cache(node, function_names):
+            self._cache_returning_helpers.add(node.name)
 
     def _add(self, finding: str) -> None:
         rendered = f"canonical cutover audit: {self.filename}: {finding}"
@@ -305,14 +374,18 @@ class _CutoverVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Assign(self, node: ast.Assign) -> None:
-        if isinstance(node.value, ast.Call) and _call_name(node.value) == "UnifiedCache":
-            self._known_cache_names.update(_assignment_names(node))
+        self._record_cache_assignment(node, node.value)
         self.generic_visit(node)
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
-        if isinstance(node.value, ast.Call) and _call_name(node.value) == "UnifiedCache":
-            self._known_cache_names.update(_assignment_names(node))
+        self._record_cache_assignment(node, node.value)
         self.generic_visit(node)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._visit_function(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_function(node)
 
     def visit_Call(self, node: ast.Call) -> None:
         call_name = _call_name(node)
@@ -332,10 +405,7 @@ class _CutoverVisitor(ast.NodeVisitor):
 
         if not self._is_deliberate_negative and isinstance(node.func, ast.Attribute):
             receiver = node.func.value
-            receiver_name = _dotted_name(receiver)
-            receiver_is_cache = (
-                isinstance(receiver, ast.Call) and _call_name(receiver) == "UnifiedCache"
-            ) or (receiver_name in self._known_cache_names)
+            receiver_is_cache = self._is_known_cache_value(receiver)
             if receiver_is_cache and node.func.attr in _RETIRED_CACHE_SURFACES:
                 self._add(f"removed UnifiedCache surface: {node.func.attr}()")
         self.generic_visit(node)

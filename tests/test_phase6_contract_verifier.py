@@ -104,6 +104,54 @@ cache.get('entry')
     )
 
 
+@pytest.mark.parametrize(
+    "source",
+    (
+        """
+cache = UnifiedCache(config, store=store)
+alias = cache
+alias.get('entry')
+""",
+        """
+def configured_cache():
+    return UnifiedCache(config, store=store)
+
+cache = configured_cache()
+cache.get('entry')
+""",
+    ),
+)
+def test_cutover_audit_rejects_cache_aliases_and_known_helper_returns(
+    source: str,
+) -> None:
+    """Retired calls cannot hide behind a proven cache alias or helper."""
+
+    verifier = _load_verifier()
+
+    assert verifier.audit_cutover_source(source, "tests/test_cache_signing.py") == (
+        "canonical cutover audit: tests/test_cache_signing.py: removed UnifiedCache "
+        "surface: get()",
+    )
+
+
+def test_cutover_audit_does_not_treat_an_unproven_receiver_as_a_cache() -> None:
+    """A same-named unrelated value stays outside the targeted cache audit."""
+
+    verifier = _load_verifier()
+
+    assert verifier.audit_cutover_source(
+        """
+class Mapping:
+    def get(self, key):
+        return key
+
+cache = Mapping()
+cache.get('entry')
+""",
+        "tests/test_cache_signing.py",
+    ) == ()
+
+
 def test_cutover_audit_allows_only_structural_negative_assertions() -> None:
     """TypeError and explicit signature-absence negatives remain legal evidence."""
     verifier = _load_verifier()
