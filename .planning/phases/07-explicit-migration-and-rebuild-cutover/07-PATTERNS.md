@@ -248,9 +248,14 @@ class VerificationProof:
             raise ValueError("digest must be a lowercase SHA-256 hexadecimal value")
 ```
 
-Keep candidate/activation receipts immutable and corroborated by source
-identity/revision. Whole-store activation, rollback eligibility, and finalize
-state belong to this authority—not evidence JSON, a pointer file, or a projection.
+Keep candidate/activation/rollback/finalize receipts immutable and corroborated
+by source identity/revision. The resolved publication states are `candidate`,
+`activated_offline`, `active`, and `rolled_back`; every ordinary worker
+open/read/query/mutation entry point fails with the typed offline-decision
+outcome while activated-offline, and finalize seals rollback before workers
+restart. Narrow maintenance status/receipt methods remain available. These
+states belong to this authority—not evidence JSON, a pointer file, a
+first-write hook, or a projection.
 
 ### `src/cacheness/storage/sqlite_lifecycle_authority.py` (authority adapter, CRUD + batch)
 
@@ -319,7 +324,7 @@ explicit `initialize()` (`419-441`), bounded `catalog_page()` (`986-1075`),
 and SQLSTATE handling (`74-80`, `1074-1077`).
 
 ```python
-POSTGRESQL_AUTHORITY_SCHEMA_VERSION = 3
+POSTGRESQL_AUTHORITY_SCHEMA_VERSION = 3  # current tree before Phase 7
 POSTGRESQL_AUTHORITY_CAPABILITY = "postgresql-lifecycle-authority-v3"
 
 def open(self) -> "PostgresqlLifecycleAuthority":
@@ -329,9 +334,12 @@ def open(self) -> "PostgresqlLifecycleAuthority":
 ```
 
 Use PostgreSQL's own schema/capability in the compatibility matrix; never infer
-it from `sqlite_user_version`. The maintenance primitive should run in one
-PostgreSQL transaction and preserve typed retryable outcomes with original
-causes. Live PostgreSQL/S3 qualification remains Phase 8.
+it from `sqlite_user_version`. Resolved RQ-01 changes the first release baseline
+to schema 4 / `postgresql-lifecycle-authority-v4` and adds the exact authority
+publication fields plus candidate/prior rows; schema 3 gains no production
+migration edge. Each maintenance primitive runs in one PostgreSQL transaction
+and preserves typed retryable outcomes with original causes. Live PostgreSQL/S3
+qualification remains Phase 8.
 
 ### `src/cacheness/handlers.py` (registry/contract, transform + file-I/O)
 
@@ -364,10 +372,10 @@ custom handler priority/duplicate-name behavior from `register_handler()`
 ### `src/cacheness/storage/__init__.py` (public API barrel, request-response)
 
 **Analog:** deliberate re-export barrel (`storage/__init__.py:49-76,114-181`).
-Export only supported maintenance symbols if a public Python API is selected.
-Keep optional PostgreSQL/S3 imports guarded. A CLI, if included, is a stateless
-adapter over the same model and requires explicit paths/run IDs; it must not
-implement a second plan/evidence model.
+Export the supported maintenance symbols through the Python library API and
+keep optional PostgreSQL/S3 imports guarded. Resolved RQ-02 adds no CLI or
+`[project.scripts]` entry in Phase 7. Any later CLI is a stateless adapter over
+the same model and must not implement a second plan/evidence model.
 
 ### `tests/test_migration_inspection.py` (test, batch + request-response)
 
@@ -433,9 +441,10 @@ assert authority.snapshot_state() == before
 Test stopped-worker acknowledgement; stage/copy, whole-candidate verify, and
 explicit activate; interruption after each evidence/payload/authority boundary;
 stale revision rejection; no partial publication; source/prior retention;
-rollback only before writer restart; finalize ending rollback; and separate,
-confirmed, idempotent purge with retryable cleanup failure. Separate safety,
-recovery, progress, and performance assertions and cover memory/memory plus
+`activated_offline` refusal of ordinary worker open/read/query/mutation; rollback while workers remain
+stopped; finalize sealing rollback before restart; and separate, confirmed,
+idempotent purge with retryable cleanup failure. Separate safety, recovery,
+progress, and performance assertions and cover memory/memory plus
 SQLite/filesystem deterministic tiers.
 
 ### `tests/test_rebuild_workflow.py` (integration/contract test, transform + file-I/O)
