@@ -431,7 +431,47 @@ Plans:
   4. Incompatible formats and cross-backend moves offer an explicit, scoped, confirmed rebuild path rather than implicit deletion or a promise of universal physical migration.
   5. Define the supported source-version window explicitly; it may exclude pre-production development layouts. Distinguish catalog/payload migration from rebuilding derived indexes; a missing or stale index cannot require rewriting valid payloads or become a second cutover authority.
 
-**Plans**: TBD
+**Plans**: 11 plans
+
+Plans:
+
+**Wave 0**
+
+- [ ] 07-01-PLAN.md — Prove one explicit memory inspect-plan-stage-verify-activate tracer and preserve ordinary no-upgrade behavior.
+
+**Wave 1** *(blocked on Wave 0 completion)*
+
+- [ ] 07-02-PLAN.md — Confirm the one-way release-window, rebuild-exclusion, and finalize/purge decisions.
+
+**Wave 2** *(blocked on the decision gates)*
+
+- [ ] 07-03-PLAN.md — Publish the independent compatibility matrix, release window, and canonical human/machine plan model.
+
+**Wave 3** *(blocked on compatibility contracts)*
+
+- [ ] 07-04-PLAN.md — Add bounded entry-complete authority inventory for memory, SQLite, and deterministic PostgreSQL.
+- [ ] 07-05-PLAN.md — Authenticate, contain, and explicitly resume maintenance evidence without candidate adoption.
+
+**Wave 4** *(blocked on inventory and evidence)*
+
+- [ ] 07-06-PLAN.md — Complete local whole-store stage/verify/activate and interruption recovery with derived projections separate.
+
+**Wave 5** *(blocked on local cutover)*
+
+- [ ] 07-07-PLAN.md — Extend deterministic PostgreSQL/S3 maintenance contracts without claiming live qualification.
+- [ ] 07-08-PLAN.md — Implement offline rollback, finalize, abort, and separately confirmed idempotent purge.
+
+**Wave 6** *(blocked on retirement semantics)*
+
+- [ ] 07-09-PLAN.md — Deliver include-all, exact-confirmation rebuild through registered handlers and destination BlobStore.
+
+**Wave 7** *(blocked on remote contracts and rebuild)*
+
+- [ ] 07-10-PLAN.md — Publish the single maintenance API, operator runbook, and reasoned external-API coverage declaration.
+
+**Wave 8** *(blocked on the complete public workflow)*
+
+- [ ] 07-11-PLAN.md — Run the fixed Phase 7 contract, architecture, security, Nyquist, full-suite, and Ruff gates.
 
 ### Phase 8: Production Gates and Performance Stabilization
 
