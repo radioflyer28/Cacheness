@@ -17,17 +17,25 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from .cache_policy import CacheLookupResult, CacheOutcome
+from .cache_policy import CacheLookupResult, CacheOutcome, CacheStatistics, _CacheOutcomeRecorder
 from .config import CacheConfig, _DEFAULT_TTL, create_cache_config
 from .error_handling import (
+    CacheBlobBackendError,
+    CacheBlobIntegrityError,
     CacheBlobLifecycleConflictError,
+    CacheBlobLifecycleTimeoutError,
+    CacheBlobManifestUnsupportedVersionError,
+    CacheBlobMigrationRequiredError,
+    CacheBlobPayloadUnsupportedVersionError,
     CacheBlobStoreClosedError,
+    CacheManifestUnsupportedVersionError,
 )
 from .handlers import HandlerRegistry
 from .serialization import create_unified_cache_key
 from .storage.blob_store import BlobStore
 from .storage.composition import StoreTopology
 from .storage.path_security import encode_physical_name
+from .storage.read_contract import CacheReadFailureCategory, classify_cache_read_failure
 
 
 logger = logging.getLogger(__name__)
@@ -80,7 +88,7 @@ class UnifiedCache:
         self.cache_dir = Path(self.config.storage.cache_dir)
         self.handlers = HandlerRegistry(self.config)
         self._closed = False
-        self._policy_stats = {"cache_hits": 0, "cache_misses": 0}
+        self._outcome_recorder = _CacheOutcomeRecorder()
         self._owns_store = isinstance(store, StoreTopology)
         if isinstance(store, BlobStore):
             self.store = store
@@ -284,13 +292,51 @@ class UnifiedCache:
                 logger.warning("Blob committed; cache size policy remains pending: %s", error)
         return cache_key
 
-    def _record_cache_miss(self) -> None:
-        if self.config.metadata.enable_cache_stats:
-            self._policy_stats["cache_misses"] += 1
+    def _record_outcome(self, outcome: CacheOutcome) -> None:
+        """Best-effort record an already-final lookup outcome.
 
-    def _record_successful_read(self) -> None:
-        if self.config.metadata.enable_cache_stats:
-            self._policy_stats["cache_hits"] += 1
+        Derived statistics must never alter canonical BlobStore state or turn a
+        completed lookup into a failed read. ``RuntimeError`` is the narrow
+        observer-unavailable signal used for a recorder close race; arbitrary
+        programming errors still propagate from the lookup itself.
+        """
+
+        if not self.config.metadata.enable_cache_stats:
+            return
+        try:
+            self._outcome_recorder.record(outcome)
+        except RuntimeError:
+            logger.debug("Cache statistics observer was unavailable", exc_info=True)
+
+    @staticmethod
+    def _outcome_for_storage_failure(error: BaseException) -> CacheOutcome | None:
+        """Map declared direct-read failures into the public policy vocabulary."""
+
+        category = classify_cache_read_failure(error)
+        if category is CacheReadFailureCategory.INTEGRITY:
+            return CacheOutcome.CORRUPT
+        if category is CacheReadFailureCategory.LIFECYCLE_CONFLICT:
+            return CacheOutcome.CONFLICT
+        if category in {
+            CacheReadFailureCategory.MANIFEST_UNSUPPORTED_VERSION,
+            CacheReadFailureCategory.PAYLOAD_UNSUPPORTED_VERSION,
+            CacheReadFailureCategory.UNSUPPORTED_VERSION,
+            CacheReadFailureCategory.BACKEND_FAILURE,
+            CacheReadFailureCategory.MIGRATION_REQUIRED,
+        }:
+            return CacheOutcome.BACKEND_ERROR
+        if isinstance(
+            error, (CacheBlobLifecycleTimeoutError, CacheBlobStoreClosedError)
+        ):
+            return CacheOutcome.BACKEND_ERROR
+        return None
+
+    def statistics(self) -> CacheStatistics:
+        """Return a frozen derived outcome snapshot without observing storage."""
+
+        if not self.config.metadata.enable_cache_stats:
+            return CacheStatistics()
+        return self._outcome_recorder.snapshot()
 
     @_clear_read_coordinated
     def lookup(
@@ -306,18 +352,34 @@ class UnifiedCache:
         if cache_key is None:
             cache_key = self._create_cache_key(kwargs)
         self._cache_blob_store.handlers = self.handlers
-        with self._cache_blob_store.open_entry(cache_key) as snapshot:
-            if snapshot is None:
-                self._record_cache_miss()
-                return CacheLookupResult(CacheOutcome.ABSENT)
-            entry = self._cache_entry(snapshot)
-            if self._is_expired(cache_key, ttl_hours, entry):
-                self._retire_exact_authority_snapshot(cache_key, snapshot)
-                self._record_cache_miss()
-                return CacheLookupResult(CacheOutcome.EXPIRED)
-            data = snapshot.read()
-        self._record_successful_read()
-        return CacheLookupResult(CacheOutcome.HIT, value=data)
+        try:
+            with self._cache_blob_store.open_entry(cache_key) as snapshot:
+                if snapshot is None:
+                    result = CacheLookupResult(CacheOutcome.ABSENT)
+                else:
+                    entry = self._cache_entry(snapshot)
+                    if self._is_expired(cache_key, ttl_hours, entry):
+                        self._retire_exact_authority_snapshot(cache_key, snapshot)
+                        result = CacheLookupResult(CacheOutcome.EXPIRED)
+                    else:
+                        result = CacheLookupResult(CacheOutcome.HIT, value=snapshot.read())
+        except (
+            CacheBlobIntegrityError,
+            CacheBlobLifecycleConflictError,
+            CacheBlobBackendError,
+            CacheBlobManifestUnsupportedVersionError,
+            CacheBlobPayloadUnsupportedVersionError,
+            CacheManifestUnsupportedVersionError,
+            CacheBlobMigrationRequiredError,
+            CacheBlobLifecycleTimeoutError,
+            CacheBlobStoreClosedError,
+        ) as error:
+            outcome = self._outcome_for_storage_failure(error)
+            if outcome is None:
+                raise
+            result = CacheLookupResult(outcome, cause=error)
+        self._record_outcome(result.outcome)
+        return result
 
     @_clear_coordinated
     def invalidate(
@@ -366,18 +428,17 @@ class UnifiedCache:
         """Return cache policy counters plus canonical BlobStore inventory."""
 
         entries = self.list_entries()
-        hits = self._policy_stats["cache_hits"]
-        misses = self._policy_stats["cache_misses"]
-        total_requests = hits + misses
+        statistics = self.statistics()
         return {
-            **self._policy_stats,
+            "cache_hits": statistics.hit,
+            "cache_misses": statistics.misses,
             "total_entries": len(entries),
             "dataframe_entries": sum(
                 entry["data_type"] == "dataframe" for entry in entries
             ),
             "array_entries": sum(entry["data_type"] == "array" for entry in entries),
             "total_size_mb": round(sum(entry["size_mb"] for entry in entries), 2),
-            "hit_rate": hits / total_requests if total_requests else 0.0,
+            "hit_rate": statistics.hit_rate,
             "cache_dir": str(self.cache_dir),
             "max_size_mb": self.config.storage.max_cache_size_mb,
             "default_ttl_hours": self.config.metadata.default_ttl_hours,
