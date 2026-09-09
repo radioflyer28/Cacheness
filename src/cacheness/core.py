@@ -935,6 +935,7 @@ class UnifiedCache:
             return CacheOutcome.BACKEND_ERROR
         return None
 
+    @_clear_read_coordinated
     def statistics(self) -> CacheStatistics:
         """Return a frozen derived outcome snapshot without observing storage."""
 
