@@ -136,7 +136,6 @@ class UnifiedCache:
         validate_config_strict(config)
         self.config = config
         self.cache_dir = Path(self.config.storage.cache_dir)
-        self.handlers = HandlerRegistry(self.config)
         self._closed = False
         self._outcome_recorder = _CacheOutcomeRecorder()
         self._maintenance_secret = secrets.token_bytes(32)
@@ -147,6 +146,7 @@ class UnifiedCache:
             if not hasattr(store.topology, "qualified_profile"):
                 raise TypeError("injected BlobStore must expose a qualified topology")
             self.store = store
+            self.handlers = store.handlers
             self._owned_store: BlobStore | None = None
         elif isinstance(store, StoreTopology):
             # Preflight profile/capability declarations before BlobStore can
@@ -154,12 +154,13 @@ class UnifiedCache:
             store.qualification_report()
             store.capability_report()
             root = self.cache_dir / ".cacheness" / "blobstore"
+            self.handlers = HandlerRegistry(self.config)
             self.store = BlobStore(store, cache_dir=root, config=self.config)
+            self.store.handlers = self.handlers
             self._owned_store = self.store
         else:
             raise TypeError("store must be a BlobStore or StoreTopology")
         self._cache_blob_store = self.store
-        self._cache_blob_store.handlers = self.handlers
         self.actual_backend = "-".join(
             self._cache_blob_store.topology.qualified_profile.pair
         )
@@ -826,7 +827,6 @@ class UnifiedCache:
         }
         if function_namespace is not None:
             catalog_values["function_namespace"] = function_namespace
-        self._cache_blob_store.handlers = self.handlers
         receipt = self._cache_blob_store.put_entry(
             data,
             key=cache_key,
@@ -956,7 +956,6 @@ class UnifiedCache:
         del prefix  # Public policy identity is not a physical path prefix.
         if cache_key is None:
             cache_key = self._create_cache_key(kwargs)
-        self._cache_blob_store.handlers = self.handlers
         try:
             with self._cache_blob_store.open_entry(cache_key) as snapshot:
                 if snapshot is None:

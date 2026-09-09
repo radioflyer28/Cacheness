@@ -8,6 +8,7 @@ S3 live-service qualification.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,7 @@ import pytest
 from cacheness.config import CacheConfig, CacheStorageConfig
 from cacheness.core import UnifiedCache
 from cacheness.error_handling import CacheBlobStoreClosedError
+from cacheness.handlers import ObjectHandler
 from cacheness.storage.blob_store import BlobStore
 from cacheness.storage.backends.blob_backends import InMemoryBlobBackend
 from cacheness.storage.composition import (
@@ -67,6 +69,25 @@ class _CandidatePostgresqlAuthority(InMemoryLifecycleAuthority):
         "canonical_scan": True,
         "index_acceleration": True,
     }
+
+
+@dataclass(frozen=True)
+class _CustomValue:
+    """A caller-owned payload type handled outside UnifiedCache configuration."""
+
+    label: str
+
+
+class _CustomValueHandler(ObjectHandler):
+    """Use ObjectHandler persistence while making custom selection observable."""
+
+    def can_handle(self, data, config=None) -> bool:
+        del config
+        return isinstance(data, _CustomValue)
+
+    @property
+    def data_type(self) -> str:
+        return "phase6_custom_value"
 
 
 def _local_topology(profile: str, root: Path) -> StoreTopology:
@@ -234,6 +255,41 @@ def test_injected_store_remains_caller_initialized_and_caller_owned(
         assert initialize_calls == 0
         assert close_calls == 0
         assert store.get("missing") is None
+    finally:
+        store.close()
+
+
+def test_injected_store_retains_its_custom_handler_registry(tmp_path: Path) -> None:
+    """Cache policy never replaces the handler registry selected by a caller."""
+
+    store = BlobStore(
+        _local_topology("memory-memory", tmp_path / "payloads"),
+        cache_dir=tmp_path / "store",
+    )
+    store.handlers.register_handler(_CustomValueHandler(), priority=0)
+    caller_handlers = store.handlers
+    store.initialize()
+    try:
+        store.put(_CustomValue("before"), key="before")
+        assert store.get("before") == _CustomValue("before")
+
+        cache = UnifiedCache(
+            CacheConfig(storage=CacheStorageConfig(cache_dir=tmp_path / "cache")),
+            store=store,
+        )
+        cache.initialize()
+        try:
+            assert cache.handlers is caller_handlers
+            assert store.handlers is caller_handlers
+            stored = cache.put(_CustomValue("during"), request_id="during")
+            assert store.get(stored.receipt.key) == _CustomValue("during")
+            assert store.handlers is caller_handlers
+        finally:
+            cache.close()
+
+        store.put(_CustomValue("after"), key="after")
+        assert store.get("after") == _CustomValue("after")
+        assert store.handlers is caller_handlers
     finally:
         store.close()
 
