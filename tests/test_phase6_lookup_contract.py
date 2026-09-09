@@ -9,6 +9,11 @@ import pytest
 from cacheness.cache_policy import CacheOutcome
 from cacheness.config import CacheConfig
 from cacheness.core import UnifiedCache
+from cacheness.error_handling import (
+    CacheBlobBackendError,
+    CacheBlobLifecycleConflictError,
+    CacheBlobPayloadTamperedError,
+)
 from cacheness.storage.blob_store import BlobStore
 from cacheness.storage.composition import BackendRef, StoreTopology
 
@@ -85,3 +90,69 @@ def test_existing_store_is_retained_and_topology_creates_one_store(tmp_path):
     assert isinstance(topology_cache.store, BlobStore)
     assert topology_cache.store.lifecycle is topology_cache.store._authority_lifecycle
     topology_cache.close()
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_outcome"),
+    [
+        (
+            CacheBlobPayloadTamperedError("payload evidence is invalid"),
+            CacheOutcome.CORRUPT,
+        ),
+        (
+            CacheBlobLifecycleConflictError("generation changed"),
+            CacheOutcome.CONFLICT,
+        ),
+        (
+            CacheBlobBackendError("authority is unavailable"),
+            CacheOutcome.BACKEND_ERROR,
+        ),
+    ],
+)
+def test_lookup_classifies_declared_storage_failures_without_cleanup(
+    tmp_path, monkeypatch, error, expected_outcome
+):
+    """Declared direct-read failures retain their category and exact cause."""
+
+    cache = UnifiedCache(CacheConfig(cache_dir=tmp_path), store=_memory_topology())
+    cache.initialize()
+    delete_calls = 0
+
+    @contextmanager
+    def failing_open_entry(_cache_key):
+        raise error
+        yield None
+
+    def unexpected_delete(*_args, **_kwargs):
+        nonlocal delete_calls
+        delete_calls += 1
+        raise AssertionError("lookup failure classification must not clean up evidence")
+
+    monkeypatch.setattr(cache.store, "open_entry", failing_open_entry)
+    monkeypatch.setattr(cache.store, "delete", unexpected_delete)
+
+    result = cache.lookup(cache_key="failure-key")
+
+    assert result.outcome is expected_outcome
+    assert result.cause is error
+    assert delete_calls == 0
+    cache.close()
+
+
+def test_lookup_propagates_unclassified_programming_errors(tmp_path, monkeypatch):
+    """Lookup never converts arbitrary control-flow errors into cache outcomes."""
+
+    cache = UnifiedCache(CacheConfig(cache_dir=tmp_path), store=_memory_topology())
+    cache.initialize()
+
+    @contextmanager
+    def failing_open_entry(_cache_key):
+        raise ValueError("programming error")
+        yield None
+
+    monkeypatch.setattr(cache.store, "open_entry", failing_open_entry)
+
+    with pytest.raises(ValueError, match="programming error"):
+        cache.lookup(cache_key="failure-key")
+
+    cache.close()
