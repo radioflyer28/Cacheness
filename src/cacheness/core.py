@@ -140,12 +140,22 @@ class UnifiedCache:
         self._closed = False
         self._outcome_recorder = _CacheOutcomeRecorder()
         self._maintenance_secret = secrets.token_bytes(32)
-        self._owns_store = isinstance(store, StoreTopology)
         if isinstance(store, BlobStore):
+            # An application has already selected, composed, and owns this
+            # store. Validate its declared profile without initializing or
+            # otherwise mutating the caller's lifecycle resource.
+            if not hasattr(store.topology, "qualified_profile"):
+                raise TypeError("injected BlobStore must expose a qualified topology")
             self.store = store
+            self._owned_store: BlobStore | None = None
         elif isinstance(store, StoreTopology):
+            # Preflight profile/capability declarations before BlobStore can
+            # resolve participants or materialize any storage resource.
+            store.qualification_report()
+            store.capability_report()
             root = self.cache_dir / ".cacheness" / "blobstore"
             self.store = BlobStore(store, cache_dir=root, config=self.config)
+            self._owned_store = self.store
         else:
             raise TypeError("store must be a BlobStore or StoreTopology")
         self._cache_blob_store = self.store
@@ -160,11 +170,17 @@ class UnifiedCache:
         )
 
     def initialize(self) -> None:
-        """Initialize the internal store before sharing this cache with workers."""
+        """Initialize a cache-created store before sharing the cache with workers.
+
+        An injected store remains caller-owned, including its initialization
+        boundary.  It is already a validated BlobStore composition, so the
+        facade has no participant lifecycle work to perform for that form.
+        """
 
         if self._closed:
             raise CacheBlobStoreClosedError("Cache is closed")
-        self._cache_blob_store.initialize()
+        if self._owned_store is not None:
+            self._owned_store.initialize()
 
     def _create_cache_key(self, params: Mapping[str, Any]) -> str:
         """Return the deterministic public cache identity for ``params``."""
@@ -1109,13 +1125,18 @@ class UnifiedCache:
         }
 
     def close(self) -> None:
-        """Close the composed store exactly once."""
+        """Close only a cache-created store and then close this policy facade.
+
+        BlobStore preserves its own typed close outcomes.  The facade neither
+        enumerates topology participants nor turns a storage close failure
+        into an aggregate cache lifecycle report.
+        """
 
         if self._closed:
             return
+        if self._owned_store is not None:
+            self._owned_store.close()
         self._closed = True
-        if self._owns_store:
-            self._cache_blob_store.close()
 
     def __enter__(self) -> "UnifiedCache":
         return self
