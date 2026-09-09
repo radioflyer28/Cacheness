@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 06
 current_phase_name: UnifiedCache Policy Composition
 status: executing
-stopped_at: Completed 06-03-PLAN.md
-last_updated: "2026-09-09T03:02:53.542Z"
+stopped_at: Completed 06-04-PLAN.md
+last_updated: "2026-09-09T03:16:33.500Z"
 last_activity: 2026-09-09
 last_activity_desc: Phase 06 execution started
-state_head: 0d5680715679b37fcb22b93b8bdf4f92a774e2d8
+state_head: 3532e112f7222d4384de76dcdc756459b23a7160
 progress:
   total_phases: 8
   completed_phases: 4
   total_plans: 78
-  completed_plans: 72
+  completed_plans: 73
 milestone_name: milestone
 ---
 
@@ -29,7 +29,7 @@ See: .planning/PROJECT.md (updated 2026-09-06)
 ## Current Position
 
 Phase: 06 (UnifiedCache Policy Composition) — EXECUTING
-Plan: 4 of 8
+Plan: 5 of 8
 Status: Ready to execute
 Last activity: 2026-09-08 — Phase 06 execution started
 
@@ -155,6 +155,7 @@ Phase 03 rows in this historical table include superseded attempts and do not de
 | Phase 06 P01 | 11 min | 2 tasks | 4 files |
 | Phase 06 P02 | 13 min | 2 tasks | 7 files |
 | Phase 06 P03 | 14 min | 2 tasks | 7 files |
+| Phase 06 P04 | 10 min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -322,6 +323,9 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 - [Phase 06]: CachePutResult holds one immutable BlobReceipt plus one bounded CacheMaintenanceResult, so post-commit policy work cannot rewrite committed storage truth.
 - [Phase 06]: UnifiedCache.put runs exactly one size-maintenance step; callers explicitly resume validated opaque continuation state.
 - [Phase 06]: The pre-production put-result cutover exposes cache keys through receipt.key rather than retaining a string-return compatibility layer.
+- [Phase 06]: UnifiedCache owns qualified function namespaces and normalized function keys; BlobStore persists the namespace as canonical catalog data.
+- [Phase 06]: The explicit cached decorator recomputes only absent and expired by default, preserving typed failure outcomes unless callers opt in.
+- [Phase 06]: Function cache_clear delegates to bounded exact-generation invalidation and returns the canonical CacheRemovalReport.
 
 ### Pending Todos
 
@@ -351,6 +355,6 @@ Current replacement decisions are D-23 through D-31 in `03-CONTEXT.md`: one tran
 
 ## Session Continuity
 
-Last session: 2026-09-09T03:02:53.422Z
-Stopped at: Completed 06-03-PLAN.md
+Last session: 2026-09-09T03:16:33.367Z
+Stopped at: Completed 06-04-PLAN.md
 Resume file: None
