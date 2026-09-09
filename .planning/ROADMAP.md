@@ -11,7 +11,7 @@ Cacheness will move from overlapping cache and storage paths to one storage engi
 - [x] **Phase 3: Atomic Lifecycle and Recovery Engine** - Make writes, replacements, deletions, races, and crash residue converge without corrupting the last valid generation.
 - [x] **Phase 4: Metadata Composition and Topology Contracts** - Unify all metadata backends behind one injectable CAS contract with honest capability validation. (completed 2026-09-08)
 - [x] **Phase 5: Payload Backends and Supported Topology Qualification** - Qualify explicitly supported filesystem, memory, and AWS S3 pairings at their declared capability tiers. (completed 2026-09-08)
-- [ ] **Phase 6: UnifiedCache Policy Composition** - Route cache behavior through `BlobStore` while preserving public APIs, cache semantics, and the `SqlCache` boundary.
+- [x] **Phase 6: UnifiedCache Policy Composition** - Route cache behavior through `BlobStore` while preserving public APIs, cache semantics, and the `SqlCache` boundary. (completed 2026-09-09)
 - [ ] **Phase 7: Explicit Migration and Rebuild Cutover** - Give existing stores an inspectable, resumable same-backend migration or confirmed rebuild path.
 - [ ] **Phase 8: Production Gates and Performance Stabilization** - Make packaging, service integration, fault testing, coverage, and measured scalability release requirements.
 
@@ -416,7 +416,7 @@ Plans:
 
 **Wave 10** *(blocked on both Wave 9 plans)*
 
-- [ ] 06-11: Deterministic non-live suite isolation and fixed verification
+- [x] 06-11: Deterministic non-live suite isolation and fixed verification
 
 ### Phase 7: Explicit Migration and Rebuild Cutover
 
@@ -458,7 +458,7 @@ Plans:
 | 3. Atomic Lifecycle and Recovery Engine | 24/24 | Complete — direct qualification | 2026-09-06 |
 | 4. Metadata Composition and Topology Contracts | 14/14 | Complete    | 2026-09-08 |
 | 5. Payload Backends and Supported Topology Qualification | 9/9 | Complete    | 2026-09-08 |
-| 6. UnifiedCache Policy Composition | 11/11 | In Progress|  |
+| 6. UnifiedCache Policy Composition | 11/11 | Complete    | 2026-09-09 |
 | 7. Explicit Migration and Rebuild Cutover | 0/TBD | Not started | - |
 | 8. Production Gates and Performance Stabilization | 0/TBD | Not started | - |
 
